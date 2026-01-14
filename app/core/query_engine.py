@@ -34,7 +34,7 @@ from app.core.permission_handler import permission_handler
 from app.core.platform import detect_deployment_mode, DeploymentMode
 from app.core.user_question_handler import user_question_handler
 from app.core import encryption
-from app.core.jsonl_parser import write_hook_message
+from app.core.jsonl_parser import write_hook_message, write_system_message
 
 logger = logging.getLogger(__name__)
 
@@ -2699,6 +2699,28 @@ async def stream_to_websocket(
                     sdk_session_id = message.data["session_id"]
                     state.sdk_session_id = sdk_session_id
                     logger.info(f"[WS] Captured SDK session ID: {sdk_session_id}")
+
+                    # Write worktree context message if this is a worktree session
+                    # This creates a persistent record in JSONL that appears first in chat history
+                    if session_id and options.cwd:
+                        worktree = database.get_worktree_by_session(session_id)
+                        if worktree and worktree.get("status") == "active":
+                            branch_name = worktree.get("branch_name", "unknown")
+                            base_branch = worktree.get("base_branch", "main")
+                            worktree_path = worktree.get("worktree_path", "")
+                            logger.info(f"[WS] Writing worktree context for session {session_id}: branch={branch_name}")
+                            write_system_message(
+                                sdk_session_id=sdk_session_id,
+                                working_dir=options.cwd,
+                                subtype="worktree_context",
+                                content=f"Working in git worktree on branch '{branch_name}' (based on '{base_branch}')",
+                                data={
+                                    "branch_name": branch_name,
+                                    "base_branch": base_branch,
+                                    "worktree_path": worktree_path,
+                                    "worktree_id": worktree.get("id")
+                                }
+                            )
                 else:
                     # Forward other system messages (like /context output) to frontend
                     logger.info(f"[WS] Forwarding SystemMessage to frontend: subtype={message.subtype}")

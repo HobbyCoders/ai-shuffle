@@ -4331,9 +4331,15 @@ function createTabsStore() {
 							messages: [...t.messages, {
 								id: systemMsgId,
 								role: 'system' as const,
-								content: `🌿 Work tree created on branch \`${response.branch_name}\` (based on \`${response.base_branch}\`)`,
+								content: `Branch: \`${response.branch_name}\` (based on \`${response.base_branch}\`)\n\nPath: \`${response.worktree_path}\``,
 								type: 'system' as const,
-								systemSubtype: 'worktree_created'
+								systemSubtype: 'worktree_created',
+								systemData: {
+									branch_name: response.branch_name,
+									base_branch: response.base_branch,
+									worktree_path: response.worktree_path,
+									worktree_id: response.worktree_id
+								}
 							}]
 						};
 					})
@@ -4409,9 +4415,13 @@ function createTabsStore() {
 						messages: [...t.messages, {
 							id: systemMsgId,
 							role: 'system' as const,
-							content: `🌿 Using existing worktree on branch \`${branchDisplay}\``,
+							content: `Using existing worktree on branch \`${branchDisplay}\``,
 							type: 'system' as const,
-							systemSubtype: 'worktree_selected'
+							systemSubtype: 'worktree_selected',
+							systemData: {
+								branch_name: branchDisplay,
+								worktree_id: tab.worktreeId
+							}
 						}]
 					};
 				})
