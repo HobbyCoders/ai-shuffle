@@ -16,7 +16,7 @@ import type { Session, Profile } from '$lib/api/client';
 import { api } from '$lib/api/client';
 import { isNotificationsEnabled, notifySessionComplete, getPermission, type SessionCompleteInfo } from '$lib/services/notifications';
 
-export type MessageType = 'text' | 'tool_use' | 'tool_result';
+export type MessageType = 'text' | 'tool_use' | 'tool_result' | 'plugin_warning';
 
 export interface ChatMessage {
 	id: string;
@@ -865,6 +865,28 @@ function createChatStore() {
 				if (ws?.readyState === WebSocket.OPEN) {
 					ws.send(JSON.stringify({ type: 'pong' }));
 				}
+				break;
+			}
+
+			case 'plugin_message': {
+				// Plugin hook message (warnings, info)
+				const plugin = data.plugin as string;
+				const message = data.message as string;
+				const severity = data.severity as string;
+
+				console.log(`[Chat] Plugin message from ${plugin} (${severity}):`, message);
+
+				// Add as a system message with plugin_warning type
+				update(s => ({
+					...s,
+					messages: [...s.messages, {
+						id: `plugin-${Date.now()}`,
+						role: 'system',
+						content: message,
+						type: 'plugin_warning',
+						metadata: { plugin, severity }
+					}]
+				}));
 				break;
 			}
 		}

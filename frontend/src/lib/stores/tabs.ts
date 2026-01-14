@@ -42,7 +42,7 @@ export interface ApiUser {
 	last_used_at?: string;
 }
 
-export type MessageType = 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'system' | 'subagent';
+export type MessageType = 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'system' | 'subagent' | 'command' | 'plugin_warning';
 
 // Subagent child message - represents a single tool call or text from a subagent
 export interface SubagentChildMessage {
@@ -88,6 +88,10 @@ export interface ChatMessage {
 	agentPrompt?: string; // The initial prompt sent to the subagent
 	agentStatus?: 'pending' | 'running' | 'completed' | 'error'; // Current status
 	agentChildren?: SubagentChildMessage[]; // Nested messages from subagent execution
+	// Command-specific fields (for slash commands like /commit, /ralph-loop)
+	commandId?: string; // Internal command identifier (e.g., 'commit-commands:commit')
+	commandName?: string; // Display name with slash (e.g., '/commit')
+	commandArgs?: string; // Arguments passed to the command
 }
 
 export interface Project {
@@ -3646,6 +3650,35 @@ function createTabsStore() {
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
 						return { ...tab, pendingQuestions: questions };
+					})
+				}));
+				break;
+			}
+
+			case 'plugin_message': {
+				// Plugin hook message (warnings, info from security-guidance, etc.)
+				const plugin = data.plugin as string;
+				const message = data.message as string;
+				const severity = data.severity as string;
+
+				// Add as a system message with plugin_warning subtype
+				// This matches how it's loaded from hooks.jsonl for consistency
+				update(s => ({
+					...s,
+					tabs: s.tabs.map(tab => {
+						if (tab.id !== tabId) return tab;
+						return {
+							...tab,
+							messages: [...tab.messages, {
+								id: `plugin-${Date.now()}`,
+								role: 'system' as const,
+								content: message,
+								type: 'system' as MessageType,
+								systemSubtype: 'plugin_warning',
+								systemData: { plugin, message, severity },
+								metadata: { plugin, severity }
+							}]
+						};
 					})
 				}));
 				break;

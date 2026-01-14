@@ -118,6 +118,113 @@ def get_session_jsonl_path(sdk_session_id: str, working_dir: str = "/workspace")
     return None
 
 
+def get_hooks_jsonl_path(sdk_session_id: str, working_dir: str) -> Path:
+    """
+    Get the path to a session's hooks JSONL file.
+
+    This file stores hook stderr output (plugin warnings) that aren't captured
+    in the main session JSONL.
+
+    Args:
+        sdk_session_id: The Claude SDK session ID (UUID)
+        working_dir: The working directory for the project
+
+    Returns:
+        Path to the hooks JSONL file (may not exist yet)
+    """
+    claude_projects_dir = settings.get_claude_projects_dir
+    project_dir_name = get_project_dir_name(working_dir)
+    project_dir = claude_projects_dir / project_dir_name
+
+    # Ensure directory exists
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    return project_dir / f"{sdk_session_id}.hooks.jsonl"
+
+
+def write_hook_message(
+    sdk_session_id: str,
+    working_dir: str,
+    plugin: str,
+    message: str,
+    severity: str
+) -> None:
+    """
+    Append a hook message to the session's hooks JSONL file.
+
+    Args:
+        sdk_session_id: The Claude SDK session ID
+        working_dir: The working directory for the project
+        plugin: Name of the plugin that generated the message
+        message: The stderr output from the hook
+        severity: Severity level (warning, error, info)
+    """
+    hooks_path = get_hooks_jsonl_path(sdk_session_id, working_dir)
+
+    entry = {
+        "type": "plugin_warning",
+        "plugin": plugin,
+        "message": message,
+        "severity": severity,
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+
+    try:
+        with open(hooks_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry) + '\n')
+        logger.debug(f"Wrote hook message to {hooks_path}")
+    except Exception as e:
+        logger.error(f"Failed to write hook message to {hooks_path}: {e}")
+
+
+def parse_hooks_jsonl(sdk_session_id: str, working_dir: str) -> List[Dict[str, Any]]:
+    """
+    Parse a session's hooks JSONL file and return plugin warning messages.
+
+    Args:
+        sdk_session_id: The Claude SDK session ID
+        working_dir: The working directory for the project
+
+    Returns:
+        List of plugin warning messages with: id, role, content, type, metadata
+    """
+    hooks_path = get_hooks_jsonl_path(sdk_session_id, working_dir)
+
+    if not hooks_path.exists():
+        return []
+
+    messages = []
+    for entry in parse_jsonl_file(hooks_path):
+        if entry.get("type") == "plugin_warning":
+            plugin = entry.get("plugin", "Plugin")
+            message_content = entry.get("message", "")
+            severity = entry.get("severity", "warning")
+            timestamp = entry.get("timestamp", "")
+
+            messages.append({
+                "id": f"plugin-{timestamp}",
+                "role": "system",
+                "content": message_content,
+                "type": "system",
+                "subtype": "plugin_warning",
+                "systemSubtype": "plugin_warning",
+                "systemData": {
+                    "plugin": plugin,
+                    "message": message_content,
+                    "severity": severity
+                },
+                "metadata": {
+                    "plugin": plugin,
+                    "severity": severity,
+                    "timestamp": timestamp
+                },
+                "streaming": False
+            })
+
+    logger.debug(f"Parsed {len(messages)} hook messages from {hooks_path}")
+    return messages
+
+
 def parse_jsonl_file(jsonl_path: Path) -> Generator[Dict[str, Any], None, None]:
     """
     Parse a JSONL file line by line.
@@ -159,35 +266,56 @@ def extract_text_from_content(content: Any) -> str:
 
 def _is_system_content(content: str) -> bool:
     """
-    Check if content is a system/meta message that should be filtered out.
+    Check if content is empty or whitespace-only.
 
-    These include:
-    - Command-related tags like <command-name>, <command-message>, etc.
-    - Interrupt messages
-    - Empty XML tags
-
-    NOTE: <local-command-stdout> is NOT filtered - it contains actual command output
-    like /context and /compact results that should be displayed.
+    Previously this filtered out various system messages, but we now display
+    all content to the user. Slash commands are handled by _parse_slash_command(),
+    and other system content is shown as-is.
     """
-    if not content:
+    if not content or not content.strip():
         return True
-
-    # Check for system/meta content patterns
-    # NOTE: <local-command-stdout> is intentionally NOT in this list
-    system_patterns = [
-        "<command-name>",
-        "<command-message>",
-        "<command-args>",
-        "[Request interrupted by user]",
-        "Caveat: The messages below were generated",
-    ]
-
-    content_lower = content.strip()
-    for pattern in system_patterns:
-        if content_lower.startswith(pattern):
-            return True
-
     return False
+
+
+def _parse_slash_command(content: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse slash command XML tags into structured data.
+
+    Slash commands from Claude SDK have this format:
+    <command-message>plugin:command</command-message>
+    <command-name>/plugin:command</command-name>
+    <command-args>arguments here</command-args>
+
+    Returns:
+        Dict with command_id, command_name, command_args, or None if not a slash command
+    """
+    import re
+
+    if not content or not content.strip().startswith("<command-"):
+        return None
+
+    result = {}
+
+    # Extract command-message (the internal command identifier)
+    msg_match = re.search(r'<command-message>(.*?)</command-message>', content, re.DOTALL)
+    if msg_match:
+        result["command_id"] = msg_match.group(1).strip()
+
+    # Extract command-name (the display name with slash prefix)
+    name_match = re.search(r'<command-name>(.*?)</command-name>', content, re.DOTALL)
+    if name_match:
+        result["command_name"] = name_match.group(1).strip()
+
+    # Extract command-args (the arguments passed to the command)
+    args_match = re.search(r'<command-args>(.*?)</command-args>', content, re.DOTALL)
+    if args_match:
+        result["command_args"] = args_match.group(1).strip()
+
+    # Must have at least command_name to be valid
+    if "command_name" in result:
+        return result
+
+    return None
 
 
 def _extract_local_command_output(content: str) -> Optional[str]:
@@ -438,6 +566,28 @@ def parse_session_history(
         if entry_type == "user" and role == "user":
             # User message - can be plain text, tool results, or array with text blocks
             if isinstance(content, str):
+                # Check for slash command (e.g., /commit, /ralph-loop)
+                slash_cmd = _parse_slash_command(content)
+                if slash_cmd is not None:
+                    msg_counter += 1
+                    # Format display content: "/command args" or just "/command"
+                    display_content = slash_cmd.get("command_name", "")
+                    if slash_cmd.get("command_args"):
+                        display_content = f"{display_content} {slash_cmd['command_args']}"
+                    messages.append({
+                        "id": uuid,
+                        "uuid": uuid,  # Raw JSONL UUID for rewind
+                        "role": "user",
+                        "content": display_content,
+                        "type": "command",
+                        "commandId": slash_cmd.get("command_id"),
+                        "commandName": slash_cmd.get("command_name"),
+                        "commandArgs": slash_cmd.get("command_args"),
+                        "metadata": {"timestamp": timestamp},
+                        "streaming": False
+                    })
+                    continue
+
                 # Check for local command output (e.g., /context, /compact)
                 local_output = _extract_local_command_output(content)
                 if local_output is not None:
@@ -746,6 +896,24 @@ def parse_session_history(
                 })
 
     logger.info(f"Parsed {len(messages)} messages from JSONL history")
+
+    # Merge plugin warning messages from hooks JSONL file
+    hook_messages = parse_hooks_jsonl(sdk_session_id, working_dir)
+    if hook_messages:
+        logger.info(f"Merging {len(hook_messages)} hook messages from hooks.jsonl")
+        # Insert hook messages at their correct positions based on timestamp
+        for hook_msg in hook_messages:
+            hook_ts = hook_msg.get("metadata", {}).get("timestamp", "")
+            # Find insertion point - after the last message with earlier timestamp
+            insert_idx = len(messages)  # Default to end
+            for i, msg in enumerate(messages):
+                msg_ts = msg.get("metadata", {}).get("timestamp", "")
+                if msg_ts and hook_ts and msg_ts > hook_ts:
+                    insert_idx = i
+                    break
+            messages.insert(insert_idx, hook_msg)
+        logger.info(f"Total messages after merging hooks: {len(messages)}")
+
     return messages
 
 

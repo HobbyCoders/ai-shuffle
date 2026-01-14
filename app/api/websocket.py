@@ -288,7 +288,10 @@ async def chat_websocket(
                 api_user_id=api_user_id  # Pass for user-scoped credential resolution
             ):
                 event_type = event.get('type')
-                logger.debug(f"Streaming event for session {session_id}: {event_type}")
+                if event_type == 'plugin_message':
+                    logger.info(f"[WS] Sending plugin_message to frontend: {event}")
+                else:
+                    logger.debug(f"Streaming event for session {session_id}: {event_type}")
 
                 # Send to this websocket - may fail if connection died
                 # Important: Do NOT skip store updates if WebSocket fails!

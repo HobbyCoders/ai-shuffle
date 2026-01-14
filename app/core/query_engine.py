@@ -34,6 +34,7 @@ from app.core.permission_handler import permission_handler
 from app.core.platform import detect_deployment_mode, DeploymentMode
 from app.core.user_question_handler import user_question_handler
 from app.core import encryption
+from app.core.jsonl_parser import write_hook_message
 
 logger = logging.getLogger(__name__)
 
@@ -182,64 +183,39 @@ def cleanup_agents_directory(agents_dir: Path, agent_ids: list) -> None:
 
 
 def _build_plugins_list(
-    enabled_plugins: Optional[list],
+    profile_enabled_plugins: Optional[list],
     setting_sources: Optional[list] = None
 ) -> Optional[list]:
     """
-    Build the plugins list for ClaudeAgentOptions from profile's enabled_plugins.
+    Build the plugins list for ClaudeAgentOptions.
+
+    IMPORTANT: The Agent SDK does NOT auto-load plugins from settings.json!
+    Unlike the terminal CLI, the SDK requires explicit plugin paths via options.plugins.
+    See: https://platform.claude.com/docs/en/agent-sdk/plugins
+
+    This function loads plugins from TWO sources:
+    1. Claude's settings.json (enabledPlugins) - plugins enabled via CLI
+    2. Profile config (enabled_plugins) - additional plugins specified per-profile
 
     According to the Claude Agent SDK documentation, plugins are specified as:
     [{"type": "local", "path": "./my-plugin"}, ...]
 
-    IMPORTANT: When setting_sources includes "user" or "project", Claude Code CLI
-    automatically loads plugins from ~/.claude/settings.json (enabledPlugins).
-    To avoid duplication, we only return explicit plugins here when:
-    1. setting_sources doesn't include "user" or "project", OR
-    2. enabled_plugins contains paths (not plugin IDs) that wouldn't be auto-loaded
-
-    Supports two formats for enabled_plugins entries:
+    Supports two formats for plugin entries:
     1. Plugin IDs: "plugin-name@marketplace" - resolved via installed_plugins.json
     2. Direct paths: "/path/to/plugin" or "relative/path" - used directly
 
     Args:
-        enabled_plugins: List of plugin IDs or paths from profile config
-        setting_sources: List of setting sources (e.g., ["user", "project"])
+        profile_enabled_plugins: List of plugin IDs or paths from profile config
+        setting_sources: List of setting sources (unused, kept for API compatibility)
 
     Returns:
         List of plugin dicts for SDK, or None if no plugins enabled/needed
     """
-    if not enabled_plugins:
-        return None
-
-    # Check if Claude Code will auto-load plugins from settings
-    # When "user" or "project" is in setting_sources, Claude reads settings.json
-    # which contains enabledPlugins - those plugins are loaded automatically
-    auto_loads_from_settings = setting_sources and (
-        "user" in setting_sources or "project" in setting_sources
-    )
-
-    if auto_loads_from_settings:
-        # Filter to only include direct path entries (not plugin IDs)
-        # Plugin IDs (name@marketplace) are already in settings.json and will be auto-loaded
-        # Direct paths won't be auto-loaded, so we need to pass them explicitly
-        direct_path_plugins = [
-            p for p in enabled_plugins
-            if p and (p.startswith("/") or p.startswith(".") or "@" not in p)
-        ]
-
-        if not direct_path_plugins:
-            # All plugins are IDs that will be auto-loaded from settings
-            logger.info("Skipping explicit plugins list - Claude Code will auto-load from settings.json")
-            return None
-
-        # Only process direct paths
-        enabled_plugins = direct_path_plugins
-        logger.info(f"Setting sources includes user/project - only passing {len(direct_path_plugins)} direct path plugin(s)")
-
-    # Try to load installed plugins registry to resolve plugin IDs
     # Import here to avoid circular imports
     from app.core.plugin_service import get_plugin_service
     service = get_plugin_service()
+
+    # Load installed plugins registry to resolve plugin IDs
     installed_plugins = {}
     installed_plugins_file = service.INSTALLED_FILE
     try:
@@ -251,10 +227,32 @@ def _build_plugins_list(
     except Exception as e:
         logger.warning(f"Failed to load installed_plugins.json: {e}")
 
+    # Get plugins enabled in Claude's settings.json
+    settings_enabled = service.get_enabled_plugins()  # Returns Dict[str, bool]
+    logger.info(f"Plugins enabled in settings.json: {list(settings_enabled.keys())}")
+
+    # Combine plugins from settings.json and profile config
+    all_plugin_entries = []
+
+    # Add plugins enabled in Claude's settings.json
+    for plugin_id, is_enabled in settings_enabled.items():
+        if is_enabled:
+            all_plugin_entries.append(plugin_id)
+
+    # Add plugins from profile config (may be paths or IDs)
+    if profile_enabled_plugins:
+        for entry in profile_enabled_plugins:
+            if entry and entry not in all_plugin_entries:
+                all_plugin_entries.append(entry)
+
+    if not all_plugin_entries:
+        logger.info("No plugins enabled in settings.json or profile config")
+        return None
+
     plugins = []
     seen_paths = set()  # Avoid duplicates
 
-    for plugin_entry in enabled_plugins:
+    for plugin_entry in all_plugin_entries:
         if not plugin_entry:
             continue
 
@@ -2542,20 +2540,54 @@ async def stream_to_websocket(
                 # In non-default modes (bypassPermissions, acceptEdits), allow other tools
                 return PermissionResultAllow()
 
-    # No longer using hooks for AskUserQuestion - it's handled in canUseTool
-    hooks_config = None
-
-    # Build options with the callback, hooks, and user-scoped credential resolution
+    # Build options first without hooks (we need working_dir to build hooks)
     options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
         overrides=overrides,
         resume_session_id=resume_id,
         can_use_tool=can_use_tool_callback,
-        hooks=hooks_config,
+        hooks=None,  # Will be set after we have working_dir
         api_user_id=api_user_id,
         session_id=session_id
     )
+
+    # Build hooks configuration from all sources (plugins, database)
+    # This enables plugin hooks (PreToolUse, Stop, etc.) and database hooks to work
+    # IMPORTANT: The SDK does NOT auto-execute plugin hooks from hooks.json!
+    # We must execute them ourselves via this hook configuration.
+    from app.core.hook_service import build_hooks_config
+
+    # Create a queue for plugin stderr messages to be broadcast to frontend
+    # Plugin hooks run in the SDK's async loop but need to send messages to our streaming loop
+    stderr_queue: asyncio.Queue = asyncio.Queue()
+
+    async def stderr_callback(plugin_name: str, stderr_output: str, severity: str):
+        """Callback for plugin hooks to broadcast stderr to frontend."""
+        await stderr_queue.put({
+            "type": "plugin_message",
+            "plugin": plugin_name,
+            "message": stderr_output,
+            "severity": severity
+        })
+
+    if options.cwd:
+        # Extract plugin paths from options.plugins (list of {"type": "local", "path": str})
+        plugin_paths = []
+        if options.plugins:
+            for plugin_entry in options.plugins:
+                if isinstance(plugin_entry, dict) and plugin_entry.get("path"):
+                    plugin_paths.append(plugin_entry["path"])
+
+        hooks_config = build_hooks_config(
+            working_dir=options.cwd,
+            project_id=project_id,
+            plugin_paths=plugin_paths,
+            stderr_callback=stderr_callback
+        )
+        if hooks_config:
+            options.hooks = hooks_config
+            logger.debug(f"[WS] Hooks configured: {list(hooks_config.keys())}")
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
     # On Docker/Linux, agents are already passed via SDK's --agents flag
@@ -2622,6 +2654,21 @@ async def stream_to_websocket(
     interrupted = False
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
 
+    # Helper to drain stderr queue and yield plugin messages
+    async def drain_stderr_queue():
+        """Drain all pending stderr messages from plugin hooks."""
+        messages = []
+        while True:
+            try:
+                msg = stderr_queue.get_nowait()
+                messages.append(msg)
+                logger.debug(f"[WS] Drained plugin message from queue: {msg.get('type')}")
+            except asyncio.QueueEmpty:
+                break
+        if messages:
+            logger.debug(f"[WS] Drained {len(messages)} plugin message(s) from stderr queue")
+        return messages
+
     try:
         await state.client.query(prompt)
 
@@ -2631,6 +2678,20 @@ async def stream_to_websocket(
                 logger.info(f"[WS] Interrupt flag detected for session {session_id}, breaking out of loop")
                 interrupted = True
                 break
+
+            # Drain stderr queue and yield any plugin messages
+            for stderr_msg in await drain_stderr_queue():
+                logger.debug(f"[WS] Yielding plugin message to websocket: {stderr_msg.get('type')}")
+                # Write hook message to JSONL file for persistence across app restarts
+                if state.sdk_session_id and options.cwd:
+                    write_hook_message(
+                        sdk_session_id=state.sdk_session_id,
+                        working_dir=options.cwd,
+                        plugin=stderr_msg.get("plugin", "unknown"),
+                        message=stderr_msg.get("message", ""),
+                        severity=stderr_msg.get("severity", "warning")
+                    )
+                yield stderr_msg
 
             if isinstance(message, SystemMessage):
                 logger.info(f"[WS] SystemMessage received: subtype={message.subtype}, data_keys={list(message.data.keys()) if message.data else []}, data_preview={str(message.data)[:500] if message.data else 'None'}")
@@ -2957,6 +3018,19 @@ async def stream_to_websocket(
                     metadata["tokens_out"] = message.usage.get("output_tokens", 0)
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+
+        # Final drain of stderr queue after streaming loop completes
+        for stderr_msg in await drain_stderr_queue():
+            # Write hook message to JSONL file for persistence across app restarts
+            if state.sdk_session_id and options.cwd:
+                write_hook_message(
+                    sdk_session_id=state.sdk_session_id,
+                    working_dir=options.cwd,
+                    plugin=stderr_msg.get("plugin", "unknown"),
+                    message=stderr_msg.get("message", ""),
+                    severity=stderr_msg.get("severity", "warning")
+                )
+            yield stderr_msg
 
     except asyncio.CancelledError:
         interrupted = True

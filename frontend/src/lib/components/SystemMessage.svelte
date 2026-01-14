@@ -172,6 +172,18 @@
 				};
 			}
 
+			case 'plugin_warning': {
+				// Plugin hook stderr output (security warnings, etc.)
+				const pluginName = (data.plugin as string) || message.metadata?.plugin || 'Plugin';
+				const warningContent = (data.message as string) || message.content || 'Plugin warning';
+				return {
+					title: pluginName,
+					content: warningContent,
+					badge: 'warning',
+					badgeColor: 'amber'
+				};
+			}
+
 			case 'error':
 			case 'exception':
 			case 'validation_error':
