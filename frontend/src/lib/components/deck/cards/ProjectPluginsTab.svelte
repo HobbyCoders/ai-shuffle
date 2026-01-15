@@ -330,11 +330,13 @@
 		</div>
 
 		<!-- Install button -->
-		<div class="tab-footer">
-			<button onclick={() => (showInstallModal = true)} class="card-btn-primary">
-				<Download />
-				Install Plugin
-			</button>
+		<div class="card-footer">
+			<div class="card-footer-content">
+				<button onclick={() => (showInstallModal = true)} class="card-btn-primary">
+					<Download />
+					Install Plugin
+				</button>
+			</div>
 		</div>
 	{/if}
 </div>
@@ -424,11 +426,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-2);
-	}
-
-	.tab-footer {
-		padding: var(--space-3) var(--space-4);
-		border-top: 1px solid var(--border);
 	}
 
 	.text-success {

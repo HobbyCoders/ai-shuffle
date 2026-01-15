@@ -269,11 +269,13 @@
 
 		<!-- Footer -->
 		{#if activeTab === 'custom'}
-			<div class="tab-footer">
-				<button onclick={() => (showForm = true)} class="card-btn-primary">
-					<Plus />
-					New Hook
-				</button>
+			<div class="card-footer">
+				<div class="card-footer-content">
+					<button onclick={() => (showForm = true)} class="card-btn-primary">
+						<Plus />
+						New Hook
+					</button>
+				</div>
 			</div>
 		{/if}
 	{/if}
@@ -341,11 +343,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-2);
-	}
-
-	.tab-footer {
-		padding: var(--space-3) var(--space-4);
-		border-top: 1px solid var(--border);
 	}
 
 	.form-container {
