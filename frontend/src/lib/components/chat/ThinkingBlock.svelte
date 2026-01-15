@@ -6,8 +6,10 @@
 	 * it from regular response content while keeping it readable.
 	 */
 	import { marked } from 'marked';
+	import { onMount, tick } from 'svelte';
+	import { get } from 'svelte/store';
 	import StreamingIndicator from './StreamingIndicator.svelte';
-	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
+	import { chatPreferences, type ChatPreferences, DEFAULT_PREFERENCES } from '$lib/stores/chatPreferences';
 
 	// Configure marked for markdown rendering
 	marked.setOptions({
@@ -31,19 +33,26 @@
 		profileName = 'Assistant'
 	}: Props = $props();
 
-	// Subscribe to preferences for reactive updates
-	let prefs = $state<ChatPreferences | null>(null);
-	$effect(() => {
-		const unsubscribe = chatPreferences.subscribe(p => {
-			prefs = p;
-		});
-		return unsubscribe;
-	});
+	// Current preferences - starts with defaults, updated reactively
+	let prefs = $state<ChatPreferences>(DEFAULT_PREFERENCES);
 
 	// Track if user has manually toggled this block
 	// Once toggled, user's choice takes precedence over preference
 	let userToggled = $state(false);
 	let userExpandedChoice = $state(false);
+
+	// Subscribe to preferences on mount (client-side only)
+	onMount(async () => {
+		// Get current value immediately (may have been updated before mount)
+		prefs = get(chatPreferences);
+		await tick(); // Force re-render with current preferences
+
+		// Subscribe to future changes
+		const unsubscribe = chatPreferences.subscribe(p => {
+			prefs = p;
+		});
+		return unsubscribe;
+	});
 
 	// Compute expanded state: prop override > user toggle > preference
 	const isExpanded = $derived(
@@ -51,7 +60,7 @@
 			? initialExpanded
 			: userToggled
 				? userExpandedChoice
-				: (prefs?.thinkingStartExpanded ?? false)
+				: prefs.thinkingStartExpanded
 	);
 
 	function toggleExpanded() {
@@ -91,7 +100,7 @@
 	}
 
 	// Derived: should show summary when collapsed
-	const showSummary = $derived(!isExpanded && prefs?.showThinkingSummary && content);
+	const showSummary = $derived(!isExpanded && prefs.showThinkingSummary && content);
 </script>
 
 <div class="thinking-block" class:streaming>

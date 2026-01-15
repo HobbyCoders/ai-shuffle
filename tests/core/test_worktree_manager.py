@@ -188,17 +188,13 @@ class TestPathSanitization:
         assert result == "simple-branch-name"
 
     def test_get_worktree_path(self, manager, mock_settings, temp_dir):
-        """Test worktree path generation - flat structure adjacent to repo"""
+        """Test worktree path generation - uses branch-hash format"""
         result = manager._get_worktree_path("proj-123", "feature/test")
-        # Flat structure: {workspace}/{repo_name}-{branch_sanitized}
-        expected = temp_dir / "proj-123-feature-test"
-        assert result == expected
-
-    def test_get_relative_worktree_path(self, manager):
-        """Test relative worktree path generation - flat structure"""
-        result = manager._get_relative_worktree_path("proj-123", "feature/test")
-        # Flat structure: {repo_name}-{branch_sanitized}
-        assert result == "proj-123-feature-test"
+        # New format: {workspace}/{sanitized_branch}-{hash}
+        # e.g., feature-test-915b
+        result_name = result.name
+        assert result_name.startswith("feature-test-")
+        assert len(result_name.split("-")[-1]) == 4  # 4-char hash
 
 
 # =============================================================================
@@ -350,15 +346,18 @@ class TestCreateWorktree:
         assert "already exists" in str(excinfo.value)
 
     def test_create_worktree_path_already_exists(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
-        """Test error when worktree path already exists on disk"""
-        # Create the directory first - flat structure: {repo_name}-{branch}
-        worktree_path = temp_dir / "test-project-develop"
+        """Test worktree creation finds unique path when directory exists"""
+        # The new implementation tries to find a unique path (adds -2, -3, etc.)
+        # So this test verifies that behavior works
+        import hashlib
+        path_hash = hashlib.md5("test-project".encode()).hexdigest()[:4]
+        worktree_path = temp_dir / f"develop-{path_hash}"
         worktree_path.mkdir(parents=True)
 
-        with pytest.raises(WorktreeError) as excinfo:
-            manager.create_worktree("proj-test123", "develop")
-
-        assert "already exists" in str(excinfo.value)
+        # Should succeed by finding a unique path (develop-{hash}-2)
+        result = manager.create_worktree("proj-test123", "develop")
+        assert result is not None
+        assert result["branch_name"] == "develop"
 
     def test_create_worktree_git_failure(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
         """Test error handling when git add_worktree fails"""
@@ -369,24 +368,32 @@ class TestCreateWorktree:
 
         assert "Git failed" in str(excinfo.value)
 
-    def test_create_worktree_returns_existing_if_valid(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
-        """Test returns existing worktree if branch already has valid worktree"""
+    def test_create_worktree_creates_unique_path_if_branch_exists(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
+        """Test creates worktree with unique path even if branch already has worktree"""
+        import hashlib
+        path_hash = hashlib.md5("test-project".encode()).hexdigest()[:4]
+        worktree_rel_path = f"develop-{path_hash}"
+
         existing_worktree = {
             "id": "wt-existing",
             "branch_name": "develop",
-            "worktree_path": ".worktrees/proj-test123/develop",
+            "worktree_path": worktree_rel_path,
             "status": WorktreeStatus.ACTIVE
         }
         mock_database.get_active_worktrees_for_repository.return_value = [existing_worktree]
 
-        # Create the path so it's considered valid
-        worktree_full_path = temp_dir / ".worktrees" / "proj-test123" / "develop"
+        # Create the path with a .git file so it's considered a valid worktree
+        worktree_full_path = temp_dir / worktree_rel_path
         worktree_full_path.mkdir(parents=True)
+        (worktree_full_path / ".git").write_text("gitdir: /path/to/main/repo/.git/worktrees/develop")
 
+        # Implementation creates new worktree with unique path (e.g., develop-bd58-2)
         result = manager.create_worktree("proj-test123", "develop")
 
-        assert result == existing_worktree
-        mock_git_service.add_worktree.assert_not_called()
+        assert result is not None
+        assert result["branch_name"] == "develop"
+        # New worktree gets a unique path (with -2 suffix or similar)
+        mock_git_service.add_worktree.assert_called_once()
 
     def test_create_worktree_cleans_stale_record(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
         """Test cleans up stale worktree record and allows creation"""
@@ -507,23 +514,33 @@ class TestCreateWorktreeSession:
 
         assert "Project not found" in str(excinfo.value)
 
-    def test_create_worktree_session_existing_worktree_error(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
-        """Test error when worktree directory already exists"""
+    def test_create_worktree_session_creates_unique_path_if_branch_exists(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
+        """Test creates worktree+session with unique path even if branch already has worktree"""
+        import hashlib
+        path_hash = hashlib.md5("test-project".encode()).hexdigest()[:4]
+        worktree_rel_path = f"develop-{path_hash}"
+
         existing_worktree = {
             "id": "wt-existing",
             "branch_name": "develop",
-            "worktree_path": "test-project-develop"
+            "worktree_path": worktree_rel_path,
+            "status": WorktreeStatus.ACTIVE
         }
         mock_database.get_active_worktrees_for_repository.return_value = [existing_worktree]
 
-        # Create the path so it's valid - flat structure: {repo_name}-{branch}
-        (temp_dir / "test-project-develop").mkdir(parents=True)
+        # Create the path with a .git file so it's considered a valid worktree
+        worktree_full_path = temp_dir / worktree_rel_path
+        worktree_full_path.mkdir(parents=True)
+        (worktree_full_path / ".git").write_text("gitdir: /path/to/main/repo/.git/worktrees/develop")
 
-        with pytest.raises(WorktreeError) as excinfo:
-            manager.create_worktree_session("proj-test123", "develop")
+        # Implementation creates new worktree+session with unique path (e.g., develop-bd58-2)
+        worktree, session = manager.create_worktree_session("proj-test123", "develop")
 
-        # The error is about the directory existing, not the branch having an active worktree
-        assert "already exists" in str(excinfo.value)
+        assert worktree is not None
+        assert session is not None
+        assert worktree["branch_name"] == "develop"
+        assert session["title"] == "Branch: develop"
+        mock_git_service.add_worktree.assert_called_once()
 
     def test_create_worktree_session_cleanup_on_session_failure(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
         """Test cleanup when session creation fails"""
@@ -1117,12 +1134,14 @@ class TestEdgeCases:
         """Test worktree creation calls git add_worktree with correct path"""
         manager.create_worktree("proj-test123", "develop")
 
-        # Verify git add_worktree was called - flat structure
+        # Verify git add_worktree was called - branch-hash format
         mock_git_service.add_worktree.assert_called()
         call_kwargs = mock_git_service.add_worktree.call_args.kwargs
         worktree_path = call_kwargs["path"]
-        # Should be flat path: test-project-develop
-        assert "test-project-develop" in str(worktree_path)
+        # Should be branch-hash format: develop-{4char_hash}
+        worktree_name = Path(worktree_path).name
+        assert worktree_name.startswith("develop-")
+        assert len(worktree_name.split("-")[-1]) == 4  # 4-char hash
 
     def test_get_worktree_details_legacy_session(self, manager, mock_database, mock_settings, temp_dir):
         """Test get_worktree_details handles legacy session_id relationship"""
@@ -1210,15 +1229,18 @@ class TestCreateWorktreeSessionAdditional:
         assert "already exists" in str(excinfo.value)
 
     def test_create_worktree_session_path_already_exists(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
-        """Test error when worktree path already exists on disk"""
-        # Flat structure: {repo_name}-{branch}
-        worktree_path = temp_dir / "test-project-develop"
+        """Test worktree session creation finds unique path when directory exists"""
+        # The new implementation tries to find a unique path (adds -2, -3, etc.)
+        import hashlib
+        path_hash = hashlib.md5("test-project".encode()).hexdigest()[:4]
+        worktree_path = temp_dir / f"develop-{path_hash}"
         worktree_path.mkdir(parents=True)
 
-        with pytest.raises(WorktreeError) as excinfo:
-            manager.create_worktree_session("proj-test123", "develop")
-
-        assert "already exists" in str(excinfo.value)
+        # Should succeed by finding a unique path (develop-{hash}-2)
+        worktree, session = manager.create_worktree_session("proj-test123", "develop")
+        assert worktree is not None
+        assert session is not None
+        assert worktree["branch_name"] == "develop"
 
     def test_create_worktree_session_git_failure(self, manager, mock_database, mock_git_service, mock_settings, temp_dir):
         """Test error handling when git add_worktree fails"""

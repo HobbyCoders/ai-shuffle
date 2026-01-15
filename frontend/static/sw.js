@@ -1,17 +1,19 @@
 // AI Shuffle Service Worker
-// Version: 1.0.2
+// Version: 2.0.0
+// Auto-update enabled - clients reload automatically on new version
 
-const CACHE_NAME = 'ai-shuffle-v2';
+const CACHE_VERSION = 3;
+const CACHE_NAME = `ai-shuffle-v${CACHE_VERSION}`;
+const API_CACHE_NAME = `ai-shuffle-api-v${CACHE_VERSION}`;
 const OFFLINE_URL = '/offline.html';
 
-// Static assets to cache on install
+// Static assets to cache on install (minimal - let network-first handle the rest)
 const STATIC_ASSETS = [
-  '/',
+  '/offline.html',
   '/manifest.json',
   '/favicon.svg',
   '/icons/icon.svg',
-  '/icons/icon-maskable.svg',
-  '/offline.html'
+  '/icons/icon-maskable.svg'
 ];
 
 // Cache strategies
@@ -81,14 +83,14 @@ self.addEventListener('install', (event) => {
   );
 });
 
-// Activate event - clean up old caches
+// Activate event - clean up old caches and notify clients to reload
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
       .then((cacheNames) => {
         return Promise.all(
           cacheNames
-            .filter((cacheName) => cacheName !== CACHE_NAME)
+            .filter((cacheName) => !cacheName.includes(`v${CACHE_VERSION}`))
             .map((cacheName) => {
               console.log('[SW] Deleting old cache:', cacheName);
               return caches.delete(cacheName);
@@ -96,6 +98,18 @@ self.addEventListener('activate', (event) => {
         );
       })
       .then(() => self.clients.claim())
+      .then(() => {
+        // Notify all clients that a new version is active - trigger reload
+        return self.clients.matchAll({ type: 'window' }).then((clients) => {
+          clients.forEach((client) => {
+            client.postMessage({
+              type: 'SW_UPDATED',
+              version: CACHE_VERSION,
+              message: 'New version available'
+            });
+          });
+        });
+      })
   );
 });
 
@@ -128,7 +142,7 @@ async function handleRequest(request, url) {
   if (url.pathname.startsWith('/api/')) {
     // For session list and chat history, cache for offline reading
     if (url.pathname.includes('/sessions') || url.pathname.includes('/messages')) {
-      const response = await CACHE_STRATEGIES.networkFirst(request, 'ai-shuffle-api-v1');
+      const response = await CACHE_STRATEGIES.networkFirst(request, API_CACHE_NAME);
       if (response) {
         return response;
       }
@@ -166,19 +180,29 @@ async function handleRequest(request, url) {
     return fetch(request);
   }
 
-  // HTML pages - stale while revalidate
+  // HTML pages - network first (always get fresh content, cache for offline only)
   if (request.headers.get('Accept')?.includes('text/html')) {
-    const response = await CACHE_STRATEGIES.staleWhileRevalidate(request);
-    if (response) {
-      return response;
+    try {
+      const networkResponse = await fetch(request);
+      if (networkResponse.ok) {
+        // Cache for offline use
+        const cache = await caches.open(CACHE_NAME);
+        cache.put(request, networkResponse.clone());
+      }
+      return networkResponse;
+    } catch (error) {
+      // Network failed - try cache, then offline page
+      const cache = await caches.open(CACHE_NAME);
+      const cachedResponse = await cache.match(request);
+      if (cachedResponse) {
+        return cachedResponse;
+      }
+      const offlinePage = await cache.match(OFFLINE_URL);
+      if (offlinePage) {
+        return offlinePage;
+      }
+      return new Response('Offline', { status: 503 });
     }
-    // Return offline page if available
-    const cache = await caches.open(CACHE_NAME);
-    const offlinePage = await cache.match(OFFLINE_URL);
-    if (offlinePage) {
-      return offlinePage;
-    }
-    return new Response('Offline', { status: 503 });
   }
 
   // Default - try network, fall back to cache
@@ -200,14 +224,26 @@ self.addEventListener('message', (event) => {
     self.skipWaiting();
   }
 
+  if (event.data && event.data.type === 'GET_VERSION') {
+    event.ports[0]?.postMessage({ version: CACHE_VERSION });
+  }
+
   if (event.data && event.data.type === 'CLEAR_CACHE') {
     event.waitUntil(
       caches.keys().then((cacheNames) => {
         return Promise.all(
           cacheNames.map((cacheName) => caches.delete(cacheName))
         );
+      }).then(() => {
+        // Notify client that cache was cleared
+        event.ports[0]?.postMessage({ cleared: true });
       })
     );
+  }
+
+  if (event.data && event.data.type === 'CHECK_FOR_UPDATE') {
+    // Force update check
+    self.registration.update();
   }
 });
 

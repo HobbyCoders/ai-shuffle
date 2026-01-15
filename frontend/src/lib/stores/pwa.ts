@@ -50,7 +50,8 @@ function createPWAStore() {
 
     try {
       const registration = await navigator.serviceWorker.register('/sw.js', {
-        scope: '/'
+        scope: '/',
+        updateViaCache: 'none' // Always check for SW updates
       });
 
       console.log('[PWA] Service worker registered:', registration.scope);
@@ -61,18 +62,37 @@ function createPWAStore() {
       registration.addEventListener('updatefound', () => {
         const newWorker = registration.installing;
         if (newWorker) {
+          console.log('[PWA] New service worker installing...');
           newWorker.addEventListener('statechange', () => {
             if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-              console.log('[PWA] New version available');
+              console.log('[PWA] New version installed, will activate shortly');
+              // The SW will skipWaiting and send SW_UPDATED message
               update(state => ({ ...state, hasUpdate: true }));
             }
           });
         }
       });
 
-      // Handle controller change (new service worker activated)
+      // Handle controller change (new service worker activated) - auto reload
+      let refreshing = false;
       navigator.serviceWorker.addEventListener('controllerchange', () => {
-        console.log('[PWA] New service worker activated');
+        console.log('[PWA] New service worker activated, reloading...');
+        if (!refreshing) {
+          refreshing = true;
+          window.location.reload();
+        }
+      });
+
+      // Listen for SW_UPDATED message from service worker
+      navigator.serviceWorker.addEventListener('message', (event) => {
+        if (event.data?.type === 'SW_UPDATED') {
+          console.log('[PWA] Received SW_UPDATED message, version:', event.data.version);
+          // The controllerchange event will handle reload, but this is a backup
+          if (!refreshing) {
+            refreshing = true;
+            window.location.reload();
+          }
+        }
       });
 
       return registration;
@@ -156,6 +176,22 @@ function createPWAStore() {
     return daysSinceDismissed < 7;
   }
 
+  // Force check for service worker updates
+  async function checkForUpdates() {
+    const state = await new Promise<PWAState>(resolve => {
+      subscribe(s => resolve(s))();
+    });
+
+    if (state.serviceWorkerRegistration) {
+      try {
+        await state.serviceWorkerRegistration.update();
+        console.log('[PWA] Checked for updates');
+      } catch (error) {
+        console.log('[PWA] Update check failed:', error);
+      }
+    }
+  }
+
   // Initialize PWA features
   function init() {
     if (!browser) return;
@@ -165,10 +201,24 @@ function createPWAStore() {
     // Listen for online/offline events
     window.addEventListener('online', () => {
       update(state => ({ ...state, isOnline: true }));
+      // Check for updates when coming back online
+      checkForUpdates();
     });
 
     window.addEventListener('offline', () => {
       update(state => ({ ...state, isOnline: false }));
+    });
+
+    // Check for updates when page becomes visible (critical for mobile)
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        checkForUpdates();
+      }
+    });
+
+    // Check for updates when window gains focus
+    window.addEventListener('focus', () => {
+      checkForUpdates();
     });
 
     // Listen for install prompt
@@ -223,7 +273,8 @@ function createPWAStore() {
     applyUpdate,
     dismissUpdate,
     clearCache,
-    registerServiceWorker
+    registerServiceWorker,
+    checkForUpdates
   };
 }
 
