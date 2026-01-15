@@ -914,7 +914,10 @@ class PluginService:
                 plugin_id = f"{plugin_name}@project-{scope.value}"
 
                 # Read plugin.json for metadata if exists
+                # Check both root and .claude-plugin/ directory
                 plugin_json = plugin_dir / "plugin.json"
+                if not plugin_json.exists():
+                    plugin_json = plugin_dir / ".claude-plugin" / "plugin.json"
                 version = "1.0.0"
                 if plugin_json.exists():
                     try:
@@ -1288,8 +1291,33 @@ def get_hooks_from_plugins(plugins: List["PluginInfo"]) -> List[Dict[str, Any]]:
                 if hook_info:
                     result.append(hook_info)
 
+        # Check hooks/hooks.json for hook definitions
+        hooks_json = hooks_dir / "hooks.json" if hooks_dir and hooks_dir.exists() else None
+        if hooks_json and hooks_json.exists():
+            try:
+                import json
+                with open(hooks_json) as f:
+                    hooks_data = json.load(f)
+
+                # hooks.json can be a list of hooks or an object with hook definitions
+                hooks_list = hooks_data if isinstance(hooks_data, list) else hooks_data.get("hooks", [])
+                for hook in hooks_list:
+                    result.append({
+                        "plugin_id": plugin.id,
+                        "plugin_name": plugin.name,
+                        "event": hook.get("event", "Unknown"),
+                        "hook_type": hook.get("type", "prompt"),
+                        "description": hook.get("description"),
+                        "tool_matcher": hook.get("toolMatcher"),
+                    })
+            except Exception:
+                pass
+
         # Also check plugin.json for hooks section
+        # Check both root and .claude-plugin/ directory
         plugin_json = plugin_dir / "plugin.json"
+        if not plugin_json.exists():
+            plugin_json = plugin_dir / ".claude-plugin" / "plugin.json"
         if plugin_json.exists():
             try:
                 import json
