@@ -9,6 +9,7 @@
 import { writable, derived, get } from 'svelte/store';
 import type { ProjectPluginInfo, AvailablePluginInfo } from '$lib/api/projectPlugins';
 import * as projectPluginsApi from '$lib/api/projectPlugins';
+import { hooks } from './hooks';
 
 // ============================================================================
 // Types
@@ -144,6 +145,10 @@ function createProjectPluginsStore() {
 					),
 					installing: { ...state.installing, [pluginId]: false }
 				}));
+
+				// Refresh hooks since plugin may have hooks
+				hooks.loadAll(projectId);
+
 				return plugin;
 			} catch (e) {
 				const error = e instanceof Error ? e.message : 'Failed to install plugin';
@@ -181,6 +186,9 @@ function createProjectPluginsStore() {
 					),
 					installing: { ...state.installing, [pluginId]: false }
 				}));
+
+				// Refresh hooks since plugin hooks may have changed
+				hooks.loadAll(projectId);
 			} catch (e) {
 				const error = e instanceof Error ? e.message : 'Failed to uninstall plugin';
 				update((state) => ({
