@@ -1306,18 +1306,44 @@ def get_hooks_from_plugins(plugins: List["PluginInfo"]) -> List[Dict[str, Any]]:
 
                 logger.debug(f"[get_hooks_from_plugins] Plugin {plugin.id}: hooks_data type={type(hooks_data)}, content={hooks_data}")
 
-                # hooks.json can be a list of hooks or an object with hook definitions
-                hooks_list = hooks_data if isinstance(hooks_data, list) else hooks_data.get("hooks", [])
+                # hooks.json can be in multiple formats:
+                # 1. List of event names: ["PreToolUse", "PostToolUse"]
+                # 2. Dict mapping events to files: {"PreToolUse": "pretooluse.py"}
+                # 3. List of hook objects: [{"event": "PreToolUse", "type": "prompt"}]
+                # 4. Object with "hooks" key: {"hooks": [...]}
+
+                hooks_list = []
+                if isinstance(hooks_data, list):
+                    hooks_list = hooks_data
+                elif isinstance(hooks_data, dict):
+                    if "hooks" in hooks_data:
+                        hooks_list = hooks_data["hooks"]
+                    else:
+                        # Dict mapping event names to something (file paths, configs, etc)
+                        hooks_list = list(hooks_data.keys())
+
                 logger.debug(f"[get_hooks_from_plugins] Plugin {plugin.id}: found {len(hooks_list)} hooks in hooks.json")
                 for hook in hooks_list:
-                    result.append({
-                        "plugin_id": plugin.id,
-                        "plugin_name": plugin.name,
-                        "event": hook.get("event", "Unknown"),
-                        "hook_type": hook.get("type", "prompt"),
-                        "description": hook.get("description"),
-                        "tool_matcher": hook.get("toolMatcher"),
-                    })
+                    if isinstance(hook, str):
+                        # Simple event name string
+                        result.append({
+                            "plugin_id": plugin.id,
+                            "plugin_name": plugin.name,
+                            "event": hook,
+                            "hook_type": "prompt",
+                            "description": None,
+                            "tool_matcher": None,
+                        })
+                    elif isinstance(hook, dict):
+                        # Full hook object
+                        result.append({
+                            "plugin_id": plugin.id,
+                            "plugin_name": plugin.name,
+                            "event": hook.get("event", "Unknown"),
+                            "hook_type": hook.get("type", "prompt"),
+                            "description": hook.get("description"),
+                            "tool_matcher": hook.get("toolMatcher"),
+                        })
             except Exception as e:
                 logger.error(f"[get_hooks_from_plugins] Error parsing hooks.json for {plugin.id}: {e}")
 
