@@ -87,19 +87,19 @@ export async function installProjectPlugin(
  * Uninstall a plugin from a project
  */
 export async function uninstallProjectPlugin(projectId: string, pluginId: string): Promise<void> {
-	return api.delete(`/projects/${projectId}/plugins/${encodeURIComponent(pluginId)}`);
+	await api.delete(`/projects/${projectId}/plugins/${encodeURIComponent(pluginId)}`);
 }
 
 /**
  * Enable a plugin in a project
  */
 export async function enableProjectPlugin(projectId: string, pluginId: string): Promise<void> {
-	return api.post(`/projects/${projectId}/plugins/${encodeURIComponent(pluginId)}/enable`);
+	await api.post(`/projects/${projectId}/plugins/${encodeURIComponent(pluginId)}/enable`);
 }
 
 /**
  * Disable a plugin in a project
  */
 export async function disableProjectPlugin(projectId: string, pluginId: string): Promise<void> {
-	return api.post(`/projects/${projectId}/plugins/${encodeURIComponent(pluginId)}/disable`);
+	await api.post(`/projects/${projectId}/plugins/${encodeURIComponent(pluginId)}/disable`);
 }

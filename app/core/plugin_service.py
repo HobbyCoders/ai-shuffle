@@ -19,6 +19,7 @@ import logging
 import stat
 import subprocess
 import shutil
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any
@@ -1223,6 +1224,7 @@ class PluginService:
 
 # Global service instance cache (keyed by project_dir)
 _plugin_services: Dict[Optional[str], PluginService] = {}
+_plugin_services_lock = threading.Lock()
 
 
 def get_plugin_service(project_dir: Optional[Path] = None) -> PluginService:
@@ -1238,16 +1240,17 @@ def get_plugin_service(project_dir: Optional[Path] = None) -> PluginService:
     """
     cache_key = str(project_dir) if project_dir else None
 
-    if cache_key not in _plugin_services:
-        _plugin_services[cache_key] = PluginService(project_dir=project_dir)
-
-    return _plugin_services[cache_key]
+    with _plugin_services_lock:
+        if cache_key not in _plugin_services:
+            _plugin_services[cache_key] = PluginService(project_dir=project_dir)
+        return _plugin_services[cache_key]
 
 
 def clear_plugin_service_cache():
     """Clear the plugin service cache (useful for testing)"""
     global _plugin_services
-    _plugin_services = {}
+    with _plugin_services_lock:
+        _plugin_services = {}
 
 
 def get_all_plugin_hooks() -> List[Dict[str, Any]]:

@@ -16,6 +16,7 @@ System prompt content here...
 
 import logging
 import re
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any
@@ -459,6 +460,7 @@ class ProjectAgentService:
 
 # Service instance cache (keyed by project_path)
 _agent_services: Dict[str, ProjectAgentService] = {}
+_agent_services_lock = threading.Lock()
 
 
 def get_project_agent_service(project_path: Path) -> ProjectAgentService:
@@ -473,13 +475,14 @@ def get_project_agent_service(project_path: Path) -> ProjectAgentService:
     """
     cache_key = str(project_path)
 
-    if cache_key not in _agent_services:
-        _agent_services[cache_key] = ProjectAgentService(project_path)
-
-    return _agent_services[cache_key]
+    with _agent_services_lock:
+        if cache_key not in _agent_services:
+            _agent_services[cache_key] = ProjectAgentService(project_path)
+        return _agent_services[cache_key]
 
 
 def clear_agent_service_cache():
     """Clear the agent service cache (useful for testing)"""
     global _agent_services
-    _agent_services = {}
+    with _agent_services_lock:
+        _agent_services = {}
