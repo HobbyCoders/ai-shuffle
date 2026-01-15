@@ -120,6 +120,38 @@ def _fix_python_command_for_windows(command: str) -> str:
     return command
 
 
+def _get_jq_shim_env(env: dict) -> dict:
+    """
+    Add the Python jq shim to PATH.
+
+    This ensures shell scripts can call 'jq' and have it handled
+    by our Python implementation, eliminating the need for external
+    jq installation on any platform.
+
+    Args:
+        env: The current environment dict
+
+    Returns:
+        Modified environment dict with jq shim in PATH
+    """
+    # Get the path to the jq shim bin directory
+    shim_dir = Path(__file__).parent / "jq_shim" / "bin"
+
+    # Prepend to PATH (so our shim takes precedence over any system jq)
+    current_path = env.get("PATH", "")
+    env["PATH"] = str(shim_dir) + os.pathsep + current_path
+
+    # Also set PYTHONPATH so the shim can import its modules
+    app_root = Path(__file__).parent.parent.parent
+    current_pythonpath = env.get("PYTHONPATH", "")
+    if current_pythonpath:
+        env["PYTHONPATH"] = str(app_root) + os.pathsep + current_pythonpath
+    else:
+        env["PYTHONPATH"] = str(app_root)
+
+    return env
+
+
 async def execute_plugin_hook(
     hook_def: Dict[str, Any],
     hook_input: Dict[str, Any],
@@ -156,33 +188,9 @@ async def execute_plugin_hook(
     env = os.environ.copy()
     env["CLAUDE_PLUGIN_ROOT"] = plugin_path
 
-    # On Windows, add common jq install locations to PATH for shell scripts
-    # This is needed because Git Bash subprocess doesn't always inherit Windows PATH properly
-    if sys.platform == "win32":
-        import shutil
-        # Check if jq is already in PATH
-        if not shutil.which("jq"):
-            # Common jq installation paths on Windows
-            user_home = os.path.expanduser("~")
-            common_jq_paths = [
-                os.path.join(user_home, "AppData", "Local", "Microsoft", "WinGet", "Packages"),
-                os.path.join(user_home, "scoop", "shims"),
-                r"C:\ProgramData\chocolatey\bin",
-                r"C:\tools",
-            ]
-            # Search for jq.exe in common paths
-            for base_path in common_jq_paths:
-                if os.path.exists(base_path):
-                    # For WinGet, search subdirectories
-                    if "WinGet" in base_path:
-                        for root, dirs, files in os.walk(base_path):
-                            if "jq.exe" in files:
-                                env["PATH"] = root + os.pathsep + env.get("PATH", "")
-                                logger.debug(f"Added jq path to env: {root}")
-                                break
-                    elif os.path.exists(os.path.join(base_path, "jq.exe")):
-                        env["PATH"] = base_path + os.pathsep + env.get("PATH", "")
-                        logger.debug(f"Added jq path to env: {base_path}")
+    # Add Python jq shim to PATH (cross-platform)
+    # This eliminates the need for external jq installation
+    env = _get_jq_shim_env(env)
 
     # Prepare stdin JSON
     stdin_data = json.dumps(hook_input)

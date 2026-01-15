@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Python jq shim - routes jq calls to Python implementation
+# This allows shell scripts to use jq syntax while processing is handled by Python
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Find the app root (4 levels up: bin -> jq_shim -> core -> app -> root)
+APP_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+
+# Set PYTHONPATH to include app root
+export PYTHONPATH="$APP_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+# Execute the Python jq shim module
+exec python3 -m app.core.jq_shim "$@"
