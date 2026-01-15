@@ -176,15 +176,15 @@ export async function uninstallPlugin(pluginId: string): Promise<void> {
 /**
  * Enable a plugin globally
  */
-export async function enablePlugin(pluginId: string): Promise<{ success: boolean }> {
-	return api.post<{ success: boolean }>(`/plugins/${encodeURIComponent(pluginId)}/enable`);
+export async function enablePlugin(pluginId: string): Promise<void> {
+	await api.post<void>(`/plugins/${encodeURIComponent(pluginId)}/enable`);
 }
 
 /**
  * Disable a plugin globally
  */
-export async function disablePlugin(pluginId: string): Promise<{ success: boolean }> {
-	return api.post<{ success: boolean }>(`/plugins/${encodeURIComponent(pluginId)}/disable`);
+export async function disablePlugin(pluginId: string): Promise<void> {
+	await api.post<void>(`/plugins/${encodeURIComponent(pluginId)}/disable`);
 }
 
 // ============================================================================
