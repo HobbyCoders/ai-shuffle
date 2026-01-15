@@ -216,6 +216,7 @@ class Project(ProjectBase):
     id: str
     path: str
     settings: ProjectSettings
+    session_count: Optional[int] = None  # Number of sessions in this project
     created_at: datetime
     updated_at: datetime
 
