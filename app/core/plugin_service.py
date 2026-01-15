@@ -899,6 +899,7 @@ class PluginService:
         ]
 
         for scope, plugins_dir in scope_dirs:
+            logger.debug(f"[get_project_installed_plugins] Checking scope={scope.value}, dir={plugins_dir}, exists={plugins_dir.exists() if plugins_dir else False}")
             if not plugins_dir or not plugins_dir.exists():
                 continue
 
@@ -1277,8 +1278,11 @@ def get_hooks_from_plugins(plugins: List["PluginInfo"]) -> List[Dict[str, Any]]:
     """
     result = []
 
+    logger.debug(f"[get_hooks_from_plugins] Processing {len(plugins)} plugins")
+
     for plugin in plugins:
         plugin_dir = Path(plugin.install_path) if plugin.install_path else None
+        logger.debug(f"[get_hooks_from_plugins] Plugin {plugin.id}: install_path={plugin.install_path}, dir_exists={plugin_dir.exists() if plugin_dir else False}")
         if not plugin_dir or not plugin_dir.exists():
             continue
 
@@ -1293,14 +1297,18 @@ def get_hooks_from_plugins(plugins: List["PluginInfo"]) -> List[Dict[str, Any]]:
 
         # Check hooks/hooks.json for hook definitions
         hooks_json = hooks_dir / "hooks.json" if hooks_dir and hooks_dir.exists() else None
+        logger.debug(f"[get_hooks_from_plugins] Plugin {plugin.id}: hooks_json={hooks_json}, exists={hooks_json.exists() if hooks_json else False}")
         if hooks_json and hooks_json.exists():
             try:
                 import json
                 with open(hooks_json) as f:
                     hooks_data = json.load(f)
 
+                logger.debug(f"[get_hooks_from_plugins] Plugin {plugin.id}: hooks_data type={type(hooks_data)}, content={hooks_data}")
+
                 # hooks.json can be a list of hooks or an object with hook definitions
                 hooks_list = hooks_data if isinstance(hooks_data, list) else hooks_data.get("hooks", [])
+                logger.debug(f"[get_hooks_from_plugins] Plugin {plugin.id}: found {len(hooks_list)} hooks in hooks.json")
                 for hook in hooks_list:
                     result.append({
                         "plugin_id": plugin.id,
@@ -1310,8 +1318,8 @@ def get_hooks_from_plugins(plugins: List["PluginInfo"]) -> List[Dict[str, Any]]:
                         "description": hook.get("description"),
                         "tool_matcher": hook.get("toolMatcher"),
                     })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"[get_hooks_from_plugins] Error parsing hooks.json for {plugin.id}: {e}")
 
         # Also check plugin.json for hooks section
         # Check both root and .claude-plugin/ directory

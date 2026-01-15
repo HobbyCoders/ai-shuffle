@@ -6,9 +6,12 @@ Plugins can be installed to:
 - PROJECT scope: <project>/plugins/ (committed to git)
 """
 
+import logging
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
@@ -337,11 +340,16 @@ async def get_project_plugin_hooks(
     Returns hooks from plugins installed in both LOCAL and PROJECT scopes.
     """
     project = _validate_project_access(request, project_id)
+    logger.info(f"[get_project_plugin_hooks] Project: {project.get('name')}, path: {project.get('path')}")
+
     service = _get_project_plugin_service(project)
+    logger.info(f"[get_project_plugin_hooks] Service project_dir: {service.project_dir}, LOCAL_PLUGINS_DIR: {service.LOCAL_PLUGINS_DIR}")
 
     # Get project-installed plugins
     plugins = service.get_project_installed_plugins()
+    logger.info(f"[get_project_plugin_hooks] Found {len(plugins)} project plugins: {[p.id for p in plugins]}")
 
     # Get hooks from these plugins
     hooks = get_hooks_from_plugins(plugins)
+    logger.info(f"[get_project_plugin_hooks] Found {len(hooks)} hooks")
     return hooks
