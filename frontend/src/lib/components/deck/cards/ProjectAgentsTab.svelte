@@ -5,9 +5,9 @@
 	 * Features:
 	 * - View agents in .claude/agents/
 	 * - Create/edit/delete file-based agents
-	 * - 3-tab editor (Identity, Config, Prompt)
+	 * - 3-tab editor (Identity, Config, Prompt) matching SubagentCard UI
+	 * - AI generation support
 	 */
-	import { onMount } from 'svelte';
 	import {
 		projectAgents,
 		allProjectAgents,
@@ -18,7 +18,9 @@
 		projectAgentCount
 	} from '$lib/stores/projectAgents';
 	import type { CreateProjectAgentRequest, UpdateProjectAgentRequest } from '$lib/api/projectAgents';
-	import { Search, Bot, Plus, Trash2, X, Loader2, Save, ChevronLeft } from 'lucide-svelte';
+	import type { SubagentExport } from '$lib/api/client';
+	import { Search, Bot, Plus, Trash2, X, ArrowLeft, User, Settings, Terminal, Zap } from 'lucide-svelte';
+	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -39,7 +41,7 @@
 	// Form state
 	let formName = $state('');
 	let formDescription = $state('');
-	let formModel = $state<string | null>(null);
+	let formModel = $state<string>('');
 	let formTools = $state<string[]>([]);
 	let formPrompt = $state('');
 
@@ -48,6 +50,10 @@
 
 	// Delete confirmation
 	let deletingAgent = $state<string | null>(null);
+	let deleteLoading = $state(false);
+
+	// AI Generate state
+	let showGenerateDialog = $state(false);
 
 	// Load agents when project changes
 	$effect(() => {
@@ -67,19 +73,41 @@
 		);
 	});
 
-	// Available models
-	const models = [
-		{ value: null, label: 'Inherit (default)' },
-		{ value: 'haiku', label: 'Haiku' },
-		{ value: 'sonnet', label: 'Sonnet' },
-		{ value: 'opus', label: 'Opus' }
+	// Validation per tab
+	const identityValid = $derived(() => {
+		if (isCreating && !formName.match(/^[a-zA-Z][a-zA-Z0-9_-]*$/)) return false;
+		if (isCreating && formName.length === 0) return false;
+		if (formDescription.length === 0) return false;
+		return true;
+	});
+
+	const configValid = $derived(() => true);
+	const promptValid = $derived(() => formPrompt.length > 0);
+	const isValid = $derived(() => identityValid() && configValid() && promptValid());
+
+	// Model options
+	const MODEL_OPTIONS = [
+		{ value: '', label: 'Inherit', description: 'Use profile default' },
+		{ value: 'haiku', label: 'Haiku', description: 'Fast & cheap' },
+		{ value: 'sonnet', label: 'Sonnet', description: 'Balanced' },
+		{ value: 'opus', label: 'Opus', description: 'Most capable' }
 	];
+
+	function getModelBadgeClass(model?: string | null): string {
+		if (!model || model === '') return 'card-badge--inherit';
+		return `card-badge--${model}`;
+	}
+
+	function getModelDisplay(model?: string | null): string {
+		const opt = MODEL_OPTIONS.find(o => o.value === model);
+		return opt?.label || 'Inherit';
+	}
 
 	// Reset form
 	function resetForm() {
 		formName = '';
 		formDescription = '';
-		formModel = null;
+		formModel = '';
 		formTools = [];
 		formPrompt = '';
 		editorTab = 'identity';
@@ -100,7 +128,7 @@
 		if ($selectedProjectAgent) {
 			formName = $selectedProjectAgent.name;
 			formDescription = $selectedProjectAgent.description;
-			formModel = $selectedProjectAgent.model;
+			formModel = $selectedProjectAgent.model || '';
 			formTools = $selectedProjectAgent.tools || [];
 			formPrompt = $selectedProjectAgent.prompt;
 		}
@@ -118,7 +146,7 @@
 
 	// Save agent
 	async function handleSave() {
-		if (!formName.trim() || !formDescription.trim() || !formPrompt.trim()) return;
+		if (!isValid()) return;
 
 		try {
 			if (isCreating) {
@@ -147,11 +175,14 @@
 
 	// Delete agent
 	async function handleDelete(agentName: string) {
+		deleteLoading = true;
 		try {
 			await projectAgents.deleteAgent(projectId, agentName);
 			deletingAgent = null;
 		} catch (e) {
 			console.error('Failed to delete agent:', e);
+		} finally {
+			deleteLoading = false;
 		}
 	}
 
@@ -169,107 +200,157 @@
 		'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash',
 		'WebFetch', 'WebSearch', 'Task', 'TodoWrite'
 	];
+
+	// Handle AI-generated subagent
+	function handleGeneratedSubagent(data: SubagentExport | unknown) {
+		showGenerateDialog = false;
+		const sub = (data as SubagentExport).subagent;
+
+		// Populate form with generated data
+		isCreating = true;
+		formName = sub.id || sub.name.toLowerCase().replace(/\s+/g, '-');
+		formDescription = sub.description;
+		formPrompt = sub.prompt;
+		formTools = sub.tools || [];
+		formModel = sub.model || '';
+
+		viewMode = 'editor';
+		editorTab = 'identity';
+	}
+
+	// Editor tabs config
+	const tabs: { id: EditorTab; label: string; icon: typeof User }[] = [
+		{ id: 'identity', label: 'Identity', icon: User },
+		{ id: 'config', label: 'Config', icon: Settings },
+		{ id: 'prompt', label: 'Prompt', icon: Terminal }
+	];
 </script>
 
-<div class="agents-tab">
+<div class="card-system agents-tab">
 	{#if $projectAgentsLoading && viewMode === 'list'}
-		<div class="card-empty-state">
-			<Loader2 class="card-empty-icon animate-spin" />
-			<p class="card-empty-title">Loading agents...</p>
-		</div>
-	{:else if $projectAgentsError}
-		<div class="card-error-banner">
-			<span class="flex-1">{$projectAgentsError}</span>
-			<button onclick={() => projectAgents.clearError()}>
-				<X class="w-4 h-4" />
-			</button>
+		<div class="card-content">
+			<div class="loading-container">
+				<div class="card-spinner"></div>
+			</div>
 		</div>
 	{:else if viewMode === 'editor'}
-		<!-- Editor View -->
-		<div class="editor-view">
-			<div class="editor-header">
-				<button onclick={handleBack} class="card-btn-secondary">
-					<ChevronLeft class="w-4 h-4" />
-					Back
-				</button>
-				<span class="editor-title">{isCreating ? 'New Agent' : formName}</span>
+		<!-- EDITOR VIEW -->
+		<!-- Header -->
+		<div class="card-header">
+			<div class="editor-header-left">
 				<button
-					onclick={handleSave}
-					disabled={$projectAgentsSaving || !formName.trim() || !formDescription.trim() || !formPrompt.trim()}
-					class="card-btn-primary"
+					onclick={handleBack}
+					class="card-back-btn"
+					title="Back to list"
 				>
-					{#if $projectAgentsSaving}
-						<Loader2 class="w-4 h-4 animate-spin" />
-					{:else}
-						<Save class="w-4 h-4" />
+					<ArrowLeft />
+				</button>
+				<div class="card-header-info">
+					<span class="card-header-title">
+						{isCreating ? 'New Agent' : 'Edit Agent'}
+					</span>
+					{#if !isCreating && formName}
+						<span class="card-header-subtitle">{formName}</span>
 					{/if}
-					Save
-				</button>
+				</div>
 			</div>
+		</div>
 
-			<!-- Editor tabs -->
-			<div class="editor-tabs">
+		<!-- Tab Navigation -->
+		<div class="card-tabs">
+			{#each tabs as tab}
 				<button
-					class="editor-tab"
-					class:active={editorTab === 'identity'}
-					onclick={() => (editorTab = 'identity')}
+					onclick={() => editorTab = tab.id}
+					class="card-tab"
+					class:card-tab--active={editorTab === tab.id}
 				>
-					Identity
+					<tab.icon />
+					<span class="tab-label">{tab.label}</span>
 				</button>
-				<button
-					class="editor-tab"
-					class:active={editorTab === 'config'}
-					onclick={() => (editorTab = 'config')}
-				>
-					Config
-				</button>
-				<button
-					class="editor-tab"
-					class:active={editorTab === 'prompt'}
-					onclick={() => (editorTab = 'prompt')}
-				>
-					Prompt
-				</button>
-			</div>
+			{/each}
+		</div>
 
-			<!-- Tab content -->
-			<div class="editor-content">
+		<!-- Tab Content -->
+		<div class="card-content">
+			<div class="centered-content">
+				{#if $projectAgentsError}
+					<div class="card-error-banner">
+						<span class="flex-1">{$projectAgentsError}</span>
+						<button onclick={() => projectAgents.clearError()}>
+							<X class="w-4 h-4" />
+						</button>
+					</div>
+				{/if}
+
+				<!-- Identity Tab -->
 				{#if editorTab === 'identity'}
-					<div class="form-section">
+					<div class="editor-tab-content">
 						{#if isCreating}
-							<div class="form-field">
-								<label class="card-form-label">Name</label>
+							<div class="card-form-section">
+								<label for="agent-name" class="card-form-label">
+									Name <span class="required">*</span>
+								</label>
 								<input
+									id="agent-name"
+									type="text"
 									bind:value={formName}
-									class="card-form-input card-form-input--mono"
 									placeholder="my-agent"
+									class="card-form-input card-form-input--mono"
 								/>
-								<span class="form-hint">Used as filename: {formName || 'name'}.md</span>
+								<p class="card-form-hint">
+									Used as filename: {formName || 'name'}.md
+								</p>
 							</div>
 						{/if}
-						<div class="form-field">
-							<label class="card-form-label">Description</label>
+
+						<div class="card-form-section">
+							<label for="agent-description" class="card-form-label">
+								Description <span class="required">*</span>
+							</label>
 							<textarea
+								id="agent-description"
 								bind:value={formDescription}
-								class="card-form-input card-form-textarea"
-								rows="3"
 								placeholder="When should this agent be invoked? What does it do?"
+								rows={3}
+								class="card-form-input card-form-textarea"
 							></textarea>
-							<span class="form-hint">Helps Claude understand when to use this agent</span>
+							<p class="card-form-hint">
+								Helps Claude understand when to use this agent.
+							</p>
 						</div>
 					</div>
-				{:else if editorTab === 'config'}
-					<div class="form-section">
-						<div class="form-field">
-							<label class="card-form-label">Model</label>
-							<select bind:value={formModel} class="card-form-input">
-								{#each models as model}
-									<option value={model.value}>{model.label}</option>
+				{/if}
+
+				<!-- Config Tab -->
+				{#if editorTab === 'config'}
+					<div class="editor-tab-content">
+						<!-- Model Selection -->
+						<div class="card-form-section">
+							<label class="card-form-label">
+								Model — {#if formModel === ''}use profile default{:else if formModel === 'haiku'}fastest and most compact{:else if formModel === 'sonnet'}balanced performance{:else if formModel === 'opus'}most capable{/if}
+							</label>
+							<div class="card-mode-selector">
+								{#each MODEL_OPTIONS as opt}
+									<button
+										type="button"
+										class="card-mode-btn"
+										class:card-mode-btn--active={formModel === opt.value}
+										onclick={() => formModel = opt.value}
+									>
+										{opt.label}
+									</button>
 								{/each}
-							</select>
+							</div>
 						</div>
-						<div class="form-field">
-							<label class="card-form-label">Tools</label>
+
+						<!-- Tool Selection -->
+						<div class="card-form-section">
+							<div class="section-header">
+								<label class="card-form-label">Tools</label>
+								<span class="card-badge card-badge--primary">
+									{formTools.length === 0 ? 'All' : formTools.length + ' selected'}
+								</span>
+							</div>
 							<div class="tools-grid">
 								{#each commonTools as tool}
 									<button
@@ -282,30 +363,66 @@
 									</button>
 								{/each}
 							</div>
-							<span class="form-hint">
-								{formTools.length === 0 ? 'All tools (default)' : `${formTools.length} tools selected`}
-							</span>
+							<p class="card-form-hint">
+								{formTools.length === 0 ? 'Agent can use all available tools.' : 'Agent can ONLY use selected tools.'}
+							</p>
 						</div>
 					</div>
-				{:else if editorTab === 'prompt'}
-					<div class="form-section form-section--full">
-						<div class="form-field form-field--full">
-							<label class="card-form-label">System Prompt</label>
-							<textarea
-								bind:value={formPrompt}
-								class="card-form-input card-form-textarea prompt-textarea"
-								placeholder="You are a specialized agent that..."
-							></textarea>
-							<span class="form-hint">{formPrompt.length} characters</span>
+				{/if}
+
+				<!-- Prompt Tab -->
+				{#if editorTab === 'prompt'}
+					<div class="editor-tab-content prompt-tab">
+						<div class="prompt-header">
+							<label for="agent-prompt" class="card-form-label">
+								System Prompt <span class="required">*</span>
+							</label>
+							<span class="char-count">
+								{formPrompt.length} characters
+							</span>
 						</div>
+						<textarea
+							id="agent-prompt"
+							bind:value={formPrompt}
+							placeholder="You are a specialized agent that helps users with..."
+							class="card-form-input card-form-textarea prompt-textarea"
+						></textarea>
+						<p class="card-form-hint">
+							Instructions that define the agent's behavior and capabilities.
+						</p>
 					</div>
 				{/if}
 			</div>
 		</div>
+
+		<!-- Footer -->
+		<div class="card-footer">
+			<div class="card-footer-content">
+				<button
+					onclick={handleBack}
+					class="card-btn-secondary"
+				>
+					Cancel
+				</button>
+				<button
+					onclick={handleSave}
+					disabled={!isValid() || $projectAgentsSaving}
+					class="card-btn-primary"
+				>
+					{#if $projectAgentsSaving}
+						<div class="card-spinner card-spinner--small"></div>
+						Saving...
+					{:else}
+						{isCreating ? 'Create' : 'Save Changes'}
+					{/if}
+				</button>
+			</div>
+		</div>
 	{:else}
-		<!-- List View -->
+		<!-- LIST VIEW -->
+		<!-- Search bar (show if > 3 agents) -->
 		{#if $projectAgentCount > 3}
-			<div class="tab-search">
+			<div class="card-search-wrapper">
 				<div class="card-search-container">
 					<Search class="card-search-icon" />
 					<input
@@ -318,80 +435,134 @@
 			</div>
 		{/if}
 
-		<div class="list-view">
-			{#if filteredAgents().length === 0}
-				<div class="card-empty-state">
-					<Bot class="card-empty-icon" />
-					<p class="card-empty-title">No agents defined</p>
-					<p class="card-empty-description">
-						Create agents to add specialized capabilities to this project.
-					</p>
-				</div>
-			{:else}
-				{#each filteredAgents() as agent (agent.name)}
-					{#if deletingAgent === agent.name}
-						<!-- Delete confirmation -->
-						<div class="card-list-item card-list-item--deleting">
-							<div class="card-item-icon card-item-icon--destructive">
-								<Trash2 />
-							</div>
-							<div class="card-item-content">
-								<p class="delete-confirm-text">
-									Delete <strong>{agent.name}</strong>? This cannot be undone.
-								</p>
-								<div class="delete-confirm-actions">
-									<button onclick={() => (deletingAgent = null)} class="card-btn-secondary">
-										Cancel
-									</button>
-									<button onclick={() => handleDelete(agent.name)} class="card-btn-destructive">
-										Delete
-									</button>
-								</div>
-							</div>
-						</div>
-					{:else}
-						<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-						<div
-							class="card-list-item card-list-item--clickable"
-							onclick={() => handleEdit(agent.name)}
-							role="button"
-							tabindex="0"
-							onkeydown={(e) => e.key === 'Enter' && handleEdit(agent.name)}
-						>
-							<div class="card-item-icon">
-								<Bot />
-							</div>
-							<div class="card-item-content">
-								<div class="card-item-header">
-									<span class="card-item-name">{agent.name}</span>
-									{#if agent.model}
-										<span class="card-badge card-badge--primary">{agent.model}</span>
-									{/if}
-								</div>
-								<span class="card-item-description">{agent.description || 'No description'}</span>
-							</div>
-							<div class="card-item-actions" onclick={(e) => e.stopPropagation()}>
-								<button
-									onclick={() => (deletingAgent = agent.name)}
-									class="card-action-btn card-action-btn--destructive"
-									title="Delete"
-								>
+		<!-- Content -->
+		<div class="card-content">
+			<div class="centered-content">
+				{#if $projectAgentsError}
+					<div class="card-error-banner">
+						<span class="flex-1">{$projectAgentsError}</span>
+						<button onclick={() => projectAgents.clearError()}>
+							<X class="w-4 h-4" />
+						</button>
+					</div>
+				{/if}
+
+				{#if filteredAgents().length === 0}
+					<div class="card-empty-state">
+						{#if searchQuery}
+							<Search class="card-empty-icon" />
+							<p class="card-empty-title">No agents match "{searchQuery}"</p>
+							<button onclick={() => (searchQuery = '')} class="card-empty-action">
+								Clear search
+							</button>
+						{:else}
+							<Bot class="card-empty-icon" />
+							<p class="card-empty-title">No agents defined</p>
+							<p class="card-empty-description">
+								Create agents to add specialized capabilities to this project.
+							</p>
+						{/if}
+					</div>
+				{:else}
+					{#each filteredAgents() as agent (agent.name)}
+						{#if deletingAgent === agent.name}
+							<!-- Inline delete confirmation -->
+							<div class="card-list-item card-list-item--deleting">
+								<div class="card-item-icon card-item-icon--destructive">
 									<Trash2 />
-								</button>
+								</div>
+								<div class="card-item-content">
+									<p class="delete-confirm-text">
+										Delete <strong>{agent.name}</strong>? This cannot be undone.
+									</p>
+									<div class="delete-confirm-actions">
+										<button
+											onclick={() => (deletingAgent = null)}
+											disabled={deleteLoading}
+											class="card-btn-secondary"
+										>
+											Cancel
+										</button>
+										<button
+											onclick={() => handleDelete(agent.name)}
+											disabled={deleteLoading}
+											class="card-btn-destructive"
+										>
+											{#if deleteLoading}
+												<div class="card-spinner card-spinner--small"></div>
+											{/if}
+											Delete
+										</button>
+									</div>
+								</div>
 							</div>
-						</div>
-					{/if}
-				{/each}
-			{/if}
+						{:else}
+							<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+							<div
+								class="card-list-item"
+								onclick={() => handleEdit(agent.name)}
+							>
+								<div class="card-item-icon">
+									<Bot />
+								</div>
+								<div class="card-item-content">
+									<div class="card-item-header">
+										<span class="card-item-name">{agent.name}</span>
+										<span class="card-badge {getModelBadgeClass(agent.model)}">
+											{getModelDisplay(agent.model)}
+										</span>
+										{#if agent.tools && agent.tools.length > 0}
+											<span class="card-badge card-badge--tools">
+												{agent.tools.length} tools
+											</span>
+										{/if}
+									</div>
+									<p class="card-item-description">{agent.description || 'No description'}</p>
+								</div>
+								<div class="card-item-actions">
+									<button
+										onclick={(e) => { e.stopPropagation(); deletingAgent = agent.name; }}
+										class="card-action-btn card-action-btn--destructive"
+										title="Delete"
+									>
+										<Trash2 />
+									</button>
+								</div>
+							</div>
+						{/if}
+					{/each}
+				{/if}
+			</div>
 		</div>
 
-		<div class="tab-footer">
-			<button onclick={handleCreate} class="card-btn-primary">
-				<Plus />
-				New Agent
-			</button>
+		<!-- Footer -->
+		<div class="card-footer">
+			<div class="card-footer-content">
+				<button
+					onclick={handleCreate}
+					class="card-btn-primary"
+				>
+					<Plus />
+					New Agent
+				</button>
+				<button
+					onclick={() => showGenerateDialog = true}
+					class="card-btn-secondary"
+					title="Generate with AI"
+				>
+					<Zap />
+				</button>
+			</div>
 		</div>
 	{/if}
+
+	<!-- AI Generate Dialog -->
+	<AIGenerateDialog
+		type="subagent"
+		isOpen={showGenerateDialog}
+		onClose={() => showGenerateDialog = false}
+		onGenerated={handleGeneratedSubagent}
+	/>
 </div>
 
 <style>
@@ -399,116 +570,97 @@
 		display: flex;
 		flex-direction: column;
 		height: 100%;
+		background: var(--card);
+		overflow: hidden;
 	}
 
-	.tab-search {
-		padding: 0 var(--space-4) var(--space-3);
+	/* Centered content wrapper */
+	.centered-content {
+		width: 100%;
+		max-width: 800px;
+		margin: 0 auto;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-4, 16px);
 	}
 
-	.list-view {
+	.flex-1 {
 		flex: 1;
-		overflow-y: auto;
-		padding: 0 var(--space-4);
+	}
+
+	/* Search wrapper */
+	.card-search-wrapper {
+		padding: 0 var(--space-4) var(--space-3);
+		border-bottom: 1px solid var(--border-subtle);
+		background: linear-gradient(180deg, transparent 0%, color-mix(in oklch, var(--muted) 20%, transparent) 100%);
+	}
+
+	/* Loading state */
+	.loading-container {
 		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
+		align-items: center;
+		justify-content: center;
+		padding: var(--space-8);
 	}
 
-	.tab-footer {
-		padding: var(--space-3) var(--space-4);
-		border-top: 1px solid var(--border);
-	}
-
-	/* Editor styles */
-	.editor-view {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-	}
-
-	.editor-header {
+	/* Editor header */
+	.editor-header-left {
 		display: flex;
 		align-items: center;
 		gap: var(--space-3);
-		padding: var(--space-3) var(--space-4);
-		border-bottom: 1px solid var(--border);
 	}
 
-	.editor-title {
-		flex: 1;
-		font-weight: 500;
-		font-size: var(--text-base);
+	/* Tab label visibility */
+	.tab-label {
+		display: none;
 	}
 
-	.editor-tabs {
-		display: flex;
-		gap: var(--space-1);
-		padding: var(--space-2) var(--space-4);
-		border-bottom: 1px solid var(--border);
-		background: var(--muted);
+	@media (min-width: 400px) {
+		.tab-label {
+			display: inline;
+		}
 	}
 
-	.editor-tab {
-		padding: var(--space-2) var(--space-3);
-		font-size: var(--text-sm);
-		border-radius: var(--radius);
-		background: transparent;
-		border: none;
-		cursor: pointer;
-		color: var(--muted-foreground);
-		transition: all 0.15s ease;
-	}
-
-	.editor-tab:hover {
-		color: var(--foreground);
-	}
-
-	.editor-tab.active {
-		background: var(--background);
-		color: var(--foreground);
-		font-weight: 500;
-	}
-
-	.editor-content {
-		flex: 1;
-		overflow-y: auto;
-		padding: var(--space-4);
-	}
-
-	.form-section {
+	/* Editor tab content */
+	.editor-tab-content {
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-4);
 	}
 
-	.form-section--full {
-		height: 100%;
-	}
-
-	.form-field {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-1);
-	}
-
-	.form-field--full {
+	.prompt-tab {
 		flex: 1;
 		display: flex;
 		flex-direction: column;
 	}
 
-	.form-hint {
+	.prompt-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+
+	.char-count {
 		font-size: var(--text-xs);
-		color: var(--muted-foreground);
+		color: var(--text-tertiary);
 	}
 
 	.prompt-textarea {
 		flex: 1;
-		min-height: 300px;
-		font-family: var(--font-mono);
+		min-height: 200px;
+		font-family: var(--card-font-mono);
 		font-size: var(--text-sm);
 	}
 
+	/* Section header */
+	.section-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: var(--space-2);
+	}
+
+	/* Tools grid */
 	.tools-grid {
 		display: flex;
 		flex-wrap: wrap;
@@ -516,17 +668,19 @@
 	}
 
 	.tool-chip {
-		padding: var(--space-1) var(--space-2);
+		padding: var(--space-2) var(--space-3);
 		font-size: var(--text-sm);
-		border-radius: var(--radius);
-		background: var(--muted);
-		border: 1px solid var(--border);
+		border-radius: var(--radius-md);
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
 		cursor: pointer;
-		transition: all 0.15s ease;
+		transition: all var(--transition-fast, 100ms);
+		color: var(--text-primary);
 	}
 
 	.tool-chip:hover {
-		border-color: var(--border-hover);
+		border-color: var(--border-default);
+		background: var(--surface-hover);
 	}
 
 	.tool-chip.active {
@@ -535,32 +689,8 @@
 		border-color: var(--primary);
 	}
 
-	.card-list-item--clickable {
-		cursor: pointer;
-		width: 100%;
-		text-align: left;
-		background: transparent;
-		border: none;
-	}
-
-	.card-list-item--clickable:hover {
-		background: var(--muted);
-	}
-
-	.flex-1 {
-		flex: 1;
-	}
-
-	.animate-spin {
-		animation: spin 1s linear infinite;
-	}
-
-	@keyframes spin {
-		from {
-			transform: rotate(0deg);
-		}
-		to {
-			transform: rotate(360deg);
-		}
+	/* Required indicator */
+	.required {
+		color: var(--destructive);
 	}
 </style>
