@@ -173,32 +173,37 @@ class TestExtractTextFromContent:
 
 
 class TestIsSystemContent:
-    """Test system/meta content filtering."""
+    """Test system/meta content filtering.
+
+    Note: The _is_system_content function was simplified to only check for
+    empty/whitespace content. Slash commands are now parsed separately via
+    _parse_slash_command(), and other system content is shown as-is.
+    """
 
     def test_empty_content_is_system(self):
         """Empty content should be treated as system content."""
         assert jsonl_parser._is_system_content("") is True
         assert jsonl_parser._is_system_content(None) is True
 
-    def test_command_name_is_system(self):
-        """Command name tags should be system content."""
-        assert jsonl_parser._is_system_content("<command-name>test</command-name>") is True
+    def test_whitespace_only_is_system(self):
+        """Whitespace-only content should be treated as system content."""
+        assert jsonl_parser._is_system_content("   ") is True
+        assert jsonl_parser._is_system_content("\n\t") is True
 
-    def test_command_message_is_system(self):
-        """Command message tags should be system content."""
-        assert jsonl_parser._is_system_content("<command-message>msg</command-message>") is True
+    def test_command_tags_not_system(self):
+        """Command tags are NOT filtered as system content - they're parsed separately."""
+        # These are displayed as-is or parsed via _parse_slash_command
+        assert jsonl_parser._is_system_content("<command-name>test</command-name>") is False
+        assert jsonl_parser._is_system_content("<command-message>msg</command-message>") is False
+        assert jsonl_parser._is_system_content("<command-args>args</command-args>") is False
 
-    def test_command_args_is_system(self):
-        """Command args tags should be system content."""
-        assert jsonl_parser._is_system_content("<command-args>args</command-args>") is True
+    def test_interrupt_message_not_system(self):
+        """Interrupt messages are NOT filtered - they are shown to user."""
+        assert jsonl_parser._is_system_content("[Request interrupted by user]") is False
 
-    def test_interrupt_message_is_system(self):
-        """Interrupt messages should be system content."""
-        assert jsonl_parser._is_system_content("[Request interrupted by user]") is True
-
-    def test_caveat_message_is_system(self):
-        """Caveat messages should be system content."""
-        assert jsonl_parser._is_system_content("Caveat: The messages below were generated...") is True
+    def test_caveat_message_not_system(self):
+        """Caveat messages are NOT filtered - they are shown to user."""
+        assert jsonl_parser._is_system_content("Caveat: The messages below were generated...") is False
 
     def test_normal_content_not_system(self):
         """Normal user content should not be filtered."""

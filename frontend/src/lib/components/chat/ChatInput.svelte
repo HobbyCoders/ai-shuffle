@@ -902,9 +902,9 @@
 						</div>
 					</div>
 
-					<!-- Center: Profile & Project selectors -->
+					<!-- Center: Profile selector + Project selector OR Worktree badge -->
 					<div class="controls-center">
-						<!-- Profile Selector -->
+						<!-- Profile Selector - always visible -->
 						<div class="selector-wrapper" bind:this={profileDropdownRef}>
 							<button
 								type="button"
@@ -952,53 +952,66 @@
 							{/if}
 						</div>
 
-						<!-- Project Selector -->
-						<div class="selector-wrapper" bind:this={projectDropdownRef}>
-							<button
-								type="button"
-								class="context-selector-btn {liveTab.project ? '' : 'unset'}"
-								onclick={handleProjectClick}
-								title="Change project"
-							>
-								<div class="selector-icon">
-									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-									</svg>
-								</div>
-								<span class="selector-text desktop">{selectedProjectName}</span>
-								<span class="selector-text mobile">{selectedProjectNameMobile}</span>
-								<svg class="w-3 h-3 opacity-50 chevron" class:open={showProjectDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+						{#if liveTab.executionMode === 'worktree' && liveTab.messages.length > 0}
+							<!-- Worktree Badge - replaces project selector after session starts -->
+							<div class="worktree-badge" title="Working in git worktree">
+								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<circle cx="6" cy="6" r="2" stroke-width="2"/>
+									<circle cx="18" cy="6" r="2" stroke-width="2"/>
+									<circle cx="12" cy="18" r="2" stroke-width="2"/>
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4m6-8v4c0 2-2 4-6 4" />
 								</svg>
-							</button>
+								<span class="worktree-branch">{liveTab.selectedWorktreeBranch || liveTab.worktreeBranch || 'worktree'}</span>
+							</div>
+						{:else}
+							<!-- Project Selector -->
+							<div class="selector-wrapper" bind:this={projectDropdownRef}>
+								<button
+									type="button"
+									class="context-selector-btn {liveTab.project ? '' : 'unset'}"
+									onclick={handleProjectClick}
+									title="Change project"
+								>
+									<div class="selector-icon">
+										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+										</svg>
+									</div>
+									<span class="selector-text desktop">{selectedProjectName}</span>
+									<span class="selector-text mobile">{selectedProjectNameMobile}</span>
+									<svg class="w-3 h-3 opacity-50 chevron" class:open={showProjectDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+									</svg>
+								</button>
 
-							{#if showProjectDropdown}
-								<div class="selector-dropdown">
-									{#if $projects.length === 0}
-										<div class="dropdown-empty">No projects available</div>
-									{:else}
-										{#each $projects as project}
-											<button
-												type="button"
-												class="dropdown-item"
-												class:selected={project.id === liveTab.project}
-												onclick={() => selectProject(project.id)}
-											>
-												<svg class="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-												</svg>
-												<span>{project.name}</span>
-												{#if project.id === liveTab.project}
-													<svg class="w-3.5 h-3.5 ml-auto text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+								{#if showProjectDropdown}
+									<div class="selector-dropdown">
+										{#if $projects.length === 0}
+											<div class="dropdown-empty">No projects available</div>
+										{:else}
+											{#each $projects as project}
+												<button
+													type="button"
+													class="dropdown-item"
+													class:selected={project.id === liveTab.project}
+													onclick={() => selectProject(project.id)}
+												>
+													<svg class="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 													</svg>
-												{/if}
-											</button>
-										{/each}
-									{/if}
-								</div>
-							{/if}
-						</div>
+													<span>{project.name}</span>
+													{#if project.id === liveTab.project}
+														<svg class="w-3.5 h-3.5 ml-auto text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+														</svg>
+													{/if}
+												</button>
+											{/each}
+										{/if}
+									</div>
+								{/if}
+							</div>
+						{/if}
 					</div>
 
 					<!-- Right: Override buttons, Attach & Mic buttons -->
@@ -1471,6 +1484,32 @@
 		flex: 2;
 	}
 
+	/* Worktree badge - shown when working in git worktree mode */
+	.worktree-badge {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 4px 10px;
+		background: color-mix(in srgb, var(--primary) 15%, transparent);
+		border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
+		border-radius: calc(var(--radius, 0.75rem) * 0.67);
+		color: var(--primary);
+		font-size: 12px;
+		font-weight: 500;
+	}
+
+	.worktree-badge svg {
+		flex-shrink: 0;
+		color: var(--primary);
+	}
+
+	.worktree-branch {
+		max-width: 120px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
 	.controls-right {
 		display: flex;
 		align-items: center;
@@ -1774,6 +1813,12 @@
 		/* Tighter gap in center */
 		.controls-center {
 			gap: 4px;
+		}
+
+		/* Smaller worktree badge on mobile */
+		.worktree-branch {
+			max-width: 80px;
+			font-size: 11px;
 		}
 	}
 

@@ -447,7 +447,6 @@ class WorktreeManager:
         existing_worktrees = database.get_active_worktrees_for_repository(repo["id"])
         for wt in existing_worktrees:
             if not self.is_worktree_valid(wt):
-                worktree_full_path = settings.workspace_dir / wt["worktree_path"]
                 logger.info(f"Cleaning up stale worktree record: '{wt['worktree_path']}' (invalid worktree)")
                 database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
 

@@ -118,13 +118,14 @@ fi
 # Check for existing GitHub credentials in the volume
 if [ -f /home/appuser/.config/gh/hosts.yml ]; then
     echo "GitHub CLI credentials found in volume"
-    # Configure git to use gh as credential helper
-    git config --global credential.helper '!gh auth git-credential'
-    echo "Git configured to use GitHub CLI for authentication"
 
-    # Verify GitHub auth status
+    # Verify GitHub auth status and configure git credential helper for appuser
     if setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser gh auth status 2>/dev/null; then
         echo "GitHub CLI: Authentication verified"
+        # Configure git to use gh as credential helper (as appuser so it goes to appuser's .gitconfig)
+        setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+            git config --global credential.helper '!gh auth git-credential'
+        echo "Git configured to use GitHub CLI for authentication"
     else
         echo "GitHub CLI: Credentials exist but may be expired - re-login via web UI recommended"
     fi
@@ -138,7 +139,9 @@ if [ -f /root/.config/gh/hosts.yml ] && [ ! -f /home/appuser/.config/gh/hosts.ym
     cp /root/.config/gh/hosts.yml /home/appuser/.config/gh/ 2>/dev/null || true
     cp -r /root/.config/gh/* /home/appuser/.config/gh/ 2>/dev/null || true
     chown -R appuser:appuser /home/appuser/.config/gh
-    git config --global credential.helper '!gh auth git-credential'
+    # Configure git credential helper as appuser
+    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+        git config --global credential.helper '!gh auth git-credential'
     echo "GitHub CLI auth copied and git configured"
 fi
 

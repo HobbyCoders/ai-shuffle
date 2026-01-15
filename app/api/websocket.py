@@ -1183,6 +1183,20 @@ async def chat_websocket(
                                         streaming_buffer, streaming_usage = sync_engine.get_streaming_buffer_with_usage(session_id)
                                         logger.info(f"Session {session_id} is streaming, sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages, usage: {streaming_usage}")
 
+                                # Add worktree info if session is linked to a worktree
+                                worktree_id = session.get("worktree_id")
+                                if worktree_id:
+                                    worktree = database.get_worktree(worktree_id)
+                                    if worktree:
+                                        session["worktree_id"] = worktree_id
+                                        session["worktree_branch"] = worktree.get("branch_name")
+                                        session["worktree_path"] = worktree.get("worktree_path")
+                                    else:
+                                        # Worktree was deleted but session still has reference
+                                        session["worktree_id"] = None
+                                        session["worktree_branch"] = None
+                                        session["worktree_path"] = None
+
                                 # Build response with optional streamingUsage for late-joiners
                                 history_response = {
                                     "type": "history",

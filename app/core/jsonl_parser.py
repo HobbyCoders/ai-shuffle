@@ -20,6 +20,7 @@ Key fields that affect parsing:
 
 import json
 import logging
+import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Generator
 from datetime import datetime
@@ -150,7 +151,11 @@ def write_hook_message(
     severity: str
 ) -> None:
     """
-    Append a hook message to the session's hooks JSONL file.
+    Append a plugin hook message to the session's main JSONL file.
+
+    This is a wrapper around write_system_message() that writes plugin warnings
+    to the main session JSONL instead of a separate hooks file. This ensures
+    hook messages are part of the chat history and persist with the session.
 
     Args:
         sdk_session_id: The Claude SDK session ID
@@ -159,22 +164,61 @@ def write_hook_message(
         message: The stderr output from the hook
         severity: Severity level (warning, error, info)
     """
-    hooks_path = get_hooks_jsonl_path(sdk_session_id, working_dir)
+    write_system_message(
+        sdk_session_id=sdk_session_id,
+        working_dir=working_dir,
+        subtype="plugin_warning",
+        content=message,
+        data={
+            "plugin": plugin,
+            "message": message,
+            "severity": severity
+        }
+    )
+
+
+def write_system_message(
+    sdk_session_id: str,
+    working_dir: str,
+    subtype: str,
+    content: str,
+    data: Optional[Dict[str, Any]] = None
+) -> None:
+    """
+    Append a system message to the session's main JSONL file.
+
+    This writes messages in the Claude SDK's JSONL format for system entries.
+    These messages are displayed in chat history and persist across session loads.
+
+    Args:
+        sdk_session_id: The Claude SDK session ID (UUID)
+        working_dir: The working directory for the project
+        subtype: Message subtype (e.g., 'worktree_context', 'plugin_warning')
+        content: Human-readable message content
+        data: Optional structured data for the message
+    """
+    jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)
+    if not jsonl_path:
+        logger.warning(f"Cannot write system message - JSONL not found for session {sdk_session_id}")
+        return
 
     entry = {
-        "type": "plugin_warning",
-        "plugin": plugin,
-        "message": message,
-        "severity": severity,
-        "timestamp": datetime.utcnow().isoformat() + "Z"
+        "type": "system",
+        "subtype": subtype,
+        "content": content,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "uuid": f"sys-{uuid.uuid4().hex[:12]}"
     }
 
+    if data:
+        entry["data"] = data
+
     try:
-        with open(hooks_path, 'a', encoding='utf-8') as f:
+        with open(jsonl_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry) + '\n')
-        logger.debug(f"Wrote hook message to {hooks_path}")
+        logger.debug(f"Wrote system message ({subtype}) to {jsonl_path}")
     except Exception as e:
-        logger.error(f"Failed to write hook message to {hooks_path}: {e}")
+        logger.error(f"Failed to write system message to {jsonl_path}: {e}")
 
 
 def parse_hooks_jsonl(sdk_session_id: str, working_dir: str) -> List[Dict[str, Any]]:
@@ -542,10 +586,11 @@ def parse_session_history(
         timestamp = entry.get("timestamp")
         uuid = entry.get("uuid", f"msg-{msg_counter}")
 
-        # Handle system messages (e.g., compact_boundary)
+        # Handle system messages (e.g., compact_boundary, worktree_context, plugin_warning)
         if entry_type == "system":
             subtype = entry.get("subtype")
             system_content = entry.get("content", "")
+            system_data = entry.get("data", {})
             msg_counter += 1
 
             messages.append({
@@ -555,6 +600,8 @@ def parse_session_history(
                 "content": system_content,
                 "type": "system",
                 "subtype": subtype,
+                "systemSubtype": subtype,  # Frontend compatibility
+                "systemData": system_data,  # Pass through structured data
                 "metadata": {
                     "timestamp": timestamp,
                     "compactMetadata": entry.get("compactMetadata")

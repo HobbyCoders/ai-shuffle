@@ -300,6 +300,10 @@ class Session(SessionBase):
     parent_session_id: Optional[str] = None  # ID of parent session if this is a fork
     fork_point_message_index: Optional[int] = None  # Message index where fork occurred
     has_forks: bool = False  # True if this session has forked children
+    # Worktree fields - for restoring worktree mode on session resume
+    worktree_id: Optional[str] = None  # ID of linked worktree (if any)
+    worktree_branch: Optional[str] = None  # Branch name of linked worktree
+    worktree_path: Optional[str] = None  # Path to worktree directory
     created_at: datetime
     updated_at: datetime
 

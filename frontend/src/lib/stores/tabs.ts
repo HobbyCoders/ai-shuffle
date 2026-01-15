@@ -234,6 +234,12 @@ interface PersistedTab {
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	thinkingModeOverride: string | null;
+	// Worktree fields for restoring worktree mode on app resume
+	executionMode?: ExecutionMode;
+	worktreeId?: string | null;
+	worktreeBranch?: string;
+	selectedWorktreeBranch?: string | null;
+	worktreeMode?: 'new' | 'existing';
 }
 
 interface PersistedTabsState {
@@ -400,7 +406,13 @@ async function saveTabsToServer(state: TabsState) {
 					project: tab.project,
 					modelOverride: tab.modelOverride,
 					permissionModeOverride: tab.permissionModeOverride,
-					thinkingModeOverride: tab.thinkingModeOverride
+					thinkingModeOverride: tab.thinkingModeOverride,
+					// Worktree fields for restoring worktree mode on app resume
+					executionMode: tab.executionMode,
+					worktreeId: tab.worktreeId,
+					worktreeBranch: tab.worktreeBranch,
+					selectedWorktreeBranch: tab.selectedWorktreeBranch,
+					worktreeMode: tab.worktreeMode
 				})),
 				activeTabId: pendingTabsState.activeTabId
 			};
@@ -2205,7 +2217,7 @@ function createTabsStore() {
 							content: m.content as string,
 							type: 'system' as const,
 							systemSubtype: m.subtype as string | undefined,
-							systemData: { content: m.content } as Record<string, unknown>,
+							systemData: (m.systemData as Record<string, unknown>) || { content: m.content },
 							metadata: m.metadata as Record<string, unknown>,
 							streaming: false
 						});
@@ -2470,14 +2482,28 @@ function createTabsStore() {
 						return canPreserveId ? { ...msg, id: existingMsg.id } : msg;
 					});
 
-					updateTab(tabId, {
+					const tabUpdate: Partial<ChatTab> = {
 						sessionId: data.session_id as string,
 						messages: messagesWithPreservedIds,
 						isStreaming: isStreaming,
 						todos: latestTodos,
 						error: null,  // Clear any previous error
 						...tokenUpdates
-					});
+					};
+
+					// Restore worktree state if session was created in worktree mode
+					const session = data.session as Record<string, unknown> | undefined;
+					const worktreeId = session?.worktree_id as string | undefined;
+					const worktreeBranch = session?.worktree_branch as string | undefined;
+					if (worktreeId && worktreeBranch) {
+						tabUpdate.executionMode = 'worktree';
+						tabUpdate.worktreeId = worktreeId;
+						tabUpdate.worktreeBranch = worktreeBranch;
+						tabUpdate.selectedWorktreeBranch = worktreeBranch;
+						tabUpdate.worktreeMode = 'existing';  // Session already has worktree
+					}
+
+					updateTab(tabId, tabUpdate);
 
 					// Update tab title based on first message
 					if (finalMessages.length > 0 && finalMessages[0].role === 'user') {
@@ -3922,13 +3948,14 @@ function createTabsStore() {
 						draft: '',
 						scrollTop: 0,
 						streamStartTime: null,
-						executionMode: 'local',
-						worktreeBranch: '',
+						// Restore worktree state from persisted tab, with defaults for backward compatibility
+						executionMode: pt.executionMode || 'local',
+						worktreeBranch: pt.worktreeBranch || '',
 						worktreeBaseBranch: 'main',
 						worktreeCreateNewBranch: false,
-						worktreeId: null,
-						worktreeMode: 'new',
-						selectedWorktreeBranch: null,
+						worktreeId: pt.worktreeId ?? null,
+						worktreeMode: pt.worktreeMode || 'new',
+						selectedWorktreeBranch: pt.selectedWorktreeBranch ?? null,
 						isCreatingWorktree: false,
 						worktreeError: null,
 						sessionLocked: false,
@@ -4331,9 +4358,15 @@ function createTabsStore() {
 							messages: [...t.messages, {
 								id: systemMsgId,
 								role: 'system' as const,
-								content: `🌿 Work tree created on branch \`${response.branch_name}\` (based on \`${response.base_branch}\`)`,
+								content: `Branch: \`${response.branch_name}\` (based on \`${response.base_branch}\`)\n\nPath: \`${response.worktree_path}\``,
 								type: 'system' as const,
-								systemSubtype: 'worktree_created'
+								systemSubtype: 'worktree_created',
+								systemData: {
+									branch_name: response.branch_name,
+									base_branch: response.base_branch,
+									worktree_path: response.worktree_path,
+									worktree_id: response.worktree_id
+								}
 							}]
 						};
 					})
@@ -4409,9 +4442,13 @@ function createTabsStore() {
 						messages: [...t.messages, {
 							id: systemMsgId,
 							role: 'system' as const,
-							content: `🌿 Using existing worktree on branch \`${branchDisplay}\``,
+							content: `Using existing worktree on branch \`${branchDisplay}\``,
 							type: 'system' as const,
-							systemSubtype: 'worktree_selected'
+							systemSubtype: 'worktree_selected',
+							systemData: {
+								branch_name: branchDisplay,
+								worktree_id: tab.worktreeId
+							}
 						}]
 					};
 				})
@@ -4567,7 +4604,7 @@ function createTabsStore() {
 							content: m.content as string,
 							type: 'system' as const,
 							systemSubtype: m.subtype as string | undefined,
-							systemData: { content: m.content } as Record<string, unknown>,
+							systemData: (m.systemData as Record<string, unknown>) || { content: m.content },
 							metadata: m.metadata as Record<string, unknown>,
 							streaming: false
 						};
@@ -4631,7 +4668,7 @@ function createTabsStore() {
 				// Load token totals from session history - single source of truth
 				// Note: Don't reset profile to session.profile_id - preserve user's current selection
 				// sessionProfileId is for fallback display only (legacy messages without per-message profileId)
-				updateTab(tabId, {
+				const tabUpdate: Partial<ChatTab> = {
 					sessionId: session.id,
 					messages: messagesWithPreservedIds,
 					title,
@@ -4643,7 +4680,20 @@ function createTabsStore() {
 					// profile: session.profile_id,  // REMOVED: Don't reset user's current selection
 					sessionProfileId: session.profile_id,  // Fallback for legacy messages without profileId
 					project: session.project_id || ''
-				});
+				};
+
+				// Restore worktree state if session was created in worktree mode
+				const worktreeId = (session as Record<string, unknown>).worktree_id as string | undefined;
+				const worktreeBranch = (session as Record<string, unknown>).worktree_branch as string | undefined;
+				if (worktreeId && worktreeBranch) {
+					tabUpdate.executionMode = 'worktree';
+					tabUpdate.worktreeId = worktreeId;
+					tabUpdate.worktreeBranch = worktreeBranch;
+					tabUpdate.selectedWorktreeBranch = worktreeBranch;
+					tabUpdate.worktreeMode = 'existing';  // Session already has worktree
+				}
+
+				updateTab(tabId, tabUpdate);
 
 				// Save tabs state (debounced)
 				saveTabsToServer(get({ subscribe }));
