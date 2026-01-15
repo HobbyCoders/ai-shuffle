@@ -1472,10 +1472,17 @@ export async function testHook(hookId: string): Promise<HookTestResult> {
 }
 
 /**
- * Get all hooks contributed by installed plugins (read-only)
+ * Get all hooks contributed by globally installed plugins (read-only)
  */
 export async function getPluginHooks(): Promise<PluginHookInfo[]> {
 	return api.get<PluginHookInfo[]>('/hooks/plugins/all');
+}
+
+/**
+ * Get all hooks contributed by project-installed plugins (read-only)
+ */
+export async function getProjectPluginHooks(projectId: string): Promise<PluginHookInfo[]> {
+	return api.get<PluginHookInfo[]>(`/projects/${projectId}/plugins/hooks`);
 }
 
 // ============================================================================

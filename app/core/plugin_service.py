@@ -1248,7 +1248,7 @@ def clear_plugin_service_cache():
 
 def get_all_plugin_hooks() -> List[Dict[str, Any]]:
     """
-    Get all hooks contributed by installed plugins.
+    Get all hooks contributed by globally installed plugins.
 
     Returns a list of hook info dicts with:
     - plugin_id: Plugin ID
@@ -1258,12 +1258,25 @@ def get_all_plugin_hooks() -> List[Dict[str, Any]]:
     - description: Optional description
     - tool_matcher: Optional tool name pattern
     """
-    result = []
     service = get_plugin_service()
+    plugins = service.get_installed_plugins()
+    return get_hooks_from_plugins(plugins)
 
-    for plugin in service.get_installed_plugins():
+
+def get_hooks_from_plugins(plugins: List["PluginInfo"]) -> List[Dict[str, Any]]:
+    """
+    Get all hooks from a list of plugins.
+
+    This is a generalized version that works with any list of plugins,
+    whether global or project-scoped.
+
+    Returns a list of hook info dicts.
+    """
+    result = []
+
+    for plugin in plugins:
         plugin_dir = Path(plugin.install_path) if plugin.install_path else None
-        if not plugin_dir:
+        if not plugin_dir or not plugin_dir.exists():
             continue
 
         # Check for hooks directory

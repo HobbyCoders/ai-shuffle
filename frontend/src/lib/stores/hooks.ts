@@ -219,10 +219,15 @@ function createHooksStore() {
 			}));
 
 			try {
-				const [hooks, pluginHooks] = await Promise.all([
+				// Load project hooks, global plugin hooks, and project plugin hooks
+				const [hooks, globalPluginHooks, projectPluginHooks] = await Promise.all([
 					api.getProjectHooks(projectId),
-					api.getPluginHooks()
+					api.getPluginHooks(),
+					api.getProjectPluginHooks(projectId)
 				]);
+
+				// Combine global and project plugin hooks
+				const pluginHooks = [...globalPluginHooks, ...projectPluginHooks];
 
 				update((state) => ({
 					...state,

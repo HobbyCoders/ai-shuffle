@@ -21,6 +21,7 @@ from app.core.plugin_service import (
     PluginScope,
     PluginInfo,
     AvailablePlugin,
+    get_hooks_from_plugins,
 )
 
 router = APIRouter(prefix="/api/v1/projects", tags=["Project Plugins"])
@@ -69,6 +70,16 @@ class InstallPluginRequest(BaseModel):
         "local",
         description="Installation scope: 'local' (.claude/plugins/) or 'project' (plugins/)"
     )
+
+
+class PluginHookResponse(BaseModel):
+    """Hook info from a plugin"""
+    plugin_id: str
+    plugin_name: str
+    event: str
+    hook_type: str
+    description: Optional[str] = None
+    tool_matcher: Optional[str] = None
 
 
 # ============================================================================
@@ -312,3 +323,25 @@ async def disable_project_plugin(
         )
 
     service.disable_project_plugin(plugin_id)
+
+
+@router.get("/{project_id}/plugins/hooks", response_model=List[PluginHookResponse])
+async def get_project_plugin_hooks(
+    project_id: str,
+    request: Request,
+    token: str = Depends(require_auth)
+):
+    """
+    Get all hooks contributed by project-installed plugins.
+
+    Returns hooks from plugins installed in both LOCAL and PROJECT scopes.
+    """
+    project = _validate_project_access(request, project_id)
+    service = _get_project_plugin_service(project)
+
+    # Get project-installed plugins
+    plugins = service.get_project_installed_plugins()
+
+    # Get hooks from these plugins
+    hooks = get_hooks_from_plugins(plugins)
+    return hooks
