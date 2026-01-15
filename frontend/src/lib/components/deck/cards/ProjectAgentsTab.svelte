@@ -154,7 +154,7 @@
 					name: formName.trim(),
 					description: formDescription.trim(),
 					prompt: formPrompt,
-					model: formModel || undefined,
+					model: formModel || null,
 					tools: formTools.length > 0 ? formTools : undefined
 				};
 				await projectAgents.createAgent(projectId, data);
@@ -162,7 +162,7 @@
 				const data: UpdateProjectAgentRequest = {
 					description: formDescription.trim(),
 					prompt: formPrompt,
-					model: formModel || undefined,
+					model: formModel || null,
 					tools: formTools.length > 0 ? formTools : undefined
 				};
 				await projectAgents.updateAgent(projectId, formName, data);

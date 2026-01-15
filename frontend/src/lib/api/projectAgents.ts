@@ -30,14 +30,14 @@ export interface CreateProjectAgentRequest {
 	name: string;
 	description: string;
 	prompt: string;
-	model?: string;
+	model?: string | null;
 	tools?: string[];
 }
 
 export interface UpdateProjectAgentRequest {
 	description?: string;
 	prompt?: string;
-	model?: string;
+	model?: string | null;
 	tools?: string[];
 }
 

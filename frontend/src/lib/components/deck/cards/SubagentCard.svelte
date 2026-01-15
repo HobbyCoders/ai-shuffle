@@ -248,9 +248,8 @@
 			if (toolSelectionMode === 'select' && formTools.length > 0) {
 				body.tools = formTools;
 			}
-			if (formModel) {
-				body.model = formModel;
-			}
+			// Always include model - use null to clear/inherit
+			body.model = formModel || null;
 
 			if (isEditMode && editingSubagent) {
 				await api.put(`/subagents/${editingSubagent.id}`, body);
