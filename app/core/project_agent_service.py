@@ -20,7 +20,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
