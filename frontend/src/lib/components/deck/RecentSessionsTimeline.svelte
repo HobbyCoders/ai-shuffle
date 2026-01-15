@@ -196,9 +196,9 @@
 		width: 2px;
 		background: linear-gradient(
 			to bottom,
-			var(--ai-primary, #22d3ee) 0%,
-			var(--text-dim, #52525b) 30%,
-			var(--border-subtle, rgba(255, 255, 255, 0.06)) 100%
+			var(--primary) 0%,
+			var(--muted-foreground) 30%,
+			color-mix(in oklch, var(--border) 30%, transparent) 100%
 		);
 		opacity: 0.5;
 	}
@@ -217,7 +217,7 @@
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
-		color: var(--text-dim, #52525b);
+		color: var(--muted-foreground);
 		margin-bottom: 12px;
 		margin-left: 4px;
 	}
@@ -262,8 +262,8 @@
 		width: 10px;
 		height: 10px;
 		border-radius: 50%;
-		background: var(--text-dim, #52525b);
-		border: 2px solid var(--bg-base, oklch(0.10 0.01 260));
+		background: var(--muted-foreground);
+		border: 2px solid var(--background);
 		transition: all 0.2s ease;
 	}
 
@@ -289,8 +289,8 @@
 	/* Timeline card */
 	.timeline-card {
 		flex: 1;
-		background: var(--bg-card, oklch(0.15 0.01 260));
-		border: 1px solid var(--border-default, rgba(255, 255, 255, 0.1));
+		background: var(--card);
+		border: 1px solid var(--border);
 		border-radius: var(--radius, 0.75rem);
 		padding: 14px 16px;
 		cursor: pointer;
@@ -302,8 +302,8 @@
 	}
 
 	.timeline-card:hover {
-		background: var(--bg-card-hover, oklch(0.17 0.01 260));
-		border-color: var(--primary);
+		border-color: color-mix(in oklch, var(--accent) 50%, var(--border));
+		box-shadow: 0 0 12px color-mix(in oklch, var(--accent) 20%, transparent);
 		transform: translateX(4px);
 	}
 
@@ -327,7 +327,7 @@
 	.card-title {
 		font-size: 0.875rem;
 		font-weight: 500;
-		color: var(--text-primary, #f4f4f5);
+		color: var(--foreground);
 		line-height: 1.4;
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
@@ -344,8 +344,8 @@
 		text-transform: uppercase;
 		letter-spacing: 0.03em;
 		color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--primary) 20%, transparent);
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
 		padding: 2px 8px;
 		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		flex-shrink: 0;
@@ -353,7 +353,7 @@
 
 	.card-preview {
 		font-size: 0.8125rem;
-		color: var(--text-muted, #71717a);
+		color: var(--muted-foreground);
 		line-height: 1.4;
 		margin-bottom: 10px;
 	}
@@ -366,7 +366,7 @@
 
 	.card-time {
 		font-size: 0.6875rem;
-		color: var(--text-dim, #52525b);
+		color: var(--muted-foreground);
 	}
 
 	.card-meta {
@@ -374,7 +374,7 @@
 		align-items: center;
 		gap: 4px;
 		font-size: 0.75rem;
-		color: var(--text-dim, #52525b);
+		color: var(--muted-foreground);
 	}
 
 	/* Loading more indicator */
@@ -384,7 +384,7 @@
 		justify-content: center;
 		gap: 8px;
 		padding: 16px 20px;
-		color: var(--text-muted, #71717a);
+		color: var(--muted-foreground);
 		font-size: 0.875rem;
 	}
 
@@ -403,7 +403,7 @@
 		align-items: center;
 		justify-content: center;
 		padding: 60px 20px;
-		color: var(--text-muted, #71717a);
+		color: var(--muted-foreground);
 		font-size: 0.9375rem;
 	}
 

@@ -63,6 +63,9 @@
 		--secondary-foreground: oklch(0.90 0.01 260);
 		--muted: oklch(0.22 0.01 260);
 		--muted-foreground: oklch(0.65 0.02 260);
+		--muted-light: oklch(0.28 0.01 260);
+		--muted-dark: oklch(0.17 0.01 260);
+		--muted-border: color-mix(in oklch, var(--muted) 60%, var(--border));
 
 		/* Accent for hover states */
 		--accent: oklch(0.25 0.015 260);
@@ -261,6 +264,9 @@
 		--secondary-foreground: oklch(0.25 0.01 260);
 		--muted: oklch(0.93 0.008 260);
 		--muted-foreground: oklch(0.45 0.015 260);
+		--muted-light: oklch(0.96 0.005 260);
+		--muted-dark: oklch(0.88 0.01 260);
+		--muted-border: color-mix(in oklch, var(--muted) 60%, var(--border));
 
 		/* Accent for hover states */
 		--accent: oklch(0.90 0.01 260);

@@ -196,10 +196,19 @@
 		transition: all 0.15s ease;
 	}
 
-	.card-action-btn:hover,
-	.card-action-btn.active {
-		background: var(--accent);
+	.card-action-btn:hover {
+		background: var(--hover-overlay, oklch(1 0 0 / 0.1));
 		color: var(--foreground);
+	}
+
+	.card-action-btn.active {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		color: var(--primary);
+	}
+
+	.card-action-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.card-action-btn svg {
@@ -257,7 +266,17 @@
 	}
 
 	:global(.group-dropdown-portal .dropdown-item:hover) {
-		background: var(--accent);
+		background: var(--hover-overlay, oklch(1 0 0 / 0.1));
+	}
+
+	:global(.group-dropdown-portal .dropdown-item.selected) {
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		color: var(--primary);
+	}
+
+	:global(.group-dropdown-portal .dropdown-item:focus-visible) {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
 	}
 
 	:global(.group-dropdown-portal .dropdown-item.muted) {

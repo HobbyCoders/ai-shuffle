@@ -201,7 +201,7 @@
 
 	.collapse-toggle:hover {
 		color: var(--foreground);
-		background: var(--accent);
+		background: var(--hover-overlay);
 		border-color: var(--border);
 	}
 
