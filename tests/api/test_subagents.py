@@ -1034,13 +1034,15 @@ class TestDatabaseInteraction:
                 }
             )
 
+            # Ellipsis (...) is used as sentinel to indicate "not provided"
+            # This allows distinguishing from explicitly setting to None
             mock_db.update_subagent.assert_called_once_with(
                 subagent_id="test-subagent",
                 name="Updated",
                 description="New Desc",
-                prompt=None,
-                tools=None,
-                model=None
+                prompt=...,
+                tools=...,
+                model=...
             )
 
     def test_delete_calls_database(self, subagents_test_client):
