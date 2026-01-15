@@ -454,8 +454,8 @@
 	}
 
 	.stats-btn:hover:not(:disabled) {
-		background: var(--accent);
-		color: var(--accent-foreground);
+		background: var(--hover-overlay);
+		color: var(--foreground);
 		border-color: var(--border);
 	}
 

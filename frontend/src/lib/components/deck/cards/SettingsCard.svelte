@@ -2203,7 +2203,7 @@
 	}
 
 	.btn.secondary:hover:not(:disabled) {
-		background: var(--accent);
+		background: var(--hover-overlay);
 	}
 
 	.btn.danger {
