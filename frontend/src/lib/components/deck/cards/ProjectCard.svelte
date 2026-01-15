@@ -276,9 +276,23 @@
 									<Trash2 />
 								</div>
 								<div class="card-item-content">
-									<p class="delete-confirm-text">
-										Delete <strong>{project.name}</strong>? This cannot be undone.
-									</p>
+									{#if project.session_count && project.session_count > 0}
+										<div class="delete-warning">
+											<div class="delete-warning-header">
+												<svg class="warning-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+													<path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+												</svg>
+												<span>This project has {project.session_count} conversation{project.session_count === 1 ? '' : 's'}</span>
+											</div>
+											<p class="delete-warning-text">
+												Deleting <strong>{project.name}</strong> will permanently delete all associated conversations. This cannot be undone.
+											</p>
+										</div>
+									{:else}
+										<p class="delete-confirm-text">
+											Delete <strong>{project.name}</strong>? This cannot be undone.
+										</p>
+									{/if}
 									<div class="delete-confirm-actions">
 										<button
 											onclick={() => (deletingId = null)}
@@ -295,7 +309,7 @@
 											{#if deleteLoading}
 												<div class="card-spinner card-spinner--small"></div>
 											{/if}
-											Delete
+											{project.session_count && project.session_count > 0 ? 'Delete All' : 'Delete'}
 										</button>
 									</div>
 								</div>

@@ -1454,10 +1454,34 @@ def update_project(
     return get_project(project_id)
 
 
-def delete_project(project_id: str) -> bool:
-    """Delete a project"""
+def get_project_session_count(project_id: str) -> int:
+    """Get the number of sessions associated with a project"""
     with get_db() as conn:
         cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,))
+        return cursor.fetchone()[0]
+
+
+def get_all_project_session_counts() -> Dict[str, int]:
+    """Get session counts for all projects in a single query"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT project_id, COUNT(*) as count
+            FROM sessions
+            WHERE project_id IS NOT NULL
+            GROUP BY project_id
+        """)
+        return {row["project_id"]: row["count"] for row in cursor.fetchall()}
+
+
+def delete_project(project_id: str) -> bool:
+    """Delete a project and all associated sessions (sessions are cwd-dependent)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # First delete all sessions associated with this project
+        cursor.execute("DELETE FROM sessions WHERE project_id = ?", (project_id,))
+        # Then delete the project
         cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         return cursor.rowcount > 0
 
