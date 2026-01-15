@@ -61,13 +61,21 @@ async def list_projects(request: Request, token: str = Depends(require_auth)):
     """List all projects. API users only see their assigned project."""
     api_user = get_api_user_from_request(request)
 
+    # Get session counts for all projects
+    session_counts = database.get_all_project_session_counts()
+
     if api_user and api_user.get("project_id"):
         # API user with assigned project - only return that project
         project = database.get_project(api_user["project_id"])
-        return [project] if project else []
+        if project:
+            project["session_count"] = session_counts.get(project["id"], 0)
+            return [project]
+        return []
 
     # Admin or unrestricted API user - return all projects
     projects = database.get_all_projects()
+    for project in projects:
+        project["session_count"] = session_counts.get(project["id"], 0)
     return projects
 
 
@@ -82,6 +90,7 @@ async def get_project(request: Request, project_id: str, token: str = Depends(re
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project not found: {project_id}"
         )
+    project["session_count"] = database.get_project_session_count(project_id)
     return project
 
 

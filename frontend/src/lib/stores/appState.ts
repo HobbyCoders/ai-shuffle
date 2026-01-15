@@ -36,6 +36,7 @@ export interface Project {
 	description?: string;
 	path: string;
 	settings: Record<string, unknown>;
+	session_count?: number;  // Number of sessions in this project
 	created_at: string;
 	updated_at: string;
 }
