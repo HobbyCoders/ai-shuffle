@@ -104,7 +104,7 @@
 	}
 
 	.close-btn:hover {
-		background: var(--accent);
+		background: var(--hover-overlay);
 		color: var(--foreground);
 	}
 

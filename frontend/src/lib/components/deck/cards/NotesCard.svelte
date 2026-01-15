@@ -675,8 +675,8 @@
 	}
 
 	.note-item:hover {
-		border-color: var(--border-emphasis);
-		box-shadow: var(--shadow-inset), var(--shadow-md);
+		border-color: color-mix(in oklch, var(--accent) 50%, var(--border));
+		box-shadow: var(--shadow-inset), 0 0 12px color-mix(in oklch, var(--accent) 20%, transparent);
 		transform: translateY(-1px);
 	}
 
@@ -1065,7 +1065,7 @@
 		background: none;
 		border: none;
 		color: var(--text-primary);
-		font-family: var(--card-font-mono);
+		font-family: var(--font-mono);
 		font-size: var(--text-md);
 		line-height: 1.6;
 		resize: none;
@@ -1106,7 +1106,7 @@
 		padding: 2px calc(var(--space-1) * 1.5);
 		background: var(--surface-1);
 		border-radius: var(--radius-sm);
-		font-family: var(--card-font-mono);
+		font-family: var(--font-mono);
 		font-size: 0.9em;
 	}
 

@@ -345,10 +345,10 @@
 		justify-content: space-between;
 		gap: 1rem;
 		padding: 0.75rem 1rem;
-		background: hsl(var(--destructive) / 0.1);
-		border: 1px solid hsl(var(--destructive) / 0.3);
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+		border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
 		border-radius: 0.5rem;
-		color: hsl(var(--destructive));
+		color: var(--destructive);
 		font-size: 0.875rem;
 	}
 
@@ -356,7 +356,7 @@
 		flex-shrink: 0;
 		background: none;
 		border: none;
-		color: hsl(var(--destructive));
+		color: var(--destructive);
 		font-size: 1.25rem;
 		cursor: pointer;
 		padding: 0;
@@ -408,7 +408,7 @@
 
 	/* User message styling - distinct teal/primary tint with good contrast */
 	.chat-card-content :global(.user-message) {
-		background: color-mix(in oklch, var(--primary) 10%, var(--card));
+		background: color-mix(in oklch, var(--primary) 15%, var(--card));
 		border: 1px solid color-mix(in oklch, var(--primary) 25%, var(--border));
 		border-radius: var(--radius, 0.75rem);
 		padding: 12px 16px;
@@ -418,7 +418,7 @@
 
 	.chat-card-content :global(.user-message:hover) {
 		box-shadow: var(--shadow-m);
-		background: color-mix(in oklch, var(--primary) 14%, var(--card));
+		background: color-mix(in oklch, var(--primary) 20%, var(--card));
 	}
 
 	/* Assistant messages - no bubble, clean layout */

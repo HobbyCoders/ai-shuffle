@@ -609,12 +609,17 @@
 
 	.option-card:hover {
 		border-color: var(--accent);
-		background: color-mix(in oklch, var(--accent) 8%, var(--card));
+		box-shadow: 0 0 12px color-mix(in oklch, var(--accent) 25%, transparent);
 	}
 
 	.option-card.selected {
 		border-color: var(--primary);
 		background: color-mix(in oklch, var(--primary) 8%, var(--card));
+	}
+
+	.option-card:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	/* Checkbox Indicator */
@@ -667,23 +672,31 @@
 		font-size: 0.875rem;
 		font-weight: 500;
 		border-radius: var(--radius, 0.75rem);
-		background: var(--primary);
+		background: var(--button-primary-gradient, var(--primary));
 		color: var(--primary-foreground);
+		box-shadow: var(--shadow-s);
 		transition: all 0.15s ease;
 	}
 
 	.submit-btn:hover:not(.disabled) {
-		background: color-mix(in oklch, var(--primary) 90%, black);
+		filter: brightness(1.1);
+		box-shadow: var(--shadow-m), 0 0 20px var(--glow-color-soft);
 	}
 
 	.submit-btn:active:not(.disabled) {
 		transform: scale(0.98);
 	}
 
+	.submit-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
 	.submit-btn.disabled {
 		background: var(--muted);
 		color: var(--muted-foreground);
 		cursor: not-allowed;
+		box-shadow: none;
 	}
 
 	/* Other Textarea */
@@ -700,9 +713,9 @@
 	}
 
 	.other-textarea:focus {
-		outline: none;
-		border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 20%, transparent);
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+		border-color: var(--ring);
 	}
 
 	@keyframes dot-pop {

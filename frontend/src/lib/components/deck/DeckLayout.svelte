@@ -463,7 +463,7 @@
 	}
 
 	.layout-option:hover {
-		background: var(--accent, rgba(255, 255, 255, 0.08));
+		background: var(--hover-overlay, oklch(1 0 0 / 0.08));
 	}
 
 	.layout-option.active {
@@ -519,9 +519,9 @@
 	}
 
 	.dealer-button-mobile:hover {
-		background: var(--accent);
+		border-color: var(--accent);
 		transform: translateY(-2px);
-		box-shadow: var(--shadow-l);
+		box-shadow: var(--shadow-l), 0 0 12px color-mix(in oklch, var(--accent) 25%, transparent);
 	}
 
 	.dealer-button-mobile:active {

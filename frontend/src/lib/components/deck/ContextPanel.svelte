@@ -312,7 +312,7 @@
 
 	.collapse-toggle:hover {
 		color: var(--foreground);
-		background: var(--accent);
+		background: var(--hover-overlay);
 		border-color: var(--border);
 	}
 
@@ -524,7 +524,7 @@
 	}
 
 	.generation-item.generating {
-		border-color: #a855f7;
+		border-color: var(--primary);
 	}
 
 	.generation-thumbnail {

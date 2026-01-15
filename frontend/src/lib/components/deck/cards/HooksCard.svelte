@@ -898,8 +898,13 @@
 	}
 
 	.profile-selector-btn:hover {
-		background: var(--accent);
-		border-color: var(--primary);
+		border-color: var(--accent);
+		box-shadow: 0 0 12px color-mix(in oklch, var(--accent) 25%, transparent);
+	}
+
+	.profile-selector-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.profile-selector-btn .chevron {
@@ -938,14 +943,20 @@
 		text-align: left;
 		border-radius: calc(var(--radius, 8px) * 0.75);
 		background: transparent;
-		border: none;
+		border: 1px solid transparent;
 		color: var(--foreground);
 		cursor: pointer;
-		transition: background 150ms ease;
+		transition: all 150ms ease;
 	}
 
 	.profile-dropdown-item:hover {
-		background: var(--accent);
+		border-color: var(--accent);
+		box-shadow: 0 0 8px color-mix(in oklch, var(--accent) 20%, transparent);
+	}
+
+	.profile-dropdown-item:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.profile-dropdown-item.selected {
@@ -985,6 +996,11 @@
 		filter: brightness(1.1);
 	}
 
+	.project-selector-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
 	.project-selector-btn .chevron {
 		display: flex;
 		transition: transform 150ms ease;
@@ -1021,14 +1037,20 @@
 		text-align: left;
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		background: transparent;
-		border: none;
+		border: 1px solid transparent;
 		color: var(--foreground);
 		cursor: pointer;
-		transition: background 150ms ease;
+		transition: all 150ms ease;
 	}
 
 	.project-dropdown-item:hover {
-		background: var(--accent);
+		border-color: var(--accent);
+		box-shadow: 0 0 8px color-mix(in oklch, var(--accent) 20%, transparent);
+	}
+
+	.project-dropdown-item:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.project-dropdown-item span {
@@ -1059,16 +1081,22 @@
 		gap: 4px;
 		padding: 4px 8px;
 		background: transparent;
-		border: none;
+		border: 1px solid transparent;
 		color: var(--foreground);
 		font-size: 0.8125rem;
 		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		cursor: pointer;
-		transition: background 0.15s;
+		transition: all 0.15s;
 	}
 
 	.selector-btn:hover {
-		background: var(--surface-hover);
+		border-color: var(--accent);
+		box-shadow: 0 0 8px color-mix(in oklch, var(--accent) 20%, transparent);
+	}
+
+	.selector-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.selector-btn .chevron {
@@ -1113,16 +1141,22 @@
 		width: 100%;
 		padding: 8px 12px;
 		background: transparent;
-		border: none;
+		border: 1px solid transparent;
 		color: var(--foreground);
 		font-size: 0.8125rem;
 		text-align: left;
 		cursor: pointer;
-		transition: background 0.15s;
+		transition: all 0.15s;
 	}
 
 	.selector-dropdown-item:hover {
-		background: var(--muted);
+		border-color: var(--accent);
+		box-shadow: 0 0 8px color-mix(in oklch, var(--accent) 20%, transparent);
+	}
+
+	.selector-dropdown-item:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.selector-dropdown-item.selected {
@@ -1153,19 +1187,26 @@
 		gap: 6px;
 		color: var(--muted-foreground);
 		background: transparent;
-		border: none;
+		border: 1px solid transparent;
 		cursor: pointer;
 		transition: all 150ms ease;
 	}
 
 	.hooks-tab:hover {
 		color: var(--foreground);
-		background: var(--hover-overlay);
+		border-color: var(--accent);
+		box-shadow: 0 0 8px color-mix(in oklch, var(--accent) 20%, transparent);
+	}
+
+	.hooks-tab:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.hooks-tab.active {
 		background: var(--primary);
 		color: var(--primary-foreground);
+		border-color: var(--primary);
 	}
 
 	.hooks-tab-count {
@@ -1243,6 +1284,11 @@
 
 	.add-hook-btn:hover {
 		filter: brightness(1.1);
+	}
+
+	.add-hook-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	/* Test result toast */

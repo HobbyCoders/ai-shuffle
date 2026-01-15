@@ -171,16 +171,15 @@
     box-shadow var(--transition-fast, 100ms cubic-bezier(0.4, 0, 0.2, 1));
 }
 
-.autocomplete-item:hover,
-.autocomplete-item.selected {
-  background: var(--surface-hover, color-mix(in oklch, var(--primary) 8%, var(--accent)));
-  border-color: var(--border-subtle, color-mix(in oklch, var(--border) 40%, transparent));
+.autocomplete-item:hover {
+  border-color: color-mix(in oklch, var(--accent) 50%, var(--border));
+  box-shadow: 0 0 12px color-mix(in oklch, var(--accent) 20%, transparent);
 }
 
 .autocomplete-item.selected {
-  background: var(--surface-active, color-mix(in oklch, var(--primary) 12%, var(--accent)));
-  border-color: var(--border-emphasis, color-mix(in oklch, var(--primary) 30%, var(--border)));
-  box-shadow: var(--shadow-glow-soft, 0 0 12px -3px color-mix(in oklch, var(--primary) 20%, transparent));
+  background: color-mix(in oklch, var(--primary) 10%, var(--card));
+  border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
+  box-shadow: 0 0 12px color-mix(in oklch, var(--primary) 20%, transparent);
 }
 
 /* ========================================

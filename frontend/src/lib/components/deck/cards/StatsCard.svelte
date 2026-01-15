@@ -518,7 +518,7 @@
 		gap: 0.375rem;
 		font-size: 0.75rem;
 		color: var(--muted-foreground);
-		font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
+		font-family: var(--font-mono);
 	}
 
 	/* ============================================
@@ -650,7 +650,7 @@
 	}
 
 	.stat-value.mono, .mono {
-		font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
+		font-family: var(--font-mono);
 		font-feature-settings: 'tnum' 1;
 	}
 
@@ -673,7 +673,7 @@
 		gap: 0.5rem;
 		font-size: 0.75rem;
 		margin-top: 0.5rem;
-		font-family: var(--font-mono, monospace);
+		font-family: var(--font-mono);
 	}
 
 	.stat-breakdown .in {
@@ -764,7 +764,7 @@
 
 	.breakdown-bar {
 		height: 100%;
-		background: linear-gradient(90deg, var(--primary), color-mix(in oklch, var(--primary) 60%, var(--info)));
+		background: var(--primary);
 		border-radius: calc(var(--radius) * 0.25);
 		transition: width 500ms ease;
 	}

@@ -815,7 +815,7 @@
 	}
 
 	.dropdown-item:hover {
-		background: var(--accent);
+		background: var(--hover-overlay);
 	}
 
 	.dropdown-item.selected {
@@ -1086,7 +1086,7 @@
 	}
 
 	.prefix-tag:hover {
-		background: var(--accent);
+		background: var(--hover-overlay);
 		color: var(--foreground);
 	}
 
@@ -1132,7 +1132,8 @@
 	}
 
 	.modal-btn.secondary:hover {
-		background: var(--accent);
+		background: var(--hover-overlay);
+		border-color: var(--accent);
 	}
 
 	.modal-btn.primary {
