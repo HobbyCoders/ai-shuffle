@@ -138,13 +138,16 @@ async def update_subagent(
             detail=f"Subagent not found: {subagent_id}"
         )
 
+    # Only pass fields that were explicitly provided in the request
+    # This allows distinguishing between "not provided" and "set to null"
+    fields = request.model_fields_set
     subagent = database.update_subagent(
         subagent_id=subagent_id,
-        name=request.name,
-        description=request.description,
-        prompt=request.prompt,
-        tools=request.tools,
-        model=request.model
+        name=request.name if 'name' in fields else ...,
+        description=request.description if 'description' in fields else ...,
+        prompt=request.prompt if 'prompt' in fields else ...,
+        tools=request.tools if 'tools' in fields else ...,
+        model=request.model if 'model' in fields else ...
     )
 
     return _build_subagent_response(subagent)

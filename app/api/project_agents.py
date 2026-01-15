@@ -224,19 +224,22 @@ async def update_project_agent(
     Update an existing agent.
 
     Only provided fields will be updated; others are preserved.
+    Uses model_fields_set to distinguish between "not provided" and "set to null".
     """
     project = _validate_project_access(request, project_id)
     project_path = _get_project_path(project)
 
     service = get_project_agent_service(project_path)
 
+    # Only pass fields that were explicitly provided in the request
+    fields = agent_data.model_fields_set
     try:
         agent = service.update_agent(
             name=agent_name,
-            description=agent_data.description,
-            prompt=agent_data.prompt,
-            model=agent_data.model,
-            tools=agent_data.tools,
+            description=agent_data.description if 'description' in fields else ...,
+            prompt=agent_data.prompt if 'prompt' in fields else ...,
+            model=agent_data.model if 'model' in fields else ...,
+            tools=agent_data.tools if 'tools' in fields else ...,
         )
         return _agent_to_response(agent)
     except ValueError as e:

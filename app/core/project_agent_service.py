@@ -327,20 +327,23 @@ class ProjectAgentService:
     def update_agent(
         self,
         name: str,
-        description: Optional[str] = None,
-        prompt: Optional[str] = None,
-        model: Optional[str] = None,
-        tools: Optional[List[str]] = None,
+        description: Optional[str] = ...,  # type: ignore[assignment]
+        prompt: Optional[str] = ...,  # type: ignore[assignment]
+        model: Optional[str] = ...,  # type: ignore[assignment]
+        tools: Optional[List[str]] = ...,  # type: ignore[assignment]
     ) -> ProjectAgent:
         """
         Update an existing agent file.
 
+        Uses Ellipsis (...) as default to distinguish between "not provided" and "explicitly set to None".
+        This allows clearing fields by passing None explicitly.
+
         Args:
             name: Agent name
-            description: New description (None to keep existing)
-            prompt: New prompt (None to keep existing)
-            model: New model (None to keep existing)
-            tools: New tools (None to keep existing)
+            description: New description (... to keep existing, None not allowed for description)
+            prompt: New prompt (... to keep existing, None not allowed for prompt)
+            model: New model (... to keep existing, None to clear)
+            tools: New tools (... to keep existing, None to clear)
 
         Returns:
             Updated ProjectAgent
@@ -362,11 +365,11 @@ class ProjectAgentService:
         if not existing:
             raise ValueError(f"Failed to read agent: {name}")
 
-        # Merge with updates
-        new_description = description if description is not None else existing.description
-        new_prompt = prompt if prompt is not None else existing.prompt
-        new_model = model if model is not None else existing.model
-        new_tools = tools if tools is not None else existing.tools
+        # Merge with updates - use ... to mean "keep existing"
+        new_description = description if description is not ... else existing.description
+        new_prompt = prompt if prompt is not ... else existing.prompt
+        new_model = model if model is not ... else existing.model
+        new_tools = tools if tools is not ... else existing.tools
 
         # Generate new file content
         frontmatter = self._generate_frontmatter(new_description, new_model, new_tools)

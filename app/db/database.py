@@ -3370,34 +3370,39 @@ def create_subagent(
 
 def update_subagent(
     subagent_id: str,
-    name: Optional[str] = None,
-    description: Optional[str] = None,
-    prompt: Optional[str] = None,
-    tools: Optional[List[str]] = None,
-    model: Optional[str] = None
+    name: Optional[str] = ...,  # type: ignore[assignment]
+    description: Optional[str] = ...,  # type: ignore[assignment]
+    prompt: Optional[str] = ...,  # type: ignore[assignment]
+    tools: Optional[List[str]] = ...,  # type: ignore[assignment]
+    model: Optional[str] = ...  # type: ignore[assignment]
 ) -> Optional[Dict[str, Any]]:
-    """Update a subagent"""
+    """
+    Update a subagent.
+
+    Uses Ellipsis (...) as default to distinguish between "not provided" and "explicitly set to None".
+    This allows clearing fields by passing None explicitly.
+    """
     existing = get_subagent(subagent_id)
     if not existing:
         return None
 
     updates = []
     values = []
-    if name is not None:
+    if name is not ...:
         updates.append("name = ?")
         values.append(name)
-    if description is not None:
+    if description is not ...:
         updates.append("description = ?")
         values.append(description)
-    if prompt is not None:
+    if prompt is not ...:
         updates.append("prompt = ?")
         values.append(prompt)
-    if tools is not None:
+    if tools is not ...:
         updates.append("tools = ?")
-        values.append(json.dumps(tools))
-    if model is not None:
+        values.append(json.dumps(tools) if tools else None)
+    if model is not ...:
         updates.append("model = ?")
-        values.append(model if model else None)
+        values.append(model)
 
     if updates:
         updates.append("updated_at = ?")
