@@ -200,7 +200,7 @@
 					title: 'Git Worktree',
 					content,
 					badge: branchName,
-					badgeColor: 'green'
+					badgeColor: 'purple'  // Uses --primary color
 				};
 			}
 
@@ -218,7 +218,7 @@
 					title: 'Git Worktree',
 					content,
 					badge: branchName,
-					badgeColor: 'green'
+					badgeColor: 'purple'  // Uses --primary color
 				};
 			}
 

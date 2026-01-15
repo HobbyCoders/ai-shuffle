@@ -1487,17 +1487,17 @@
 		align-items: center;
 		gap: 6px;
 		padding: 4px 10px;
-		background: color-mix(in srgb, var(--success) 15%, transparent);
-		border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
+		background: color-mix(in srgb, var(--primary) 15%, transparent);
+		border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
 		border-radius: calc(var(--radius, 0.75rem) * 0.67);
-		color: var(--success);
+		color: var(--primary);
 		font-size: 12px;
 		font-weight: 500;
 	}
 
 	.worktree-badge svg {
 		flex-shrink: 0;
-		color: var(--success);
+		color: var(--primary);
 	}
 
 	.worktree-branch {
