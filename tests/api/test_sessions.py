@@ -492,11 +492,31 @@ class TestGetSession:
     def test_get_session_not_found(self, client, mock_database):
         """Should return 404 for non-existent session."""
         mock_database.get_session.return_value = None
+        mock_database.get_session_by_sdk_id.return_value = None  # Also mock fallback lookup
 
         response = client.get("/api/v1/sessions/non-existent")
 
         assert response.status_code == 404
         assert "not found" in response.json()["detail"].lower()
+
+    def test_get_session_by_sdk_session_id_fallback(self, client, mock_database, sample_session):
+        """Should find session by SDK session ID if direct lookup fails."""
+        # Direct lookup fails
+        mock_database.get_session.return_value = None
+        # But fallback lookup by SDK session ID succeeds
+        mock_database.get_session_by_sdk_id.return_value = sample_session
+        mock_database.get_session_messages.return_value = []
+        mock_database.get_all_session_usage.return_value = []
+        mock_database.get_session_tags.return_value = []
+        mock_database.session_has_forks.return_value = False
+
+        # Request using a UUID (which looks like an SDK session ID)
+        response = client.get("/api/v1/sessions/417f9ae9-5012-47f9-b4a4-713c7f8e3cd5")
+
+        # Should succeed because fallback lookup found the session
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == "test-session-id"
 
     def test_get_session_with_jsonl_messages(self, client, mock_database, sample_session):
         """Should load messages from JSONL file when available."""
