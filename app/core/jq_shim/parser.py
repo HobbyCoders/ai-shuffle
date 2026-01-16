@@ -18,7 +18,6 @@ Supports a subset of jq syntax commonly used in Claude Code plugin hooks:
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Union
 from enum import Enum
-import re
 
 
 class NodeType(Enum):

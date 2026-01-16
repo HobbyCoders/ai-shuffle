@@ -238,7 +238,6 @@ def main(args: Optional[List[str]] = None) -> int:
         return 3
 
     # Evaluate and output
-    had_output = False
     last_result = None
 
     for input_data in inputs:
@@ -255,7 +254,6 @@ def main(args: Optional[List[str]] = None) -> int:
                 if r is EMPTY:
                     continue
 
-                had_output = True
                 last_result = r
                 output_result(r, parsed)
 

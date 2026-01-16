@@ -4,7 +4,7 @@ jq expression evaluator.
 Evaluates AST nodes against JSON data with variable support.
 """
 
-from typing import Any, Callable, Dict, Generator, Iterator, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from .parser import ASTNode, NodeType
 
 
