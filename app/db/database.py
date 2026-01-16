@@ -259,7 +259,7 @@ def _create_schema(cursor: sqlite3.Cursor):
         CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             project_id TEXT,
-            profile_id TEXT NOT NULL,
+            profile_id TEXT,  -- Nullable: sessions persist even when profile is deleted
             api_user_id TEXT,
             sdk_session_id TEXT,
             worktree_id TEXT,
@@ -273,7 +273,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id),
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
             FOREIGN KEY (worktree_id) REFERENCES worktrees(id) ON DELETE SET NULL
         )
@@ -1321,11 +1321,10 @@ def update_profile(
 
 
 def delete_profile(profile_id: str) -> bool:
-    """Delete a profile and handle foreign key references.
+    """Delete a profile and unlink sessions.
 
-    Note: Sessions using this profile will also be deleted (along with their messages
-    due to CASCADE). This is necessary because sessions.profile_id is NOT NULL and
-    the FK constraint doesn't have ON DELETE SET NULL.
+    Sessions are preserved when a profile is deleted - their profile_id is set to NULL.
+    This allows users to keep their chat history even after deleting a profile.
     """
     existing = get_profile(profile_id)
     if not existing:
@@ -1333,8 +1332,12 @@ def delete_profile(profile_id: str) -> bool:
 
     with get_db() as conn:
         cursor = conn.cursor()
-        # Delete sessions using this profile (session_messages will cascade delete)
-        cursor.execute("DELETE FROM sessions WHERE profile_id = ?", (profile_id,))
+        # Unlink sessions from this profile (sessions are preserved with NULL profile_id)
+        cursor.execute("UPDATE sessions SET profile_id = NULL WHERE profile_id = ?", (profile_id,))
+        # Unlink session_messages from this profile
+        cursor.execute("UPDATE session_messages SET profile_id = NULL WHERE profile_id = ?", (profile_id,))
+        # Unlink usage_log entries from this profile
+        cursor.execute("UPDATE usage_log SET profile_id = NULL WHERE profile_id = ?", (profile_id,))
         # Now delete the profile
         cursor.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
         return cursor.rowcount > 0
