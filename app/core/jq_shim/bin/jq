@@ -11,5 +11,14 @@ APP_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 # Set PYTHONPATH to include app root
 export PYTHONPATH="$APP_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
+# Detect Python executable - Windows uses 'python', Unix uses 'python3'
+# On Windows (including Git Bash/MSYS), 'python3' often doesn't exist or
+# triggers the Microsoft Store app execution alias
+if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ -n "$WINDIR" ]]; then
+    PYTHON_CMD="python"
+else
+    PYTHON_CMD="python3"
+fi
+
 # Execute the Python jq shim module
-exec python3 -m app.core.jq_shim "$@"
+exec $PYTHON_CMD -m app.core.jq_shim "$@"
