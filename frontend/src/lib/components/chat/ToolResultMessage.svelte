@@ -38,7 +38,7 @@
 <div class="w-full tool-result-message">
 	<div class="min-w-0">
 		<details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
-			<summary class="w-full px-4 py-2 bg-muted/30 hover:bg-muted/50 flex items-center gap-2 cursor-pointer list-none transition-colors">
+			<summary class="tool-result-summary w-full px-4 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
 				<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 				</svg>
@@ -67,3 +67,18 @@
 		</details>
 	</div>
 </div>
+
+<style>
+	.tool-result-summary {
+		background: color-mix(in oklch, var(--muted) 30%, transparent);
+	}
+
+	.tool-result-summary:hover {
+		background: color-mix(in oklch, var(--muted) 50%, transparent);
+	}
+
+	.tool-result-summary:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
+	}
+</style>

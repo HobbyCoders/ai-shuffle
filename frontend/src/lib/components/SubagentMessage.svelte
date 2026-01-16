@@ -114,7 +114,7 @@
 </script>
 
 <details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
-	<summary class="w-full px-4 py-2 bg-muted/30 hover:bg-muted/50 flex items-center gap-2 cursor-pointer list-none transition-colors">
+	<summary class="subagent-summary w-full px-4 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
 		<!-- Status icon -->
 		{#if statusInfo().isRunning}
 			<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -184,7 +184,7 @@
 					{#if child.type === 'tool_use'}
 						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
 							<details class="group/tool">
-								<summary class="flex items-center gap-2 cursor-pointer list-none hover:bg-muted/30 -mx-1 px-1 py-1 rounded">
+								<summary class="subagent-tool-summary flex items-center gap-2 cursor-pointer list-none -mx-1 px-1 py-1 rounded">
 									{#if child.toolStatus === 'running'}
 										<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -231,7 +231,7 @@
 						<!-- Standalone tool result (fallback) -->
 						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
 							<details class="group/result">
-								<summary class="flex items-center gap-2 cursor-pointer list-none hover:bg-muted/30 -mx-1 px-1 py-1 rounded">
+								<summary class="subagent-tool-summary flex items-center gap-2 cursor-pointer list-none -mx-1 px-1 py-1 rounded">
 									<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 									</svg>
@@ -296,3 +296,27 @@
 		</div>
 	</div>
 </details>
+
+<style>
+	.subagent-summary {
+		background: color-mix(in oklch, var(--muted) 30%, transparent);
+	}
+
+	.subagent-summary:hover {
+		background: color-mix(in oklch, var(--muted) 50%, transparent);
+	}
+
+	.subagent-summary:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
+	}
+
+	.subagent-tool-summary:hover {
+		background: var(--hover-overlay);
+	}
+
+	.subagent-tool-summary:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
+	}
+</style>

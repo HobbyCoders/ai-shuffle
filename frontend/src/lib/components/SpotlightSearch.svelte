@@ -245,7 +245,7 @@
               <button
                 type="button"
                 data-index={globalIndex}
-                class="w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors hover:bg-accent {selectedIndex === globalIndex ? 'bg-accent' : ''}"
+                class="spotlight-item w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors {selectedIndex === globalIndex ? 'selected' : ''}"
                 onclick={() => { onSelectSession(session); onClose(); }}
                 onmouseenter={() => selectedIndex = globalIndex}
               >
@@ -276,7 +276,7 @@
               <button
                 type="button"
                 data-index={globalIndex}
-                class="w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors hover:bg-accent {selectedIndex === globalIndex ? 'bg-accent' : ''}"
+                class="spotlight-item w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors {selectedIndex === globalIndex ? 'selected' : ''}"
                 onclick={() => { onSelectCommand(command); onClose(); }}
                 onmouseenter={() => selectedIndex = globalIndex}
               >
@@ -310,7 +310,7 @@
               <button
                 type="button"
                 data-index={globalIndex}
-                class="w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors hover:bg-accent {selectedIndex === globalIndex ? 'bg-accent' : ''}"
+                class="spotlight-item w-full px-4 py-2.5 flex items-center gap-3 text-left transition-colors {selectedIndex === globalIndex ? 'selected' : ''}"
                 onclick={() => { action.action(); onClose(); }}
                 onmouseenter={() => selectedIndex = globalIndex}
               >
@@ -360,3 +360,18 @@
     </div>
   </div>
 {/if}
+
+<style>
+  .spotlight-item:hover {
+    background: var(--hover-overlay);
+  }
+
+  .spotlight-item.selected {
+    background: color-mix(in oklch, var(--primary) 10%, var(--card));
+  }
+
+  .spotlight-item:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: -2px;
+  }
+</style>
