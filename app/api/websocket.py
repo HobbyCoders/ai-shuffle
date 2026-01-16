@@ -1007,7 +1007,18 @@ async def chat_websocket(
                         # Load a session's message history from JSONL file
                         session_id = data.get("session_id")
                         if session_id:
+                            # Try direct lookup by AI Shuffle session ID first
                             session = database.get_session(session_id)
+
+                            # If not found, try fallback lookup by SDK session ID (Claude Code UUID)
+                            # This handles cases where old references might use the SDK session ID
+                            if not session:
+                                session = database.get_session_by_sdk_id(session_id)
+                                if session:
+                                    logger.info(f"Session found via SDK session ID fallback: {session_id} -> {session['id']}")
+                                    # Update session_id to the actual AI Shuffle ID for consistency
+                                    session_id = session['id']
+
                             if session:
                                 # Check if THIS DEVICE already has this session open in another tab
                                 # This prevents duplicate tabs with the same session on the same device
