@@ -15,7 +15,15 @@ Usage:
 import sys
 import json
 import argparse
+import io
 from typing import List, Optional, Any
+
+# Fix Windows console encoding - Windows uses cp1252 by default which
+# can't handle Unicode characters like emojis in JSON data
+if sys.platform == "win32":
+    # Reconfigure stdout/stderr to use UTF-8
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from .parser import parse_jq_expression, ParseError
 from .evaluator import evaluate, EvaluationError, EMPTY
