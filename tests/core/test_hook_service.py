@@ -3,10 +3,7 @@ Tests for the unified hook service.
 """
 
 import pytest
-import tempfile
-import os
-from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, AsyncMock
 
 from app.core.hook_service import (
     load_plugin_hooks,

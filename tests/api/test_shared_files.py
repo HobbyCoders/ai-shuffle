@@ -16,8 +16,6 @@ Tests cover:
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-import tempfile
-import os
 import time
 
 from fastapi import FastAPI

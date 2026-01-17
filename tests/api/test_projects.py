@@ -15,10 +15,9 @@ Tests cover:
 import pytest
 import tempfile
 import shutil
-from datetime import datetime
 from pathlib import Path
 from io import BytesIO
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

@@ -9,11 +9,8 @@ Tests cover:
 - Recovery code generation and verification
 """
 
-import pytest
 import json
 import hashlib
-import time
-from unittest.mock import patch, MagicMock
 
 from app.core import totp_service
 

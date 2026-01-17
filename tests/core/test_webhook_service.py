@@ -15,8 +15,7 @@ import hashlib
 import hmac
 import json
 import pytest
-from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 

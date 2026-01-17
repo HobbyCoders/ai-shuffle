@@ -318,7 +318,15 @@
 													{plugin}
 													installing={$pluginInstalling[plugin.id] || false}
 													selected={selectedForInstall.has(plugin.id)}
-													onInstall={() => plugins.installPlugin(plugin.id)}
+													onInstall={() => {
+														plugins.installPlugin(plugin.id);
+														// Remove from selection if it was selected (fixes count getting stuck)
+														if (selectedForInstall.has(plugin.id)) {
+															const newSet = new Set(selectedForInstall);
+															newSet.delete(plugin.id);
+															selectedForInstall = newSet;
+														}
+													}}
 													onSelect={() => togglePluginSelection(plugin.id)}
 													onDetails={() => handleSelectPlugin(plugin.id)}
 													mode="available"

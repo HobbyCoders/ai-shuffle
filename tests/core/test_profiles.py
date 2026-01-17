@@ -10,9 +10,7 @@ Tests cover:
 - All code paths including edge cases and error handling
 """
 
-import pytest
-from unittest.mock import MagicMock, patch, call
-from typing import Dict, Any, List
+from unittest.mock import patch
 
 
 # =============================================================================

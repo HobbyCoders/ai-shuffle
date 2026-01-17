@@ -13,12 +13,9 @@ Tests cover:
 """
 
 import json
-import pytest
 import subprocess
-import tempfile
 from pathlib import Path
-from datetime import datetime
-from unittest.mock import patch, MagicMock, mock_open
+from unittest.mock import patch, MagicMock
 
 from app.core.rewind_manager import RewindManager, rewind_manager
 

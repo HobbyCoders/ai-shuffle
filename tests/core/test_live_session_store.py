@@ -13,15 +13,9 @@ Tests cover:
 """
 
 import pytest
-import asyncio
-from datetime import datetime
-from typing import Dict, Any, List
 
 from app.core.live_session_store import (
     LiveSessionStore,
-    LiveSession,
-    LiveMessage,
-    live_session_store,
 )
 
 

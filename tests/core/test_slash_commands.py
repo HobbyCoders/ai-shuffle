@@ -14,7 +14,6 @@ Tests cover:
 - get_all_commands aggregation
 """
 
-import pytest
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock

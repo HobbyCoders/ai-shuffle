@@ -13,13 +13,12 @@ Tests cover:
 """
 
 import pytest
-from datetime import datetime
 from unittest.mock import patch, MagicMock
 from pathlib import Path
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.git import router, require_auth, get_api_user_from_request
+from app.api.git import router, require_auth
 
 
 # =============================================================================

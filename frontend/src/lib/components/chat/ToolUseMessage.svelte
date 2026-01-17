@@ -99,29 +99,26 @@
 	const isWriteTool = $derived(name === 'Write');
 	const isBashTool = $derived(name === 'Bash');
 
-	// Extract Edit tool fields - works with both complete input and streaming partialInput
+	// Extract Edit tool fields - prefer input, fallback to partialInput for each field
 	const editFields = $derived.by(() => {
 		if (!isEditTool) return { filePath: '', oldString: '', newString: '' };
 
-		// Try complete input first
-		if (input?.old_string !== undefined && input?.new_string !== undefined) {
-			return {
-				filePath: String(input.file_path || ''),
-				oldString: String(input.old_string || ''),
-				newString: String(input.new_string || '')
-			};
-		}
+		// Get file_path: prefer complete input, fallback to streaming partial
+		const filePath = input?.file_path !== undefined
+			? String(input.file_path || '')
+			: (partialInput ? extractFieldFromPartial(partialInput, 'file_path') : '');
 
-		// During streaming, extract from partialInput
-		if (partialInput) {
-			return {
-				filePath: extractFieldFromPartial(partialInput, 'file_path'),
-				oldString: extractFieldFromPartial(partialInput, 'old_string'),
-				newString: extractFieldFromPartial(partialInput, 'new_string')
-			};
-		}
+		// Get old_string: prefer complete input, fallback to streaming partial
+		const oldString = input?.old_string !== undefined
+			? String(input.old_string || '')
+			: (partialInput ? extractFieldFromPartial(partialInput, 'old_string') : '');
 
-		return { filePath: '', oldString: '', newString: '' };
+		// Get new_string: prefer complete input, fallback to streaming partial
+		const newString = input?.new_string !== undefined
+			? String(input.new_string || '')
+			: (partialInput ? extractFieldFromPartial(partialInput, 'new_string') : '');
+
+		return { filePath, oldString, newString };
 	});
 
 	const editFilePath = $derived(editFields.filePath);
@@ -145,27 +142,21 @@
 	const readFilePath = $derived(readFields.filePath);
 	const readContent = $derived(readFields.content);
 
-	// Extract Write tool fields
+	// Extract Write tool fields - prefer input, fallback to partialInput for each field
 	const writeFields = $derived.by(() => {
 		if (!isWriteTool) return { filePath: '', content: '' };
 
-		// Try complete input first
-		if (input?.file_path !== undefined && input?.content !== undefined) {
-			return {
-				filePath: String(input.file_path || ''),
-				content: String(input.content || '')
-			};
-		}
+		// Get file_path: prefer complete input, fallback to streaming partial
+		const filePath = input?.file_path !== undefined
+			? String(input.file_path || '')
+			: (partialInput ? extractFieldFromPartial(partialInput, 'file_path') : '');
 
-		// During streaming, extract from partialInput
-		if (partialInput) {
-			return {
-				filePath: extractFieldFromPartial(partialInput, 'file_path'),
-				content: extractFieldFromPartial(partialInput, 'content')
-			};
-		}
+		// Get content: prefer complete input, fallback to streaming partial
+		const content = input?.content !== undefined
+			? String(input.content || '')
+			: (partialInput ? extractFieldFromPartial(partialInput, 'content') : '');
 
-		return { filePath: '', content: '' };
+		return { filePath, content };
 	});
 
 	const writeFilePath = $derived(writeFields.filePath);

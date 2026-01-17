@@ -13,7 +13,7 @@ This module tests the query API routes in app/api/query.py including:
 
 import json
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch
 
 
 # =============================================================================

@@ -14,7 +14,7 @@ This module tests all endpoints in app/api/github.py:
 """
 
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 from pathlib import Path
 from fastapi import Request, HTTPException
 
@@ -273,7 +273,6 @@ class TestGetProjectPath:
     def test_returns_path_for_valid_project(self, mock_project_data):
         """Test get_project_path returns correct path."""
         from app.api.github import get_project_path
-        from pathlib import Path
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -308,7 +307,6 @@ class TestGetProjectPath:
     def test_raises_404_for_missing_directory(self, mock_project_data):
         """Test get_project_path raises 404 when directory doesn't exist."""
         from app.api.github import get_project_path
-        from pathlib import Path
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -334,7 +332,6 @@ class TestGetRepoForProject:
     def test_returns_repo_when_found(self, mock_project_data):
         """Test get_repo_for_project returns repo when found."""
         from app.api.github import get_repo_for_project
-        from pathlib import Path
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -358,7 +355,6 @@ class TestGetRepoForProject:
     def test_raises_400_when_no_remote(self, mock_project_data):
         """Test get_repo_for_project raises 400 when no GitHub remote."""
         from app.api.github import get_repo_for_project
-        from pathlib import Path
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -600,7 +596,6 @@ class TestGetGitHubStatusEndpoint:
     async def test_returns_status_when_authenticated_with_repo(self, mock_project_data):
         """Test status endpoint returns full status when authenticated with repo."""
         from app.api.github import get_github_status
-        from pathlib import Path
         import tempfile
 
         mock_request = MagicMock(spec=Request)
@@ -658,7 +653,6 @@ class TestGetGitHubStatusEndpoint:
     async def test_returns_status_when_no_remote(self, mock_project_data):
         """Test status endpoint returns error when no remote configured."""
         from app.api.github import get_github_status
-        from pathlib import Path
         import tempfile
 
         mock_request = MagicMock(spec=Request)

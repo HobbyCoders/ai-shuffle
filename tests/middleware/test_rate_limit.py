@@ -14,10 +14,9 @@ Tests cover:
 import hashlib
 import pytest
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from starlette.responses import JSONResponse, Response
-from starlette.datastructures import MutableHeaders
+from starlette.responses import Response
 
 from app.middleware.rate_limit import (
     RateLimitMiddleware,

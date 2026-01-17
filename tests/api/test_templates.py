@@ -12,7 +12,7 @@ Tests all template management endpoints:
 
 import pytest
 from datetime import datetime
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from fastapi import HTTPException
 
 

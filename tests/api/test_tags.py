@@ -12,7 +12,7 @@ Tests cover:
 
 import pytest
 from datetime import datetime
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 from fastapi import HTTPException
 
 
@@ -1116,12 +1116,8 @@ class TestSessionAccessControl:
     ):
         """Session access should be checked for all session tag operations."""
         from app.api.tags import (
-            get_session_tags,
-            set_session_tags,
-            add_tag_to_session,
-            remove_tag_from_session
+            get_session_tags
         )
-        from app.core.models import SessionTagsUpdate
 
         # Test each session operation
         operations = [

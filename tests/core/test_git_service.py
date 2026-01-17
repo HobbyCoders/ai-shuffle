@@ -12,8 +12,7 @@ Tests cover:
 
 import pytest
 import subprocess
-from unittest.mock import MagicMock, patch, call
-from typing import List
+from unittest.mock import patch
 
 from app.core.git_service import GitService, git_service
 
@@ -1081,10 +1080,11 @@ class TestAddWorktree:
             )
 
     def test_add_worktree_new_branch_with_base(self):
-        """Should add worktree with new branch from base."""
+        """Should add worktree with new branch from base, fetching latest first."""
         service = GitService()
 
         with patch.object(service, "_run_git") as mock_run:
+            # Mock successful responses for fetch, rev-parse check, and worktree add
             mock_run.return_value = subprocess.CompletedProcess(
                 args=[],
                 returncode=0,
@@ -1101,11 +1101,46 @@ class TestAddWorktree:
             )
 
             assert success is True
-            mock_run.assert_called_once_with(
+            # Should have called: fetch, rev-parse (to check origin/develop), worktree add
+            assert mock_run.call_count == 3
+
+            # Verify fetch was called first
+            fetch_call = mock_run.call_args_list[0]
+            assert fetch_call[0][1] == ["fetch", "origin", "--prune"]
+
+            # Verify rev-parse check for origin/develop
+            revparse_call = mock_run.call_args_list[1]
+            assert revparse_call[0][1] == ["rev-parse", "--verify", "origin/develop"]
+
+            # Verify worktree add uses origin/develop (not local develop)
+            worktree_call = mock_run.call_args_list[2]
+            assert worktree_call[0][1] == ["worktree", "add", "-b", "new-feature", "/path/to/worktree", "origin/develop"]
+
+    def test_add_worktree_new_branch_with_base_no_remote(self):
+        """Should fall back to local branch when remote doesn't exist."""
+        service = GitService()
+
+        with patch.object(service, "_run_git") as mock_run:
+            def side_effect(working_dir, args, timeout=None):
+                if args[0] == "rev-parse":
+                    # Remote branch doesn't exist
+                    return subprocess.CompletedProcess(args=[], returncode=128, stdout="", stderr="")
+                return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+            mock_run.side_effect = side_effect
+
+            success, error = service.add_worktree(
                 "/main/repo",
-                ["worktree", "add", "-b", "new-feature", "/path/to/worktree", "develop"],
-                timeout=30
+                "/path/to/worktree",
+                "new-feature",
+                new_branch=True,
+                base_branch="develop"
             )
+
+            assert success is True
+            # Final call should use local 'develop' since origin/develop doesn't exist
+            worktree_call = mock_run.call_args_list[-1]
+            assert worktree_call[0][1] == ["worktree", "add", "-b", "new-feature", "/path/to/worktree", "develop"]
 
     def test_add_worktree_failure(self):
         """Should return error message on failure."""

@@ -15,11 +15,8 @@ The goal is bulletproof cross-device streaming that allows users to:
 """
 
 import pytest
-import asyncio
-from datetime import datetime
-from typing import Dict, Any, List
 
-from app.core.sync_engine import SyncEngine, StreamingBuffer
+from app.core.sync_engine import StreamingBuffer
 from app.core.live_session_store import LiveSessionStore
 
 

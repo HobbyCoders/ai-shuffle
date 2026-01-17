@@ -11,8 +11,7 @@ Tests cover:
 """
 
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
-from typing import Dict, Any
+from unittest.mock import MagicMock, patch
 
 from app.core.audit_service import (
     AuditEventType,

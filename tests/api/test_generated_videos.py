@@ -14,9 +14,7 @@ Tests cover:
 
 import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
-import tempfile
-import os
+from unittest.mock import patch
 
 from fastapi import HTTPException
 from fastapi.responses import FileResponse

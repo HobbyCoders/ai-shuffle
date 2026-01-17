@@ -13,11 +13,8 @@ Tests cover:
 """
 
 import pytest
-import json
-import tempfile
 from pathlib import Path
-from datetime import datetime, timedelta
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 

@@ -14,7 +14,7 @@ Tests cover:
 import pytest
 import asyncio
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import patch
 
 from app.core.rate_limiter import (
     RateLimitConfig,

@@ -11,10 +11,8 @@ Tests cover:
 - All error paths and edge cases
 """
 
-import json
 import pytest
-from datetime import datetime
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 

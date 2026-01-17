@@ -1,6 +1,5 @@
 """Tests for the jq shim CLI interface."""
 
-import pytest
 import json
 import subprocess
 import sys

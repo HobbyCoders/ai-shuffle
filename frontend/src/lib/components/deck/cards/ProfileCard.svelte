@@ -12,7 +12,7 @@
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
 	import { profiles as profilesStore, tabs as tabsStore } from '$lib/stores/tabs';
 	import { groups as groupsStore } from '$lib/stores/groups';
-	import { plugins, installedPlugins, fileBasedAgents } from '$lib/stores/plugins';
+	import { plugins, fileBasedAgents } from '$lib/stores/plugins';
 	import type { PluginInfo, FileBasedAgent } from '$lib/api/plugins';
 	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
 	import './card-design-system.css';
@@ -189,7 +189,6 @@
 
 	// Plugin management
 	let pluginAgents = $derived($fileBasedAgents);
-	let installedPluginsList = $derived($installedPlugins);
 
 	// Tab definitions
 	const tabs = [
@@ -1448,69 +1447,6 @@
 							</div>
 						{/if}
 					</div>
-
-					<!-- Installed Plugins Quick View -->
-					<div class="card-form-section">
-						<div class="section-header">
-							<h3 class="card-form-title">Installed Plugins</h3>
-							<span class="card-badge card-badge--muted">{installedPluginsList.length} installed</span>
-						</div>
-
-						{#if installedPluginsList.length === 0}
-							<div class="card-empty-state">
-								<p class="card-empty-description">No plugins installed</p>
-								<button
-									type="button"
-									class="card-btn-secondary small"
-									onclick={() => onOpenPlugins?.()}
-								>
-									Browse Plugins
-								</button>
-							</div>
-						{:else}
-							<div class="installed-plugins-compact">
-								{#each installedPluginsList.slice(0, 6) as plugin (plugin.id)}
-									<div class="plugin-compact-item" class:disabled={!plugin.enabled}>
-										<div class="plugin-compact-info">
-											<span class="plugin-compact-name">{plugin.name}</span>
-											<div class="plugin-compact-badges">
-												{#if plugin.has_agents}
-													<span class="feature-dot agents" title="Has agents"></span>
-												{/if}
-												{#if plugin.has_commands}
-													<span class="feature-dot commands" title="Has commands"></span>
-												{/if}
-												{#if plugin.has_skills}
-													<span class="feature-dot skills" title="Has skills"></span>
-												{/if}
-											</div>
-										</div>
-										<span class="plugin-status" class:enabled={plugin.enabled}>
-											{plugin.enabled ? 'On' : 'Off'}
-										</span>
-									</div>
-								{/each}
-								{#if installedPluginsList.length > 6}
-									<button
-										type="button"
-										class="show-more-btn"
-										onclick={() => onOpenPlugins?.()}
-									>
-										+{installedPluginsList.length - 6} more plugins
-									</button>
-								{/if}
-							</div>
-							<div class="plugins-footer">
-								<button
-									type="button"
-									class="card-btn-secondary small"
-									onclick={() => onOpenPlugins?.()}
-								>
-									Open Plugin Manager
-								</button>
-							</div>
-						{/if}
-					</div>
 				{:else if activeTab === 'prompt'}
 					<!-- System Prompt Tab -->
 					<div class="card-form-section">
@@ -2623,117 +2559,6 @@
 	.tool-badge.more {
 		background: color-mix(in oklch, var(--primary) 10%, transparent);
 		color: var(--primary);
-	}
-
-	/* Installed Plugins Compact */
-	.installed-plugins-compact {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		gap: 6px;
-	}
-
-	@media (max-width: 480px) {
-		.installed-plugins-compact {
-			grid-template-columns: 1fr;
-		}
-	}
-
-	.plugin-compact-item {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: var(--space-2, 8px) var(--space-3, 12px);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-sm, 6px);
-		transition: all var(--transition-smooth, 200ms);
-	}
-
-	.plugin-compact-item:hover {
-		border-color: var(--border-emphasis);
-	}
-
-	.plugin-compact-item.disabled {
-		opacity: 0.5;
-	}
-
-	.plugin-compact-info {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		min-width: 0;
-		flex: 1;
-	}
-
-	.plugin-compact-name {
-		font-size: var(--text-base, 0.8125rem);
-		color: var(--text-primary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.plugin-compact-badges {
-		display: flex;
-		gap: 3px;
-		flex-shrink: 0;
-	}
-
-	.feature-dot {
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-	}
-
-	.feature-dot.agents {
-		background: var(--primary);
-	}
-
-	.feature-dot.commands {
-		background: hsl(142 76% 36%);
-	}
-
-	.feature-dot.skills {
-		background: hsl(280 80% 55%);
-	}
-
-	.plugin-status {
-		font-size: var(--text-xs, 0.6875rem);
-		font-weight: 500;
-		padding: 2px 6px;
-		border-radius: 4px;
-		background: var(--surface-1);
-		color: var(--text-secondary);
-	}
-
-	.plugin-status.enabled {
-		background: color-mix(in oklch, hsl(142 76% 36%) 20%, transparent);
-		color: hsl(142 76% 36%);
-	}
-
-	.show-more-btn {
-		grid-column: 1 / -1;
-		padding: var(--space-2, 8px);
-		background: transparent;
-		border: 1px dashed var(--border-subtle);
-		border-radius: var(--radius-sm, 6px);
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: all var(--transition-fast, 100ms);
-	}
-
-	.show-more-btn:hover {
-		color: var(--text-primary);
-		border-color: var(--border-emphasis);
-	}
-
-	.plugins-footer {
-		margin-top: var(--space-3, 12px);
-		padding-top: var(--space-3, 12px);
-		border-top: 1px solid var(--border-subtle);
-		display: flex;
-		justify-content: center;
 	}
 
 	/* Button modifiers */

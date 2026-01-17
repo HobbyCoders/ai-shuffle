@@ -12,10 +12,8 @@ Comprehensive test coverage for worktree lifecycle management including:
 """
 
 import pytest
-import uuid
 from pathlib import Path
-from unittest.mock import patch, MagicMock, PropertyMock
-from typing import Dict, Any, List, Optional
+from unittest.mock import patch
 
 # Import module under test
 from app.core.worktree_manager import WorktreeManager, WorktreeError, worktree_manager
