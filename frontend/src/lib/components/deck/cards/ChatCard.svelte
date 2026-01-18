@@ -502,7 +502,7 @@
 	}
 
 	.chat-card-content :global(button:hover:not(:disabled)) {
-		background-color: var(--accent);
+		background-color: var(--hover-overlay);
 	}
 
 	.chat-card-content :global(button:focus-visible) {
@@ -557,8 +557,7 @@
 	/* Dropdown item hover states */
 	.chat-card-content :global([role="option"]:hover),
 	.chat-card-content :global([role="menuitem"]:hover) {
-		background-color: var(--accent);
-		color: var(--accent-foreground);
+		background-color: var(--hover-overlay);
 	}
 
 	/* ========================================

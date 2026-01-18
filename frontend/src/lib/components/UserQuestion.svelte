@@ -332,7 +332,7 @@
 							<button
 								type="button"
 								onclick={() => goToQuestion(idx)}
-								class="flex-shrink-0 p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors opacity-0 group-hover:opacity-100"
+								class="uq-edit-btn flex-shrink-0 p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors opacity-0 group-hover:opacity-100"
 								aria-label="Edit answer"
 							>
 								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -751,5 +751,15 @@
 		.option-card {
 			padding: 1rem;
 		}
+	}
+
+	/* Edit button hover */
+	.uq-edit-btn:hover {
+		background: var(--hover-overlay);
+	}
+
+	.uq-edit-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 </style>

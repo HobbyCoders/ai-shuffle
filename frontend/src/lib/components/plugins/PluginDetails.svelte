@@ -70,7 +70,7 @@
 	<div class="flex items-start gap-4 mb-6">
 		<button
 			onclick={onClose}
-			class="p-2 hover:bg-muted rounded-lg transition-colors flex-shrink-0"
+			class="p-2 plugin-action-btn rounded-lg transition-colors flex-shrink-0"
 		>
 			<svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
@@ -266,3 +266,14 @@
 		{/if}
 	</div>
 </div>
+
+<style>
+	.plugin-action-btn:hover {
+		background: var(--hover-overlay);
+	}
+
+	.plugin-action-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+</style>

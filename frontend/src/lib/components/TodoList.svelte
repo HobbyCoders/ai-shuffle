@@ -85,7 +85,7 @@
 		<!-- Collapsed Header -->
 		<button
 			onclick={toggleExpanded}
-			class="w-full flex items-center gap-2 py-1.5 text-left hover:bg-muted/30 rounded px-2 -mx-2 transition-colors"
+			class="todo-toggle-btn w-full flex items-center gap-2 py-1.5 text-left rounded px-2 -mx-2 transition-colors"
 		>
 			<!-- Circular Progress or Checkmark -->
 			{#if allCompleted()}
@@ -176,3 +176,14 @@
 		{/if}
 	</div>
 {/if}
+
+<style>
+	.todo-toggle-btn:hover {
+		background: var(--hover-overlay);
+	}
+
+	.todo-toggle-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+</style>

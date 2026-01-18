@@ -56,7 +56,7 @@
 	<!-- Add new marketplace button -->
 	<button
 		onclick={onAdd}
-		class="w-full px-4 py-3 rounded-lg border border-dashed border-border text-muted-foreground hover:text-foreground hover:border-primary/50 hover:bg-accent/50 transition-colors flex items-center justify-center gap-2"
+		class="w-full px-4 py-3 rounded-lg border border-dashed border-border text-muted-foreground hover:text-foreground hover:border-primary/50 add-source-btn-hover transition-colors flex items-center justify-center gap-2"
 	>
 		<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
@@ -117,7 +117,7 @@
 								<button
 									onclick={() => onSync(marketplace.id)}
 									disabled={syncing[marketplace.id]}
-									class="p-2 hover:bg-muted rounded-lg transition-colors disabled:opacity-50"
+									class="p-2 plugin-action-btn rounded-lg transition-colors disabled:opacity-50"
 									title="Sync from git"
 								>
 									{#if syncing[marketplace.id]}
@@ -147,7 +147,7 @@
 										</button>
 										<button
 											onclick={cancelDelete}
-											class="p-1.5 hover:bg-muted rounded-md transition-colors"
+											class="p-1.5 plugin-action-btn rounded-md transition-colors"
 											title="Cancel"
 										>
 											<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -208,3 +208,18 @@
 		</div>
 	</div>
 </div>
+
+<style>
+	.plugin-action-btn:hover {
+		background: var(--hover-overlay);
+	}
+
+	.plugin-action-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
+	.add-source-btn-hover:hover {
+		background: color-mix(in oklch, var(--accent) 10%, transparent);
+	}
+</style>

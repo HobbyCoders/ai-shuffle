@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Python jq shim - routes jq calls to Python implementation
+# This allows shell scripts to use jq syntax while processing is handled by Python
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Find the app root (4 levels up: bin -> jq_shim -> core -> app -> root)
+APP_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+
+# Set PYTHONPATH to include app root
+export PYTHONPATH="$APP_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+# Detect Python executable - Windows uses 'python', Unix uses 'python3'
+# On Windows (including Git Bash/MSYS), 'python3' often doesn't exist or
+# triggers the Microsoft Store app execution alias
+if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ -n "$WINDIR" ]]; then
+    PYTHON_CMD="python"
+else
+    PYTHON_CMD="python3"
+fi
+
+# Execute the Python jq shim module
+exec $PYTHON_CMD -m app.core.jq_shim "$@"
