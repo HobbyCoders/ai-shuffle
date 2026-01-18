@@ -117,7 +117,7 @@
 					<!-- Close button -->
 					<button
 						onclick={onClose}
-						class="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+						class="modal-icon-btn p-2 rounded-lg text-muted-foreground hover:text-foreground transition-colors"
 						aria-label="Close"
 					>
 						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -165,11 +165,7 @@
 				<footer class="shrink-0 px-6 py-4 border-t border-border bg-card/50 flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-end gap-3">
 					<button
 						onclick={onClose}
-						class="
-							px-6 py-2.5 rounded-xl text-sm font-medium
-							bg-muted text-foreground border border-border
-							hover:bg-accent transition-colors
-						"
+						class="modal-secondary-btn px-6 py-2.5 rounded-xl text-sm font-medium bg-muted text-foreground border border-border transition-colors"
 					>
 						Cancel
 					</button>
@@ -225,5 +221,24 @@
 
 	.scrollbar-none::-webkit-scrollbar {
 		display: none;
+	}
+
+	.modal-icon-btn:hover {
+		background: var(--hover-overlay);
+	}
+
+	.modal-icon-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
+	.modal-secondary-btn:hover {
+		background: var(--hover-overlay);
+		border-color: color-mix(in oklch, var(--accent) 50%, var(--border));
+	}
+
+	.modal-secondary-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 </style>

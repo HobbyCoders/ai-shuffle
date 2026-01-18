@@ -325,7 +325,7 @@
 <div class="w-full tool-use-message">
 	<div class="min-w-0">
 		<details class="w-full border border-border rounded-lg overflow-hidden group" open={isExpanded} ontoggle={handleToggle}>
-			<summary class="w-full px-3 py-2 hover:bg-muted/30 flex items-center gap-2 cursor-pointer list-none transition-colors">
+			<summary class="tool-summary w-full px-3 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
 				<!-- Status indicator - use toolStatus as primary, not streaming -->
 				{#if status === 'running'}
 					<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -587,3 +587,14 @@
 		</details>
 	</div>
 </div>
+
+<style>
+	.tool-summary:hover {
+		background: var(--hover-overlay);
+	}
+
+	.tool-summary:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
+	}
+</style>

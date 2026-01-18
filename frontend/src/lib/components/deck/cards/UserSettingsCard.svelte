@@ -397,7 +397,7 @@
 						class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors
 							{activeSection === section.id
 								? 'bg-primary/15 text-primary'
-								: 'text-muted-foreground hover:bg-muted'}"
+								: 'text-muted-foreground user-settings-btn'}"
 					>
 						<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
 							<path d={section.icon} />
@@ -453,7 +453,7 @@
 									</button>
 									<button
 										onclick={() => { editingName = false; nameInput = profile!.name; }}
-										class="px-4 py-2 border rounded-lg hover:bg-muted"
+										class="px-4 py-2 border rounded-lg user-settings-btn"
 									>
 										Cancel
 									</button>
@@ -497,7 +497,7 @@
 										</button>
 										<button
 											onclick={() => { editingDescription = false; descriptionInput = profile!.description || ''; }}
-											class="px-4 py-2 border rounded-lg hover:bg-muted"
+											class="px-4 py-2 border rounded-lg user-settings-btn"
 										>
 											Cancel
 										</button>
@@ -561,7 +561,7 @@
 										</button>
 										<button
 											onclick={() => { showPasswordChange = false; currentPassword = ''; newPassword = ''; confirmPassword = ''; passwordError = ''; }}
-											class="px-4 py-2 border rounded-lg hover:bg-muted"
+											class="px-4 py-2 border rounded-lg user-settings-btn"
 										>
 											Cancel
 										</button>
@@ -570,7 +570,7 @@
 							{:else}
 								<button
 									onclick={() => showPasswordChange = true}
-									class="px-4 py-2 border rounded-lg hover:bg-muted"
+									class="px-4 py-2 border rounded-lg user-settings-btn"
 								>
 									Change Password
 								</button>
@@ -645,7 +645,7 @@
 														</button>
 														<button
 															onclick={() => { editingCredential = null; credentialInput = ''; credentialError = ''; }}
-															class="px-3 py-1.5 border rounded text-sm hover:bg-muted"
+															class="px-3 py-1.5 border rounded text-sm user-settings-btn"
 														>
 															Cancel
 														</button>
@@ -740,7 +740,7 @@
 								<button
 									onclick={handleLoadRepos}
 									disabled={loadingRepos}
-									class="px-4 py-2 border rounded-lg hover:bg-muted disabled:opacity-50"
+									class="px-4 py-2 border rounded-lg user-settings-btn disabled:opacity-50"
 								>
 									{loadingRepos ? 'Loading...' : 'Load Repositories'}
 								</button>
@@ -817,7 +817,7 @@
 										</button>
 										<button
 											onclick={() => { showGitHubConnect = false; gitHubPAT = ''; gitHubError = ''; }}
-											class="px-4 py-2 border rounded-lg hover:bg-muted"
+											class="px-4 py-2 border rounded-lg user-settings-btn"
 										>
 											Cancel
 										</button>
@@ -841,3 +841,14 @@
 		</div>
 	</div>
 </BaseCard>
+
+<style>
+	:global(.user-settings-btn:hover) {
+		background: var(--hover-overlay);
+	}
+
+	:global(.user-settings-btn:focus-visible) {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+</style>

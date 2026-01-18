@@ -459,27 +459,15 @@
 	}
 
 	.alert.error {
-		background: #fee2e2;
-		color: #991b1b;
-		border: 1px solid #fecaca;
-	}
-
-	:global(.dark) .alert.error {
-		background: rgba(239, 68, 68, 0.15);
-		color: #fca5a5;
-		border-color: rgba(239, 68, 68, 0.3);
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
+		color: var(--destructive);
+		border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
 	}
 
 	.alert.success {
-		background: #d1fae5;
-		color: #065f46;
-		border: 1px solid #a7f3d0;
-	}
-
-	:global(.dark) .alert.success {
-		background: rgba(16, 185, 129, 0.15);
-		color: #6ee7b7;
-		border-color: rgba(16, 185, 129, 0.3);
+		background: color-mix(in oklch, var(--success) 15%, transparent);
+		color: var(--success);
+		border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
 	}
 
 	.loading {
@@ -527,18 +515,23 @@
 		align-items: center;
 		gap: 0.5rem;
 		padding: 0.5rem 1rem;
-		background: var(--primary-color, #3b82f6);
-		color: white;
+		background: var(--primary);
+		color: var(--primary-foreground);
 		border: none;
 		border-radius: 0.375rem;
 		font-size: 0.875rem;
 		font-weight: 500;
 		cursor: pointer;
-		transition: background-color 0.2s;
+		transition: filter 0.2s;
 	}
 
 	.btn-primary:hover {
-		background: var(--primary-hover, #2563eb);
+		filter: brightness(1.1);
+	}
+
+	.btn-primary:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.btn-primary svg {
@@ -548,32 +541,45 @@
 
 	.btn-secondary {
 		padding: 0.5rem 1rem;
-		background: var(--bg-secondary);
-		color: var(--text-primary);
-		border: 1px solid var(--border-color);
+		background: var(--secondary);
+		color: var(--secondary-foreground);
+		border: 1px solid var(--border);
 		border-radius: 0.375rem;
 		font-size: 0.875rem;
 		font-weight: 500;
 		cursor: pointer;
+		transition: all 0.15s ease;
 	}
 
 	.btn-secondary:hover {
-		background: var(--bg-tertiary);
+		background: var(--hover-overlay);
+		border-color: var(--accent);
+	}
+
+	.btn-secondary:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.btn-danger {
 		padding: 0.5rem 1rem;
-		background: #ef4444;
-		color: white;
+		background: var(--destructive);
+		color: var(--destructive-foreground, white);
 		border: none;
 		border-radius: 0.375rem;
 		font-size: 0.875rem;
 		font-weight: 500;
 		cursor: pointer;
+		transition: filter 0.2s;
 	}
 
 	.btn-danger:hover {
-		background: #dc2626;
+		filter: brightness(1.1);
+	}
+
+	.btn-danger:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.btn-sm {
@@ -621,8 +627,8 @@
 	.form-group input:focus,
 	.form-group select:focus {
 		outline: none;
-		border-color: var(--primary-color);
-		box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+		border-color: var(--ring);
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 20%, transparent);
 	}
 
 	.form-row {
@@ -717,45 +723,33 @@
 
 	.unlimited-badge {
 		padding: 0.125rem 0.5rem;
-		background: #dbeafe;
-		color: #1e40af;
+		background: color-mix(in oklch, var(--info) 15%, transparent);
+		color: var(--info);
+		border: 1px solid color-mix(in oklch, var(--info) 30%, transparent);
 		border-radius: 0.25rem;
 		font-size: 0.75rem;
 		font-weight: 500;
 	}
 
-	:global(.dark) .unlimited-badge {
-		background: rgba(59, 130, 246, 0.2);
-		color: #93c5fd;
-	}
-
 	.priority-badge {
 		display: inline-block;
 		padding: 0.125rem 0.5rem;
-		background: var(--bg-tertiary);
+		background: var(--muted);
 		border-radius: 0.25rem;
 		font-size: 0.75rem;
 		font-weight: 500;
 	}
 
 	.priority-badge.high {
-		background: #d1fae5;
-		color: #065f46;
-	}
-
-	:global(.dark) .priority-badge.high {
-		background: rgba(16, 185, 129, 0.2);
-		color: #6ee7b7;
+		background: color-mix(in oklch, var(--success) 15%, transparent);
+		color: var(--success);
+		border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
 	}
 
 	.priority-badge.low {
-		background: #fee2e2;
-		color: #991b1b;
-	}
-
-	:global(.dark) .priority-badge.low {
-		background: rgba(239, 68, 68, 0.15);
-		color: #fca5a5;
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
+		color: var(--destructive);
+		border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
 	}
 
 	.status {
@@ -764,11 +758,11 @@
 	}
 
 	.status.active {
-		color: #059669;
+		color: var(--success);
 	}
 
 	.status.unlimited {
-		color: #2563eb;
+		color: var(--info);
 	}
 
 	.btn-icon {
@@ -777,22 +771,23 @@
 		border: none;
 		border-radius: 0.25rem;
 		cursor: pointer;
-		color: var(--text-secondary);
+		color: var(--muted-foreground);
+		transition: all 0.15s ease;
 	}
 
 	.btn-icon:hover {
-		background: var(--bg-tertiary);
-		color: var(--text-primary);
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+
+	.btn-icon:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.btn-icon.danger:hover {
-		background: #fee2e2;
-		color: #dc2626;
-	}
-
-	:global(.dark) .btn-icon.danger:hover {
-		background: rgba(239, 68, 68, 0.15);
-		color: #f87171;
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
+		color: var(--destructive);
 	}
 
 	.btn-icon svg {

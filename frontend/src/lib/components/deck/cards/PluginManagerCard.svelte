@@ -494,19 +494,26 @@
 		gap: 6px;
 		color: var(--muted-foreground);
 		background: transparent;
-		border: none;
+		border: 1px solid transparent;
 		cursor: pointer;
 		transition: all 150ms ease;
 	}
 
 	.plugin-tab:hover {
 		color: var(--foreground);
-		background: var(--accent);
+		border-color: var(--accent);
+		box-shadow: 0 0 8px color-mix(in oklch, var(--accent) 20%, transparent);
+	}
+
+	.plugin-tab:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.plugin-tab.active {
 		background: var(--primary);
 		color: var(--primary-foreground);
+		border-color: var(--primary);
 	}
 
 	.plugin-tab-count {
@@ -599,6 +606,11 @@
 
 	.batch-install-btn:hover:not(:disabled) {
 		filter: brightness(1.1);
+	}
+
+	.batch-install-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.batch-install-btn:disabled {
@@ -824,10 +836,17 @@
 	.btn-secondary {
 		background: var(--secondary);
 		color: var(--foreground);
+		border: 1px solid var(--border);
 	}
 
 	.btn-secondary:hover {
-		background: var(--accent);
+		border-color: var(--accent);
+		box-shadow: 0 0 8px color-mix(in oklch, var(--accent) 20%, transparent);
+	}
+
+	.btn-secondary:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.btn-primary {
@@ -837,6 +856,11 @@
 
 	.btn-primary:hover:not(:disabled) {
 		filter: brightness(1.1);
+	}
+
+	.btn-primary:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.btn-primary:disabled {

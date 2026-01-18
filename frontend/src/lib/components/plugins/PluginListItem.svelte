@@ -205,27 +205,32 @@
 	.card-badge--feature-commands {
 		background: color-mix(in oklch, var(--feature-commands, oklch(0.6 0.2 250)) 15%, transparent);
 		color: var(--feature-commands, oklch(0.6 0.2 250));
+		border: 1px solid color-mix(in oklch, var(--feature-commands, oklch(0.6 0.2 250)) 30%, transparent);
 	}
 
 	.card-badge--feature-agents {
 		background: color-mix(in oklch, var(--feature-agents, oklch(0.6 0.2 300)) 15%, transparent);
 		color: var(--feature-agents, oklch(0.6 0.2 300));
+		border: 1px solid color-mix(in oklch, var(--feature-agents, oklch(0.6 0.2 300)) 30%, transparent);
 	}
 
 	.card-badge--feature-skills {
 		background: color-mix(in oklch, var(--feature-skills, oklch(0.6 0.2 145)) 15%, transparent);
 		color: var(--feature-skills, oklch(0.6 0.2 145));
+		border: 1px solid color-mix(in oklch, var(--feature-skills, oklch(0.6 0.2 145)) 30%, transparent);
 	}
 
 	.card-badge--feature-hooks {
 		background: color-mix(in oklch, var(--feature-hooks, oklch(0.7 0.15 55)) 15%, transparent);
 		color: var(--feature-hooks, oklch(0.7 0.15 55));
+		border: 1px solid color-mix(in oklch, var(--feature-hooks, oklch(0.7 0.15 55)) 30%, transparent);
 	}
 
 	/* Success badge */
 	.card-badge--success {
 		background: color-mix(in oklch, var(--success, oklch(0.6 0.2 145)) 15%, transparent);
 		color: var(--success, oklch(0.6 0.2 145));
+		border: 1px solid color-mix(in oklch, var(--success, oklch(0.6 0.2 145)) 30%, transparent);
 	}
 
 	/* Version info */

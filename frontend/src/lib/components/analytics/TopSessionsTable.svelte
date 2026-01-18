@@ -79,7 +79,7 @@
 					</thead>
 					<tbody>
 						{#each sessions as session, i}
-							<tr class="border-b border-border/50 hover:bg-muted/20 transition-colors">
+							<tr class="border-b border-border/50 sessions-table-row transition-colors">
 								<td class="px-4 py-3">
 									<div class="flex items-center gap-2">
 										<span class="w-6 h-6 rounded-full bg-primary/20 text-primary text-xs font-medium flex items-center justify-center">
@@ -117,3 +117,9 @@
 		</div>
 	{/if}
 </div>
+
+<style>
+	.sessions-table-row:hover {
+		background: var(--hover-overlay);
+	}
+</style>

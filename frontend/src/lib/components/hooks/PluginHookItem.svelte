@@ -19,7 +19,7 @@
 		SessionEnd: 'var(--primary)',
 		UserPromptSubmit: 'var(--warning)',
 		PreCompact: 'var(--muted-foreground)',
-		SubagentStop: 'var(--accent-foreground)',
+		SubagentStop: 'var(--info)',
 		Notification: 'var(--warning)'
 	};
 

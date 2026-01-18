@@ -332,7 +332,7 @@
 
 			<div class="flex justify-end gap-2">
 				<button
-					class="px-3 py-1.5 text-sm rounded border border-border hover:bg-muted transition-colors"
+					class="px-3 py-1.5 text-sm rounded border border-border msg-action-btn transition-colors"
 					onclick={handleRewindCancel}
 					disabled={isRewinding}
 				>
@@ -368,5 +368,14 @@
 	.action-btn:hover {
 		background-color: var(--muted);
 		color: var(--foreground);
+	}
+
+	.msg-action-btn:hover {
+		background: var(--hover-overlay);
+	}
+
+	.msg-action-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 </style>

@@ -227,7 +227,7 @@
 				<button
 					type="button"
 					onclick={onClose}
-					class="p-1.5 text-muted-foreground hover:text-foreground rounded-md hover:bg-muted transition-colors"
+					class="p-1.5 text-muted-foreground hover:text-foreground rounded-md search-hover-btn transition-colors"
 					aria-label="Close"
 				>
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -269,7 +269,7 @@
 								{#each searchHistory as query}
 									<button
 										type="button"
-										class="w-full px-3 py-2 text-left text-sm text-foreground hover:bg-muted transition-colors flex items-center gap-2"
+										class="w-full px-3 py-2 text-left text-sm text-foreground search-hover-btn transition-colors flex items-center gap-2"
 										onclick={() => selectFromHistory(query)}
 									>
 										<svg class="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -284,7 +284,7 @@
 					<button
 						type="button"
 						onclick={() => showFilters = !showFilters}
-						class="p-2 text-muted-foreground hover:text-foreground rounded-md hover:bg-muted transition-colors relative"
+						class="p-2 text-muted-foreground hover:text-foreground rounded-md search-hover-btn transition-colors relative"
 						title="Toggle filters"
 					>
 						<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -425,7 +425,7 @@
 						{#each results as result}
 							<button
 								type="button"
-								class="w-full px-4 py-3 text-left hover:bg-muted/50 transition-colors"
+								class="w-full px-4 py-3 text-left search-hover-btn transition-colors"
 								onclick={() => handleResultClick(result.session_id)}
 							>
 								<div class="flex items-start justify-between gap-3">
@@ -494,3 +494,14 @@
 		</div>
 	</div>
 {/if}
+
+<style>
+	.search-hover-btn:hover {
+		background: var(--hover-overlay);
+	}
+
+	.search-hover-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+</style>

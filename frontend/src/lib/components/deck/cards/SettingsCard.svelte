@@ -1991,8 +1991,13 @@
 	}
 
 	.tab-btn:hover {
-		background: var(--accent);
-		color: var(--accent-foreground);
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+
+	.tab-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.tab-btn.active {
@@ -2043,7 +2048,12 @@
 	}
 
 	.section-header:hover {
-		background: var(--accent);
+		background: var(--hover-overlay);
+	}
+
+	.section-header:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.section-header h3 {
@@ -2172,6 +2182,11 @@
 		cursor: not-allowed;
 	}
 
+	.btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
 	.btn.primary {
 		background: var(--primary);
 		color: var(--primary-foreground);
@@ -2188,7 +2203,7 @@
 	}
 
 	.btn.secondary:hover:not(:disabled) {
-		background: var(--accent);
+		background: var(--hover-overlay);
 	}
 
 	.btn.danger {
@@ -2218,6 +2233,11 @@
 		border-color: var(--ring);
 	}
 
+	.toggle:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
 	.toggle.active {
 		background: var(--primary);
 		border-color: var(--primary);
@@ -2235,7 +2255,7 @@
 		left: 2px;
 		width: 18px;
 		height: 18px;
-		background: white;
+		background: var(--primary-foreground);
 		border-radius: 50%;
 		transition: transform 200ms ease;
 		box-shadow: var(--shadow-s);
@@ -2278,8 +2298,13 @@
 	}
 
 	.theme-option:hover {
-		background: var(--accent);
-		color: var(--accent-foreground);
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+
+	.theme-option:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.theme-option.active {
@@ -2308,21 +2333,25 @@
 	.badge.success {
 		background: color-mix(in oklch, var(--success) 15%, transparent);
 		color: var(--success);
+		border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
 	}
 
 	.badge.muted {
 		background: var(--muted);
 		color: var(--muted-foreground);
+		border: 1px solid var(--border);
 	}
 
 	.badge.primary {
 		background: color-mix(in oklch, var(--primary) 15%, transparent);
 		color: var(--primary);
+		border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
 	}
 
 	.badge.warning {
 		background: color-mix(in oklch, var(--warning) 15%, transparent);
 		color: var(--warning);
+		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
 	}
 
 	/* Security Instructions Editor */
@@ -2457,15 +2486,15 @@
 		align-items: center;
 		justify-content: center;
 		border-radius: var(--radius, 0.75rem);
-		color: white;
+		color: var(--primary-foreground);
 	}
 
 	.connection-icon.claude {
-		background: linear-gradient(135deg, #d97706, #b45309);
+		background: linear-gradient(135deg, var(--warning), color-mix(in oklch, var(--warning) 80%, oklch(0.3 0 0)));
 	}
 
 	.connection-icon.github {
-		background: #24292e;
+		background: var(--muted-foreground);
 	}
 
 	.connection-icon svg {
@@ -2652,8 +2681,13 @@
 	}
 
 	.icon-btn:hover {
-		background: var(--accent);
-		color: var(--accent-foreground);
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+
+	.icon-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.icon-btn.danger:hover {

@@ -496,15 +496,21 @@
 		height: 32px;
 		border-radius: var(--radius);
 		background: var(--muted);
-		border: none;
+		border: 1px solid var(--border);
 		cursor: pointer;
 		color: var(--muted-foreground);
 		transition: all 0.15s ease;
 	}
 
 	.back-btn:hover {
-		background: var(--accent);
+		border-color: var(--accent);
+		box-shadow: 0 0 12px color-mix(in oklch, var(--accent) 25%, transparent);
 		color: var(--foreground);
+	}
+
+	.back-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.detail-header-info {
@@ -541,7 +547,7 @@
 		font-size: var(--text-sm);
 		border-radius: var(--radius);
 		background: transparent;
-		border: none;
+		border: 1px solid transparent;
 		cursor: pointer;
 		color: var(--muted-foreground);
 		transition: all 0.15s ease;
@@ -549,12 +555,20 @@
 
 	.detail-tab:hover {
 		color: var(--foreground);
+		border-color: var(--accent);
+		box-shadow: 0 0 12px color-mix(in oklch, var(--accent) 25%, transparent);
+	}
+
+	.detail-tab:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.detail-tab.active {
 		background: var(--background);
 		color: var(--foreground);
 		font-weight: 500;
+		border-color: var(--primary);
 	}
 
 	.detail-content {
@@ -564,17 +578,11 @@
 		flex-direction: column;
 	}
 
-	/* Clickable list item */
+	/* Clickable list item - inherits hover from card-design-system.css */
 	.card-list-item--clickable {
 		cursor: pointer;
 		width: 100%;
 		text-align: left;
-		background: transparent;
-		border: none;
-	}
-
-	.card-list-item--clickable:hover {
-		background: var(--muted);
 	}
 
 	/* Create form styles */

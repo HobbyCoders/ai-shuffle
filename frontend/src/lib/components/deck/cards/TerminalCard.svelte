@@ -574,9 +574,9 @@
 		flex: 1;
 		display: flex;
 		flex-direction: column;
-		background: oklch(0.06 0.01 260);
-		color: var(--foreground);
-		font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+		background: var(--terminal-bg);
+		color: var(--terminal-fg);
+		font-family: var(--font-mono, 'SF Mono', 'Fira Code', 'Consolas', monospace);
 		min-height: 0;
 		overflow: hidden;
 		border-radius: 0 0 12px 12px;
@@ -594,8 +594,8 @@
 		justify-content: space-between;
 		gap: 8px;
 		padding: 8px 12px;
-		background: oklch(0.1 0.01 260);
-		border-bottom: 1px solid oklch(0.15 0.01 260);
+		background: color-mix(in oklch, var(--terminal-bg) 80%, black);
+		border-bottom: 1px solid var(--border);
 		flex-shrink: 0;
 	}
 
@@ -616,9 +616,9 @@
 
 	.session-select,
 	.command-select {
-		background: oklch(0.08 0.01 260);
-		color: oklch(0.9 0.01 260);
-		border: 1px solid oklch(0.2 0.01 260);
+		background: var(--muted);
+		color: var(--foreground);
+		border: 1px solid var(--border);
 		border-radius: 6px;
 		padding: 6px 10px;
 		font-size: 0.75rem;
@@ -645,14 +645,14 @@
 	.session-select:focus,
 	.command-select:focus {
 		outline: none;
-		border-color: var(--primary);
-		box-shadow: 0 0 0 2px oklch(from var(--primary) l c h / 0.2);
+		border-color: var(--ring);
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 20%, transparent);
 	}
 
 	.session-select option,
 	.command-select option {
-		background: oklch(0.12 0.01 260);
-		color: oklch(0.9 0.01 260);
+		background: var(--popover);
+		color: var(--popover-foreground);
 	}
 
 	.toolbar-btn {
@@ -660,9 +660,9 @@
 		align-items: center;
 		gap: 4px;
 		padding: 6px 10px;
-		background: oklch(0.15 0.01 260);
-		color: oklch(0.85 0.01 260);
-		border: 1px solid oklch(0.2 0.01 260);
+		background: var(--secondary);
+		color: var(--secondary-foreground);
+		border: 1px solid var(--border);
 		border-radius: 6px;
 		font-size: 0.75rem;
 		font-family: inherit;
@@ -671,8 +671,13 @@
 	}
 
 	.toolbar-btn:hover:not(:disabled) {
-		background: oklch(0.2 0.01 260);
-		border-color: oklch(0.25 0.01 260);
+		background: var(--hover-overlay);
+		border-color: var(--accent);
+	}
+
+	.toolbar-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.toolbar-btn:disabled {
@@ -681,41 +686,41 @@
 	}
 
 	.toolbar-btn.connect {
-		background: oklch(0.35 0.15 145);
-		border-color: oklch(0.4 0.15 145);
+		background: var(--success);
+		border-color: var(--success);
 		color: white;
 	}
 
 	.toolbar-btn.connect:hover:not(:disabled) {
-		background: oklch(0.4 0.15 145);
+		filter: brightness(1.1);
 	}
 
 	.toolbar-btn.disconnect {
-		background: oklch(0.35 0.15 25);
-		border-color: oklch(0.4 0.15 25);
+		background: var(--destructive);
+		border-color: var(--destructive);
 		color: white;
 	}
 
 	.toolbar-btn.disconnect:hover {
-		background: oklch(0.4 0.15 25);
+		filter: brightness(1.1);
 	}
 
 	.status-indicator {
 		width: 8px;
 		height: 8px;
 		border-radius: 50%;
-		background: oklch(0.4 0.01 260);
+		background: var(--muted-foreground);
 		transition: all 0.2s ease;
 	}
 
 	.status-indicator.connected {
-		background: oklch(0.65 0.2 145);
-		box-shadow: 0 0 6px oklch(0.65 0.2 145);
+		background: var(--success);
+		box-shadow: 0 0 6px var(--success);
 	}
 
 	.status-indicator.error {
-		background: oklch(0.6 0.2 25);
-		box-shadow: 0 0 6px oklch(0.6 0.2 25);
+		background: var(--destructive);
+		box-shadow: 0 0 6px var(--destructive);
 	}
 
 	/* Terminal container */
@@ -740,17 +745,17 @@
 		align-items: center;
 		gap: 16px;
 		padding: 6px 12px;
-		background: oklch(0.1 0.01 260);
-		border-top: 1px solid oklch(0.15 0.01 260);
+		background: color-mix(in oklch, var(--terminal-bg) 80%, black);
+		border-top: 1px solid var(--border);
 		font-size: 0.7rem;
-		color: oklch(0.5 0.01 260);
+		color: var(--muted-foreground);
 		flex-shrink: 0;
 	}
 
 	.terminal-footer kbd {
 		display: inline-block;
 		padding: 2px 5px;
-		background: oklch(0.15 0.01 260);
+		background: var(--muted);
 		border-radius: 3px;
 		font-family: inherit;
 		font-size: 0.65rem;

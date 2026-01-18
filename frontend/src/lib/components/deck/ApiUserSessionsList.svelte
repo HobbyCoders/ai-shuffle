@@ -231,7 +231,7 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 12px 32px;
-		border-bottom: 1px solid var(--border-default, rgba(255, 255, 255, 0.08));
+		border-bottom: 1px solid var(--border);
 		flex-shrink: 0;
 	}
 
@@ -244,10 +244,10 @@
 		align-items: center;
 		gap: 8px;
 		padding: 8px 12px;
-		background: var(--bg-card, oklch(0.15 0.01 260));
-		border: 1px solid var(--border-default, rgba(255, 255, 255, 0.08));
+		background: var(--card);
+		border: 1px solid var(--border);
 		border-radius: var(--radius, 0.75rem);
-		color: var(--text-primary, #f4f4f5);
+		color: var(--foreground);
 		font-size: 0.8125rem;
 		font-weight: 500;
 		cursor: pointer;
@@ -256,8 +256,8 @@
 	}
 
 	.filter-dropdown:hover {
-		background: var(--bg-card-hover, oklch(0.17 0.01 260));
-		border-color: var(--border-strong, rgba(255, 255, 255, 0.12));
+		background: color-mix(in oklch, var(--card) 90%, var(--foreground));
+		border-color: color-mix(in oklch, var(--border) 80%, var(--foreground));
 	}
 
 	.filter-dropdown.open {
@@ -267,7 +267,7 @@
 
 	.filter-dropdown :global(.chevron) {
 		transition: transform 0.2s ease;
-		color: var(--text-muted, #71717a);
+		color: var(--muted-foreground);
 	}
 
 	.filter-dropdown :global(.chevron.rotated) {
@@ -283,7 +283,7 @@
 
 	.session-count {
 		font-size: 0.75rem;
-		color: var(--text-muted, #71717a);
+		color: var(--muted-foreground);
 	}
 
 	/* Dropdown menu */
@@ -294,12 +294,10 @@
 		min-width: 220px;
 		max-height: 320px;
 		overflow-y: auto;
-		background: var(--bg-card, oklch(0.13 0.01 260));
-		border: 1px solid var(--border-default, rgba(255, 255, 255, 0.1));
+		background: var(--popover);
+		border: 1px solid var(--border);
 		border-radius: var(--radius, 0.75rem);
-		box-shadow:
-			0 8px 32px rgba(0, 0, 0, 0.4),
-			0 0 0 1px rgba(255, 255, 255, 0.05);
+		box-shadow: var(--shadow-l);
 		z-index: 100;
 		padding: 6px;
 		animation: dropdownEnter 0.15s ease;
@@ -325,7 +323,7 @@
 		background: transparent;
 		border: none;
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		color: var(--text-primary, #f4f4f5);
+		color: var(--foreground);
 		font-size: 0.8125rem;
 		cursor: pointer;
 		transition: all 0.1s ease;
@@ -334,7 +332,7 @@
 	}
 
 	.dropdown-item:hover {
-		background: var(--hover-overlay, rgba(255, 255, 255, 0.06));
+		background: var(--hover-overlay);
 	}
 
 	.dropdown-item.active {
@@ -358,7 +356,7 @@
 
 	.dropdown-item .user-username {
 		font-size: 0.6875rem;
-		color: var(--text-muted, #71717a);
+		color: var(--muted-foreground);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -375,14 +373,14 @@
 
 	.dropdown-divider {
 		height: 1px;
-		background: var(--border-default, rgba(255, 255, 255, 0.08));
+		background: var(--border);
 		margin: 6px 8px;
 	}
 
 	.dropdown-empty {
 		padding: 16px;
 		text-align: center;
-		color: var(--text-muted, #71717a);
+		color: var(--muted-foreground);
 		font-size: 0.75rem;
 	}
 
@@ -404,8 +402,8 @@
 		align-items: center;
 		gap: 12px;
 		padding: 10px 14px;
-		background: var(--bg-card, oklch(0.15 0.01 260));
-		border: 1px solid var(--border-default, rgba(255, 255, 255, 0.08));
+		background: var(--card);
+		border: 1px solid var(--border);
 		border-radius: var(--radius, 0.75rem);
 		cursor: pointer;
 		transition: all 0.15s ease;
@@ -430,8 +428,8 @@
 	}
 
 	.list-item:hover {
-		background: var(--bg-card-hover, oklch(0.17 0.01 260));
-		border-color: var(--border-strong, rgba(255, 255, 255, 0.12));
+		background: color-mix(in oklch, var(--card) 90%, var(--foreground));
+		border-color: color-mix(in oklch, var(--border) 80%, var(--foreground));
 		transform: translateX(3px);
 	}
 
@@ -447,14 +445,14 @@
 		top: 0;
 		bottom: 0;
 		width: 3px;
-		background: var(--accent-purple, #a855f7);
+		background: var(--accent);
 		opacity: 0.3;
 		transition: all 0.15s ease;
 	}
 
 	.list-item:hover .accent-bar {
 		opacity: 0.7;
-		background: var(--accent-purple, #a855f7);
+		background: var(--accent);
 	}
 
 	.list-item.is-streaming .accent-bar {
@@ -480,20 +478,20 @@
 		gap: 4px;
 		min-width: 44px;
 		padding: 4px 8px;
-		background: rgba(255, 255, 255, 0.04);
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		background: color-mix(in oklch, var(--muted) 50%, transparent);
+		border: 1px solid var(--border-subtle);
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		font-size: 0.75rem;
 		font-weight: 500;
-		color: var(--text-muted, #71717a);
+		color: var(--muted-foreground);
 		flex-shrink: 0;
 		transition: all 0.15s ease;
 	}
 
 	.list-item:hover .msg-count {
-		background: rgba(168, 85, 247, 0.08);
-		border-color: rgba(168, 85, 247, 0.15);
-		color: var(--text-secondary, #a1a1aa);
+		background: color-mix(in oklch, var(--accent) 10%, transparent);
+		border-color: color-mix(in oklch, var(--accent) 20%, transparent);
+		color: var(--foreground);
 	}
 
 	.msg-count.streaming {
@@ -515,7 +513,7 @@
 	.item-title {
 		font-size: 0.875rem;
 		font-weight: 450;
-		color: var(--text-primary, #f4f4f5);
+		color: var(--foreground);
 		line-height: 1.35;
 		white-space: nowrap;
 		overflow: hidden;
@@ -528,7 +526,7 @@
 		align-items: center;
 		gap: 4px;
 		font-size: 0.6875rem;
-		color: var(--accent-purple, #a855f7);
+		color: var(--accent);
 		opacity: 0.8;
 	}
 
@@ -543,10 +541,10 @@
 	.streaming-dot {
 		width: 6px;
 		height: 6px;
-		background: var(--ai-primary, #22d3ee);
+		background: var(--primary);
 		border-radius: 50%;
 		animation: blink 1.5s ease-in-out infinite;
-		box-shadow: 0 0 6px var(--ai-primary, #22d3ee);
+		box-shadow: 0 0 6px var(--primary);
 	}
 
 	@keyframes blink {
@@ -562,7 +560,7 @@
 	/* Timestamp */
 	.item-time {
 		font-size: 0.6875rem;
-		color: var(--text-dim, #52525b);
+		color: color-mix(in oklch, var(--muted-foreground) 70%, transparent);
 		flex-shrink: 0;
 		white-space: nowrap;
 		min-width: 55px;
@@ -577,7 +575,7 @@
 		justify-content: center;
 		gap: 12px;
 		padding: 60px 20px;
-		color: var(--text-muted, #71717a);
+		color: var(--muted-foreground);
 		font-size: 0.9375rem;
 	}
 
@@ -587,10 +585,10 @@
 
 	.clear-filter {
 		padding: 8px 16px;
-		background: rgba(168, 85, 247, 0.1);
-		border: 1px solid rgba(168, 85, 247, 0.2);
+		background: color-mix(in oklch, var(--accent) 15%, transparent);
+		border: 1px solid color-mix(in oklch, var(--accent) 30%, transparent);
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		color: var(--accent-purple, #a855f7);
+		color: var(--accent);
 		font-size: 0.8125rem;
 		font-weight: 500;
 		cursor: pointer;
@@ -599,8 +597,13 @@
 	}
 
 	.clear-filter:hover {
-		background: rgba(168, 85, 247, 0.15);
-		border-color: rgba(168, 85, 247, 0.3);
+		background: color-mix(in oklch, var(--accent) 20%, transparent);
+		border-color: color-mix(in oklch, var(--accent) 40%, transparent);
+	}
+
+	.clear-filter:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	/* Mobile responsive */

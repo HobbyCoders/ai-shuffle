@@ -558,6 +558,11 @@
 		background: color-mix(in oklch, var(--primary) 8%, var(--card));
 	}
 
+	.remember-option:focus-within {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
 	.radio-indicator {
 		width: 1rem;
 		height: 1rem;
@@ -610,8 +615,13 @@
 	}
 
 	.pattern-badge:hover {
-		background: color-mix(in oklch, var(--accent) 15%, var(--muted));
 		border-color: var(--accent);
+		box-shadow: 0 0 12px color-mix(in oklch, var(--accent) 25%, transparent);
+	}
+
+	.pattern-badge:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.pattern-badge code {
@@ -624,10 +634,14 @@
 		font-size: 0.7rem;
 		font-family: ui-monospace, 'Monaco', 'Menlo', monospace;
 		background: var(--input);
-		border: 1px solid var(--primary);
+		border: 1px solid var(--ring);
 		border-radius: 0.5rem;
 		color: var(--foreground);
-		outline: none;
+	}
+
+	.pattern-input:focus {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.pattern-input::placeholder {
@@ -656,9 +670,9 @@
 		transform: scale(0.98);
 	}
 
-	.deny-btn:focus {
-		outline: none;
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--secondary) 50%, transparent);
+	.deny-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.allow-btn {
@@ -667,23 +681,25 @@
 		font-size: 0.875rem;
 		font-weight: 500;
 		border-radius: var(--radius, 0.75rem);
-		background: var(--primary);
+		background: var(--button-primary-gradient, var(--primary));
 		color: var(--primary-foreground);
 		border: 1px solid transparent;
+		box-shadow: var(--shadow-s);
 		transition: all 0.15s ease;
 	}
 
 	.allow-btn:hover {
-		background: color-mix(in oklch, var(--primary) 85%, black);
+		filter: brightness(1.1);
+		box-shadow: var(--shadow-m), 0 0 20px var(--glow-color-soft);
 	}
 
 	.allow-btn:active {
 		transform: scale(0.98);
 	}
 
-	.allow-btn:focus {
-		outline: none;
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 30%, transparent);
+	.allow-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	@media (min-width: 640px) {

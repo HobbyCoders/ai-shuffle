@@ -392,7 +392,7 @@
 								<button
 									onclick={() => testWebhook(webhook.id)}
 									disabled={testingWebhookId === webhook.id}
-									class="p-1.5 text-muted-foreground hover:text-primary hover:bg-muted rounded transition-colors disabled:opacity-50"
+									class="p-1.5 text-muted-foreground hover:text-primary webhook-action-btn rounded transition-colors disabled:opacity-50"
 									title="Test webhook"
 								>
 									{#if testingWebhookId === webhook.id}
@@ -409,7 +409,7 @@
 								</button>
 								<button
 									onclick={() => startEdit(webhook)}
-									class="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+									class="p-1.5 text-muted-foreground hover:text-foreground webhook-action-btn rounded transition-colors"
 									title="Edit webhook"
 								>
 									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -418,7 +418,7 @@
 								</button>
 								<button
 									onclick={() => deleteWebhook(webhook.id)}
-									class="p-1.5 text-muted-foreground hover:text-destructive hover:bg-muted rounded transition-colors"
+									class="p-1.5 text-muted-foreground hover:text-destructive webhook-action-btn rounded transition-colors"
 									title="Delete webhook"
 								>
 									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -433,3 +433,14 @@
 		{/if}
 	{/if}
 </div>
+
+<style>
+	.webhook-action-btn:hover {
+		background: var(--hover-overlay);
+	}
+
+	.webhook-action-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+</style>
