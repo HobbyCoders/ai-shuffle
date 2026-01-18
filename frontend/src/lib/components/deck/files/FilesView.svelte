@@ -798,7 +798,7 @@
 		position: absolute;
 		inset: 0;
 		z-index: 50;
-		background: oklch(0.14 0.008 260 / 0.95);
+		background: color-mix(in oklch, var(--popover) 95%, transparent);
 		backdrop-filter: blur(8px);
 		display: flex;
 		align-items: center;
@@ -814,7 +814,7 @@
 		padding: 3rem;
 		border: 2px dashed var(--primary);
 		border-radius: 1.5rem;
-		background: oklch(0.72 0.14 180 / 0.08);
+		background: color-mix(in oklch, var(--primary) 8%, transparent);
 		animation: pulse 2s ease-in-out infinite;
 	}
 
@@ -827,12 +827,12 @@
 	.drag-text {
 		font-size: 1.25rem;
 		font-weight: 600;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 	}
 
 	.drag-subtext {
 		font-size: 0.875rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 	}
 
 	@keyframes pulse {
@@ -850,7 +850,7 @@
 	   ============================================ */
 	.files-header {
 		flex-shrink: 0;
-		background: hsl(var(--card));
+		background: var(--card);
 		border-bottom: 1px solid var(--border);
 	}
 
@@ -876,8 +876,8 @@
 		gap: 0.5rem;
 		padding: 0.625rem 1rem;
 		font-size: 0.875rem;
-		color: hsl(var(--muted-foreground));
-		background: hsl(var(--muted) / 0.3);
+		color: var(--muted-foreground);
+		background: color-mix(in oklch, var(--muted) 30%, transparent);
 		border-radius: 0.75rem;
 	}
 
@@ -887,7 +887,7 @@
 		gap: 0.75rem;
 		width: 100%;
 		padding: 0.5rem 0.75rem;
-		background: hsl(var(--muted) / 0.4);
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
 		border: 1px solid transparent;
 		border-radius: 0.75rem;
 		cursor: pointer;
@@ -895,7 +895,7 @@
 	}
 
 	.project-trigger:hover {
-		background: hsl(var(--muted) / 0.6);
+		background: color-mix(in oklch, var(--muted) 60%, transparent);
 		border-color: var(--border);
 	}
 
@@ -929,13 +929,13 @@
 		font-weight: 500;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 	}
 
 	.project-name {
 		font-size: 0.9375rem;
 		font-weight: 600;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -945,7 +945,7 @@
 	.chevron {
 		width: 1rem;
 		height: 1rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 		transition: transform 0.2s ease;
 	}
 
@@ -959,12 +959,10 @@
 		top: calc(100% + 0.5rem);
 		left: 0;
 		right: 0;
-		background: oklch(0.13 0.01 260);
-		border: 1px solid oklch(0.25 0.015 260);
+		background: var(--popover);
+		border: 1px solid var(--border);
 		border-radius: 0.75rem;
-		box-shadow:
-			0 8px 32px rgba(0, 0, 0, 0.5),
-			0 0 0 1px oklch(0.2 0.01 260);
+		box-shadow: var(--shadow-l);
 		z-index: 100;
 		overflow: hidden;
 		animation: slideDown 0.15s ease;
@@ -987,9 +985,9 @@
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
-		color: oklch(0.6 0.01 260);
-		background: oklch(0.11 0.008 260);
-		border-bottom: 1px solid oklch(0.2 0.01 260);
+		color: var(--muted-foreground);
+		background: var(--muted);
+		border-bottom: 1px solid var(--border);
 	}
 
 	.dropdown-list {
@@ -1013,11 +1011,11 @@
 	}
 
 	.dropdown-item:hover {
-		background: oklch(0.18 0.012 260);
+		background: var(--hover-overlay);
 	}
 
 	.dropdown-item.active {
-		background: oklch(0.2 0.04 180);
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
 	}
 
 	.dropdown-item :global(.item-icon) {
@@ -1029,7 +1027,7 @@
 	.dropdown-item .item-name {
 		flex: 1;
 		font-size: 0.875rem;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 	}
 
 	.dropdown-item :global(.check-icon) {
@@ -1055,7 +1053,7 @@
 		background: transparent;
 		border: none;
 		border-radius: 0.5rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: all 0.15s ease;
 	}
@@ -1066,18 +1064,18 @@
 	}
 
 	.action-btn:hover {
-		background: hsl(var(--muted));
-		color: hsl(var(--foreground));
+		background: var(--muted);
+		color: var(--foreground);
 	}
 
 	.action-btn.active {
-		background: hsl(var(--primary) / 0.15);
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
 		color: var(--primary);
 	}
 
 	.action-btn.primary-action {
 		background: var(--primary);
-		color: hsl(var(--primary-foreground));
+		color: var(--primary-foreground);
 		padding: 0 0.875rem;
 	}
 
@@ -1104,7 +1102,7 @@
 		justify-content: space-between;
 		gap: 1rem;
 		padding: 0.625rem 1.25rem;
-		background: hsl(var(--muted) / 0.25);
+		background: color-mix(in oklch, var(--muted) 25%, transparent);
 		border-top: 1px solid var(--border);
 	}
 
@@ -1132,19 +1130,19 @@
 		border: none;
 		border-radius: 0.375rem;
 		font-size: 0.8125rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 		cursor: pointer;
 		white-space: nowrap;
 		transition: all 0.15s ease;
 	}
 
 	.path-segment:hover {
-		background: hsl(var(--muted));
-		color: hsl(var(--foreground));
+		background: var(--muted);
+		color: var(--foreground);
 	}
 
 	.path-segment.current {
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 		font-weight: 600;
 	}
 
@@ -1156,7 +1154,7 @@
 	.path-sep {
 		width: 0.875rem;
 		height: 0.875rem;
-		color: hsl(var(--muted-foreground) / 0.5);
+		color: color-mix(in oklch, var(--muted-foreground) 50%, transparent);
 		flex-shrink: 0;
 	}
 
@@ -1174,7 +1172,7 @@
 		left: 0.625rem;
 		width: 0.875rem;
 		height: 0.875rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 		pointer-events: none;
 	}
 
@@ -1182,21 +1180,21 @@
 		width: 100%;
 		height: 2rem;
 		padding: 0 2rem 0 2rem;
-		background: hsl(var(--muted) / 0.5);
+		background: color-mix(in oklch, var(--muted) 50%, transparent);
 		border: 1px solid transparent;
 		border-radius: 0.5rem;
 		font-size: 0.8125rem;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 		transition: all 0.15s ease;
 	}
 
 	.search-input::placeholder {
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 	}
 
 	.search-input:focus {
 		outline: none;
-		background: hsl(var(--background));
+		background: var(--background);
 		border-color: var(--border);
 	}
 
@@ -1211,7 +1209,7 @@
 		background: transparent;
 		border: none;
 		border-radius: 0.25rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 		cursor: pointer;
 	}
 
@@ -1221,8 +1219,8 @@
 	}
 
 	.search-clear:hover {
-		background: hsl(var(--muted));
-		color: hsl(var(--foreground));
+		background: var(--muted);
+		color: var(--foreground);
 	}
 
 	/* ============================================
@@ -1233,8 +1231,10 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 0.625rem 1.25rem;
-		background: linear-gradient(135deg, oklch(0.72 0.14 180 / 0.12), oklch(0.72 0.14 180 / 0.08));
-		border-bottom: 1px solid oklch(0.72 0.14 180 / 0.2);
+		background: linear-gradient(135deg,
+			color-mix(in oklch, var(--primary) 12%, transparent),
+			color-mix(in oklch, var(--primary) 8%, transparent));
+		border-bottom: 1px solid color-mix(in oklch, var(--primary) 20%, transparent);
 		flex-shrink: 0;
 	}
 
@@ -1243,7 +1243,7 @@
 		align-items: center;
 		gap: 0.5rem;
 		font-size: 0.875rem;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 	}
 
 	.selection-count {
@@ -1254,7 +1254,7 @@
 		height: 1.5rem;
 		padding: 0 0.5rem;
 		background: var(--primary);
-		color: hsl(var(--primary-foreground));
+		color: var(--primary-foreground);
 		border-radius: 1rem;
 		font-size: 0.75rem;
 		font-weight: 600;
@@ -1270,11 +1270,11 @@
 		align-items: center;
 		gap: 0.375rem;
 		padding: 0.375rem 0.75rem;
-		background: hsl(var(--background));
+		background: var(--background);
 		border: 1px solid var(--border);
 		border-radius: 0.5rem;
 		font-size: 0.8125rem;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 		cursor: pointer;
 		transition: all 0.15s ease;
 	}
@@ -1285,16 +1285,16 @@
 	}
 
 	.sel-action:hover {
-		background: hsl(var(--muted));
+		background: var(--muted);
 	}
 
 	.sel-action.danger {
-		color: hsl(var(--destructive));
-		border-color: hsl(var(--destructive) / 0.3);
+		color: var(--destructive);
+		border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
 	}
 
 	.sel-action.danger:hover {
-		background: hsl(var(--destructive) / 0.1);
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
 	}
 
 	/* ============================================
@@ -1302,14 +1302,14 @@
 	   ============================================ */
 	.upload-bar {
 		padding: 0.75rem 1.25rem;
-		background: hsl(var(--muted) / 0.3);
+		background: color-mix(in oklch, var(--muted) 30%, transparent);
 		border-bottom: 1px solid var(--border);
 		flex-shrink: 0;
 	}
 
 	.upload-track {
 		height: 4px;
-		background: hsl(var(--muted));
+		background: var(--muted);
 		border-radius: 2px;
 		overflow: hidden;
 		margin-bottom: 0.5rem;
@@ -1317,14 +1317,14 @@
 
 	.upload-fill {
 		height: 100%;
-		background: linear-gradient(90deg, var(--primary), oklch(0.72 0.14 180));
+		background: linear-gradient(90deg, var(--primary), var(--accent));
 		border-radius: 2px;
 		transition: width 0.3s ease;
 	}
 
 	.upload-text {
 		font-size: 0.75rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 	}
 
 	/* ============================================
@@ -1335,9 +1335,9 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 0.75rem 1.25rem;
-		background: hsl(var(--destructive) / 0.1);
-		border-bottom: 1px solid hsl(var(--destructive) / 0.2);
-		color: hsl(var(--destructive));
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+		border-bottom: 1px solid color-mix(in oklch, var(--destructive) 20%, transparent);
+		color: var(--destructive);
 		font-size: 0.875rem;
 		flex-shrink: 0;
 	}
@@ -1353,7 +1353,7 @@
 	}
 
 	.error-bar button:hover {
-		background: hsl(var(--destructive) / 0.15);
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
 	}
 
 	.error-bar button :global(svg) {
@@ -1390,7 +1390,7 @@
 		justify-content: center;
 		width: 5rem;
 		height: 5rem;
-		background: hsl(var(--muted) / 0.5);
+		background: color-mix(in oklch, var(--muted) 50%, transparent);
 		border-radius: 1.25rem;
 		margin-bottom: 0.5rem;
 	}
@@ -1398,19 +1398,19 @@
 	.empty-icon {
 		width: 2.5rem;
 		height: 2.5rem;
-		color: hsl(var(--muted-foreground) / 0.6);
+		color: color-mix(in oklch, var(--muted-foreground) 60%, transparent);
 	}
 
 	.empty-title {
 		font-size: 1.125rem;
 		font-weight: 600;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 		margin: 0;
 	}
 
 	.empty-desc {
 		font-size: 0.875rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 		max-width: 280px;
 		margin: 0;
 	}
@@ -1426,12 +1426,12 @@
 		align-items: center;
 		gap: 0.5rem;
 		padding: 0.625rem 1rem;
-		background: hsl(var(--muted));
+		background: var(--muted);
 		border: 1px solid var(--border);
 		border-radius: 0.625rem;
 		font-size: 0.875rem;
 		font-weight: 500;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 		cursor: pointer;
 		transition: all 0.15s ease;
 	}
@@ -1442,13 +1442,13 @@
 	}
 
 	.empty-btn:hover {
-		background: hsl(var(--muted) / 0.8);
-		border-color: hsl(var(--muted-foreground) / 0.3);
+		background: color-mix(in oklch, var(--muted) 80%, transparent);
+		border-color: color-mix(in oklch, var(--muted-foreground) 30%, transparent);
 	}
 
 	.empty-btn.primary {
 		background: var(--primary);
-		color: hsl(var(--primary-foreground));
+		color: var(--primary-foreground);
 		border-color: var(--primary);
 	}
 
@@ -1462,7 +1462,7 @@
 
 	.loading-state p {
 		font-size: 0.875rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 		margin: 0;
 	}
 
@@ -1514,17 +1514,17 @@
 	}
 
 	.file-card:hover {
-		background: hsl(var(--muted) / 0.5);
+		background: color-mix(in oklch, var(--muted) 50%, transparent);
 		border-color: var(--border);
 	}
 
 	.file-card.selected {
-		background: hsl(var(--primary) / 0.1);
-		border-color: hsl(var(--primary) / 0.3);
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		border-color: color-mix(in oklch, var(--primary) 30%, transparent);
 	}
 
 	.file-card.new-folder {
-		background: hsl(var(--muted) / 0.3);
+		background: color-mix(in oklch, var(--muted) 30%, transparent);
 		border: 1px dashed var(--border);
 		opacity: 1;
 		transform: none;
@@ -1597,7 +1597,7 @@
 		min-width: 0;
 		font-size: 0.875rem;
 		font-weight: 500;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1615,7 +1615,7 @@
 
 	.file-meta {
 		font-size: 0.75rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 		white-space: nowrap;
 		width: 80px;
 		text-align: right;
@@ -1636,7 +1636,7 @@
 		background: transparent;
 		border: none;
 		border-radius: 0.375rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 		cursor: pointer;
 		opacity: 0;
 		transition: all 0.15s ease;
@@ -1652,8 +1652,8 @@
 	}
 
 	.file-menu:hover {
-		background: hsl(var(--muted));
-		color: hsl(var(--foreground));
+		background: var(--muted);
+		color: var(--foreground);
 	}
 
 	.file-grid.grid .file-menu {
@@ -1674,7 +1674,7 @@
 		height: 1.25rem;
 		background: var(--primary);
 		border-radius: 50%;
-		color: hsl(var(--primary-foreground));
+		color: var(--primary-foreground);
 	}
 
 	.selected-indicator :global(svg) {
@@ -1694,17 +1694,17 @@
 		min-width: 0;
 		height: 2rem;
 		padding: 0 0.625rem;
-		background: hsl(var(--background));
+		background: var(--background);
 		border: 1px solid var(--primary);
 		border-radius: 0.375rem;
 		font-size: 0.875rem;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 	}
 
 	.folder-input:focus,
 	.rename-input:focus {
 		outline: none;
-		box-shadow: 0 0 0 2px hsl(var(--primary) / 0.2);
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 20%, transparent);
 	}
 
 	.folder-actions,
@@ -1732,20 +1732,20 @@
 	}
 
 	.folder-btn.confirm {
-		color: hsl(var(--success));
+		color: var(--success);
 	}
 
 	.folder-btn.confirm:hover {
-		background: hsl(var(--success) / 0.15);
+		background: color-mix(in oklch, var(--success) 15%, transparent);
 	}
 
 	.folder-btn.cancel {
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 	}
 
 	.folder-btn.cancel:hover {
-		background: hsl(var(--muted));
-		color: hsl(var(--foreground));
+		background: var(--muted);
+		color: var(--foreground);
 	}
 
 	/* ============================================
@@ -1787,7 +1787,7 @@
 		border: none;
 		border-radius: 0.5rem;
 		font-size: 0.875rem;
-		color: hsl(var(--foreground));
+		color: var(--foreground);
 		cursor: pointer;
 		text-align: left;
 		transition: background 0.15s ease;
@@ -1810,11 +1810,11 @@
 	.ctx-btn :global(.external) {
 		width: 0.75rem;
 		height: 0.75rem;
-		color: hsl(var(--muted-foreground));
+		color: var(--muted-foreground);
 	}
 
 	.ctx-btn.danger {
-		color: hsl(var(--destructive));
+		color: var(--destructive);
 	}
 
 	.ctx-btn.danger:hover {
