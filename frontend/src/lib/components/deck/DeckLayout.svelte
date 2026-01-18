@@ -13,7 +13,6 @@
 	import { onMount } from 'svelte';
 	import {
 		Plus,
-		ChevronsUp,
 		ChevronDown,
 		Move,
 		Columns,
@@ -72,12 +71,12 @@
 		isMobile = window.innerWidth < 640 || (isTouchDevice && isReasonableMobileSize);
 	}
 
-	function handleIndicatorEnter() {
+	function handleEdgeTriggerEnter() {
 		if (menuTimeout) clearTimeout(menuTimeout);
 		isMenuVisible = true;
 	}
 
-	function handleIndicatorLeave() {
+	function handleEdgeTriggerLeave() {
 		if (menuTimeout) clearTimeout(menuTimeout);
 		// Don't hide if layout panel is open
 		if (!isLayoutPanelOpen) {
@@ -152,82 +151,72 @@
 			</div>
 		{/if}
 
-		<!-- Menu Container - Bottom left, hidden by default with hover indicator -->
+		<!-- Left edge hover trigger zone - invisible, triggers menu on hover -->
 		{#if showDealerButton && !isMobile}
-			<div class="menu-container">
-				<!-- Hover indicator - bouncing arrow pointing up -->
-				<div
-					class="menu-indicator"
-					class:hidden={isMenuVisible}
-					onmouseenter={handleIndicatorEnter}
-					onmouseleave={handleIndicatorLeave}
-					role="button"
-					tabindex="0"
-					aria-label="Menu"
-				>
-					<ChevronsUp size={16} strokeWidth={2} class="indicator-arrow" />
-				</div>
+			<div
+				class="left-edge-trigger"
+				onmouseenter={handleEdgeTriggerEnter}
+				onmouseleave={handleEdgeTriggerLeave}
+			></div>
 
-				<!-- Menu buttons - revealed on hover -->
-				{#if isMenuVisible}
-					<div
-						class="menu-buttons"
-						onmouseenter={handleMenuEnter}
-						onmouseleave={handleMenuLeave}
+			<!-- Menu Container - Left edge, vertically centered -->
+			<div
+				class="menu-container"
+				class:visible={isMenuVisible}
+				onmouseenter={handleMenuEnter}
+				onmouseleave={handleMenuLeave}
+			>
+				<!-- Card Layout Button -->
+				{#if hasOpenCards}
+					<button
+						class="menu-button"
+						class:expanded={isLayoutPanelOpen}
+						onclick={handleLayoutButtonClick}
+						title="Card Layout"
 					>
-						<!-- Card Layout Button -->
-						{#if hasOpenCards}
-							<button
-								class="menu-button"
-								class:expanded={isLayoutPanelOpen}
-								onclick={handleLayoutButtonClick}
-								title="Card Layout"
-							>
-								<svelte:component this={currentModeInfo.icon} size={18} strokeWidth={2} class="menu-icon" />
-								<span class="menu-label">{currentModeInfo.label}</span>
-								<ChevronDown
-									size={14}
-									strokeWidth={2}
-									class="chevron-icon {isLayoutPanelOpen ? 'rotated' : ''}"
-								/>
-							</button>
+						<svelte:component this={currentModeInfo.icon} size={18} strokeWidth={2} class="menu-icon" />
+						<span class="menu-label">{currentModeInfo.label}</span>
+						<ChevronDown
+							size={14}
+							strokeWidth={2}
+							class="chevron-icon {isLayoutPanelOpen ? 'rotated' : ''}"
+						/>
+					</button>
 
-							<!-- Layout Mode Panel - between Card Layout and New Card -->
-							{#if isLayoutPanelOpen}
-								<div class="layout-panel" role="menu">
-									{#each layoutModes as { mode, label, icon: Icon }}
-										<button
-											class="layout-option"
-											class:active={layoutMode === mode}
-											onclick={() => handleLayoutModeSelect(mode)}
-											role="menuitem"
-										>
-											<Icon size={16} strokeWidth={1.5} />
-											<span>{label}</span>
-											{#if layoutMode === mode}
-												<div class="check-mark">
-													<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-														<path d="M20 6L9 17l-5-5" />
-													</svg>
-												</div>
-											{/if}
-										</button>
-									{/each}
-								</div>
-							{/if}
-						{/if}
-
-						<!-- New Card Button -->
-						<button
-							class="menu-button"
-							onclick={handleDealerClick}
-							title="New Card"
-						>
-							<Plus size={18} strokeWidth={2} class="menu-icon" />
-							<span class="menu-label">New Card</span>
-						</button>
-					</div>
+					<!-- Layout Mode Panel - between Card Layout and New Card -->
+					{#if isLayoutPanelOpen}
+						<div class="layout-panel" role="menu">
+							{#each layoutModes as { mode, label, icon: Icon }}
+								<button
+									class="layout-option"
+									class:active={layoutMode === mode}
+									onclick={() => handleLayoutModeSelect(mode)}
+									role="menuitem"
+								>
+									<Icon size={16} strokeWidth={1.5} />
+									<span>{label}</span>
+									{#if layoutMode === mode}
+										<div class="check-mark">
+											<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+												<path d="M20 6L9 17l-5-5" />
+											</svg>
+										</div>
+									{/if}
+								</button>
+							{/each}
+						</div>
+					{/if}
 				{/if}
+
+				<!-- New Card Button -->
+				<button
+					class="menu-button"
+					onclick={handleDealerClick}
+					title="New Card"
+				>
+					<Plus size={18} strokeWidth={2} class="menu-icon" />
+					<span class="menu-label">New Card</span>
+				</button>
 			</div>
 		{/if}
 
@@ -274,73 +263,41 @@
 	}
 
 	/* ===================================
-	   MENU CONTAINER - Bottom left hover reveal
+	   LEFT EDGE HOVER TRIGGER
+	   =================================== */
+
+	.left-edge-trigger {
+		position: absolute;
+		left: 0;
+		top: 0;
+		width: 24px;
+		height: 100%;
+		z-index: 50001; /* Above menu container */
+		/* Invisible but captures hover events */
+	}
+
+	/* ===================================
+	   MENU CONTAINER - Left edge, vertically centered
 	   =================================== */
 
 	.menu-container {
 		position: absolute;
-		bottom: 16px;
-		left: 16px;
+		left: 12px;
+		top: 50%;
+		transform: translateY(-50%) translateX(-100%);
 		z-index: 50000; /* Above all cards and overlays */
-		display: flex;
-		flex-direction: column-reverse;
-		align-items: flex-start;
-	}
-
-	/* Hover indicator - bouncing arrow */
-	.menu-indicator {
-		padding: 6px 10px;
-		background: transparent;
-		border: none;
-		cursor: pointer;
-		opacity: 0.5;
-		transition: opacity 0.3s ease;
-	}
-
-	.menu-indicator:hover {
-		opacity: 0.8;
-	}
-
-	.menu-indicator.hidden {
-		opacity: 0;
-		pointer-events: none;
-	}
-
-	.menu-indicator :global(.indicator-arrow) {
-		color: var(--primary);
-		opacity: 0.85;
-		animation: bounce 2s ease-in-out infinite;
-	}
-
-	@keyframes bounce {
-		0%, 100% {
-			transform: translateY(0);
-			opacity: 0.85;
-		}
-		50% {
-			transform: translateY(-3px);
-			opacity: 1;
-		}
-	}
-
-	/* Menu buttons container */
-	.menu-buttons {
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
-		margin-bottom: 4px;
-		animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+		opacity: 0;
+		pointer-events: none;
+		transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 	}
 
-	@keyframes fadeIn {
-		from {
-			opacity: 0;
-			transform: translateY(8px);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
+	.menu-container.visible {
+		opacity: 1;
+		pointer-events: auto;
+		transform: translateY(-50%) translateX(0);
 	}
 
 	/* Individual menu button */
@@ -376,7 +333,7 @@
 		box-shadow:
 			var(--shadow-l, 0 8px 24px rgba(0, 0, 0, 0.4)),
 			0 0 20px var(--btn-glow);
-		transform: translateX(2px);
+		transform: translateX(4px);
 	}
 
 	.menu-button.expanded {
@@ -539,10 +496,12 @@
 
 	/* Reduced motion */
 	@media (prefers-reduced-motion: reduce) {
-		.menu-indicator :global(.indicator-arrow) {
-			animation: none;
+		.menu-container {
+			transition: opacity 0.1s ease;
 		}
-		.menu-buttons,
+		.menu-container.visible {
+			transform: translateY(-50%);
+		}
 		.layout-panel {
 			animation: none;
 		}
