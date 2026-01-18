@@ -82,6 +82,20 @@ def table_exists(cursor: sqlite3.Cursor, table: str) -> bool:
     return cursor.fetchone() is not None
 
 
+def column_is_not_null(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
+    """Check if a column has a NOT NULL constraint using PRAGMA table_info.
+
+    Returns True if the column exists and has NOT NULL constraint.
+    Returns False if column doesn't exist or is nullable.
+    """
+    cursor.execute(f"PRAGMA table_info({table})")
+    for row in cursor.fetchall():
+        if row["name"] == column:
+            # notnull column is 1 if NOT NULL constraint exists, 0 otherwise
+            return row["notnull"] == 1
+    return False
+
+
 def _run_column_migrations(cursor: sqlite3.Cursor):
     """Run idempotent column migrations.
 
@@ -164,6 +178,61 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(is_pinned DESC, updated_at DESC)")
         migrations_applied.append("notes_table_global")
+
+    # Migrate sessions.profile_id to be nullable (for profile deletion preserving sessions)
+    # Older databases may have profile_id as NOT NULL, but we need it nullable so
+    # sessions can persist after their associated profile is deleted
+    if table_exists(cursor, "sessions") and column_is_not_null(cursor, "sessions", "profile_id"):
+        logger.info("Migrating sessions table to make profile_id nullable...")
+        # SQLite doesn't support ALTER COLUMN, so we must recreate the table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sessions_new (
+                id TEXT PRIMARY KEY,
+                project_id TEXT,
+                profile_id TEXT,
+                api_user_id TEXT,
+                sdk_session_id TEXT,
+                worktree_id TEXT,
+                title TEXT,
+                status TEXT DEFAULT 'active',
+                is_favorite BOOLEAN DEFAULT FALSE,
+                total_cost_usd REAL DEFAULT 0,
+                total_tokens_in INTEGER DEFAULT 0,
+                total_tokens_out INTEGER DEFAULT 0,
+                turn_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                parent_session_id TEXT,
+                fork_point_message_index INTEGER,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+                FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
+                FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
+                FOREIGN KEY (worktree_id) REFERENCES worktrees(id) ON DELETE SET NULL
+            )
+        """)
+        # Copy all data from old table to new
+        cursor.execute("""
+            INSERT INTO sessions_new (
+                id, project_id, profile_id, api_user_id, sdk_session_id, worktree_id,
+                title, status, is_favorite, total_cost_usd, total_tokens_in, total_tokens_out,
+                turn_count, created_at, updated_at, parent_session_id, fork_point_message_index
+            )
+            SELECT
+                id, project_id, profile_id, api_user_id, sdk_session_id, worktree_id,
+                title, status, is_favorite, total_cost_usd, total_tokens_in, total_tokens_out,
+                turn_count, created_at, updated_at, parent_session_id, fork_point_message_index
+            FROM sessions
+        """)
+        cursor.execute("DROP TABLE sessions")
+        cursor.execute("ALTER TABLE sessions_new RENAME TO sessions")
+        # Recreate indexes
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_favorite ON sessions(is_favorite)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(worktree_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_sdk_session_id ON sessions(sdk_session_id)")
+        migrations_applied.append("sessions.profile_id_nullable")
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
