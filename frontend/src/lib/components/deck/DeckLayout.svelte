@@ -463,12 +463,12 @@
 	}
 
 	.layout-option:hover {
-		background: var(--hover-overlay, oklch(1 0 0 / 0.08));
+		background: var(--hover-overlay);
 	}
 
 	.layout-option.active {
-		background: color-mix(in oklch, var(--primary, #22d3ee) 15%, transparent);
-		color: var(--primary, #22d3ee);
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		color: var(--primary);
 	}
 
 	.layout-option :global(svg) {
@@ -490,9 +490,9 @@
 		justify-content: center;
 		width: 18px;
 		height: 18px;
-		background: var(--primary, #22d3ee);
+		background: var(--primary);
 		border-radius: 50%;
-		color: var(--primary-foreground, #000);
+		color: var(--primary-foreground);
 	}
 
 	/* ===================================

@@ -548,7 +548,7 @@
 
 	.progress-bar {
 		height: 100%;
-		background: linear-gradient(90deg, #a855f7, #ec4899);
+		background: linear-gradient(90deg, var(--accent), var(--primary));
 		transition: width 0.3s ease;
 	}
 

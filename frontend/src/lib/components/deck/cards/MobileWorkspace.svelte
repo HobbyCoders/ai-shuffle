@@ -316,11 +316,11 @@
 	}
 
 	.header-btn:hover {
-		background: hsl(var(--accent));
+		background: var(--hover-overlay);
 	}
 
 	.header-btn:active {
-		background: hsl(var(--accent));
+		background: var(--hover-overlay);
 		transform: scale(0.95);
 	}
 
