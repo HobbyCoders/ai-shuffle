@@ -265,7 +265,7 @@ class SessionMessage(BaseModel):
 
 class SessionBase(BaseModel):
     """Base session fields"""
-    profile_id: str
+    profile_id: Optional[str] = None  # Nullable: sessions persist after profile deletion
     project_id: Optional[str] = None
     title: Optional[str] = None
 
