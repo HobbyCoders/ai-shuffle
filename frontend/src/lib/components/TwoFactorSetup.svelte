@@ -397,7 +397,7 @@
 	}
 
 	.status-label.enabled {
-		color: #22c55e;
+		color: var(--success);
 	}
 
 	.description {
@@ -417,7 +417,7 @@
 	}
 
 	.recovery-info .warning {
-		color: #f59e0b;
+		color: var(--warning);
 		margin-top: 0.5rem;
 		font-size: 0.875rem;
 	}
@@ -455,8 +455,8 @@
 	}
 
 	.btn-danger {
-		background: #ef4444;
-		color: white;
+		background: var(--destructive);
+		color: var(--destructive-foreground, white);
 		border: none;
 	}
 
@@ -559,14 +559,14 @@
 	}
 
 	.error {
-		color: #ef4444;
+		color: var(--destructive);
 		font-size: 0.875rem;
 		margin-top: 0.5rem;
 	}
 
 	.warning-box {
-		background: rgba(245, 158, 11, 0.1);
-		border: 1px solid rgba(245, 158, 11, 0.3);
+		background: color-mix(in oklch, var(--warning) 15%, transparent);
+		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
 		border-radius: 0.5rem;
 		padding: 1rem;
 		margin-bottom: 1.5rem;

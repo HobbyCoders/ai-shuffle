@@ -78,6 +78,24 @@
 	// Direction indicator for swipe feedback
 	const swipeIndicatorDirection = $derived(swipeOffset > 0 ? 'left' : 'right');
 
+	// Check if element or its ancestors have horizontal scroll capability
+	function hasHorizontalScroll(el: HTMLElement | null): boolean {
+		while (el) {
+			const style = getComputedStyle(el);
+			const overflowX = style.overflowX;
+
+			// Check if element has horizontal scroll enabled and has scrollable content
+			if (
+				(overflowX === 'scroll' || overflowX === 'auto') &&
+				el.scrollWidth > el.clientWidth
+			) {
+				return true;
+			}
+			el = el.parentElement;
+		}
+		return false;
+	}
+
 	// Check if touch target is an interactive element (input, textarea, etc.)
 	function isInteractiveElement(target: EventTarget | null): boolean {
 		if (!(target instanceof HTMLElement)) return false;
@@ -88,7 +106,10 @@
 		if (target.isContentEditable) return true;
 		// Check if inside an interactive element
 		const interactive = target.closest('input, textarea, select, button, a, [contenteditable="true"]');
-		return interactive !== null;
+		if (interactive !== null) return true;
+		// Check if element has horizontal scroll (e.g., code blocks, tables)
+		if (hasHorizontalScroll(target)) return true;
+		return false;
 	}
 
 	// Touch handlers
@@ -316,11 +337,11 @@
 	}
 
 	.header-btn:hover {
-		background: hsl(var(--accent));
+		background: var(--hover-overlay);
 	}
 
 	.header-btn:active {
-		background: hsl(var(--accent));
+		background: var(--hover-overlay);
 		transform: scale(0.95);
 	}
 

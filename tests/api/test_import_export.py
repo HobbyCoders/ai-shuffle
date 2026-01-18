@@ -11,9 +11,8 @@ Tests cover:
 
 import pytest
 import json
-from datetime import datetime
 from io import BytesIO
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

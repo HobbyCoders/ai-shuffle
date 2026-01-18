@@ -21,12 +21,11 @@ import shutil
 import subprocess
 from pathlib import Path
 from datetime import datetime
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import MagicMock, patch
 
 from app.core.plugin_service import (
     PluginScope,
     MarketplaceInfo,
-    PluginInstallation,
     PluginInfo,
     PluginDetails,
     AvailablePlugin,

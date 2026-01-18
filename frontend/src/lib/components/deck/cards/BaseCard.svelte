@@ -659,7 +659,7 @@
 
 	.control-btn:focus-visible {
 		outline: 2px solid var(--ring);
-		outline-offset: 1px;
+		outline-offset: 2px;
 	}
 
 	.control-btn:active {

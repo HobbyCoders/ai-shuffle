@@ -19,8 +19,7 @@ This is security-critical code - comprehensive coverage is essential.
 import asyncio
 import pytest
 from datetime import datetime
-from unittest.mock import MagicMock, AsyncMock, patch
-from typing import Dict, Any, List
+from unittest.mock import AsyncMock, patch
 
 from app.core.permission_handler import (
     PermissionDecision,

@@ -14,7 +14,6 @@ import pytest
 import subprocess
 import json
 from unittest.mock import patch, MagicMock
-from dataclasses import asdict
 
 from app.core.github_service import (
     GitHubService,

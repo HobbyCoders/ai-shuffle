@@ -628,7 +628,6 @@ class TestCLIBridgeStop:
     @pytest.mark.asyncio
     async def test_stop_sets_not_running(self, running_bridge):
         """stop should set _is_running to False."""
-        import signal
 
         with patch('os.kill') as mock_kill:
             mock_kill.side_effect = ProcessLookupError()
@@ -693,7 +692,6 @@ class TestCLIBridgeCleanup:
         bridge._pid = 12345
         bridge._is_running = True
 
-        import os as os_module
         with patch('os.waitpid', return_value=(12345, 0)):
             with patch('os.close') as mock_close:
                 await bridge._cleanup()
@@ -745,7 +743,6 @@ class TestCLIBridgeCleanup:
         )
         bridge._pid = 12345
 
-        import os as os_module
         with patch('os.waitpid', return_value=(12345, 0)):
             with patch('os.close'):
                 await bridge._cleanup()
@@ -1184,9 +1181,6 @@ class TestCLIBridgeSetTerminalSize:
     @skip_on_windows
     def test_set_terminal_size_with_fd(self):
         """Should call ioctl with correct parameters when fd is set."""
-        import struct
-        import fcntl
-        import termios
 
         bridge = CLIBridge(
             session_id="12345678-1234-1234-1234-123456789abc",
@@ -1234,7 +1228,6 @@ class TestCLIBridgeReadOutput:
     @pytest.mark.asyncio
     async def test_read_output_calls_callback(self):
         """_read_output should call on_output callback with data."""
-        import select
 
         output_received = []
 
@@ -1275,7 +1268,6 @@ class TestCLIBridgeReadOutput:
     @pytest.mark.asyncio
     async def test_read_output_handles_eof(self):
         """_read_output should handle EOF (empty read)."""
-        import select
 
         bridge = CLIBridge(
             session_id="12345678-1234-1234-1234-123456789abc",
@@ -1299,7 +1291,6 @@ class TestCLIBridgeReadOutput:
     @pytest.mark.asyncio
     async def test_read_output_handles_eio(self):
         """_read_output should handle EIO error (process exited)."""
-        import select
 
         bridge = CLIBridge(
             session_id="12345678-1234-1234-1234-123456789abc",
@@ -1326,7 +1317,6 @@ class TestCLIBridgeReadOutput:
     @pytest.mark.asyncio
     async def test_read_output_handles_cancellation(self):
         """_read_output should handle task cancellation."""
-        import select
 
         bridge = CLIBridge(
             session_id="12345678-1234-1234-1234-123456789abc",

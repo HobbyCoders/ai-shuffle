@@ -530,25 +530,6 @@
 						</div>
 					{/if}
 				</div>
-
-				<!-- Selection Summary -->
-				{#if selectedBranchName && !selectedWorktreeId}
-					<div class="selection-summary ready">
-						<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<circle cx="6" cy="6" r="2" stroke-width="2"/>
-							<circle cx="12" cy="18" r="2" stroke-width="2"/>
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4v2" />
-						</svg>
-						<span>Worktree will be created on send</span>
-					</div>
-				{:else if selectedBranchName && selectedWorktreeId}
-					<div class="selection-summary ready">
-						<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-						</svg>
-						<span>Using existing worktree</span>
-					</div>
-				{/if}
 			{/if}
 		</div>
 	{/if}
@@ -815,7 +796,7 @@
 	}
 
 	.dropdown-item:hover {
-		background: var(--accent);
+		background: var(--hover-overlay);
 	}
 
 	.dropdown-item.selected {
@@ -968,27 +949,6 @@
 		color: var(--muted-foreground);
 	}
 
-	/* Selection Summary */
-	.selection-summary {
-		display: flex;
-		align-items: center;
-		gap: 0.375rem;
-		padding: 0.5rem 0.625rem;
-		background: color-mix(in srgb, var(--muted) 40%, transparent);
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		font-size: 0.6875rem;
-		color: var(--muted-foreground);
-	}
-
-	.selection-summary.ready {
-		background: color-mix(in srgb, var(--primary) 10%, transparent);
-		color: var(--primary);
-	}
-
-	.selection-summary.ready svg {
-		color: var(--primary);
-	}
-
 	/* Error/Warning States */
 	.warning-text {
 		font-size: 0.75rem;
@@ -1086,7 +1046,7 @@
 	}
 
 	.prefix-tag:hover {
-		background: var(--accent);
+		background: var(--hover-overlay);
 		color: var(--foreground);
 	}
 
@@ -1132,7 +1092,8 @@
 	}
 
 	.modal-btn.secondary:hover {
-		background: var(--accent);
+		background: var(--hover-overlay);
+		border-color: var(--accent);
 	}
 
 	.modal-btn.primary {

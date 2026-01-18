@@ -72,25 +72,25 @@
 <div class="flex flex-wrap items-center gap-2">
 	<div class="flex items-center gap-1 bg-card border border-border rounded-lg p-1">
 		<button
-			class="px-3 py-1.5 text-sm rounded-md transition-all {selectedPreset === '7d' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+			class="px-3 py-1.5 text-sm rounded-md transition-all {selectedPreset === '7d' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground date-picker-btn'}"
 			on:click={() => selectPreset('7d')}
 		>
 			7 Days
 		</button>
 		<button
-			class="px-3 py-1.5 text-sm rounded-md transition-all {selectedPreset === '30d' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+			class="px-3 py-1.5 text-sm rounded-md transition-all {selectedPreset === '30d' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground date-picker-btn'}"
 			on:click={() => selectPreset('30d')}
 		>
 			30 Days
 		</button>
 		<button
-			class="px-3 py-1.5 text-sm rounded-md transition-all {selectedPreset === '90d' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+			class="px-3 py-1.5 text-sm rounded-md transition-all {selectedPreset === '90d' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground date-picker-btn'}"
 			on:click={() => selectPreset('90d')}
 		>
 			90 Days
 		</button>
 		<button
-			class="px-3 py-1.5 text-sm rounded-md transition-all {selectedPreset === 'custom' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'}"
+			class="px-3 py-1.5 text-sm rounded-md transition-all {selectedPreset === 'custom' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground date-picker-btn'}"
 			on:click={() => selectPreset('custom')}
 		>
 			Custom
@@ -115,3 +115,9 @@
 		</div>
 	{/if}
 </div>
+
+<style>
+	:global(.date-picker-btn:hover) {
+		background: var(--hover-overlay);
+	}
+</style>

@@ -89,8 +89,8 @@
 	}
 
 	.summary-card:hover {
-		border-color: color-mix(in oklch, var(--primary) 30%, var(--border));
-		box-shadow: var(--shadow-m);
+		border-color: color-mix(in oklch, var(--accent) 50%, var(--border));
+		box-shadow: var(--shadow-m), 0 0 12px color-mix(in oklch, var(--accent) 20%, transparent);
 		transform: translateY(-2px);
 	}
 

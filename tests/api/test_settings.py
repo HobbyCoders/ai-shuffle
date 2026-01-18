@@ -13,11 +13,7 @@ Tests cover:
 - Module imports and constants
 """
 
-import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
-from io import BytesIO
-from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from unittest.mock import patch
 
 
 # =============================================================================

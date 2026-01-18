@@ -14,7 +14,7 @@ Tests cover:
 import asyncio
 import pytest
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from app.core.user_question_handler import (
     QuestionRequest,

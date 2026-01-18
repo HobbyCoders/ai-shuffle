@@ -437,12 +437,29 @@ class GitService:
             Tuple of (success: bool, error_message: Optional[str])
         """
         try:
+            # When creating a new branch from a base branch, fetch latest from origin first
+            # This ensures the new branch includes all remote commits
+            if new_branch and base_branch:
+                logger.info(f"Fetching latest from origin before creating branch from {base_branch}")
+                self.fetch(main_dir, "origin")
+
             args = ["worktree", "add"]
 
             if new_branch:
                 args.extend(["-b", branch, path])
                 if base_branch:
-                    args.append(base_branch)
+                    # Use origin/{base_branch} to ensure we get the latest remote commits
+                    # This prevents creating branches from stale local branches
+                    remote_base = f"origin/{base_branch}"
+                    # Check if the remote branch exists
+                    check_result = self._run_git(main_dir, ["rev-parse", "--verify", remote_base], timeout=10)
+                    if check_result.returncode == 0:
+                        args.append(remote_base)
+                        logger.info(f"Using remote branch {remote_base} as base for new branch {branch}")
+                    else:
+                        # Fall back to local branch if remote doesn't exist
+                        args.append(base_branch)
+                        logger.info(f"Remote {remote_base} not found, using local {base_branch} as base")
             else:
                 args.extend([path, branch])
 

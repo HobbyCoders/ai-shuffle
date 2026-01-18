@@ -13,8 +13,7 @@ Tests cover:
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
-from datetime import datetime, timedelta
+from unittest.mock import patch
 from freezegun import freeze_time
 
 

@@ -248,7 +248,7 @@
 	}
 
 	.close-btn:hover {
-		background: var(--accent);
+		background: var(--hover-overlay);
 		color: var(--foreground);
 	}
 
@@ -386,7 +386,8 @@
 	}
 
 	.btn-secondary:hover {
-		background: var(--accent);
+		background: var(--hover-overlay);
+		border-color: var(--accent);
 	}
 
 	.btn-primary {

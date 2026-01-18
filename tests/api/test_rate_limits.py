@@ -12,12 +12,10 @@ Tests cover:
 """
 
 import pytest
-import hashlib
 import uuid
 from datetime import datetime, timedelta
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, AsyncMock
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 # =============================================================================

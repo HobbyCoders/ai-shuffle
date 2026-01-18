@@ -170,7 +170,7 @@
 			<div class="px-4 py-3 border-b border-border flex items-center justify-between">
 				<h2 class="text-lg font-semibold text-foreground">Import Session</h2>
 				<button
-					class="p-1.5 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-colors"
+					class="import-modal-btn p-1.5 text-muted-foreground hover:text-foreground rounded-lg transition-colors"
 					on:click={close}
 					aria-label="Close"
 				>
@@ -297,7 +297,7 @@
 			<div class="px-4 py-3 border-t border-border flex justify-end gap-2 bg-muted/30">
 				<button
 					on:click={close}
-					class="px-4 py-2 text-sm bg-muted text-foreground rounded-lg hover:bg-accent transition-colors"
+					class="import-modal-cancel px-4 py-2 text-sm bg-muted text-foreground rounded-lg transition-colors"
 				>
 					Cancel
 				</button>
@@ -323,3 +323,23 @@
 		</div>
 	</div>
 {/if}
+
+<style>
+	.import-modal-btn:hover {
+		background: var(--hover-overlay);
+	}
+
+	.import-modal-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
+	.import-modal-cancel:hover {
+		background: var(--hover-overlay);
+	}
+
+	.import-modal-cancel:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+</style>

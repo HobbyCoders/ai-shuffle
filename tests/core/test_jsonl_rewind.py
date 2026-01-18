@@ -13,14 +13,11 @@ Tests cover:
 - Edge cases: empty files, missing files, malformed JSON
 """
 
-import pytest
 import json
 import tempfile
 import os
-import shutil
 from pathlib import Path
-from datetime import datetime
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from app.core.jsonl_rewind import (
     Checkpoint,

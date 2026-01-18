@@ -268,9 +268,9 @@
   tabindex="-1"
 >
   <!-- Modal content -->
-  <div class="bg-[#1a1a2e] rounded-lg shadow-2xl w-[90vw] max-w-4xl h-[70vh] flex flex-col overflow-hidden border border-gray-700">
+  <div class="terminal-modal-container">
     <!-- Header -->
-    <div class="flex items-center justify-between px-4 py-2 bg-[#16162a] border-b border-gray-700">
+    <div class="terminal-modal-header">
       <div class="flex items-center gap-3">
         <div class="flex gap-1.5">
           <button
@@ -281,19 +281,19 @@
           <div class="w-3 h-3 rounded-full bg-yellow-500"></div>
           <div class="w-3 h-3 rounded-full bg-green-500"></div>
         </div>
-        <h2 id="terminal-title" class="text-sm font-medium text-gray-300">
+        <h2 id="terminal-title" class="terminal-modal-title">
           Claude Code - {command}
         </h2>
       </div>
       <div class="flex items-center gap-2 text-xs">
         {#if isConnected}
-          <span class="flex items-center gap-1 text-green-400">
-            <span class="w-2 h-2 rounded-full bg-green-400"></span>
+          <span class="terminal-status-connected">
+            <span class="terminal-status-dot connected"></span>
             Connected
           </span>
         {:else}
-          <span class="flex items-center gap-1 text-yellow-400">
-            <span class="w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></span>
+          <span class="terminal-status-connecting">
+            <span class="terminal-status-dot connecting"></span>
             Connecting...
           </span>
         {/if}
@@ -304,11 +304,11 @@
     <div class="flex-1 p-2 overflow-hidden" bind:this={terminalContainer}></div>
 
     <!-- Footer with instructions -->
-    <div class="px-4 py-2 bg-[#16162a] border-t border-gray-700 text-xs text-gray-400">
-      <span class="mr-4"><kbd class="px-1.5 py-0.5 bg-gray-700 rounded">Arrow keys</kbd> Navigate</span>
-      <span class="mr-4"><kbd class="px-1.5 py-0.5 bg-gray-700 rounded">Enter</kbd> Select</span>
-      <span class="mr-4"><kbd class="px-1.5 py-0.5 bg-gray-700 rounded">Esc</kbd> Cancel/Exit</span>
-      <span class="mr-4"><kbd class="px-1.5 py-0.5 bg-gray-700 rounded">1-4</kbd> Choose option</span>
+    <div class="terminal-modal-footer">
+      <span class="mr-4"><kbd class="terminal-kbd">Arrow keys</kbd> Navigate</span>
+      <span class="mr-4"><kbd class="terminal-kbd">Enter</kbd> Select</span>
+      <span class="mr-4"><kbd class="terminal-kbd">Esc</kbd> Cancel/Exit</span>
+      <span class="mr-4"><kbd class="terminal-kbd">1-4</kbd> Choose option</span>
     </div>
   </div>
 </div>
@@ -323,7 +323,81 @@
     overflow-y: auto !important;
   }
 
-  kbd {
+  .terminal-modal-container {
+    background: var(--terminal-bg);
+    border-radius: 0.5rem;
+    box-shadow: var(--shadow-xl);
+    width: 90vw;
+    max-width: 64rem;
+    height: 70vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+
+  .terminal-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 1rem;
+    background: color-mix(in oklch, var(--terminal-bg) 80%, black);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .terminal-modal-title {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--terminal-fg);
+    opacity: 0.85;
+  }
+
+  .terminal-modal-footer {
+    padding: 0.5rem 1rem;
+    background: color-mix(in oklch, var(--terminal-bg) 80%, black);
+    border-top: 1px solid var(--border);
+    font-size: 0.75rem;
+    color: var(--muted-foreground);
+  }
+
+  .terminal-kbd {
+    padding: 0.125rem 0.375rem;
+    background: var(--muted);
+    border-radius: 0.25rem;
     font-family: inherit;
+  }
+
+  .terminal-status-connected {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    color: var(--success);
+  }
+
+  .terminal-status-connecting {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    color: var(--warning);
+  }
+
+  .terminal-status-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+  }
+
+  .terminal-status-dot.connected {
+    background: var(--success);
+  }
+
+  .terminal-status-dot.connecting {
+    background: var(--warning);
+    animation: pulse 1s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
   }
 </style>

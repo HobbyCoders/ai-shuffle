@@ -10,9 +10,8 @@ including:
 """
 
 import pytest
-import json
 from datetime import datetime
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from fastapi import HTTPException, FastAPI
 from fastapi.testclient import TestClient
 

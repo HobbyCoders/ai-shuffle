@@ -14,7 +14,7 @@ Tests cover:
 import pytest
 import base64
 import os
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 from cryptography.fernet import Fernet
 
 # Test the core encryption functions directly

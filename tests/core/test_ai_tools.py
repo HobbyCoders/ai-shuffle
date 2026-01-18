@@ -9,8 +9,6 @@ Tests cover:
 - Edge cases and validation
 """
 
-import pytest
-from typing import Dict, Any
 from pydantic import BaseModel
 
 # Import the module under test
@@ -77,7 +75,7 @@ class TestAIToolsRegistry:
         """Verify expected categories are present."""
         categories = get_categories()
         expected_categories = {"image", "video", "3d"}
-        assert expected_categories.issubset(set(categories)), f"Missing expected categories"
+        assert expected_categories.issubset(set(categories)), "Missing expected categories"
 
     def test_image_generation_tool_exists(self):
         """Image generation tool should be defined."""

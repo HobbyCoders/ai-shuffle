@@ -182,21 +182,25 @@
 	}
 
 	.thinking-header:hover {
-		background: var(--muted, hsl(var(--muted) / 0.3));
+		background: var(--hover-overlay);
+	}
+
+	.thinking-header:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
 	}
 
 	.thinking-label {
 		font-weight: 600;
 		font-size: 0.875rem;
-		color: var(--secondary);
+		color: color-mix(in oklch, var(--primary) 80%, var(--foreground));
 	}
 
 	.thinking-icon {
 		width: 1rem;
 		height: 1rem;
 		flex-shrink: 0;
-		color: var(--muted-foreground);
-		opacity: 0.7;
+		color: color-mix(in oklch, var(--primary) 70%, var(--muted-foreground));
 	}
 
 	.thinking-chevron {

@@ -2839,19 +2839,19 @@
 	}
 
 	.dialog-btn.cancel:hover {
-		background: var(--bg-card);
-		border-color: var(--border-strong);
-		color: var(--text-primary);
+		background: var(--card);
+		border-color: var(--accent);
+		color: var(--foreground);
 	}
 
 	.dialog-btn.primary {
-		background: var(--ai-primary);
+		background: var(--primary);
 		border: none;
-		color: #000;
+		color: var(--primary-foreground);
 	}
 
 	.dialog-btn.primary:hover:not(:disabled) {
-		background: var(--ai-secondary);
+		filter: brightness(1.1);
 	}
 
 	.dialog-btn.primary:disabled {

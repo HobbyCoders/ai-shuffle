@@ -17,8 +17,7 @@ Tests cover:
 import asyncio
 import pytest
 from datetime import datetime, timedelta
-from unittest.mock import patch, MagicMock
-from typing import Callable
+from unittest.mock import patch
 
 from app.core.queue_manager import (
     QueuedRequest,

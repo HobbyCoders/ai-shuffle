@@ -1561,12 +1561,10 @@ class TestModuleImports:
 
     def test_router_exists(self):
         """Router should exist."""
-        from app.api.user_self_service import router
         assert router is not None
 
     def test_router_has_correct_prefix(self):
         """Router should have correct prefix."""
-        from app.api.user_self_service import router
         assert router.prefix == "/api/v1/me"
 
     def test_credential_info_exists(self):

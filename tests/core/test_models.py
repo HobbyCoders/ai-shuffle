@@ -17,7 +17,6 @@ from app.core.models import (
     ChangePasswordRequest,
     ApiKeyLoginRequest,
     ApiUserRegisterRequest,
-    ApiUserLoginRequest,
     ApiUserInfo,
     AuthStatus,
     SubagentDefinition,

@@ -222,11 +222,49 @@
 	});
 
 	// Save scroll position when component is destroyed (critical for card switching)
+	let resizeObserver: ResizeObserver | null = null;
+
 	onDestroy(() => {
 		if (containerRef) {
 			scrollPositionCache.set(tab.id, containerRef.scrollTop);
 			tabs.setTabScrollTop(tab.id, containerRef.scrollTop);
 		}
+		// Clean up resize observer
+		if (resizeObserver) {
+			resizeObserver.disconnect();
+			resizeObserver = null;
+		}
+	});
+
+	// Observe container size changes (e.g., when input area expands/contracts)
+	// This maintains auto-scroll when the chat input island grows, which would
+	// otherwise change the scrollbar and break the "near bottom" detection
+	$effect(() => {
+		if (!containerRef || !isMounted) return;
+
+		// Clean up previous observer
+		if (resizeObserver) {
+			resizeObserver.disconnect();
+		}
+
+		resizeObserver = new ResizeObserver(() => {
+			// If auto-scroll is enabled and we're supposed to be at bottom,
+			// ensure we stay at bottom after resize
+			if (shouldAutoScroll && containerRef) {
+				// Use requestAnimationFrame to ensure layout is complete
+				requestAnimationFrame(() => {
+					scrollToBottom();
+				});
+			}
+		});
+
+		resizeObserver.observe(containerRef);
+
+		return () => {
+			if (resizeObserver) {
+				resizeObserver.disconnect();
+			}
+		};
 	});
 
 	// Track previous values to detect actual content changes (not just re-renders)

@@ -2,7 +2,7 @@
 
 import pytest
 from app.core.jq_shim.parser import (
-    JQParser, parse_jq_expression, ASTNode, NodeType, ParseError
+    parse_jq_expression, ASTNode, NodeType, ParseError
 )
 
 

@@ -5,8 +5,6 @@ These are placeholder tests that verify the basic structure works.
 Full integration tests will require proper FastAPI testing setup.
 """
 
-import pytest
-from unittest.mock import patch, MagicMock
 
 
 class TestAuthModuleImports:
