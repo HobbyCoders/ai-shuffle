@@ -912,22 +912,22 @@
 
 						{#if liveTab.executionMode === 'worktree' && liveTab.messages.length > 0}
 							<!-- Worktree Badge - replaces project selector after session starts -->
-							<div class="worktree-badge" title="Working in git worktree">
+							<div class="context-badge worktree" title="Working in git worktree">
 								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<circle cx="6" cy="6" r="2" stroke-width="2"/>
 									<circle cx="18" cy="6" r="2" stroke-width="2"/>
 									<circle cx="12" cy="18" r="2" stroke-width="2"/>
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4m6-8v4c0 2-2 4-6 4" />
 								</svg>
-								<span class="worktree-branch">{liveTab.selectedWorktreeBranch || liveTab.worktreeBranch || 'worktree'}</span>
+								<span class="context-badge-text">{liveTab.selectedWorktreeBranch || liveTab.worktreeBranch || 'worktree'}</span>
 							</div>
 						{:else if liveTab.executionMode === 'local' && liveTab.messages.length > 0}
 							<!-- Locked Project Badge - replaces project selector after session starts in local mode -->
-							<div class="project-badge-locked" title="Project locked for this session">
+							<div class="context-badge locked" title="Project locked for this session">
 								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
 								</svg>
-								<span class="project-name-locked">{selectedProjectName}</span>
+								<span class="context-badge-text">{selectedProjectName}</span>
 							</div>
 						{:else}
 							<!-- Project Selector -->
@@ -1451,56 +1451,40 @@
 		flex: 2;
 	}
 
-	/* Worktree badge - shown when working in git worktree mode */
-	.worktree-badge {
+	/* Context badge - shared base styles for worktree and locked project badges */
+	.context-badge {
 		display: flex;
 		align-items: center;
 		gap: 6px;
 		padding: 4px 10px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.67);
+		font-size: 12px;
+		font-weight: 500;
+	}
+
+	.context-badge svg {
+		flex-shrink: 0;
+	}
+
+	.context-badge-text {
+		max-width: 120px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	/* Worktree badge variant - primary colors */
+	.context-badge.worktree {
 		background: color-mix(in srgb, var(--primary) 15%, transparent);
 		border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
-		color: var(--primary);
-		font-size: 12px;
-		font-weight: 500;
-	}
-
-	.worktree-badge svg {
-		flex-shrink: 0;
 		color: var(--primary);
 	}
 
-	.worktree-branch {
-		max-width: 120px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	/* Locked project badge - shown when project is locked after session starts in local mode */
-	.project-badge-locked {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 4px 10px;
+	/* Locked project badge variant - muted colors */
+	.context-badge.locked {
 		background: var(--muted);
 		border: 1px solid var(--border-subtle);
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
 		color: var(--muted-foreground);
-		font-size: 12px;
-		font-weight: 500;
-	}
-
-	.project-badge-locked svg {
-		flex-shrink: 0;
-		color: var(--muted-foreground);
-	}
-
-	.project-name-locked {
-		max-width: 120px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
 	}
 
 	.controls-right {
@@ -1808,14 +1792,8 @@
 			gap: 4px;
 		}
 
-		/* Smaller worktree badge on mobile */
-		.worktree-branch {
-			max-width: 80px;
-			font-size: 11px;
-		}
-
-		/* Smaller locked project badge on mobile */
-		.project-name-locked {
+		/* Smaller context badge text on mobile */
+		.context-badge-text {
 			max-width: 80px;
 			font-size: 11px;
 		}
