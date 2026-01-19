@@ -17,7 +17,7 @@
 	 * - Custom deck management
 	 */
 
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import {
 		MessageSquare, Terminal, Clock,
 		Settings, FolderOpen, X, Files, User, Users, Pencil, Check,
@@ -640,40 +640,41 @@
 		resetMobileCarousel();
 	}
 
-	// Navigate to custom deck
-	function navigateToDeck(deckId: string, name: string) {
-		currentView = 'deck';
-		currentDeckId = deckId;
-		navStack = [...navStack, { id: deckId, name, type: 'deck' }];
-		if (carouselRef) carouselRef.scrollLeft = 0;
-		resetMobileCarousel();
-	}
-
 	// Toggle deck expansion for slot machine wheel
-	function toggleDeckExpansion(deckId: string) {
+	async function toggleDeckExpansion(deckId: string) {
 		if (expandedDeckId === deckId) {
 			expandedDeckId = null;
 		} else {
 			expandedDeckId = deckId;
-			// Initialize scroll to middle for infinite wrap feel
-			setTimeout(() => initWheelScroll(), 0);
+			await tick(); // Wait for DOM to update
+			initWheelScroll();
 		}
+	}
+
+	// Close expanded deck reel
+	function closeDeckReel(e: MouseEvent) {
+		e.stopPropagation();
+		expandedDeckId = null;
 	}
 
 	// True infinite scroll: 3 copies (buffer-middle-buffer), teleport when hitting edges
 	function getWrappedDeckCards(deckId: string): NavigatorCard[] {
 		const realCards = getDeckCards(deckId);
-		if (realCards.length === 0) return [];
-		if (realCards.length === 1) return realCards;
+		if (realCards.length <= 1) return realCards;
 
-		// Only need 3 copies: top buffer, middle (where we scroll), bottom buffer
-		const repeated: NavigatorCard[] = [];
-		for (let r = 0; r < 3; r++) {
-			for (let i = 0; i < realCards.length; i++) {
-				repeated.push({ ...realCards[i], id: `r${r}-${realCards[i].id}` });
-			}
-		}
-		return repeated;
+		// Create 3 copies for infinite scroll teleportation
+		return Array.from({ length: 3 }, (_, r) =>
+			realCards.map(card => ({ ...card, id: `r${r}-${card.id}` }))
+		).flat();
+	}
+
+	// Get item height from DOM for accurate scroll calculations
+	function getReelItemHeight(): number {
+		if (!wheelScrollRef) return isMobile ? 389 : 172; // Fallback
+		const firstCard = wheelScrollRef.querySelector('.deck-reel-card') as HTMLElement;
+		if (!firstCard) return isMobile ? 389 : 172;
+		// Card height + margin (12px desktop, 16px mobile)
+		return firstCard.offsetHeight + (isMobile ? 16 : 12);
 	}
 
 	function initWheelScroll() {
@@ -681,8 +682,7 @@
 		const realCards = getDeckCards(expandedDeckId);
 		if (realCards.length <= 1) return;
 
-		// Start in the middle copy
-		const itemHeight = isMobile ? 389 : 172;
+		const itemHeight = getReelItemHeight();
 		const middleStart = realCards.length * itemHeight;
 		wheelScrollRef.scrollTop = middleStart;
 	}
@@ -693,7 +693,7 @@
 		const realCards = getDeckCards(expandedDeckId);
 		if (realCards.length <= 1) return;
 
-		const itemHeight = isMobile ? 389 : 172;
+		const itemHeight = getReelItemHeight();
 		const cycleHeight = realCards.length * itemHeight;
 		const scrollTop = container.scrollTop;
 
@@ -1622,6 +1622,7 @@
 							{#each displayCards as card, index (card.id)}
 								{#if card.type === 'deck' && card.deckId && expandedDeckId === card.deckId}
 									<!-- Mobile Expanded Deck: Borderless Slot Machine Reel -->
+									{@const wrappedCards = getWrappedDeckCards(card.deckId)}
 									<div
 										class="deck-reel mobile"
 										data-card-id={card.id}
@@ -1631,40 +1632,37 @@
 									>
 										<button
 											class="deck-reel-close"
-											onclick={(e) => { e.stopPropagation(); expandedDeckId = null; }}
+											onclick={closeDeckReel}
 											aria-label="Close deck"
 										>
 											<X size={18} />
 										</button>
-										{#if card.deckId}
-											{@const wrappedCards = getWrappedDeckCards(card.deckId)}
-											{#if wrappedCards.length > 0}
-												<div
-													class="deck-reel-track"
-													bind:this={wheelScrollRef}
-													onscroll={handleReelScroll}
-													onwheel={(e) => e.stopPropagation()}
-													onmousedown={(e) => e.stopPropagation()}
-													ontouchstart={(e) => e.stopPropagation()}
-												>
-													{#each wrappedCards as item (item.id)}
-														<button
-															class="deck-reel-card"
-															onclick={() => handleWheelItemSelect(item)}
-														>
-															<div class="deck-reel-card-inner">
-																<div class="mobile-card-icon" style:--icon-color={item.iconColor}>
-																	<item.icon size={28} strokeWidth={1.5} />
-																</div>
-																<span class="mobile-card-label">{item.title}</span>
-																<span class="mobile-card-description">{item.subtitle}</span>
+										{#if wrappedCards.length > 0}
+											<div
+												class="deck-reel-track"
+												bind:this={wheelScrollRef}
+												onscroll={handleReelScroll}
+												onwheel={(e) => e.stopPropagation()}
+												onmousedown={(e) => e.stopPropagation()}
+												ontouchstart={(e) => e.stopPropagation()}
+											>
+												{#each wrappedCards as item (item.id)}
+													<button
+														class="deck-reel-card"
+														onclick={() => handleWheelItemSelect(item)}
+													>
+														<div class="deck-reel-card-inner">
+															<div class="mobile-card-icon" style:--icon-color={item.iconColor}>
+																<item.icon size={28} strokeWidth={1.5} />
 															</div>
-														</button>
-													{/each}
-												</div>
-											{:else}
-												<div class="deck-reel-empty">Empty deck</div>
-											{/if}
+															<span class="mobile-card-label">{item.title}</span>
+															<span class="mobile-card-description">{item.subtitle}</span>
+														</div>
+													</button>
+												{/each}
+											</div>
+										{:else}
+											<div class="deck-reel-empty">Empty deck</div>
 										{/if}
 									</div>
 								{:else}
@@ -1816,6 +1814,7 @@
 						{#each displayCards as card, index (card.id)}
 							{#if card.type === 'deck' && card.deckId && expandedDeckId === card.deckId}
 								<!-- Expanded Deck: Borderless Slot Machine Reel -->
+								{@const wrappedCards = getWrappedDeckCards(card.deckId)}
 								<div
 									class="deck-reel"
 									data-card-id={card.id}
@@ -1825,40 +1824,37 @@
 								>
 									<button
 										class="deck-reel-close"
-										onclick={(e) => { e.stopPropagation(); expandedDeckId = null; }}
+										onclick={closeDeckReel}
 										aria-label="Close deck"
 									>
 										<X size={16} />
 									</button>
-									{#if card.deckId}
-										{@const wrappedCards = getWrappedDeckCards(card.deckId)}
-										{#if wrappedCards.length > 0}
-											<div
-												class="deck-reel-track"
-												bind:this={wheelScrollRef}
-												onscroll={handleReelScroll}
-												onwheel={(e) => e.stopPropagation()}
-												onmousedown={(e) => e.stopPropagation()}
-												ontouchstart={(e) => e.stopPropagation()}
-											>
-												{#each wrappedCards as item (item.id)}
-													<button
-														class="deck-reel-card"
-														onclick={() => handleWheelItemSelect(item)}
-													>
-														<div class="deck-reel-card-inner">
-															<div class="card-icon" style:--icon-color={item.iconColor}>
-																<item.icon size={20} strokeWidth={1.75} />
-															</div>
-															<h3 class="card-title">{item.title}</h3>
-															<p class="card-subtitle">{item.subtitle}</p>
+									{#if wrappedCards.length > 0}
+										<div
+											class="deck-reel-track"
+											bind:this={wheelScrollRef}
+											onscroll={handleReelScroll}
+											onwheel={(e) => e.stopPropagation()}
+											onmousedown={(e) => e.stopPropagation()}
+											ontouchstart={(e) => e.stopPropagation()}
+										>
+											{#each wrappedCards as item (item.id)}
+												<button
+													class="deck-reel-card"
+													onclick={() => handleWheelItemSelect(item)}
+												>
+													<div class="deck-reel-card-inner">
+														<div class="card-icon" style:--icon-color={item.iconColor}>
+															<item.icon size={20} strokeWidth={1.75} />
 														</div>
-													</button>
-												{/each}
-											</div>
-										{:else}
-											<div class="deck-reel-empty">Empty deck</div>
-										{/if}
+														<h3 class="card-title">{item.title}</h3>
+														<p class="card-subtitle">{item.subtitle}</p>
+													</div>
+												</button>
+											{/each}
+										</div>
+									{:else}
+										<div class="deck-reel-empty">Empty deck</div>
 									{/if}
 								</div>
 							{:else}
@@ -1883,6 +1879,8 @@
 									onmousemove={handleCardTiltMove}
 									onmouseleave={handleCardTiltLeave}
 									onanimationend={() => handleCardAnimationEnd(card.id)}
+									animate:flip={{ duration: 250, easing: cubicOut }}
+									role="option"
 									tabindex="0"
 									aria-selected="false"
 								>
