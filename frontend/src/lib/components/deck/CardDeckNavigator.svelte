@@ -658,21 +658,85 @@
 		} else {
 			expandedDeckId = deckId;
 			wheelSelectedIndex = 0;
-			setTimeout(() => wheelScrollRef?.scrollTo({ top: 0 }), 0);
+			// Initialize scroll to first real card (after clone) for infinite wrap
+			setTimeout(() => initWheelScroll(), 0);
 		}
 	}
 
-	// Handle wheel scroll for selection tracking
+	// Get wrapped deck cards for infinite scroll effect
+	// Returns: [clone of last] + [all real cards] + [clone of first]
+	function getWrappedDeckCards(deckId: string): { cards: NavigatorCard[]; realStartIndex: number; realCount: number } {
+		const realCards = getDeckCards(deckId);
+		if (realCards.length <= 1) {
+			return { cards: realCards, realStartIndex: 0, realCount: realCards.length };
+		}
+		// Clone last card at beginning, first card at end for seamless wrap
+		const wrapped = [
+			{ ...realCards[realCards.length - 1], id: `clone-start-${realCards[realCards.length - 1].id}` },
+			...realCards,
+			{ ...realCards[0], id: `clone-end-${realCards[0].id}` }
+		];
+		return { cards: wrapped, realStartIndex: 1, realCount: realCards.length };
+	}
+
+	// Track if we're programmatically scrolling (to avoid recursion)
+	let isResettingScroll = false;
+
+	// Handle wheel scroll for selection tracking with infinite wrap
 	function handleWheelScroll(e: Event) {
+		if (isResettingScroll) return;
+
 		const container = e.target as HTMLDivElement;
 		// Card height + margin: desktop 160px + 12px, mobile ~373px (280 * 4/3) + 16px
 		const itemHeight = isMobile ? 389 : 172;
-		wheelSelectedIndex = Math.max(0, Math.round(container.scrollTop / itemHeight));
+		const scrollIndex = Math.round(container.scrollTop / itemHeight);
+
+		if (!expandedDeckId) return;
+		const { realCount } = getWrappedDeckCards(expandedDeckId);
+
+		if (realCount <= 1) {
+			wheelSelectedIndex = 0;
+			return;
+		}
+
+		// Check if scrolled to clone regions and wrap around
+		if (scrollIndex <= 0) {
+			// Scrolled to clone of last card -> jump to real last card
+			isResettingScroll = true;
+			const newScrollTop = realCount * itemHeight;
+			container.scrollTop = newScrollTop;
+			wheelSelectedIndex = realCount - 1;
+			setTimeout(() => { isResettingScroll = false; }, 50);
+		} else if (scrollIndex >= realCount + 1) {
+			// Scrolled to clone of first card -> jump to real first card
+			isResettingScroll = true;
+			container.scrollTop = itemHeight;
+			wheelSelectedIndex = 0;
+			setTimeout(() => { isResettingScroll = false; }, 50);
+		} else {
+			// Normal scroll within real cards (index 1 to realCount maps to 0 to realCount-1)
+			wheelSelectedIndex = scrollIndex - 1;
+		}
 	}
 
-	// Handle wheel item selection
-	function handleWheelItemSelect(card: NavigatorCard, index: number) {
-		if (index !== wheelSelectedIndex) return;
+	// Initialize scroll position to first real card (after the clone)
+	function initWheelScroll() {
+		if (!wheelScrollRef || !expandedDeckId) return;
+		const itemHeight = isMobile ? 389 : 172;
+		// Scroll to index 1 (first real card, after the prepended clone)
+		wheelScrollRef.scrollTop = itemHeight;
+	}
+
+	// Handle wheel item selection - index is in wrapped array, convert to real
+	function handleWheelItemSelect(card: NavigatorCard, wrappedIndex: number) {
+		if (!expandedDeckId) return;
+		const { realCount } = getWrappedDeckCards(expandedDeckId);
+
+		// Convert wrapped index to real index
+		const realIndex = wrappedIndex - 1;
+		if (realIndex < 0 || realIndex >= realCount) return; // Clicked on a clone
+		if (realIndex !== wheelSelectedIndex) return; // Not the selected card
+
 		expandedDeckId = null;
 		wheelSelectedIndex = 0;
 
@@ -1602,37 +1666,38 @@
 										>
 											<X size={18} />
 										</button>
-										{#if getDeckCards(card.deckId).length > 0}
-											<div
-												class="deck-reel-track"
-												bind:this={wheelScrollRef}
-												onscroll={handleWheelScroll}
-												onwheel={(e) => e.stopPropagation()}
-												onmousedown={(e) => e.stopPropagation()}
-												ontouchstart={(e) => e.stopPropagation()}
-											>
-												<div class="deck-reel-spacer"></div>
-												{#each getDeckCards(card.deckId) as item, i}
-													<button
-														class="deck-reel-card"
-														class:selected={i === wheelSelectedIndex}
-														onclick={() => handleWheelItemSelect(item, i)}
-														role="option"
-														aria-selected={i === wheelSelectedIndex}
-													>
-														<div class="deck-reel-card-inner">
-															<div class="mobile-card-icon" style:--icon-color={item.iconColor}>
-																<item.icon size={28} strokeWidth={1.5} />
+										{#if card.deckId}
+											{@const wrappedData = getWrappedDeckCards(card.deckId)}
+											{#if wrappedData.realCount > 0}
+												<div
+													class="deck-reel-track"
+													bind:this={wheelScrollRef}
+													onscroll={handleWheelScroll}
+													onwheel={(e) => e.stopPropagation()}
+													onmousedown={(e) => e.stopPropagation()}
+													ontouchstart={(e) => e.stopPropagation()}
+												>
+													{#each wrappedData.cards as item, i (item.id)}
+														<button
+															class="deck-reel-card"
+															class:selected={i === wheelSelectedIndex + 1}
+															onclick={() => handleWheelItemSelect(item, i)}
+															role="option"
+															aria-selected={i === wheelSelectedIndex + 1}
+														>
+															<div class="deck-reel-card-inner">
+																<div class="mobile-card-icon" style:--icon-color={item.iconColor}>
+																	<item.icon size={28} strokeWidth={1.5} />
+																</div>
+																<span class="mobile-card-label">{item.title}</span>
+																<span class="mobile-card-description">{item.subtitle}</span>
 															</div>
-															<span class="mobile-card-label">{item.title}</span>
-															<span class="mobile-card-description">{item.subtitle}</span>
-														</div>
-													</button>
-												{/each}
-												<div class="deck-reel-spacer"></div>
-											</div>
-										{:else}
-											<div class="deck-reel-empty">Empty deck</div>
+														</button>
+													{/each}
+												</div>
+											{:else}
+												<div class="deck-reel-empty">Empty deck</div>
+											{/if}
 										{/if}
 									</div>
 								{:else}
@@ -1798,37 +1863,38 @@
 									>
 										<X size={16} />
 									</button>
-									{#if getDeckCards(card.deckId).length > 0}
-										<div
-											class="deck-reel-track"
-											bind:this={wheelScrollRef}
-											onscroll={handleWheelScroll}
-											onwheel={(e) => e.stopPropagation()}
-											onmousedown={(e) => e.stopPropagation()}
-											ontouchstart={(e) => e.stopPropagation()}
-										>
-											<div class="deck-reel-spacer"></div>
-											{#each getDeckCards(card.deckId) as item, i}
-												<button
-													class="deck-reel-card"
-													class:selected={i === wheelSelectedIndex}
-													onclick={() => handleWheelItemSelect(item, i)}
-													role="option"
-													aria-selected={i === wheelSelectedIndex}
-												>
-													<div class="deck-reel-card-inner">
-														<div class="card-icon" style:--icon-color={item.iconColor}>
-															<item.icon size={20} strokeWidth={1.75} />
+									{#if card.deckId}
+										{@const wrappedData = getWrappedDeckCards(card.deckId)}
+										{#if wrappedData.realCount > 0}
+											<div
+												class="deck-reel-track"
+												bind:this={wheelScrollRef}
+												onscroll={handleWheelScroll}
+												onwheel={(e) => e.stopPropagation()}
+												onmousedown={(e) => e.stopPropagation()}
+												ontouchstart={(e) => e.stopPropagation()}
+											>
+												{#each wrappedData.cards as item, i (item.id)}
+													<button
+														class="deck-reel-card"
+														class:selected={i === wheelSelectedIndex + 1}
+														onclick={() => handleWheelItemSelect(item, i)}
+														role="option"
+														aria-selected={i === wheelSelectedIndex + 1}
+													>
+														<div class="deck-reel-card-inner">
+															<div class="card-icon" style:--icon-color={item.iconColor}>
+																<item.icon size={20} strokeWidth={1.75} />
+															</div>
+															<h3 class="card-title">{item.title}</h3>
+															<p class="card-subtitle">{item.subtitle}</p>
 														</div>
-														<h3 class="card-title">{item.title}</h3>
-														<p class="card-subtitle">{item.subtitle}</p>
-													</div>
-												</button>
-											{/each}
-											<div class="deck-reel-spacer"></div>
-										</div>
-									{:else}
-										<div class="deck-reel-empty">Empty deck</div>
+													</button>
+												{/each}
+											</div>
+										{:else}
+											<div class="deck-reel-empty">Empty deck</div>
+										{/if}
 									{/if}
 								</div>
 							{:else}
@@ -3498,12 +3564,6 @@
 		display: none;
 	}
 
-	/* Spacers for centering first/last items */
-	.deck-reel-spacer {
-		/* Half the container height minus half a card = centers first/last card */
-		height: calc(var(--card-height) * 0.75);
-	}
-
 	/* Full-sized card items */
 	.deck-reel-card {
 		display: block;
@@ -3600,10 +3660,6 @@
 		width: min(75vw, 280px);
 		/* Taller for mobile cards with 3:4 aspect ratio */
 		height: calc(min(75vw, 280px) * 4 / 3 * 2);
-	}
-
-	.deck-reel.mobile .deck-reel-spacer {
-		height: calc(min(75vw, 280px) * 4 / 3 * 0.5);
 	}
 
 	.deck-reel.mobile .deck-reel-card {
