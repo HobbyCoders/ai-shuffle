@@ -921,6 +921,14 @@
 								</svg>
 								<span class="worktree-branch">{liveTab.selectedWorktreeBranch || liveTab.worktreeBranch || 'worktree'}</span>
 							</div>
+						{:else if liveTab.executionMode === 'local' && liveTab.messages.length > 0}
+							<!-- Locked Project Badge - replaces project selector after session starts in local mode -->
+							<div class="project-badge-locked" title="Project locked for this session">
+								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+								</svg>
+								<span class="project-name-locked">{selectedProjectName}</span>
+							</div>
 						{:else}
 							<!-- Project Selector -->
 							<div class="selector-wrapper" bind:this={projectDropdownRef}>
@@ -1469,6 +1477,32 @@
 		white-space: nowrap;
 	}
 
+	/* Locked project badge - shown when project is locked after session starts in local mode */
+	.project-badge-locked {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 4px 10px;
+		background: var(--muted);
+		border: 1px solid var(--border-subtle);
+		border-radius: calc(var(--radius, 0.75rem) * 0.67);
+		color: var(--muted-foreground);
+		font-size: 12px;
+		font-weight: 500;
+	}
+
+	.project-badge-locked svg {
+		flex-shrink: 0;
+		color: var(--muted-foreground);
+	}
+
+	.project-name-locked {
+		max-width: 120px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
 	.controls-right {
 		display: flex;
 		align-items: center;
@@ -1776,6 +1810,12 @@
 
 		/* Smaller worktree badge on mobile */
 		.worktree-branch {
+			max-width: 80px;
+			font-size: 11px;
+		}
+
+		/* Smaller locked project badge on mobile */
+		.project-name-locked {
 			max-width: 80px;
 			font-size: 11px;
 		}
