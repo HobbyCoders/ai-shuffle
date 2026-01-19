@@ -69,6 +69,8 @@
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import CardDeckNavigator from '$lib/components/deck/CardDeckNavigator.svelte';
+	import GlobalSttIndicator from '$lib/components/GlobalSttIndicator.svelte';
+	import { initGlobalStt } from '$lib/services/globalStt';
 
 	// ============================================
 	// State: Deck Layout
@@ -273,6 +275,9 @@
 
 	// Visibility change handler for cross-device sync
 	let visibilityChangeHandler: (() => void) | null = null;
+
+	// Global STT cleanup function
+	let cleanupGlobalStt: (() => void) | null = null;
 
 	onMount(async () => {
 		if (!$isAuthenticated) {
@@ -496,6 +501,9 @@
 				}
 			})
 		];
+
+		// Initialize global STT (voice input hotkey)
+		cleanupGlobalStt = initGlobalStt();
 	});
 
 	onDestroy(() => {
@@ -509,6 +517,11 @@
 		shortcutRegistrations.forEach((reg) => reg.unregister());
 		shortcutRegistrations = [];
 		tabs.destroy();
+
+		// Cleanup global STT
+		if (cleanupGlobalStt) {
+			cleanupGlobalStt();
+		}
 	});
 
 	// ============================================
@@ -1426,6 +1439,9 @@
 			onClose={closeTerminalModal}
 		/>
 	{/if}
+
+	<!-- Global STT Indicator (floating recording UI) -->
+	<GlobalSttIndicator />
 
 {/if}
 

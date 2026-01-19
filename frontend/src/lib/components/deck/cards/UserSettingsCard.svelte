@@ -32,6 +32,8 @@
 		type GitHubRepo,
 		type GitHubBranch
 	} from '$lib/api/userSelfService';
+	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
+	import HotkeyCapture from '$lib/components/settings/HotkeyCapture.svelte';
 
 	interface Props {
 		card: DeckCard;
@@ -58,7 +60,7 @@
 	}: Props = $props();
 
 	// Navigation
-	type Section = 'profile' | 'credentials' | 'github';
+	type Section = 'profile' | 'credentials' | 'github' | 'hotkeys';
 	let activeSection: Section = $state('profile');
 
 	const sections: { id: Section; label: string; icon: string }[] = [
@@ -76,6 +78,11 @@
 			id: 'github',
 			label: 'GitHub',
 			icon: 'M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.6.11.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z'
+		},
+		{
+			id: 'hotkeys',
+			label: 'Hotkeys',
+			icon: 'M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z'
 		}
 	];
 
@@ -836,6 +843,69 @@
 							{/if}
 						</div>
 					{/if}
+				</div>
+
+			{:else if activeSection === 'hotkeys'}
+				<!-- Hotkeys Section -->
+				<div class="space-y-6">
+					<h3 class="text-lg font-semibold text-foreground">Keyboard Shortcuts</h3>
+
+					<!-- Global Voice Input -->
+					<div class="p-4 border rounded-lg border-border space-y-4">
+						<div class="flex items-center justify-between">
+							<div>
+								<h4 class="font-medium text-foreground">Global Voice Input</h4>
+								<p class="text-sm text-muted-foreground">
+									Press hotkey anywhere to start voice-to-text
+								</p>
+							</div>
+							<button
+								role="switch"
+								aria-checked={$hotkeyPreferences.globalSttEnabled}
+								onclick={() => hotkeyPreferences.setGlobalSttEnabled(!$hotkeyPreferences.globalSttEnabled)}
+								class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+									{$hotkeyPreferences.globalSttEnabled ? 'bg-primary' : 'bg-muted'}"
+							>
+								<span class="inline-block h-4 w-4 transform rounded-full bg-white transition
+									{$hotkeyPreferences.globalSttEnabled ? 'translate-x-6' : 'translate-x-1'}" />
+							</button>
+						</div>
+
+						{#if $hotkeyPreferences.globalSttEnabled}
+							<div class="pt-3 border-t border-border">
+								<label class="block text-sm font-medium text-muted-foreground mb-2">Hotkey</label>
+								<HotkeyCapture
+									value={$hotkeyPreferences.globalSttHotkey}
+									onChange={(v) => hotkeyPreferences.setGlobalSttHotkey(v)}
+								/>
+								<p class="text-xs text-muted-foreground mt-2">
+									Click the box above, then press your desired key combination
+								</p>
+							</div>
+						{/if}
+					</div>
+
+					<div class="p-4 bg-muted/50 rounded-lg">
+						<h4 class="text-sm font-medium text-foreground mb-2">How it works</h4>
+						<ul class="text-sm text-muted-foreground space-y-1.5">
+							<li class="flex items-start gap-2">
+								<span class="text-primary mt-0.5">1.</span>
+								Press the hotkey to start recording
+							</li>
+							<li class="flex items-start gap-2">
+								<span class="text-primary mt-0.5">2.</span>
+								Speak your message
+							</li>
+							<li class="flex items-start gap-2">
+								<span class="text-primary mt-0.5">3.</span>
+								Press the hotkey again to stop
+							</li>
+							<li class="flex items-start gap-2">
+								<span class="text-primary mt-0.5">4.</span>
+								Text is copied to clipboard and pasted into any focused input
+							</li>
+						</ul>
+					</div>
 				</div>
 			{/if}
 		</div>

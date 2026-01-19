@@ -314,3 +314,66 @@ export function clearAllShortcuts(): void {
 	shortcuts.clear();
 	detachListener();
 }
+
+/**
+ * Format a hotkey config object for display (used by HotkeyCapture component)
+ */
+export function formatHotkeyConfig(config: {
+	key: string;
+	cmdOrCtrl?: boolean;
+	shift?: boolean;
+	alt?: boolean;
+}): string {
+	const parts: string[] = [];
+
+	if (config.cmdOrCtrl) {
+		parts.push(isMac ? 'Cmd' : 'Ctrl');
+	}
+	if (config.shift) {
+		parts.push('Shift');
+	}
+	if (config.alt) {
+		parts.push(isMac ? 'Option' : 'Alt');
+	}
+
+	// Format the key nicely
+	let keyDisplay = config.key;
+	switch (config.key.toLowerCase()) {
+		case 'enter':
+			keyDisplay = 'Enter';
+			break;
+		case 'escape':
+			keyDisplay = 'Esc';
+			break;
+		case 'arrowup':
+			keyDisplay = 'Up';
+			break;
+		case 'arrowdown':
+			keyDisplay = 'Down';
+			break;
+		case 'arrowleft':
+			keyDisplay = 'Left';
+			break;
+		case 'arrowright':
+			keyDisplay = 'Right';
+			break;
+		case ' ':
+			keyDisplay = 'Space';
+			break;
+		case 'backspace':
+			keyDisplay = 'Backspace';
+			break;
+		case 'delete':
+			keyDisplay = 'Delete';
+			break;
+		case 'tab':
+			keyDisplay = 'Tab';
+			break;
+		default:
+			keyDisplay = config.key.toUpperCase();
+	}
+
+	parts.push(keyDisplay);
+
+	return parts.join('+');
+}
