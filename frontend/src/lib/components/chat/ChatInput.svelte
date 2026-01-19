@@ -806,7 +806,7 @@
 
 							<FileAutocomplete
 								bind:this={fileAutocompleteRef}
-								inputValue={inputValue}
+								inputValue={editorRef?.getText() ?? ''}
 								projectId={liveTab.project}
 								worktreeId={liveTab.executionMode === 'worktree' ? liveTab.worktreeId ?? undefined : undefined}
 								visible={showFileAutocomplete}
