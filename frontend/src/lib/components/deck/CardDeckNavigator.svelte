@@ -33,7 +33,6 @@
 	import ApiUserSessionsList from './ApiUserSessionsList.svelte';
 	import { fly, fade, scale } from 'svelte/transition';
 	import { cubicOut } from 'svelte/easing';
-	import { flip } from 'svelte/animate';
 
 	interface Props {
 		open: boolean;
@@ -1879,7 +1878,6 @@
 									onmousemove={handleCardTiltMove}
 									onmouseleave={handleCardTiltLeave}
 									onanimationend={() => handleCardAnimationEnd(card.id)}
-									animate:flip={{ duration: 250, easing: cubicOut }}
 									role="option"
 									tabindex="0"
 									aria-selected="false"
