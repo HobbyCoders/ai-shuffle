@@ -1603,7 +1603,14 @@
 											<X size={18} />
 										</button>
 										{#if getDeckCards(card.deckId).length > 0}
-											<div class="deck-reel-track" bind:this={wheelScrollRef} onscroll={handleWheelScroll}>
+											<div
+												class="deck-reel-track"
+												bind:this={wheelScrollRef}
+												onscroll={handleWheelScroll}
+												onwheel={(e) => e.stopPropagation()}
+												onmousedown={(e) => e.stopPropagation()}
+												ontouchstart={(e) => e.stopPropagation()}
+											>
 												<div class="deck-reel-spacer"></div>
 												{#each getDeckCards(card.deckId) as item, i}
 													<button
@@ -1792,7 +1799,14 @@
 										<X size={16} />
 									</button>
 									{#if getDeckCards(card.deckId).length > 0}
-										<div class="deck-reel-track" bind:this={wheelScrollRef} onscroll={handleWheelScroll}>
+										<div
+											class="deck-reel-track"
+											bind:this={wheelScrollRef}
+											onscroll={handleWheelScroll}
+											onwheel={(e) => e.stopPropagation()}
+											onmousedown={(e) => e.stopPropagation()}
+											ontouchstart={(e) => e.stopPropagation()}
+										>
 											<div class="deck-reel-spacer"></div>
 											{#each getDeckCards(card.deckId) as item, i}
 												<button
