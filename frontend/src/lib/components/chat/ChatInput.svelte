@@ -76,6 +76,7 @@
 
 	// Input state - use tab.draft for persistence across card switches
 	let inputValue = $state(tab.draft || '');
+	let plainTextValue = $state(''); // Plain text without chip serialization, for autocomplete
 	let uploadedFiles = $state<FileUploadResponse[]>([]);
 	let previousTabId = $state(tab.id);
 	let draftSaveTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -330,8 +331,7 @@
 		showCommandAutocomplete = inputValue.startsWith('/') && inputValue.length > 0;
 		// Use plain text for @ mention detection to avoid false positives from chip @paths
 		// inputValue contains serialized content where chips are @path, which would trigger autocomplete incorrectly
-		const plainText = editorRef?.getText() ?? '';
-		showFileAutocomplete = hasActiveAtMention(plainText) && !!liveTab.project;
+		showFileAutocomplete = hasActiveAtMention(plainTextValue) && !!liveTab.project;
 	}
 
 	// Handle form submission
@@ -806,7 +806,7 @@
 
 							<FileAutocomplete
 								bind:this={fileAutocompleteRef}
-								inputValue={editorRef?.getText() ?? ''}
+								inputValue={plainTextValue}
 								projectId={liveTab.project}
 								worktreeId={liveTab.executionMode === 'worktree' ? liveTab.worktreeId ?? undefined : undefined}
 								visible={showFileAutocomplete}
@@ -821,6 +821,8 @@
 								disabled={!$claudeAuthenticated}
 								onTextChange={(text) => {
 									inputValue = text;
+									// Also update plain text for autocomplete (without chip @path serialization)
+									plainTextValue = editorRef?.getText() ?? '';
 									handleInputChange();
 								}}
 								onKeyDown={handleKeyDown}
