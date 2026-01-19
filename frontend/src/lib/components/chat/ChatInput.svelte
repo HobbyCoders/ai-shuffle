@@ -409,9 +409,17 @@
 			return;
 		}
 
-		// For subagents, immediately invoke the agent
+		// For subagents, insert @[name] reference into input (similar to slash commands)
 		if (file.type === 'subagent' && file.subagent_id) {
-			invokeSubagent(file);
+			const agentReference = `@[${file.name}] `;
+			editorRef?.replaceAtMention(agentReference);
+			// Update inputValue to keep state in sync
+			const atStartIndex = findLastAtMentionIndex(inputValue);
+			if (atStartIndex !== -1) {
+				inputValue = inputValue.substring(0, atStartIndex) + agentReference;
+			}
+			showFileAutocomplete = false;
+			tick().then(() => editorRef?.focus());
 			return;
 		}
 
@@ -434,38 +442,6 @@
 		tick().then(() => editorRef?.focus());
 	}
 
-	/**
-	 * Invoke a subagent immediately when selected from autocomplete
-	 */
-	function invokeSubagent(file: FileItem) {
-		if (!file.subagent_id || !liveTab.project) return;
-
-		showFileAutocomplete = false;
-
-		// Get any text before the @ mention to use as the task prompt
-		const atStartIndex = findLastAtMentionIndex(plainTextValue);
-		let taskPrompt = '';
-		if (atStartIndex > 0) {
-			taskPrompt = plainTextValue.substring(0, atStartIndex).trim();
-		}
-
-		// Clear the input
-		editorRef?.clear();
-		inputValue = '';
-		plainTextValue = '';
-		saveDraftImmediately(tab.id, '');
-
-		// Build a message that will invoke the agent
-		// The format uses natural language to tell Claude to invoke this specific agent
-		const agentName = file.name;
-		const agentId = file.subagent_id;
-		const finalPrompt = taskPrompt
-			? `Use the "${agentName}" agent (${agentId}) for this task: ${taskPrompt}`
-			: `Please run the "${agentName}" agent (${agentId})`;
-
-		// Send the message
-		tabs.sendMessage(tab.id, finalPrompt);
-	}
 
 	// File upload
 	function triggerFileUpload() {

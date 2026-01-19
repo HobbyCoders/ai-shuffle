@@ -141,9 +141,13 @@
       if (a.name === NOTES_FOLDER && b.name !== NOTES_FOLDER) return -1;
       if (b.name === NOTES_FOLDER && a.name !== NOTES_FOLDER) return 1;
 
-      // Directories before files (but not for chat_history/note items which have their own order)
-      if (a.type === 'directory' && b.type !== 'directory' && b.type !== 'chat_history' && b.type !== 'note') return -1;
-      if (b.type === 'directory' && a.type !== 'directory' && a.type !== 'chat_history' && a.type !== 'note') return 1;
+      // Subagents folder third
+      if (a.name === SUBAGENTS_FOLDER && b.name !== SUBAGENTS_FOLDER) return -1;
+      if (b.name === SUBAGENTS_FOLDER && a.name !== SUBAGENTS_FOLDER) return 1;
+
+      // Directories before files (but not for chat_history/note/subagent items which have their own order)
+      if (a.type === 'directory' && b.type !== 'directory' && b.type !== 'chat_history' && b.type !== 'note' && b.type !== 'subagent') return -1;
+      if (b.type === 'directory' && a.type !== 'directory' && a.type !== 'chat_history' && a.type !== 'note' && a.type !== 'subagent') return 1;
 
       // Chat history and note items: preserve backend order (most recent first by updated_at)
       // Don't re-sort them - the backend already sorted by date
