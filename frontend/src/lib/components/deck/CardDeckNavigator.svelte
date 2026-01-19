@@ -17,7 +17,7 @@
 	 * - Custom deck management
 	 */
 
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import {
 		MessageSquare, Terminal, Clock,
 		Settings, FolderOpen, X, Files, User, Users, Pencil, Check,
@@ -33,7 +33,6 @@
 	import ApiUserSessionsList from './ApiUserSessionsList.svelte';
 	import { fly, fade, scale } from 'svelte/transition';
 	import { cubicOut } from 'svelte/easing';
-	import { flip } from 'svelte/animate';
 
 	interface Props {
 		open: boolean;
@@ -147,6 +146,10 @@
 	let showRenameDeckDialog = $state(false);
 	let renameDeckId = $state<string | null>(null);
 	let renameDeckName = $state('');
+
+	// Expanded deck wheel state (slot machine inline expansion)
+	let expandedDeckId = $state<string | null>(null);
+	let wheelScrollRef = $state<HTMLDivElement | null>(null);
 
 	// 3D tilt effect state (desktop cards)
 	// Track cards that have completed their entrance animation
@@ -594,7 +597,7 @@
 		} else if (card.type === 'category' && card.category) {
 			navigateToCategory(card);
 		} else if (card.type === 'deck' && card.deckId) {
-			navigateToDeck(card.deckId, card.title);
+			toggleDeckExpansion(card.deckId);
 		} else if (card.type === 'thread' && card.sessionId) {
 			onOpenThread(card.sessionId);
 			onClose();
@@ -636,13 +639,82 @@
 		resetMobileCarousel();
 	}
 
-	// Navigate to custom deck
-	function navigateToDeck(deckId: string, name: string) {
-		currentView = 'deck';
-		currentDeckId = deckId;
-		navStack = [...navStack, { id: deckId, name, type: 'deck' }];
-		if (carouselRef) carouselRef.scrollLeft = 0;
-		resetMobileCarousel();
+	// Toggle deck expansion for slot machine wheel
+	async function toggleDeckExpansion(deckId: string) {
+		if (expandedDeckId === deckId) {
+			expandedDeckId = null;
+		} else {
+			expandedDeckId = deckId;
+			await tick(); // Wait for DOM to update
+			initWheelScroll();
+		}
+	}
+
+	// Close expanded deck reel
+	function closeDeckReel(e: MouseEvent) {
+		e.stopPropagation();
+		expandedDeckId = null;
+	}
+
+	// True infinite scroll: 3 copies (buffer-middle-buffer), teleport when hitting edges
+	function getWrappedDeckCards(deckId: string): NavigatorCard[] {
+		const realCards = getDeckCards(deckId);
+		if (realCards.length <= 1) return realCards;
+
+		// Create 3 copies for infinite scroll teleportation
+		return Array.from({ length: 3 }, (_, r) =>
+			realCards.map(card => ({ ...card, id: `r${r}-${card.id}` }))
+		).flat();
+	}
+
+	// Get item height from DOM for accurate scroll calculations
+	function getReelItemHeight(): number {
+		if (!wheelScrollRef) return isMobile ? 389 : 172; // Fallback
+		const firstCard = wheelScrollRef.querySelector('.deck-reel-card') as HTMLElement;
+		if (!firstCard) return isMobile ? 389 : 172;
+		// Card height + margin (12px desktop, 16px mobile)
+		return firstCard.offsetHeight + (isMobile ? 16 : 12);
+	}
+
+	function initWheelScroll() {
+		if (!wheelScrollRef || !expandedDeckId) return;
+		const realCards = getDeckCards(expandedDeckId);
+		if (realCards.length <= 1) return;
+
+		const itemHeight = getReelItemHeight();
+		const middleStart = realCards.length * itemHeight;
+		wheelScrollRef.scrollTop = middleStart;
+	}
+
+	function handleReelScroll(e: Event) {
+		if (!expandedDeckId) return;
+		const container = e.target as HTMLDivElement;
+		const realCards = getDeckCards(expandedDeckId);
+		if (realCards.length <= 1) return;
+
+		const itemHeight = getReelItemHeight();
+		const cycleHeight = realCards.length * itemHeight;
+		const scrollTop = container.scrollTop;
+
+		// If scrolled into top buffer, teleport to equivalent position in middle
+		if (scrollTop < cycleHeight * 0.5) {
+			container.scrollTop = scrollTop + cycleHeight;
+		}
+		// If scrolled into bottom buffer, teleport to equivalent position in middle
+		else if (scrollTop > cycleHeight * 1.5) {
+			container.scrollTop = scrollTop - cycleHeight;
+		}
+	}
+
+	function handleWheelItemSelect(card: NavigatorCard) {
+		expandedDeckId = null;
+
+		if (card.type === 'action' && card.action) {
+			handleAction(card.action);
+		} else if (card.type === 'thread' && card.sessionId) {
+			onOpenThread(card.sessionId);
+			onClose();
+		}
 	}
 
 	// Navigate back via breadcrumb
@@ -1547,91 +1619,139 @@
 							out:fly={{ y: -30, duration: 200, easing: cubicOut }}
 						>
 							{#each displayCards as card, index (card.id)}
-								<button
-									class="mobile-card"
-									class:active={index === mobileCurrentIndex}
-									class:thread-card={card.type === 'thread'}
-									class:deck-card={card.type === 'deck'}
-									class:add-deck-card={card.type === 'add-deck'}
-									class:is-being-dragged={isPointerDragging && card.id === draggedCardId}
-									class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
-									data-ai-active={card.isStreaming}
-									data-has-children={card.hasChildren}
-									data-card-id={card.id}
-									style:--deck-color={card.iconColor}
-									style:--card-index={index}
-									onclick={(e) => handleCardClick(card, e)}
-									oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
-									aria-current={index === mobileCurrentIndex ? 'true' : undefined}
-									aria-label="{card.title}: {card.subtitle}"
-								>
-									{#if isEditMode && card.type !== 'add-deck'}
-										<!-- Mobile reorder buttons - simple tap to move -->
-										<!-- svelte-ignore a11y_no_static_element_interactions -->
-										<div class="mobile-reorder-controls">
-											<!-- svelte-ignore a11y_click_events_have_key_events -->
+								{#if card.type === 'deck' && card.deckId && expandedDeckId === card.deckId}
+									<!-- Mobile Expanded Deck: Borderless Slot Machine Reel -->
+									{@const wrappedCards = getWrappedDeckCards(card.deckId)}
+									<div
+										class="deck-reel mobile"
+										data-card-id={card.id}
+										style:--deck-color={card.iconColor}
+										role="listbox"
+										aria-label="{card.title} deck contents"
+									>
+										<button
+											class="deck-reel-close"
+											onclick={closeDeckReel}
+											aria-label="Close deck"
+										>
+											<X size={18} />
+										</button>
+										{#if wrappedCards.length > 0}
 											<div
-												class="mobile-reorder-btn"
-												class:disabled={pendingCardOrder.indexOf(card.id) <= 0}
-												onclick={(e) => moveCardLeft(card.id, e)}
-												role="button"
-												tabindex="-1"
-												aria-label="Move left"
+												class="deck-reel-track"
+												bind:this={wheelScrollRef}
+												onscroll={handleReelScroll}
+												onwheel={(e) => e.stopPropagation()}
+												onmousedown={(e) => e.stopPropagation()}
+												ontouchstart={(e) => e.stopPropagation()}
 											>
-												<ChevronLeft size={18} strokeWidth={2.5} />
+												{#each wrappedCards as item (item.id)}
+													<button
+														class="deck-reel-card"
+														onclick={() => handleWheelItemSelect(item)}
+													>
+														<div class="deck-reel-card-inner">
+															<div class="mobile-card-icon" style:--icon-color={item.iconColor}>
+																<item.icon size={28} strokeWidth={1.5} />
+															</div>
+															<span class="mobile-card-label">{item.title}</span>
+															<span class="mobile-card-description">{item.subtitle}</span>
+														</div>
+													</button>
+												{/each}
 											</div>
-											<!-- svelte-ignore a11y_click_events_have_key_events -->
-											<div
-												class="mobile-reorder-btn"
-												class:disabled={pendingCardOrder.indexOf(card.id) >= pendingCardOrder.length - 1}
-												onclick={(e) => moveCardRight(card.id, e)}
-												role="button"
-												tabindex="-1"
-												aria-label="Move right"
-											>
-												<ChevronRight size={18} strokeWidth={2.5} />
-											</div>
-										</div>
-									{/if}
-
-									{#if card.isStreaming}
-										<div class="mobile-card-status">
-											<span class="status-dot"></span>
-											Streaming
-										</div>
-									{/if}
-
-									<div class="mobile-card-icon" style:--icon-color={card.iconColor}>
-										<card.icon size={32} strokeWidth={1.5} />
+										{:else}
+											<div class="deck-reel-empty">Empty deck</div>
+										{/if}
 									</div>
+								{:else}
+									<!-- Normal Mobile Card -->
+									<button
+										class="mobile-card"
+										class:active={index === mobileCurrentIndex}
+										class:thread-card={card.type === 'thread'}
+										class:deck-card={card.type === 'deck'}
+										class:add-deck-card={card.type === 'add-deck'}
+										class:is-being-dragged={isPointerDragging && card.id === draggedCardId}
+										class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
+										data-ai-active={card.isStreaming}
+										data-has-children={card.hasChildren}
+										data-card-id={card.id}
+										style:--deck-color={card.iconColor}
+										style:--card-index={index}
+										onclick={(e) => handleCardClick(card, e)}
+										oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
+										aria-current={index === mobileCurrentIndex ? 'true' : undefined}
+										aria-label="{card.title}: {card.subtitle}"
+									>
+										{#if isEditMode && card.type !== 'add-deck'}
+											<!-- Mobile reorder buttons - simple tap to move -->
+											<!-- svelte-ignore a11y_no_static_element_interactions -->
+											<div class="mobile-reorder-controls">
+												<!-- svelte-ignore a11y_click_events_have_key_events -->
+												<div
+													class="mobile-reorder-btn"
+													class:disabled={pendingCardOrder.indexOf(card.id) <= 0}
+													onclick={(e) => moveCardLeft(card.id, e)}
+													role="button"
+													tabindex="-1"
+													aria-label="Move left"
+												>
+													<ChevronLeft size={18} strokeWidth={2.5} />
+												</div>
+												<!-- svelte-ignore a11y_click_events_have_key_events -->
+												<div
+													class="mobile-reorder-btn"
+													class:disabled={pendingCardOrder.indexOf(card.id) >= pendingCardOrder.length - 1}
+													onclick={(e) => moveCardRight(card.id, e)}
+													role="button"
+													tabindex="-1"
+													aria-label="Move right"
+												>
+													<ChevronRight size={18} strokeWidth={2.5} />
+												</div>
+											</div>
+										{/if}
 
-									<span class="mobile-card-label">{card.title}</span>
+										{#if card.isStreaming}
+											<div class="mobile-card-status">
+												<span class="status-dot"></span>
+												Streaming
+											</div>
+										{/if}
 
-									{#if card.type === 'thread'}
-										<div class="mobile-card-meta">
-											{#if card.lastActive}
-												<span class="meta-item">
-													<Clock size={14} />
-													{card.lastActive}
-												</span>
-											{/if}
-											{#if card.messageCount}
-												<span class="meta-item">
-													<MessageSquare size={14} />
-													{card.messageCount}
-												</span>
-											{/if}
+										<div class="mobile-card-icon" style:--icon-color={card.iconColor}>
+											<card.icon size={32} strokeWidth={1.5} />
 										</div>
-									{:else if card.subtitle}
-										<span class="mobile-card-description">{card.subtitle}</span>
-									{/if}
 
-									{#if card.hasChildren}
-										<div class="mobile-card-chevron">
-											<ChevronRight size={20} />
-										</div>
-									{/if}
-								</button>
+										<span class="mobile-card-label">{card.title}</span>
+
+										{#if card.type === 'thread'}
+											<div class="mobile-card-meta">
+												{#if card.lastActive}
+													<span class="meta-item">
+														<Clock size={14} />
+														{card.lastActive}
+													</span>
+												{/if}
+												{#if card.messageCount}
+													<span class="meta-item">
+														<MessageSquare size={14} />
+														{card.messageCount}
+													</span>
+												{/if}
+											</div>
+										{:else if card.subtitle}
+											<span class="mobile-card-description">{card.subtitle}</span>
+										{/if}
+
+										{#if card.hasChildren}
+											<div class="mobile-card-chevron">
+												<ChevronRight size={20} />
+											</div>
+										{/if}
+									</button>
+								{/if}
 							{/each}
 
 							{#if currentCards.length === 0}
@@ -1691,78 +1811,125 @@
 						out:fly={{ x: -100, duration: 200, easing: cubicOut }}
 					>
 						{#each displayCards as card, index (card.id)}
-							<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-							<article
-								class="card"
-								class:thread-card={card.type === 'thread'}
-								class:deck-card={card.type === 'deck'}
-								class:add-deck-card={card.type === 'add-deck'}
-								class:is-being-dragged={isPointerDragging && card.id === draggedCardId}
-								class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
-								class:animation-complete={animationCompleteCards.has(card.id)}
-								data-ai-active={card.isStreaming}
-								data-has-children={card.hasChildren}
-								data-card-id={card.id}
-								style:animation-delay="{index * 50}ms"
-								style:--deck-color={card.iconColor}
-								onclick={(e) => handleCardClick(card, e)}
-								oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
-								onkeydown={(e) => e.key === 'Enter' && handleCardClick(card, e as unknown as MouseEvent)}
-								onmousemove={handleCardTiltMove}
-								onmouseleave={handleCardTiltLeave}
-								onanimationend={() => handleCardAnimationEnd(card.id)}
-								role="option"
-								tabindex="0"
-								aria-selected="false"
-								animate:flip={{ duration: 250, easing: cubicOut }}
-							>
-								<div class="card-inner">
-									{#if isEditMode && card.type !== 'add-deck'}
-										<!-- svelte-ignore a11y_no_static_element_interactions -->
+							{#if card.type === 'deck' && card.deckId && expandedDeckId === card.deckId}
+								<!-- Expanded Deck: Borderless Slot Machine Reel -->
+								{@const wrappedCards = getWrappedDeckCards(card.deckId)}
+								<div
+									class="deck-reel"
+									data-card-id={card.id}
+									style:--deck-color={card.iconColor}
+									role="listbox"
+									aria-label="{card.title} deck contents"
+								>
+									<button
+										class="deck-reel-close"
+										onclick={closeDeckReel}
+										aria-label="Close deck"
+									>
+										<X size={16} />
+									</button>
+									{#if wrappedCards.length > 0}
 										<div
-											class="drag-handle"
-											onpointerdown={(e) => handleDragHandlePointerDown(e, card, index)}
+											class="deck-reel-track"
+											bind:this={wheelScrollRef}
+											onscroll={handleReelScroll}
+											onwheel={(e) => e.stopPropagation()}
+											onmousedown={(e) => e.stopPropagation()}
+											ontouchstart={(e) => e.stopPropagation()}
 										>
-											<GripVertical size={16} />
+											{#each wrappedCards as item (item.id)}
+												<button
+													class="deck-reel-card"
+													onclick={() => handleWheelItemSelect(item)}
+												>
+													<div class="deck-reel-card-inner">
+														<div class="card-icon" style:--icon-color={item.iconColor}>
+															<item.icon size={20} strokeWidth={1.75} />
+														</div>
+														<h3 class="card-title">{item.title}</h3>
+														<p class="card-subtitle">{item.subtitle}</p>
+													</div>
+												</button>
+											{/each}
 										</div>
-									{/if}
-
-									{#if card.isStreaming}
-										<div class="card-status">Streaming</div>
-									{/if}
-
-									<div class="card-icon" style:--icon-color={card.iconColor}>
-										<card.icon size={20} strokeWidth={1.75} />
-									</div>
-
-									<h3 class="card-title">{card.title}</h3>
-
-									{#if card.type === 'thread'}
-										<div class="card-meta">
-											{#if card.lastActive}
-												<span class="card-meta-item">
-													<Clock size={12} />
-													{card.lastActive}
-												</span>
-											{/if}
-											{#if card.messageCount}
-												<span class="card-meta-item">
-													<MessageSquare size={12} />
-													{card.messageCount}
-												</span>
-											{/if}
-										</div>
-									{:else if card.subtitle}
-										<p class="card-subtitle">{card.subtitle}</p>
-									{/if}
-
-									{#if card.hasChildren}
-										<div class="card-chevron">
-											<ChevronRight size={16} />
-										</div>
+									{:else}
+										<div class="deck-reel-empty">Empty deck</div>
 									{/if}
 								</div>
-							</article>
+							{:else}
+								<!-- Normal Card -->
+								<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+								<article
+									class="card"
+									class:thread-card={card.type === 'thread'}
+									class:deck-card={card.type === 'deck'}
+									class:add-deck-card={card.type === 'add-deck'}
+									class:is-being-dragged={isPointerDragging && card.id === draggedCardId}
+									class:drop-into-deck={card.type === 'deck' && card.deckId === dragOverDeckId}
+									class:animation-complete={animationCompleteCards.has(card.id)}
+									data-ai-active={card.isStreaming}
+									data-has-children={card.hasChildren}
+									data-card-id={card.id}
+									style:animation-delay="{index * 50}ms"
+									style:--deck-color={card.iconColor}
+									onclick={(e) => handleCardClick(card, e)}
+									oncontextmenu={(e) => isEditMode && showContextMenu(card.id, e)}
+									onkeydown={(e) => e.key === 'Enter' && handleCardClick(card, e as unknown as MouseEvent)}
+									onmousemove={handleCardTiltMove}
+									onmouseleave={handleCardTiltLeave}
+									onanimationend={() => handleCardAnimationEnd(card.id)}
+									role="option"
+									tabindex="0"
+									aria-selected="false"
+								>
+									<div class="card-inner">
+										{#if isEditMode && card.type !== 'add-deck'}
+											<!-- svelte-ignore a11y_no_static_element_interactions -->
+											<div
+												class="drag-handle"
+												onpointerdown={(e) => handleDragHandlePointerDown(e, card, index)}
+											>
+												<GripVertical size={16} />
+											</div>
+										{/if}
+
+										{#if card.isStreaming}
+											<div class="card-status">Streaming</div>
+										{/if}
+
+										<div class="card-icon" style:--icon-color={card.iconColor}>
+											<card.icon size={20} strokeWidth={1.75} />
+										</div>
+
+										<h3 class="card-title">{card.title}</h3>
+
+										{#if card.type === 'thread'}
+											<div class="card-meta">
+												{#if card.lastActive}
+													<span class="card-meta-item">
+														<Clock size={12} />
+														{card.lastActive}
+													</span>
+												{/if}
+												{#if card.messageCount}
+													<span class="card-meta-item">
+														<MessageSquare size={12} />
+														{card.messageCount}
+													</span>
+												{/if}
+											</div>
+										{:else if card.subtitle}
+											<p class="card-subtitle">{card.subtitle}</p>
+										{/if}
+
+										{#if card.hasChildren}
+											<div class="card-chevron">
+												<ChevronRight size={16} />
+											</div>
+										{/if}
+									</div>
+								</article>
+							{/if}
 						{/each}
 
 						{#if currentCards.length === 0}
@@ -3299,6 +3466,193 @@
 	/* ========================================
 	   REDUCED MOTION
 	   ======================================== */
+	/* ========================================
+	   DECK REEL (Borderless Slot Machine)
+	   ======================================== */
+
+	/* Borderless Deck Reel - shows full-sized cards vertically */
+	.deck-reel {
+		position: relative;
+		width: var(--card-width);
+		/* Height shows ~2.5 cards: center card full, top/bottom partial */
+		height: calc(var(--card-height) * 2.5);
+		flex-shrink: 0;
+		/* No overflow hidden - close button needs to appear outside */
+	}
+
+	/* Floating close button */
+	.deck-reel-close {
+		position: absolute;
+		top: 8px;
+		right: -40px;
+		z-index: 10;
+		width: 32px;
+		height: 32px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--bg-card);
+		border: 1px solid var(--border-default);
+		border-radius: 50%;
+		color: var(--text-secondary);
+		cursor: pointer;
+		opacity: 0.8;
+		transition: all 0.15s ease;
+		box-shadow: var(--shadow-m);
+	}
+
+	.deck-reel-close:hover {
+		opacity: 1;
+		background: var(--bg-card-hover);
+		color: var(--text-primary);
+		border-color: var(--border-strong);
+	}
+
+	/* Scrollable track - simple native scroll, no snap */
+	.deck-reel-track {
+		width: 100%;
+		height: 100%;
+		overflow-y: auto;
+		overflow-x: hidden;
+		scrollbar-width: none;
+		-webkit-overflow-scrolling: touch;
+	}
+
+	.deck-reel-track::-webkit-scrollbar {
+		display: none;
+	}
+
+	/* Full-sized card items */
+	.deck-reel-card {
+		display: block;
+		width: 100%;
+		height: var(--card-height);
+		margin-bottom: 12px;
+		padding: 0;
+		border: none;
+		background: transparent;
+		cursor: pointer;
+		font-family: inherit;
+	}
+
+	.deck-reel-card:last-of-type {
+		margin-bottom: 0;
+	}
+
+	/* Card inner - matches normal card styling */
+	.deck-reel-card-inner {
+		width: 100%;
+		height: 100%;
+		background: var(--bg-card);
+		border: 1px solid var(--border-subtle);
+		border-radius: calc(var(--radius, 0.75rem) * 1.167);
+		padding: 20px;
+		display: flex;
+		flex-direction: column;
+		box-shadow: var(--shadow-m);
+		transition: all 0.2s ease;
+	}
+
+	.deck-reel-card:hover .deck-reel-card-inner {
+		background: var(--bg-card-hover);
+		border-color: var(--primary);
+	}
+
+	/* Reuse existing card-icon, card-title, card-subtitle styles */
+	.deck-reel-card .card-icon {
+		width: 40px;
+		height: 40px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md);
+		margin-bottom: 16px;
+		color: var(--icon-color, var(--text-secondary));
+		transition: all 0.2s ease;
+	}
+
+
+	.deck-reel-card .card-title {
+		font-size: 0.9375rem;
+		font-weight: 600;
+		color: var(--text-primary);
+		margin: 0 0 4px 0;
+	}
+
+	.deck-reel-card .card-subtitle {
+		font-size: 0.8125rem;
+		color: var(--text-muted);
+		margin: 0;
+	}
+
+	/* Mobile deck reel */
+	.deck-reel.mobile {
+		width: min(75vw, 280px);
+		/* Taller for mobile cards with 3:4 aspect ratio */
+		height: calc(min(75vw, 280px) * 4 / 3 * 2);
+	}
+
+	.deck-reel.mobile .deck-reel-card {
+		width: 100%;
+		aspect-ratio: 3 / 4;
+		height: auto;
+		margin-bottom: 16px;
+	}
+
+	.deck-reel.mobile .deck-reel-card-inner {
+		padding: 1.5rem 1rem;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 0.75rem;
+		text-align: center;
+	}
+
+	.deck-reel.mobile .deck-reel-close {
+		right: -36px;
+	}
+
+	/* Reuse mobile card icon styling */
+	.deck-reel.mobile .mobile-card-icon {
+		width: 64px;
+		height: 64px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: var(--radius-lg);
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-subtle);
+		color: var(--icon-color, var(--text-secondary));
+		transition: all 0.15s ease;
+	}
+
+
+	.deck-reel.mobile .mobile-card-label {
+		font-size: 0.9rem;
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		color: var(--text-primary);
+		text-transform: uppercase;
+	}
+
+	.deck-reel.mobile .mobile-card-description {
+		font-size: 0.8rem;
+		color: var(--text-muted);
+	}
+
+	/* Empty state */
+	.deck-reel-empty {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		height: 100%;
+		color: var(--text-muted);
+		font-size: 0.875rem;
+	}
+
 	@media (prefers-reduced-motion: reduce) {
 		*, *::before, *::after {
 			animation-duration: 0.01ms !important;

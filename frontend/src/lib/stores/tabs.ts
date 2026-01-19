@@ -4684,8 +4684,8 @@ function createTabsStore() {
 				};
 
 				// Restore worktree state if session was created in worktree mode
-				const worktreeId = (session as Record<string, unknown>).worktree_id as string | undefined;
-				const worktreeBranch = (session as Record<string, unknown>).worktree_branch as string | undefined;
+				const worktreeId = (session as unknown as Record<string, unknown>).worktree_id as string | undefined;
+				const worktreeBranch = (session as unknown as Record<string, unknown>).worktree_branch as string | undefined;
 				if (worktreeId && worktreeBranch) {
 					tabUpdate.executionMode = 'worktree';
 					tabUpdate.worktreeId = worktreeId;

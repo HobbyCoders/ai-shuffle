@@ -26,10 +26,10 @@
 	let userExpandedChoice = $state(false);
 
 	// Subscribe to preferences on mount (client-side only)
-	onMount(async () => {
+	onMount(() => {
 		// Get current value immediately (may have been updated before mount)
 		prefs = get(chatPreferences);
-		await tick(); // Force re-render with current preferences
+		tick(); // Force re-render with current preferences
 
 		// Subscribe to future changes
 		const unsubscribe = chatPreferences.subscribe(p => {
