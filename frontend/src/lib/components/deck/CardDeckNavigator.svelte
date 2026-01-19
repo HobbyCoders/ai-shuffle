@@ -1404,13 +1404,13 @@
 		mobileCarouselRef.scrollTo({ left: offset, behavior: 'smooth' });
 	}
 
-	// Find closest mobile card to center - extracted for reuse
+	// Find closest carousel item (mobile card or expanded deck folder) to center
 	function findClosestMobileCardIndex(): number {
 		if (!mobileCarouselRef) return mobileCurrentIndex;
 
 		const carouselRect = mobileCarouselRef.getBoundingClientRect();
 		const carouselCenter = carouselRect.left + carouselRect.width / 2;
-		const cardElements = mobileCarouselRef.querySelectorAll('.mobile-card');
+		const cardElements = mobileCarouselRef.querySelectorAll('.mobile-card, .deck-reel');
 
 		let closestIndex = 0;
 		let closestDistance = Infinity;
@@ -3590,8 +3590,8 @@
 	/* Mobile deck reel */
 	.deck-reel.mobile {
 		width: min(75vw, 280px);
-		/* Taller for mobile cards with 3:4 aspect ratio */
 		height: calc(min(75vw, 280px) * 4 / 3 * 2);
+		scroll-snap-align: center;
 	}
 
 	.deck-reel.mobile .deck-reel-card {
