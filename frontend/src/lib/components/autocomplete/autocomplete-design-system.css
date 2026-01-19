@@ -323,6 +323,14 @@
   border: 1px solid color-mix(in oklch, var(--feature-skills, oklch(0.65 0.18 145)) 25%, transparent);
 }
 
+/* Subagent types */
+.autocomplete-badge.type-subagents,
+.autocomplete-badge.type-subagent {
+  background: color-mix(in oklch, var(--feature-agents, oklch(0.65 0.20 300)) 15%, transparent);
+  color: var(--feature-agents, oklch(0.65 0.20 300));
+  border: 1px solid color-mix(in oklch, var(--feature-agents, oklch(0.65 0.20 300)) 25%, transparent);
+}
+
 /* ========================================
    File Icons - Semantic Colors
    ======================================== */
@@ -341,6 +349,11 @@
 
 .autocomplete-icon-notes {
   color: var(--feature-skills, oklch(0.65 0.18 145));
+}
+
+.autocomplete-icon-subagents,
+.autocomplete-icon-subagent {
+  color: var(--feature-agents, oklch(0.65 0.20 300));
 }
 
 /* ========================================

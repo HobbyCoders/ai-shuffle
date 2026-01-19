@@ -6,9 +6,10 @@ from typing import List, Optional
 from datetime import datetime
 import re
 
-from fastapi import APIRouter, HTTPException, Depends, status, Request
+from fastapi import APIRouter, HTTPException, Depends, status, Request, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from pathlib import Path
 
 from app.core.models import (
     Profile, ProfileCreate, ProfileUpdate,
@@ -16,6 +17,9 @@ from app.core.models import (
 )
 from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
+from app.core.plugin_service import get_plugin_service
+from app.core.project_agent_service import get_project_agent_service
+from app.core.config import settings
 
 router = APIRouter(prefix="/api/v1/profiles", tags=["Profiles"])
 
@@ -38,6 +42,19 @@ class SubagentResponse(BaseModel):
 class EnabledAgentsRequest(BaseModel):
     """Request to update enabled agents for a profile"""
     enabled_agents: List[str] = Field(..., description="List of subagent IDs to enable")
+
+
+# Unified subagent item for autocomplete
+class UnifiedSubagentItem(BaseModel):
+    """Unified subagent item for autocomplete - aggregates from all sources"""
+    id: str
+    name: str
+    description: str
+    prompt: str
+    tools: Optional[List[str]] = None
+    model: Optional[str] = None
+    source: str = Field(..., description="Source: 'profile', 'plugin', or 'project'")
+    source_name: Optional[str] = Field(None, description="Name of the source (e.g., plugin name)")
 
 
 @router.get("", response_model=List[Profile])
@@ -139,6 +156,151 @@ async def get_profile_agents(
             ))
 
     return agents
+
+
+@router.get("/{profile_id}/subagents/all", response_model=List[UnifiedSubagentItem])
+async def get_all_available_subagents(
+    request: Request,
+    profile_id: str,
+    project_id: Optional[str] = Query(None, description="Project ID to include project agents"),
+    search: str = Query("", description="Search filter for name/description"),
+    limit: int = Query(30, ge=1, le=50, description="Maximum number of results"),
+    token: str = Depends(require_auth)
+):
+    """
+    Get all available subagents for autocomplete from multiple sources:
+    1. Profile-enabled subagents (from database)
+    2. Plugin file-based agents (from enabled plugins)
+    3. Project agents (if project_id provided)
+
+    Returns a unified list with source information for each agent.
+    Deduplication is handled with priority: profile > project > plugin.
+    """
+    api_user = get_api_user_from_request(request)
+
+    # Check if API user is restricted to specific profiles
+    profile_ids = api_user.get("profile_ids") if api_user else None
+    if profile_ids:
+        if profile_id not in profile_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this profile"
+            )
+
+    profile = database.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Profile not found: {profile_id}"
+        )
+
+    # Track seen IDs for deduplication (profile > project > plugin priority)
+    seen_ids: set = set()
+    result: List[UnifiedSubagentItem] = []
+    search_lower = search.lower() if search else ""
+
+    # 1. Profile-enabled subagents (highest priority)
+    enabled_agent_ids = profile.get("config", {}).get("enabled_agents", [])
+    for agent_id in enabled_agent_ids:
+        subagent = database.get_subagent(agent_id)
+        if subagent:
+            # Apply search filter
+            if search_lower:
+                name_match = search_lower in subagent["name"].lower()
+                desc_match = search_lower in subagent["description"].lower()
+                if not (name_match or desc_match):
+                    continue
+
+            seen_ids.add(agent_id)
+            result.append(UnifiedSubagentItem(
+                id=subagent["id"],
+                name=subagent["name"],
+                description=subagent["description"],
+                prompt=subagent["prompt"],
+                tools=subagent.get("tools"),
+                model=subagent.get("model"),
+                source="profile",
+                source_name=profile.get("name", profile_id)
+            ))
+
+    # 2. Project agents (if project_id provided)
+    if project_id:
+        project = database.get_project(project_id)
+        if project:
+            project_path = settings.effective_workspace_dir / project["path"]
+            try:
+                project_agent_service = get_project_agent_service(project_path)
+                for agent in project_agent_service.get_agents():
+                    agent_id = f"project:{agent.name}"
+
+                    # Skip if already seen
+                    if agent_id in seen_ids:
+                        continue
+
+                    # Apply search filter
+                    if search_lower:
+                        name_match = search_lower in agent.name.lower()
+                        desc_match = search_lower in agent.description.lower()
+                        if not (name_match or desc_match):
+                            continue
+
+                    seen_ids.add(agent_id)
+
+                    # Need to get full agent details for prompt
+                    agent_detail = project_agent_service.get_agent(agent.name)
+                    result.append(UnifiedSubagentItem(
+                        id=agent_id,
+                        name=agent.name,
+                        description=agent.description,
+                        prompt=agent_detail.prompt if agent_detail else "",
+                        tools=agent.tools,
+                        model=agent.model,
+                        source="project",
+                        source_name=project.get("name", project_id)
+                    ))
+            except Exception as e:
+                # Log but don't fail if project agents can't be loaded
+                import logging
+                logging.warning(f"Failed to load project agents for {project_id}: {e}")
+
+    # 3. Plugin file-based agents (lowest priority)
+    try:
+        plugin_service = get_plugin_service()
+        for agent in plugin_service.get_file_based_agents():
+            agent_id = agent.get("id", "")
+
+            # Skip if already seen
+            if agent_id in seen_ids:
+                continue
+
+            agent_name = agent.get("name", "")
+            agent_desc = agent.get("description", "")
+
+            # Apply search filter
+            if search_lower:
+                name_match = search_lower in agent_name.lower()
+                desc_match = search_lower in agent_desc.lower()
+                if not (name_match or desc_match):
+                    continue
+
+            seen_ids.add(agent_id)
+            result.append(UnifiedSubagentItem(
+                id=agent_id,
+                name=agent_name,
+                description=agent_desc,
+                prompt=agent.get("prompt", ""),
+                tools=agent.get("tools"),
+                model=agent.get("model"),
+                source="plugin",
+                source_name=agent.get("source_plugin")
+            ))
+    except Exception as e:
+        # Log but don't fail if plugin agents can't be loaded
+        import logging
+        logging.warning(f"Failed to load plugin agents: {e}")
+
+    # Apply limit
+    return result[:limit]
 
 
 # Request model for creating/updating a subagent via profile
