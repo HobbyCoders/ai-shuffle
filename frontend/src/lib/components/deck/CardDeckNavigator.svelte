@@ -665,8 +665,8 @@
 	// Handle wheel scroll for selection tracking
 	function handleWheelScroll(e: Event) {
 		const container = e.target as HTMLDivElement;
-		// Card height + gap: desktop 160px + 12px gap, mobile uses aspect ratio ~200px + 16px gap
-		const itemHeight = isMobile ? 216 : 172;
+		// Card height + margin: desktop 160px + 12px, mobile ~373px (280 * 4/3) + 16px
+		const itemHeight = isMobile ? 389 : 172;
 		wheelSelectedIndex = Math.max(0, Math.round(container.scrollTop / itemHeight));
 	}
 
@@ -3434,13 +3434,11 @@
 	/* Borderless Deck Reel - shows full-sized cards vertically */
 	.deck-reel {
 		position: relative;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
 		width: var(--card-width);
-		/* Height shows ~3 cards: center card full, top/bottom partial */
+		/* Height shows ~2.5 cards: center card full, top/bottom partial */
 		height: calc(var(--card-height) * 2.5);
 		flex-shrink: 0;
+		overflow: hidden;
 	}
 
 	/* Floating close button */
@@ -3471,18 +3469,15 @@
 		border-color: var(--border-strong);
 	}
 
-	/* Scrollable track - no visible container */
+	/* Scrollable track */
 	.deck-reel-track {
 		width: 100%;
 		height: 100%;
 		overflow-y: scroll;
+		overflow-x: hidden;
 		scroll-snap-type: y mandatory;
 		scrollbar-width: none;
 		-webkit-overflow-scrolling: touch;
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-		padding: 0 4px;
 	}
 
 	.deck-reel-track::-webkit-scrollbar {
@@ -3492,15 +3487,15 @@
 	/* Spacers for centering first/last items */
 	.deck-reel-spacer {
 		/* Half the container height minus half a card = centers first/last card */
-		height: calc(var(--card-height) * 0.75 - 6px);
-		flex-shrink: 0;
+		height: calc(var(--card-height) * 0.75);
 	}
 
 	/* Full-sized card items */
 	.deck-reel-card {
-		flex-shrink: 0;
+		display: block;
 		width: 100%;
 		height: var(--card-height);
+		margin-bottom: 12px;
 		padding: 0;
 		border: none;
 		background: transparent;
@@ -3510,6 +3505,10 @@
 		font-family: inherit;
 		/* Non-selected cards are dimmed */
 		opacity: 0.5;
+	}
+
+	.deck-reel-card:last-of-type {
+		margin-bottom: 0;
 	}
 
 	.deck-reel-card:hover:not(.selected) {
@@ -3589,18 +3588,15 @@
 		height: calc(min(75vw, 280px) * 4 / 3 * 2);
 	}
 
-	.deck-reel.mobile .deck-reel-track {
-		gap: 16px;
-	}
-
 	.deck-reel.mobile .deck-reel-spacer {
-		height: calc(min(75vw, 280px) * 4 / 3 * 0.5 - 8px);
+		height: calc(min(75vw, 280px) * 4 / 3 * 0.5);
 	}
 
 	.deck-reel.mobile .deck-reel-card {
 		width: 100%;
 		aspect-ratio: 3 / 4;
 		height: auto;
+		margin-bottom: 16px;
 	}
 
 	.deck-reel.mobile .deck-reel-card-inner {
