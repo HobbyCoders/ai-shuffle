@@ -13,6 +13,7 @@
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import { AUTO_COMPACTION_BASE, CONTEXT_MAX } from '$lib/constants/chat';
+	import TiptapEditor from './TiptapEditor.svelte';
 
 	interface Command {
 		name: string;
@@ -124,7 +125,7 @@
 	onDestroy(() => {
 		saveDraftImmediately(tab.id, inputValue);
 	});
-	let textareaRef = $state<HTMLTextAreaElement | null>(null);
+	let editorRef = $state<TiptapEditor | null>(null);
 	let fileInputRef = $state<HTMLInputElement | null>(null);
 	let isUploading = $state(false);
 
@@ -330,7 +331,10 @@
 
 	// Handle form submission
 	async function handleSubmit() {
-		if (!inputValue.trim() || !liveTab || isUploading) return;
+		// Get serialized message from editor (includes inline @path references)
+		const finalPrompt = editorRef?.getMessage() ?? '';
+
+		if (!finalPrompt.trim() || !liveTab || isUploading) return;
 
 		// Require profile and project to be selected
 		if (!liveTab.profile) {
@@ -342,15 +346,16 @@
 			return;
 		}
 
-		// Append file references to the end of the message
-		let finalPrompt = inputValue;
+		// Append any legacy uploaded files (from file upload button) to the end
+		// Note: Files added via @ autocomplete are now inline chips, not in uploadedFiles
+		let messageToSend = finalPrompt;
 		if (uploadedFiles.length > 0) {
 			const fileRefs = uploadedFiles.map(f => `@${f.path}`).join(' ');
-			finalPrompt = inputValue.trim() + '\n\n' + fileRefs;
+			messageToSend = finalPrompt.trim() + '\n\n' + fileRefs;
 		}
 
 		// Send the message
-		sendMessage(finalPrompt);
+		sendMessage(messageToSend);
 	}
 
 	// Actually send the message
@@ -358,14 +363,12 @@
 		inputValue = '';
 		uploadedFiles = [];
 
+		// Clear editor content
+		editorRef?.clear();
+
 		// Clear draft immediately (not debounced) - important because
 		// the component may be destroyed/recreated when isEmptyState changes
 		saveDraftImmediately(tab.id, '');
-
-		// Reset textarea height
-		if (textareaRef) {
-			textareaRef.style.height = '';
-		}
 
 		tabs.sendMessage(tab.id, finalPrompt);
 	}
@@ -404,48 +407,45 @@
 			onOpenTerminalModal(tab.id, `/${command.name}`);
 		} else {
 			inputValue = `/${command.name} `;
+			editorRef?.setContent(`/${command.name} `);
 			await tick();
-			textareaRef?.focus();
+			editorRef?.focus();
 		}
 	}
 
 	// Handle file selection (including chat history and note items)
 	function handleFileSelect(file: FileItem) {
-		const atStartIndex = findLastAtIndex(inputValue);
-		if (atStartIndex === -1) {
-			showFileAutocomplete = false;
-			return;
-		}
-
-		// For directories, replace with path (with trailing /) and keep autocomplete open
+		// For directories, replace @ mention with path (with trailing /) and keep autocomplete open
 		if (file.type === 'directory') {
 			// Handle empty path (going back to root) - just show @
-			if (!file.path) {
-				inputValue = inputValue.substring(0, atStartIndex) + '@';
-			} else {
-				const pathWithSlash = file.path.endsWith('/') ? file.path : file.path + '/';
-				inputValue = inputValue.substring(0, atStartIndex) + '@' + pathWithSlash;
+			const newPath = file.path ? (file.path.endsWith('/') ? file.path : file.path + '/') : '';
+			editorRef?.replaceAtMention(newPath);
+			// Update inputValue to keep autocomplete state in sync
+			const atStartIndex = findLastAtIndex(inputValue);
+			if (atStartIndex !== -1) {
+				inputValue = inputValue.substring(0, atStartIndex) + '@' + newPath;
 			}
-			tick().then(() => textareaRef?.focus());
+			tick().then(() => editorRef?.focus());
 			return;
 		}
 
-		// For files, chat history, and notes, add to uploaded files list
-		const fileRef: FileUploadResponse & { type?: string } = {
-			filename: file.name,
+		// For files, chat history, and notes, insert as inline chip
+		const chipType = file.type === 'chat_history' ? 'chat_history' :
+						 file.type === 'note' ? 'note' : 'file';
+
+		editorRef?.insertFileChipReplacingMention({
 			path: file.path,
-			full_path: file.path,
+			filename: file.name,
+			fullPath: file.path,
 			size: file.size || 0,
-			type: file.type // 'file', 'chat_history', or 'note'
-		};
+			type: chipType
+		});
 
-		uploadedFiles = [...uploadedFiles, fileRef];
-
-		// Remove the @query from input
-		inputValue = inputValue.substring(0, atStartIndex).trimEnd();
+		// Update inputValue to reflect text after chip insertion (for autocomplete state)
+		inputValue = editorRef?.getText() ?? '';
 		showFileAutocomplete = false;
 
-		tick().then(() => textareaRef?.focus());
+		tick().then(() => editorRef?.focus());
 	}
 
 	// File upload
@@ -466,8 +466,17 @@
 		try {
 			for (const file of Array.from(files)) {
 				const result = await api.uploadFile(`/projects/${liveTab.project}/upload`, file);
-				uploadedFiles = [...uploadedFiles, result];
+				// Insert as inline chip at cursor position
+				editorRef?.insertFileChip({
+					path: result.path,
+					filename: result.filename,
+					fullPath: result.full_path,
+					size: result.size,
+					type: 'file'
+				});
 			}
+			// Update inputValue for state sync
+			inputValue = editorRef?.getText() ?? '';
 		} catch (error: unknown) {
 			console.error('Upload failed:', error);
 			const err = error as { detail?: string };
@@ -712,9 +721,11 @@
 			const transcribedText = result.text?.trim();
 
 			if (transcribedText) {
-				inputValue = inputValue ? `${inputValue} ${transcribedText}` : transcribedText;
+				// Append transcribed text to editor
+				editorRef?.appendText(transcribedText);
+				inputValue = editorRef?.getText() ?? '';
 				await tick();
-				textareaRef?.focus();
+				editorRef?.focus();
 			}
 		} catch (error: unknown) {
 			console.error('Transcription failed:', error);
@@ -775,42 +786,6 @@
 			<div class="chat-island" bind:this={islandRef}>
 				<!-- Input Wrapper - The Hero (outer container with border) -->
 				<div class="input-wrapper">
-					<!-- Uploaded Files (if any) - inside wrapper so focus glow includes them -->
-					{#if uploadedFiles.length > 0}
-						<div class="uploaded-files">
-							{#each uploadedFiles as file, index}
-								<div class="file-chip" class:chat-history-chip={(file as any).type === 'chat_history'} class:note-chip={(file as any).type === 'note'}>
-									{#if (file as any).type === 'chat_history'}
-										<!-- Chat history icon -->
-										<svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-										</svg>
-									{:else if (file as any).type === 'note'}
-										<!-- Note icon -->
-										<svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-										</svg>
-									{:else}
-										<!-- File icon -->
-										<svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-										</svg>
-									{/if}
-									<span class="file-name" title={file.path}>{file.filename}</span>
-									<button
-										type="button"
-										onclick={() => removeUploadedFile(index)}
-										class="file-remove"
-										aria-label="Remove file"
-									>
-										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-										</svg>
-									</button>
-								</div>
-							{/each}
-						</div>
-					{/if}
 					<!-- Input Inner - Dark background container -->
 					<div class="input-inner">
 						<!-- Textarea with autocomplete -->
@@ -834,16 +809,17 @@
 								onClose={() => showFileAutocomplete = false}
 							/>
 
-							<textarea
-								bind:this={textareaRef}
-								bind:value={inputValue}
-								oninput={handleInputChange}
-								onkeydown={handleKeyDown}
+							<TiptapEditor
+								bind:this={editorRef}
 								placeholder="Message {selectedProfileName}..."
-								class="chat-textarea"
-								rows="1"
+								initialContent={tab.draft || ''}
 								disabled={!$claudeAuthenticated}
-							></textarea>
+								onTextChange={(text) => {
+									inputValue = text;
+									handleInputChange();
+								}}
+								onKeyDown={handleKeyDown}
+							/>
 						</div>
 
 						<!-- Send button only -->
