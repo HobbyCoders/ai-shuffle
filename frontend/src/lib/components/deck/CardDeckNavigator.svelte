@@ -665,7 +665,8 @@
 	// Handle wheel scroll for selection tracking
 	function handleWheelScroll(e: Event) {
 		const container = e.target as HTMLDivElement;
-		const itemHeight = 56;
+		// Item height is 60px desktop, 72px mobile (matches CSS)
+		const itemHeight = isMobile ? 72 : 60;
 		wheelSelectedIndex = Math.max(0, Math.round(container.scrollTop / itemHeight));
 	}
 
@@ -1586,43 +1587,46 @@
 						>
 							{#each displayCards as card, index (card.id)}
 								{#if card.type === 'deck' && card.deckId && expandedDeckId === card.deckId}
-									<!-- Mobile Expanded Deck: Slot Machine Wheel -->
+									<!-- Mobile Expanded Deck: Borderless Slot Machine Reel -->
 									<div
-										class="mobile-card deck-card expanded"
-										class:active={index === mobileCurrentIndex}
+										class="deck-reel mobile"
 										data-card-id={card.id}
 										style:--deck-color={card.iconColor}
-										style:--card-index={index}
-										aria-label="{card.title} deck expanded"
+										role="listbox"
+										aria-label="{card.title} deck contents"
 									>
-										<div class="slot-wheel">
-											<div class="slot-wheel-header">
-												<span class="slot-wheel-title">{card.title}</span>
-												<button class="slot-wheel-close" onclick={(e) => { e.stopPropagation(); expandedDeckId = null; }}>
-													<X size={16} />
-												</button>
+										<button
+											class="deck-reel-close"
+											onclick={(e) => { e.stopPropagation(); expandedDeckId = null; }}
+											aria-label="Close deck"
+										>
+											<X size={18} />
+										</button>
+										{#if getDeckCards(card.deckId).length > 0}
+											<div class="deck-reel-track" bind:this={wheelScrollRef} onscroll={handleWheelScroll}>
+												<div class="deck-reel-spacer"></div>
+												{#each getDeckCards(card.deckId) as item, i}
+													<button
+														class="deck-reel-item"
+														class:selected={i === wheelSelectedIndex}
+														onclick={() => handleWheelItemSelect(item, i)}
+														role="option"
+														aria-selected={i === wheelSelectedIndex}
+													>
+														<div class="deck-reel-item-icon">
+															<item.icon size={22} strokeWidth={1.5} />
+														</div>
+														<div class="deck-reel-item-content">
+															<span class="deck-reel-item-title">{item.title}</span>
+															<span class="deck-reel-item-subtitle">{item.subtitle}</span>
+														</div>
+													</button>
+												{/each}
+												<div class="deck-reel-spacer"></div>
 											</div>
-											{#if getDeckCards(card.deckId).length > 0}
-												<div class="slot-wheel-container" bind:this={wheelScrollRef} onscroll={handleWheelScroll}>
-													<div class="slot-wheel-spacer"></div>
-													{#each getDeckCards(card.deckId) as item, i}
-														<button
-															class="slot-item"
-															class:selected={i === wheelSelectedIndex}
-															onclick={() => handleWheelItemSelect(item, i)}
-														>
-															<div class="slot-item-icon">
-																<item.icon size={20} strokeWidth={1.5} />
-															</div>
-															<span class="slot-item-label">{item.title}</span>
-														</button>
-													{/each}
-													<div class="slot-wheel-spacer"></div>
-												</div>
-											{:else}
-												<div class="slot-wheel-empty">Empty deck</div>
-											{/if}
-										</div>
+										{:else}
+											<div class="deck-reel-empty">Empty deck</div>
+										{/if}
 									</div>
 								{:else}
 									<!-- Normal Mobile Card -->
@@ -1772,47 +1776,47 @@
 					>
 						{#each displayCards as card, index (card.id)}
 							{#if card.type === 'deck' && card.deckId && expandedDeckId === card.deckId}
-								<!-- Expanded Deck: Slot Machine Wheel -->
-								<article
-									class="card deck-card expanded"
-									class:animation-complete={animationCompleteCards.has(card.id)}
+								<!-- Expanded Deck: Borderless Slot Machine Reel -->
+								<div
+									class="deck-reel"
 									data-card-id={card.id}
-									style:animation-delay="{index * 50}ms"
 									style:--deck-color={card.iconColor}
-									onanimationend={() => handleCardAnimationEnd(card.id)}
-									role="option"
-									tabindex="0"
-									aria-selected="false"
+									role="listbox"
+									aria-label="{card.title} deck contents"
 								>
-									<div class="slot-wheel">
-										<div class="slot-wheel-header">
-											<span class="slot-wheel-title">{card.title}</span>
-											<button class="slot-wheel-close" onclick={(e) => { e.stopPropagation(); expandedDeckId = null; }}>
-												<X size={14} />
-											</button>
+									<button
+										class="deck-reel-close"
+										onclick={(e) => { e.stopPropagation(); expandedDeckId = null; }}
+										aria-label="Close deck"
+									>
+										<X size={16} />
+									</button>
+									{#if getDeckCards(card.deckId).length > 0}
+										<div class="deck-reel-track" bind:this={wheelScrollRef} onscroll={handleWheelScroll}>
+											<div class="deck-reel-spacer"></div>
+											{#each getDeckCards(card.deckId) as item, i}
+												<button
+													class="deck-reel-item"
+													class:selected={i === wheelSelectedIndex}
+													onclick={() => handleWheelItemSelect(item, i)}
+													role="option"
+													aria-selected={i === wheelSelectedIndex}
+												>
+													<div class="deck-reel-item-icon">
+														<item.icon size={20} strokeWidth={1.5} />
+													</div>
+													<div class="deck-reel-item-content">
+														<span class="deck-reel-item-title">{item.title}</span>
+														<span class="deck-reel-item-subtitle">{item.subtitle}</span>
+													</div>
+												</button>
+											{/each}
+											<div class="deck-reel-spacer"></div>
 										</div>
-										{#if getDeckCards(card.deckId).length > 0}
-											<div class="slot-wheel-container" bind:this={wheelScrollRef} onscroll={handleWheelScroll}>
-												<div class="slot-wheel-spacer"></div>
-												{#each getDeckCards(card.deckId) as item, i}
-													<button
-														class="slot-item"
-														class:selected={i === wheelSelectedIndex}
-														onclick={() => handleWheelItemSelect(item, i)}
-													>
-														<div class="slot-item-icon">
-															<item.icon size={18} strokeWidth={1.75} />
-														</div>
-														<span class="slot-item-label">{item.title}</span>
-													</button>
-												{/each}
-												<div class="slot-wheel-spacer"></div>
-											</div>
-										{:else}
-											<div class="slot-wheel-empty">Empty deck</div>
-										{/if}
-									</div>
-								</article>
+									{:else}
+										<div class="deck-reel-empty">Empty deck</div>
+									{/if}
+								</div>
 							{:else}
 								<!-- Normal Card -->
 								<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
@@ -3424,55 +3428,28 @@
 	   REDUCED MOTION
 	   ======================================== */
 	/* ========================================
-	   SLOT MACHINE WHEEL (Expanded Deck)
+	   DECK REEL (Borderless Slot Machine)
 	   ======================================== */
 
-	/* Expanded deck card - taller to fit wheel */
-	.card.deck-card.expanded {
-		height: 240px;
-		width: var(--card-width);
-		transition: height 0.3s var(--ease-out);
-	}
-
-	.mobile-card.deck-card.expanded {
-		height: 280px;
-		width: calc(75vw - 16px);
-		min-width: 260px;
-		max-width: 320px;
-		transition: height 0.3s var(--ease-out);
-	}
-
-	/* Slot wheel container */
-	.slot-wheel {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		width: 100%;
-		background: var(--bg-card);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-lg);
-		overflow: hidden;
-	}
-
-	.slot-wheel-header {
+	/* Borderless Deck Reel - replaces card container entirely */
+	.deck-reel {
+		position: relative;
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		padding: 12px 16px;
-		border-bottom: 1px solid var(--border-subtle);
+		justify-content: center;
+		width: var(--card-width);
+		height: 220px;
 		flex-shrink: 0;
-		background: var(--bg-elevated);
 	}
 
-	.slot-wheel-title {
-		font-size: 0.875rem;
-		font-weight: 600;
-		color: var(--text-primary);
-	}
-
-	.slot-wheel-close {
-		width: 28px;
-		height: 28px;
+	/* Floating close button */
+	.deck-reel-close {
+		position: absolute;
+		top: 8px;
+		right: 8px;
+		z-index: 10;
+		width: 32px;
+		height: 32px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -3481,66 +3458,77 @@
 		border-radius: 50%;
 		color: var(--text-secondary);
 		cursor: pointer;
+		opacity: 0.7;
 		transition: all 0.15s ease;
+		box-shadow: var(--shadow-m);
 	}
 
-	.slot-wheel-close:hover {
+	.deck-reel-close:hover {
+		opacity: 1;
 		background: var(--bg-card-hover);
 		color: var(--text-primary);
 		border-color: var(--border-strong);
 	}
 
-	/* Scrollable wheel area */
-	.slot-wheel-container {
-		flex: 1;
+	/* Scrollable track - no visible container */
+	.deck-reel-track {
+		width: 100%;
+		height: 100%;
 		overflow-y: scroll;
 		scroll-snap-type: y mandatory;
 		scrollbar-width: none;
-		position: relative;
+		-webkit-overflow-scrolling: touch;
 	}
 
-	.slot-wheel-container::-webkit-scrollbar {
+	.deck-reel-track::-webkit-scrollbar {
 		display: none;
 	}
 
-	/* Spacer elements to allow first/last items to center */
-	.slot-wheel-spacer {
-		height: 56px;
+	/* Spacers for centering first/last items */
+	.deck-reel-spacer {
+		height: 80px;
 		flex-shrink: 0;
 	}
 
-	/* Individual slot items */
-	.slot-item {
-		height: 56px;
-		width: 100%;
+	/* Individual reel items - styled like mini-cards */
+	.deck-reel-item {
 		display: flex;
 		align-items: center;
 		gap: 12px;
-		padding: 0 16px;
-		background: transparent;
-		border: none;
-		border-left: 3px solid transparent;
+		width: calc(100% - 16px);
+		margin: 0 8px;
+		padding: 12px 16px;
+		height: 60px;
+		background: var(--bg-card);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md);
 		cursor: pointer;
 		scroll-snap-align: center;
-		transition: all 0.2s ease;
 		opacity: 0.4;
-		transform: scale(0.95);
+		transform: scale(0.92);
+		transition: all 0.2s ease;
 		font-family: inherit;
+		box-shadow: var(--shadow-s);
 	}
 
-	.slot-item:hover {
+	.deck-reel-item:hover:not(.selected) {
 		opacity: 0.6;
+		transform: scale(0.95);
 	}
 
-	.slot-item.selected {
+	/* Selected item - prominent like active card */
+	.deck-reel-item.selected {
 		opacity: 1;
 		transform: scale(1);
-		background: var(--ai-subtle);
-		border-left-color: var(--ai-primary);
-		box-shadow: inset 0 0 20px color-mix(in srgb, var(--primary) 10%, transparent);
+		background: var(--bg-card-hover);
+		border-color: var(--primary);
+		box-shadow:
+			var(--shadow-m),
+			0 0 20px color-mix(in srgb, var(--primary) 25%, transparent);
 	}
 
-	.slot-item-icon {
+	/* Item icon */
+	.deck-reel-item-icon {
 		width: 36px;
 		height: 36px;
 		display: flex;
@@ -3554,52 +3542,74 @@
 		transition: all 0.2s ease;
 	}
 
-	.slot-item.selected .slot-item-icon {
+	.deck-reel-item.selected .deck-reel-item-icon {
 		background: var(--ai-subtle);
 		border-color: var(--ai-primary);
 		color: var(--ai-primary);
 		box-shadow: 0 0 12px var(--ai-glow);
 	}
 
-	.slot-item-label {
-		font-size: 0.875rem;
-		font-weight: 500;
-		color: var(--text-secondary);
-		transition: color 0.2s ease;
+	/* Item content */
+	.deck-reel-item-content {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		overflow: hidden;
 		text-align: left;
 	}
 
-	.slot-item.selected .slot-item-label {
+	.deck-reel-item-title {
+		font-size: 0.875rem;
+		font-weight: 600;
+		color: var(--text-secondary);
+		transition: color 0.2s ease;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.deck-reel-item.selected .deck-reel-item-title {
 		color: var(--text-primary);
 	}
 
-	/* Empty deck state */
-	.slot-wheel-empty {
+	.deck-reel-item-subtitle {
+		font-size: 0.75rem;
+		color: var(--text-muted);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	/* Mobile adjustments */
+	.deck-reel.mobile {
+		width: calc(75vw - 16px);
+		min-width: 260px;
+		max-width: 320px;
+		height: 280px;
+	}
+
+	.deck-reel.mobile .deck-reel-item {
+		height: 72px;
+		padding: 14px 20px;
+	}
+
+	.deck-reel.mobile .deck-reel-item-icon {
+		width: 44px;
+		height: 44px;
+	}
+
+	.deck-reel.mobile .deck-reel-spacer {
+		height: 104px;
+	}
+
+	/* Empty state */
+	.deck-reel-empty {
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		height: 100%;
 		color: var(--text-muted);
 		font-size: 0.875rem;
-	}
-
-	/* Mobile-specific slot wheel adjustments */
-	.mobile-card.deck-card.expanded .slot-wheel-spacer {
-		height: 64px;
-	}
-
-	.mobile-card.deck-card.expanded .slot-item {
-		height: 64px;
-		padding: 0 20px;
-	}
-
-	.mobile-card.deck-card.expanded .slot-item-icon {
-		width: 40px;
-		height: 40px;
-	}
-
-	.mobile-card.deck-card.expanded .slot-item-label {
-		font-size: 0.9375rem;
 	}
 
 	@media (prefers-reduced-motion: reduce) {
