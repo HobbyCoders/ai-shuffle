@@ -83,11 +83,25 @@
     return query.slice(lastSlashIndex + 1);
   }
 
-  // Fetch files when visible and projectId changes - initial load
+  // Track previous visibility to detect transitions
+  let wasVisible = $state(false);
+
+  // Handle visibility changes and initial load
   $effect(() => {
-    if (visible && projectId && lastFetchedPath === null) {
+    // Detect visibility transition
+    if (!visible && wasVisible) {
+      // Going invisible - reset state
+      lastFetchedPath = null;
+      currentPath = '';
+      files = [];
+      filteredFiles = [];
+      inChatHistoryFolder = false;
+      inNotesFolder = false;
+    } else if (visible && !wasVisible && projectId) {
+      // Going visible - fetch initial files
       fetchFiles('');
     }
+    wasVisible = visible;
   });
 
   // Handle path changes from query - separate effect to avoid loops
@@ -168,16 +182,6 @@
     });
 
     selectedIndex = 0;
-  });
-
-  // Reset when becoming invisible
-  $effect(() => {
-    if (!visible) {
-      lastFetchedPath = null;
-      currentPath = '';
-      files = [];
-      filteredFiles = [];
-    }
   });
 
   /**

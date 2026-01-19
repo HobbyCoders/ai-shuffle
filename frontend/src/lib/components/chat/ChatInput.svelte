@@ -328,7 +328,10 @@
 	// Handle input changes for autocomplete
 	function handleInputChange() {
 		showCommandAutocomplete = inputValue.startsWith('/') && inputValue.length > 0;
-		showFileAutocomplete = hasActiveAtMention(inputValue) && !!liveTab.project;
+		// Use plain text for @ mention detection to avoid false positives from chip @paths
+		// inputValue contains serialized content where chips are @path, which would trigger autocomplete incorrectly
+		const plainText = editorRef?.getText() ?? '';
+		showFileAutocomplete = hasActiveAtMention(plainText) && !!liveTab.project;
 	}
 
 	// Handle form submission
