@@ -300,11 +300,11 @@
 	});
 
 	// Check if input contains an active @ mention
-	// @ must be at start of text or after newline (supports paths with spaces)
+	// @ must be at start of text or after any whitespace (for triggering autocomplete)
 	function hasActiveAtMention(input: string): boolean {
 		for (let i = input.length - 1; i >= 0; i--) {
 			if (input[i] === '@') {
-				if (i === 0 || input[i - 1] === '\n') {
+				if (i === 0 || /\s/.test(input[i - 1])) {
 					return true;
 				}
 			}
@@ -312,12 +312,12 @@
 		return false;
 	}
 
-	// Find the last @ position
-	// @ must be at start of text or after newline (supports paths with spaces)
+	// Find the last @ position (for triggering autocomplete)
+	// @ must be at start of text or after any whitespace
 	function findLastAtIndex(input: string): number {
 		for (let i = input.length - 1; i >= 0; i--) {
 			if (input[i] === '@') {
-				if (i === 0 || input[i - 1] === '\n') {
+				if (i === 0 || /\s/.test(input[i - 1])) {
 					return i;
 				}
 			}

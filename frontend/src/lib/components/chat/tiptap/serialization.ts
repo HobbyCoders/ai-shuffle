@@ -100,7 +100,8 @@ export function getPlainText(editor: Editor): string {
  * or null if no active mention.
  *
  * Supports paths with spaces (e.g., "@Chat History/Session 123.jsonl").
- * The @ must be at the start of input or preceded by a newline.
+ * The @ must be at the start of input or preceded by whitespace.
+ * Everything from @ to the cursor is captured as the query (including spaces).
  *
  * Example:
  *   Text: "check @src/li|" (cursor at |)
@@ -117,13 +118,13 @@ export function findActiveAtMention(editor: Editor): { from: number; to: number;
 	const textBefore = state.doc.textBetween(0, from, '\n', '\0');
 
 	// Find the last @ that starts a mention
-	// Must be at start of text or preceded by a newline
-	// (We use newline as the delimiter since paths can contain spaces)
+	// Must be at start of text or preceded by whitespace
+	// We capture everything after @ up to cursor (including spaces in paths)
 	let atIndex = -1;
 	for (let i = textBefore.length - 1; i >= 0; i--) {
 		if (textBefore[i] === '@') {
-			// Check if @ is at start or preceded by newline
-			if (i === 0 || textBefore[i - 1] === '\n') {
+			// Check if @ is at start or preceded by whitespace
+			if (i === 0 || /\s/.test(textBefore[i - 1])) {
 				atIndex = i;
 				break;
 			}
