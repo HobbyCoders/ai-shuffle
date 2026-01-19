@@ -29,10 +29,9 @@
 	interface Props {
 		tab: ChatTab;
 		compact?: boolean;
-		onOpenTerminalModal?: (tabId: string, command: string) => void;
 	}
 
-	let { tab, compact = false, onOpenTerminalModal }: Props = $props();
+	let { tab, compact = false }: Props = $props();
 
 	// Get live tab data directly from store to ensure reactivity in mobile snippet context
 	// The prop `tab` may not update properly when rendered via {@render} inside {#key} blocks
@@ -383,14 +382,11 @@
 	async function handleCommandSelect(command: Command) {
 		showCommandAutocomplete = false;
 
-		if (command.type === 'interactive' && onOpenTerminalModal) {
-			onOpenTerminalModal(tab.id, `/${command.name}`);
-		} else {
-			inputValue = `/${command.name} `;
-			editorRef?.setContent(`/${command.name} `);
-			await tick();
-			editorRef?.focus();
-		}
+		// Insert the command into the input
+		inputValue = `/${command.name} `;
+		editorRef?.setContent(`/${command.name} `);
+		await tick();
+		editorRef?.focus();
 	}
 
 	// Handle file selection (including chat history and note items)

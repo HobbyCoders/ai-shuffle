@@ -3,7 +3,7 @@
 	 * CardDeckNavigator - AI Shuffle themed card navigation overlay
 	 *
 	 * Full-screen card carousel for browsing and managing:
-	 * - Quick actions (new chat, new agent, terminal, etc.)
+	 * - Quick actions (new chat, new agent, etc.)
 	 * - Recent threads/conversations
 	 * - Custom decks (user-created groupings)
 	 * - Studio tools
@@ -19,7 +19,7 @@
 
 	import { onMount, tick } from 'svelte';
 	import {
-		MessageSquare, Terminal, Clock,
+		MessageSquare, Clock,
 		Settings, FolderOpen, X, Files, User, Users, Pencil, Check,
 		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronLeft, ChevronRight, Bot, Puzzle,
 		List, GitBranch, Key, Zap, StickyNote, BarChart3
@@ -38,7 +38,6 @@
 		open: boolean;
 		onClose: () => void;
 		onCreateChat: () => void;
-		onCreateTerminal: () => void;
 		onOpenThread: (sessionId: string) => void;
 		onOpenFileBrowser?: () => void;
 		onOpenProjects?: () => void;
@@ -60,7 +59,6 @@
 		open,
 		onClose,
 		onCreateChat,
-		onCreateTerminal,
 		onOpenThread,
 		onOpenFileBrowser,
 		onOpenProjects,
@@ -180,7 +178,7 @@
 	}
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'terminal' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'hooks' | 'notes' | 'stats' | 'user-settings';
+	type CardAction = 'new-chat' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'hooks' | 'notes' | 'stats' | 'user-settings';
 
 	// Cards that API users are allowed to see (whitelist approach)
 	const API_USER_ALLOWED_CARDS = new Set(['new-chat', 'recent', 'file-browser', 'user-settings']);
@@ -274,14 +272,6 @@
 				title: 'New Chat',
 				subtitle: 'Start a conversation with AI',
 				icon: MessageSquare
-			},
-			{
-				id: 'terminal',
-				type: 'action',
-				action: 'terminal',
-				title: 'Terminal',
-				subtitle: 'Command line interface',
-				icon: Terminal
 			},
 			{
 				id: 'recent',
@@ -609,7 +599,6 @@
 		onClose();
 		switch (action) {
 			case 'new-chat': onCreateChat(); break;
-			case 'terminal': onCreateTerminal(); break;
 			case 'file-browser': onOpenFileBrowser?.(); break;
 			case 'projects': onOpenProjects?.(); break;
 			case 'profiles': onOpenProfiles?.(); break;

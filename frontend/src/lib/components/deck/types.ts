@@ -59,7 +59,7 @@ export interface CardGeometry {
 // Card state for workspace cards
 export interface CardState {
 	id: string;
-	type: 'chat' | 'generation' | 'file' | 'settings' | 'profile' | 'subagent' | 'project' | 'canvas' | 'terminal';
+	type: 'chat' | 'generation' | 'file' | 'settings' | 'profile' | 'subagent' | 'project' | 'canvas';
 	title: string;
 	state: 'normal' | 'maximized';
 	geometry: CardGeometry;

@@ -4,7 +4,6 @@
 
 export type CardType =
   | 'chat'
-  | 'terminal'
   | 'settings'
   | 'profile'
   | 'subagent'
@@ -38,7 +37,6 @@ export interface DeckCard {
 
 export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
   chat: { width: 480, height: 640 },
-  terminal: { width: 600, height: 400 },
   settings: { width: 700, height: 650 },
   profile: { width: 600, height: 620 },
   subagent: { width: 550, height: 580 },
@@ -53,7 +51,6 @@ export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: numbe
 
 export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
   chat: { width: 360, height: 400 },
-  terminal: { width: 400, height: 200 },
   settings: { width: 500, height: 400 },
   profile: { width: 450, height: 400 },
   subagent: { width: 400, height: 350 },

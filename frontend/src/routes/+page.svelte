@@ -3,7 +3,7 @@
 	 * Main Page - Deck-based AI Workspace
 	 *
 	 * A card-based desktop workspace combining:
-	 * - DeckLayout with draggable, resizable cards (chat, agent, studio, terminal)
+	 * - DeckLayout with draggable, resizable cards (chat, agent, studio)
 	 * - All modals from the original page (settings, profile, analytics, etc.)
 	 * - SpotlightSearch (Cmd+K) for quick navigation
 	 * - Full keyboard shortcut support
@@ -43,7 +43,6 @@
 	import {
 		Workspace,
 		ChatCard,
-		TerminalCard,
 		MobileWorkspace,
 		ProfileCard,
 		ProjectCard,
@@ -62,7 +61,6 @@
 
 	// Modals
 	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';
-	import TerminalModal from '$lib/components/TerminalModal.svelte';
 	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
 	import TagManager from '$lib/components/TagManager.svelte';
 	import KnowledgeManager from '$lib/components/KnowledgeManager.svelte';
@@ -104,7 +102,6 @@
 	// State: Modals
 	// ============================================
 	let showKeyboardShortcuts = $state(false);
-	let showTerminalModal = $state(false);
 	let showImportModal = $state(false);
 	let showTagManager = $state(false);
 	let showKnowledgeModal = $state(false);
@@ -119,10 +116,6 @@
 	let isReorderTransitioning = $state(false);
 	let lastReorderTargetIndex = $state(-1); // Track last target to avoid redundant reorders
 	let isProcessingReorder = $state(false); // Prevent re-entrant reorder calls
-
-	// Terminal modal state
-	let terminalCommand = $state('/resume');
-	let terminalSessionId = $state('');
 
 	// Tag state
 	let allTags: Tag[] = $state([]);
@@ -167,8 +160,6 @@
 		switch (type) {
 			case 'chat':
 				return 'chat';
-			case 'terminal':
-				return 'terminal';
 			case 'settings':
 				return 'settings';
 			case 'user-settings':
@@ -352,16 +343,6 @@
 				action: () => { handleCreateCard('chat'); }
 			}),
 
-			// Terminal (Cmd+T)
-			registerShortcut({
-				id: 'new-terminal',
-				description: 'New terminal',
-				key: 't',
-				cmdOrCtrl: true,
-				category: 'general',
-				action: () => { handleCreateCard('terminal'); }
-			}),
-
 			// Show keyboard shortcuts (Cmd+/)
 			registerShortcut({
 				id: 'show-shortcuts',
@@ -397,8 +378,6 @@
 						showSpotlight = false;
 					} else if (showImportModal) {
 						showImportModal = false;
-					} else if (showTerminalModal) {
-						showTerminalModal = false;
 					} else if (showKnowledgeModal) {
 						showKnowledgeModal = false;
 					} else if (showTagManager) {
@@ -609,10 +588,6 @@
 				meta = { tabId };
 				break;
 			}
-			case 'terminal':
-				deckCardType = 'terminal';
-				title = 'Terminal';
-				break;
 			case 'recent-sessions':
 				// Open the card navigator directly to the recent sessions view
 				cardNavigatorInitialView = 'recent';
@@ -896,20 +871,8 @@
 		showSpotlight = false;
 	}
 
-	function handleSpotlightSelectCommand(command: Command) {
-		// For interactive commands, create a terminal card
-		if (command.type === 'interactive') {
-			// Need an active session for terminal
-			const activeCard = $allCards.find((c) => c.id === $focusedCardId);
-			if (activeCard?.dataId) {
-				// Create terminal card with session pre-selected
-				deck.addCard('terminal', {
-					title: `Terminal - ${command.name}`,
-					dataId: activeCard.dataId,
-					meta: { command: `/${command.name}` }
-				});
-			}
-		}
+	function handleSpotlightSelectCommand(_command: Command) {
+		// Interactive commands are no longer supported via terminal cards
 		showSpotlight = false;
 	}
 
@@ -921,14 +884,6 @@
 	function handleSpotlightOpenSettings() {
 		handleCreateCard('settings');
 		showSpotlight = false;
-	}
-
-	// ============================================
-	// Terminal Modal Handlers
-	// ============================================
-	function closeTerminalModal() {
-		showTerminalModal = false;
-		terminalSessionId = '';
 	}
 
 	// ============================================
@@ -991,16 +946,6 @@
 							<ChatCard
 								{card}
 								{tabId}
-								mobile={true}
-								onClose={() => handleCardClose(card.id)}
-								onMaximize={() => handleCardMaximize(card.id)}
-								onFocus={() => handleCardFocus(card.id)}
-								onMove={(x, y) => handleCardMove(card.id, x, y)}
-								onResize={(w, h) => handleCardResize(card.id, w, h)}
-							/>
-						{:else if card.type === 'terminal'}
-							<TerminalCard
-								{card}
 								mobile={true}
 								onClose={() => handleCardClose(card.id)}
 								onMaximize={() => handleCardMaximize(card.id)}
@@ -1186,17 +1131,6 @@
 												<p>Initializing chat...</p>
 											</div>
 										{/if}
-									{:else if card.type === 'terminal'}
-										<TerminalCard
-											{card}
-											onClose={() => handleCardClose(card.id)}
-																						onMaximize={() => handleCardMaximize(card.id)}
-											onFocus={() => handleCardFocus(card.id)}
-											onMove={(x, y) => handleCardMove(card.id, x, y)}
-											onResize={(w, h) => handleCardResize(card.id, w, h)}
-											onDragEnd={() => handleCardDragEnd(card.id)}
-											onResizeEnd={() => handleCardResizeEnd(card.id)}
-										/>
 									{:else if card.type === 'settings'}
 										<SettingsCard
 											{card}
@@ -1358,7 +1292,6 @@
 			cardNavigatorInitialView = 'main'; // Reset for next open
 		}}
 		onCreateChat={() => handleCreateCard('chat')}
-		onCreateTerminal={() => handleCreateCard('terminal')}
 		onOpenThread={handleNavigatorOpenThread}
 		onOpenFileBrowser={() => handleCreateCard('file-browser')}
 		onOpenProjects={() => handleCreateCard('project')}
@@ -1428,15 +1361,6 @@
 		<KnowledgeManager
 			projectId={$activeTab.project}
 			on:close={() => showKnowledgeModal = false}
-		/>
-	{/if}
-
-	<!-- Terminal Modal for interactive CLI commands -->
-	{#if showTerminalModal && terminalSessionId}
-		<TerminalModal
-			sessionId={terminalSessionId}
-			command={terminalCommand}
-			onClose={closeTerminalModal}
 		/>
 	{/if}
 

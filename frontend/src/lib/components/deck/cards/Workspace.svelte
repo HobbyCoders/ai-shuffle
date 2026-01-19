@@ -10,7 +10,7 @@
 	 */
 
 	import { onMount } from 'svelte';
-	import { MessageSquare, Bot, Terminal } from 'lucide-svelte';
+	import { MessageSquare, Bot } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import { WORKSPACE_PADDING } from './types';
 	import type { Snippet } from 'svelte';
@@ -121,8 +121,7 @@
 	// Card type config for create menu (used in empty state)
 	const cardTypes: { type: CardType; label: string; icon: typeof MessageSquare }[] = [
 		{ type: 'chat', label: 'New Chat', icon: MessageSquare },
-		{ type: 'subagent', label: 'New Agent', icon: Bot },
-		{ type: 'terminal', label: 'New Terminal', icon: Terminal }
+		{ type: 'subagent', label: 'New Agent', icon: Bot }
 	];
 </script>
 

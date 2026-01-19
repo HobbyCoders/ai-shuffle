@@ -391,7 +391,6 @@ font-size: var(--text-sm);
 | SettingsCard | ✓ | Partial | ✓ | ✅ Polished (large file, uses theme vars) |
 | StatsCard | ✓ | ✓ | N/A (custom) | ✅ Good |
 | SubagentCard | ✓ | ✓ | ✓ | ✅ Already good |
-| TerminalCard | ✗ | Partial | ✗ | ⚪ Special (xterm) - skip |
 | UserSettingsCard | ✓ | Partial | ✓ | ✅ Polished |
 
 ---
@@ -412,7 +411,6 @@ font-size: var(--text-sm);
 
 **Phase 3: Skip** (special cases)
 - FileBrowserCard - just wraps FilesView
-- TerminalCard - xterm.js handles styling
 - BaseCard - reference implementation
 - ProfileCard - already good
 - StatsCard - already good

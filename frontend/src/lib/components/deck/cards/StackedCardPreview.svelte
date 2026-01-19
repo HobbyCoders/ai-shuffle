@@ -14,7 +14,6 @@
 
 	import {
 		MessageSquare,
-		Terminal,
 		Settings,
 		User,
 		Users,
@@ -51,7 +50,6 @@
 	// Icon mapping for card types
 	const cardIcons: Record<CardType, typeof MessageSquare> = {
 		chat: MessageSquare,
-		terminal: Terminal,
 		settings: Settings,
 		profile: User,
 		subagent: Users,
@@ -110,8 +108,6 @@
 		switch (card.type) {
 			case 'chat':
 				return messagePreview;
-			case 'terminal':
-				return 'Terminal session';
 			case 'settings':
 				return 'Application settings';
 			case 'profile':

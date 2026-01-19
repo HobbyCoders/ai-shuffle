@@ -33,7 +33,6 @@ export type DeckCardType =
 	| 'settings'
 	| 'user-settings'
 	| 'profile'
-	| 'terminal'
 	| 'subagent'
 	| 'project'
 	| 'plugins'
@@ -391,8 +390,6 @@ function getDefaultTitle(type: DeckCardType): string {
 			return 'Settings';
 		case 'profile':
 			return 'Profile';
-		case 'terminal':
-			return 'Terminal';
 		case 'subagent':
 			return 'Subagents';
 		case 'project':
