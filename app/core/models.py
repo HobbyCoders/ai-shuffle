@@ -789,6 +789,34 @@ class AgentImportRequest(BaseModel):
 
 
 # ============================================================================
+# AI Generation Models
+# ============================================================================
+
+class ClarificationQuestionModel(BaseModel):
+    """A clarification question for the user"""
+    id: str = Field(..., description="Question identifier")
+    question: str = Field(..., description="The question to ask")
+    options: Optional[List[str]] = Field(None, description="Optional predefined answer choices")
+    context: Optional[str] = Field(None, description="Additional context about why this is asked")
+
+
+class GenerationResponseModel(BaseModel):
+    """Response from AI generation endpoints"""
+    status: str = Field(..., description="'complete' or 'needs_clarification'")
+    result: Optional[Dict[str, Any]] = Field(None, description="Generated config when complete")
+    questions: Optional[List[ClarificationQuestionModel]] = Field(
+        None, description="Questions to ask when clarification needed"
+    )
+    generation_type: Optional[str] = Field(None, description="'profile' or 'subagent'")
+
+
+class ClarificationAnswersModel(BaseModel):
+    """User's answers to clarification questions"""
+    description: str = Field(..., min_length=10, max_length=2000, description="Original description")
+    answers: Dict[str, str] = Field(..., description="Map of question_id -> user's answer")
+
+
+# ============================================================================
 # Security / 2FA Models
 # ============================================================================
 

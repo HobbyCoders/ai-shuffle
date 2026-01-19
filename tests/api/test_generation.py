@@ -255,20 +255,28 @@ class TestGenerateProfileEndpoint:
         with patch("app.api.generation.query", return_value=mock_query_gen()):
             response = authenticated_client.post(
                 "/api/v1/generate/profile",
-                json={"description": "A Python developer profile with extended thinking"}
+                json={
+                    "description": "A Python developer profile with extended thinking",
+                    "skip_clarification": True
+                }
             )
 
         assert response.status_code == 200
         data = response.json()
 
-        # Check export format
-        assert data["version"] == "1.0"
-        assert data["type"] == "ai-shuffle-agent"
-        assert "exported_at" in data
-        assert "agent" in data
+        # Check response wrapper
+        assert data["status"] == "complete"
+        assert data["generation_type"] == "profile"
+
+        # Check export format in result
+        result = data["result"]
+        assert result["version"] == "1.0"
+        assert result["type"] == "ai-shuffle-agent"
+        assert "exported_at" in result
+        assert "agent" in result
 
         # Check agent data
-        agent = data["agent"]
+        agent = result["agent"]
         assert agent["name"] == "Python Developer"
         assert agent["model"] == "sonnet"
 
@@ -292,11 +300,14 @@ class TestGenerateProfileEndpoint:
                 "/api/v1/generate/profile",
                 json={
                     "description": "A test profile for unit testing",
-                    "model": "opus"
+                    "model": "opus",
+                    "skip_clarification": True
                 }
             )
 
         assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "complete"
 
     def test_generate_profile_invalid_ai_response(self, authenticated_client):
         """Should handle invalid AI response gracefully."""
@@ -314,7 +325,10 @@ class TestGenerateProfileEndpoint:
         with patch("app.api.generation.query", return_value=mock_query_gen()):
             response = authenticated_client.post(
                 "/api/v1/generate/profile",
-                json={"description": "A profile that will fail to generate"}
+                json={
+                    "description": "A profile that will fail to generate",
+                    "skip_clarification": True
+                }
             )
 
         assert response.status_code == 500
@@ -338,7 +352,10 @@ class TestGenerateProfileEndpoint:
         with patch("app.api.generation.query", return_value=mock_query_gen()):
             response = authenticated_client.post(
                 "/api/v1/generate/profile",
-                json={"description": "A profile without a generated name"}
+                json={
+                    "description": "A profile without a generated name",
+                    "skip_clarification": True
+                }
             )
 
         assert response.status_code == 500
@@ -392,20 +409,28 @@ class TestGenerateSubagentEndpoint:
         with patch("app.api.generation.query", return_value=mock_query_gen()):
             response = authenticated_client.post(
                 "/api/v1/generate/subagent",
-                json={"description": "A code review agent that checks for bugs and style issues"}
+                json={
+                    "description": "A code review agent that checks for bugs and style issues",
+                    "skip_clarification": True
+                }
             )
 
         assert response.status_code == 200
         data = response.json()
 
-        # Check export format
-        assert data["version"] == "1.0"
-        assert data["type"] == "ai-shuffle-subagent"
-        assert "exported_at" in data
-        assert "subagent" in data
+        # Check response wrapper
+        assert data["status"] == "complete"
+        assert data["generation_type"] == "subagent"
+
+        # Check export format in result
+        result = data["result"]
+        assert result["version"] == "1.0"
+        assert result["type"] == "ai-shuffle-subagent"
+        assert "exported_at" in result
+        assert "subagent" in result
 
         # Check subagent data
-        subagent = data["subagent"]
+        subagent = result["subagent"]
         assert subagent["id"] == "code-reviewer"
         assert subagent["name"] == "Code Reviewer"
         assert "description" in subagent
@@ -438,14 +463,17 @@ class TestGenerateSubagentEndpoint:
         with patch("app.api.generation.query", return_value=mock_query_gen()):
             response = authenticated_client.post(
                 "/api/v1/generate/subagent",
-                json={"description": "A code review agent"}
+                json={
+                    "description": "A code review agent that sanitizes IDs properly",
+                    "skip_clarification": True
+                }
             )
 
         assert response.status_code == 200
         data = response.json()
 
         # ID should be sanitized to lowercase with hyphens only
-        subagent = data["subagent"]
+        subagent = data["result"]["subagent"]
         assert subagent["id"] == "code-review-agent"
 
     def test_generate_subagent_missing_required_fields(self, authenticated_client):
@@ -467,7 +495,10 @@ class TestGenerateSubagentEndpoint:
         with patch("app.api.generation.query", return_value=mock_query_gen()):
             response = authenticated_client.post(
                 "/api/v1/generate/subagent",
-                json={"description": "An incomplete subagent"}
+                json={
+                    "description": "An incomplete subagent that is missing fields",
+                    "skip_clarification": True
+                }
             )
 
         assert response.status_code == 500
@@ -500,11 +531,14 @@ class TestGenerateSubagentEndpoint:
                 "/api/v1/generate/subagent",
                 json={
                     "description": "A test subagent for unit testing purposes",
-                    "model": "sonnet"
+                    "model": "sonnet",
+                    "skip_clarification": True
                 }
             )
 
         assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "complete"
 
     def test_generate_subagent_invalid_ai_response(self, authenticated_client):
         """Should handle invalid AI response gracefully."""
@@ -522,7 +556,10 @@ class TestGenerateSubagentEndpoint:
         with patch("app.api.generation.query", return_value=mock_query_gen()):
             response = authenticated_client.post(
                 "/api/v1/generate/subagent",
-                json={"description": "A subagent that will fail to generate"}
+                json={
+                    "description": "A subagent that will fail to generate properly",
+                    "skip_clarification": True
+                }
             )
 
         assert response.status_code == 500
@@ -541,10 +578,21 @@ class TestGenerationRequestModels:
         assert response.status_code == 422
 
     def test_profile_request_max_length(self, authenticated_client):
-        """Description must be at most 2000 characters."""
+        """Description must be at most 5000 characters."""
         response = authenticated_client.post(
             "/api/v1/generate/profile",
-            json={"description": "x" * 2001}
+            json={"description": "x" * 5001}
+        )
+        assert response.status_code == 422
+
+    def test_profile_request_reference_material_max_length(self, authenticated_client):
+        """Reference material must be at most 15000 characters."""
+        response = authenticated_client.post(
+            "/api/v1/generate/profile",
+            json={
+                "description": "A valid description for testing",
+                "reference_material": "x" * 15001
+            }
         )
         assert response.status_code == 422
 
@@ -573,7 +621,12 @@ class TestGenerationRequestModels:
         with patch("app.api.generation.query", return_value=mock_query_gen()):
             response = authenticated_client.post(
                 "/api/v1/generate/subagent",
-                json={"description": "A valid description that is long enough"}
+                json={
+                    "description": "A valid description that is long enough",
+                    "skip_clarification": True
+                }
             )
 
         assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "complete"

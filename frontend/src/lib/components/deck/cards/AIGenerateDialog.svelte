@@ -1,8 +1,16 @@
 <script lang="ts">
-	import { generateProfile, generateSubagent } from '$lib/api/client';
-	import type { AgentExport, SubagentExport } from '$lib/api/client';
+	import {
+		generateProfile,
+		generateSubagent,
+		continueGeneration,
+		type GenerationResponse,
+		type ClarificationQuestion,
+		type AgentExport,
+		type SubagentExport
+	} from '$lib/api/client';
 
 	type GenerationType = 'profile' | 'subagent';
+	type DialogState = 'initial' | 'generating' | 'clarifying' | 'continuing';
 
 	interface Props {
 		type: GenerationType;
@@ -15,27 +23,77 @@
 
 	// Form state
 	let description = $state('');
-	let selectedModel = $state('haiku');
-	let isGenerating = $state(false);
+	let referenceMaterial = $state('');
+	let showReferenceMaterial = $state(false);
+	let selectedModel = $state('sonnet');
+	let dialogState: DialogState = $state('initial');
 	let error = $state('');
 
-	// Get title based on type
-	const title = $derived(type === 'profile' ? 'Generate Profile with AI' : 'Generate Sub-agent with AI');
+	// Clarification state
+	let clarificationQuestions: ClarificationQuestion[] = $state([]);
+	let clarificationAnswers: Record<string, string> = $state({});
+
+	// Get title based on type and state
+	const title = $derived(() => {
+		if (dialogState === 'clarifying') {
+			return 'A few quick questions...';
+		}
+		return type === 'profile' ? 'Generate Profile with AI' : 'Generate Sub-agent with AI';
+	});
+
 	const placeholder = $derived(
 		type === 'profile'
 			? 'Describe the profile you want, e.g., "A Python development profile with extended thinking for complex debugging tasks"'
 			: 'Describe the sub-agent you want, e.g., "A code review agent that checks for security vulnerabilities and follows best practices"'
 	);
 
+	const isLoading = $derived(dialogState === 'generating' || dialogState === 'continuing');
+
 	// Reset state when dialog opens
 	$effect(() => {
 		if (isOpen) {
 			description = '';
-			selectedModel = 'haiku';
+			referenceMaterial = '';
+			showReferenceMaterial = false;
+			selectedModel = 'sonnet';
+			dialogState = 'initial';
 			error = '';
-			isGenerating = false;
+			clarificationQuestions = [];
+			clarificationAnswers = {};
 		}
 	});
+
+	function handleResponse(response: GenerationResponse) {
+		if (response.status === 'needs_clarification' && response.questions) {
+			// Show clarification questions
+			clarificationQuestions = response.questions;
+			clarificationAnswers = {};
+			// Pre-fill with empty strings
+			for (const q of response.questions) {
+				clarificationAnswers[q.id] = '';
+			}
+			dialogState = 'clarifying';
+		} else if (response.status === 'complete' && response.result) {
+			// Generation complete - pass to parent
+			onGenerated(response.result as AgentExport | SubagentExport);
+			onClose();
+		} else {
+			throw new Error('Unexpected response from generation API');
+		}
+	}
+
+	function formatApiError(e: unknown): string {
+		const err = e as { detail?: string | Array<{ msg?: string }> };
+		if (!err.detail) {
+			return 'Failed to generate. Please try again.';
+		}
+		// Handle FastAPI validation error format (array of errors)
+		if (Array.isArray(err.detail)) {
+			const messages = err.detail.map((d) => d.msg || 'Validation error').join('; ');
+			return messages || 'Validation error';
+		}
+		return err.detail;
+	}
 
 	async function handleGenerate() {
 		if (!description.trim() || description.length < 10) {
@@ -43,37 +101,73 @@
 			return;
 		}
 
-		isGenerating = true;
+		dialogState = 'generating';
 		error = '';
 
 		try {
-			let generatedData: AgentExport | SubagentExport;
+			let response: GenerationResponse;
+			const refMaterial = referenceMaterial.trim() || undefined;
 			if (type === 'profile') {
-				generatedData = await generateProfile(description, selectedModel);
+				response = await generateProfile(description, selectedModel, false, refMaterial);
 			} else {
-				generatedData = await generateSubagent(description, selectedModel);
+				response = await generateSubagent(description, selectedModel, false, refMaterial);
 			}
-			// On success, pass data to parent and close - parent will open edit form
-			onGenerated(generatedData);
-			onClose();
+			handleResponse(response);
 		} catch (e) {
-			const err = e as { detail?: string };
-			error = err.detail || 'Failed to generate. Please try again.';
-		} finally {
-			isGenerating = false;
+			error = formatApiError(e);
+			dialogState = 'initial';
 		}
 	}
 
+	async function handleClarificationSubmit() {
+		// Validate all questions are answered
+		for (const q of clarificationQuestions) {
+			if (!clarificationAnswers[q.id]?.trim()) {
+				error = 'Please answer all questions.';
+				return;
+			}
+		}
+
+		dialogState = 'continuing';
+		error = '';
+
+		try {
+			const refMaterial = referenceMaterial.trim() || undefined;
+			const response = await continueGeneration(
+				type,
+				description,
+				clarificationAnswers,
+				selectedModel,
+				refMaterial
+			);
+			handleResponse(response);
+		} catch (e) {
+			error = formatApiError(e);
+			dialogState = 'clarifying';
+		}
+	}
+
+	function handleBackToDescription() {
+		dialogState = 'initial';
+		clarificationQuestions = [];
+		clarificationAnswers = {};
+		error = '';
+	}
+
 	function handleClose() {
-		if (!isGenerating) {
+		if (!isLoading) {
 			onClose();
 		}
 	}
 
 	function handleBackdropClick(e: MouseEvent) {
-		if (e.target === e.currentTarget && !isGenerating) {
+		if (e.target === e.currentTarget && !isLoading) {
 			onClose();
 		}
+	}
+
+	function selectOption(questionId: string, option: string) {
+		clarificationAnswers[questionId] = option;
 	}
 </script>
 
@@ -81,84 +175,204 @@
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<div class="dialog-overlay" onclick={handleBackdropClick}>
-		<div class="dialog-container">
+		<div class="dialog-container" class:clarifying={dialogState === 'clarifying'}>
 			<div class="dialog-header">
 				<div class="dialog-title">
 					<svg class="title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a2 2 0 0 1 0 4h-1.27a7 7 0 0 1-13.46 0H6a2 2 0 0 1 0-4h1a7 7 0 0 1 7-7h1V5.73A2 2 0 0 1 12 2z"/>
-						<circle cx="12" cy="14" r="1"/>
+						{#if dialogState === 'clarifying'}
+							<circle cx="12" cy="12" r="10" />
+							<path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+							<path d="M12 17h.01" />
+						{:else}
+							<path
+								d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a2 2 0 0 1 0 4h-1.27a7 7 0 0 1-13.46 0H6a2 2 0 0 1 0-4h1a7 7 0 0 1 7-7h1V5.73A2 2 0 0 1 12 2z"
+							/>
+							<circle cx="12" cy="14" r="1" />
+						{/if}
 					</svg>
-					<span>{title}</span>
+					<span>{title()}</span>
 				</div>
-				<button class="close-btn" onclick={handleClose} disabled={isGenerating} title="Close">
+				<button class="close-btn" onclick={handleClose} disabled={isLoading} title="Close">
 					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<path d="M18 6L6 18M6 6l12 12"/>
+						<path d="M18 6L6 18M6 6l12 12" />
 					</svg>
 				</button>
 			</div>
 
 			<div class="dialog-content">
-				<div class="form-section">
-					<label class="form-label" for="description">
-						Describe what you want
-					</label>
-					<textarea
-						id="description"
-						class="description-input"
-						bind:value={description}
-						placeholder={placeholder}
-						rows="4"
-						disabled={isGenerating}
-					></textarea>
-					<div class="char-count" class:error={description.length > 0 && description.length < 10}>
-						{description.length}/2000 characters {#if description.length > 0 && description.length < 10}(min 10){/if}
+				{#if dialogState === 'clarifying'}
+					<!-- Clarification Questions UI -->
+					<div class="clarification-intro">
+						<p>To generate the best configuration, I need a bit more information:</p>
 					</div>
-				</div>
 
-				<div class="form-section">
-					<label class="form-label" for="model">
-						Generation Model
-					</label>
-					<select id="model" class="model-select" bind:value={selectedModel} disabled={isGenerating}>
-						<option value="haiku">Haiku (Fast)</option>
-						<option value="sonnet">Sonnet (Balanced)</option>
-						<option value="opus">Opus (Best Quality)</option>
-					</select>
-					<div class="model-hint">
-						Haiku is recommended for quick generation. Use Sonnet or Opus for more detailed configurations.
+					{#each clarificationQuestions as question (question.id)}
+						<div class="question-section">
+							<label class="question-label">{question.question}</label>
+							{#if question.context}
+								<p class="question-context">{question.context}</p>
+							{/if}
+
+							{#if question.options && question.options.length > 0}
+								<div class="options-grid">
+									{#each question.options as option}
+										<button
+											class="option-btn"
+											class:selected={clarificationAnswers[question.id] === option}
+											onclick={() => selectOption(question.id, option)}
+											disabled={isLoading}
+										>
+											{option}
+										</button>
+									{/each}
+								</div>
+								<div class="custom-answer">
+									<input
+										type="text"
+										class="custom-input"
+										placeholder="Or type a custom answer..."
+										value={clarificationAnswers[question.id] || ''}
+										oninput={(e) => (clarificationAnswers[question.id] = e.currentTarget.value)}
+										disabled={isLoading}
+									/>
+								</div>
+							{:else}
+								<textarea
+									class="answer-input"
+									placeholder="Your answer..."
+									value={clarificationAnswers[question.id] || ''}
+									oninput={(e) => (clarificationAnswers[question.id] = e.currentTarget.value)}
+									disabled={isLoading}
+									rows="2"
+								></textarea>
+							{/if}
+						</div>
+					{/each}
+
+					{#if error}
+						<div class="error-message">
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<circle cx="12" cy="12" r="10" />
+								<path d="M12 8v4M12 16h.01" />
+							</svg>
+							<span>{error}</span>
+						</div>
+					{/if}
+
+					<div class="dialog-actions">
+						<button class="btn btn-secondary" onclick={handleBackToDescription} disabled={isLoading}>
+							Back
+						</button>
+						<button class="btn btn-primary" onclick={handleClarificationSubmit} disabled={isLoading}>
+							{#if isLoading}
+								<span class="spinner"></span>
+								<span>Generating...</span>
+							{:else}
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+								</svg>
+								<span>Generate</span>
+							{/if}
+						</button>
 					</div>
-				</div>
+				{:else}
+					<!-- Initial Form UI -->
+					<div class="form-section">
+						<label class="form-label" for="description"> Describe what you want </label>
+						<textarea
+							id="description"
+							class="description-input"
+							bind:value={description}
+							placeholder={placeholder}
+							rows="4"
+							disabled={isLoading}
+						></textarea>
+						<div class="char-count" class:error={description.length > 0 && description.length < 10}>
+							{description.length}/5000 characters
+							{#if description.length > 0 && description.length < 10}(min 10){/if}
+						</div>
+					</div>
 
-				{#if error}
-					<div class="error-message">
-						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-							<circle cx="12" cy="12" r="10"/>
-							<path d="M12 8v4M12 16h.01"/>
-						</svg>
-						<span>{error}</span>
+					<!-- Reference Material Section (Collapsible) -->
+					<div class="form-section">
+						<button
+							type="button"
+							class="reference-toggle"
+							onclick={() => (showReferenceMaterial = !showReferenceMaterial)}
+							disabled={isLoading}
+						>
+							<svg
+								class="toggle-icon"
+								class:expanded={showReferenceMaterial}
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+							>
+								<polyline points="9 18 15 12 9 6"></polyline>
+							</svg>
+							<span>Reference Material</span>
+							<span class="toggle-hint">(optional - paste existing prompts or examples)</span>
+						</button>
+
+						{#if showReferenceMaterial}
+							<div class="reference-content">
+								<textarea
+									id="reference-material"
+									class="reference-input"
+									bind:value={referenceMaterial}
+									placeholder="Paste an existing system prompt, examples, or detailed specifications here. The AI will analyze this and incorporate relevant patterns into the generated configuration."
+									rows="6"
+									disabled={isLoading}
+								></textarea>
+								<div class="char-count">
+									{referenceMaterial.length}/15000 characters
+								</div>
+							</div>
+						{/if}
+					</div>
+
+					<div class="form-section">
+						<label class="form-label" for="model"> Generation Model </label>
+						<select id="model" class="model-select" bind:value={selectedModel} disabled={isLoading}>
+							<option value="haiku">Haiku (Fast)</option>
+							<option value="sonnet">Sonnet (Recommended)</option>
+							<option value="opus">Opus (Best Quality)</option>
+						</select>
+						<div class="model-hint">
+							Sonnet is recommended for comprehensive generation. Use Opus for complex configurations.
+						</div>
+					</div>
+
+					{#if error}
+						<div class="error-message">
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<circle cx="12" cy="12" r="10" />
+								<path d="M12 8v4M12 16h.01" />
+							</svg>
+							<span>{error}</span>
+						</div>
+					{/if}
+
+					<div class="dialog-actions">
+						<button class="btn btn-secondary" onclick={handleClose} disabled={isLoading}> Cancel </button>
+						<button
+							class="btn btn-primary"
+							onclick={handleGenerate}
+							disabled={isLoading || description.length < 10}
+						>
+							{#if isLoading}
+								<span class="spinner"></span>
+								<span>Generating...</span>
+							{:else}
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+								</svg>
+								<span>Generate</span>
+							{/if}
+						</button>
 					</div>
 				{/if}
-
-				<div class="dialog-actions">
-					<button class="btn btn-secondary" onclick={handleClose} disabled={isGenerating}>
-						Cancel
-					</button>
-					<button
-						class="btn btn-primary"
-						onclick={handleGenerate}
-						disabled={isGenerating || description.length < 10}
-					>
-						{#if isGenerating}
-							<span class="spinner"></span>
-							<span>Generating...</span>
-						{:else}
-							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-								<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-							</svg>
-							<span>Generate</span>
-						{/if}
-					</button>
-				</div>
 			</div>
 		</div>
 	</div>
@@ -189,6 +403,10 @@
 		overflow: hidden;
 		display: flex;
 		flex-direction: column;
+	}
+
+	.dialog-container.clarifying {
+		max-width: 550px;
 	}
 
 	.dialog-header {
@@ -331,6 +549,197 @@
 		margin-top: 6px;
 	}
 
+	/* Reference Material Toggle */
+	.reference-toggle {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		padding: 10px 12px;
+		font-size: 0.875rem;
+		font-family: inherit;
+		color: var(--foreground);
+		background: var(--muted);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		cursor: pointer;
+		transition: all 150ms ease;
+		text-align: left;
+	}
+
+	.reference-toggle:hover:not(:disabled) {
+		background: var(--hover-overlay);
+		border-color: var(--primary);
+	}
+
+	.reference-toggle:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.toggle-icon {
+		width: 16px;
+		height: 16px;
+		transition: transform 150ms ease;
+		flex-shrink: 0;
+	}
+
+	.toggle-icon.expanded {
+		transform: rotate(90deg);
+	}
+
+	.toggle-hint {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+		margin-left: auto;
+	}
+
+	.reference-content {
+		margin-top: 12px;
+		animation: slideDown 150ms ease;
+	}
+
+	@keyframes slideDown {
+		from {
+			opacity: 0;
+			transform: translateY(-8px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	.reference-input {
+		width: 100%;
+		padding: 12px;
+		font-size: 0.8rem;
+		font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+		color: var(--foreground);
+		background: var(--background);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		resize: vertical;
+		min-height: 120px;
+		transition: border-color 150ms ease;
+	}
+
+	.reference-input:focus {
+		outline: none;
+		border-color: var(--primary);
+	}
+
+	.reference-input:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.reference-input::placeholder {
+		color: var(--muted-foreground);
+		font-family: inherit;
+	}
+
+	/* Clarification UI */
+	.clarification-intro {
+		margin-bottom: 20px;
+		padding: 12px 16px;
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		border-radius: 8px;
+	}
+
+	.clarification-intro p {
+		font-size: 0.875rem;
+		color: var(--foreground);
+		margin: 0;
+	}
+
+	.question-section {
+		margin-bottom: 24px;
+	}
+
+	.question-label {
+		display: block;
+		font-size: 0.9rem;
+		font-weight: 500;
+		color: var(--foreground);
+		margin-bottom: 6px;
+	}
+
+	.question-context {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+		margin: 0 0 12px 0;
+	}
+
+	.options-grid {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		margin-bottom: 8px;
+	}
+
+	.option-btn {
+		padding: 8px 14px;
+		font-size: 0.8rem;
+		font-family: inherit;
+		color: var(--foreground);
+		background: var(--background);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		cursor: pointer;
+		transition: all 150ms ease;
+	}
+
+	.option-btn:hover:not(:disabled) {
+		background: var(--hover-overlay);
+		border-color: var(--primary);
+	}
+
+	.option-btn.selected {
+		background: var(--primary);
+		color: var(--primary-foreground);
+		border-color: var(--primary);
+	}
+
+	.option-btn:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.custom-answer {
+		margin-top: 8px;
+	}
+
+	.custom-input,
+	.answer-input {
+		width: 100%;
+		padding: 10px 12px;
+		font-size: 0.875rem;
+		font-family: inherit;
+		color: var(--foreground);
+		background: var(--background);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		transition: border-color 150ms ease;
+	}
+
+	.custom-input:focus,
+	.answer-input:focus {
+		outline: none;
+		border-color: var(--primary);
+	}
+
+	.custom-input:disabled,
+	.answer-input:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.answer-input {
+		resize: vertical;
+		min-height: 60px;
+	}
+
 	.error-message {
 		display: flex;
 		align-items: flex-start;
@@ -411,7 +820,11 @@
 	}
 
 	@keyframes spin {
-		from { transform: rotate(0deg); }
-		to { transform: rotate(360deg); }
+		from {
+			transform: rotate(0deg);
+		}
+		to {
+			transform: rotate(360deg);
+		}
 	}
 </style>

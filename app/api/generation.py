@@ -2,13 +2,14 @@
 AI Generation API for profiles and sub-agents
 
 Uses Claude to generate configurations based on user descriptions.
+Features comprehensive prompts, domain awareness, and interactive clarification.
 """
 
 import json
 import logging
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict
 
 from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel, Field
@@ -17,7 +18,19 @@ from claude_agent_sdk import query, ClaudeAgentOptions
 from claude_agent_sdk import AssistantMessage, TextBlock
 
 from app.api.auth import require_auth
-from app.core.models import AgentExport, AgentExportData
+from app.core.models import (
+    AgentExport,
+    AgentExportData,
+    ClarificationQuestionModel,
+    GenerationResponseModel,
+)
+from app.core.generation import (
+    build_profile_generation_prompt,
+    build_subagent_generation_prompt,
+    should_ask_clarification,
+    get_clarification_questions,
+)
+from app.core.generation.clarification import format_clarification_context
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +43,27 @@ router = APIRouter(prefix="/api/v1/generate", tags=["Generation"])
 
 class GenerateProfileRequest(BaseModel):
     """Request to generate a profile configuration"""
-    description: str = Field(..., min_length=10, max_length=2000, description="Description of the desired profile")
+    description: str = Field(..., min_length=10, max_length=5000, description="Description of the desired profile")
+    reference_material: Optional[str] = Field(None, max_length=15000, description="Optional reference material like existing prompts or examples to incorporate")
     model: Optional[str] = Field(None, description="Model to use for generation (haiku, sonnet, opus)")
+    skip_clarification: bool = Field(False, description="Skip clarification questions")
 
 
 class GenerateSubagentRequest(BaseModel):
     """Request to generate a subagent configuration"""
-    description: str = Field(..., min_length=10, max_length=2000, description="Description of the desired subagent")
+    description: str = Field(..., min_length=10, max_length=5000, description="Description of the desired subagent")
+    reference_material: Optional[str] = Field(None, max_length=15000, description="Optional reference material like existing prompts or examples to incorporate")
     model: Optional[str] = Field(None, description="Model to use for generation (haiku, sonnet, opus)")
+    skip_clarification: bool = Field(False, description="Skip clarification questions")
+
+
+class ContinueGenerationRequest(BaseModel):
+    """Request to continue generation after clarification"""
+    generation_type: str = Field(..., description="'profile' or 'subagent'")
+    description: str = Field(..., min_length=10, max_length=5000, description="Original description")
+    reference_material: Optional[str] = Field(None, max_length=15000, description="Optional reference material")
+    answers: Dict[str, str] = Field(..., description="Map of question_id -> user's answer")
+    model: Optional[str] = Field(None, description="Model to use for generation")
 
 
 class SubagentExportData(BaseModel):
@@ -56,121 +82,6 @@ class SubagentExport(BaseModel):
     type: str = "ai-shuffle-subagent"
     exported_at: str
     subagent: SubagentExportData
-
-
-# ============================================================================
-# Generation Prompts
-# ============================================================================
-
-PROFILE_GENERATION_PROMPT = '''You are generating a Claude profile configuration. Based on the user's description, create a complete profile with appropriate settings.
-
-## Available Configuration Fields
-
-### Required Fields
-- **name**: Display name for the profile (string, 1-100 chars)
-- **description**: Brief description of the profile's purpose (string, can be null)
-
-### Model Settings
-- **model**: One of "haiku", "sonnet", "sonnet-1m", "opus" (default: "sonnet")
-- **permission_mode**: One of "default", "acceptEdits", "plan", "bypassPermissions"
-  - default: Ask for permission on sensitive actions
-  - acceptEdits: Auto-accept file edits
-  - plan: Plan-only mode, no execution
-  - bypassPermissions: Skip all permission prompts
-- **thinking_mode**: One of "default", "think", "think_harder", "ultra_think"
-  - default: Standard thinking
-  - think: Extended thinking with more reasoning
-  - think_harder: Even more thorough reasoning
-  - ultra_think: Maximum reasoning depth
-
-### Tool Configuration
-- **allowed_tools**: Array of tool names this profile can use (null = all tools)
-- **disallowed_tools**: Array of tool names to block (null = none blocked)
-
-### System Prompt
-- **system_prompt_type**: Either "preset" or "custom"
-- **system_prompt_preset**: When type is "preset", one of: "claude_code", "code_review", "explain_code", "debug_help", "write_tests", "refactor_code", "write_documentation"
-- **system_prompt_content**: When type is "custom", the full system prompt text
-- **system_prompt_append**: Additional text to append to the system prompt (works with both types)
-
-### Session Behavior
-- **max_turns**: Maximum conversation turns (integer, null = unlimited)
-- **include_partial_messages**: Enable streaming partial messages (boolean, default: true)
-- **continue_conversation**: Continue most recent conversation (boolean, default: false)
-- **fork_session**: Fork instead of continuing when resuming (boolean, default: false)
-
-### Advanced
-- **enabled_agents**: Array of subagent IDs this profile can use (null = none)
-- **setting_sources**: Array of setting sources to load from (["user", "project", "local"])
-- **env**: Dictionary of environment variables to set (string keys and values)
-
-## User's Description
-{description}
-
-## Output Format
-Output ONLY a valid JSON object matching this exact structure (no markdown, no explanation, just JSON):
-{{
-  "name": "...",
-  "description": "...",
-  "model": "sonnet",
-  "permission_mode": "default",
-  "thinking_mode": "default",
-  "system_prompt_type": "preset",
-  "system_prompt_preset": "claude_code",
-  "system_prompt_content": null,
-  "system_prompt_append": null,
-  "allowed_tools": null,
-  "disallowed_tools": null,
-  "enabled_agents": null,
-  "max_turns": null,
-  "include_partial_messages": true,
-  "continue_conversation": false,
-  "fork_session": false,
-  "setting_sources": null,
-  "env": null
-}}
-
-Generate settings that best match the user's description. Be creative with the name and description. If they mention specific use cases, adjust the model, permission_mode, and system_prompt accordingly.'''
-
-
-SUBAGENT_GENERATION_PROMPT = '''You are generating a Claude sub-agent configuration. Sub-agents are specialized AI assistants that the main agent can delegate tasks to.
-
-## Available Configuration Fields
-
-### Required Fields
-- **id**: Unique identifier (lowercase letters, numbers, and hyphens only, e.g., "code-reviewer")
-- **name**: Display name for the subagent (string, 1-100 chars)
-- **description**: When to use this agent - this is shown to the main agent to help it decide when to delegate (string, very important!)
-- **prompt**: System prompt/instructions for the sub-agent (string, detailed instructions for the agent)
-
-### Optional Fields
-- **tools**: Array of tool names this subagent can use. If null, inherits all tools.
-  Available tools include: Read, Write, Edit, Bash, Glob, Grep, WebFetch, WebSearch, Task, TodoWrite, NotebookEdit, KillShell
-- **model**: Model override for this subagent. One of "haiku", "sonnet", "opus", or null to inherit from parent.
-  - Use "haiku" for fast, simple tasks (searches, summaries)
-  - Use "sonnet" for balanced tasks (analysis, moderate complexity)
-  - Use "opus" for complex tasks (code writing, architecture)
-
-## User's Description
-{description}
-
-## Output Format
-Output ONLY a valid JSON object matching this exact structure (no markdown, no explanation, just JSON):
-{{
-  "id": "...",
-  "name": "...",
-  "description": "...",
-  "prompt": "...",
-  "tools": null,
-  "model": null
-}}
-
-Important guidelines:
-1. The **description** field is critical - it tells the main agent WHEN to use this subagent. Be specific about the use cases.
-2. The **prompt** field should be detailed instructions for HOW the subagent should behave and what it should do.
-3. Choose an appropriate model based on task complexity - use "haiku" for quick tasks, "sonnet" for balanced work, "opus" for complex reasoning.
-4. Only specify tools if the subagent needs a limited set - otherwise leave as null to inherit all.
-5. Generate a meaningful id that reflects the subagent's purpose.'''
 
 
 # ============================================================================
@@ -194,9 +105,7 @@ def extract_json_from_response(text: str) -> dict:
 
     # Remove markdown code blocks if present
     if text.startswith("```"):
-        # Find the end of the code block
         lines = text.split("\n")
-        # Skip first line (```json or ```)
         start_idx = 1
         end_idx = len(lines)
         for i in range(1, len(lines)):
@@ -211,7 +120,6 @@ def extract_json_from_response(text: str) -> dict:
         raise ValueError("No JSON object found in response")
 
     # Find the matching closing brace, properly handling strings
-    # This correctly ignores braces inside quoted strings
     depth = 0
     end = start
     in_string = False
@@ -221,21 +129,17 @@ def extract_json_from_response(text: str) -> dict:
         char = text[i]
 
         if escape_next:
-            # Skip this character, it's escaped
             escape_next = False
             continue
 
         if char == "\\":
-            # Next character is escaped
             escape_next = True
             continue
 
         if char == '"':
-            # Toggle string state
             in_string = not in_string
             continue
 
-        # Only count braces when not inside a string
         if not in_string:
             if char == "{":
                 depth += 1
@@ -264,8 +168,10 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
     Returns:
         Text response from Claude
     """
+    # Use sonnet by default for better quality generation
+    # The prompts are comprehensive and benefit from a more capable model
     options = ClaudeAgentOptions(
-        model=model or "haiku",  # Use haiku by default for fast generation
+        model=model or "sonnet",
         max_turns=1,
         permission_mode="bypassPermissions",
         tools=[],  # No tools needed for generation
@@ -289,40 +195,60 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
     return "".join(response_text)
 
 
-# ============================================================================
-# API Endpoints
-# ============================================================================
+def _build_clarification_response(
+    description: str,
+    generation_type: str,
+) -> GenerationResponseModel:
+    """Build a clarification response with questions."""
+    questions = get_clarification_questions(description)
 
-@router.post("/profile", response_model=AgentExport)
-async def generate_profile(
-    request: GenerateProfileRequest,
-    token: str = Depends(require_auth)
-):
+    return GenerationResponseModel(
+        status="needs_clarification",
+        result=None,
+        questions=[
+            ClarificationQuestionModel(
+                id=q.id,
+                question=q.question,
+                options=q.options,
+                context=q.context,
+            )
+            for q in questions
+        ],
+        generation_type=generation_type,
+    )
+
+
+async def _generate_profile_internal(
+    description: str,
+    model: Optional[str] = None,
+    clarification_context: Optional[str] = None,
+    reference_material: Optional[str] = None,
+) -> AgentExport:
     """
-    Generate a profile configuration using AI.
+    Internal profile generation logic.
 
-    Takes a natural language description and generates a complete profile
-    configuration in the AgentExport format (same as profile export).
+    Args:
+        description: User's description
+        model: Model to use
+        clarification_context: Additional context from clarification
+        reference_material: Optional reference material (existing prompts, examples)
+
+    Returns:
+        AgentExport with generated configuration
     """
-    if not request.description.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Description cannot be empty"
-        )
-
-    # Build the prompt
-    prompt = PROFILE_GENERATION_PROMPT.format(description=request.description)
+    # Build the comprehensive prompt
+    prompt = build_profile_generation_prompt(description, clarification_context, reference_material)
 
     # Generate with Claude
-    logger.info(f"Generating profile from description: {request.description[:100]}...")
-    response_text = await generate_with_claude(prompt, request.model)
+    logger.info(f"Generating profile from description: {description[:100]}...")
+    response_text = await generate_with_claude(prompt, model)
 
     # Parse the response
     try:
         generated = extract_json_from_response(response_text)
     except ValueError as e:
         logger.error(f"Failed to parse generated profile: {e}")
-        logger.error(f"Raw response: {response_text[:500]}")
+        logger.error(f"Raw response: {response_text[:1000]}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to parse AI response: {str(e)}"
@@ -334,6 +260,15 @@ async def generate_profile(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="AI did not generate a profile name"
         )
+
+    # Handle ai_tools configuration
+    ai_tools_config = None
+    if generated.get("ai_tools"):
+        from app.core.ai_tools import AIToolsConfig
+        try:
+            ai_tools_config = AIToolsConfig(**generated["ai_tools"])
+        except Exception as e:
+            logger.warning(f"Failed to parse ai_tools config: {e}")
 
     # Build the export format
     agent_data = AgentExportData(
@@ -349,7 +284,7 @@ async def generate_profile(
         allowed_tools=generated.get("allowed_tools"),
         disallowed_tools=generated.get("disallowed_tools"),
         enabled_agents=generated.get("enabled_agents"),
-        ai_tools=None,
+        ai_tools=ai_tools_config,
         max_turns=generated.get("max_turns"),
         max_buffer_size=None,
         include_partial_messages=generated.get("include_partial_messages", True),
@@ -370,36 +305,37 @@ async def generate_profile(
     return export_data
 
 
-@router.post("/subagent", response_model=SubagentExport)
-async def generate_subagent(
-    request: GenerateSubagentRequest,
-    token: str = Depends(require_auth)
-):
+async def _generate_subagent_internal(
+    description: str,
+    model: Optional[str] = None,
+    clarification_context: Optional[str] = None,
+    reference_material: Optional[str] = None,
+) -> SubagentExport:
     """
-    Generate a subagent configuration using AI.
+    Internal subagent generation logic.
 
-    Takes a natural language description and generates a complete subagent
-    configuration in a structured export format.
+    Args:
+        description: User's description
+        model: Model to use
+        clarification_context: Additional context from clarification
+        reference_material: Optional reference material (existing prompts, examples)
+
+    Returns:
+        SubagentExport with generated configuration
     """
-    if not request.description.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Description cannot be empty"
-        )
-
-    # Build the prompt
-    prompt = SUBAGENT_GENERATION_PROMPT.format(description=request.description)
+    # Build the comprehensive prompt
+    prompt = build_subagent_generation_prompt(description, clarification_context, reference_material)
 
     # Generate with Claude
-    logger.info(f"Generating subagent from description: {request.description[:100]}...")
-    response_text = await generate_with_claude(prompt, request.model)
+    logger.info(f"Generating subagent from description: {description[:100]}...")
+    response_text = await generate_with_claude(prompt, model)
 
     # Parse the response
     try:
         generated = extract_json_from_response(response_text)
     except ValueError as e:
         logger.error(f"Failed to parse generated subagent: {e}")
-        logger.error(f"Raw response: {response_text[:500]}")
+        logger.error(f"Raw response: {response_text[:1000]}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to parse AI response: {str(e)}"
@@ -450,3 +386,185 @@ async def generate_subagent(
 
     logger.info(f"Successfully generated subagent: {subagent_data.name} ({subagent_data.id})")
     return export_data
+
+
+# ============================================================================
+# API Endpoints
+# ============================================================================
+
+@router.post("/profile", response_model=GenerationResponseModel)
+async def generate_profile(
+    request: GenerateProfileRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Generate a profile configuration using AI.
+
+    Takes a natural language description and generates a complete profile
+    configuration. May return clarification questions if the description
+    is ambiguous.
+
+    Returns:
+        GenerationResponseModel with either:
+        - status="complete" and result containing AgentExport
+        - status="needs_clarification" and questions to ask
+    """
+    if not request.description.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Description cannot be empty"
+        )
+
+    # Check if clarification is needed (skip if reference material provided - user knows what they want)
+    if not request.skip_clarification and not request.reference_material and should_ask_clarification(request.description):
+        return _build_clarification_response(request.description, "profile")
+
+    # Generate the profile
+    export_data = await _generate_profile_internal(
+        request.description,
+        request.model,
+        reference_material=request.reference_material,
+    )
+
+    return GenerationResponseModel(
+        status="complete",
+        result=export_data.model_dump(),
+        questions=None,
+        generation_type="profile",
+    )
+
+
+@router.post("/subagent", response_model=GenerationResponseModel)
+async def generate_subagent(
+    request: GenerateSubagentRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Generate a subagent configuration using AI.
+
+    Takes a natural language description and generates a complete subagent
+    configuration. May return clarification questions if the description
+    is ambiguous.
+
+    Returns:
+        GenerationResponseModel with either:
+        - status="complete" and result containing SubagentExport
+        - status="needs_clarification" and questions to ask
+    """
+    if not request.description.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Description cannot be empty"
+        )
+
+    # Check if clarification is needed (skip if reference material provided - user knows what they want)
+    if not request.skip_clarification and not request.reference_material and should_ask_clarification(request.description):
+        return _build_clarification_response(request.description, "subagent")
+
+    # Generate the subagent
+    export_data = await _generate_subagent_internal(
+        request.description,
+        request.model,
+        reference_material=request.reference_material,
+    )
+
+    return GenerationResponseModel(
+        status="complete",
+        result=export_data.model_dump(),
+        questions=None,
+        generation_type="subagent",
+    )
+
+
+@router.post("/continue", response_model=GenerationResponseModel)
+async def continue_generation(
+    request: ContinueGenerationRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Continue generation after user provides clarification answers.
+
+    Takes the original description plus user's answers to clarification
+    questions and generates the final configuration.
+
+    Returns:
+        GenerationResponseModel with status="complete" and result
+    """
+    if request.generation_type not in ("profile", "subagent"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="generation_type must be 'profile' or 'subagent'"
+        )
+
+    # Format the clarification context
+    clarification_context = format_clarification_context(
+        request.answers,
+        request.description,
+    )
+
+    if request.generation_type == "profile":
+        export_data = await _generate_profile_internal(
+            request.description,
+            request.model,
+            clarification_context,
+            reference_material=request.reference_material,
+        )
+        return GenerationResponseModel(
+            status="complete",
+            result=export_data.model_dump(),
+            questions=None,
+            generation_type="profile",
+        )
+    else:
+        export_data = await _generate_subagent_internal(
+            request.description,
+            request.model,
+            clarification_context,
+            reference_material=request.reference_material,
+        )
+        return GenerationResponseModel(
+            status="complete",
+            result=export_data.model_dump(),
+            questions=None,
+            generation_type="subagent",
+        )
+
+
+# ============================================================================
+# Legacy Endpoints (for backward compatibility)
+# ============================================================================
+
+@router.post("/profile/direct", response_model=AgentExport)
+async def generate_profile_direct(
+    request: GenerateProfileRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Generate a profile configuration directly (no clarification).
+
+    Legacy endpoint that always returns AgentExport directly.
+    Use /profile for the new clarification-aware flow.
+    """
+    return await _generate_profile_internal(
+        request.description,
+        request.model,
+        reference_material=request.reference_material,
+    )
+
+
+@router.post("/subagent/direct", response_model=SubagentExport)
+async def generate_subagent_direct(
+    request: GenerateSubagentRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Generate a subagent configuration directly (no clarification).
+
+    Legacy endpoint that always returns SubagentExport directly.
+    Use /subagent for the new clarification-aware flow.
+    """
+    return await _generate_subagent_internal(
+        request.description,
+        request.model,
+        reference_material=request.reference_material,
+    )
