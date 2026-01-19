@@ -172,7 +172,17 @@ export const FileChipNode = Node.create({
 				e.stopPropagation();
 				const pos = getPos();
 				if (typeof pos === 'number') {
-					editor.chain().focus().deleteRange({ from: pos, to: pos + node.nodeSize }).run();
+					const chipEnd = pos + node.nodeSize;
+					// Check if there's a trailing space after the chip and delete it too
+					const docSize = editor.state.doc.content.size;
+					let deleteEnd = chipEnd;
+					if (chipEnd < docSize) {
+						const textAfter = editor.state.doc.textBetween(chipEnd, Math.min(chipEnd + 1, docSize));
+						if (textAfter === ' ') {
+							deleteEnd = chipEnd + 1;
+						}
+					}
+					editor.chain().focus().deleteRange({ from: pos, to: deleteEnd }).run();
 				}
 			});
 			dom.appendChild(removeBtn);
