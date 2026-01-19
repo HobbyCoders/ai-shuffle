@@ -660,17 +660,15 @@
 		}
 	}
 
-	// Repeat cards enough times for infinite scroll feel
-	const REPEAT_COUNT = 21;
-
+	// True infinite scroll: 3 copies (buffer-middle-buffer), teleport when hitting edges
 	function getWrappedDeckCards(deckId: string): NavigatorCard[] {
 		const realCards = getDeckCards(deckId);
 		if (realCards.length === 0) return [];
 		if (realCards.length === 1) return realCards;
 
-		// Repeat cards many times for seamless infinite scroll
+		// Only need 3 copies: top buffer, middle (where we scroll), bottom buffer
 		const repeated: NavigatorCard[] = [];
-		for (let r = 0; r < REPEAT_COUNT; r++) {
+		for (let r = 0; r < 3; r++) {
 			for (let i = 0; i < realCards.length; i++) {
 				repeated.push({ ...realCards[i], id: `r${r}-${realCards[i].id}` });
 			}
@@ -683,10 +681,30 @@
 		const realCards = getDeckCards(expandedDeckId);
 		if (realCards.length <= 1) return;
 
-		// Start in the middle of the repeated cards
+		// Start in the middle copy
 		const itemHeight = isMobile ? 389 : 172;
-		const middleIndex = Math.floor(REPEAT_COUNT / 2) * realCards.length;
-		wheelScrollRef.scrollTop = middleIndex * itemHeight;
+		const middleStart = realCards.length * itemHeight;
+		wheelScrollRef.scrollTop = middleStart;
+	}
+
+	function handleReelScroll(e: Event) {
+		if (!expandedDeckId) return;
+		const container = e.target as HTMLDivElement;
+		const realCards = getDeckCards(expandedDeckId);
+		if (realCards.length <= 1) return;
+
+		const itemHeight = isMobile ? 389 : 172;
+		const cycleHeight = realCards.length * itemHeight;
+		const scrollTop = container.scrollTop;
+
+		// If scrolled into top buffer, teleport to equivalent position in middle
+		if (scrollTop < cycleHeight * 0.5) {
+			container.scrollTop = scrollTop + cycleHeight;
+		}
+		// If scrolled into bottom buffer, teleport to equivalent position in middle
+		else if (scrollTop > cycleHeight * 1.5) {
+			container.scrollTop = scrollTop - cycleHeight;
+		}
 	}
 
 	function handleWheelItemSelect(card: NavigatorCard) {
@@ -1624,6 +1642,7 @@
 												<div
 													class="deck-reel-track"
 													bind:this={wheelScrollRef}
+													onscroll={handleReelScroll}
 													onwheel={(e) => e.stopPropagation()}
 													onmousedown={(e) => e.stopPropagation()}
 													ontouchstart={(e) => e.stopPropagation()}
@@ -1817,7 +1836,7 @@
 											<div
 												class="deck-reel-track"
 												bind:this={wheelScrollRef}
-												
+												onscroll={handleReelScroll}
 												onwheel={(e) => e.stopPropagation()}
 												onmousedown={(e) => e.stopPropagation()}
 												ontouchstart={(e) => e.stopPropagation()}
