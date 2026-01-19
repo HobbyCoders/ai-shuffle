@@ -3,6 +3,45 @@ import type { FileChipAttributes } from './FileChipNode';
 import type { JSONContent } from '@tiptap/core';
 
 /**
+ * Find the last @ position in text that could start a mention.
+ * The @ must be at position 0 or preceded by whitespace.
+ * Returns -1 if no valid @ mention found.
+ *
+ * This is a shared utility used by multiple components for consistent @ detection.
+ */
+export function findLastAtMentionIndex(input: string): number {
+	for (let i = input.length - 1; i >= 0; i--) {
+		if (input[i] === '@') {
+			if (i === 0 || /\s/.test(input[i - 1])) {
+				return i;
+			}
+		}
+	}
+	return -1;
+}
+
+/**
+ * Check if text contains an active @ mention.
+ * The @ must be at position 0 or preceded by whitespace.
+ */
+export function hasAtMention(input: string): boolean {
+	return findLastAtMentionIndex(input) !== -1;
+}
+
+/**
+ * Extract @ mention query from text.
+ * Returns the query text (everything after @) and position info, or null if no mention.
+ */
+export function extractAtMentionQuery(input: string): { query: string; atIndex: number } | null {
+	const atIndex = findLastAtMentionIndex(input);
+	if (atIndex === -1) return null;
+	return {
+		query: input.slice(atIndex + 1),
+		atIndex
+	};
+}
+
+/**
  * Serialize editor content to plain text with @path references.
  *
  * FileChip nodes are converted to @path format for backend compatibility.
@@ -77,11 +116,15 @@ export function extractFileChips(editor: Editor): FileChipAttributes[] {
 /**
  * Check if the editor content is effectively empty.
  *
- * Returns true if the editor contains only whitespace or is truly empty.
+ * Returns true if the editor contains only whitespace and no file chips.
+ * An editor with only file chips (no text) is NOT considered empty.
  */
 export function isEditorEmpty(editor: Editor): boolean {
 	const text = editor.getText();
-	return !text.trim();
+	if (text.trim()) return false;
+	// Also check for file chips - editor with only chips is not empty
+	const chips = extractFileChips(editor);
+	return chips.length === 0;
 }
 
 /**

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { getWorktreeFiles } from '$lib/api/git';
   import { getNotesAutocomplete } from '$lib/api/client';
+  import { extractAtMentionQuery } from '$lib/components/chat/tiptap/serialization';
   import './autocomplete/autocomplete-design-system.css';
 
   export interface FileItem {
@@ -42,30 +43,7 @@
   let listElement = $state<HTMLUListElement | null>(null);
   let inChatHistoryFolder = $state(false);
   let inNotesFolder = $state(false);
-
-  // Extract the @ query from input - finds the last @ and text after it
-  // Supports paths with spaces by capturing everything after @ until end of input
-  function extractAtQuery(input: string): { query: string; atIndex: number } | null {
-    // Find the last @ that's either at the start or preceded by whitespace
-    // Search backwards to find the last valid @ position
-    let atIndex = -1;
-    for (let i = input.length - 1; i >= 0; i--) {
-      if (input[i] === '@') {
-        // Check if @ is at start or preceded by whitespace
-        if (i === 0 || /\s/.test(input[i - 1])) {
-          atIndex = i;
-          break;
-        }
-      }
-    }
-
-    if (atIndex === -1) return null;
-
-    // Everything after @ is the query
-    const query = input.slice(atIndex + 1);
-
-    return { query, atIndex };
-  }
+  let fetchCounter = 0; // For cancelling stale fetches
 
   // Get the directory path from query
   // Handles paths with spaces like "Chat History/"
@@ -108,7 +86,7 @@
   $effect(() => {
     if (!visible || !projectId) return;
 
-    const atInfo = extractAtQuery(inputValue);
+    const atInfo = extractAtMentionQuery(inputValue);
     if (!atInfo) return;
 
     // Don't lowercase the path - file systems can be case-sensitive
@@ -123,7 +101,7 @@
 
   // Filter files based on @ query - pure filtering, no fetching
   $effect(() => {
-    const atInfo = extractAtQuery(inputValue);
+    const atInfo = extractAtMentionQuery(inputValue);
     if (!atInfo) {
       filteredFiles = [];
       return;
@@ -217,6 +195,7 @@
   async function fetchFiles(path: string) {
     if (!projectId) return;
 
+    const thisFetchId = ++fetchCounter;
     loading = true;
     lastFetchedPath = path;
     currentPath = path;
@@ -225,7 +204,7 @@
     if (isChatHistoryPath(path)) {
       inChatHistoryFolder = true;
       inNotesFolder = false;
-      await fetchChatHistory(getChatHistoryFilter(path));
+      await fetchChatHistory(getChatHistoryFilter(path), thisFetchId);
       return;
     }
 
@@ -233,7 +212,7 @@
     if (isNotesPath(path)) {
       inNotesFolder = true;
       inChatHistoryFolder = false;
-      await fetchNotes(getNotesFilter(path));
+      await fetchNotes(getNotesFilter(path), thisFetchId);
       return;
     }
 
@@ -243,38 +222,15 @@
     try {
       // If we have a worktreeId, use the worktree file API
       // This allows browsing files in the worktree's directory instead of the main project
+      let fetchedFiles: FileItem[];
       if (worktreeId) {
         const response = await getWorktreeFiles(projectId, worktreeId, path);
-        // Add virtual folders at root level (for worktrees too)
-        if (!path) {
-          files = [
-            {
-              name: CHAT_HISTORY_FOLDER,
-              type: 'directory' as const,
-              path: CHAT_HISTORY_FOLDER,
-              size: null
-            },
-            {
-              name: NOTES_FOLDER,
-              type: 'directory' as const,
-              path: NOTES_FOLDER,
-              size: null
-            },
-            ...response.files.map(f => ({
-              name: f.name,
-              type: f.type as 'file' | 'directory',
-              path: f.path,
-              size: f.size
-            }))
-          ];
-        } else {
-          files = response.files.map(f => ({
-            name: f.name,
-            type: f.type as 'file' | 'directory',
-            path: f.path,
-            size: f.size
-          }));
-        }
+        fetchedFiles = response.files.map(f => ({
+          name: f.name,
+          type: f.type as 'file' | 'directory',
+          path: f.path,
+          size: f.size
+        }));
       } else {
         // Use the standard project file API
         const params = new URLSearchParams();
@@ -288,39 +244,44 @@
 
         if (response.ok) {
           const data = await response.json();
-          // Add virtual folders at root level
-          if (!path) {
-            files = [
-              {
-                name: CHAT_HISTORY_FOLDER,
-                type: 'directory' as const,
-                path: CHAT_HISTORY_FOLDER,
-                size: null
-              },
-              {
-                name: NOTES_FOLDER,
-                type: 'directory' as const,
-                path: NOTES_FOLDER,
-                size: null
-              },
-              ...data.files
-            ];
-          } else {
-            files = data.files;
-          }
+          fetchedFiles = data.files;
         } else {
-          files = [];
+          fetchedFiles = [];
         }
+      }
+
+      // Check if this fetch is still valid (not superseded by a newer fetch)
+      if (thisFetchId !== fetchCounter) return;
+
+      // Add virtual folders at root level
+      if (!path) {
+        files = [
+          {
+            name: CHAT_HISTORY_FOLDER,
+            type: 'directory' as const,
+            path: CHAT_HISTORY_FOLDER,
+            size: null
+          },
+          {
+            name: NOTES_FOLDER,
+            type: 'directory' as const,
+            path: NOTES_FOLDER,
+            size: null
+          },
+          ...fetchedFiles
+        ];
+      } else {
+        files = fetchedFiles;
       }
     } catch (error) {
       console.error('Failed to fetch files:', error);
-      files = [];
+      if (thisFetchId === fetchCounter) files = [];
     } finally {
-      loading = false;
+      if (thisFetchId === fetchCounter) loading = false;
     }
   }
 
-  async function fetchChatHistory(search: string = '') {
+  async function fetchChatHistory(search: string = '', fetchId: number) {
     if (!projectId) return;
 
     try {
@@ -333,6 +294,9 @@
       const response = await fetch(`/api/v1/projects/${projectId}/chat-history?${params}`, {
         credentials: 'include'
       });
+
+      // Check if this fetch is still valid
+      if (fetchId !== fetchCounter) return;
 
       if (response.ok) {
         const data = await response.json();
@@ -351,15 +315,19 @@
       }
     } catch (error) {
       console.error('Failed to fetch chat history:', error);
-      files = [];
+      if (fetchId === fetchCounter) files = [];
     } finally {
-      loading = false;
+      if (fetchId === fetchCounter) loading = false;
     }
   }
 
-  async function fetchNotes(search: string = '') {
+  async function fetchNotes(search: string = '', fetchId: number) {
     try {
       const notes = await getNotesAutocomplete(search || undefined, 30);
+
+      // Check if this fetch is still valid
+      if (fetchId !== fetchCounter) return;
+
       files = notes.map((note) => ({
         name: note.title,
         type: 'note' as const,
@@ -370,9 +338,9 @@
       }));
     } catch (error) {
       console.error('Failed to fetch notes:', error);
-      files = [];
+      if (fetchId === fetchCounter) files = [];
     } finally {
-      loading = false;
+      if (fetchId === fetchCounter) loading = false;
     }
   }
 
@@ -427,7 +395,7 @@
 
       case 'Backspace':
         // If the input ends with a path (trailing /), go back to parent directory
-        const backspaceAtInfo = extractAtQuery(inputValue);
+        const backspaceAtInfo = extractAtMentionQuery(inputValue);
         if (backspaceAtInfo && backspaceAtInfo.query.endsWith('/')) {
           event.preventDefault();
           // Get the parent path - remove trailing slash and last path component
@@ -481,14 +449,6 @@
     inChatHistoryFolder = false;
     inNotesFolder = false;
     fetchFiles('');
-  }
-
-  function goToChatHistory() {
-    fetchFiles(CHAT_HISTORY_FOLDER);
-  }
-
-  function goToNotes() {
-    fetchFiles(NOTES_FOLDER);
   }
 
   function formatRelativeDate(isoDate: string): string {

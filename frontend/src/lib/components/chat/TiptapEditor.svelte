@@ -32,8 +32,12 @@
 	let editor = $state<Editor | null>(null);
 	let isFocused = $state(false);
 
+	// Store reference for cleanup to handle edge cases where editorElement might change
+	let boundElement: HTMLDivElement | null = null;
+
 	onMount(() => {
 		if (editorElement) {
+			boundElement = editorElement;
 			editor = createChatEditor({
 				element: editorElement,
 				placeholder,
@@ -41,7 +45,9 @@
 				onUpdate: () => {
 					// Use getMessage() to include chip @path references in the text
 					// This ensures send button enables when chips are present
-					onTextChange?.(serializeToMessage(editor!));
+					if (editor) {
+						onTextChange?.(serializeToMessage(editor));
+					}
 				},
 				onFocus: () => {
 					isFocused = true;
@@ -52,13 +58,13 @@
 			});
 
 			// Add keydown handler to the editor element
-			editorElement.addEventListener('keydown', handleEditorKeyDown);
+			boundElement.addEventListener('keydown', handleEditorKeyDown);
 		}
 	});
 
 	onDestroy(() => {
-		if (editorElement) {
-			editorElement.removeEventListener('keydown', handleEditorKeyDown);
+		if (boundElement) {
+			boundElement.removeEventListener('keydown', handleEditorKeyDown);
 		}
 		editor?.destroy();
 	});

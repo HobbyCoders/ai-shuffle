@@ -14,6 +14,7 @@
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import { AUTO_COMPACTION_BASE, CONTEXT_MAX } from '$lib/constants/chat';
 	import TiptapEditor from './TiptapEditor.svelte';
+	import { hasAtMention, findLastAtMentionIndex } from './tiptap/serialization';
 
 	interface Command {
 		name: string;
@@ -300,38 +301,12 @@
 		};
 	});
 
-	// Check if input contains an active @ mention
-	// @ must be at start of text or after any whitespace (for triggering autocomplete)
-	function hasActiveAtMention(input: string): boolean {
-		for (let i = input.length - 1; i >= 0; i--) {
-			if (input[i] === '@') {
-				if (i === 0 || /\s/.test(input[i - 1])) {
-					return true;
-				}
-			}
-		}
-		return false;
-	}
-
-	// Find the last @ position (for triggering autocomplete)
-	// @ must be at start of text or after any whitespace
-	function findLastAtIndex(input: string): number {
-		for (let i = input.length - 1; i >= 0; i--) {
-			if (input[i] === '@') {
-				if (i === 0 || /\s/.test(input[i - 1])) {
-					return i;
-				}
-			}
-		}
-		return -1;
-	}
-
 	// Handle input changes for autocomplete
 	function handleInputChange() {
 		showCommandAutocomplete = inputValue.startsWith('/') && inputValue.length > 0;
 		// Use plain text for @ mention detection to avoid false positives from chip @paths
 		// inputValue contains serialized content where chips are @path, which would trigger autocomplete incorrectly
-		showFileAutocomplete = hasActiveAtMention(plainTextValue) && !!liveTab.project;
+		showFileAutocomplete = hasAtMention(plainTextValue) && !!liveTab.project;
 	}
 
 	// Handle form submission
@@ -426,7 +401,7 @@
 			const newPath = file.path ? (file.path.endsWith('/') ? file.path : file.path + '/') : '';
 			editorRef?.replaceAtMention(newPath);
 			// Update inputValue to keep autocomplete state in sync
-			const atStartIndex = findLastAtIndex(inputValue);
+			const atStartIndex = findLastAtMentionIndex(inputValue);
 			if (atStartIndex !== -1) {
 				inputValue = inputValue.substring(0, atStartIndex) + '@' + newPath;
 			}

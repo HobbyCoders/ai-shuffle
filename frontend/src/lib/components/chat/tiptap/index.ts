@@ -7,5 +7,9 @@ export {
 	isEditorEmpty,
 	getPlainText,
 	findActiveAtMention,
-	getSlashCommand
+	getSlashCommand,
+	// Shared @ mention utilities for plain text
+	findLastAtMentionIndex,
+	hasAtMention,
+	extractAtMentionQuery
 } from './serialization';
