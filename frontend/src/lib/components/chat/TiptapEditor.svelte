@@ -38,8 +38,10 @@
 				element: editorElement,
 				placeholder,
 				initialContent,
-				onUpdate: (text) => {
-					onTextChange?.(text);
+				onUpdate: () => {
+					// Use getMessage() to include chip @path references in the text
+					// This ensures send button enables when chips are present
+					onTextChange?.(serializeToMessage(editor!));
 				},
 				onFocus: () => {
 					isFocused = true;
@@ -220,6 +222,8 @@
 		min-height: 24px;
 		max-height: 300px;
 		overflow-y: auto;
+		display: flex;
+		align-items: center;
 	}
 
 	.tiptap-editor.disabled {
@@ -230,6 +234,7 @@
 	/* ProseMirror editor styles */
 	.tiptap-editor :global(.ProseMirror) {
 		outline: none;
+		width: 100%;
 		min-height: 24px;
 		font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 		font-size: 15px;

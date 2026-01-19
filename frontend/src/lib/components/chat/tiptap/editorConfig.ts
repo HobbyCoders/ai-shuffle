@@ -7,7 +7,7 @@ export interface EditorOptions {
 	element: HTMLElement;
 	placeholder?: string;
 	initialContent?: string;
-	onUpdate?: (text: string) => void;
+	onUpdate?: () => void;
 	onTransaction?: () => void;
 	onFocus?: () => void;
 	onBlur?: () => void;
@@ -75,8 +75,8 @@ export function createChatEditor(options: EditorOptions): Editor {
 				return false;
 			}
 		},
-		onUpdate: ({ editor }) => {
-			onUpdate?.(editor.getText());
+		onUpdate: () => {
+			onUpdate?.();
 		},
 		onTransaction: () => {
 			onTransaction?.();
