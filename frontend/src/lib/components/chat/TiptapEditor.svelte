@@ -293,6 +293,10 @@
 		background: var(--status-success-bg);
 	}
 
+	.tiptap-editor :global(.file-chip-node.file-chip-subagent) {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+	}
+
 	/* Chip icon */
 	.tiptap-editor :global(.file-chip-icon) {
 		display: flex;

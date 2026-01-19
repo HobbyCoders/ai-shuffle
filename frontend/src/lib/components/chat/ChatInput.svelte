@@ -409,23 +409,10 @@
 			return;
 		}
 
-		// For subagents, insert @[name] reference into input (similar to slash commands)
-		if (file.type === 'subagent' && file.subagent_id) {
-			const agentReference = `@[${file.name}] `;
-			editorRef?.replaceAtMention(agentReference);
-			// Update inputValue to keep state in sync
-			const atStartIndex = findLastAtMentionIndex(inputValue);
-			if (atStartIndex !== -1) {
-				inputValue = inputValue.substring(0, atStartIndex) + agentReference;
-			}
-			showFileAutocomplete = false;
-			tick().then(() => editorRef?.focus());
-			return;
-		}
-
-		// For files, chat history, and notes, insert as inline chip
+		// For files, chat history, notes, and subagents, insert as inline chip
 		const chipType = file.type === 'chat_history' ? 'chat_history' :
-						 file.type === 'note' ? 'note' : 'file';
+						 file.type === 'note' ? 'note' :
+						 file.type === 'subagent' ? 'subagent' : 'file';
 
 		editorRef?.insertFileChipReplacingMention({
 			path: file.path,

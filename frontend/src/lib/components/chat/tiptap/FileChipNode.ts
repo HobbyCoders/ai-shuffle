@@ -9,7 +9,7 @@ export interface FileChipAttributes {
 	filename: string;
 	fullPath: string;
 	size: number;
-	type: 'file' | 'chat_history' | 'note';
+	type: 'file' | 'chat_history' | 'note' | 'subagent';
 }
 
 declare module '@tiptap/core' {
@@ -81,7 +81,9 @@ export const FileChipNode = Node.create({
 			? 'file-chip-chat-history'
 			: attrs.type === 'note'
 				? 'file-chip-note'
-				: '';
+				: attrs.type === 'subagent'
+					? 'file-chip-subagent'
+					: '';
 
 		// Get appropriate icon based on type
 		const icon = getFileIcon(attrs.type);
@@ -142,6 +144,8 @@ export const FileChipNode = Node.create({
 				dom.classList.add('file-chip-chat-history');
 			} else if (attrs.type === 'note') {
 				dom.classList.add('file-chip-note');
+			} else if (attrs.type === 'subagent') {
+				dom.classList.add('file-chip-subagent');
 			}
 
 			dom.setAttribute('data-file-chip', '');
@@ -221,6 +225,15 @@ function getFileIcon(type: string): string {
 			return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 				<path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"></path>
 				<polyline points="14,2 14,8 20,8"></polyline>
+			</svg>`;
+		case 'subagent':
+			// Agent/robot icon
+			return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+				<rect x="3" y="11" width="18" height="10" rx="2"></rect>
+				<circle cx="12" cy="5" r="2"></circle>
+				<path d="M12 7v4"></path>
+				<line x1="8" y1="16" x2="8" y2="16"></line>
+				<line x1="16" y1="16" x2="16" y2="16"></line>
 			</svg>`;
 		default:
 			// File icon
