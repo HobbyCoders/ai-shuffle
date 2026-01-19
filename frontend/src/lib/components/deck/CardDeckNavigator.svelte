@@ -3481,7 +3481,7 @@
 		/* Height shows ~2.5 cards: center card full, top/bottom partial */
 		height: calc(var(--card-height) * 2.5);
 		flex-shrink: 0;
-		overflow: hidden;
+		/* No overflow hidden - close button needs to appear outside */
 	}
 
 	/* Floating close button */
