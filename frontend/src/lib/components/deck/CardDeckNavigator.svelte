@@ -663,9 +663,8 @@
 		}
 	}
 
-	// Get deck cards repeated many times for seamless infinite scroll
-	// No jarring jumps - just repeat the cards enough times that user can scroll freely
-	const REPEAT_COUNT = 100;
+	// Repeat cards enough times for infinite scroll feel, but not too many for performance
+	const REPEAT_COUNT = 11;
 
 	function getWrappedDeckCards(deckId: string): { cards: NavigatorCard[]; realCount: number; middleStartIndex: number } {
 		const realCards = getDeckCards(deckId);
@@ -676,7 +675,6 @@
 			return { cards: realCards, realCount: 1, middleStartIndex: 0 };
 		}
 
-		// Create a long repeated array so user can scroll "infinitely"
 		const repeated: NavigatorCard[] = [];
 		for (let r = 0; r < REPEAT_COUNT; r++) {
 			for (let i = 0; i < realCards.length; i++) {
@@ -684,45 +682,50 @@
 			}
 		}
 
-		// Start in the middle so user can scroll up or down freely
 		const middleStartIndex = Math.floor(REPEAT_COUNT / 2) * realCards.length;
 		return { cards: repeated, realCount: realCards.length, middleStartIndex };
 	}
 
-	// Handle wheel scroll for selection tracking
+	// Throttle scroll updates with RAF for smooth performance
+	let wheelScrollRaf: number | null = null;
+	let lastScrollIndex = -1;
+
 	function handleWheelScroll(e: Event) {
-		const container = e.target as HTMLDivElement;
-		// Card height + margin: desktop 160px + 12px, mobile ~373px (280 * 4/3) + 16px
-		const itemHeight = isMobile ? 389 : 172;
-		const scrollIndex = Math.round(container.scrollTop / itemHeight);
+		if (wheelScrollRaf) return;
 
-		if (!expandedDeckId) return;
-		const { realCount } = getWrappedDeckCards(expandedDeckId);
+		wheelScrollRaf = requestAnimationFrame(() => {
+			wheelScrollRaf = null;
+			const container = e.target as HTMLDivElement;
+			const itemHeight = isMobile ? 389 : 172;
+			const scrollIndex = Math.round(container.scrollTop / itemHeight);
 
-		if (realCount <= 1) {
-			wheelSelectedIndex = 0;
-			return;
-		}
+			if (scrollIndex === lastScrollIndex) return;
+			lastScrollIndex = scrollIndex;
 
-		// Map scroll position to actual card index (modulo real count)
-		wheelSelectedIndex = ((scrollIndex % realCount) + realCount) % realCount;
+			if (!expandedDeckId) return;
+			const { realCount } = getWrappedDeckCards(expandedDeckId);
+
+			if (realCount <= 1) {
+				wheelSelectedIndex = 0;
+				return;
+			}
+
+			wheelSelectedIndex = ((scrollIndex % realCount) + realCount) % realCount;
+		});
 	}
 
-	// Initialize scroll position to middle of repeated array
 	function initWheelScroll() {
 		if (!wheelScrollRef || !expandedDeckId) return;
 		const itemHeight = isMobile ? 389 : 172;
 		const { middleStartIndex } = getWrappedDeckCards(expandedDeckId);
-		// Start at middle so user can scroll up or down
+		lastScrollIndex = middleStartIndex;
 		wheelScrollRef.scrollTop = middleStartIndex * itemHeight;
 	}
 
-	// Handle wheel item selection
 	function handleWheelItemSelect(card: NavigatorCard, index: number) {
 		if (!expandedDeckId) return;
 		const { realCount } = getWrappedDeckCards(expandedDeckId);
 
-		// Check if this is the currently selected card (by modulo position)
 		const cardRealIndex = index % realCount;
 		if (cardRealIndex !== wheelSelectedIndex) return;
 
@@ -3544,9 +3547,11 @@
 		height: 100%;
 		overflow-y: scroll;
 		overflow-x: hidden;
-		scroll-snap-type: y mandatory;
+		scroll-snap-type: y proximity;
 		scrollbar-width: none;
 		-webkit-overflow-scrolling: touch;
+		will-change: scroll-position;
+		transform: translateZ(0);
 	}
 
 	.deck-reel-track::-webkit-scrollbar {
@@ -3565,10 +3570,12 @@
 		cursor: pointer;
 		scroll-snap-align: center;
 		scroll-snap-stop: normal;
-		transition: opacity 0.3s ease-out, transform 0.3s ease-out;
+		transition: opacity 0.15s ease-out;
 		font-family: inherit;
-		/* Non-selected cards are dimmed */
 		opacity: 0.5;
+		will-change: opacity;
+		transform: translateZ(0);
+		contain: layout style paint;
 	}
 
 	.deck-reel-card:last-of-type {
