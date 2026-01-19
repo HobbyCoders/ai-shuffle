@@ -109,14 +109,14 @@
 <style>
 	.global-stt-indicator {
 		position: fixed;
-		bottom: 24px;
+		bottom: 16px;
 		left: 50%;
 		transform: translateX(-50%);
 		z-index: 9999;
 
 		background: var(--popover);
 		border: 1px solid var(--border);
-		border-radius: 12px;
+		border-radius: 10px;
 		box-shadow:
 			0 4px 6px -1px rgba(0, 0, 0, 0.1),
 			0 2px 4px -1px rgba(0, 0, 0, 0.06),
@@ -145,14 +145,14 @@
 	.indicator-content {
 		display: flex;
 		align-items: center;
-		gap: 12px;
-		padding: 12px 16px;
+		gap: 8px;
+		padding: 8px 12px;
 	}
 
 	.indicator-icon {
 		position: relative;
-		width: 40px;
-		height: 40px;
+		width: 32px;
+		height: 32px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -160,8 +160,8 @@
 	}
 
 	.icon {
-		width: 24px;
-		height: 24px;
+		width: 20px;
+		height: 20px;
 		z-index: 1;
 	}
 
@@ -183,8 +183,8 @@
 
 	.ring {
 		position: absolute;
-		width: 32px;
-		height: 32px;
+		width: 26px;
+		height: 26px;
 		border: 2px solid var(--destructive);
 		border-radius: 50%;
 		transition: transform 0.1s ease-out, opacity 0.1s ease-out;
@@ -200,12 +200,12 @@
 
 	.processing-dots {
 		display: flex;
-		gap: 6px;
+		gap: 4px;
 	}
 
 	.dot {
-		width: 8px;
-		height: 8px;
+		width: 6px;
+		height: 6px;
 		background: var(--primary);
 		border-radius: 50%;
 		animation: bounce 1.2s infinite ease-in-out;
@@ -224,8 +224,8 @@
 	}
 
 	.preparing-spinner {
-		width: 24px;
-		height: 24px;
+		width: 20px;
+		height: 20px;
 		border: 2px solid var(--muted);
 		border-top-color: var(--primary);
 		border-radius: 50%;
@@ -235,12 +235,12 @@
 	.indicator-text {
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		gap: 6px;
 		flex-wrap: wrap;
 	}
 
 	.status-text {
-		font-size: 14px;
+		font-size: 13px;
 		font-weight: 500;
 		color: var(--foreground);
 	}
@@ -253,18 +253,18 @@
 	.hotkey-hint {
 		display: inline-flex;
 		align-items: center;
-		padding: 2px 6px;
+		padding: 1px 5px;
 		background: var(--muted);
 		border: 1px solid var(--border);
-		border-radius: 4px;
+		border-radius: 3px;
 		font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, monospace;
-		font-size: 11px;
+		font-size: 10px;
 		font-weight: 600;
 		color: var(--muted-foreground);
 	}
 
 	.hint-text {
-		font-size: 13px;
+		font-size: 12px;
 		color: var(--muted-foreground);
 	}
 
@@ -272,12 +272,12 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 20px;
-		height: 20px;
+		width: 18px;
+		height: 18px;
 		padding: 0;
 		background: transparent;
 		border: none;
-		border-radius: 4px;
+		border-radius: 3px;
 		cursor: pointer;
 		color: var(--muted-foreground);
 		transition: color 0.15s, background 0.15s;
@@ -289,8 +289,8 @@
 	}
 
 	.dismiss-btn svg {
-		width: 14px;
-		height: 14px;
+		width: 12px;
+		height: 12px;
 	}
 
 	@keyframes slide-up {

@@ -9,10 +9,12 @@
 	 * - Empty state with create buttons
 	 */
 
-	import { ChevronLeft, X, MessageSquare, Terminal, Plus, Settings, User, Users, FolderKanban, FolderOpen, Puzzle, StickyNote, Zap, BarChart3 } from 'lucide-svelte';
+	import { ChevronLeft, X, MessageSquare, Terminal, Plus, Settings, User, Users, FolderKanban, FolderOpen, Puzzle, StickyNote, Zap, BarChart3, Mic } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 	import { MobileWelcome } from '../welcome';
+	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
+	import { globalSttState, triggerToggle } from '$lib/services/globalStt';
 
 	interface Props {
 		cards: DeckCard[];
@@ -229,6 +231,18 @@
 						<Plus size={20} />
 					</button>
 				{/if}
+				{#if $hotkeyPreferences.globalSttEnabled}
+					<button
+						class="header-btn mic"
+						class:recording={$globalSttState.isRecording}
+						class:transcribing={$globalSttState.isTranscribing}
+						class:preparing={$globalSttState.isPreparing}
+						onclick={triggerToggle}
+						aria-label={$globalSttState.isRecording ? 'Stop recording' : 'Start voice input'}
+					>
+						<Mic size={20} />
+					</button>
+				{/if}
 			</div>
 
 			<div class="header-center">
@@ -372,6 +386,63 @@
 	.header-btn.close:active {
 		background: hsl(var(--destructive) / 0.15);
 		color: hsl(var(--destructive));
+	}
+
+	/* Mic button for global STT */
+	.header-btn.mic {
+		color: hsl(var(--muted-foreground));
+		transition: all 0.15s ease;
+	}
+
+	.header-btn.mic:hover {
+		background: hsl(var(--primary) / 0.1);
+		color: hsl(var(--primary));
+	}
+
+	.header-btn.mic:active {
+		background: hsl(var(--primary) / 0.15);
+		color: hsl(var(--primary));
+	}
+
+	/* Recording state - red pulsing */
+	.header-btn.mic.recording {
+		background: hsl(var(--destructive) / 0.15);
+		color: hsl(var(--destructive));
+		animation: pulse-recording 1.5s ease-in-out infinite;
+	}
+
+	/* Transcribing state - primary color */
+	.header-btn.mic.transcribing {
+		background: hsl(var(--primary) / 0.15);
+		color: hsl(var(--primary));
+		animation: pulse-transcribing 0.8s ease-in-out infinite;
+	}
+
+	/* Preparing state - subtle pulse */
+	.header-btn.mic.preparing {
+		background: hsl(var(--muted) / 0.5);
+		color: hsl(var(--muted-foreground));
+		animation: pulse-transcribing 1s ease-in-out infinite;
+	}
+
+	@keyframes pulse-recording {
+		0%, 100% {
+			transform: scale(1);
+			box-shadow: 0 0 0 0 hsl(var(--destructive) / 0.4);
+		}
+		50% {
+			transform: scale(1.05);
+			box-shadow: 0 0 0 4px hsl(var(--destructive) / 0);
+		}
+	}
+
+	@keyframes pulse-transcribing {
+		0%, 100% {
+			opacity: 1;
+		}
+		50% {
+			opacity: 0.6;
+		}
 	}
 
 	/* Small button - still maintains 44px touch target */
