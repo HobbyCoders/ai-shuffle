@@ -10,7 +10,7 @@
 		sessionId?: string | null;
 		messageUuid?: string | null;  // UUID from JSONL for direct rewind
 		streaming?: boolean;
-		onRewindComplete?: () => void;
+		onRewindComplete?: (warning?: string) => void;  // Optional warning for partial success
 		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 	}
 

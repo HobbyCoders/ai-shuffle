@@ -17,7 +17,7 @@
 		onCopy?: (content: string) => void;
 		onRead?: () => void;
 		isReading?: boolean;
-		onRewindComplete?: () => void;
+		onRewindComplete?: (warning?: string) => void;  // Optional warning for partial success
 		fileCheckpointingEnabled?: boolean;  // If true, show option to rewind files too
 	}
 
@@ -114,10 +114,11 @@
 				const includeResponse = messageRole === 'assistant';
 				const result = await executeRewind(sessionId, messageUuid, includeResponse, messageRole, restoreFiles);
 
-				if (result.success) {
-					console.log('[Rewind] Success - removed', result.messages_removed, 'messages, files_rewound:', result.files_rewound);
+				if (result.success || result.chat_rewound) {
+					console.log('[Rewind] Success - removed', result.messages_removed, 'messages, files_rewound:', result.files_rewound, 'partial_success:', result.partial_success);
 					showRewindDialog = false;
-					onRewindComplete?.();
+					// Pass warning to parent to show as system message (for partial success)
+					onRewindComplete?.(result.warning ?? undefined);
 				} else {
 					rewindError = result.error || 'Rewind failed';
 				}
@@ -183,10 +184,11 @@
 			const includeResponse = messageRole === 'assistant';
 			const result = await executeRewind(sessionId, targetCheckpoint.uuid, includeResponse, messageRole, restoreFiles);
 
-			if (result.success) {
-				console.log('[Rewind] Success - removed', result.messages_removed, 'messages, files_rewound:', result.files_rewound);
+			if (result.success || result.chat_rewound) {
+				console.log('[Rewind] Success - removed', result.messages_removed, 'messages, files_rewound:', result.files_rewound, 'partial_success:', result.partial_success);
 				showRewindDialog = false;
-				onRewindComplete?.();
+				// Pass warning to parent to show as system message (for partial success)
+				onRewindComplete?.(result.warning ?? undefined);
 			} else {
 				rewindError = result.error || 'Rewind failed';
 			}

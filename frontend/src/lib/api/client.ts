@@ -1202,6 +1202,8 @@ export interface RewindExecuteResponse {
 	files_rewound: boolean;
 	messages_removed: number;
 	error: string | null;
+	partial_success: boolean;  // True if chat rewound but files didn't (when files were requested)
+	warning: string | null;    // Warning message for partial success scenarios
 }
 
 /**
