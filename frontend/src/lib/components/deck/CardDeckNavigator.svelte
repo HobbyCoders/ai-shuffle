@@ -665,8 +665,8 @@
 	// Handle wheel scroll for selection tracking
 	function handleWheelScroll(e: Event) {
 		const container = e.target as HTMLDivElement;
-		// Item height is 60px desktop, 72px mobile (matches CSS)
-		const itemHeight = isMobile ? 72 : 60;
+		// Card height + gap: desktop 160px + 12px gap, mobile uses aspect ratio ~200px + 16px gap
+		const itemHeight = isMobile ? 216 : 172;
 		wheelSelectedIndex = Math.max(0, Math.round(container.scrollTop / itemHeight));
 	}
 
@@ -1607,18 +1607,18 @@
 												<div class="deck-reel-spacer"></div>
 												{#each getDeckCards(card.deckId) as item, i}
 													<button
-														class="deck-reel-item"
+														class="deck-reel-card"
 														class:selected={i === wheelSelectedIndex}
 														onclick={() => handleWheelItemSelect(item, i)}
 														role="option"
 														aria-selected={i === wheelSelectedIndex}
 													>
-														<div class="deck-reel-item-icon">
-															<item.icon size={22} strokeWidth={1.5} />
-														</div>
-														<div class="deck-reel-item-content">
-															<span class="deck-reel-item-title">{item.title}</span>
-															<span class="deck-reel-item-subtitle">{item.subtitle}</span>
+														<div class="deck-reel-card-inner">
+															<div class="mobile-card-icon" style:--icon-color={item.iconColor}>
+																<item.icon size={28} strokeWidth={1.5} />
+															</div>
+															<span class="mobile-card-label">{item.title}</span>
+															<span class="mobile-card-description">{item.subtitle}</span>
 														</div>
 													</button>
 												{/each}
@@ -1796,18 +1796,18 @@
 											<div class="deck-reel-spacer"></div>
 											{#each getDeckCards(card.deckId) as item, i}
 												<button
-													class="deck-reel-item"
+													class="deck-reel-card"
 													class:selected={i === wheelSelectedIndex}
 													onclick={() => handleWheelItemSelect(item, i)}
 													role="option"
 													aria-selected={i === wheelSelectedIndex}
 												>
-													<div class="deck-reel-item-icon">
-														<item.icon size={20} strokeWidth={1.5} />
-													</div>
-													<div class="deck-reel-item-content">
-														<span class="deck-reel-item-title">{item.title}</span>
-														<span class="deck-reel-item-subtitle">{item.subtitle}</span>
+													<div class="deck-reel-card-inner">
+														<div class="card-icon" style:--icon-color={item.iconColor}>
+															<item.icon size={20} strokeWidth={1.75} />
+														</div>
+														<h3 class="card-title">{item.title}</h3>
+														<p class="card-subtitle">{item.subtitle}</p>
 													</div>
 												</button>
 											{/each}
@@ -3431,14 +3431,15 @@
 	   DECK REEL (Borderless Slot Machine)
 	   ======================================== */
 
-	/* Borderless Deck Reel - replaces card container entirely */
+	/* Borderless Deck Reel - shows full-sized cards vertically */
 	.deck-reel {
 		position: relative;
 		display: flex;
+		flex-direction: column;
 		align-items: center;
-		justify-content: center;
 		width: var(--card-width);
-		height: 220px;
+		/* Height shows ~3 cards: center card full, top/bottom partial */
+		height: calc(var(--card-height) * 2.5);
 		flex-shrink: 0;
 	}
 
@@ -3446,7 +3447,7 @@
 	.deck-reel-close {
 		position: absolute;
 		top: 8px;
-		right: 8px;
+		right: -40px;
 		z-index: 10;
 		width: 32px;
 		height: 32px;
@@ -3458,7 +3459,7 @@
 		border-radius: 50%;
 		color: var(--text-secondary);
 		cursor: pointer;
-		opacity: 0.7;
+		opacity: 0.8;
 		transition: all 0.15s ease;
 		box-shadow: var(--shadow-m);
 	}
@@ -3478,6 +3479,10 @@
 		scroll-snap-type: y mandatory;
 		scrollbar-width: none;
 		-webkit-overflow-scrolling: touch;
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		padding: 0 4px;
 	}
 
 	.deck-reel-track::-webkit-scrollbar {
@@ -3486,120 +3491,164 @@
 
 	/* Spacers for centering first/last items */
 	.deck-reel-spacer {
-		height: 80px;
+		/* Half the container height minus half a card = centers first/last card */
+		height: calc(var(--card-height) * 0.75 - 6px);
 		flex-shrink: 0;
 	}
 
-	/* Individual reel items - styled like mini-cards */
-	.deck-reel-item {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		width: calc(100% - 16px);
-		margin: 0 8px;
-		padding: 12px 16px;
-		height: 60px;
-		background: var(--bg-card);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
+	/* Full-sized card items */
+	.deck-reel-card {
+		flex-shrink: 0;
+		width: 100%;
+		height: var(--card-height);
+		padding: 0;
+		border: none;
+		background: transparent;
 		cursor: pointer;
 		scroll-snap-align: center;
-		opacity: 0.4;
-		transform: scale(0.92);
-		transition: all 0.2s ease;
+		transition: opacity 0.25s ease, transform 0.25s ease;
 		font-family: inherit;
-		box-shadow: var(--shadow-s);
+		/* Non-selected cards are dimmed */
+		opacity: 0.5;
 	}
 
-	.deck-reel-item:hover:not(.selected) {
-		opacity: 0.6;
-		transform: scale(0.95);
+	.deck-reel-card:hover:not(.selected) {
+		opacity: 0.7;
 	}
 
-	/* Selected item - prominent like active card */
-	.deck-reel-item.selected {
+	/* Selected card - fully visible */
+	.deck-reel-card.selected {
 		opacity: 1;
-		transform: scale(1);
+	}
+
+	/* Card inner - matches normal card styling */
+	.deck-reel-card-inner {
+		width: 100%;
+		height: 100%;
+		background: var(--bg-card);
+		border: 1px solid var(--border-subtle);
+		border-radius: calc(var(--radius, 0.75rem) * 1.167);
+		padding: 20px;
+		display: flex;
+		flex-direction: column;
+		box-shadow: var(--shadow-m);
+		transition: all 0.2s ease;
+	}
+
+	.deck-reel-card:hover .deck-reel-card-inner {
 		background: var(--bg-card-hover);
 		border-color: var(--primary);
-		box-shadow:
-			var(--shadow-m),
-			0 0 20px color-mix(in srgb, var(--primary) 25%, transparent);
 	}
 
-	/* Item icon */
-	.deck-reel-item-icon {
-		width: 36px;
-		height: 36px;
+	.deck-reel-card.selected .deck-reel-card-inner {
+		border-color: var(--primary);
+		box-shadow:
+			var(--shadow-l),
+			0 0 25px color-mix(in srgb, var(--primary) 30%, transparent);
+	}
+
+	/* Reuse existing card-icon, card-title, card-subtitle styles */
+	.deck-reel-card .card-icon {
+		width: 40px;
+		height: 40px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		background: var(--bg-elevated);
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-md);
-		color: var(--text-secondary);
-		flex-shrink: 0;
+		margin-bottom: 16px;
+		color: var(--icon-color, var(--text-secondary));
 		transition: all 0.2s ease;
 	}
 
-	.deck-reel-item.selected .deck-reel-item-icon {
+	.deck-reel-card.selected .card-icon {
 		background: var(--ai-subtle);
 		border-color: var(--ai-primary);
 		color: var(--ai-primary);
 		box-shadow: 0 0 12px var(--ai-glow);
 	}
 
-	/* Item content */
-	.deck-reel-item-content {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		overflow: hidden;
-		text-align: left;
-	}
-
-	.deck-reel-item-title {
-		font-size: 0.875rem;
+	.deck-reel-card .card-title {
+		font-size: 0.9375rem;
 		font-weight: 600;
-		color: var(--text-secondary);
-		transition: color 0.2s ease;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.deck-reel-item.selected .deck-reel-item-title {
 		color: var(--text-primary);
+		margin: 0 0 4px 0;
 	}
 
-	.deck-reel-item-subtitle {
-		font-size: 0.75rem;
+	.deck-reel-card .card-subtitle {
+		font-size: 0.8125rem;
 		color: var(--text-muted);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
+		margin: 0;
 	}
 
-	/* Mobile adjustments */
+	/* Mobile deck reel */
 	.deck-reel.mobile {
-		width: calc(75vw - 16px);
-		min-width: 260px;
-		max-width: 320px;
-		height: 280px;
+		width: min(75vw, 280px);
+		/* Taller for mobile cards with 3:4 aspect ratio */
+		height: calc(min(75vw, 280px) * 4 / 3 * 2);
 	}
 
-	.deck-reel.mobile .deck-reel-item {
-		height: 72px;
-		padding: 14px 20px;
-	}
-
-	.deck-reel.mobile .deck-reel-item-icon {
-		width: 44px;
-		height: 44px;
+	.deck-reel.mobile .deck-reel-track {
+		gap: 16px;
 	}
 
 	.deck-reel.mobile .deck-reel-spacer {
-		height: 104px;
+		height: calc(min(75vw, 280px) * 4 / 3 * 0.5 - 8px);
+	}
+
+	.deck-reel.mobile .deck-reel-card {
+		width: 100%;
+		aspect-ratio: 3 / 4;
+		height: auto;
+	}
+
+	.deck-reel.mobile .deck-reel-card-inner {
+		padding: 1.5rem 1rem;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 0.75rem;
+		text-align: center;
+	}
+
+	.deck-reel.mobile .deck-reel-close {
+		right: -36px;
+	}
+
+	/* Reuse mobile card icon styling */
+	.deck-reel.mobile .mobile-card-icon {
+		width: 64px;
+		height: 64px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: var(--radius-lg);
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-subtle);
+		color: var(--icon-color, var(--text-secondary));
+		transition: all 0.15s ease;
+	}
+
+	.deck-reel.mobile .deck-reel-card.selected .mobile-card-icon {
+		background: var(--ai-subtle);
+		border-color: var(--ai-primary);
+		color: var(--ai-primary);
+		box-shadow: 0 0 16px var(--ai-glow);
+	}
+
+	.deck-reel.mobile .mobile-card-label {
+		font-size: 0.9rem;
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		color: var(--text-primary);
+		text-transform: uppercase;
+	}
+
+	.deck-reel.mobile .mobile-card-description {
+		font-size: 0.8rem;
+		color: var(--text-muted);
 	}
 
 	/* Empty state */
