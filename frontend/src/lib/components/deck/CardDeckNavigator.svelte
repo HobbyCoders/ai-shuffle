@@ -150,7 +150,6 @@
 
 	// Expanded deck wheel state (slot machine inline expansion)
 	let expandedDeckId = $state<string | null>(null);
-	let wheelSelectedIndex = $state(0);
 	let wheelScrollRef = $state<HTMLDivElement | null>(null);
 
 	// 3D tilt effect state (desktop cards)
@@ -654,83 +653,44 @@
 	function toggleDeckExpansion(deckId: string) {
 		if (expandedDeckId === deckId) {
 			expandedDeckId = null;
-			wheelSelectedIndex = 0;
 		} else {
 			expandedDeckId = deckId;
-			wheelSelectedIndex = 0;
-			// Initialize scroll to first real card (after clone) for infinite wrap
+			// Initialize scroll to middle for infinite wrap feel
 			setTimeout(() => initWheelScroll(), 0);
 		}
 	}
 
-	// Repeat cards enough times for infinite scroll feel, but not too many for performance
-	const REPEAT_COUNT = 11;
+	// Repeat cards enough times for infinite scroll feel
+	const REPEAT_COUNT = 21;
 
-	function getWrappedDeckCards(deckId: string): { cards: NavigatorCard[]; realCount: number; middleStartIndex: number } {
+	function getWrappedDeckCards(deckId: string): NavigatorCard[] {
 		const realCards = getDeckCards(deckId);
-		if (realCards.length === 0) {
-			return { cards: [], realCount: 0, middleStartIndex: 0 };
-		}
-		if (realCards.length === 1) {
-			return { cards: realCards, realCount: 1, middleStartIndex: 0 };
-		}
+		if (realCards.length === 0) return [];
+		if (realCards.length === 1) return realCards;
 
+		// Repeat cards many times for seamless infinite scroll
 		const repeated: NavigatorCard[] = [];
 		for (let r = 0; r < REPEAT_COUNT; r++) {
 			for (let i = 0; i < realCards.length; i++) {
 				repeated.push({ ...realCards[i], id: `r${r}-${realCards[i].id}` });
 			}
 		}
-
-		const middleStartIndex = Math.floor(REPEAT_COUNT / 2) * realCards.length;
-		return { cards: repeated, realCount: realCards.length, middleStartIndex };
-	}
-
-	// Throttle scroll updates with RAF for smooth performance
-	let wheelScrollRaf: number | null = null;
-	let lastScrollIndex = -1;
-
-	function handleWheelScroll(e: Event) {
-		if (wheelScrollRaf) return;
-
-		wheelScrollRaf = requestAnimationFrame(() => {
-			wheelScrollRaf = null;
-			const container = e.target as HTMLDivElement;
-			const itemHeight = isMobile ? 389 : 172;
-			const scrollIndex = Math.round(container.scrollTop / itemHeight);
-
-			if (scrollIndex === lastScrollIndex) return;
-			lastScrollIndex = scrollIndex;
-
-			if (!expandedDeckId) return;
-			const { realCount } = getWrappedDeckCards(expandedDeckId);
-
-			if (realCount <= 1) {
-				wheelSelectedIndex = 0;
-				return;
-			}
-
-			wheelSelectedIndex = ((scrollIndex % realCount) + realCount) % realCount;
-		});
+		return repeated;
 	}
 
 	function initWheelScroll() {
 		if (!wheelScrollRef || !expandedDeckId) return;
+		const realCards = getDeckCards(expandedDeckId);
+		if (realCards.length <= 1) return;
+
+		// Start in the middle of the repeated cards
 		const itemHeight = isMobile ? 389 : 172;
-		const { middleStartIndex } = getWrappedDeckCards(expandedDeckId);
-		lastScrollIndex = middleStartIndex;
-		wheelScrollRef.scrollTop = middleStartIndex * itemHeight;
+		const middleIndex = Math.floor(REPEAT_COUNT / 2) * realCards.length;
+		wheelScrollRef.scrollTop = middleIndex * itemHeight;
 	}
 
-	function handleWheelItemSelect(card: NavigatorCard, index: number) {
-		if (!expandedDeckId) return;
-		const { realCount } = getWrappedDeckCards(expandedDeckId);
-
-		const cardRealIndex = index % realCount;
-		if (cardRealIndex !== wheelSelectedIndex) return;
-
+	function handleWheelItemSelect(card: NavigatorCard) {
 		expandedDeckId = null;
-		wheelSelectedIndex = 0;
 
 		if (card.type === 'action' && card.action) {
 			handleAction(card.action);
@@ -1659,23 +1619,19 @@
 											<X size={18} />
 										</button>
 										{#if card.deckId}
-											{@const wrappedData = getWrappedDeckCards(card.deckId)}
-											{#if wrappedData.realCount > 0}
+											{@const wrappedCards = getWrappedDeckCards(card.deckId)}
+											{#if wrappedCards.length > 0}
 												<div
 													class="deck-reel-track"
 													bind:this={wheelScrollRef}
-													onscroll={handleWheelScroll}
 													onwheel={(e) => e.stopPropagation()}
 													onmousedown={(e) => e.stopPropagation()}
 													ontouchstart={(e) => e.stopPropagation()}
 												>
-													{#each wrappedData.cards as item, i (item.id)}
+													{#each wrappedCards as item (item.id)}
 														<button
 															class="deck-reel-card"
-															class:selected={(i % wrappedData.realCount) === wheelSelectedIndex}
-															onclick={() => handleWheelItemSelect(item, i)}
-															role="option"
-															aria-selected={(i % wrappedData.realCount) === wheelSelectedIndex}
+															onclick={() => handleWheelItemSelect(item)}
 														>
 															<div class="deck-reel-card-inner">
 																<div class="mobile-card-icon" style:--icon-color={item.iconColor}>
@@ -1856,23 +1812,20 @@
 										<X size={16} />
 									</button>
 									{#if card.deckId}
-										{@const wrappedData = getWrappedDeckCards(card.deckId)}
-										{#if wrappedData.realCount > 0}
+										{@const wrappedCards = getWrappedDeckCards(card.deckId)}
+										{#if wrappedCards.length > 0}
 											<div
 												class="deck-reel-track"
 												bind:this={wheelScrollRef}
-												onscroll={handleWheelScroll}
+												
 												onwheel={(e) => e.stopPropagation()}
 												onmousedown={(e) => e.stopPropagation()}
 												ontouchstart={(e) => e.stopPropagation()}
 											>
-												{#each wrappedData.cards as item, i (item.id)}
+												{#each wrappedCards as item (item.id)}
 													<button
 														class="deck-reel-card"
-														class:selected={(i % wrappedData.realCount) === wheelSelectedIndex}
-														onclick={() => handleWheelItemSelect(item, i)}
-														role="option"
-														aria-selected={(i % wrappedData.realCount) === wheelSelectedIndex}
+														onclick={() => handleWheelItemSelect(item)}
 													>
 														<div class="deck-reel-card-inner">
 															<div class="card-icon" style:--icon-color={item.iconColor}>
@@ -1911,7 +1864,6 @@
 									onmousemove={handleCardTiltMove}
 									onmouseleave={handleCardTiltLeave}
 									onanimationend={() => handleCardAnimationEnd(card.id)}
-									role="option"
 									tabindex="0"
 									aria-selected="false"
 								>
@@ -3541,17 +3493,14 @@
 		border-color: var(--border-strong);
 	}
 
-	/* Scrollable track */
+	/* Scrollable track - simple native scroll, no snap */
 	.deck-reel-track {
 		width: 100%;
 		height: 100%;
-		overflow-y: scroll;
+		overflow-y: auto;
 		overflow-x: hidden;
-		scroll-snap-type: y proximity;
 		scrollbar-width: none;
 		-webkit-overflow-scrolling: touch;
-		will-change: scroll-position;
-		transform: translateZ(0);
 	}
 
 	.deck-reel-track::-webkit-scrollbar {
@@ -3568,27 +3517,11 @@
 		border: none;
 		background: transparent;
 		cursor: pointer;
-		scroll-snap-align: center;
-		scroll-snap-stop: normal;
-		transition: opacity 0.15s ease-out;
 		font-family: inherit;
-		opacity: 0.5;
-		will-change: opacity;
-		transform: translateZ(0);
-		contain: layout style paint;
 	}
 
 	.deck-reel-card:last-of-type {
 		margin-bottom: 0;
-	}
-
-	.deck-reel-card:hover:not(.selected) {
-		opacity: 0.7;
-	}
-
-	/* Selected card - fully visible */
-	.deck-reel-card.selected {
-		opacity: 1;
 	}
 
 	/* Card inner - matches normal card styling */
@@ -3610,13 +3543,6 @@
 		border-color: var(--primary);
 	}
 
-	.deck-reel-card.selected .deck-reel-card-inner {
-		border-color: var(--primary);
-		box-shadow:
-			var(--shadow-l),
-			0 0 25px color-mix(in srgb, var(--primary) 30%, transparent);
-	}
-
 	/* Reuse existing card-icon, card-title, card-subtitle styles */
 	.deck-reel-card .card-icon {
 		width: 40px;
@@ -3632,12 +3558,6 @@
 		transition: all 0.2s ease;
 	}
 
-	.deck-reel-card.selected .card-icon {
-		background: var(--ai-subtle);
-		border-color: var(--ai-primary);
-		color: var(--ai-primary);
-		box-shadow: 0 0 12px var(--ai-glow);
-	}
 
 	.deck-reel-card .card-title {
 		font-size: 0.9375rem;
@@ -3694,12 +3614,6 @@
 		transition: all 0.15s ease;
 	}
 
-	.deck-reel.mobile .deck-reel-card.selected .mobile-card-icon {
-		background: var(--ai-subtle);
-		border-color: var(--ai-primary);
-		color: var(--ai-primary);
-		box-shadow: 0 0 16px var(--ai-glow);
-	}
 
 	.deck-reel.mobile .mobile-card-label {
 		font-size: 0.9rem;
