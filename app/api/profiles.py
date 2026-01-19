@@ -5,11 +5,11 @@ Profile management API routes
 from typing import List, Optional
 from datetime import datetime
 import re
+import logging
 
 from fastapi import APIRouter, HTTPException, Depends, status, Request, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from pathlib import Path
 
 from app.core.models import (
     Profile, ProfileCreate, ProfileUpdate,
@@ -260,7 +260,6 @@ async def get_all_available_subagents(
                     ))
             except Exception as e:
                 # Log but don't fail if project agents can't be loaded
-                import logging
                 logging.warning(f"Failed to load project agents for {project_id}: {e}")
 
     # 3. Plugin file-based agents (lowest priority)
@@ -296,7 +295,6 @@ async def get_all_available_subagents(
             ))
     except Exception as e:
         # Log but don't fail if plugin agents can't be loaded
-        import logging
         logging.warning(f"Failed to load plugin agents: {e}")
 
     # Apply limit
