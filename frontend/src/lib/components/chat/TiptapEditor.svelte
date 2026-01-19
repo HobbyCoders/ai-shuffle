@@ -222,8 +222,6 @@
 		min-height: 24px;
 		max-height: 300px;
 		overflow-y: auto;
-		display: flex;
-		align-items: center;
 	}
 
 	.tiptap-editor.disabled {
@@ -231,16 +229,22 @@
 		pointer-events: none;
 	}
 
-	/* ProseMirror editor styles */
+	/* ProseMirror editor styles - match original textarea */
 	.tiptap-editor :global(.ProseMirror) {
 		outline: none;
 		width: 100%;
 		min-height: 24px;
+		padding: 0;
+		margin: 0;
+		background: transparent;
+		border: none;
 		font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 		font-size: 15px;
 		font-weight: 400;
 		line-height: 1.5;
 		color: var(--foreground);
+		/* Align text baseline with send button center (32px button, so ~6px offset) */
+		padding-top: 4px;
 	}
 
 	.tiptap-editor :global(.ProseMirror p) {

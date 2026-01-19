@@ -100,30 +100,53 @@ export function getPlainText(editor: Editor): string {
  * or null if no active mention.
  *
  * Example:
- *   Text: "check @src/li|" (cursor at |)
- *   Returns: { from: 6, to: 14, query: "src/li" }
+ *   Text: "check @src/lib/api|" (cursor at |)
+ *   Returns: { from: 6, to: 19, query: "src/lib/api" }
  */
 export function findActiveAtMention(editor: Editor): { from: number; to: number; query: string } | null {
 	const { state } = editor;
 	const { from } = state.selection;
 
-	// Get text from start of document to cursor
-	const textBefore = state.doc.textBetween(0, from, '\n', '\0');
+	// Walk backwards from cursor to find @ symbol
+	// This correctly handles document positions with non-text nodes
+	let pos = from;
+	let query = '';
+	let foundAt = false;
+	let atPos = -1;
 
-	// Find the last @ that could be starting a mention
-	// Must be preceded by whitespace or be at start
-	const match = textBefore.match(/(^|[\s])@([^\s@]*)$/);
+	// Search backwards character by character
+	while (pos > 0) {
+		const $pos = state.doc.resolve(pos);
+		const before = pos > 0 ? state.doc.textBetween(pos - 1, pos, '\0', '\0') : '';
 
-	if (!match) {
+		if (before === '@') {
+			// Found @, check if it's at start or after whitespace
+			const charBefore = pos > 1 ? state.doc.textBetween(pos - 2, pos - 1, '\0', '\0') : '';
+			if (pos === 1 || charBefore === '' || /\s/.test(charBefore)) {
+				foundAt = true;
+				atPos = pos - 1;
+				break;
+			} else {
+				// @ is part of text (like email), not a mention
+				return null;
+			}
+		} else if (/\s/.test(before) || before === '\0' || before === '') {
+			// Hit whitespace or node boundary without finding @
+			return null;
+		} else {
+			// Valid path character, prepend to query
+			query = before + query;
+		}
+
+		pos--;
+	}
+
+	if (!foundAt) {
 		return null;
 	}
 
-	const query = match[2];
-	const prefixLength = match[1].length; // 0 if at start, 1 if after whitespace
-	const atStart = from - query.length - 1; // -1 for the @
-
 	return {
-		from: atStart,
+		from: atPos,
 		to: from,
 		query
 	};
