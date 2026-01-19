@@ -664,19 +664,24 @@
 	}
 
 	// Get wrapped deck cards for infinite scroll effect
-	// Returns: [clone of last] + [all real cards] + [clone of first]
+	// Returns: [clone of last 2] + [all real cards] + [clone of first 2]
+	// Extra clones ensure scroll-snap doesn't prevent reaching wrap points
 	function getWrappedDeckCards(deckId: string): { cards: NavigatorCard[]; realStartIndex: number; realCount: number } {
 		const realCards = getDeckCards(deckId);
 		if (realCards.length <= 1) {
 			return { cards: realCards, realStartIndex: 0, realCount: realCards.length };
 		}
-		// Clone last card at beginning, first card at end for seamless wrap
+		// Clone last 2 cards at beginning, first 2 cards at end for seamless wrap
+		const lastIdx = realCards.length - 1;
+		const secondLastIdx = realCards.length - 2;
 		const wrapped = [
-			{ ...realCards[realCards.length - 1], id: `clone-start-${realCards[realCards.length - 1].id}` },
+			{ ...realCards[secondLastIdx >= 0 ? secondLastIdx : lastIdx], id: `clone-start-2-${realCards[secondLastIdx >= 0 ? secondLastIdx : lastIdx].id}` },
+			{ ...realCards[lastIdx], id: `clone-start-1-${realCards[lastIdx].id}` },
 			...realCards,
-			{ ...realCards[0], id: `clone-end-${realCards[0].id}` }
+			{ ...realCards[0], id: `clone-end-1-${realCards[0].id}` },
+			{ ...realCards[Math.min(1, lastIdx)], id: `clone-end-2-${realCards[Math.min(1, lastIdx)].id}` }
 		];
-		return { cards: wrapped, realStartIndex: 1, realCount: realCards.length };
+		return { cards: wrapped, realStartIndex: 2, realCount: realCards.length };
 	}
 
 	// Track if we're programmatically scrolling (to avoid recursion)
@@ -692,48 +697,55 @@
 		const scrollIndex = Math.round(container.scrollTop / itemHeight);
 
 		if (!expandedDeckId) return;
-		const { realCount } = getWrappedDeckCards(expandedDeckId);
+		const { realCount, realStartIndex } = getWrappedDeckCards(expandedDeckId);
 
 		if (realCount <= 1) {
 			wheelSelectedIndex = 0;
 			return;
 		}
 
+		// Wrapped array: [clone-2, clone-1, real0, real1, ..., realN-1, clone+1, clone+2]
+		// realStartIndex = 2, so real cards are at indices 2 to (2 + realCount - 1)
+		const firstRealIndex = realStartIndex;
+		const lastRealIndex = realStartIndex + realCount - 1;
+
 		// Check if scrolled to clone regions and wrap around
-		if (scrollIndex <= 0) {
-			// Scrolled to clone of last card -> jump to real last card
+		if (scrollIndex <= firstRealIndex - 1) {
+			// Scrolled into top clone region -> jump to corresponding real card at bottom
 			isResettingScroll = true;
-			const newScrollTop = realCount * itemHeight;
-			container.scrollTop = newScrollTop;
-			wheelSelectedIndex = realCount - 1;
-			setTimeout(() => { isResettingScroll = false; }, 50);
-		} else if (scrollIndex >= realCount + 1) {
-			// Scrolled to clone of first card -> jump to real first card
+			const targetRealIndex = lastRealIndex - (firstRealIndex - 1 - scrollIndex);
+			container.scrollTop = targetRealIndex * itemHeight;
+			wheelSelectedIndex = targetRealIndex - realStartIndex;
+			setTimeout(() => { isResettingScroll = false; }, 100);
+		} else if (scrollIndex >= lastRealIndex + 1) {
+			// Scrolled into bottom clone region -> jump to corresponding real card at top
 			isResettingScroll = true;
-			container.scrollTop = itemHeight;
-			wheelSelectedIndex = 0;
-			setTimeout(() => { isResettingScroll = false; }, 50);
+			const targetRealIndex = firstRealIndex + (scrollIndex - lastRealIndex - 1);
+			container.scrollTop = targetRealIndex * itemHeight;
+			wheelSelectedIndex = targetRealIndex - realStartIndex;
+			setTimeout(() => { isResettingScroll = false; }, 100);
 		} else {
-			// Normal scroll within real cards (index 1 to realCount maps to 0 to realCount-1)
-			wheelSelectedIndex = scrollIndex - 1;
+			// Normal scroll within real cards
+			wheelSelectedIndex = scrollIndex - realStartIndex;
 		}
 	}
 
-	// Initialize scroll position to first real card (after the clone)
+	// Initialize scroll position to first real card (after the clones)
 	function initWheelScroll() {
 		if (!wheelScrollRef || !expandedDeckId) return;
 		const itemHeight = isMobile ? 389 : 172;
-		// Scroll to index 1 (first real card, after the prepended clone)
-		wheelScrollRef.scrollTop = itemHeight;
+		const { realStartIndex } = getWrappedDeckCards(expandedDeckId);
+		// Scroll to first real card (index 2 with 2 prepended clones)
+		wheelScrollRef.scrollTop = realStartIndex * itemHeight;
 	}
 
 	// Handle wheel item selection - index is in wrapped array, convert to real
 	function handleWheelItemSelect(card: NavigatorCard, wrappedIndex: number) {
 		if (!expandedDeckId) return;
-		const { realCount } = getWrappedDeckCards(expandedDeckId);
+		const { realCount, realStartIndex } = getWrappedDeckCards(expandedDeckId);
 
 		// Convert wrapped index to real index
-		const realIndex = wrappedIndex - 1;
+		const realIndex = wrappedIndex - realStartIndex;
 		if (realIndex < 0 || realIndex >= realCount) return; // Clicked on a clone
 		if (realIndex !== wheelSelectedIndex) return; // Not the selected card
 
@@ -1680,10 +1692,10 @@
 													{#each wrappedData.cards as item, i (item.id)}
 														<button
 															class="deck-reel-card"
-															class:selected={i === wheelSelectedIndex + 1}
+															class:selected={i === wheelSelectedIndex + wrappedData.realStartIndex}
 															onclick={() => handleWheelItemSelect(item, i)}
 															role="option"
-															aria-selected={i === wheelSelectedIndex + 1}
+															aria-selected={i === wheelSelectedIndex + wrappedData.realStartIndex}
 														>
 															<div class="deck-reel-card-inner">
 																<div class="mobile-card-icon" style:--icon-color={item.iconColor}>
@@ -1877,10 +1889,10 @@
 												{#each wrappedData.cards as item, i (item.id)}
 													<button
 														class="deck-reel-card"
-														class:selected={i === wheelSelectedIndex + 1}
+														class:selected={i === wheelSelectedIndex + wrappedData.realStartIndex}
 														onclick={() => handleWheelItemSelect(item, i)}
 														role="option"
-														aria-selected={i === wheelSelectedIndex + 1}
+														aria-selected={i === wheelSelectedIndex + wrappedData.realStartIndex}
 													>
 														<div class="deck-reel-card-inner">
 															<div class="card-icon" style:--icon-color={item.iconColor}>
@@ -3556,6 +3568,7 @@
 		overflow-y: scroll;
 		overflow-x: hidden;
 		scroll-snap-type: y mandatory;
+		scroll-behavior: smooth;
 		scrollbar-width: none;
 		-webkit-overflow-scrolling: touch;
 	}
@@ -3575,7 +3588,8 @@
 		background: transparent;
 		cursor: pointer;
 		scroll-snap-align: center;
-		transition: opacity 0.25s ease, transform 0.25s ease;
+		scroll-snap-stop: normal;
+		transition: opacity 0.3s ease-out, transform 0.3s ease-out;
 		font-family: inherit;
 		/* Non-selected cards are dimmed */
 		opacity: 0.5;
