@@ -368,16 +368,20 @@
 		transform: none;
 	}
 
-	.header-btn.add:hover {
+	/* Primary-colored buttons (add, mic) */
+	.header-btn.add:hover,
+	.header-btn.mic:hover {
 		background: hsl(var(--primary) / 0.1);
 		color: hsl(var(--primary));
 	}
 
-	.header-btn.add:active {
+	.header-btn.add:active,
+	.header-btn.mic:active {
 		background: hsl(var(--primary) / 0.15);
 		color: hsl(var(--primary));
 	}
 
+	/* Destructive-colored button (close) */
 	.header-btn.close:hover {
 		background: hsl(var(--destructive) / 0.1);
 		color: hsl(var(--destructive));
@@ -388,20 +392,9 @@
 		color: hsl(var(--destructive));
 	}
 
-	/* Mic button for global STT */
+	/* Mic button base state - muted until interacted */
 	.header-btn.mic {
 		color: hsl(var(--muted-foreground));
-		transition: all 0.15s ease;
-	}
-
-	.header-btn.mic:hover {
-		background: hsl(var(--primary) / 0.1);
-		color: hsl(var(--primary));
-	}
-
-	.header-btn.mic:active {
-		background: hsl(var(--primary) / 0.15);
-		color: hsl(var(--primary));
 	}
 
 	/* Recording state - red pulsing */
@@ -409,6 +402,11 @@
 		background: hsl(var(--destructive) / 0.15);
 		color: hsl(var(--destructive));
 		animation: pulse-recording 1.5s ease-in-out infinite;
+	}
+
+	/* Prevent transform conflict between :active and animation */
+	.header-btn.mic.recording:active {
+		transform: scale(1.05);
 	}
 
 	/* Transcribing state - primary color */
