@@ -99,9 +99,15 @@ export function getPlainText(editor: Editor): string {
  * Returns the position and query text if an @ mention is being typed,
  * or null if no active mention.
  *
+ * Supports paths with spaces (e.g., "@Chat History/Session 123.jsonl").
+ * The @ must be at the start of input or preceded by a newline.
+ *
  * Example:
  *   Text: "check @src/li|" (cursor at |)
  *   Returns: { from: 6, to: 14, query: "src/li" }
+ *
+ *   Text: "@Chat History/Session|" (cursor at |)
+ *   Returns: { from: 0, to: 21, query: "Chat History/Session" }
  */
 export function findActiveAtMention(editor: Editor): { from: number; to: number; query: string } | null {
 	const { state } = editor;
@@ -110,17 +116,26 @@ export function findActiveAtMention(editor: Editor): { from: number; to: number;
 	// Get text from start of document to cursor
 	const textBefore = state.doc.textBetween(0, from, '\n', '\0');
 
-	// Find the last @ that could be starting a mention
-	// Must be preceded by whitespace or be at start
-	const match = textBefore.match(/(^|[\s])@([^\s@]*)$/);
+	// Find the last @ that starts a mention
+	// Must be at start of text or preceded by a newline
+	// (We use newline as the delimiter since paths can contain spaces)
+	let atIndex = -1;
+	for (let i = textBefore.length - 1; i >= 0; i--) {
+		if (textBefore[i] === '@') {
+			// Check if @ is at start or preceded by newline
+			if (i === 0 || textBefore[i - 1] === '\n') {
+				atIndex = i;
+				break;
+			}
+		}
+	}
 
-	if (!match) {
+	if (atIndex === -1) {
 		return null;
 	}
 
-	const query = match[2];
-	const prefixLength = match[1].length; // 0 if at start, 1 if after whitespace
-	const atStart = from - query.length - 1; // -1 for the @
+	const query = textBefore.slice(atIndex + 1); // Everything after @
+	const atStart = from - query.length - 1; // Position of @
 
 	return {
 		from: atStart,

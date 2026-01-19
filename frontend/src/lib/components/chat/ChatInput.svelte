@@ -300,10 +300,11 @@
 	});
 
 	// Check if input contains an active @ mention
+	// @ must be at start of text or after newline (supports paths with spaces)
 	function hasActiveAtMention(input: string): boolean {
 		for (let i = input.length - 1; i >= 0; i--) {
 			if (input[i] === '@') {
-				if (i === 0 || /\s/.test(input[i - 1])) {
+				if (i === 0 || input[i - 1] === '\n') {
 					return true;
 				}
 			}
@@ -312,10 +313,11 @@
 	}
 
 	// Find the last @ position
+	// @ must be at start of text or after newline (supports paths with spaces)
 	function findLastAtIndex(input: string): number {
 		for (let i = input.length - 1; i >= 0; i--) {
 			if (input[i] === '@') {
-				if (i === 0 || /\s/.test(input[i - 1])) {
+				if (i === 0 || input[i - 1] === '\n') {
 					return i;
 				}
 			}
@@ -1289,7 +1291,7 @@
 	/* ===== INPUT INNER - Glass rounded bubble inside ===== */
 	.input-inner {
 		display: flex;
-		align-items: flex-end;
+		align-items: center;
 		gap: 8px;
 		background: var(--input-bg);
 		border-radius: var(--radius, 0.75rem);
@@ -1342,10 +1344,11 @@
 		color: var(--muted-foreground);
 	}
 
-	/* Send button wrapper */
+	/* Send button wrapper - aligns to bottom when text wraps to multiple lines */
 	.send-button-wrapper {
 		display: flex;
 		align-items: center;
+		align-self: flex-end;
 		flex-shrink: 0;
 	}
 
