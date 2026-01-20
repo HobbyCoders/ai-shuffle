@@ -5269,6 +5269,29 @@ function createTabsStore() {
 			if (ws?.readyState === WebSocket.OPEN) {
 				ws.send(JSON.stringify({ type: 'get_pending_questions' }));
 			}
+		},
+
+		/**
+		 * Add a system message to a tab's message list
+		 * Used for displaying warnings, notifications, etc.
+		 */
+		addSystemMessage(tabId: string, content: string, subtype?: string) {
+			update(s => ({
+				...s,
+				tabs: s.tabs.map(t => {
+					if (t.id !== tabId) return t;
+					return {
+						...t,
+						messages: [...t.messages, {
+							id: `system-${Date.now()}`,
+							role: 'system' as const,
+							content,
+							type: 'system' as MessageType,
+							systemSubtype: subtype
+						}]
+					};
+				})
+			}));
 		}
 	};
 }

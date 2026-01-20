@@ -361,6 +361,8 @@ class RewindResponseV2(BaseModel):
     files_rewound: bool = False
     messages_removed: int = 0
     error: Optional[str] = None
+    partial_success: bool = False  # True if chat rewound but files didn't (when files were requested)
+    warning: Optional[str] = None  # Warning message for partial success scenarios
 
 
 async def rewind_files_via_sdk(
@@ -561,18 +563,34 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
             errors.append(file_error or "File rewind failed")
 
     # Determine overall success
-    success = (not request.restore_chat or chat_rewound) and (not request.restore_files or files_rewound)
+    # Chat rewind is the primary operation - if it succeeds, the operation is successful
+    # File rewind failure is a partial success, not a total failure
+    chat_success = not request.restore_chat or chat_rewound
+    file_success = not request.restore_files or files_rewound
+
+    # Success if chat rewind worked (or wasn't requested)
+    success = chat_success
+
+    # Partial success: chat worked but files didn't (when files were requested)
+    partial_success = chat_success and request.restore_files and not files_rewound
+
+    # Warning message for partial success
+    warning = None
+    if partial_success:
+        warning = "Chat rewound successfully. File restore unavailable - no checkpoint exists for this point."
 
     # Build result message
-    if success:
+    if success and not partial_success:
         parts = []
         if chat_rewound:
             parts.append(f"removed {messages_removed} messages")
         if files_rewound:
             parts.append("restored files")
         message = f"Successfully rewound: {', '.join(parts)}" if parts else "Rewind completed"
+    elif partial_success:
+        message = f"Chat rewound (removed {messages_removed} messages), but file restore was unavailable"
     else:
-        message = "Rewind partially failed"
+        message = "Rewind failed"
 
     # Broadcast rewind event to all connected devices for this session
     if chat_rewound and messages_removed > 0:
@@ -591,7 +609,9 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
         chat_rewound=chat_rewound,
         files_rewound=files_rewound,
         messages_removed=messages_removed,
-        error="; ".join(errors) if errors else None
+        error="; ".join(errors) if errors else None,
+        partial_success=partial_success,
+        warning=warning
     )
 
 

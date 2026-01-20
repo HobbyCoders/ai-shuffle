@@ -191,6 +191,16 @@
 				};
 			}
 
+			case 'rewind_warning': {
+				// Rewind partial success warning (chat rewound but file restore unavailable)
+				return {
+					title: 'Rewind Notice',
+					content: message.content || 'Chat was rewound but file restoration was unavailable.',
+					badge: 'partial',
+					badgeColor: 'amber'
+				};
+			}
+
 			case 'worktree_context':
 			case 'worktree_created': {
 				// Worktree session context (new worktree created or context loaded from history)
