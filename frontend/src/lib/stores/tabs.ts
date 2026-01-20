@@ -4761,6 +4761,15 @@ function createTabsStore() {
 		 *                           Set to false when setting project for non-chat-card purposes (e.g., ConversationCard)
 		 */
 		setTabProject(tabId: string, projectId: string, persistAsDefault: boolean = true) {
+			const tab = getTab(tabId);
+
+			// Prevent changing project after first message in local sessions
+			// Once a session starts, the project is locked for the duration
+			if (tab && tab.executionMode === 'local' && tab.messages.length > 0) {
+				console.warn(`Cannot change project after session has started (tab: ${tabId})`);
+				return;
+			}
+
 			updateTab(tabId, { project: projectId });
 			// Save tabs state (debounced) to persist the project selection
 			saveTabsToServer(get({ subscribe }));
