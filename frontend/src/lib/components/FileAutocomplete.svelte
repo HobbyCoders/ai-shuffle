@@ -1,12 +1,12 @@
 <script lang="ts">
   import { getWorktreeFiles } from '$lib/api/git';
-  import { getNotesAutocomplete } from '$lib/api/client';
+  import { getNotesAutocomplete, getSubagentsForAutocomplete } from '$lib/api/client';
   import { extractAtMentionQuery } from '$lib/components/chat/tiptap/serialization';
   import './autocomplete/autocomplete-design-system.css';
 
   export interface FileItem {
     name: string;
-    type: 'file' | 'directory' | 'chat_history' | 'note';
+    type: 'file' | 'directory' | 'chat_history' | 'note' | 'subagent';
     path: string;
     size?: number | null;
     // Chat history specific fields
@@ -17,22 +17,31 @@
     // Note specific fields
     note_id?: string;
     note_tags?: string[];
+    // Subagent specific fields
+    subagent_id?: string;
+    subagent_description?: string;
+    subagent_source?: 'profile' | 'plugin' | 'project';
+    subagent_prompt?: string;
+    subagent_tools?: string[];
+    subagent_model?: string | null;
   }
 
   // Virtual folder names
   const CHAT_HISTORY_FOLDER = 'Chat History';
   const NOTES_FOLDER = 'Notes';
+  const SUBAGENTS_FOLDER = 'Subagents';
 
   interface Props {
     inputValue: string;
     projectId?: string;
+    profileId?: string;  // Required for fetching profile-enabled agents
     worktreeId?: string;  // If provided, use worktree file API instead of project file API
     onSelect: (file: FileItem) => void;
     onClose: () => void;
     visible: boolean;
   }
 
-  let { inputValue, projectId, worktreeId, onSelect, onClose, visible }: Props = $props();
+  let { inputValue, projectId, profileId, worktreeId, onSelect, onClose, visible }: Props = $props();
 
   let files = $state<FileItem[]>([]);
   let filteredFiles = $state<FileItem[]>([]);
@@ -43,6 +52,7 @@
   let listElement = $state<HTMLUListElement | null>(null);
   let inChatHistoryFolder = $state(false);
   let inNotesFolder = $state(false);
+  let inSubagentsFolder = $state(false);
   let fetchCounter = 0; // For cancelling stale fetches
 
   // Get the directory path from query
@@ -131,9 +141,13 @@
       if (a.name === NOTES_FOLDER && b.name !== NOTES_FOLDER) return -1;
       if (b.name === NOTES_FOLDER && a.name !== NOTES_FOLDER) return 1;
 
-      // Directories before files (but not for chat_history/note items which have their own order)
-      if (a.type === 'directory' && b.type !== 'directory' && b.type !== 'chat_history' && b.type !== 'note') return -1;
-      if (b.type === 'directory' && a.type !== 'directory' && a.type !== 'chat_history' && a.type !== 'note') return 1;
+      // Subagents folder third
+      if (a.name === SUBAGENTS_FOLDER && b.name !== SUBAGENTS_FOLDER) return -1;
+      if (b.name === SUBAGENTS_FOLDER && a.name !== SUBAGENTS_FOLDER) return 1;
+
+      // Directories before files (but not for chat_history/note/subagent items which have their own order)
+      if (a.type === 'directory' && b.type !== 'directory' && b.type !== 'chat_history' && b.type !== 'note' && b.type !== 'subagent') return -1;
+      if (b.type === 'directory' && a.type !== 'directory' && a.type !== 'chat_history' && a.type !== 'note' && a.type !== 'subagent') return 1;
 
       // Chat history and note items: preserve backend order (most recent first by updated_at)
       // Don't re-sort them - the backend already sorted by date
@@ -192,6 +206,21 @@
     return path.slice(NOTES_FOLDER.length + 1);
   }
 
+  /**
+   * Check if the path indicates we're in the Subagents virtual folder
+   */
+  function isSubagentsPath(path: string): boolean {
+    return path === SUBAGENTS_FOLDER || path.startsWith(SUBAGENTS_FOLDER + '/');
+  }
+
+  /**
+   * Get the search filter from a Subagents path
+   */
+  function getSubagentsFilter(path: string): string {
+    if (path === SUBAGENTS_FOLDER) return '';
+    return path.slice(SUBAGENTS_FOLDER.length + 1);
+  }
+
   async function fetchFiles(path: string) {
     if (!projectId) return;
 
@@ -204,6 +233,7 @@
     if (isChatHistoryPath(path)) {
       inChatHistoryFolder = true;
       inNotesFolder = false;
+      inSubagentsFolder = false;
       await fetchChatHistory(getChatHistoryFilter(path), thisFetchId);
       return;
     }
@@ -212,12 +242,23 @@
     if (isNotesPath(path)) {
       inNotesFolder = true;
       inChatHistoryFolder = false;
+      inSubagentsFolder = false;
       await fetchNotes(getNotesFilter(path), thisFetchId);
+      return;
+    }
+
+    // Check if we're in the Subagents virtual folder
+    if (isSubagentsPath(path)) {
+      inSubagentsFolder = true;
+      inChatHistoryFolder = false;
+      inNotesFolder = false;
+      await fetchSubagents(getSubagentsFilter(path), thisFetchId);
       return;
     }
 
     inChatHistoryFolder = false;
     inNotesFolder = false;
+    inSubagentsFolder = false;
 
     try {
       // If we have a worktreeId, use the worktree file API
@@ -266,6 +307,12 @@
             name: NOTES_FOLDER,
             type: 'directory' as const,
             path: NOTES_FOLDER,
+            size: null
+          },
+          {
+            name: SUBAGENTS_FOLDER,
+            type: 'directory' as const,
+            path: SUBAGENTS_FOLDER,
             size: null
           },
           ...fetchedFiles
@@ -338,6 +385,41 @@
       }));
     } catch (error) {
       console.error('Failed to fetch notes:', error);
+      if (fetchId === fetchCounter) files = [];
+    } finally {
+      if (fetchId === fetchCounter) loading = false;
+    }
+  }
+
+  async function fetchSubagents(search: string = '', fetchId: number) {
+    if (!profileId) {
+      // No profile - can't fetch subagents
+      if (fetchId === fetchCounter) {
+        files = [];
+        loading = false;
+      }
+      return;
+    }
+
+    try {
+      const subagents = await getSubagentsForAutocomplete(profileId, projectId, search || undefined, 30);
+
+      // Check if this fetch is still valid
+      if (fetchId !== fetchCounter) return;
+
+      files = subagents.map((agent) => ({
+        name: agent.name,
+        type: 'subagent' as const,
+        path: `${SUBAGENTS_FOLDER}/${agent.id}`,
+        subagent_id: agent.id,
+        subagent_description: agent.description,
+        subagent_source: agent.source,
+        subagent_prompt: agent.prompt,
+        subagent_tools: agent.tools ?? undefined,
+        subagent_model: agent.model
+      }));
+    } catch (error) {
+      console.error('Failed to fetch subagents:', error);
       if (fetchId === fetchCounter) files = [];
     } finally {
       if (fetchId === fetchCounter) loading = false;
@@ -475,10 +557,12 @@
     if (file.type === 'directory') {
       if (file.name === CHAT_HISTORY_FOLDER) return 'autocomplete-icon-history';
       if (file.name === NOTES_FOLDER) return 'autocomplete-icon-notes';
+      if (file.name === SUBAGENTS_FOLDER) return 'autocomplete-icon-subagents';
       return 'autocomplete-icon-folder';
     }
     if (file.type === 'chat_history') return 'autocomplete-icon-history';
     if (file.type === 'note') return 'autocomplete-icon-notes';
+    if (file.type === 'subagent') return 'autocomplete-icon-subagent';
     return 'autocomplete-icon-file';
   }
 
@@ -486,10 +570,12 @@
     if (file.type === 'directory') {
       if (file.name === CHAT_HISTORY_FOLDER) return 'type-history';
       if (file.name === NOTES_FOLDER) return 'type-notes';
+      if (file.name === SUBAGENTS_FOLDER) return 'type-subagents';
       return 'type-folder';
     }
     if (file.type === 'chat_history') return 'type-chat';
     if (file.type === 'note') return 'type-note';
+    if (file.type === 'subagent') return 'type-subagent';
     return '';
   }
 
@@ -497,10 +583,12 @@
     if (file.type === 'directory') {
       if (file.name === CHAT_HISTORY_FOLDER) return 'history';
       if (file.name === NOTES_FOLDER) return 'notes';
+      if (file.name === SUBAGENTS_FOLDER) return 'agents';
       return 'folder';
     }
     if (file.type === 'chat_history') return 'chat';
     if (file.type === 'note') return 'note';
+    if (file.type === 'subagent') return 'agent';
     return '';
   }
 </script>
@@ -511,11 +599,13 @@
     <div class="autocomplete-header">
       <span class="autocomplete-count">
         {#if loading}
-          {inChatHistoryFolder ? 'Loading history...' : inNotesFolder ? 'Loading notes...' : 'Loading...'}
+          {inChatHistoryFolder ? 'Loading history...' : inNotesFolder ? 'Loading notes...' : inSubagentsFolder ? 'Loading agents...' : 'Loading...'}
         {:else if inChatHistoryFolder}
           {filteredFiles.length} chat{filteredFiles.length !== 1 ? 's' : ''}
         {:else if inNotesFolder}
           {filteredFiles.length} note{filteredFiles.length !== 1 ? 's' : ''}
+        {:else if inSubagentsFolder}
+          {filteredFiles.length} agent{filteredFiles.length !== 1 ? 's' : ''}
         {:else}
           {filteredFiles.length} item{filteredFiles.length !== 1 ? 's' : ''}
           {#if currentPath}
@@ -563,6 +653,11 @@
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
+                  {:else if file.name === SUBAGENTS_FOLDER}
+                    <!-- Robot/Agent icon -->
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                    </svg>
                   {:else}
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
@@ -575,6 +670,11 @@
                 {:else if file.type === 'note'}
                   <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                {:else if file.type === 'subagent'}
+                  <!-- Robot/Agent icon for subagent item -->
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                   </svg>
                 {:else}
                   <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -592,6 +692,10 @@
                   <span class="autocomplete-item-description">
                     {file.preview}
                   </span>
+                {:else if file.type === 'subagent' && file.subagent_description}
+                  <span class="autocomplete-item-description">
+                    {file.subagent_description}
+                  </span>
                 {/if}
               </div>
 
@@ -607,6 +711,10 @@
               {:else if file.type === 'note' && file.note_tags && file.note_tags.length > 0}
                 <span class="autocomplete-item-meta file-note-tags">
                   {file.note_tags.slice(0, 2).join(', ')}{file.note_tags.length > 2 ? '...' : ''}
+                </span>
+              {:else if file.type === 'subagent' && file.subagent_source}
+                <span class="autocomplete-item-meta">
+                  {file.subagent_source}
                 </span>
               {/if}
 

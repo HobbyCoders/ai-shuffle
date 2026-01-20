@@ -409,9 +409,10 @@
 			return;
 		}
 
-		// For files, chat history, and notes, insert as inline chip
+		// For files, chat history, notes, and subagents, insert as inline chip
 		const chipType = file.type === 'chat_history' ? 'chat_history' :
-						 file.type === 'note' ? 'note' : 'file';
+						 file.type === 'note' ? 'note' :
+						 file.type === 'subagent' ? 'subagent' : 'file';
 
 		editorRef?.insertFileChipReplacingMention({
 			path: file.path,
@@ -427,6 +428,7 @@
 
 		tick().then(() => editorRef?.focus());
 	}
+
 
 	// File upload
 	function triggerFileUpload() {
@@ -783,6 +785,7 @@
 								bind:this={fileAutocompleteRef}
 								inputValue={plainTextValue}
 								projectId={liveTab.project}
+								profileId={liveTab.profile}
 								worktreeId={liveTab.executionMode === 'worktree' ? liveTab.worktreeId ?? undefined : undefined}
 								visible={showFileAutocomplete}
 								onSelect={handleFileSelect}
