@@ -122,11 +122,15 @@ def _fix_python_command_for_windows(command: str) -> str:
 
 def _get_jq_shim_env(env: dict) -> dict:
     """
-    Add the Python jq shim to PATH.
+    Add the self-contained Python jq shim to PATH.
 
     This ensures shell scripts can call 'jq' and have it handled
     by our Python implementation, eliminating the need for external
     jq installation on any platform.
+
+    The jq shim scripts (bin/jq and bin/jq.bat) are fully self-contained
+    with all Python code embedded inline - no external module imports needed.
+    This makes them portable and independent of any specific project folder.
 
     Args:
         env: The current environment dict
@@ -140,14 +144,6 @@ def _get_jq_shim_env(env: dict) -> dict:
     # Prepend to PATH (so our shim takes precedence over any system jq)
     current_path = env.get("PATH", "")
     env["PATH"] = str(shim_dir) + os.pathsep + current_path
-
-    # Also set PYTHONPATH so the shim can import its modules
-    app_root = Path(__file__).parent.parent.parent
-    current_pythonpath = env.get("PYTHONPATH", "")
-    if current_pythonpath:
-        env["PYTHONPATH"] = str(app_root) + os.pathsep + current_pythonpath
-    else:
-        env["PYTHONPATH"] = str(app_root)
 
     return env
 

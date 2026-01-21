@@ -1,24 +1,1499 @@
 #!/usr/bin/env bash
-# Python jq shim - routes jq calls to Python implementation
-# This allows shell scripts to use jq syntax while processing is handled by Python
+# Self-contained Python jq shim - no external module dependencies
+# This script embeds the entire jq implementation inline
 
-# Get the directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Use file descriptor 3 for the Python script, keeping stdin (fd 0) available
+exec 3<<'PYTHON_JQ_SHIM_EOF'
+#!/usr/bin/env python3
+"""
+Self-contained Python jq shim - CLI compatible with jq.
 
-# Find the app root (4 levels up: bin -> jq_shim -> core -> app -> root)
-APP_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+This module provides a command-line interface compatible with jq,
+allowing shell scripts to use jq syntax while the processing is
+handled by Python. All code is embedded - no external imports needed.
+"""
 
-# Set PYTHONPATH to include app root
-export PYTHONPATH="$APP_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+import sys
+import json
+import argparse
+import io
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Union
+from enum import Enum
 
-# Detect Python executable - Windows uses 'python', Unix uses 'python3'
-# On Windows (including Git Bash/MSYS), 'python3' often doesn't exist or
-# triggers the Microsoft Store app execution alias
-if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ -n "$WINDIR" ]]; then
-    PYTHON_CMD="python"
-else
-    PYTHON_CMD="python3"
-fi
+# Fix Windows console encoding
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-# Execute the Python jq shim module
-exec $PYTHON_CMD -m app.core.jq_shim "$@"
+
+# =============================================================================
+# AST Node Types and Structures
+# =============================================================================
+
+class NodeType(Enum):
+    """AST node types."""
+    IDENTITY = "identity"
+    FIELD = "field"
+    INDEX = "index"
+    ITERATE = "iterate"
+    PIPE = "pipe"
+    DEFAULT = "default"
+    OBJECT = "object"
+    ARRAY = "array"
+    STRING = "string"
+    NUMBER = "number"
+    BOOL = "bool"
+    NULL = "null"
+    VARIABLE = "variable"
+    FUNCTION = "function"
+    COMPARISON = "comparison"
+    LOGICAL = "logical"
+    NEGATE = "negate"
+
+
+@dataclass
+class ASTNode:
+    """AST node representation."""
+    type: NodeType
+    value: Any = None
+    children: List["ASTNode"] = field(default_factory=list)
+
+
+class ParseError(Exception):
+    """Raised when parsing fails."""
+    pass
+
+
+class EvaluationError(Exception):
+    """Raised when evaluation fails."""
+    pass
+
+
+class EmptyValue:
+    """Sentinel for jq 'empty' - produces no output."""
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self):
+        return "empty"
+
+
+EMPTY = EmptyValue()
+
+
+# =============================================================================
+# Parser
+# =============================================================================
+
+class JQParser:
+    """Recursive descent parser for jq expressions."""
+
+    def __init__(self, expression: str):
+        self.expr = expression
+        self.pos = 0
+        self.length = len(expression)
+
+    def parse(self) -> ASTNode:
+        """Parse the full expression."""
+        self._skip_whitespace()
+        if self.pos >= self.length:
+            return ASTNode(NodeType.IDENTITY)
+        result = self._parse_pipe()
+        self._skip_whitespace()
+        if self.pos < self.length:
+            raise ParseError(
+                f"Unexpected character at position {self.pos}: {self.expr[self.pos]!r}"
+            )
+        return result
+
+    def _skip_whitespace(self) -> None:
+        while self.pos < self.length and self.expr[self.pos] in " \t\n\r":
+            self.pos += 1
+
+    def _peek(self, offset: int = 0) -> str:
+        pos = self.pos + offset
+        if pos < self.length:
+            return self.expr[pos]
+        return ""
+
+    def _consume(self, expected: Optional[str] = None) -> str:
+        if self.pos >= self.length:
+            if expected:
+                raise ParseError(f"Expected {expected!r} but reached end of input")
+            return ""
+        char = self.expr[self.pos]
+        if expected and char != expected:
+            raise ParseError(
+                f"Expected {expected!r} but got {char!r} at position {self.pos}"
+            )
+        self.pos += 1
+        return char
+
+    def _match(self, s: str) -> bool:
+        return self.expr[self.pos : self.pos + len(s)] == s
+
+    def _consume_string(self, s: str) -> None:
+        if not self._match(s):
+            raise ParseError(f"Expected {s!r} at position {self.pos}")
+        self.pos += len(s)
+
+    def _parse_pipe(self) -> ASTNode:
+        left = self._parse_default()
+        while True:
+            self._skip_whitespace()
+            if self._peek() == "|" and self._peek(1) != "|":
+                self._consume()
+                self._skip_whitespace()
+                right = self._parse_default()
+                left = ASTNode(NodeType.PIPE, children=[left, right])
+            else:
+                break
+        return left
+
+    def _parse_default(self) -> ASTNode:
+        left = self._parse_logical()
+        while True:
+            self._skip_whitespace()
+            if self._match("//"):
+                self._consume_string("//")
+                self._skip_whitespace()
+                right = self._parse_logical()
+                left = ASTNode(NodeType.DEFAULT, children=[left, right])
+            else:
+                break
+        return left
+
+    def _parse_logical(self) -> ASTNode:
+        left = self._parse_comparison()
+        while True:
+            self._skip_whitespace()
+            if self._match("and") and not self._is_identifier_char(self._peek(3)):
+                self._consume_string("and")
+                self._skip_whitespace()
+                right = self._parse_comparison()
+                left = ASTNode(NodeType.LOGICAL, "and", [left, right])
+            elif self._match("or") and not self._is_identifier_char(self._peek(2)):
+                self._consume_string("or")
+                self._skip_whitespace()
+                right = self._parse_comparison()
+                left = ASTNode(NodeType.LOGICAL, "or", [left, right])
+            else:
+                break
+        return left
+
+    def _parse_comparison(self) -> ASTNode:
+        left = self._parse_term()
+        self._skip_whitespace()
+        op = None
+        if self._match("=="):
+            op = "=="
+            self._consume_string("==")
+        elif self._match("!="):
+            op = "!="
+            self._consume_string("!=")
+        elif self._match("<="):
+            op = "<="
+            self._consume_string("<=")
+        elif self._match(">="):
+            op = ">="
+            self._consume_string(">=")
+        elif self._peek() == "<":
+            op = "<"
+            self._consume()
+        elif self._peek() == ">":
+            op = ">"
+            self._consume()
+
+        if op:
+            self._skip_whitespace()
+            right = self._parse_term()
+            return ASTNode(NodeType.COMPARISON, op, [left, right])
+        return left
+
+    def _parse_term(self) -> ASTNode:
+        self._skip_whitespace()
+        if self._match("not") and not self._is_identifier_char(self._peek(3)):
+            self._consume_string("not")
+            self._skip_whitespace()
+            operand = self._parse_term()
+            return ASTNode(NodeType.LOGICAL, "not", [operand])
+        if self._peek() == "-" and self._peek(1) not in "0123456789.":
+            self._consume()
+            self._skip_whitespace()
+            operand = self._parse_term()
+            return ASTNode(NodeType.NEGATE, children=[operand])
+        return self._parse_factor()
+
+    def _parse_factor(self) -> ASTNode:
+        node = self._parse_primary()
+        return self._parse_postfix(node)
+
+    def _parse_postfix(self, node: ASTNode) -> ASTNode:
+        while True:
+            self._skip_whitespace()
+            if self._peek() == ".":
+                if self._is_identifier_start(self._peek(1)):
+                    self._consume()
+                    field_name = self._parse_identifier()
+                    node = ASTNode(NodeType.PIPE, children=[node, ASTNode(NodeType.FIELD, field_name)])
+                else:
+                    break
+            elif self._peek() == "[":
+                self._consume()
+                self._skip_whitespace()
+                if self._peek() == "]":
+                    self._consume()
+                    node = ASTNode(NodeType.PIPE, children=[node, ASTNode(NodeType.ITERATE)])
+                else:
+                    index_expr = self._parse_pipe()
+                    self._skip_whitespace()
+                    self._consume("]")
+                    node = ASTNode(NodeType.PIPE, children=[node, ASTNode(NodeType.INDEX, children=[index_expr])])
+            else:
+                break
+        return node
+
+    def _parse_primary(self) -> ASTNode:
+        self._skip_whitespace()
+        char = self._peek()
+
+        if char == ".":
+            self._consume()
+            if self._is_identifier_start(self._peek()):
+                field_name = self._parse_identifier()
+                return ASTNode(NodeType.FIELD, field_name)
+            elif self._peek() == "[":
+                self._consume()
+                self._skip_whitespace()
+                if self._peek() == "]":
+                    self._consume()
+                    return ASTNode(NodeType.ITERATE)
+                else:
+                    index_expr = self._parse_pipe()
+                    self._skip_whitespace()
+                    self._consume("]")
+                    return ASTNode(NodeType.INDEX, children=[index_expr])
+            else:
+                return ASTNode(NodeType.IDENTITY)
+
+        if char == "-" or char.isdigit():
+            return self._parse_number()
+
+        if char == '"':
+            return self._parse_string()
+
+        if char == "$":
+            self._consume()
+            var_name = self._parse_identifier()
+            return ASTNode(NodeType.VARIABLE, var_name)
+
+        if char == "{":
+            return self._parse_object()
+
+        if char == "[":
+            return self._parse_array()
+
+        if char == "(":
+            self._consume()
+            self._skip_whitespace()
+            expr = self._parse_pipe()
+            self._skip_whitespace()
+            self._consume(")")
+            return expr
+
+        if self._is_identifier_start(char):
+            name = self._parse_identifier()
+            if name == "true":
+                return ASTNode(NodeType.BOOL, True)
+            if name == "false":
+                return ASTNode(NodeType.BOOL, False)
+            if name == "null":
+                return ASTNode(NodeType.NULL)
+            if name == "empty":
+                return ASTNode(NodeType.FUNCTION, "empty")
+
+            self._skip_whitespace()
+            if self._peek() == "(":
+                self._consume()
+                self._skip_whitespace()
+                args = []
+                if self._peek() != ")":
+                    args.append(self._parse_pipe())
+                    while self._peek() == ";":
+                        self._consume()
+                        self._skip_whitespace()
+                        args.append(self._parse_pipe())
+                self._skip_whitespace()
+                self._consume(")")
+                return ASTNode(NodeType.FUNCTION, name, args)
+            return ASTNode(NodeType.FUNCTION, name)
+
+        raise ParseError(f"Unexpected character {char!r} at position {self.pos}")
+
+    def _parse_number(self) -> ASTNode:
+        start = self.pos
+        if self._peek() == "-":
+            self._consume()
+        while self._peek().isdigit():
+            self._consume()
+        if self._peek() == ".":
+            self._consume()
+            while self._peek().isdigit():
+                self._consume()
+        if self._peek() in "eE":
+            self._consume()
+            if self._peek() in "+-":
+                self._consume()
+            while self._peek().isdigit():
+                self._consume()
+
+        num_str = self.expr[start : self.pos]
+        try:
+            if "." in num_str or "e" in num_str.lower():
+                return ASTNode(NodeType.NUMBER, float(num_str))
+            else:
+                return ASTNode(NodeType.NUMBER, int(num_str))
+        except ValueError:
+            raise ParseError(f"Invalid number: {num_str}")
+
+    def _parse_string(self) -> ASTNode:
+        self._consume('"')
+        parts: List[Union[str, ASTNode]] = []
+        current_str = ""
+
+        while self.pos < self.length and self._peek() != '"':
+            char = self._peek()
+            if char == "\\":
+                self._consume()
+                next_char = self._consume()
+                if next_char == "(":
+                    if current_str:
+                        parts.append(current_str)
+                        current_str = ""
+                    expr = self._parse_pipe()
+                    self._skip_whitespace()
+                    self._consume(")")
+                    parts.append(expr)
+                elif next_char == "n":
+                    current_str += "\n"
+                elif next_char == "r":
+                    current_str += "\r"
+                elif next_char == "t":
+                    current_str += "\t"
+                elif next_char == "\\":
+                    current_str += "\\"
+                elif next_char == '"':
+                    current_str += '"'
+                else:
+                    current_str += next_char
+            else:
+                current_str += self._consume()
+
+        self._consume('"')
+
+        if current_str:
+            parts.append(current_str)
+
+        if len(parts) == 0:
+            return ASTNode(NodeType.STRING, "")
+        if len(parts) == 1 and isinstance(parts[0], str):
+            return ASTNode(NodeType.STRING, parts[0])
+        return ASTNode(NodeType.STRING, parts)
+
+    def _parse_object(self) -> ASTNode:
+        self._consume("{")
+        self._skip_whitespace()
+        pairs: List[tuple] = []
+
+        if self._peek() != "}":
+            pairs.append(self._parse_object_pair())
+            while True:
+                self._skip_whitespace()
+                if self._peek() == ",":
+                    self._consume()
+                    self._skip_whitespace()
+                    if self._peek() == "}":
+                        break
+                    pairs.append(self._parse_object_pair())
+                else:
+                    break
+
+        self._skip_whitespace()
+        self._consume("}")
+        return ASTNode(NodeType.OBJECT, pairs)
+
+    def _parse_object_pair(self) -> tuple:
+        self._skip_whitespace()
+        if self._peek() == '"':
+            key_node = self._parse_string()
+            key = key_node.value if isinstance(key_node.value, str) else key_node
+        elif self._peek() == "(":
+            self._consume()
+            self._skip_whitespace()
+            key = self._parse_pipe()
+            self._skip_whitespace()
+            self._consume(")")
+        else:
+            key = self._parse_identifier()
+
+        self._skip_whitespace()
+        self._consume(":")
+        self._skip_whitespace()
+        value = self._parse_pipe()
+        return (key, value)
+
+    def _parse_array(self) -> ASTNode:
+        self._consume("[")
+        self._skip_whitespace()
+        items: List[ASTNode] = []
+
+        if self._peek() != "]":
+            items.append(self._parse_pipe())
+            while True:
+                self._skip_whitespace()
+                if self._peek() == ",":
+                    self._consume()
+                    self._skip_whitespace()
+                    if self._peek() == "]":
+                        break
+                    items.append(self._parse_pipe())
+                else:
+                    break
+
+        self._skip_whitespace()
+        self._consume("]")
+        return ASTNode(NodeType.ARRAY, children=items)
+
+    def _parse_identifier(self) -> str:
+        if not self._is_identifier_start(self._peek()):
+            raise ParseError(f"Expected identifier at position {self.pos}")
+        start = self.pos
+        while self._is_identifier_char(self._peek()):
+            self._consume()
+        return self.expr[start : self.pos]
+
+    def _is_identifier_start(self, char: str) -> bool:
+        return bool(char) and (char.isalpha() or char == "_")
+
+    def _is_identifier_char(self, char: str) -> bool:
+        return bool(char) and (char.isalnum() or char == "_")
+
+
+def parse_jq_expression(expression: str) -> ASTNode:
+    """Parse a jq expression and return the AST."""
+    parser = JQParser(expression)
+    return parser.parse()
+
+
+# =============================================================================
+# Evaluator
+# =============================================================================
+
+class JQEvaluator:
+    """Evaluator for jq AST nodes."""
+
+    def __init__(self, variables: Dict[str, Any]):
+        self.variables = variables
+
+    def evaluate(self, node: ASTNode, data: Any) -> Any:
+        method_name = f"_eval_{node.type.value}"
+        method = getattr(self, method_name, None)
+        if method is None:
+            raise EvaluationError(f"Unsupported node type: {node.type}")
+        return method(node, data)
+
+    def _eval_identity(self, node: ASTNode, data: Any) -> Any:
+        return data
+
+    def _eval_field(self, node: ASTNode, data: Any) -> Any:
+        if data is None:
+            return None
+        if not isinstance(data, dict):
+            raise EvaluationError(
+                f"Cannot index {type(data).__name__} with string {node.value!r}"
+            )
+        return data.get(node.value)
+
+    def _eval_index(self, node: ASTNode, data: Any) -> Any:
+        if data is None:
+            return None
+        index = self.evaluate(node.children[0], data)
+
+        if isinstance(index, int):
+            if not isinstance(data, list):
+                raise EvaluationError(f"Cannot index {type(data).__name__} with number")
+            if index < 0:
+                index = len(data) + index
+            if 0 <= index < len(data):
+                return data[index]
+            return None
+        elif isinstance(index, str):
+            if not isinstance(data, dict):
+                raise EvaluationError(f"Cannot index {type(data).__name__} with string")
+            return data.get(index)
+        else:
+            raise EvaluationError(f"Invalid index type: {type(index).__name__}")
+
+    def _eval_iterate(self, node: ASTNode, data: Any) -> Any:
+        if data is None:
+            return []
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return list(data.values())
+        raise EvaluationError(f"Cannot iterate over {type(data).__name__}")
+
+    def _eval_pipe(self, node: ASTNode, data: Any) -> Any:
+        left_result = self.evaluate(node.children[0], data)
+        if left_result is EMPTY:
+            return EMPTY
+
+        if isinstance(left_result, list) and self._is_iterator(node.children[0]):
+            results = []
+            for item in left_result:
+                result = self.evaluate(node.children[1], item)
+                if result is EMPTY:
+                    continue
+                if isinstance(result, list) and self._is_iterator(node.children[1]):
+                    results.extend(result)
+                else:
+                    results.append(result)
+            return results
+
+        return self.evaluate(node.children[1], left_result)
+
+    def _is_iterator(self, node: ASTNode) -> bool:
+        if node.type == NodeType.ITERATE:
+            return True
+        if node.type == NodeType.PIPE:
+            return self._is_iterator(node.children[1])
+        return False
+
+    def _eval_default(self, node: ASTNode, data: Any) -> Any:
+        left_result = self.evaluate(node.children[0], data)
+        if left_result is None or left_result is False or left_result is EMPTY:
+            return self.evaluate(node.children[1], data)
+        return left_result
+
+    def _eval_object(self, node: ASTNode, data: Any) -> Any:
+        result = {}
+        for key, value_node in node.value:
+            if isinstance(key, str):
+                key_val = key
+            elif isinstance(key, ASTNode):
+                key_val = self.evaluate(key, data)
+                if not isinstance(key_val, str):
+                    key_val = str(key_val)
+            else:
+                key_val = str(key)
+            value_result = self.evaluate(value_node, data)
+            result[key_val] = value_result
+        return result
+
+    def _eval_array(self, node: ASTNode, data: Any) -> Any:
+        result = []
+        for child in node.children:
+            value = self.evaluate(child, data)
+            if value is EMPTY:
+                continue
+            if isinstance(value, list) and self._is_iterator(child):
+                result.extend(value)
+            else:
+                result.append(value)
+        return result
+
+    def _eval_string(self, node: ASTNode, data: Any) -> Any:
+        if isinstance(node.value, str):
+            return node.value
+
+        parts = []
+        for part in node.value:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, ASTNode):
+                value = self.evaluate(part, data)
+                if value is None:
+                    parts.append("null")
+                elif isinstance(value, bool):
+                    parts.append("true" if value else "false")
+                elif isinstance(value, str):
+                    parts.append(value)
+                else:
+                    parts.append(str(value))
+            else:
+                parts.append(str(part))
+        return "".join(parts)
+
+    def _eval_number(self, node: ASTNode, data: Any) -> Any:
+        return node.value
+
+    def _eval_bool(self, node: ASTNode, data: Any) -> Any:
+        return node.value
+
+    def _eval_null(self, node: ASTNode, data: Any) -> Any:
+        return None
+
+    def _eval_variable(self, node: ASTNode, data: Any) -> Any:
+        var_name = node.value
+        if var_name not in self.variables:
+            raise EvaluationError(f"Variable ${var_name} is not defined")
+        return self.variables[var_name]
+
+    def _eval_comparison(self, node: ASTNode, data: Any) -> Any:
+        left = self.evaluate(node.children[0], data)
+        right = self.evaluate(node.children[1], data)
+        op = node.value
+
+        try:
+            if op == "==":
+                return left == right
+            elif op == "!=":
+                return left != right
+            elif op == "<":
+                return left < right
+            elif op == ">":
+                return left > right
+            elif op == "<=":
+                return left <= right
+            elif op == ">=":
+                return left >= right
+            else:
+                raise EvaluationError(f"Unknown comparison operator: {op}")
+        except TypeError:
+            if op == "==":
+                return False
+            elif op == "!=":
+                return True
+            raise EvaluationError(
+                f"Cannot compare {type(left).__name__} and {type(right).__name__}"
+            )
+
+    def _eval_logical(self, node: ASTNode, data: Any) -> Any:
+        op = node.value
+        if op == "not":
+            operand = self.evaluate(node.children[0], data)
+            return not self._truthy(operand)
+        elif op == "and":
+            left = self.evaluate(node.children[0], data)
+            if not self._truthy(left):
+                return False
+            right = self.evaluate(node.children[1], data)
+            return self._truthy(right)
+        elif op == "or":
+            left = self.evaluate(node.children[0], data)
+            if self._truthy(left):
+                return True
+            right = self.evaluate(node.children[1], data)
+            return self._truthy(right)
+        else:
+            raise EvaluationError(f"Unknown logical operator: {op}")
+
+    def _eval_negate(self, node: ASTNode, data: Any) -> Any:
+        operand = self.evaluate(node.children[0], data)
+        if isinstance(operand, (int, float)):
+            return -operand
+        raise EvaluationError(f"Cannot negate {type(operand).__name__}")
+
+    def _eval_function(self, node: ASTNode, data: Any) -> Any:
+        func_name = node.value
+        args = node.children
+
+        if func_name == "empty":
+            return EMPTY
+
+        if func_name == "select":
+            if len(args) != 1:
+                raise EvaluationError("select() requires exactly 1 argument")
+            predicate_result = self.evaluate(args[0], data)
+            if self._truthy(predicate_result):
+                return data
+            return EMPTY
+
+        if func_name == "map":
+            if len(args) != 1:
+                raise EvaluationError("map() requires exactly 1 argument")
+            if not isinstance(data, list):
+                raise EvaluationError(f"Cannot map over {type(data).__name__}")
+            results = []
+            for item in data:
+                result = self.evaluate(args[0], item)
+                if result is not EMPTY:
+                    results.append(result)
+            return results
+
+        if func_name == "keys":
+            if isinstance(data, dict):
+                return sorted(data.keys())
+            if isinstance(data, list):
+                return list(range(len(data)))
+            raise EvaluationError(f"Cannot get keys of {type(data).__name__}")
+
+        if func_name == "values":
+            if isinstance(data, dict):
+                return list(data.values())
+            if isinstance(data, list):
+                return data
+            raise EvaluationError(f"Cannot get values of {type(data).__name__}")
+
+        if func_name == "length":
+            if data is None:
+                return 0
+            if isinstance(data, (str, list, dict)):
+                return len(data)
+            raise EvaluationError(f"Cannot get length of {type(data).__name__}")
+
+        if func_name == "type":
+            return self._type_name(data)
+
+        if func_name == "keys_unsorted":
+            if isinstance(data, dict):
+                return list(data.keys())
+            if isinstance(data, list):
+                return list(range(len(data)))
+            raise EvaluationError(f"Cannot get keys of {type(data).__name__}")
+
+        if func_name == "has":
+            if len(args) != 1:
+                raise EvaluationError("has() requires exactly 1 argument")
+            key = self.evaluate(args[0], data)
+            if isinstance(data, dict):
+                return key in data
+            if isinstance(data, list) and isinstance(key, int):
+                return 0 <= key < len(data)
+            return False
+
+        if func_name == "in":
+            if len(args) != 1:
+                raise EvaluationError("in() requires exactly 1 argument")
+            container = self.evaluate(args[0], data)
+            if isinstance(container, dict):
+                return data in container
+            return False
+
+        if func_name == "contains":
+            if len(args) != 1:
+                raise EvaluationError("contains() requires exactly 1 argument")
+            needle = self.evaluate(args[0], data)
+            return self._contains(data, needle)
+
+        if func_name == "inside":
+            if len(args) != 1:
+                raise EvaluationError("inside() requires exactly 1 argument")
+            container = self.evaluate(args[0], data)
+            return self._contains(container, data)
+
+        if func_name == "add":
+            if not isinstance(data, list):
+                raise EvaluationError(f"Cannot add {type(data).__name__}")
+            if len(data) == 0:
+                return None
+            result = data[0]
+            for item in data[1:]:
+                if isinstance(result, str) and isinstance(item, str):
+                    result = result + item
+                elif isinstance(result, (int, float)) and isinstance(item, (int, float)):
+                    result = result + item
+                elif isinstance(result, list) and isinstance(item, list):
+                    result = result + item
+                elif isinstance(result, dict) and isinstance(item, dict):
+                    result = {**result, **item}
+                else:
+                    raise EvaluationError(
+                        f"Cannot add {type(result).__name__} and {type(item).__name__}"
+                    )
+            return result
+
+        if func_name == "flatten":
+            depth = 1
+            if args:
+                depth = self.evaluate(args[0], data)
+            if not isinstance(data, list):
+                raise EvaluationError(f"Cannot flatten {type(data).__name__}")
+            return self._flatten(data, depth)
+
+        if func_name == "reverse":
+            if isinstance(data, list):
+                return list(reversed(data))
+            if isinstance(data, str):
+                return data[::-1]
+            raise EvaluationError(f"Cannot reverse {type(data).__name__}")
+
+        if func_name == "sort":
+            if not isinstance(data, list):
+                raise EvaluationError(f"Cannot sort {type(data).__name__}")
+            return sorted(data, key=self._sort_key)
+
+        if func_name == "sort_by":
+            if len(args) != 1:
+                raise EvaluationError("sort_by() requires exactly 1 argument")
+            if not isinstance(data, list):
+                raise EvaluationError(f"Cannot sort {type(data).__name__}")
+            return sorted(data, key=lambda x: self._sort_key(self.evaluate(args[0], x)))
+
+        if func_name == "unique":
+            if not isinstance(data, list):
+                raise EvaluationError(f"Cannot get unique of {type(data).__name__}")
+            seen = []
+            result = []
+            for item in data:
+                if item not in seen:
+                    seen.append(item)
+                    result.append(item)
+            return result
+
+        if func_name == "first":
+            if isinstance(data, list):
+                return data[0] if data else None
+            return data
+
+        if func_name == "last":
+            if isinstance(data, list):
+                return data[-1] if data else None
+            return data
+
+        if func_name == "nth":
+            if len(args) != 1:
+                raise EvaluationError("nth() requires exactly 1 argument")
+            n = self.evaluate(args[0], data)
+            if isinstance(data, list):
+                if 0 <= n < len(data):
+                    return data[n]
+                return None
+            return data if n == 0 else None
+
+        if func_name == "min":
+            if not isinstance(data, list) or len(data) == 0:
+                return None
+            return min(data, key=self._sort_key)
+
+        if func_name == "max":
+            if not isinstance(data, list) or len(data) == 0:
+                return None
+            return max(data, key=self._sort_key)
+
+        if func_name == "floor":
+            if isinstance(data, (int, float)):
+                import math
+                return math.floor(data)
+            raise EvaluationError(f"Cannot floor {type(data).__name__}")
+
+        if func_name == "ceil":
+            if isinstance(data, (int, float)):
+                import math
+                return math.ceil(data)
+            raise EvaluationError(f"Cannot ceil {type(data).__name__}")
+
+        if func_name == "round":
+            if isinstance(data, (int, float)):
+                return round(data)
+            raise EvaluationError(f"Cannot round {type(data).__name__}")
+
+        if func_name == "abs":
+            if isinstance(data, (int, float)):
+                return abs(data)
+            raise EvaluationError(f"Cannot abs {type(data).__name__}")
+
+        if func_name == "tostring":
+            if data is None:
+                return "null"
+            if isinstance(data, bool):
+                return "true" if data else "false"
+            if isinstance(data, str):
+                return data
+            return json.dumps(data)
+
+        if func_name == "tonumber":
+            if isinstance(data, (int, float)):
+                return data
+            if isinstance(data, str):
+                try:
+                    if "." in data or "e" in data.lower():
+                        return float(data)
+                    return int(data)
+                except ValueError:
+                    raise EvaluationError(f"Cannot convert {data!r} to number")
+            raise EvaluationError(f"Cannot convert {type(data).__name__} to number")
+
+        if func_name == "not":
+            return not self._truthy(data)
+
+        if func_name == "ascii_downcase":
+            if isinstance(data, str):
+                return data.lower()
+            raise EvaluationError(f"Cannot lowercase {type(data).__name__}")
+
+        if func_name == "ascii_upcase":
+            if isinstance(data, str):
+                return data.upper()
+            raise EvaluationError(f"Cannot uppercase {type(data).__name__}")
+
+        if func_name == "ltrimstr":
+            if len(args) != 1:
+                raise EvaluationError("ltrimstr() requires exactly 1 argument")
+            prefix = self.evaluate(args[0], data)
+            if isinstance(data, str) and isinstance(prefix, str):
+                if data.startswith(prefix):
+                    return data[len(prefix):]
+                return data
+            raise EvaluationError("ltrimstr requires string arguments")
+
+        if func_name == "rtrimstr":
+            if len(args) != 1:
+                raise EvaluationError("rtrimstr() requires exactly 1 argument")
+            suffix = self.evaluate(args[0], data)
+            if isinstance(data, str) and isinstance(suffix, str):
+                if data.endswith(suffix):
+                    return data[:-len(suffix)] if suffix else data
+                return data
+            raise EvaluationError("rtrimstr requires string arguments")
+
+        if func_name == "startswith":
+            if len(args) != 1:
+                raise EvaluationError("startswith() requires exactly 1 argument")
+            prefix = self.evaluate(args[0], data)
+            if isinstance(data, str) and isinstance(prefix, str):
+                return data.startswith(prefix)
+            raise EvaluationError("startswith requires string arguments")
+
+        if func_name == "endswith":
+            if len(args) != 1:
+                raise EvaluationError("endswith() requires exactly 1 argument")
+            suffix = self.evaluate(args[0], data)
+            if isinstance(data, str) and isinstance(suffix, str):
+                return data.endswith(suffix)
+            raise EvaluationError("endswith requires string arguments")
+
+        if func_name == "split":
+            if len(args) != 1:
+                raise EvaluationError("split() requires exactly 1 argument")
+            sep = self.evaluate(args[0], data)
+            if isinstance(data, str) and isinstance(sep, str):
+                return data.split(sep)
+            raise EvaluationError("split requires string arguments")
+
+        if func_name == "join":
+            if len(args) != 1:
+                raise EvaluationError("join() requires exactly 1 argument")
+            sep = self.evaluate(args[0], data)
+            if isinstance(data, list) and isinstance(sep, str):
+                return sep.join(str(item) for item in data)
+            raise EvaluationError("join requires array and string separator")
+
+        if func_name == "test":
+            if len(args) != 1:
+                raise EvaluationError("test() requires exactly 1 argument")
+            pattern = self.evaluate(args[0], data)
+            if isinstance(data, str) and isinstance(pattern, str):
+                import re
+                return bool(re.search(pattern, data))
+            raise EvaluationError("test requires string arguments")
+
+        if func_name == "match":
+            if len(args) != 1:
+                raise EvaluationError("match() requires exactly 1 argument")
+            pattern = self.evaluate(args[0], data)
+            if isinstance(data, str) and isinstance(pattern, str):
+                import re
+                m = re.search(pattern, data)
+                if m:
+                    return {
+                        "offset": m.start(),
+                        "length": m.end() - m.start(),
+                        "string": m.group(0),
+                        "captures": [
+                            {"offset": m.start(i+1), "length": m.end(i+1) - m.start(i+1), "string": m.group(i+1), "name": None}
+                            for i in range(len(m.groups()))
+                        ] if m.groups() else []
+                    }
+                return None
+            raise EvaluationError("match requires string arguments")
+
+        if func_name == "capture":
+            if len(args) != 1:
+                raise EvaluationError("capture() requires exactly 1 argument")
+            pattern = self.evaluate(args[0], data)
+            if isinstance(data, str) and isinstance(pattern, str):
+                import re
+                m = re.search(pattern, data)
+                if m:
+                    return m.groupdict()
+                return {}
+            raise EvaluationError("capture requires string arguments")
+
+        if func_name == "sub":
+            if len(args) != 2:
+                raise EvaluationError("sub() requires exactly 2 arguments")
+            pattern = self.evaluate(args[0], data)
+            replacement = self.evaluate(args[1], data)
+            if isinstance(data, str) and isinstance(pattern, str) and isinstance(replacement, str):
+                import re
+                return re.sub(pattern, replacement, data, count=1)
+            raise EvaluationError("sub requires string arguments")
+
+        if func_name == "gsub":
+            if len(args) != 2:
+                raise EvaluationError("gsub() requires exactly 2 arguments")
+            pattern = self.evaluate(args[0], data)
+            replacement = self.evaluate(args[1], data)
+            if isinstance(data, str) and isinstance(pattern, str) and isinstance(replacement, str):
+                import re
+                return re.sub(pattern, replacement, data)
+            raise EvaluationError("gsub requires string arguments")
+
+        if func_name == "error":
+            msg = data
+            if args:
+                msg = self.evaluate(args[0], data)
+            raise EvaluationError(str(msg) if msg else "error")
+
+        if func_name == "debug":
+            print(f"DEBUG: {json.dumps(data)}", file=sys.stderr)
+            return data
+
+        if func_name == "getpath":
+            if len(args) != 1:
+                raise EvaluationError("getpath() requires exactly 1 argument")
+            path = self.evaluate(args[0], data)
+            if not isinstance(path, list):
+                raise EvaluationError("getpath requires array path")
+            result = data
+            for key in path:
+                if result is None:
+                    return None
+                if isinstance(key, str) and isinstance(result, dict):
+                    result = result.get(key)
+                elif isinstance(key, int) and isinstance(result, list):
+                    if 0 <= key < len(result):
+                        result = result[key]
+                    else:
+                        return None
+                else:
+                    return None
+            return result
+
+        if func_name == "group_by":
+            if len(args) != 1:
+                raise EvaluationError("group_by() requires exactly 1 argument")
+            if not isinstance(data, list):
+                raise EvaluationError(f"Cannot group {type(data).__name__}")
+            groups: Dict[Any, List] = {}
+            group_order = []
+            for item in data:
+                key = self.evaluate(args[0], item)
+                key_str = str(key) if not isinstance(key, (str, int, float, bool, type(None))) else key
+                if key_str not in groups:
+                    groups[key_str] = []
+                    group_order.append(key_str)
+                groups[key_str].append(item)
+            return [groups[k] for k in group_order]
+
+        if func_name == "any":
+            if not isinstance(data, list):
+                return self._truthy(data)
+            if args:
+                return any(self._truthy(self.evaluate(args[0], item)) for item in data)
+            return any(self._truthy(item) for item in data)
+
+        if func_name == "all":
+            if not isinstance(data, list):
+                return self._truthy(data)
+            if args:
+                return all(self._truthy(self.evaluate(args[0], item)) for item in data)
+            return all(self._truthy(item) for item in data)
+
+        if func_name == "from_entries":
+            if not isinstance(data, list):
+                raise EvaluationError(f"Cannot convert {type(data).__name__} from entries")
+            result = {}
+            for entry in data:
+                if not isinstance(entry, dict):
+                    continue
+                key = entry.get("key") or entry.get("name") or entry.get("k")
+                value = entry.get("value") or entry.get("v")
+                if key is not None:
+                    result[str(key)] = value
+            return result
+
+        if func_name == "to_entries":
+            if not isinstance(data, dict):
+                raise EvaluationError(f"Cannot convert {type(data).__name__} to entries")
+            return [{"key": k, "value": v} for k, v in data.items()]
+
+        if func_name == "with_entries":
+            if len(args) != 1:
+                raise EvaluationError("with_entries() requires exactly 1 argument")
+            if not isinstance(data, dict):
+                raise EvaluationError(f"Cannot process {type(data).__name__} with_entries")
+            entries = [{"key": k, "value": v} for k, v in data.items()]
+            transformed = [self.evaluate(args[0], entry) for entry in entries]
+            result = {}
+            for entry in transformed:
+                if isinstance(entry, dict):
+                    key = entry.get("key") or entry.get("name") or entry.get("k")
+                    value = entry.get("value") or entry.get("v")
+                    if key is not None:
+                        result[str(key)] = value
+            return result
+
+        if func_name == "recurse":
+            results = [data]
+            to_process = [data]
+            while to_process:
+                current = to_process.pop(0)
+                if args:
+                    children = self.evaluate(args[0], current)
+                else:
+                    if isinstance(current, list):
+                        children = current
+                    elif isinstance(current, dict):
+                        children = list(current.values())
+                    else:
+                        continue
+
+                if children is EMPTY:
+                    continue
+                if isinstance(children, list):
+                    for child in children:
+                        if child is not None and child is not EMPTY:
+                            results.append(child)
+                            to_process.append(child)
+                elif children is not None:
+                    results.append(children)
+                    to_process.append(children)
+            return results
+
+        if func_name == "walk":
+            if len(args) != 1:
+                raise EvaluationError("walk() requires exactly 1 argument")
+            return self._walk(data, args[0])
+
+        if func_name == "env":
+            import os
+            if isinstance(data, str):
+                return os.environ.get(data)
+            return dict(os.environ)
+
+        if func_name == "now":
+            import time
+            return time.time()
+
+        if func_name == "infinite":
+            return float('inf')
+
+        if func_name == "nan":
+            return float('nan')
+
+        if func_name == "isinfinite":
+            if isinstance(data, float):
+                import math
+                return math.isinf(data)
+            return False
+
+        if func_name == "isnan":
+            if isinstance(data, float):
+                import math
+                return math.isnan(data)
+            return False
+
+        if func_name == "isnormal":
+            if isinstance(data, (int, float)):
+                import math
+                if isinstance(data, int):
+                    return data != 0
+                return not (math.isnan(data) or math.isinf(data) or data == 0)
+            return False
+
+        raise EvaluationError(f"Unknown function: {func_name}")
+
+    def _walk(self, data: Any, transform: ASTNode) -> Any:
+        if isinstance(data, list):
+            data = [self._walk(item, transform) for item in data]
+        elif isinstance(data, dict):
+            data = {k: self._walk(v, transform) for k, v in data.items()}
+        return self.evaluate(transform, data)
+
+    def _truthy(self, value: Any) -> bool:
+        if value is None:
+            return False
+        if value is False:
+            return False
+        if value is EMPTY:
+            return False
+        return True
+
+    def _type_name(self, value: Any) -> str:
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, (int, float)):
+            return "number"
+        if isinstance(value, str):
+            return "string"
+        if isinstance(value, list):
+            return "array"
+        if isinstance(value, dict):
+            return "object"
+        return "unknown"
+
+    def _contains(self, container: Any, needle: Any) -> bool:
+        if container == needle:
+            return True
+        if isinstance(needle, dict) and isinstance(container, dict):
+            for key, value in needle.items():
+                if key not in container:
+                    return False
+                if not self._contains(container[key], value):
+                    return False
+            return True
+        if isinstance(needle, list) and isinstance(container, list):
+            for item in needle:
+                if not any(self._contains(c_item, item) for c_item in container):
+                    return False
+            return True
+        if isinstance(needle, str) and isinstance(container, str):
+            return needle in container
+        return False
+
+    def _flatten(self, data: List, depth: int) -> List:
+        if depth <= 0:
+            return data
+        result = []
+        for item in data:
+            if isinstance(item, list):
+                result.extend(self._flatten(item, depth - 1))
+            else:
+                result.append(item)
+        return result
+
+    def _sort_key(self, value: Any) -> tuple:
+        type_order = {"null": 0, "boolean": 1, "number": 2, "string": 3, "array": 4, "object": 5}
+        type_name = self._type_name(value)
+        type_rank = type_order.get(type_name, 6)
+
+        if value is None:
+            return (type_rank, 0)
+        if isinstance(value, bool):
+            return (type_rank, int(value))
+        if isinstance(value, (int, float)):
+            return (type_rank, value)
+        if isinstance(value, str):
+            return (type_rank, value)
+        if isinstance(value, list):
+            return (type_rank, tuple(self._sort_key(v) for v in value))
+        if isinstance(value, dict):
+            return (type_rank, tuple(sorted((k, self._sort_key(v)) for k, v in value.items())))
+        return (type_rank, str(value))
+
+
+def evaluate(node: ASTNode, data: Any, variables: Optional[Dict[str, Any]] = None) -> Any:
+    """Evaluate an AST node against input data."""
+    variables = variables or {}
+    evaluator = JQEvaluator(variables)
+    return evaluator.evaluate(node, data)
+
+
+# =============================================================================
+# CLI Main
+# =============================================================================
+
+def main(args: Optional[List[str]] = None) -> int:
+    """Main entry point for jq shim CLI."""
+    parser = argparse.ArgumentParser(
+        prog="jq",
+        description="Python jq shim - JSON processor",
+        add_help=True,
+    )
+
+    parser.add_argument("filter", nargs="?", default=".", help="jq filter expression")
+    parser.add_argument("files", nargs="*", help="Input JSON files")
+    parser.add_argument("-r", "--raw-output", action="store_true", help="Output raw strings")
+    parser.add_argument("-n", "--null-input", action="store_true", help="Use null as input")
+    parser.add_argument("-c", "--compact-output", action="store_true", help="Compact output")
+    parser.add_argument("-e", "--exit-status", action="store_true", help="Exit status on null/false")
+    parser.add_argument("-s", "--slurp", action="store_true", help="Read entire input into array")
+    parser.add_argument("-S", "--sort-keys", action="store_true", help="Sort object keys")
+    parser.add_argument("-j", "--join-output", action="store_true", help="No newline after output")
+    parser.add_argument("--tab", action="store_true", help="Use tabs for indentation")
+    parser.add_argument("--arg", nargs=2, action="append", default=[], metavar=("NAME", "VALUE"), help="Set variable")
+    parser.add_argument("--argjson", nargs=2, action="append", default=[], metavar=("NAME", "JSON"), help="Set JSON variable")
+    parser.add_argument("--slurpfile", nargs=2, action="append", default=[], metavar=("NAME", "FILE"), help="Set variable from file")
+    parser.add_argument("--rawfile", nargs=2, action="append", default=[], metavar=("NAME", "FILE"), help="Set variable to file contents")
+    parser.add_argument("--version", action="store_true", help="Show version")
+
+    parsed = parser.parse_args(args)
+
+    if parsed.version:
+        print("jq-shim - Self-contained Python jq implementation")
+        print("Version: 1.1.0")
+        return 0
+
+    # Build variables dict
+    variables = {}
+    for name, value in parsed.arg:
+        variables[name] = value
+    for name, json_value in parsed.argjson:
+        try:
+            variables[name] = json.loads(json_value)
+        except json.JSONDecodeError as e:
+            print(f"jq: error: --argjson {name}: {e}", file=sys.stderr)
+            return 2
+    for name, filepath in parsed.slurpfile:
+        try:
+            with open(filepath, "r") as f:
+                content = f.read()
+                values = []
+                decoder = json.JSONDecoder()
+                idx = 0
+                while idx < len(content):
+                    while idx < len(content) and content[idx] in " \t\n\r":
+                        idx += 1
+                    if idx >= len(content):
+                        break
+                    obj, end = decoder.raw_decode(content, idx)
+                    values.append(obj)
+                    idx = end
+                variables[name] = values
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"jq: error: --slurpfile {name}: {e}", file=sys.stderr)
+            return 2
+    for name, filepath in parsed.rawfile:
+        try:
+            with open(filepath, "r") as f:
+                variables[name] = f.read()
+        except OSError as e:
+            print(f"jq: error: --rawfile {name}: {e}", file=sys.stderr)
+            return 2
+
+    # Get input data
+    inputs = []
+    if parsed.null_input:
+        inputs = [None]
+    elif parsed.files:
+        for filepath in parsed.files:
+            try:
+                with open(filepath, "r") as f:
+                    content = f.read().strip()
+                    if content:
+                        if parsed.slurp:
+                            decoder = json.JSONDecoder()
+                            idx = 0
+                            while idx < len(content):
+                                while idx < len(content) and content[idx] in " \t\n\r":
+                                    idx += 1
+                                if idx >= len(content):
+                                    break
+                                obj, end = decoder.raw_decode(content, idx)
+                                inputs.append(obj)
+                                idx = end
+                        else:
+                            inputs.append(json.loads(content))
+            except OSError as e:
+                print(f"jq: error reading {filepath}: {e}", file=sys.stderr)
+                return 2
+            except json.JSONDecodeError as e:
+                print(f"jq: error parsing {filepath}: {e}", file=sys.stderr)
+                return 3
+    else:
+        stdin_data = sys.stdin.read().strip()
+        if stdin_data:
+            try:
+                if parsed.slurp:
+                    decoder = json.JSONDecoder()
+                    idx = 0
+                    while idx < len(stdin_data):
+                        while idx < len(stdin_data) and stdin_data[idx] in " \t\n\r":
+                            idx += 1
+                        if idx >= len(stdin_data):
+                            break
+                        obj, end = decoder.raw_decode(stdin_data, idx)
+                        inputs.append(obj)
+                        idx = end
+                else:
+                    inputs.append(json.loads(stdin_data))
+            except json.JSONDecodeError as e:
+                print(f"jq: error parsing stdin: {e}", file=sys.stderr)
+                return 3
+        else:
+            inputs = [None]
+
+    if parsed.slurp and len(inputs) > 0:
+        inputs = [inputs]
+
+    # Parse the filter expression
+    try:
+        ast = parse_jq_expression(parsed.filter)
+    except ParseError as e:
+        print(f"jq: error: {e}", file=sys.stderr)
+        return 3
+
+    # Evaluate and output
+    last_result = None
+
+    def is_multi_output(node: ASTNode) -> bool:
+        if node.type == NodeType.ITERATE:
+            return True
+        if node.type == NodeType.PIPE:
+            return is_multi_output(node.children[0]) or is_multi_output(node.children[1])
+        return False
+
+    def output_result(result: Any) -> None:
+        if result is None:
+            output = "null"
+        elif parsed.raw_output and isinstance(result, str):
+            output = result
+        else:
+            if parsed.sort_keys:
+                output = json.dumps(result, sort_keys=True, ensure_ascii=False,
+                                  indent=None if parsed.compact_output else (None if parsed.tab else 2),
+                                  separators=(",", ":") if parsed.compact_output else None)
+            else:
+                if parsed.compact_output:
+                    output = json.dumps(result, separators=(",", ":"), ensure_ascii=False)
+                elif parsed.tab:
+                    output = json.dumps(result, indent="\t", ensure_ascii=False)
+                else:
+                    output = json.dumps(result, indent=2, ensure_ascii=False)
+
+        if parsed.join_output:
+            print(output, end="")
+        else:
+            print(output)
+
+    for input_data in inputs:
+        try:
+            result = evaluate(ast, input_data, variables)
+
+            if result is EMPTY:
+                continue
+
+            results = result if (isinstance(result, list) and is_multi_output(ast)) else [result]
+
+            for r in results:
+                if r is EMPTY:
+                    continue
+                last_result = r
+                output_result(r)
+
+        except EvaluationError as e:
+            print(f"jq: error: {e}", file=sys.stderr)
+            return 5
+
+    if parsed.exit_status:
+        if last_result is None or last_result is False:
+            return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PYTHON_JQ_SHIM_EOF
+
+# Execute Python with the script from fd 3
+exec python3 /dev/fd/3 "$@"
