@@ -7,6 +7,7 @@
 	import { theme } from '$lib/stores/theme';
 	import { pwa, hasUpdate, isOnline } from '$lib/stores/pwa';
 	import { chatPreferences } from '$lib/stores/chatPreferences';
+	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
 	import { files } from '$lib/stores/files';
 	import { syncNotificationsFromServer } from '$lib/services/notifications';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
@@ -31,6 +32,7 @@
 				// These run in parallel for faster startup
 				await Promise.all([
 					chatPreferences.load(),
+					hotkeyPreferences.syncFromServer(),
 					theme.syncFromServer(),
 					files.syncFromServer(),
 					syncNotificationsFromServer()
