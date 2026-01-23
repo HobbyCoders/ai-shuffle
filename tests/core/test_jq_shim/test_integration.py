@@ -26,21 +26,15 @@ class TestJQShimEnv:
         # Original path should still be there
         assert "/usr/bin" in result["PATH"]
 
-    def test_get_jq_shim_env_adds_pythonpath(self):
-        """Should add app root to PYTHONPATH."""
+    def test_get_jq_shim_env_is_self_contained(self):
+        """The jq shim is self-contained and doesn't require PYTHONPATH."""
         env = {}
         result = _get_jq_shim_env(env)
 
-        assert "PYTHONPATH" in result
-        # Should contain path to app directory
-        assert "app" in result["PYTHONPATH"] or result["PYTHONPATH"]
-
-    def test_get_jq_shim_env_preserves_existing_pythonpath(self):
-        """Should preserve existing PYTHONPATH."""
-        env = {"PYTHONPATH": "/some/existing/path"}
-        result = _get_jq_shim_env(env)
-
-        assert "/some/existing/path" in result["PYTHONPATH"]
+        # Self-contained shim only needs PATH, not PYTHONPATH
+        assert "PATH" in result
+        # PYTHONPATH is not needed since the shim has Python code embedded inline
+        # This is intentionally not set to keep the shim portable
 
     def test_shim_prepends_to_path(self):
         """Shim should be first in PATH (takes precedence)."""
