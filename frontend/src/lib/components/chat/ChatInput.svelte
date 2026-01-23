@@ -80,6 +80,9 @@
 	let uploadedFiles = $state<FileUploadResponse[]>([]);
 	let previousTabId = $state(tab.id);
 	let draftSaveTimeout: ReturnType<typeof setTimeout> | null = null;
+	// Flag to prevent onDestroy from overwriting draft after we've already cleared it
+	// Using plain variable (not $state) to avoid reactivity issues with onDestroy capture
+	let messageSent = false;
 
 	// Helper to save draft immediately (used on unmount and before tab switch)
 	function saveDraftImmediately(tabId: string, value: string) {
@@ -123,8 +126,12 @@
 	});
 
 	// Save draft immediately when component unmounts (critical for mode switches)
+	// BUT skip if we just sent a message - the draft was already cleared and we don't
+	// want to overwrite it with a stale value from Tiptap's destruction events
 	onDestroy(() => {
-		saveDraftImmediately(tab.id, inputValue);
+		if (!messageSent) {
+			saveDraftImmediately(tab.id, inputValue);
+		}
 	});
 	let editorRef = $state<TiptapEditor | null>(null);
 	let fileInputRef = $state<HTMLInputElement | null>(null);
@@ -339,6 +346,10 @@
 
 	// Actually send the message
 	function sendMessage(finalPrompt: string) {
+		// Mark that we're sending - prevents onDestroy from overwriting the cleared draft
+		// This is critical for the first message when the component gets destroyed/recreated
+		messageSent = true;
+
 		inputValue = '';
 		uploadedFiles = [];
 
@@ -1331,11 +1342,11 @@
 		color: var(--muted-foreground);
 	}
 
-	/* Send button wrapper - aligns to bottom when text wraps to multiple lines */
+	/* Send button wrapper - stays vertically centered regardless of text height */
 	.send-button-wrapper {
 		display: flex;
 		align-items: center;
-		align-self: flex-end;
+		align-self: center;
 		flex-shrink: 0;
 	}
 

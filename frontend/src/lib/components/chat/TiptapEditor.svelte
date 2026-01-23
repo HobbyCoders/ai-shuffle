@@ -7,7 +7,7 @@
 	 * - Inline file chip nodes
 	 * - Keyboard shortcuts for sending messages
 	 */
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import { createChatEditor, type Editor } from './tiptap/editorConfig';
 	import type { FileChipAttributes } from './tiptap/FileChipNode';
 	import { serializeToMessage, isEditorEmpty, findActiveAtMention, getSlashCommand } from './tiptap/serialization';
@@ -53,7 +53,12 @@
 					isFocused = true;
 				},
 				onBlur: () => {
-					isFocused = false;
+					// Defer state mutation to avoid Svelte 5 state_unsafe_mutation error
+					// The blur event can fire during render phase, so we use tick() to
+					// ensure the mutation happens after the current render completes
+					tick().then(() => {
+						isFocused = false;
+					});
 				}
 			});
 
@@ -229,7 +234,8 @@
 		max-height: 300px;
 		overflow-y: auto;
 		display: flex;
-		align-items: center;
+		/* Use flex-start so content starts at top and scrollbar works properly */
+		align-items: flex-start;
 	}
 
 	.tiptap-editor.disabled {
