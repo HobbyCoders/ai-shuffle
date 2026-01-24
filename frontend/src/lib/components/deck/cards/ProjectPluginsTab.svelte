@@ -21,7 +21,10 @@
 	} from '$lib/stores/projectPlugins';
 	import { marketplaces } from '$lib/stores/plugins';
 	import { plugins as globalPlugins } from '$lib/stores/plugins';
-	import { Search, Package, Download, Trash2, X, Loader2, ToggleLeft, ToggleRight, FolderGit2, FolderLock } from 'lucide-svelte';
+	import { mcp, projectMcpServers, mcpLoading } from '$lib/stores/mcp';
+	import type { McpServerInfo, CreateProjectMcpServerRequest } from '$lib/api/mcp';
+	import { McpServerList, McpServerForm } from '$lib/components/mcp';
+	import { Search, Package, Download, Trash2, X, Loader2, ToggleLeft, ToggleRight, FolderGit2, FolderLock, Server } from 'lucide-svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -36,11 +39,17 @@
 	let selectedScope = $state<'local' | 'project'>('local');
 	let selectedMarketplace = $state<string | null>(null);
 
-	// Load plugins when project changes
+	// MCP state
+	let showMcpServerForm = $state(false);
+	let editingMcpServer = $state<McpServerInfo | null>(null);
+	let mcpSelectedScope = $state<'local' | 'project'>('local');
+
+	// Load plugins and MCP servers when project changes
 	$effect(() => {
 		if (projectId) {
 			projectPlugins.loadAll(projectId);
 			globalPlugins.loadMarketplaces();
+			mcp.loadProjectServers(projectId);
 		}
 	});
 
@@ -93,6 +102,60 @@
 
 	async function handleInstall(pluginId: string) {
 		await projectPlugins.installPlugin(projectId, pluginId, selectedScope);
+	}
+
+	// MCP Handlers
+	function handleAddMcpServer() {
+		editingMcpServer = null;
+		showMcpServerForm = true;
+	}
+
+	function handleEditMcpServer(server: McpServerInfo) {
+		editingMcpServer = server;
+		mcpSelectedScope = server.scope as 'local' | 'project';
+		showMcpServerForm = true;
+	}
+
+	async function handleSaveMcpServer(config: {
+		name: string;
+		type: 'stdio' | 'sse' | 'http';
+		command?: string;
+		args?: string[];
+		url?: string;
+		env?: Record<string, string>;
+		headers?: Record<string, string>;
+		description?: string;
+		scope?: 'local' | 'project';
+	}) {
+		try {
+			const scope = config.scope || mcpSelectedScope;
+			if (editingMcpServer) {
+				await mcp.updateProjectServer(
+					projectId,
+					editingMcpServer.name,
+					config,
+					scope
+				);
+			} else {
+				await mcp.addProjectServer(projectId, {
+					...config,
+					scope
+				});
+			}
+			showMcpServerForm = false;
+			editingMcpServer = null;
+		} catch (e) {
+			console.error('Failed to save MCP server:', e);
+		}
+	}
+
+	async function handleRemoveMcpServer(serverName: string, scope: 'local' | 'project' | 'user') {
+		if (scope === 'user') return; // Can't remove global from project view
+		try {
+			await mcp.removeProjectServer(projectId, serverName, scope as 'local' | 'project');
+		} catch (e) {
+			console.error('Failed to remove MCP server:', e);
+		}
 	}
 </script>
 
@@ -317,28 +380,95 @@
 				</div>
 			{/if}
 
-			<!-- Empty state -->
+			<!-- Empty state for plugins -->
 			{#if $projectPluginStats.totalInstalled === 0}
-				<div class="card-empty-state">
-					<Package class="card-empty-icon" />
-					<p class="card-empty-title">No plugins installed</p>
-					<p class="card-empty-description">
-						Install plugins to add commands, agents, and hooks to this project.
-					</p>
+				<div class="card-empty-state-inline">
+					<Package class="card-empty-icon-small" />
+					<p class="card-empty-title-small">No plugins installed</p>
 				</div>
 			{/if}
+
+			<!-- MCP Servers Section -->
+			<div class="mcp-section">
+				<div class="section-divider">
+					<Server class="w-4 h-4" />
+					<span>MCP Servers</span>
+				</div>
+
+				<!-- Local MCP Servers -->
+				{#if ($projectMcpServers.local?.length || 0) > 0}
+					<div class="scope-section">
+						<div class="scope-header">
+							<FolderLock class="w-4 h-4" />
+							<span>Local MCP Servers</span>
+							<span class="card-badge card-badge--muted">.claude/.mcp.json</span>
+						</div>
+						<McpServerList
+							servers={$projectMcpServers.local || []}
+							scope="local"
+							loading={$mcpLoading}
+							onEdit={handleEditMcpServer}
+							onRemove={(name) => handleRemoveMcpServer(name, 'local')}
+						/>
+					</div>
+				{/if}
+
+				<!-- Project MCP Servers -->
+				{#if ($projectMcpServers.project?.length || 0) > 0}
+					<div class="scope-section">
+						<div class="scope-header">
+							<FolderGit2 class="w-4 h-4" />
+							<span>Project MCP Servers</span>
+							<span class="card-badge card-badge--muted">.mcp.json</span>
+						</div>
+						<McpServerList
+							servers={$projectMcpServers.project || []}
+							scope="project"
+							loading={$mcpLoading}
+							onEdit={handleEditMcpServer}
+							onRemove={(name) => handleRemoveMcpServer(name, 'project')}
+						/>
+					</div>
+				{/if}
+
+				<!-- Empty state for MCP -->
+				{#if ($projectMcpServers.local?.length || 0) === 0 && ($projectMcpServers.project?.length || 0) === 0}
+					<div class="card-empty-state-inline">
+						<Server class="card-empty-icon-small" />
+						<p class="card-empty-title-small">No MCP servers configured</p>
+					</div>
+				{/if}
+			</div>
 		</div>
 
-		<!-- Install button -->
+		<!-- Action buttons -->
 		<div class="card-footer">
-			<div class="card-footer-content">
-				<button onclick={() => (showInstallModal = true)} class="card-btn-primary">
+			<div class="card-footer-content footer-buttons">
+				<button onclick={() => (showInstallModal = true)} class="card-btn-secondary">
 					<Download />
 					Install Plugin
+				</button>
+				<button onclick={handleAddMcpServer} class="card-btn-primary">
+					<Server />
+					Add MCP Server
 				</button>
 			</div>
 		</div>
 	{/if}
+
+	<!-- MCP Server Form Modal -->
+	<McpServerForm
+		show={showMcpServerForm}
+		server={editingMcpServer}
+		scope={mcpSelectedScope}
+		loading={$mcpLoading}
+		showScopeSelector={true}
+		onSave={handleSaveMcpServer}
+		onClose={() => {
+			showMcpServerForm = false;
+			editingMcpServer = null;
+		}}
+	/>
 </div>
 
 <style>
@@ -447,5 +577,52 @@
 		to {
 			transform: rotate(360deg);
 		}
+	}
+
+	/* MCP Section */
+	.mcp-section {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+		padding-top: var(--space-4);
+	}
+
+	.section-divider {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		font-size: var(--text-sm);
+		font-weight: 600;
+		color: var(--foreground);
+		padding-bottom: var(--space-2);
+		border-bottom: 1px solid var(--border);
+	}
+
+	/* Inline empty states */
+	.card-empty-state-inline {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		padding: var(--space-3);
+		background: var(--muted);
+		border-radius: var(--radius);
+	}
+
+	.card-empty-icon-small {
+		width: 16px;
+		height: 16px;
+		color: var(--muted-foreground);
+	}
+
+	.card-empty-title-small {
+		font-size: var(--text-sm);
+		color: var(--muted-foreground);
+		margin: 0;
+	}
+
+	/* Footer buttons */
+	.footer-buttons {
+		display: flex;
+		gap: var(--space-2);
 	}
 </style>
