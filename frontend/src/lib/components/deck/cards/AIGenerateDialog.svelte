@@ -26,7 +26,7 @@
 	let referenceMaterial = $state('');
 	let showReferenceMaterial = $state(false);
 	let selectedModel = $state('sonnet');
-	let dialogState: DialogState = $state('initial');
+	let dialogState = $state<DialogState>('initial');
 	let error = $state('');
 
 	// Clarification state
