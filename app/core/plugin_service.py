@@ -766,7 +766,11 @@ class PluginService:
             raise ValueError(f"Marketplace not found: {marketplace_id}")
 
         mp_location = marketplaces[marketplace_id].get("installLocation")
+
+        # Check both plugins/ and external_plugins/ directories
         plugin_source = Path(mp_location) / "plugins" / plugin_name
+        if not plugin_source.exists():
+            plugin_source = Path(mp_location) / "external_plugins" / plugin_name
 
         if not plugin_source.exists():
             raise ValueError(f"Plugin not found in marketplace: {plugin_name}")
@@ -1077,7 +1081,11 @@ class PluginService:
             raise ValueError(f"Marketplace not found: {marketplace_id}")
 
         mp_location = marketplaces[marketplace_id].get("installLocation")
+
+        # Check both plugins/ and external_plugins/ directories
         plugin_source = Path(mp_location) / "plugins" / plugin_name
+        if not plugin_source.exists():
+            plugin_source = Path(mp_location) / "external_plugins" / plugin_name
 
         if not plugin_source.exists():
             raise ValueError(f"Plugin not found in marketplace: {plugin_name}")

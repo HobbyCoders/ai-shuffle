@@ -94,6 +94,9 @@
 			{#if plugin.has_hooks}
 				<span class="card-badge card-badge--feature-hooks">Hooks</span>
 			{/if}
+			{#if plugin.has_mcp}
+				<span class="card-badge card-badge--feature-mcp">MCP</span>
+			{/if}
 			{#if mode === 'installed' && installedPlugin}
 				<span class="card-badge card-badge--muted">v{installedPlugin.version}</span>
 			{/if}
@@ -224,6 +227,12 @@
 		background: color-mix(in oklch, var(--feature-hooks, oklch(0.7 0.15 55)) 15%, transparent);
 		color: var(--feature-hooks, oklch(0.7 0.15 55));
 		border: 1px solid color-mix(in oklch, var(--feature-hooks, oklch(0.7 0.15 55)) 30%, transparent);
+	}
+
+	.card-badge--feature-mcp {
+		background: color-mix(in oklch, var(--feature-mcp, oklch(0.6 0.18 30)) 15%, transparent);
+		color: var(--feature-mcp, oklch(0.6 0.18 30));
+		border: 1px solid color-mix(in oklch, var(--feature-mcp, oklch(0.6 0.18 30)) 30%, transparent);
 	}
 
 	/* Success badge */
