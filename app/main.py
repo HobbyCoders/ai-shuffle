@@ -4,6 +4,7 @@ Main FastAPI application entry point
 """
 
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -58,11 +59,32 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
-# Configure logging
-logging.basicConfig(
-    level=getattr(logging, settings.log_level.upper()),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+# Configure logging with both console and file handlers
+log_level = getattr(logging, settings.log_level.upper())
+log_format = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+# Root logger setup
+root_logger = logging.getLogger()
+root_logger.setLevel(log_level)
+
+# Console handler (for docker logs)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(log_level)
+console_handler.setFormatter(log_format)
+root_logger.addHandler(console_handler)
+
+# File handler (for in-container access) - 5MB max, keep 3 backups
+log_file = Path("/data/backend.log")
+file_handler = RotatingFileHandler(
+    log_file,
+    maxBytes=5 * 1024 * 1024,  # 5MB
+    backupCount=3,
+    encoding="utf-8"
 )
+file_handler.setLevel(log_level)
+file_handler.setFormatter(log_format)
+root_logger.addHandler(file_handler)
+
 logger = logging.getLogger(__name__)
 
 
