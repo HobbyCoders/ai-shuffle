@@ -22,7 +22,8 @@
 		FolderOpen,
 		StickyNote,
 		Zap,
-		BarChart3
+		BarChart3,
+		Server
 	} from 'lucide-svelte';
 	import { allTabs } from '$lib/stores/tabs';
 	import type { DeckCard, CardType } from './types';
@@ -55,6 +56,7 @@
 		subagent: Users,
 		project: FolderKanban,
 		plugins: Puzzle,
+		mcp: Server,
 		'user-settings': Settings,
 		'file-browser': FolderOpen,
 		notes: StickyNote,

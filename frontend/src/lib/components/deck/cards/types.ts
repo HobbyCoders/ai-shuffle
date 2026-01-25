@@ -11,6 +11,7 @@ export type CardType =
   | 'user-settings'
   | 'file-browser'
   | 'plugins'
+  | 'mcp'
   | 'notes'
   | 'hooks'
   | 'stats';
@@ -44,6 +45,7 @@ export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: numbe
   'user-settings': { width: 650, height: 550 },
   'file-browser': { width: 600, height: 500 },
   plugins: { width: 650, height: 550 },
+  mcp: { width: 600, height: 550 },
   notes: { width: 600, height: 550 },
   hooks: { width: 650, height: 550 },
   stats: { width: 700, height: 600 },
@@ -58,6 +60,7 @@ export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }>
   'user-settings': { width: 500, height: 400 },
   'file-browser': { width: 400, height: 350 },
   plugins: { width: 500, height: 450 },
+  mcp: { width: 450, height: 400 },
   notes: { width: 400, height: 350 },
   hooks: { width: 500, height: 400 },
   stats: { width: 500, height: 400 },

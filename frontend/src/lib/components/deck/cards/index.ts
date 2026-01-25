@@ -32,3 +32,6 @@ export { default as HooksCard } from './HooksCard.svelte';
 
 // Analytics
 export { default as StatsCard } from './StatsCard.svelte';
+
+// MCP Management
+export { default as McpManagerCard } from './McpManagerCard.svelte';

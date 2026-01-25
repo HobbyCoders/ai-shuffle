@@ -52,6 +52,7 @@
 		CardShuffle,
 		FileBrowserCard,
 		PluginManagerCard,
+		McpManagerCard,
 		NotesCard,
 		HooksCard,
 		StatsCard,
@@ -174,6 +175,8 @@
 				return 'file-browser';
 			case 'plugins':
 				return 'plugins';
+			case 'mcp':
+				return 'mcp';
 			case 'hooks':
 				return 'hooks';
 			case 'notes':
@@ -658,6 +661,17 @@
 				title = 'Plugins';
 				break;
 			}
+			case 'mcp': {
+				// Singleton - only one MCP card at a time
+				const existingMcp = $allCards.find(c => c.type === 'mcp');
+				if (existingMcp) {
+					deck.focusCard(existingMcp.id);
+					return;
+				}
+				deckCardType = 'mcp';
+				title = 'MCP Servers';
+				break;
+			}
 			case 'hooks': {
 				// Singleton - only one hooks card at a time
 				const existingHooks = $allCards.find(c => c.type === 'hooks');
@@ -1024,6 +1038,16 @@
 								onMove={(x, y) => handleCardMove(card.id, x, y)}
 								onResize={(w, h) => handleCardResize(card.id, w, h)}
 							/>
+						{:else if card.type === 'mcp'}
+							<McpManagerCard
+								{card}
+								mobile={true}
+								onClose={() => handleCardClose(card.id)}
+								onMaximize={() => handleCardMaximize(card.id)}
+								onFocus={() => handleCardFocus(card.id)}
+								onMove={(x, y) => handleCardMove(card.id, x, y)}
+								onResize={(w, h) => handleCardResize(card.id, w, h)}
+							/>
 						{:else if card.type === 'notes'}
 							<NotesCard
 								{card}
@@ -1209,6 +1233,17 @@
 											onDragEnd={() => handleCardDragEnd(card.id)}
 											onResizeEnd={() => handleCardResizeEnd(card.id)}
 										/>
+									{:else if card.type === 'mcp'}
+										<McpManagerCard
+											{card}
+											onClose={() => handleCardClose(card.id)}
+											onMaximize={() => handleCardMaximize(card.id)}
+											onFocus={() => handleCardFocus(card.id)}
+											onMove={(x, y) => handleCardMove(card.id, x, y)}
+											onResize={(w, h) => handleCardResize(card.id, w, h)}
+											onDragEnd={() => handleCardDragEnd(card.id)}
+											onResizeEnd={() => handleCardResizeEnd(card.id)}
+										/>
 									{:else if card.type === 'notes'}
 										<NotesCard
 											{card}
@@ -1299,6 +1334,7 @@
 		onOpenSubagents={() => handleCreateCard('subagent')}
 		onOpenSettings={() => handleCreateCard('settings')}
 		onOpenPlugins={() => handleCreateCard('plugins')}
+		onOpenMcp={() => handleCreateCard('mcp')}
 		onOpenHooks={() => handleCreateCard('hooks')}
 		onOpenNotes={() => handleCreateCard('notes')}
 		onOpenStats={() => handleCreateCard('stats')}

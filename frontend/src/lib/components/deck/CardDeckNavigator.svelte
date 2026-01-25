@@ -22,7 +22,7 @@
 		MessageSquare, Clock,
 		Settings, FolderOpen, X, Files, User, Users, Pencil, Check,
 		GripVertical, Plus, Folder, Trash2, MoreVertical, ChevronLeft, ChevronRight, Bot, Puzzle,
-		List, GitBranch, Key, Zap, StickyNote, BarChart3
+		List, GitBranch, Key, Zap, StickyNote, BarChart3, Server
 	} from 'lucide-svelte';
 	import { tabs, type ApiUser } from '$lib/stores/tabs';
 	import type { Session } from '$lib/api/client';
@@ -45,6 +45,7 @@
 		onOpenSubagents?: () => void;
 		onOpenSettings?: () => void;
 		onOpenPlugins?: () => void;
+		onOpenMcp?: () => void;
 		onOpenHooks?: () => void;
 		onOpenNotes?: () => void;
 		onOpenStats?: () => void;
@@ -66,6 +67,7 @@
 		onOpenSubagents,
 		onOpenSettings,
 		onOpenPlugins,
+		onOpenMcp,
 		onOpenHooks,
 		onOpenNotes,
 		onOpenStats,
@@ -178,7 +180,7 @@
 	}
 
 	// Card types for main deck
-	type CardAction = 'new-chat' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'hooks' | 'notes' | 'stats' | 'user-settings';
+	type CardAction = 'new-chat' | 'recent' | 'file-browser' | 'projects' | 'profiles' | 'subagents' | 'settings' | 'plugins' | 'mcp' | 'hooks' | 'notes' | 'stats' | 'user-settings';
 
 	// Cards that API users are allowed to see (whitelist approach)
 	const API_USER_ALLOWED_CARDS = new Set(['new-chat', 'recent', 'file-browser', 'user-settings']);
@@ -313,6 +315,14 @@
 				title: 'Plugins',
 				subtitle: 'Manage extensions',
 				icon: Puzzle
+			},
+			{
+				id: 'mcp',
+				type: 'action',
+				action: 'mcp',
+				title: 'MCP Servers',
+				subtitle: 'MCP connections',
+				icon: Server
 			},
 			{
 				id: 'hooks',
@@ -605,6 +615,7 @@
 			case 'subagents': onOpenSubagents?.(); break;
 			case 'settings': onOpenSettings?.(); break;
 			case 'plugins': onOpenPlugins?.(); break;
+			case 'mcp': onOpenMcp?.(); break;
 			case 'hooks': onOpenHooks?.(); break;
 			case 'notes': onOpenNotes?.(); break;
 			case 'stats': onOpenStats?.(); break;

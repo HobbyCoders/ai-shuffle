@@ -38,7 +38,8 @@ export type DeckCardType =
 	| 'plugins'
 	| 'hooks'
 	| 'notes'
-	| 'stats';
+	| 'stats'
+	| 'mcp';
 
 export type SnapZone =
 	| 'left'

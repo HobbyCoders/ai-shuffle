@@ -25,21 +25,11 @@
 		uninstalledPluginsByMarketplace,
 		pluginStats
 	} from '$lib/stores/plugins';
-	import {
-		mcp,
-		globalMcpServers,
-		mcpTools,
-		mcpLoading,
-		mcpError,
-		mcpDisplayStats
-	} from '$lib/stores/mcp';
 	import type { AvailablePlugin, PluginInfo, MarketplaceInfo } from '$lib/api/plugins';
-	import type { McpServerInfo } from '$lib/api/mcp';
 	import PluginListItem from '$lib/components/plugins/PluginListItem.svelte';
 	import MarketplaceList from '$lib/components/plugins/MarketplaceList.svelte';
 	import PluginDetails from '$lib/components/plugins/PluginDetails.svelte';
-	import { McpServerList, McpServerForm, McpToolList } from '$lib/components/mcp';
-	import { Search, X, Loader2, Package, FolderOpen, AlertCircle, Server } from 'lucide-svelte';
+	import { Search, X, Loader2, Package, FolderOpen, AlertCircle } from 'lucide-svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -66,7 +56,7 @@
 		mobile = false
 	}: Props = $props();
 
-	type Tab = 'marketplaces' | 'available' | 'installed' | 'mcp' | 'details';
+	type Tab = 'marketplaces' | 'available' | 'installed' | 'details';
 	let activeTab = $state<Tab>('installed');
 	let searchQuery = $state('');
 	let selectedMarketplaceFilter = $state<string | ''>('');
@@ -81,15 +71,9 @@
 	let newMarketplaceName = $state('');
 	let addingMarketplace = $state(false);
 
-	// MCP server form
-	let showMcpServerForm = $state(false);
-	let editingMcpServer = $state<McpServerInfo | null>(null);
-
 	// Load data on mount
 	onMount(() => {
 		plugins.loadAll();
-		mcp.loadGlobalServers();
-		mcp.loadTools();
 	});
 
 	// Filter available plugins (only uninstalled)
@@ -187,42 +171,8 @@
 	const tabs = $derived([
 		{ id: 'installed' as Tab, label: 'Installed', count: $pluginStats.totalInstalled },
 		{ id: 'available' as Tab, label: 'Available', count: $pluginStats.totalAvailable },
-		{ id: 'mcp' as Tab, label: 'MCP', count: $mcpDisplayStats.globalCount },
 		{ id: 'marketplaces' as Tab, label: 'Sources', count: $pluginStats.totalMarketplaces }
 	]);
-
-	// MCP handlers
-	function handleAddMcpServer() {
-		editingMcpServer = null;
-		showMcpServerForm = true;
-	}
-
-	function handleEditMcpServer(server: McpServerInfo) {
-		editingMcpServer = server;
-		showMcpServerForm = true;
-	}
-
-	async function handleSaveMcpServer(config: any) {
-		try {
-			if (editingMcpServer) {
-				await mcp.updateGlobalServer(editingMcpServer.name, config);
-			} else {
-				await mcp.addGlobalServer(config);
-			}
-			showMcpServerForm = false;
-			editingMcpServer = null;
-		} catch (e) {
-			console.error('Failed to save MCP server:', e);
-		}
-	}
-
-	async function handleRemoveMcpServer(serverName: string) {
-		try {
-			await mcp.removeGlobalServer(serverName);
-		} catch (e) {
-			console.error('Failed to remove MCP server:', e);
-		}
-	}
 </script>
 
 <BaseCard
@@ -418,50 +368,6 @@
 							</div>
 						{/if}
 					</div>
-				{:else if activeTab === 'mcp'}
-					<div class="mcp-content">
-						{#if $mcpError}
-							<div class="plugin-error">
-								<AlertCircle size={16} />
-								<span>{$mcpError}</span>
-								<button onclick={() => mcp.clearError()} class="error-close">
-									<X size={14} />
-								</button>
-							</div>
-						{/if}
-
-						<div class="mcp-sections">
-							<!-- Global MCP Servers -->
-							<div class="mcp-section">
-								<div class="section-header">
-									<div class="section-title-row">
-										<Server size={16} />
-										<h3>Global MCP Servers</h3>
-									</div>
-									<p class="section-description">
-										MCP servers available to all projects
-									</p>
-								</div>
-								<McpServerList
-									servers={$globalMcpServers}
-									scope="user"
-									loading={$mcpLoading}
-									onAdd={handleAddMcpServer}
-									onEdit={handleEditMcpServer}
-									onRemove={handleRemoveMcpServer}
-								/>
-							</div>
-
-							<!-- MCP Tools -->
-							<div class="mcp-section">
-								<McpToolList
-									tools={$mcpTools}
-									loading={$mcpLoading}
-									onRefresh={() => mcp.loadTools(true)}
-								/>
-							</div>
-						</div>
-					</div>
 				{:else if activeTab === 'details' && $selectedPlugin}
 					<PluginDetails
 						plugin={$selectedPlugin}
@@ -476,26 +382,13 @@
 			<!-- Footer -->
 			<div class="plugin-footer">
 				<div class="footer-info">
-					{$pluginStats.totalFileBasedAgents} agents | {$mcpDisplayStats.toolCount} MCP tools
+					{$pluginStats.totalFileBasedAgents} agents
 				</div>
 				<div class="footer-stats">
-					{$pluginStats.totalEnabled} plugins | {$mcpDisplayStats.globalCount} MCP servers
+					{$pluginStats.totalEnabled} plugins enabled
 				</div>
 			</div>
 		</div>
-
-		<!-- MCP Server Form Modal -->
-		<McpServerForm
-			show={showMcpServerForm}
-			server={editingMcpServer}
-			scope="user"
-			loading={$mcpLoading}
-			onSave={handleSaveMcpServer}
-			onClose={() => {
-				showMcpServerForm = false;
-				editingMcpServer = null;
-			}}
-		/>
 
 		<!-- Add Marketplace Modal -->
 		{#if showAddMarketplace}
@@ -989,47 +882,6 @@
 		}
 	}
 
-	/* MCP Content */
-	.mcp-content {
-		padding: 16px;
-	}
-
-	.mcp-sections {
-		display: flex;
-		flex-direction: column;
-		gap: 24px;
-	}
-
-	.mcp-section {
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		padding: 16px;
-	}
-
-	.section-header {
-		margin-bottom: 16px;
-	}
-
-	.section-title-row {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		color: var(--foreground);
-		font-weight: 500;
-	}
-
-	.section-title-row h3 {
-		font-size: 0.9375rem;
-		margin: 0;
-	}
-
-	.section-description {
-		font-size: 0.8125rem;
-		color: var(--muted-foreground);
-		margin-top: 4px;
-	}
-
 	/* Mobile adjustments */
 	.plugin-card.mobile .plugin-tabs {
 		padding: 8px 12px;
@@ -1046,13 +898,5 @@
 
 	.plugin-card.mobile .marketplace-select {
 		flex: 1;
-	}
-
-	.plugin-card.mobile .mcp-content {
-		padding: 12px;
-	}
-
-	.plugin-card.mobile .mcp-section {
-		padding: 12px;
 	}
 </style>
