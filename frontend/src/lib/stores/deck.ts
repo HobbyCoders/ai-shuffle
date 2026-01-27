@@ -1090,12 +1090,32 @@ function createDeckStore() {
 
 		/**
 		 * Set workspace bounds (for responsive layout)
+		 * Automatically reapplies layout when bounds change (except freeflow mode)
 		 */
 		setWorkspaceBounds(width: number, height: number): void {
-			update((state) => ({
-				...state,
-				workspaceBounds: { width, height }
-			}));
+			update((state) => {
+				const boundsChanged =
+					state.workspaceBounds.width !== width ||
+					state.workspaceBounds.height !== height;
+
+				if (!boundsChanged) return state;
+
+				const newState = {
+					...state,
+					workspaceBounds: { width, height }
+				};
+
+				// Auto-reapply layout when bounds change (except freeflow)
+				if (state.layoutMode !== 'freeflow') {
+					const layoutAppliedState = this.applyLayout(newState, state.layoutMode);
+					// Persist changes (saveToStorage and saveToServer have internal debouncing)
+					saveToStorage(layoutAppliedState);
+					saveToServer(layoutAppliedState);
+					return layoutAppliedState;
+				}
+
+				return newState;
+			});
 		},
 
 		/**
