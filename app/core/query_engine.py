@@ -189,13 +189,13 @@ def _build_plugins_list(
     """
     Build the plugins list for ClaudeAgentOptions.
 
-    IMPORTANT: The Agent SDK does NOT auto-load plugins from settings.json!
-    Unlike the terminal CLI, the SDK requires explicit plugin paths via options.plugins.
-    See: https://platform.claude.com/docs/en/agent-sdk/plugins
+    IMPORTANT: When setting_sources includes "user", the SDK auto-loads plugins from
+    ~/.claude/settings.json. We must NOT pass those same plugins explicitly, or they
+    will be loaded twice (causing duplicate skills, agents, etc.).
 
-    This function loads plugins from TWO sources:
-    1. Claude's settings.json (enabledPlugins) - plugins enabled via CLI
-    2. Profile config (enabled_plugins) - additional plugins specified per-profile
+    This function only adds plugins from profile config when:
+    1. setting_sources does NOT include "user" (we need to load all plugins explicitly)
+    2. OR the plugin is specified in profile config but NOT in user settings
 
     According to the Claude Agent SDK documentation, plugins are specified as:
     [{"type": "local", "path": "./my-plugin"}, ...]
@@ -206,7 +206,7 @@ def _build_plugins_list(
 
     Args:
         profile_enabled_plugins: List of plugin IDs or paths from profile config
-        setting_sources: List of setting sources (unused, kept for API compatibility)
+        setting_sources: List of setting sources (e.g., ["user", "project"])
 
     Returns:
         List of plugin dicts for SDK, or None if no plugins enabled/needed
@@ -214,6 +214,10 @@ def _build_plugins_list(
     # Import here to avoid circular imports
     from app.core.plugin_service import get_plugin_service
     service = get_plugin_service()
+
+    # Check if SDK will auto-load plugins from user settings
+    # When "user" is in setting_sources, SDK loads plugins from ~/.claude/settings.json
+    sdk_loads_user_plugins = setting_sources and "user" in setting_sources
 
     # Load installed plugins registry to resolve plugin IDs
     installed_plugins = {}
@@ -227,23 +231,35 @@ def _build_plugins_list(
     except Exception as e:
         logger.warning(f"Failed to load installed_plugins.json: {e}")
 
-    # Get plugins enabled in Claude's settings.json
+    # Get plugins enabled in Claude's settings.json (for reference/logging)
     settings_enabled = service.get_enabled_plugins()  # Returns Dict[str, bool]
-    logger.info(f"Plugins enabled in settings.json: {list(settings_enabled.keys())}")
+    settings_plugin_ids = {pid for pid, enabled in settings_enabled.items() if enabled}
+    logger.info(f"Plugins in user settings.json: {list(settings_plugin_ids)}")
 
-    # Combine plugins from settings.json and profile config
+    # Build list of plugins to pass explicitly
     all_plugin_entries = []
 
-    # Add plugins enabled in Claude's settings.json
-    for plugin_id, is_enabled in settings_enabled.items():
-        if is_enabled:
-            all_plugin_entries.append(plugin_id)
+    if sdk_loads_user_plugins:
+        # SDK will auto-load user settings plugins - only add profile-specific plugins
+        # that are NOT already in user settings (to avoid duplicates)
+        logger.info("SDK will auto-load user plugins (setting_sources includes 'user')")
+        if profile_enabled_plugins:
+            for entry in profile_enabled_plugins:
+                if entry and entry not in settings_plugin_ids:
+                    all_plugin_entries.append(entry)
+                    logger.info(f"Adding profile-only plugin (not in user settings): {entry}")
+    else:
+        # SDK won't auto-load - we need to pass all plugins explicitly
+        logger.info("SDK won't auto-load plugins - adding all enabled plugins explicitly")
+        for plugin_id, is_enabled in settings_enabled.items():
+            if is_enabled:
+                all_plugin_entries.append(plugin_id)
 
-    # Add plugins from profile config (may be paths or IDs)
-    if profile_enabled_plugins:
-        for entry in profile_enabled_plugins:
-            if entry and entry not in all_plugin_entries:
-                all_plugin_entries.append(entry)
+        # Add plugins from profile config (may be paths or IDs)
+        if profile_enabled_plugins:
+            for entry in profile_enabled_plugins:
+                if entry and entry not in all_plugin_entries:
+                    all_plugin_entries.append(entry)
 
     if not all_plugin_entries:
         logger.info("No plugins enabled in settings.json or profile config")

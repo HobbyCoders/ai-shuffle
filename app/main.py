@@ -60,6 +60,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 # Configure logging with both console and file handlers
+# Guard against duplicate handlers when module is imported multiple times
+# (e.g., uvicorn.run("app.main:app") re-imports the module)
 log_level = getattr(logging, settings.log_level.upper())
 log_format = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
@@ -67,25 +69,27 @@ log_format = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(messa
 root_logger = logging.getLogger()
 root_logger.setLevel(log_level)
 
-# Console handler (for docker logs)
-console_handler = logging.StreamHandler()
-console_handler.setLevel(log_level)
-console_handler.setFormatter(log_format)
-root_logger.addHandler(console_handler)
+# Only add handlers if not already present (prevents duplicates on re-import)
+if not root_logger.handlers:
+    # Console handler (for docker logs)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(log_format)
+    root_logger.addHandler(console_handler)
 
-# File handler (for in-container access) - only if /data exists (Docker environment)
-log_dir = Path("/data")
-if log_dir.exists():
-    log_file = log_dir / "backend.log"
-    file_handler = RotatingFileHandler(
-        log_file,
-        maxBytes=5 * 1024 * 1024,  # 5MB
-        backupCount=3,
-        encoding="utf-8"
-    )
-    file_handler.setLevel(log_level)
-    file_handler.setFormatter(log_format)
-    root_logger.addHandler(file_handler)
+    # File handler (for in-container access) - only if /data exists (Docker environment)
+    log_dir = Path("/data")
+    if log_dir.exists():
+        log_file = log_dir / "backend.log"
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=5 * 1024 * 1024,  # 5MB
+            backupCount=3,
+            encoding="utf-8"
+        )
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(log_format)
+        root_logger.addHandler(file_handler)
 
 logger = logging.getLogger(__name__)
 
