@@ -26,6 +26,8 @@ from app.core.mcp_service import McpScope, McpServerType, McpServerConfig
 def mock_mcp_service():
     """Create a mock MCP service."""
     mock_service = MagicMock()
+    # Default to no validation errors
+    mock_service.validate_server_config.return_value = []
     return mock_service
 
 
