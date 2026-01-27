@@ -9,7 +9,7 @@ Provides REST endpoints for managing MCP (Model Context Protocol) servers:
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Literal
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
@@ -49,7 +49,7 @@ class McpServerResponse(BaseModel):
 class McpServerCreateRequest(BaseModel):
     """Request to create a new MCP server"""
     name: str = Field(..., description="Unique server name", min_length=1, max_length=64)
-    type: str = Field("stdio", description="Server type: stdio, sse, or http")
+    type: Literal["stdio", "sse", "http"] = Field("stdio", description="Server type: stdio, sse, or http")
     command: Optional[str] = Field(None, description="Command to execute (stdio only)")
     args: Optional[List[str]] = Field(None, description="Command arguments (stdio only)")
     url: Optional[str] = Field(None, description="Server URL (sse/http only)")
@@ -60,7 +60,7 @@ class McpServerCreateRequest(BaseModel):
 
 class McpServerUpdateRequest(BaseModel):
     """Request to update an MCP server"""
-    type: Optional[str] = Field(None, description="Server type: stdio, sse, or http")
+    type: Optional[Literal["stdio", "sse", "http"]] = Field(None, description="Server type: stdio, sse, or http")
     command: Optional[str] = Field(None, description="Command to execute (stdio only)")
     args: Optional[List[str]] = Field(None, description="Command arguments (stdio only)")
     url: Optional[str] = Field(None, description="Server URL (sse/http only)")

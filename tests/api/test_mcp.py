@@ -9,11 +9,9 @@ Tests cover:
 """
 
 import pytest
-from datetime import datetime
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from unittest.mock import patch, MagicMock
-from pathlib import Path
 
 from app.api.mcp import router
 from app.api.auth import require_auth, require_admin
@@ -28,16 +26,6 @@ from app.core.mcp_service import McpScope, McpServerType, McpServerConfig
 def mock_mcp_service():
     """Create a mock MCP service."""
     mock_service = MagicMock()
-    return mock_service
-
-
-@pytest.fixture
-def mock_project_service():
-    """Create a mock project service."""
-    mock_service = MagicMock()
-    project = MagicMock()
-    project.path = "/test/project"
-    mock_service.get.return_value = project
     return mock_service
 
 
@@ -109,7 +97,7 @@ class TestGlobalMcpServers:
             }
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 201
         data = response.json()
         assert data["name"] == "new-server"
         mock_mcp_service.add_server.assert_called_once()
@@ -148,7 +136,7 @@ class TestGlobalMcpServers:
 
         response = client.delete("/api/v1/mcp/servers/test-server")
 
-        assert response.status_code == 200
+        assert response.status_code == 204
         mock_mcp_service.remove_server.assert_called_with("test-server", McpScope.USER)
 
 
@@ -160,18 +148,25 @@ class TestProjectMcpServers:
     """Tests for project-scoped MCP server endpoints."""
 
     @pytest.fixture
-    def project_client(self, app, mock_mcp_service, mock_project_service):
-        """Create a test client with mocked MCP and project services."""
+    def project_client(self, app, mock_mcp_service):
+        """Create a test client with mocked MCP service and database."""
         with patch("app.api.mcp.get_mcp_service") as mock_get_mcp:
-            with patch("app.api.mcp.get_project_service") as mock_get_project:
+            with patch("app.api.mcp.database") as mock_db:
                 mock_get_mcp.return_value = mock_mcp_service
-                mock_get_project.return_value = mock_project_service
+                mock_db.get_project.return_value = {
+                    "id": "test-project",
+                    "path": "/test/project"
+                }
                 with TestClient(app) as test_client:
                     yield test_client
 
-    def test_list_project_servers(self, project_client, mock_mcp_service, mock_project_service):
+    def test_list_project_servers(self, project_client, mock_mcp_service):
         """Test listing project MCP servers."""
-        mock_mcp_service.get_servers_for_scope.return_value = []
+        mock_mcp_service.get_all_servers.return_value = {
+            "user": [],
+            "local": [],
+            "project": []
+        }
 
         response = project_client.get("/api/v1/projects/test-project/mcp/servers")
 
@@ -181,7 +176,7 @@ class TestProjectMcpServers:
         assert "local" in data
         assert "project" in data
 
-    def test_add_project_server(self, project_client, mock_mcp_service, mock_project_service):
+    def test_add_project_server(self, project_client, mock_mcp_service):
         """Test adding an MCP server to a project."""
         mock_mcp_service.add_server.return_value = McpServerConfig(
             name="project-server",
@@ -201,7 +196,7 @@ class TestProjectMcpServers:
             }
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 201
         data = response.json()
         assert data["name"] == "project-server"
 
@@ -215,8 +210,8 @@ class TestMcpTools:
 
     def test_list_tools_empty(self, client, mock_mcp_service):
         """Test listing MCP tools when none are discovered."""
-        with patch("app.api.mcp.discover_mcp_tools") as mock_discover:
-            mock_discover.return_value = []
+        with patch("app.api.system.discover_tools_from_cli") as mock_discover:
+            mock_discover.return_value = {"tools": []}
 
             response = client.get("/api/v1/mcp/tools")
 
@@ -226,17 +221,16 @@ class TestMcpTools:
 
     def test_list_tools_with_tools(self, client, mock_mcp_service):
         """Test listing MCP tools when tools are discovered."""
-        with patch("app.api.mcp.discover_mcp_tools") as mock_discover:
-            mock_discover.return_value = [
-                {"name": "mcp__server__tool1", "server": "server", "description": "Test tool"}
-            ]
+        with patch("app.api.system.discover_tools_from_cli") as mock_discover:
+            mock_discover.return_value = {"tools": ["mcp__server__tool1"]}
 
             response = client.get("/api/v1/mcp/tools")
 
             assert response.status_code == 200
             data = response.json()
             assert len(data) == 1
-            assert data[0]["name"] == "mcp__server__tool1"
+            assert data[0]["name"] == "tool1"
+            assert data[0]["server"] == "server"
 
 
 # =============================================================================
