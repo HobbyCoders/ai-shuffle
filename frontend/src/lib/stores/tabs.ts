@@ -24,6 +24,7 @@ import {
 	appendToStreamingThinking,
 	appendToToolInput,
 	hasPendingData,
+	setActiveBlockType,
 	type BatchedUpdate,
 	type BufferedEvent
 } from './streaming-buffer';
@@ -2398,6 +2399,14 @@ function createTabsStore() {
 
 						finalMessages.push(bufferMsg);
 						existingContentHashes.add(hash);
+					}
+
+					// Initialize the streaming buffer's active block type for late-joining devices
+					// This ensures incoming streaming deltas are routed to the correct content block
+					const activeBlockType = data.activeBlockType as 'thinking' | 'text' | 'tool_use' | null | undefined;
+					if (activeBlockType) {
+						console.log(`[Tab ${tabId}] Setting activeBlockType for late-joiner:`, activeBlockType);
+						setActiveBlockType(tabId, activeBlockType);
 					}
 				}
 

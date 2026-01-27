@@ -451,13 +451,14 @@ export function getActiveBlockType(tabId: string): 'thinking' | 'text' | 'tool_u
 }
 
 /**
- * Set the active block type for a tab (used when recovering from polling)
+ * Set the active block type for a tab (used when late-joining a streaming session)
+ * Creates the buffer if it doesn't exist to ensure the block type is set
  */
 export function setActiveBlockType(tabId: string, blockType: 'thinking' | 'text' | 'tool_use' | null): void {
-	const buffer = buffers.get(tabId);
-	if (buffer) {
-		buffer.activeBlockType = blockType;
-	}
+	// Use getOrCreateBuffer to ensure buffer exists for late-joining devices
+	// This prevents race conditions where history arrives before streaming events
+	const buffer = getOrCreateBuffer(tabId);
+	buffer.activeBlockType = blockType;
 }
 
 // Helper functions for applying batched updates to messages

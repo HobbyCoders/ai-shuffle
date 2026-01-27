@@ -83,11 +83,26 @@ class StreamingBuffer:
     started_at: datetime = field(default_factory=datetime.utcnow)
     # Store usage data from stream_start for late-joining devices
     usage: Optional[Dict[str, Any]] = None
+    # Track the currently active block type for late-joining devices
+    # This allows them to initialize their streaming buffer correctly
+    active_block_type: Optional[str] = None  # 'thinking', 'text', 'tool_use', or None
 
     def add_chunk(self, chunk_type: str, content: str, tool_name: str = None, tool_id: str = None, tool_input: Dict = None, subtype: str = None, data: Dict = None,
                   agent_id: str = None, agent_type: str = None, description: str = None, prompt: str = None,
-                  tool_use_id: str = None, output: str = None, is_error: bool = False, result: str = None):
+                  tool_use_id: str = None, output: str = None, is_error: bool = False, result: str = None,
+                  block_type: str = None):
         """Add a streaming chunk to the buffer"""
+        # Handle block start/stop events to track active block type
+        if chunk_type == 'stream_block_start':
+            # Update active block type when a new block starts
+            if block_type in ('thinking', 'text', 'tool_use'):
+                self.active_block_type = block_type
+            return
+        elif chunk_type == 'stream_block_stop':
+            # Clear active block type when block ends
+            self.active_block_type = None
+            return
+
         # Find or create message for this chunk type
         if chunk_type == 'text':
             # Find existing text message or create new one
@@ -558,7 +573,9 @@ class SyncEngine:
                 tool_use_id=chunk_data.get('tool_use_id'),
                 output=chunk_data.get('output'),
                 is_error=chunk_data.get('is_error', False),
-                result=chunk_data.get('result')
+                result=chunk_data.get('result'),
+                # Block type for tracking active streaming block
+                block_type=chunk_data.get('block_type')
             )
 
         event = SyncEvent(
@@ -580,16 +597,19 @@ class SyncEngine:
             return buffer.get_messages()
         return None
 
-    def get_streaming_buffer_with_usage(self, session_id: str) -> tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]]]:
-        """Get the current streaming buffer and usage data for a session (for late-joining devices).
+    def get_streaming_buffer_with_usage(self, session_id: str) -> tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]], Optional[str]]:
+        """Get the current streaming buffer, usage data, and active block type for a session (for late-joining devices).
 
         Returns:
-            Tuple of (messages, usage) where usage contains token usage data from stream_start
+            Tuple of (messages, usage, active_block_type) where:
+            - messages: buffered streaming messages
+            - usage: token usage data from stream_start
+            - active_block_type: currently active block type ('thinking', 'text', 'tool_use', or None)
         """
         buffer = self._streaming_buffers.get(session_id)
         if buffer:
-            return buffer.get_messages(), buffer.usage
-        return None, None
+            return buffer.get_messages(), buffer.usage, buffer.active_block_type
+        return None, None, None
 
     async def broadcast_stream_end(
         self,

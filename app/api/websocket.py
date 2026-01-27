@@ -1173,6 +1173,7 @@ async def chat_websocket(
 
                                 # Validate streaming state - if marked streaming but no active task, it's stale
                                 streaming_usage = None
+                                active_block_type = None
                                 if is_streaming:
                                     active_task = _active_chat_sessions.get(session_id)
                                     if active_task is None or active_task.done():
@@ -1190,9 +1191,9 @@ async def chat_websocket(
                                         )
                                         is_streaming = False
                                     else:
-                                        # Get buffer with usage data for late-joining devices
-                                        streaming_buffer, streaming_usage = sync_engine.get_streaming_buffer_with_usage(session_id)
-                                        logger.info(f"Session {session_id} is streaming, sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages, usage: {streaming_usage}")
+                                        # Get buffer with usage data and active block type for late-joining devices
+                                        streaming_buffer, streaming_usage, active_block_type = sync_engine.get_streaming_buffer_with_usage(session_id)
+                                        logger.info(f"Session {session_id} is streaming, sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages, usage: {streaming_usage}, activeBlockType: {active_block_type}")
 
                                 # Add worktree info if session is linked to a worktree
                                 worktree_id = session.get("worktree_id")
@@ -1208,7 +1209,7 @@ async def chat_websocket(
                                         session["worktree_branch"] = None
                                         session["worktree_path"] = None
 
-                                # Build response with optional streamingUsage for late-joiners
+                                # Build response with optional streamingUsage and activeBlockType for late-joiners
                                 history_response = {
                                     "type": "history",
                                     "session_id": session_id,
@@ -1219,6 +1220,8 @@ async def chat_websocket(
                                 }
                                 if streaming_usage:
                                     history_response["streamingUsage"] = streaming_usage
+                                if active_block_type:
+                                    history_response["activeBlockType"] = active_block_type
                                 await send_json(history_response)
 
                                 # Broadcast to other devices that this session was opened
