@@ -73,17 +73,19 @@ console_handler.setLevel(log_level)
 console_handler.setFormatter(log_format)
 root_logger.addHandler(console_handler)
 
-# File handler (for in-container access) - 5MB max, keep 3 backups
-log_file = Path("/data/backend.log")
-file_handler = RotatingFileHandler(
-    log_file,
-    maxBytes=5 * 1024 * 1024,  # 5MB
-    backupCount=3,
-    encoding="utf-8"
-)
-file_handler.setLevel(log_level)
-file_handler.setFormatter(log_format)
-root_logger.addHandler(file_handler)
+# File handler (for in-container access) - only if /data exists (Docker environment)
+log_dir = Path("/data")
+if log_dir.exists():
+    log_file = log_dir / "backend.log"
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=5 * 1024 * 1024,  # 5MB
+        backupCount=3,
+        encoding="utf-8"
+    )
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(log_format)
+    root_logger.addHandler(file_handler)
 
 logger = logging.getLogger(__name__)
 
