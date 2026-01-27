@@ -15,7 +15,7 @@ import json
 import logging
 import threading
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from enum import Enum
 

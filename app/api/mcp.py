@@ -9,7 +9,7 @@ Provides REST endpoints for managing MCP (Model Context Protocol) servers:
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
@@ -18,7 +18,6 @@ from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.core.mcp_service import (
     get_mcp_service,
-    McpService,
     McpScope,
     McpServerConfig,
     McpServerType,
