@@ -1081,3 +1081,93 @@ class PluginHookInfo(BaseModel):
     hook_type: str  # 'prompt' or 'command'
     description: Optional[str] = None
     tool_matcher: Optional[str] = None
+
+
+# ============================================================================
+# Mobile Device Models
+# ============================================================================
+
+class DeviceCapabilities(BaseModel):
+    """Mobile device capabilities"""
+    supports_biometric: bool = False
+    supports_push: bool = False
+    biometric_types: List[str] = Field(default_factory=list)  # face_id, touch_id, fingerprint
+
+
+class DeviceInfo(BaseModel):
+    """Device registration info"""
+    device_id: str = Field(..., min_length=1, max_length=255)
+    device_name: str = Field(..., min_length=1, max_length=100)
+    platform: str = Field(..., pattern=r'^(ios|android)$')
+    capabilities: DeviceCapabilities
+
+
+class MobileDeviceRegisterRequest(BaseModel):
+    """Request to register a mobile device"""
+    device_info: DeviceInfo
+
+
+class MobileDeviceRegisterResponse(BaseModel):
+    """Response after registering a mobile device"""
+    api_key: str
+    device_id: str
+    expires_at: datetime
+
+
+class MobileDeviceCapabilitiesRequest(BaseModel):
+    """Request to update device capabilities"""
+    device_id: str
+    capabilities: DeviceCapabilities
+
+
+class MobileDevice(BaseModel):
+    """Full mobile device response"""
+    id: str
+    device_id: str
+    device_name: str
+    platform: str
+    capabilities: DeviceCapabilities
+    fcm_token: Optional[str] = None
+    created_at: datetime
+    last_seen: Optional[datetime] = None
+
+
+class PendingActionStatus(BaseModel):
+    """Status values for pending actions"""
+    PENDING: str = "pending"
+    APPROVED: str = "approved"
+    REJECTED: str = "rejected"
+    EXPIRED: str = "expired"
+
+
+class PendingAction(BaseModel):
+    """A pending action waiting for mobile confirmation"""
+    id: str
+    device_id: str
+    action_type: str
+    params: Dict[str, Any] = Field(default_factory=dict)
+    security_level: str = "normal"  # normal, high, critical
+    created_at: datetime
+    expires_at: datetime
+    status: str = "pending"
+
+
+class ActionConfirmRequest(BaseModel):
+    """Request to confirm or reject an action"""
+    approved: bool
+    biometric_verified: bool = False
+
+
+class PushTokenRequest(BaseModel):
+    """Request to register FCM push token"""
+    device_id: str
+    fcm_token: str = Field(..., min_length=1)
+
+
+class TrustedAction(BaseModel):
+    """A trusted action pattern for auto-approval"""
+    id: str
+    device_id: str
+    action_pattern: str
+    auto_approve: bool = True
+    require_preview: bool = False
