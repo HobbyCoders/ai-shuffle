@@ -76,7 +76,6 @@ tools/node_modules/
 /generated-videos/
 /docs/Claude Agent SDK Documentation/
 /docs/API_DOCUMENTATION.md
-CLAUDE.md
 unban.py
 frontend/build-frontend.bat
 /generated-audio
