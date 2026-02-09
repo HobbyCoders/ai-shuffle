@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.core.git_service import git_service
 from app.core.git_state_cache import git_state_cache, CachedGitState
+from app.core.git_watcher import git_watcher
 from app.core.worktree_manager import worktree_manager
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.db import database
@@ -288,6 +289,32 @@ def get_working_dir(project_id: str, worktree_id: Optional[str] = None) -> str:
     return get_project_path(project_id)
 
 
+async def _broadcast_git_update(
+    request: Request,
+    project_id: str,
+    working_dir: str,
+    categories: set,
+    worktree_id: Optional[str] = None,
+) -> None:
+    """Recompute changed categories and broadcast via WebSocket.
+
+    Called by mutation endpoints after git operations complete.
+    Bypasses the watchdog debounce for instant UI updates.
+    """
+    api_user = get_api_user_from_request(request)
+    user_id = api_user["id"] if api_user else "admin"
+    try:
+        await git_watcher.trigger_immediate_update(
+            project_id=project_id,
+            worktree_id=worktree_id,
+            working_dir=working_dir,
+            categories=categories,
+            user_id=user_id,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to broadcast git update for {project_id}: {e}")
+
+
 def check_project_access(request: Request, project_id: str) -> None:
     """Check if the user has access to the project. Raises HTTPException if not."""
     api_user = get_api_user_from_request(request)
@@ -539,8 +566,9 @@ async def create_branch(
             detail=f"Failed to create branch '{body.name}'. Branch may already exist or start point is invalid."
         )
 
-    # Invalidate cache — new branch affects branch list
+    # Invalidate cache and broadcast — new branch affects branch list
     await git_state_cache.invalidate_project(project_id)
+    await _broadcast_git_update(request, project_id, working_dir, {"branches"})
 
     return OperationResponse(
         success=True,
@@ -589,8 +617,9 @@ async def delete_branch(
             detail=f"Failed to delete branch '{branch_name}'. It may not exist or is not fully merged (use force=true)."
         )
 
-    # Invalidate cache — deleted branch affects branch list
+    # Invalidate cache and broadcast — deleted branch affects branch list
     await git_state_cache.invalidate_project(project_id)
+    await _broadcast_git_update(request, project_id, working_dir, {"branches"})
 
     return OperationResponse(
         success=True,
@@ -647,10 +676,13 @@ async def checkout_branch(
             detail=f"Failed to checkout '{body.ref}'. It may not exist."
         )
 
-    # Invalidate cache — checkout affects status and branches
+    # Invalidate cache and broadcast — checkout affects status, branches, and diff stats
     await git_state_cache.invalidate_project(project_id)
+    await _broadcast_git_update(
+        request, project_id, working_dir, {"status", "branches", "diff_stats"}
+    )
 
-    # Broadcast branch change to all user devices so they can refresh git state
+    # Also broadcast branch_changed for backwards compatibility with other handlers
     api_user = get_api_user_from_request(request)
     user_id = api_user["id"] if api_user else "admin"
     try:
@@ -766,8 +798,11 @@ async def fetch_from_remote(
             detail=f"Failed to fetch from remote '{remote}'. Check network connection and authentication."
         )
 
-    # Invalidate cache — fetch updates remote refs and ahead/behind counts
+    # Invalidate cache and broadcast — fetch updates remote refs and ahead/behind counts
     await git_state_cache.invalidate_project(project_id)
+    await _broadcast_git_update(
+        request, project_id, working_dir, {"status", "branches"}, worktree_id
+    )
 
     return FetchResponse(
         success=True,
@@ -874,9 +909,12 @@ async def create_commit(
             detail="Failed to create commit. There may be no changes to commit."
         )
 
-    # Invalidate cache — commit affects status and diff stats
+    # Invalidate cache and broadcast — commit affects status, diff stats, and branches
     cache_key = git_state_cache.make_key(project_id, worktree_id)
     await git_state_cache.invalidate(cache_key)
+    await _broadcast_git_update(
+        request, project_id, working_dir, {"status", "diff_stats", "branches"}, worktree_id
+    )
 
     return CommitResponse(
         success=True,
@@ -930,9 +968,12 @@ async def push_commits(
             detail=error_msg or "Failed to push commits"
         )
 
-    # Invalidate cache — push affects ahead/behind counts
+    # Invalidate cache and broadcast — push affects ahead/behind counts
     cache_key = git_state_cache.make_key(project_id, worktree_id)
     await git_state_cache.invalidate(cache_key)
+    await _broadcast_git_update(
+        request, project_id, working_dir, {"status", "branches"}, worktree_id
+    )
 
     return OperationResponse(
         success=True,

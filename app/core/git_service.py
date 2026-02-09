@@ -966,6 +966,55 @@ class GitService:
 
         return (commit_log, diff_stat)
 
+    # =========================================================================
+    # Efficient Ahead/Behind Methods
+    # =========================================================================
+
+    def get_ahead_behind_counts(self, working_dir: str) -> Tuple[int, int]:
+        """Get ahead/behind counts relative to upstream tracking branch.
+
+        Uses 'git rev-list --count --left-right' for efficient computation
+        without running full git status.
+
+        Returns:
+            Tuple of (ahead, behind) counts. (0, 0) on error.
+        """
+        try:
+            result = self._run_git(
+                working_dir,
+                ["rev-list", "--count", "--left-right", "@{u}...HEAD"],
+                timeout=5
+            )
+            if result.returncode == 0:
+                parts = result.stdout.strip().split()
+                if len(parts) >= 2:
+                    return (int(parts[1]), int(parts[0]))
+        except (subprocess.SubprocessError, OSError, ValueError):
+            pass
+        return (0, 0)
+
+    def check_remote_head(self, working_dir: str, remote: str = "origin") -> Optional[str]:
+        """Check the remote HEAD SHA without performing a fetch.
+
+        Uses 'git ls-remote' which is a lightweight network operation
+        (~100ms) that only reads the remote ref advertisement.
+
+        Returns:
+            The SHA-1 of the remote HEAD, or None on error.
+        """
+        try:
+            result = self._run_git(
+                working_dir,
+                ["ls-remote", "--head", remote, "HEAD"],
+                timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                # Output format: "<sha>\tHEAD"
+                return result.stdout.strip().split()[0]
+        except (subprocess.SubprocessError, OSError):
+            pass
+        return None
+
 
 # Global instance
 git_service = GitService()

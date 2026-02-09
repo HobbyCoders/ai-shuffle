@@ -1,14 +1,25 @@
 """
 Git File Watcher Service
 
-Monitors .git/ directories for filesystem changes using watchdog.
-When changes are detected, invalidates the git state cache and broadcasts
-updated state to connected frontend clients via WebSocket.
+Three-layer event system for real-time git state monitoring:
+
+1. **Git Hooks** (via GitHookManager) — Precise event-driven detection of
+   commits, checkouts, merges, rewrites from any source (CLI, IDE, etc.).
+   Bypasses the debounce for instant updates.
+
+2. **Watchdog filesystem watcher** — Real-time detection of working tree
+   changes (staging, file edits) that don't trigger hooks.
+   500ms trailing-edge debounce to batch rapid operations.
+
+3. **Programmatic triggers** (via trigger_immediate_update) — API mutation
+   endpoints call this after git operations complete, bypassing debounce
+   for instant feedback.
 
 Key design:
 - One watchdog Observer per active project (ref-counted by WebSocket connections)
-- 500ms trailing-edge debounce to batch rapid git operations
-- Maps file changes to categories (status, diff_stats, branches)
+- Repo-to-project reverse lookup for hook callback resolution
+- Deduplication: 1-second suppression window after hook events prevents
+  double-broadcast when both hook and filesystem fire for the same operation
 - Cross-platform: ReadDirectoryChangesW on Windows, inotify on Linux
 """
 
@@ -17,8 +28,9 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, Tuple
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
@@ -28,6 +40,10 @@ logger = logging.getLogger(__name__)
 # Debounce interval: git operations cause many rapid file changes
 DEBOUNCE_SECONDS = 0.5
 
+# After a hook event fires, suppress watchdog events for the same
+# categories for this duration to prevent double-broadcast.
+HOOK_SUPPRESSION_SECONDS = 1.0
+
 # File patterns mapped to the cache categories they invalidate
 _FILE_CATEGORY_MAP = {
     "index": {"status", "diff_stats"},
@@ -35,6 +51,14 @@ _FILE_CATEGORY_MAP = {
     "MERGE_HEAD": {"status"},
     "REBASE_HEAD": {"status"},
     "COMMIT_EDITMSG": {"status", "diff_stats"},
+}
+
+# Hook names mapped to cache categories (higher precision than filesystem events)
+_HOOK_CATEGORY_MAP = {
+    "post-commit": {"status", "diff_stats", "branches"},
+    "post-checkout": {"status", "branches", "diff_stats"},
+    "post-merge": {"status", "diff_stats", "branches"},
+    "post-rewrite": {"status", "diff_stats"},
 }
 
 
@@ -150,6 +174,8 @@ class ProjectWatcher:
         self._user_ids: Set[str] = set()
         self._ref_count = 0
         self._lock = threading.Lock()
+        # Deduplication: tracks when hook events last processed each category
+        self._hook_suppressed_until: Dict[str, float] = {}
 
     def add_ref(self, user_id: str) -> None:
         with self._lock:
@@ -199,9 +225,21 @@ class ProjectWatcher:
         """Schedule a debounced update for the given categories.
 
         Called from the watchdog thread, so we schedule work on the asyncio loop.
+        Respects hook suppression window to prevent double-broadcast.
         """
+        # Filter out categories that are currently suppressed by a recent hook event
+        now = time.monotonic()
+        unsuppressed = set()
+        for cat in categories:
+            suppressed_until = self._hook_suppressed_until.get(cat, 0)
+            if now >= suppressed_until:
+                unsuppressed.add(cat)
+
+        if not unsuppressed:
+            return
+
         with self._lock:
-            self._pending_categories.update(categories)
+            self._pending_categories.update(unsuppressed)
 
         loop = self._service._loop
         if loop is None or loop.is_closed():
@@ -209,6 +247,15 @@ class ProjectWatcher:
 
         # Schedule on the event loop (thread-safe)
         loop.call_soon_threadsafe(self._reset_debounce)
+
+    def set_hook_suppression(self, categories: Set[str]) -> None:
+        """Suppress watchdog events for the given categories for a short window.
+
+        Called after a hook event is processed to prevent double-broadcast.
+        """
+        until = time.monotonic() + HOOK_SUPPRESSION_SECONDS
+        for cat in categories:
+            self._hook_suppressed_until[cat] = until
 
     def _reset_debounce(self) -> None:
         """Reset the debounce timer (must be called on the event loop)."""
@@ -245,12 +292,20 @@ class ProjectWatcher:
 
 
 class GitWatcherService:
-    """Manages file watchers for all active projects."""
+    """Manages file watchers for all active projects.
+
+    Provides three entry points for state updates:
+    1. Filesystem events (via watchdog) — debounced, for working tree changes
+    2. Hook events (via process_hook_event) — immediate, for git operations
+    3. API triggers (via trigger_immediate_update) — immediate, for mutations
+    """
 
     def __init__(self):
         self._watchers: Dict[str, ProjectWatcher] = {}  # key -> ProjectWatcher
         self._lock = asyncio.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Reverse lookup: normalized repo_path -> (project_id, working_dir, worktree_id)
+        self._repo_to_project: Dict[str, Tuple[str, str, Optional[str]]] = {}
 
     @staticmethod
     def _make_key(project_id: str, worktree_id: Optional[str] = None) -> str:
@@ -262,11 +317,21 @@ class GitWatcherService:
         logger.info("Git watcher service started")
 
     async def shutdown(self) -> None:
-        """Stop all watchers. Call during app shutdown."""
+        """Stop all watchers and uninstall hooks. Call during app shutdown."""
+        from app.core.git_hook_manager import git_hook_manager
+
+        # Uninstall hooks for all watched repos
+        for repo_path in list(self._repo_to_project.keys()):
+            try:
+                git_hook_manager.uninstall_hooks(repo_path)
+            except Exception as e:
+                logger.debug(f"Failed to uninstall hooks for {repo_path}: {e}")
+
         async with self._lock:
             for watcher in self._watchers.values():
                 watcher.stop()
             self._watchers.clear()
+            self._repo_to_project.clear()
         logger.info("Git watcher service stopped")
 
     async def watch_project(
@@ -276,7 +341,12 @@ class GitWatcherService:
         user_id: str,
         worktree_id: Optional[str] = None,
     ) -> None:
-        """Start watching a project's .git/ directory (or increment ref count)."""
+        """Start watching a project's .git/ directory (or increment ref count).
+
+        Also installs git hooks for event-driven detection.
+        """
+        from app.core.git_hook_manager import git_hook_manager
+
         key = self._make_key(project_id, worktree_id)
 
         async with self._lock:
@@ -301,13 +371,25 @@ class GitWatcherService:
             watcher.start()
             self._watchers[key] = watcher
 
+            # Register reverse lookup for hook callback resolution
+            norm_path = os.path.normpath(working_dir)
+            self._repo_to_project[norm_path] = (project_id, working_dir, worktree_id)
+
+            # Install git hooks (idempotent — skips if already installed)
+            git_hook_manager.install_hooks(norm_path, git_dir)
+
     async def unwatch_project(
         self,
         project_id: str,
         user_id: str,
         worktree_id: Optional[str] = None,
     ) -> None:
-        """Decrement ref count and stop watching if no more references."""
+        """Decrement ref count and stop watching if no more references.
+
+        Uninstalls git hooks when the last reference is removed.
+        """
+        from app.core.git_hook_manager import git_hook_manager
+
         key = self._make_key(project_id, worktree_id)
 
         async with self._lock:
@@ -318,6 +400,97 @@ class GitWatcherService:
             if watcher.remove_ref(user_id):
                 watcher.stop()
                 del self._watchers[key]
+
+                # Uninstall hooks and remove reverse lookup
+                norm_path = os.path.normpath(watcher.working_dir)
+                git_hook_manager.uninstall_hooks(norm_path)
+                self._repo_to_project.pop(norm_path, None)
+
+    async def process_hook_event(
+        self,
+        hook_name: str,
+        repo_path: str,
+    ) -> None:
+        """Process a git hook callback. Bypasses debounce for immediate updates.
+
+        Called by the internal /git-hook endpoint when a hook fires.
+        Maps the repo path to a project and triggers immediate state recomputation.
+        """
+        categories = _HOOK_CATEGORY_MAP.get(hook_name)
+        if not categories:
+            logger.debug(f"Unknown hook: {hook_name}")
+            return
+
+        # Resolve repo path to project info
+        norm_path = os.path.normpath(repo_path)
+        project_info = self._repo_to_project.get(norm_path)
+        if not project_info:
+            logger.debug(f"Hook callback for untracked repo: {repo_path}")
+            return
+
+        project_id, working_dir, worktree_id = project_info
+        key = self._make_key(project_id, worktree_id)
+
+        # Get user_ids from the watcher for broadcast targeting
+        watcher = self._watchers.get(key)
+        if not watcher:
+            return
+
+        # Set suppression window to prevent double-broadcast from watchdog
+        watcher.set_hook_suppression(categories)
+
+        # Get user_ids to broadcast to
+        with watcher._lock:
+            user_ids = watcher._user_ids.copy()
+
+        if not user_ids:
+            return
+
+        logger.debug(
+            f"Hook {hook_name} for project={project_id}: "
+            f"processing categories={categories}"
+        )
+
+        await self.process_changes(
+            project_id=project_id,
+            worktree_id=worktree_id,
+            working_dir=working_dir,
+            categories=categories,
+            user_ids=user_ids,
+        )
+
+    async def trigger_immediate_update(
+        self,
+        project_id: str,
+        worktree_id: Optional[str],
+        working_dir: str,
+        categories: Set[str],
+        user_id: str,
+    ) -> None:
+        """Trigger an immediate state update (bypasses debounce).
+
+        Called by API mutation endpoints after git operations complete.
+        Ensures the requesting user is in the broadcast target set.
+        """
+        key = self._make_key(project_id, worktree_id)
+        watcher = self._watchers.get(key)
+
+        # Build user_ids set: always include the requesting user,
+        # plus any other users watching this project
+        user_ids = {user_id}
+        if watcher:
+            with watcher._lock:
+                user_ids.update(watcher._user_ids)
+            # Suppress watchdog events to prevent double-broadcast
+            watcher.set_hook_suppression(categories)
+
+        await self.process_changes(
+            project_id=project_id,
+            worktree_id=worktree_id,
+            working_dir=working_dir,
+            categories=categories,
+            user_ids=user_ids,
+        )
 
     async def process_changes(
         self,
@@ -343,8 +516,6 @@ class GitWatcherService:
         try:
             if "status" in categories:
                 status_data = git_service.get_status(working_dir)
-                # Store raw dict in cache — the API endpoint will format it
-                # But for WebSocket broadcast, send the relevant fields directly
                 changes["status"] = {
                     "is_git_repo": status_data.get("is_git_repo", False),
                     "current_branch": status_data.get("current_branch"),

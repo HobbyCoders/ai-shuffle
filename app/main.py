@@ -21,7 +21,7 @@ from app.core.auth import auth_service
 from app.core import encryption
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, user_self_service, meshy, notes, hooks, generation, project_agents, project_plugins, mcp, mobile
+from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, user_self_service, meshy, notes, hooks, generation, project_agents, project_plugins, mcp, mobile, internal
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -161,14 +161,19 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(f"Admin user: {auth_service.get_admin_username()}")
 
-    # Start git file watcher service
+    # Start git file watcher service and hook manager
     from app.core.git_watcher import git_watcher
+    from app.core.git_hook_manager import git_hook_manager
     await git_watcher.start()
+    await git_hook_manager.start(port=settings.port)
 
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
     yield
+
+    # Shutdown git hook manager (uninstalls hooks before watcher stops)
+    await git_hook_manager.shutdown()
 
     # Shutdown git file watcher
     await git_watcher.shutdown()
@@ -276,6 +281,7 @@ app.include_router(project_agents.router)
 app.include_router(project_plugins.router)
 app.include_router(mcp.router)
 app.include_router(mobile.router)
+app.include_router(internal.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"

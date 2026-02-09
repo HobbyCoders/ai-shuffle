@@ -203,10 +203,15 @@
 	});
 
 	// =========================================================================
-	// Event-driven git state updates
+	// Event-driven git state updates (three-layer system)
 	// =========================================================================
-	// Git state is now pushed by the backend file watcher via WebSocket
-	// (git_state_changed events). This replaces the old 15-second poller.
+	// Git state updates arrive via three mechanisms, all pushing through WebSocket:
+	// 1. Git hooks (post-commit, post-checkout, post-merge, post-rewrite) — instant,
+	//    bypasses debounce, handles external CLI/IDE git operations.
+	// 2. Watchdog file watcher — detects staging, file edits, and other .git/ changes
+	//    with 500ms debounce.
+	// 3. Programmatic broadcast — API mutation endpoints (commit, push, checkout, etc.)
+	//    immediately recompute and broadcast state after operations complete.
 	// A 60-second safety-net fallback poll catches any missed events.
 
 	const GIT_FALLBACK_INTERVAL_MS = 60_000;
@@ -238,7 +243,7 @@
 	}
 
 	// Safety-net fallback poll: refreshes diff stats every 60s when tab is visible.
-	// Real-time updates come via WebSocket from the backend file watcher.
+	// Real-time updates come via WebSocket from git hooks, file watcher, and API broadcasts.
 	$effect(() => {
 		const project = activeProject;
 		const worktreeId = activeWorktreeId; // Track worktree changes for tab switches
