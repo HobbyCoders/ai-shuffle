@@ -265,15 +265,29 @@ async def chat_websocket(
         heartbeat_stop = asyncio.Event()
 
         async def send_heartbeats():
-            """Send periodic heartbeat events while streaming."""
+            """Send periodic heartbeat events while streaming.
+            Includes pending permission/question counts so the frontend can
+            detect and recover missed permission_request / user_question messages."""
             while not heartbeat_stop.is_set():
                 try:
                     await asyncio.wait_for(heartbeat_stop.wait(), timeout=5.0)
                     # Event was set, stop sending heartbeats
                     break
                 except asyncio.TimeoutError:
-                    # Timeout expired, send heartbeat
-                    await send_json({"type": "heartbeat", "timestamp": asyncio.get_event_loop().time()})
+                    # Timeout expired, send heartbeat with pending counts
+                    heartbeat_data: dict = {
+                        "type": "heartbeat",
+                        "timestamp": asyncio.get_event_loop().time(),
+                    }
+                    # Include pending permission/question counts so the frontend
+                    # can recover from missed WebSocket messages
+                    if session_id:
+                        perm_count = permission_handler.get_queue_count(session_id)
+                        question_count = len(user_question_handler.get_pending_questions(session_id))
+                        if perm_count > 0 or question_count > 0:
+                            heartbeat_data["pending_permissions"] = perm_count
+                            heartbeat_data["pending_questions"] = question_count
+                    await send_json(heartbeat_data)
 
         try:
             logger.debug(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, overrides={overrides}")

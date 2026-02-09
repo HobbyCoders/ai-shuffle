@@ -2511,7 +2511,31 @@ function createTabsStore() {
 			case 'heartbeat': {
 				// Heartbeat from server during long operations (tool execution, subagents)
 				// Just receiving this message updates tabLastMessageTime (done in onmessage)
-				// which prevents false disconnect detection
+				// which prevents false disconnect detection.
+				//
+				// Recovery: heartbeats include pending permission/question counts.
+				// If the server reports pending items that we don't have locally,
+				// the original WebSocket message was likely missed — request full state.
+				const pendingPermCount = data.pending_permissions as number | undefined;
+				const pendingQCount = data.pending_questions as number | undefined;
+				if (pendingPermCount && pendingPermCount > 0) {
+					const currentTab = getTab(tabId);
+					if (currentTab && (!currentTab.pendingPermissions || currentTab.pendingPermissions.length === 0)) {
+						const currentWs = tabConnections.get(tabId);
+						if (currentWs?.readyState === WebSocket.OPEN) {
+							currentWs.send(JSON.stringify({ type: 'get_pending_permissions' }));
+						}
+					}
+				}
+				if (pendingQCount && pendingQCount > 0) {
+					const currentTab = getTab(tabId);
+					if (currentTab && (!currentTab.pendingQuestions || currentTab.pendingQuestions.length === 0)) {
+						const currentWs = tabConnections.get(tabId);
+						if (currentWs?.readyState === WebSocket.OPEN) {
+							currentWs.send(JSON.stringify({ type: 'get_pending_questions' }));
+						}
+					}
+				}
 				break;
 			}
 
