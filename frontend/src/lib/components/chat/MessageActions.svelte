@@ -42,6 +42,19 @@
 	let rewindMode = $state<'chat' | 'chat_and_files'>('chat');  // Selected rewind mode
 
 	/**
+	 * Portal action: moves the element to document.body so it escapes
+	 * parent containment contexts (content-visibility, overflow, etc.)
+	 */
+	function portal(node: HTMLElement) {
+		document.body.appendChild(node);
+		return {
+			destroy() {
+				node.remove();
+			}
+		};
+	}
+
+	/**
 	 * Strip markdown syntax but keep readable text for copying
 	 */
 	function prepareTextForCopy(text: string): string {
@@ -262,10 +275,10 @@
 	{/if}
 </div>
 
-<!-- Rewind Confirmation Dialog -->
+<!-- Rewind Confirmation Dialog - portaled to body to escape content-visibility containment -->
 {#if showRewindDialog}
 	<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onclick={handleRewindCancel} role="presentation">
+	<div use:portal class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onclick={handleRewindCancel} role="presentation">
 		<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
 		<div
 			class="bg-card border border-border rounded-lg shadow-lg max-w-md w-full mx-4 p-4"
