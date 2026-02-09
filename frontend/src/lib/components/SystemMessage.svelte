@@ -295,6 +295,17 @@
 				};
 			}
 
+			case 'worktree_selected': {
+				// Worktree selection info - hide since branch is shown in header
+				return {
+					title: 'Worktree Selected',
+					content: message.content || '',
+					badge: 'worktree',
+					badgeColor: 'green',
+					hidden: true
+				};
+			}
+
 			case 'error':
 			case 'exception':
 			case 'validation_error':

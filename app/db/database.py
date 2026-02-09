@@ -243,6 +243,30 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
         cursor.execute("ALTER TABLE notes ADD COLUMN file_path TEXT")
         migrations_applied.append("notes.file_path")
 
+    # Add worktree_branch and worktree_path columns to sessions for persistent worktree info
+    # These store worktree info directly on the session so it survives worktree deletion
+    if table_exists(cursor, "sessions"):
+        if not column_exists(cursor, "sessions", "worktree_branch"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN worktree_branch TEXT")
+            migrations_applied.append("sessions.worktree_branch")
+        if not column_exists(cursor, "sessions", "worktree_path"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN worktree_path TEXT")
+            migrations_applied.append("sessions.worktree_path")
+        # Backfill for existing sessions with active worktrees
+        if "sessions.worktree_branch" in migrations_applied:
+            try:
+                cursor.execute("""
+                    UPDATE sessions SET
+                        worktree_branch = (SELECT w.branch_name FROM worktrees w WHERE w.id = sessions.worktree_id),
+                        worktree_path = (SELECT w.worktree_path FROM worktrees w WHERE w.id = sessions.worktree_id)
+                    WHERE worktree_id IS NOT NULL AND worktree_branch IS NULL
+                """)
+                backfilled = cursor.rowcount
+                if backfilled > 0:
+                    logger.info(f"Backfilled worktree_branch/worktree_path for {backfilled} sessions")
+            except sqlite3.OperationalError:
+                pass  # worktrees table may not exist yet
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -515,32 +539,6 @@ def _create_schema(cursor: sqlite3.Cursor):
         else:
             logger.error(f"Failed to migrate worktree-session relationships: {e}")
             raise  # Re-raise unexpected errors
-
-    # Add worktree_branch and worktree_path columns to sessions for persistent worktree info
-    # These columns store worktree info directly on the session so it survives worktree deletion
-    try:
-        cursor.execute("ALTER TABLE sessions ADD COLUMN worktree_branch TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE sessions ADD COLUMN worktree_path TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-
-    # Backfill worktree_branch/worktree_path for existing sessions with active worktrees
-    try:
-        cursor.execute("""
-            UPDATE sessions SET
-                worktree_branch = (SELECT w.branch_name FROM worktrees w WHERE w.id = sessions.worktree_id),
-                worktree_path = (SELECT w.worktree_path FROM worktrees w WHERE w.id = sessions.worktree_id)
-            WHERE worktree_id IS NOT NULL AND worktree_branch IS NULL
-        """)
-        backfilled = cursor.rowcount
-        if backfilled > 0:
-            logger.info(f"Backfilled worktree_branch/worktree_path for {backfilled} sessions")
-    except sqlite3.OperationalError as e:
-        if "no such table" not in str(e).lower():
-            logger.error(f"Failed to backfill worktree info: {e}")
 
     # Login attempts tracking for brute force protection
     cursor.execute("""
