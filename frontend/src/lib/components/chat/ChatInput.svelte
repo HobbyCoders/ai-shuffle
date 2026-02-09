@@ -1169,6 +1169,7 @@
 
 	/* Worktree completed (read-only) styling */
 	.error-banner.worktree-completed {
+		justify-content: center;
 		background: color-mix(in srgb, var(--muted-foreground) 8%, transparent);
 		border-color: color-mix(in srgb, var(--muted-foreground) 20%, transparent);
 		color: var(--muted-foreground);
