@@ -160,13 +160,14 @@
 
 	function handleBranchCreated(branchName: string) {
 		// Set up the new branch as a worktree
+		// Branch was already created by CreateBranchModal, so use create_new_branch=false
 		tabs.clearWorktreeSelection(tab.id);
 		tabs.setTabWorktreeBranch(tab.id, branchName);
 		tabs.setTabWorktreeMode(tab.id, 'new');
-		tabs.setTabWorktreeCreateNewBranch(tab.id, true);
+		tabs.setTabWorktreeCreateNewBranch(tab.id, false);
 
-		// Eagerly create the worktree + new branch
-		eagerCreateWorktree(branchName, true);
+		// Create the worktree for the already-created branch
+		eagerCreateWorktree(branchName, false);
 	}
 </script>
 
