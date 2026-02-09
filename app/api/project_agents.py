@@ -97,9 +97,8 @@ def _validate_project_access(request: Request, project_id: str) -> dict:
 
 def _get_project_path(project: dict) -> Path:
     """Get the full path to the project directory"""
-    # Project path is relative to workspace
-    from app.core.config import settings
-    return settings.effective_workspace_dir / project["path"]
+    from app.core.project_utils import get_project_working_dir_as_path
+    return get_project_working_dir_as_path(project)
 
 
 def _agent_to_response(agent: ProjectAgent) -> ProjectAgentResponse:

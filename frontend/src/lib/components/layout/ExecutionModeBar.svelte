@@ -71,12 +71,8 @@
 		}
 	});
 
-	// Load worktrees when switching to worktree mode
-	$effect(() => {
-		if (tab.executionMode === 'worktree' && tab.project) {
-			refreshWorktrees();
-		}
-	});
+	// Worktree/branch data is loaded by MainPanel's git store effect.
+	// We only refresh on-demand when the dropdown is opened (see toggleDropdown).
 
 	// --- Functions ---
 

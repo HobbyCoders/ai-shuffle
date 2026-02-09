@@ -515,6 +515,162 @@ async def validate_workspace_path(request: WorkspaceConfigRequest) -> dict:
 
 
 # ============================================================================
+# Filesystem Browse API (local mode only)
+# ============================================================================
+
+class DirectoryEntry(BaseModel):
+    """A directory entry for the filesystem browser"""
+    name: str
+    path: str
+    is_dir: bool
+    has_children: bool = False  # For directories: whether they contain subdirs
+
+
+class BrowseResponse(BaseModel):
+    """Response from filesystem browse"""
+    path: str
+    parent: Optional[str]
+    entries: List[DirectoryEntry]
+    is_local_mode: bool
+
+
+@router.get("/api/v1/filesystem/browse")
+async def browse_filesystem(
+    path: Optional[str] = None,
+    token: str = Depends(require_admin)
+) -> BrowseResponse:
+    """
+    Browse the filesystem for directory selection (admin only).
+
+    In local mode: browse the full filesystem.
+    In Docker mode: browse within the workspace directory only.
+
+    Returns directories at the given path for the tree browser UI.
+    If no path is given, returns starting points.
+    """
+    from app.core.platform import is_local_mode
+    from app.core.config import settings as app_settings
+    import sys
+
+    local_mode = is_local_mode()
+    workspace_root = app_settings.workspace_dir.resolve()
+
+    if not path:
+        entries = []
+        if local_mode:
+            # Local mode: platform-specific starting points
+            if sys.platform == "win32":
+                import string
+                for letter in string.ascii_uppercase:
+                    drive = f"{letter}:\\"
+                    if Path(drive).exists():
+                        entries.append(DirectoryEntry(
+                            name=f"{letter}:",
+                            path=drive,
+                            is_dir=True,
+                            has_children=True
+                        ))
+            else:
+                home = str(Path.home())
+                entries.append(DirectoryEntry(
+                    name="Home",
+                    path=home,
+                    is_dir=True,
+                    has_children=True
+                ))
+                entries.append(DirectoryEntry(
+                    name="/",
+                    path="/",
+                    is_dir=True,
+                    has_children=True
+                ))
+        else:
+            # Docker mode: start at workspace root
+            entries.append(DirectoryEntry(
+                name="workspace",
+                path=str(workspace_root),
+                is_dir=True,
+                has_children=True
+            ))
+
+        return BrowseResponse(
+            path="",
+            parent=None,
+            entries=entries,
+            is_local_mode=local_mode
+        )
+
+    # Browse the specified directory
+    target = Path(path).resolve()
+
+    # Docker mode: enforce workspace boundary
+    if not local_mode:
+        try:
+            target.relative_to(workspace_root)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Browsing outside the workspace is not allowed"
+            )
+
+    if not target.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Path not found: {path}"
+        )
+    if not target.is_dir():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Path is not a directory: {path}"
+        )
+
+    entries = []
+    try:
+        for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+            # Skip hidden files/dirs (starting with .)
+            if item.name.startswith('.'):
+                continue
+            # Skip system directories
+            if sys.platform == "win32" and item.name in ('$Recycle.Bin', 'System Volume Information', 'Recovery'):
+                continue
+
+            is_dir = item.is_dir()
+            has_children = False
+            if is_dir:
+                try:
+                    has_children = any(c.is_dir() for c in item.iterdir() if not c.name.startswith('.'))
+                except PermissionError:
+                    pass
+
+            entries.append(DirectoryEntry(
+                name=item.name,
+                path=str(item),
+                is_dir=is_dir,
+                has_children=has_children
+            ))
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Permission denied: {path}"
+        )
+
+    # Parent path (don't go above workspace root in Docker mode)
+    parent = str(target.parent) if target.parent != target else None
+    if not local_mode and parent:
+        try:
+            Path(parent).resolve().relative_to(workspace_root)
+        except ValueError:
+            parent = None
+
+    return BrowseResponse(
+        path=str(target),
+        parent=parent,
+        entries=entries,
+        is_local_mode=local_mode
+    )
+
+
+# ============================================================================
 # Tools API
 # ============================================================================
 

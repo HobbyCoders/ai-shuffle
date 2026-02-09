@@ -18,6 +18,7 @@ from app.core.models import (
 from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.core.plugin_service import get_plugin_service
+from app.core.project_utils import get_project_working_dir_as_path
 from app.core.project_agent_service import get_project_agent_service
 from app.core.config import settings
 
@@ -227,7 +228,7 @@ async def get_all_available_subagents(
     if project_id:
         project = database.get_project(project_id)
         if project:
-            project_path = settings.effective_workspace_dir / project["path"]
+            project_path = get_project_working_dir_as_path(project)
             try:
                 project_agent_service = get_project_agent_service(project_path)
                 for agent in project_agent_service.get_agents():

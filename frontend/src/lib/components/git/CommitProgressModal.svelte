@@ -7,8 +7,8 @@
 	 */
 	import { Check, Loader2, X, AlertCircle } from 'lucide-svelte';
 
-	type CommitAction = 'commit' | 'push' | 'pr';
-	type ModalMode = 'commit' | 'pr-only';
+	type CommitAction = 'commit' | 'push' | 'pr' | 'finish';
+	type ModalMode = 'commit' | 'pr-only' | 'finish';
 
 	interface ProgressStep {
 		label: string;
@@ -24,12 +24,23 @@
 		error: string | null;
 		branchName?: string;
 		isGenerating?: boolean;
+		/** Whether cleanup steps are included (finish mode) */
+		hasCleanup?: boolean;
 		onClose: () => void;
 	}
 
-	let { open, action, mode = 'commit', currentStep, completed, error, branchName = '', isGenerating = false, onClose }: Props = $props();
+	let { open, action, mode = 'commit', currentStep, completed, error, branchName = '', isGenerating = false, hasCleanup = false, onClose }: Props = $props();
 
 	const steps = $derived.by((): ProgressStep[] => {
+		if (mode === 'finish') {
+			const result: ProgressStep[] = [];
+			result.push({ label: 'Merging pull request' });
+			if (hasCleanup) {
+				result.push({ label: 'Cleaning up worktree and branch' });
+			}
+			return result;
+		}
+
 		if (mode === 'pr-only') {
 			const result: ProgressStep[] = [];
 			if (isGenerating) {
@@ -64,6 +75,12 @@
 	const title = $derived.by(() => {
 		if (error) return 'Error';
 		if (completed) return 'Done';
+
+		if (mode === 'finish') {
+			if (currentStep === 1) return 'Merging PR';
+			if (currentStep === 2) return 'Cleaning up';
+			return 'Processing';
+		}
 
 		if (mode === 'pr-only') {
 			if (isGenerating && currentStep <= 1) return 'Generating description';

@@ -13,6 +13,8 @@ from pydantic import BaseModel
 
 from app.core.models import Project, ProjectCreate, ProjectUpdate
 from app.core.config import settings
+from app.core.project_utils import get_project_working_dir, get_project_working_dir_as_path, get_worktree_working_dir, is_absolute_project_path
+from app.core.platform import is_local_mode
 from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 
@@ -28,12 +30,39 @@ class RenameRequest(BaseModel):
 router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
 
 
-def validate_project_path(path: str) -> Path:
-    """Ensure path is within workspace and normalized"""
-    # Normalize and resolve the path
+def validate_project_path(path: str, allow_create: bool = False) -> Path:
+    """
+    Validate a project path.
+
+    In Docker mode: path must be relative and within workspace boundary.
+    In local mode: absolute paths are allowed (pointing anywhere on disk),
+                   relative paths are resolved within workspace.
+
+    If allow_create=True, non-existent directories are permitted (caller will create them).
+    """
+    if is_absolute_project_path(path):
+        # Absolute paths only allowed in local mode
+        if not is_local_mode():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Absolute paths are not allowed in Docker mode"
+            )
+        full_path = Path(path).resolve()
+        if full_path.exists() and not full_path.is_dir():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Path is not a directory: {path}"
+            )
+        if not allow_create and not full_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Directory does not exist: {path}"
+            )
+        return full_path
+
+    # Relative path - resolve within workspace and enforce boundary
     full_path = (settings.workspace_dir / path).resolve()
 
-    # Security check - ensure path is within workspace
     try:
         full_path.relative_to(settings.workspace_dir.resolve())
     except ValueError:
@@ -105,9 +134,17 @@ async def create_project(request: ProjectCreate, token: str = Depends(require_ad
             detail=f"Project already exists: {request.id}"
         )
 
-    # Validate and create project directory
-    project_path = validate_project_path(request.id)
-    project_path.mkdir(parents=True, exist_ok=True)
+    # Determine project path and create directory if needed
+    if request.path and is_absolute_project_path(request.path):
+        # Absolute path (local mode) - create directory if it doesn't exist
+        project_path = validate_project_path(request.path, allow_create=True)
+        project_path.mkdir(parents=True, exist_ok=True)
+        db_path = request.path
+    else:
+        # Relative path - create directory inside workspace
+        project_path = validate_project_path(request.id)
+        project_path.mkdir(parents=True, exist_ok=True)
+        db_path = request.id
 
     # Create project in database
     settings_dict = None
@@ -118,7 +155,7 @@ async def create_project(request: ProjectCreate, token: str = Depends(require_ad
         project_id=request.id,
         name=request.name,
         description=request.description,
-        path=request.id,  # Path relative to /workspace
+        path=db_path,
         settings_dict=settings_dict
     )
 
@@ -202,7 +239,7 @@ async def list_project_files(
         )
 
     # Build the full path
-    base_path = settings.workspace_dir / project["path"]
+    base_path = get_project_working_dir_as_path(project)
     if path:
         full_path = validate_project_path(f"{project['path']}/{path}")
     else:
@@ -280,7 +317,7 @@ async def upload_file(
         worktree = database.get_worktree_by_session(session_id)
         if worktree and worktree.get("worktree_path"):
             # Verify the worktree directory actually exists on disk
-            worktree_full = settings.workspace_dir / worktree["worktree_path"]
+            worktree_full = Path(get_worktree_working_dir(worktree))
             if worktree_full.exists():
                 base_project_path = worktree["worktree_path"]
 
@@ -325,7 +362,7 @@ async def upload_file(
         )
 
     # Return relative path for reference (relative to the effective base path)
-    base_path = settings.workspace_dir / base_project_path
+    base_path = get_project_working_dir_as_path(base_project_path)
     relative_path = file_path.relative_to(base_path)
 
     return {
@@ -420,7 +457,7 @@ async def create_folder(
             detail=f"Failed to create folder: {str(e)}"
         )
 
-    base_path = settings.workspace_dir / project["path"]
+    base_path = get_project_working_dir_as_path(project)
     return {
         "name": folder_name,
         "path": str(folder_path.relative_to(base_path)),
@@ -477,7 +514,7 @@ async def rename_file_or_folder(
             detail=f"Failed to rename: {str(e)}"
         )
 
-    base_path = settings.workspace_dir / project["path"]
+    base_path = get_project_working_dir_as_path(project)
     return {
         "name": new_name,
         "path": str(new_path.relative_to(base_path)),
@@ -510,7 +547,7 @@ async def delete_file_or_folder(
         )
 
     # Don't allow deleting the project root
-    base_path = settings.workspace_dir / project["path"]
+    base_path = get_project_working_dir_as_path(project)
     if target_path.resolve() == base_path.resolve():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -579,7 +616,7 @@ async def list_chat_history(
         )
 
     # Get the project's working directory
-    working_dir = str(settings.workspace_dir / project["path"])
+    working_dir = get_project_working_dir(project)
 
     # List chat history sessions
     sessions = list_chat_history_sessions(

@@ -66,6 +66,42 @@ export const workspaceIsStreaming = derived(
 );
 
 /**
+ * Whether git controls (branch selector, commit button) should be locked due to streaming.
+ *
+ * For worktree-mode tabs: only locked if the active tab's OWN session is streaming,
+ * because worktrees have independent working directories and branches.
+ *
+ * For project-mode tabs: locked if ANY session in the same project is streaming,
+ * because they share the same working directory and branch.
+ */
+export const gitControlsStreaming = derived(
+	[tabs, sessionState, streamingSessions],
+	([$tabs, $sessionState, $streamingSessions]) => {
+		const tab = $tabs.tabs.find(t => t.id === $tabs.activeTabId);
+		if (!tab) return false;
+
+		// Active tab's own session is streaming (always relevant)
+		if (tab.isStreaming) return true;
+		if (tab.sessionId) {
+			const session = $sessionState.sessions.get(tab.sessionId);
+			if (session?.isStreaming) return true;
+		}
+
+		// For worktree-mode tabs, that's all we check — independent working directory
+		if (tab.executionMode === 'worktree') return false;
+
+		// For project-mode tabs, also check cross-session streaming in the same project
+		if (tab.project) {
+			for (const [, projectId] of $streamingSessions) {
+				if (projectId === tab.project) return true;
+			}
+		}
+
+		return false;
+	}
+);
+
+/**
  * Whether the active tab's WebSocket is connected.
  * (This remains in tabs store since it's connection/UI state, not session data)
  */

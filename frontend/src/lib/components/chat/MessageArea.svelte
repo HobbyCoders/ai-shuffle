@@ -345,7 +345,7 @@
 	{#if tab.messages.length === 0}
 		<!-- Empty State -->
 		<div class="h-full flex flex-col">
-			<!-- Error display for empty state (e.g., worktree creation failures) -->
+			<!-- Error display for empty state -->
 			{#if tab.error}
 				<div class="max-w-5xl mx-auto w-full px-4 sm:px-8 pt-4">
 					<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg flex items-center justify-between shadow-s">

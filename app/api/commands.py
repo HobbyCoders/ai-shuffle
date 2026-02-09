@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from app.db import database
 from app.core.config import settings
+from app.core.project_utils import get_project_working_dir
 from app.core.slash_commands import (
     get_command_by_name, get_all_commands,
     is_interactive_command, is_rest_api_command, get_rest_api_command_info,
@@ -89,7 +90,7 @@ def get_working_dir_for_project(project_id: Optional[str]) -> str:
     if project_id:
         project = database.get_project(project_id)
         if project:
-            return str(settings.workspace_dir / project["path"])
+            return get_project_working_dir(project)
     return str(settings.workspace_dir)
 
 

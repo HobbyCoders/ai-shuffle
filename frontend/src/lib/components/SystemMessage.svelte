@@ -16,7 +16,7 @@
 
 	// Check if content should be rendered as markdown
 	function isMarkdownContent(subtype: string | undefined): boolean {
-		return ['local_command', 'worktree_context', 'worktree_created', 'worktree_selected'].includes(subtype || '');
+		return ['local_command'].includes(subtype || '');
 	}
 
 	function renderMarkdown(content: string): string {
@@ -292,44 +292,6 @@
 					content: message.content || 'Chat was rewound but file restoration was unavailable.',
 					badge: 'partial',
 					badgeColor: 'amber'
-				};
-			}
-
-			case 'worktree_context':
-			case 'worktree_created': {
-				// Worktree session context (new worktree created or context loaded from history)
-				const branchName = (data.branch_name as string) || 'unknown';
-				const baseBranch = (data.base_branch as string) || 'main';
-				const worktreePath = (data.worktree_path as string) || '';
-
-				let content = `Branch: \`${branchName}\` (based on \`${baseBranch}\`)`;
-				if (worktreePath) {
-					content += `\n\nPath: \`${worktreePath}\``;
-				}
-
-				return {
-					title: 'Git Worktree',
-					content,
-					badge: branchName,
-					badgeColor: 'purple'  // Uses --primary color
-				};
-			}
-
-			case 'worktree_selected': {
-				// Using an existing worktree
-				const branchName = (data.branch_name as string) || 'existing';
-				const worktreePath = (data.worktree_path as string) || '';
-
-				let content = `Using existing worktree on branch \`${branchName}\``;
-				if (worktreePath) {
-					content += `\n\nPath: \`${worktreePath}\``;
-				}
-
-				return {
-					title: 'Git Worktree',
-					content,
-					badge: branchName,
-					badgeColor: 'purple'  // Uses --primary color
 				};
 			}
 

@@ -201,10 +201,11 @@ export interface CreateWorktreeResponse {
 // ============================================================================
 
 /**
- * Get the git status for a project
+ * Get the git status for a project or worktree
  */
-export async function getGitStatus(projectId: string): Promise<GitStatus> {
-    return api.get<GitStatus>(`${BASE}/${projectId}/git/status`);
+export async function getGitStatus(projectId: string, worktreeId?: string): Promise<GitStatus> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+    return api.get<GitStatus>(`${BASE}/${projectId}/git/status${params}`);
 }
 
 // ============================================================================
@@ -226,9 +227,12 @@ export interface BranchListResponse {
  * @param projectId - The project ID
  * @param includeRemote - Whether to include remote tracking branches (default: false for cleaner UI)
  */
-export async function getBranches(projectId: string, includeRemote: boolean = false): Promise<Branch[]> {
-    const params = includeRemote ? '' : '?include_remote=false';
-    const response = await api.get<RawBranchListResponse>(`${BASE}/${projectId}/git/branches${params}`);
+export async function getBranches(projectId: string, includeRemote: boolean = false, worktreeId?: string): Promise<Branch[]> {
+    const searchParams = new URLSearchParams();
+    if (!includeRemote) searchParams.set('include_remote', 'false');
+    if (worktreeId) searchParams.set('worktree_id', worktreeId);
+    const qs = searchParams.toString();
+    const response = await api.get<RawBranchListResponse>(`${BASE}/${projectId}/git/branches${qs ? `?${qs}` : ''}`);
     return response.branches.map(transformBranch);
 }
 
@@ -253,15 +257,17 @@ export async function deleteBranch(projectId: string, name: string): Promise<voi
 /**
  * Checkout a branch or ref
  */
-export async function checkout(projectId: string, ref: string): Promise<{ success: boolean; message: string }> {
-    return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/checkout`, { ref });
+export async function checkout(projectId: string, ref: string, worktreeId?: string): Promise<{ success: boolean; message: string }> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+    return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/checkout${params}`, { ref });
 }
 
 /**
  * Fetch from remote
  */
-export async function fetchRemote(projectId: string): Promise<{ success: boolean; message: string }> {
-    return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/fetch`);
+export async function fetchRemote(projectId: string, worktreeId?: string): Promise<{ success: boolean; message: string }> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+    return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/fetch${params}`);
 }
 
 // ============================================================================
@@ -315,8 +321,9 @@ export async function createWorktree(projectId: string, data: CreateWorktreeRequ
 /**
  * Delete a worktree
  */
-export async function deleteWorktree(projectId: string, worktreeId: string): Promise<void> {
-    await api.delete(`${BASE}/${projectId}/git/worktrees/${worktreeId}`);
+export async function deleteWorktree(projectId: string, worktreeId: string, keepBranch: boolean = true): Promise<void> {
+    const params = keepBranch ? '' : '?keep_branch=false';
+    await api.delete(`${BASE}/${projectId}/git/worktrees/${worktreeId}${params}`);
 }
 
 // ============================================================================
@@ -403,9 +410,12 @@ export interface DiffStats {
 /**
  * Get diff statistics (lines added/removed)
  */
-export async function getDiffStats(projectId: string, includeUnstaged: boolean = true): Promise<DiffStats> {
-    const params = includeUnstaged ? '' : '?include_unstaged=false';
-    return api.get<DiffStats>(`${BASE}/${projectId}/git/diff-stats${params}`);
+export async function getDiffStats(projectId: string, includeUnstaged: boolean = true, worktreeId?: string): Promise<DiffStats> {
+    const searchParams = new URLSearchParams();
+    if (!includeUnstaged) searchParams.set('include_unstaged', 'false');
+    if (worktreeId) searchParams.set('worktree_id', worktreeId);
+    const qs = searchParams.toString();
+    return api.get<DiffStats>(`${BASE}/${projectId}/git/diff-stats${qs ? `?${qs}` : ''}`);
 }
 
 // ============================================================================
@@ -426,8 +436,9 @@ export interface CommitResponse {
 /**
  * Create a commit
  */
-export async function commitChanges(projectId: string, request: CommitRequest): Promise<CommitResponse> {
-    return api.post<CommitResponse>(`${BASE}/${projectId}/git/commit`, request);
+export async function commitChanges(projectId: string, request: CommitRequest, worktreeId?: string): Promise<CommitResponse> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+    return api.post<CommitResponse>(`${BASE}/${projectId}/git/commit${params}`, request);
 }
 
 // ============================================================================
@@ -443,8 +454,9 @@ export interface PushRequest {
 /**
  * Push commits to remote
  */
-export async function pushCommits(projectId: string, request: PushRequest = {}): Promise<{ success: boolean; message: string }> {
-    return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/push`, request);
+export async function pushCommits(projectId: string, request: PushRequest = {}, worktreeId?: string): Promise<{ success: boolean; message: string }> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+    return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/push${params}`, request);
 }
 
 // ============================================================================
@@ -473,10 +485,12 @@ export interface GeneratePRDescriptionResponse {
  */
 export async function generateCommitMessage(
     projectId: string,
-    request: GenerateCommitMessageRequest = {}
+    request: GenerateCommitMessageRequest = {},
+    worktreeId?: string
 ): Promise<GenerateCommitMessageResponse> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
     return api.post<GenerateCommitMessageResponse>(
-        `${BASE}/${projectId}/git/generate-commit-message`, request
+        `${BASE}/${projectId}/git/generate-commit-message${params}`, request
     );
 }
 
@@ -485,9 +499,11 @@ export async function generateCommitMessage(
  */
 export async function generatePRDescription(
     projectId: string,
-    request: GeneratePRDescriptionRequest = {}
+    request: GeneratePRDescriptionRequest = {},
+    worktreeId?: string
 ): Promise<GeneratePRDescriptionResponse> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
     return api.post<GeneratePRDescriptionResponse>(
-        `${BASE}/${projectId}/git/generate-pr-description`, request
+        `${BASE}/${projectId}/git/generate-pr-description${params}`, request
     );
 }

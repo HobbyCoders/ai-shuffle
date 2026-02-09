@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 from app.core.config import settings
+from app.core.project_utils import get_project_working_dir
 from app.core.jsonl_parser import (
     get_project_dir_name,
     get_session_cost_from_jsonl,
@@ -210,7 +211,7 @@ class SessionSyncService:
             }
 
         # Build working directory path
-        working_dir = str(settings.workspace_dir / project["path"])
+        working_dir = get_project_working_dir(project)
 
         # Discover unimported sessions
         unimported = self.discover_unimported_sessions(project_id, working_dir)

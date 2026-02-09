@@ -22,7 +22,7 @@
 		sessions,
 		sessionsTagFilter
 	} from '$lib/stores/tabs';
-	import { git } from '$lib/stores/git';
+
 	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout';
 	import type { ViewType } from '$lib/stores/layout';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
@@ -58,23 +58,8 @@
 	// Shortcut registrations for cleanup
 	let shortcutRegistrations: ShortcutRegistration[] = [];
 
-	// Track last loaded git project to avoid unnecessary reloads
-	let lastGitProjectId: string | null = null;
-
-	// Sync git repository data when active tab's project changes
-	$effect(() => {
-		const tab = $activeTab;
-		const currentProjectId = tab?.project || null;
-
-		if (currentProjectId !== lastGitProjectId) {
-			lastGitProjectId = currentProjectId;
-			if (currentProjectId) {
-				git.loadRepository(currentProjectId);
-			} else {
-				git.clearRepository();
-			}
-		}
-	});
+	// Git repository loading is handled by MainPanel's $effect, which supports
+	// both project mode and worktree mode. No duplicate load needed here.
 
 	// ============================================
 	// Navigation Handlers

@@ -4,10 +4,11 @@
 	 *
 	 * Codex-style workspace picker shown when starting a new chat.
 	 * Centered hero with clickable workspace name dropdown.
-	 * Includes "New Project" button that opens a small creation modal.
+	 * Includes unified "Add Project" modal with directory browser.
 	 */
-	import { FolderClosed, ChevronDown, Plus, Check, X } from 'lucide-svelte';
-	import { projects, tabs } from '$lib/stores/tabs';
+	import { FolderClosed, ChevronDown, FolderPlus, Check } from 'lucide-svelte';
+	import { projects } from '$lib/stores/tabs';
+	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 
 	interface Props {
 		selectedProject: string | null;
@@ -19,12 +20,8 @@
 	let showDropdown = $state(false);
 	let dropdownRef = $state<HTMLDivElement | null>(null);
 
-	// New project modal state
-	let showCreateModal = $state(false);
-	let newProjectId = $state('');
-	let newProjectName = $state('');
-	let creating = $state(false);
-	let createError = $state<string | null>(null);
+	// Add project modal state
+	let showAddModal = $state(false);
 
 	// Get selected project name
 	const selectedProjectName = $derived(
@@ -38,41 +35,14 @@
 		}
 	}
 
-	function handleSelect(projectId: string) {
-		onSelectProject(projectId);
+	function handleSelect(id: string) {
+		onSelectProject(id);
 		showDropdown = false;
 	}
 
-	function openCreateModal() {
+	function openAddModal() {
 		showDropdown = false;
-		showCreateModal = true;
-		newProjectId = '';
-		newProjectName = '';
-		createError = null;
-	}
-
-	async function handleCreateProject() {
-		if (!newProjectId.trim() || !newProjectName.trim()) return;
-
-		creating = true;
-		createError = null;
-
-		try {
-			await tabs.createProject({
-				id: newProjectId.trim(),
-				name: newProjectName.trim()
-			});
-			showCreateModal = false;
-			// Auto-select the newly created project
-			onSelectProject(newProjectId.trim());
-			newProjectId = '';
-			newProjectName = '';
-		} catch (e: unknown) {
-			const err = e as { detail?: string; message?: string };
-			createError = err.detail || err.message || 'Failed to create project';
-		} finally {
-			creating = false;
-		}
+		showAddModal = true;
 	}
 </script>
 
@@ -124,71 +94,21 @@
 					<p class="dropdown-empty">No workspaces available</p>
 				{/each}
 				<div class="dropdown-divider"></div>
-				<button class="dropdown-item new-project-item" onclick={openCreateModal}>
-					<Plus size={16} strokeWidth={1.5} />
-					<span class="item-name">New Project</span>
+				<button class="dropdown-item new-project-item" onclick={openAddModal}>
+					<FolderPlus size={16} strokeWidth={1.5} />
+					<span class="item-name">Add Project</span>
 				</button>
 			</div>
 		{/if}
 	</div>
 </div>
 
-<!-- New Project Modal -->
-{#if showCreateModal}
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<div class="create-modal-backdrop" onclick={() => showCreateModal = false}>
-		<div class="create-modal" onclick={(e) => e.stopPropagation()}>
-			<div class="create-modal-header">
-				<h3 class="create-modal-title">New Project</h3>
-				<button class="create-modal-close" onclick={() => showCreateModal = false}>
-					<X size={16} strokeWidth={1.5} />
-				</button>
-			</div>
-
-			{#if createError}
-				<div class="create-modal-error">
-					{createError}
-				</div>
-			{/if}
-
-			<div class="create-modal-field">
-				<label class="create-modal-label">Project ID</label>
-				<input
-					type="text"
-					class="create-modal-input"
-					placeholder="my-project"
-					bind:value={newProjectId}
-					onkeydown={(e) => { if (e.key === 'Enter' && newProjectId.trim() && newProjectName.trim()) handleCreateProject(); }}
-				/>
-			</div>
-
-			<div class="create-modal-field">
-				<label class="create-modal-label">Display Name</label>
-				<input
-					type="text"
-					class="create-modal-input"
-					placeholder="My Project"
-					bind:value={newProjectName}
-					onkeydown={(e) => { if (e.key === 'Enter' && newProjectId.trim() && newProjectName.trim()) handleCreateProject(); }}
-				/>
-			</div>
-
-			<div class="create-modal-actions">
-				<button class="modal-btn cancel" onclick={() => showCreateModal = false}>
-					Cancel
-				</button>
-				<button
-					class="modal-btn create"
-					disabled={!newProjectId.trim() || !newProjectName.trim() || creating}
-					onclick={handleCreateProject}
-				>
-					{#if creating}Creating...{:else}Create{/if}
-				</button>
-			</div>
-		</div>
-	</div>
-{/if}
+<!-- Add Project Modal -->
+<AddProjectModal
+	open={showAddModal}
+	onClose={() => (showAddModal = false)}
+	onCreated={(id) => onSelectProject(id)}
+/>
 
 <style>
 	.workspace-selector {
@@ -350,146 +270,11 @@
 		color: var(--primary) !important;
 	}
 
-	/* Create Project Modal */
-	.create-modal-backdrop {
-		position: fixed;
-		inset: 0;
-		background: color-mix(in oklch, var(--background) 70%, transparent);
-		backdrop-filter: blur(4px);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 1000;
-	}
-
-	.create-modal {
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: 12px;
-		padding: 20px;
-		width: 380px;
-		max-width: 90vw;
-		box-shadow: var(--shadow-l);
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-	}
-
-	.create-modal-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-	}
-
-	.create-modal-title {
-		font-size: 0.9375rem;
-		font-weight: 600;
-		color: var(--foreground);
-		margin: 0;
-	}
-
-	.create-modal-close {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 28px;
-		height: 28px;
-		background: transparent;
-		border: none;
-		border-radius: 6px;
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-
-	.create-modal-close:hover {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-
-	.create-modal-error {
-		padding: 8px 12px;
-		background: color-mix(in oklch, var(--destructive) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
-		border-radius: 8px;
-		color: var(--destructive);
-		font-size: 0.8125rem;
-	}
-
-	.create-modal-field {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.create-modal-label {
-		font-size: 0.75rem;
-		font-weight: 500;
-		color: var(--muted-foreground);
-	}
-
-	.create-modal-input {
-		width: 100%;
-		padding: 8px 12px;
-		background: var(--background);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		color: var(--foreground);
-		font-size: 0.8125rem;
-		outline: none;
-		transition: border-color 150ms ease;
-	}
-
-	.create-modal-input:focus {
-		border-color: var(--primary);
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 15%, transparent);
-	}
-
-	.create-modal-actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: 8px;
-		margin-top: 4px;
-	}
-
-	.modal-btn {
-		padding: 6px 14px;
-		font-size: 0.8125rem;
-		font-weight: 500;
-		border-radius: 8px;
-		border: none;
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-
-	.modal-btn.cancel {
-		background: var(--secondary);
-		color: var(--muted-foreground);
-	}
-
-	.modal-btn.cancel:hover {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-
-	.modal-btn.create {
-		background: var(--primary);
-		color: var(--primary-foreground);
-	}
-
-	.modal-btn.create:hover {
-		opacity: 0.9;
-	}
-
-	.modal-btn.create:disabled {
-		opacity: 0.4;
-		cursor: not-allowed;
-	}
-
 	/* Reduced motion */
 	@media (prefers-reduced-motion: reduce) {
 		.picker-dropdown {
 			animation: none;
 		}
 	}
+
 </style>

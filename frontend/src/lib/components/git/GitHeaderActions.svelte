@@ -5,55 +5,35 @@
 	 * Branch selector dropdown (checkout branches), commit button, and diff stats.
 	 * Branch selector is locked during streaming.
 	 */
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock } from 'lucide-svelte';
-	import { git, diffStats, gitStatus, branches as branchStore } from '$lib/stores/git';
-	import { onMount } from 'svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2 } from 'lucide-svelte';
+	import { git, diffStats, gitStatus, branches as branchStore, gitMode } from '$lib/stores/git';
 
 	interface Props {
 		projectId: string;
 		isStreaming?: boolean;
+		/** When set, forces worktree read-only mode and uses this as the branch display.
+		 *  This ensures the correct branch shows immediately without waiting for the store to load. */
+		worktreeBranch?: string | null;
+		/** When set, shows the "Finish" button instead of Commit/Create PR */
+		openPR?: { number: number; title: string; url: string } | null;
 		onClickCommit: () => void;
 		onClickCreatePR: () => void;
+		onClickFinish: () => void;
 		onClickNewBranch: () => void;
 	}
 
-	let { projectId, isStreaming = false, onClickCommit, onClickCreatePR, onClickNewBranch }: Props = $props();
+	let { projectId, isStreaming = false, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch }: Props = $props();
+
+	// Worktree mode: determined by prop (immediate) OR store (after load)
+	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
 
 	// --- Dropdown state ---
 	let showDropdown = $state(false);
 	let dropdownRef = $state<HTMLDivElement | null>(null);
 	let checkingOut = $state(false);
 
-	// Refresh diff stats on mount and periodically
-	const DIFF_POLL_INTERVAL_MS = 15_000;
-	let refreshInterval: ReturnType<typeof setInterval> | null = null;
-
-	onMount(() => {
-		if (projectId) {
-			git.refreshDiffStats();
-			refreshInterval = setInterval(() => {
-				git.refreshDiffStats();
-			}, DIFF_POLL_INTERVAL_MS);
-		}
-		return () => {
-			if (refreshInterval) clearInterval(refreshInterval);
-		};
-	});
-
-	// When streaming ends, refresh status to update ahead/behind counts.
-	// Track the transition explicitly to avoid firing on every parent re-render.
-	let _wasStreaming = false;
-	$effect(() => {
-		if (isStreaming) {
-			_wasStreaming = true;
-		} else if (_wasStreaming && projectId) {
-			_wasStreaming = false;
-			git.refreshStatus();
-			git.refreshDiffStats();
-		}
-	});
-
-	const currentBranch = $derived($gitStatus?.current_branch ?? null);
+	// Use worktreeBranch prop as immediate fallback while store is loading
+	const currentBranch = $derived($gitStatus?.current_branch ?? worktreeBranch ?? null);
 	const hasChanges = $derived(
 		($diffStats?.additions ?? 0) > 0 ||
 		($diffStats?.deletions ?? 0) > 0 ||
@@ -70,7 +50,8 @@
 	);
 
 	// Can the user interact with the branch selector?
-	const branchLocked = $derived(isStreaming || checkingOut);
+	// In worktree mode, branch is always locked (read-only display)
+	const branchLocked = $derived(isWorktreeMode || isStreaming || checkingOut);
 
 	function toggleDropdown() {
 		if (branchLocked) return;
@@ -129,7 +110,7 @@
 			class:locked={branchLocked}
 			onclick={toggleDropdown}
 			disabled={branchLocked}
-			title={isStreaming ? 'Branch locked during streaming' : (currentBranch ? `Branch: ${currentBranch}` : 'Select branch')}
+			title={isWorktreeMode ? `Worktree branch: ${currentBranch}` : isStreaming ? 'Branch locked during streaming' : (currentBranch ? `Branch: ${currentBranch}` : 'Select branch')}
 		>
 			<GitBranch size={14} strokeWidth={1.5} />
 			{#if currentBranch}
@@ -137,6 +118,8 @@
 			{/if}
 			{#if checkingOut}
 				<Loader2 size={11} strokeWidth={2} class="spin" />
+			{:else if isWorktreeMode}
+				<!-- No chevron in worktree mode - branch is fixed -->
 			{:else if isStreaming}
 				<Lock size={10} strokeWidth={1.5} />
 			{:else}
@@ -174,8 +157,29 @@
 		{/if}
 	</div>
 
-	<!-- Commit / Create PR button -->
-	{#if canCreatePR}
+	<!-- Commit / Create PR / Finish button -->
+	{#if hasChanges}
+		<button
+			class="git-btn"
+			onclick={onClickCommit}
+			disabled={isStreaming}
+			title={isStreaming ? 'Cannot commit during streaming' : 'Commit changes'}
+		>
+			<GitCommitHorizontal size={14} strokeWidth={1.5} />
+			<span class="btn-label">Commit</span>
+			<ChevronDown size={11} strokeWidth={1.5} />
+		</button>
+	{:else if openPR}
+		<button
+			class="git-btn finish-btn"
+			onclick={onClickFinish}
+			disabled={isStreaming}
+			title={isStreaming ? 'Cannot finish during streaming' : `PR #${openPR.number}: ${openPR.title} — Merge and finish`}
+		>
+			<CheckCircle2 size={14} strokeWidth={1.5} />
+			<span class="btn-label">Finish</span>
+		</button>
+	{:else if canCreatePR}
 		<button
 			class="git-btn"
 			onclick={onClickCreatePR}
@@ -190,8 +194,8 @@
 		<button
 			class="git-btn"
 			onclick={onClickCommit}
-			disabled={!hasChanges || isStreaming}
-			title={isStreaming ? 'Cannot commit during streaming' : hasChanges ? 'Commit changes' : 'No changes to commit'}
+			disabled={isStreaming}
+			title={isStreaming ? 'Cannot commit during streaming' : 'No changes to commit'}
 		>
 			<GitCommitHorizontal size={14} strokeWidth={1.5} />
 			<span class="btn-label">Commit</span>
@@ -252,6 +256,16 @@
 
 	.git-btn.locked {
 		opacity: 0.6;
+	}
+
+	.finish-btn {
+		border-color: color-mix(in oklch, var(--success) 40%, var(--border));
+		color: var(--success);
+	}
+
+	.finish-btn:hover:not(:disabled) {
+		background: color-mix(in oklch, var(--success) 10%, transparent);
+		color: var(--success);
 	}
 
 	.git-btn :global(svg) {

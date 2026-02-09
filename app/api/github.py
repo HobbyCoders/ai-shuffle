@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.core.github_service import github_service, PullRequest, WorkflowRun
 from app.core.config import settings
+from app.core.project_utils import get_project_working_dir_as_path
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
 
@@ -97,7 +98,7 @@ def get_project_path(project_id: str) -> str:
             detail=f"Project not found: {project_id}"
         )
 
-    project_path = settings.workspace_dir / project["path"]
+    project_path = get_project_working_dir_as_path(project)
     if not project_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

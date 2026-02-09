@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
 from app.core.config import settings
+from app.core.project_utils import get_project_working_dir
 from app.core.jsonl_parser import (
     get_session_jsonl_path,
     parse_jsonl_file,
@@ -177,12 +178,12 @@ def _search_session_jsonl(
         return matches
 
     # Get working dir from project
-    working_dir = "/workspace"
+    working_dir = str(settings.workspace_dir)
     project_id = session.get("project_id")
     if project_id:
         project = database.get_project(project_id)
         if project:
-            working_dir = str(settings.workspace_dir / project["path"])
+            working_dir = get_project_working_dir(project)
 
     # Get JSONL path
     jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)

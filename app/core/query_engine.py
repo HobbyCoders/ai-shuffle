@@ -35,6 +35,7 @@ from app.core.platform import detect_deployment_mode, DeploymentMode
 from app.core.user_question_handler import user_question_handler
 from app.core import encryption
 from app.core.jsonl_parser import write_hook_message, write_system_message
+from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 
 logger = logging.getLogger(__name__)
 
@@ -1079,18 +1080,18 @@ def build_options_from_profile(
         # Check if this session has an associated worktree
         worktree = database.get_worktree_by_session(session_id)
         if worktree and worktree.get("status") == "active":
-            working_dir = str(settings.workspace_dir / worktree["worktree_path"])
+            working_dir = get_worktree_working_dir(worktree)
             execution_mode = "worktree"
             worktree_info = {
                 "branch": worktree.get("branch_name", "unknown"),
                 "base_branch": worktree.get("base_branch", "main")
             }
         elif project:
-            working_dir = str(settings.workspace_dir / project["path"])
+            working_dir = get_project_working_dir(project)
         else:
             working_dir = str(settings.workspace_dir)
     elif project:
-        working_dir = str(settings.workspace_dir / project["path"])
+        working_dir = get_project_working_dir(project)
     elif config.get("cwd"):
         working_dir = config.get("cwd")
     else:

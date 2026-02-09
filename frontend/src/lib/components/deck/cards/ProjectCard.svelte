@@ -10,7 +10,7 @@
 	 *   - Hooks (project-scoped custom hooks)
 	 * - Group badge display
 	 * - Delete with inline confirmation
-	 * - Create form that toggles in place
+	 * - Add project via shared modal with directory browser
 	 * - Search/filter for many projects
 	 *
 	 * Modes:
@@ -27,6 +27,7 @@
 	import ProjectAgentsTab from './ProjectAgentsTab.svelte';
 	import ProjectHooksTab from './ProjectHooksTab.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -64,12 +65,10 @@
 	type DetailTab = 'plugins' | 'agents' | 'hooks';
 	let activeTab = $state<DetailTab>('plugins');
 
-	// Form state
-	let showCreateForm = $state(false);
-	let newProjectId = $state('');
-	let newProjectName = $state('');
-	let newProjectDescription = $state('');
-	let creating = $state(false);
+	// Add project modal state
+	let showAddModal = $state(false);
+
+	// Error state
 	let error = $state<string | null>(null);
 
 	// Search state
@@ -107,32 +106,6 @@
 		selectedProjectId = null;
 	}
 
-	// Create project handler
-	async function handleCreateProject() {
-		if (!newProjectId.trim() || !newProjectName.trim()) return;
-
-		creating = true;
-		error = null;
-
-		try {
-			await tabs.createProject({
-				id: newProjectId.trim(),
-				name: newProjectName.trim(),
-				description: newProjectDescription.trim() || undefined
-			});
-			// Reset form
-			newProjectId = '';
-			newProjectName = '';
-			newProjectDescription = '';
-			showCreateForm = false;
-		} catch (e: unknown) {
-			const err = e as { detail?: string; message?: string };
-			error = err.detail || err.message || 'Failed to create project';
-		} finally {
-			creating = false;
-		}
-	}
-
 	// Delete project handler
 	async function handleDeleteProject() {
 		if (!deletingId) return;
@@ -151,14 +124,7 @@
 		}
 	}
 
-	// Cancel create form
-	function cancelCreate() {
-		showCreateForm = false;
-		newProjectId = '';
-		newProjectName = '';
-		newProjectDescription = '';
-		error = null;
-	}
+
 </script>
 
 {#snippet deleteConfirmation(project: typeof $projects[0])}
@@ -259,7 +225,7 @@
 					<input type="text" bind:value={searchQuery} placeholder="Search..." class="fph-search-input" />
 				</div>
 				<!-- Create button -->
-				<button class="fp-btn fp-btn--primary" onclick={() => (showCreateForm = true)}>
+				<button class="fp-btn fp-btn--primary" onclick={() => (showAddModal = true)}>
 					<Plus size={14} /> New Project
 				</button>
 			{/snippet}
@@ -271,33 +237,6 @@
 					<button onclick={() => (error = null)}>
 						<X size={14} />
 					</button>
-				</div>
-			{/if}
-
-			<!-- Create form (slide-down when showCreateForm=true) -->
-			{#if showCreateForm}
-				<div class="fp-create-form">
-					<div class="fp-form-row">
-						<div class="fp-form-field">
-							<label class="fp-form-label">ID</label>
-							<input class="fp-form-input fp-form-input--mono" bind:value={newProjectId} placeholder="my-project" />
-						</div>
-						<div class="fp-form-field">
-							<label class="fp-form-label">Name</label>
-							<input class="fp-form-input" bind:value={newProjectName} placeholder="My Project" />
-						</div>
-					</div>
-					<div class="fp-form-field">
-						<label class="fp-form-label">Description</label>
-						<textarea class="fp-form-input fp-form-textarea" bind:value={newProjectDescription} rows="2" placeholder="Optional..."></textarea>
-					</div>
-					<div class="fp-form-actions">
-						<button class="fp-btn fp-btn--secondary" onclick={cancelCreate}>Cancel</button>
-						<button class="fp-btn fp-btn--primary" onclick={handleCreateProject} disabled={creating || !newProjectId.trim() || !newProjectName.trim()}>
-							{#if creating}<div class="fp-spinner"></div>{/if}
-							Create
-						</button>
-					</div>
 				</div>
 			{/if}
 
@@ -574,64 +513,13 @@
 				<!-- Footer -->
 				<div class="card-footer">
 					<div class="card-footer-content">
-					{#if showCreateForm}
-						<div class="create-form">
-							<div class="form-row">
-								<div class="form-field">
-									<label class="card-form-label">ID</label>
-									<input
-										bind:value={newProjectId}
-										class="card-form-input card-form-input--mono"
-										placeholder="my-project"
-									/>
-								</div>
-								<div class="form-field">
-									<label class="card-form-label">Name</label>
-									<input
-										bind:value={newProjectName}
-										class="card-form-input"
-										placeholder="My Project"
-									/>
-								</div>
-							</div>
-							<div class="form-field">
-								<label class="card-form-label">Description</label>
-								<textarea
-									bind:value={newProjectDescription}
-									class="card-form-input card-form-textarea"
-									rows="2"
-									placeholder="Optional description..."
-								></textarea>
-							</div>
-							<div class="form-actions">
-								<button
-									onclick={cancelCreate}
-									disabled={creating}
-									class="card-btn-secondary"
-								>
-									Cancel
-								</button>
-								<button
-									onclick={handleCreateProject}
-									disabled={creating || !newProjectId.trim() || !newProjectName.trim()}
-									class="card-btn-primary"
-								>
-									{#if creating}
-										<div class="card-spinner card-spinner--small"></div>
-									{/if}
-									Create
-								</button>
-							</div>
-						</div>
-					{:else}
 						<button
-							onclick={() => (showCreateForm = true)}
+							onclick={() => (showAddModal = true)}
 							class="card-btn-primary"
 						>
 							<Plus />
 							New Project
 						</button>
-					{/if}
 					</div>
 				</div>
 			{/if}
@@ -657,6 +545,12 @@
 		</BaseCard>
 	{/if}
 {/if}
+
+<!-- Add Project Modal (shared across all modes) -->
+<AddProjectModal
+	open={showAddModal}
+	onClose={() => (showAddModal = false)}
+/>
 
 <style>
 	/* ═══════════════════════════════════════════════════════════════════════════
@@ -797,51 +691,9 @@
 		text-align: left;
 	}
 
-	/* Create form styles */
-	.create-form {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-		width: 100%;
-	}
-
-	.form-row {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: var(--space-3);
-	}
-
-	.form-field {
-		display: flex;
-		flex-direction: column;
-	}
-
-	.form-actions {
-		display: flex;
-		gap: var(--space-2);
-		margin-top: var(--space-2);
-	}
-
-	.form-actions .card-btn-secondary,
-	.form-actions .card-btn-primary {
-		flex: 1;
-	}
-
-	/* Ensure footer adapts when form is showing */
-	.project-card :global(.card-footer) {
-		flex-direction: column;
-	}
-
 	/* Text utilities */
 	.flex-1 {
 		flex: 1;
-	}
-
-	/* Responsive adjustments */
-	@media (max-width: 400px) {
-		.form-row {
-			grid-template-columns: 1fr;
-		}
 	}
 
 	/* ═══════════════════════════════════════════════════════════════════════════
@@ -879,96 +731,6 @@
 	}
 
 	/* -----------------------------------------------------------------------
-	   CREATE FORM
-	   ----------------------------------------------------------------------- */
-	.fp-create-form {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3, 12px);
-		padding: var(--space-4, 16px);
-		background: var(--surface-1, color-mix(in oklch, var(--muted) 60%, transparent));
-		border: 1px solid var(--border-subtle, color-mix(in oklch, var(--border) 60%, transparent));
-		border-radius: var(--radius-lg, 10px);
-	}
-
-	.fp-form-row {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: var(--space-3, 12px);
-	}
-
-	.fp-form-field {
-		display: flex;
-		flex-direction: column;
-	}
-
-	.fp-form-label {
-		display: block;
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 500;
-		color: var(--text-primary, var(--foreground));
-		margin-bottom: var(--space-2, 8px);
-	}
-
-	.fp-form-input {
-		width: 100%;
-		padding: var(--space-2, 8px) var(--space-3, 12px);
-		background: var(--surface-0, var(--card));
-		border: 1px solid var(--border-subtle, color-mix(in oklch, var(--border) 60%, transparent));
-		border-radius: var(--radius-md, 8px);
-		color: var(--text-primary, var(--foreground));
-		font-size: var(--text-base, 0.8125rem);
-		font-family: var(--card-font-display, 'Inter', system-ui, sans-serif);
-		outline: none;
-		transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
-		box-shadow: inset 0 1px 0 0 rgba(255,255,255,0.03);
-	}
-
-	.fp-form-input::placeholder {
-		color: var(--text-tertiary, color-mix(in oklch, var(--muted-foreground) 70%, transparent));
-	}
-
-	.fp-form-input:hover {
-		border-color: var(--border-default, var(--border));
-	}
-
-	.fp-form-input:focus {
-		border-color: var(--primary);
-		background: var(--surface-0, var(--card));
-		box-shadow: inset 0 1px 0 0 rgba(255,255,255,0.03), 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
-	}
-
-	.fp-form-input:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.fp-form-input--mono {
-		font-family: var(--card-font-mono, 'JetBrains Mono', 'SF Mono', monospace);
-	}
-
-	.fp-form-textarea {
-		min-height: 60px;
-		resize: vertical;
-	}
-
-	.fp-form-actions {
-		display: flex;
-		gap: var(--space-2, 8px);
-		margin-top: var(--space-1, 4px);
-	}
-
-	.fp-form-actions .fp-btn {
-		flex: 1;
-	}
-
-	@media (max-width: 400px) {
-		.fp-form-row {
-			grid-template-columns: 1fr;
-		}
-	}
-
-	/* -----------------------------------------------------------------------
 	   ProjectCard-specific: item ID badge
 	   ----------------------------------------------------------------------- */
 	.fp-item-id {
@@ -1002,10 +764,6 @@
 	   REDUCED MOTION
 	   ----------------------------------------------------------------------- */
 	@media (prefers-reduced-motion: reduce) {
-		.fp-form-input {
-			transition: none;
-		}
-
 		.fp-spinner {
 			animation: none;
 		}

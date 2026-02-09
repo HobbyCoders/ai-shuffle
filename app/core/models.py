@@ -201,6 +201,11 @@ class ProjectBase(BaseModel):
 class ProjectCreate(ProjectBase):
     """Project creation request"""
     id: str = Field(..., pattern=r'^[a-z0-9-]+$', min_length=1, max_length=50)
+    path: Optional[str] = Field(
+        None,
+        description="Absolute filesystem path for 'add existing' projects (local mode only). "
+                    "When set, the project points to this directory instead of workspace_dir/<id>."
+    )
     settings: Optional[ProjectSettings] = None
 
 

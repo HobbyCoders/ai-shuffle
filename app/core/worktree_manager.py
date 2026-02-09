@@ -11,8 +11,9 @@ Key design principles:
 - Multiple sessions can use the same worktree (sequentially, not concurrently)
 - Worktree validity is determined by checking if the folder exists on disk
 
-Path pattern: {workspace_dir}/{branch_sanitized}-{short_hash}
-(Worktrees are adjacent to the main repo, not nested inside it)
+Path pattern:
+  Workspace projects: {workspace_dir}/{branch_sanitized}-{short_hash}
+  Absolute-path projects: {project_parent}/{branch_sanitized}-{short_hash} (sibling placement)
 """
 
 import hashlib
@@ -23,6 +24,10 @@ from typing import Optional, Tuple, Dict, Any, List
 
 from app.core.config import settings
 from app.core.git_service import git_service
+from app.core.project_utils import (
+    get_project_working_dir, get_worktree_working_dir,
+    get_worktree_working_dir_as_path, get_project_parent_dir
+)
 from app.db import database
 from app.db.database import WorktreeStatus
 
@@ -64,38 +69,47 @@ class WorktreeManager:
         Get full path for a worktree - adjacent to the main repo.
         Uses a short hash of the project path to ensure uniqueness across repos.
 
-        Example: If branch is "feature/auth" and project is "ai-shuffle",
-        worktree will be at {workspace}/feature-auth-a7b3
-        If that exists, tries feature-auth-a7b3-2, -3, etc.
+        For relative-path projects (workspace-based):
+            {workspace_dir}/feature-auth-a7b3
+        For absolute-path projects (local mode):
+            {project_parent}/feature-auth-a7b3  (sibling directory)
         """
         sanitized = self._sanitize_branch_name(branch)
 
         # Generate a short hash from the project path for uniqueness
-        # This ensures different repos with same branch names don't collide
         path_hash = hashlib.md5(project_path.encode()).hexdigest()[:4]
         base_name = f"{sanitized}-{path_hash}"
-        base_path = settings.workspace_dir / base_name
+
+        # Place worktrees in the parent directory of the project
+        # For workspace projects: this is workspace_dir
+        # For absolute-path projects: this is the project's parent dir (sibling placement)
+        parent_dir = get_project_parent_dir(project_path)
+        base_path = parent_dir / base_name
 
         # If base path doesn't exist, use it
         if not base_path.exists():
             return base_path
 
-        # Otherwise, find a unique suffix (rare case - same repo, same branch, multiple worktrees)
+        # Otherwise, find a unique suffix
         counter = 2
         while True:
-            candidate = settings.workspace_dir / f"{base_name}-{counter}"
+            candidate = parent_dir / f"{base_name}-{counter}"
             if not candidate.exists():
                 return candidate
             counter += 1
-            # Safety limit
             if counter > 100:
                 raise WorktreeError(f"Too many worktrees for branch '{branch}'")
 
-    def _get_relative_worktree_path_from_full(self, full_path: Path) -> str:
+    def _get_relative_worktree_path_from_full(self, full_path: Path, project_path: str = "") -> str:
         """
-        Get relative worktree path from a full path.
-        This is what gets stored in the database.
+        Get the worktree path to store in the database.
+
+        For workspace-based projects: just the folder name (relative to workspace_dir).
+        For absolute-path projects: the full absolute path.
         """
+        from app.core.project_utils import is_absolute_project_path
+        if project_path and is_absolute_project_path(project_path):
+            return str(full_path)
         return full_path.name
 
     def _ensure_repository_record(self, project_id: str, project_path: str) -> Optional[Dict]:
@@ -106,7 +120,7 @@ class WorktreeManager:
         Returns:
             Repository record dict or None if not a git repo
         """
-        working_dir = str(settings.workspace_dir / project_path)
+        working_dir = get_project_working_dir(project_path)
 
         if not self.git_service.is_git_repo(working_dir):
             logger.warning(f"Project {project_id} is not a git repository")
@@ -173,10 +187,10 @@ class WorktreeManager:
         cleaned_up = []
         still_active = 0
 
-        main_dir = str(settings.workspace_dir / project["path"])
+        main_dir = get_project_working_dir(project)
 
         for wt in active_worktrees:
-            worktree_full_path = settings.workspace_dir / wt["worktree_path"]
+            worktree_full_path = get_worktree_working_dir_as_path(wt)
 
             if not worktree_full_path.exists():
                 # Stale record - worktree was deleted outside the app
@@ -233,7 +247,7 @@ class WorktreeManager:
         """
         if not worktree:
             return False
-        worktree_path = settings.workspace_dir / worktree["worktree_path"]
+        worktree_path = get_worktree_working_dir_as_path(worktree)
         if not worktree_path.exists():
             return False
 
@@ -285,12 +299,12 @@ class WorktreeManager:
             logger.error(f"Project {project_id} is not a git repository")
             raise WorktreeError("This project is not a git repository. Initialize git first.")
 
-        main_dir = str(settings.workspace_dir / project["path"])
+        main_dir = get_project_working_dir(project)
 
         # Clean up stale worktree records (where the folder no longer exists)
         existing_worktrees = database.get_active_worktrees_for_repository(repo["id"])
         for wt in existing_worktrees:
-            worktree_full_path = settings.workspace_dir / wt["worktree_path"]
+            worktree_full_path = get_worktree_working_dir_as_path(wt)
             if not worktree_full_path.exists():
                 logger.info(f"Cleaning up stale worktree record: '{wt['worktree_path']}'")
                 database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
@@ -316,7 +330,7 @@ class WorktreeManager:
 
         # Calculate worktree path (auto-generates unique name if needed)
         worktree_path = self._get_worktree_path(project["path"], branch_name)
-        relative_worktree_path = self._get_relative_worktree_path_from_full(worktree_path)
+        relative_worktree_path = self._get_relative_worktree_path_from_full(worktree_path, project["path"])
 
         logger.info(f"Creating worktree at: {worktree_path}")
 
@@ -441,7 +455,7 @@ class WorktreeManager:
             logger.error(f"Project {project_id} is not a git repository")
             raise WorktreeError("This project is not a git repository. Initialize git first.")
 
-        main_dir = str(settings.workspace_dir / project["path"])
+        main_dir = get_project_working_dir(project)
 
         # Clean up stale worktree records (where the worktree is no longer valid on disk)
         existing_worktrees = database.get_active_worktrees_for_repository(repo["id"])
@@ -472,7 +486,7 @@ class WorktreeManager:
 
         # Calculate worktree path (auto-generates unique name if needed)
         worktree_path = self._get_worktree_path(project["path"], branch_name)
-        relative_worktree_path = self._get_relative_worktree_path_from_full(worktree_path)
+        relative_worktree_path = self._get_relative_worktree_path_from_full(worktree_path, project["path"])
 
         logger.info(f"Creating worktree at: {worktree_path}")
 
@@ -597,7 +611,7 @@ class WorktreeManager:
             return None
 
         # Check if worktree is valid (not just if folder exists)
-        worktree_abs_path = str(settings.workspace_dir / worktree["worktree_path"])
+        worktree_abs_path = get_worktree_working_dir(worktree)
         worktree["exists"] = self.is_worktree_valid(worktree)
 
         if worktree["exists"]:
@@ -669,8 +683,8 @@ class WorktreeManager:
             database.delete_worktree(worktree_id)
             return True
 
-        main_dir = str(settings.workspace_dir / project["path"])
-        worktree_abs_path = str(settings.workspace_dir / worktree["worktree_path"])
+        main_dir = get_project_working_dir(project)
+        worktree_abs_path = get_worktree_working_dir(worktree)
 
         # Remove git worktree
         if Path(worktree_abs_path).exists():
@@ -723,7 +737,7 @@ class WorktreeManager:
             result["errors"].append(f"No git repository for project: {project_id}")
             return result
 
-        main_dir = str(settings.workspace_dir / project["path"])
+        main_dir = get_project_working_dir(project)
 
         # Get actual worktrees from git
         git_worktrees = self.git_service.list_worktrees(main_dir)
@@ -736,7 +750,7 @@ class WorktreeManager:
         db_worktrees = database.get_worktrees_for_repository(repo["id"])
 
         for db_wt in db_worktrees:
-            worktree_abs_path = str(settings.workspace_dir / db_wt["worktree_path"])
+            worktree_abs_path = get_worktree_working_dir(db_wt)
 
             if worktree_abs_path in git_worktree_paths:
                 # Worktree exists in both git and database
@@ -752,7 +766,7 @@ class WorktreeManager:
                 result["cleaned_up"] += 1
 
         # Import external worktrees (created outside the app) into our database
-        db_paths = {str(settings.workspace_dir / wt["worktree_path"]) for wt in db_worktrees}
+        db_paths = {get_worktree_working_dir(wt) for wt in db_worktrees}
         for git_wt in git_worktrees:
             if git_wt.get("is_main"):
                 continue  # Skip main worktree

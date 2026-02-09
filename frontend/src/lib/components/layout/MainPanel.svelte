@@ -5,21 +5,23 @@
 	 * Routes between ChatView, SettingsView, and other feature pages
 	 * based on the layout store's activeView state.
 	 */
+	import { untrack } from 'svelte';
 	import { activeView, sidebarCollapsed } from '$lib/stores/layout';
 	import type { ViewType } from '$lib/stores/layout';
 	import type { CardType, DeckCard } from '$lib/components/deck/cards/types';
-	import { allTabs, projects } from '$lib/stores/tabs';
+	import { allTabs, projects, tabs } from '$lib/stores/tabs';
 	import { git, gitStatus } from '$lib/stores/git';
 	import { githubAuthenticated } from '$lib/stores/auth';
-	import { workspaceIsStreaming } from '$lib/stores/derived/active-streaming';
-	import { createPullRequest } from '$lib/api/github';
-	import { generateCommitMessage, generatePRDescription } from '$lib/api/git';
+	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming';
+	import { createPullRequest, getPullRequests, mergePullRequest } from '$lib/api/github';
+	import { generateCommitMessage, generatePRDescription, deleteWorktree } from '$lib/api/git';
 	import ChatView from './ChatView.svelte';
 	import PageHeader from './PageHeader.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import CommitModal from '$lib/components/git/CommitModal.svelte';
 	import CommitProgressModal from '$lib/components/git/CommitProgressModal.svelte';
+	import FinishModal from '$lib/components/git/FinishModal.svelte';
 
 	// Feature page components
 	import SettingsCard from '$lib/components/deck/cards/SettingsCard.svelte';
@@ -119,12 +121,17 @@
 		activeTab ? $projects.find(p => p.id === activeTab.project)?.name : undefined
 	);
 
-	// Worktree branch for header context (hidden when GitHub CLI not authenticated)
-	const headerWorktreeBranch = $derived.by(() => {
-		if (!activeTab || !$githubAuthenticated) return undefined;
+	// Worktree branch for header context.
+	// When GitHub CLI is authenticated, the GitHeaderActions branch selector shows this instead,
+	// so we hide the separate badge to avoid redundancy.
+	const activeWorktreeBranch = $derived.by(() => {
+		if (!activeTab) return undefined;
 		if (activeTab.executionMode !== 'worktree' || activeTab.messages.length === 0) return undefined;
 		return activeTab.selectedWorktreeBranch || activeTab.worktreeBranch || undefined;
 	});
+	const headerWorktreeBranch = $derived(
+		$githubAuthenticated ? undefined : activeWorktreeBranch
+	);
 
 	// =========================================================================
 	// Git modal state
@@ -134,24 +141,125 @@
 	let showCommitModal = $state(false);
 	let showCommitModalMode = $state<'commit' | 'pr-only'>('commit');
 	let showProgressModal = $state(false);
-	let progressAction = $state<'commit' | 'push' | 'pr'>('commit');
-	let progressMode = $state<'commit' | 'pr-only'>('commit');
+	let progressAction = $state<'commit' | 'push' | 'pr' | 'finish'>('commit');
+	let progressMode = $state<'commit' | 'pr-only' | 'finish'>('commit');
 	let progressStep = $state(1);
 	let progressCompleted = $state(false);
 	let progressError = $state<string | null>(null);
 	let progressIsGenerating = $state(false);
+	let progressHasCleanup = $state(false);
+
+	// Finish modal state
+	let showFinishModal = $state(false);
+
+	// PR detection for current branch
+	let branchPR = $state<{ number: number; title: string; url: string } | null>(null);
+	let _finishedWorktreeTabId: string | null = null;
+
+	const isWorktreeMode = $derived(
+		activeTab?.executionMode === 'worktree' && !!activeTab?.worktreeId
+	);
 
 	// Load git repository when active tab's project changes (only when GitHub CLI is authenticated).
-	// Extract the project string OUTSIDE the effect to avoid tracking the entire activeTab object,
-	// which changes on every streaming poll and would re-trigger loadRepository needlessly.
+	// Extract the project and worktree strings OUTSIDE the effect to avoid tracking the entire
+	// activeTab object, which changes on every streaming poll and would re-trigger load needlessly.
 	const activeProject = $derived(activeTab?.project ?? null);
+	const activeWorktreeId = $derived(
+		activeTab?.executionMode === 'worktree' ? (activeTab.worktreeId ?? null) : null
+	);
 
 	$effect(() => {
 		const project = activeProject;
+		const worktreeId = activeWorktreeId;
 		if (project && $githubAuthenticated) {
-			git.loadRepository(project);
+			if (worktreeId) {
+				git.loadForWorktree(project, worktreeId);
+			} else {
+				git.loadRepository(project);
+			}
 		} else {
 			git.clearRepository();
+		}
+	});
+
+	// =========================================================================
+	// Unified git state poller
+	// =========================================================================
+	// Single poller for diff stats + PR detection. Only one button state
+	// (Commit / Create PR / Finish) is active at a time, so a single poll
+	// that refreshes everything is simpler and avoids duplicate timers.
+
+	const GIT_POLL_INTERVAL_MS = 15_000;
+	let _gitPollTimer: ReturnType<typeof setInterval> | null = null;
+
+	/**
+	 * Refresh all git state needed for the header action buttons.
+	 * Reads branch from the store at call time — must be called outside
+	 * $effect tracking context (via untrack, setInterval, or event handler)
+	 * to avoid creating reactive loops.
+	 */
+	async function refreshGitState(projectId: string) {
+		// Always refresh diff stats (determines hasChanges → Commit button)
+		git.refreshDiffStats();
+
+		// Check for open PRs when GitHub is authenticated and we know the branch
+		const branch = $gitStatus?.current_branch ?? null;
+		if (branch && $githubAuthenticated) {
+			try {
+				const prs = await getPullRequests(projectId, 'open', 10);
+				const match = prs.find(pr => pr.head_branch === branch);
+				branchPR = match ? { number: match.number, title: match.title, url: match.url } : null;
+			} catch {
+				branchPR = null;
+			}
+		} else {
+			branchPR = null;
+		}
+	}
+
+	// Start/restart the unified poller when project or auth changes.
+	// IMPORTANT: Do NOT read $gitStatus here — refreshGitState updates
+	// the store, which would re-trigger this effect in an infinite loop.
+	$effect(() => {
+		const project = activeProject;
+		const authenticated = $githubAuthenticated;
+
+		if (_gitPollTimer) {
+			clearInterval(_gitPollTimer);
+			_gitPollTimer = null;
+		}
+
+		if (project && authenticated) {
+			// Initial refresh — untrack to prevent store reads inside
+			// refreshGitState from becoming effect dependencies
+			untrack(() => refreshGitState(project));
+			// Periodic refresh (setInterval runs outside tracking context)
+			_gitPollTimer = setInterval(() => refreshGitState(project), GIT_POLL_INTERVAL_MS);
+		} else {
+			branchPR = null;
+		}
+
+		return () => {
+			if (_gitPollTimer) {
+				clearInterval(_gitPollTimer);
+				_gitPollTimer = null;
+			}
+		};
+	});
+
+	// When streaming ends, do an immediate refresh so buttons update promptly.
+	let _wasStreaming = false;
+	$effect(() => {
+		const streaming = $gitControlsStreaming;
+		if (streaming) {
+			_wasStreaming = true;
+		} else if (_wasStreaming) {
+			_wasStreaming = false;
+			const project = activeProject;
+			if (project) {
+				git.refreshStatus();
+				untrack(() => refreshGitState(project));
+			}
 		}
 	});
 
@@ -178,6 +286,8 @@
 			return;
 		}
 
+		const worktreeId = activeTab?.worktreeId ?? undefined;
+
 		try {
 			let finalMessage = message;
 
@@ -186,7 +296,7 @@
 				try {
 					const generated = await generateCommitMessage(projectId, {
 						include_unstaged: includeUnstaged
-					});
+					}, worktreeId);
 					finalMessage = generated.message;
 				} catch (e: any) {
 					progressIsGenerating = false;
@@ -248,6 +358,8 @@
 			return;
 		}
 
+		const worktreeId = activeTab?.worktreeId ?? undefined;
+
 		try {
 			let prTitle = title;
 			let prBody = body;
@@ -257,7 +369,7 @@
 				try {
 					const generated = await generatePRDescription(projectId, {
 						base_branch: 'main'
-					});
+					}, worktreeId);
 					prTitle = generated.title;
 					prBody = generated.body;
 				} catch {
@@ -289,6 +401,68 @@
 			progressError = e?.detail || e?.message || 'An error occurred';
 		}
 	}
+
+	/**
+	 * Handle the Finish workflow (merge PR → optional cleanup)
+	 */
+	async function handleFinish(mergeMethod: 'squash' | 'merge' | 'rebase', cleanup: boolean) {
+		if (!branchPR) return;
+
+		const projectId = activeTab?.project;
+		if (!projectId) {
+			progressError = 'No project selected';
+			return;
+		}
+
+		progressAction = 'finish';
+		progressMode = 'finish';
+		progressStep = 1;
+		progressCompleted = false;
+		progressError = null;
+		progressIsGenerating = false;
+		progressHasCleanup = cleanup;
+		showProgressModal = true;
+
+		const prNumber = branchPR.number;
+		const worktreeId = activeTab?.worktreeId ?? null;
+		const tabId = activeTab?.id;
+
+		// Track tab for post-cleanup close
+		_finishedWorktreeTabId = (cleanup && isWorktreeMode && worktreeId && tabId) ? tabId : null;
+
+		try {
+			// Step 1: Merge pull request
+			await mergePullRequest(projectId, prNumber, mergeMethod);
+
+			if (cleanup) {
+				// Step 2: Cleanup
+				progressStep = 2;
+
+				if (isWorktreeMode && worktreeId) {
+					// Delete worktree and branch
+					await deleteWorktree(projectId, worktreeId, false);
+				} else {
+					// Non-worktree: checkout default branch, then delete feature branch
+					const currentBranch = $gitStatus?.current_branch;
+					const defaultBranch = 'main';
+
+					if (currentBranch && currentBranch !== defaultBranch) {
+						await git.checkout(defaultBranch);
+						await git.deleteBranch(currentBranch);
+					}
+				}
+			}
+
+			progressCompleted = true;
+			branchPR = null;
+
+			// Refresh git status
+			await git.refreshStatus();
+			await git.refreshDiffStats();
+		} catch (e: any) {
+			progressError = e?.detail || e?.message || 'An error occurred';
+		}
+	}
 </script>
 
 <div class="main-panel">
@@ -307,9 +481,12 @@
 					{#if $activeView?.type === 'chat' && activeTab?.project && $githubAuthenticated}
 						<GitHeaderActions
 							projectId={activeTab.project}
-							isStreaming={$workspaceIsStreaming}
+							isStreaming={$gitControlsStreaming}
+							worktreeBranch={activeWorktreeBranch}
+							openPR={branchPR}
 							onClickCommit={() => { showCommitModalMode = 'commit'; showCommitModal = true; }}
 							onClickCreatePR={() => { showCommitModalMode = 'pr-only'; showCommitModal = true; }}
+							onClickFinish={() => showFinishModal = true}
 							onClickNewBranch={() => showCreateBranchModal = true}
 						/>
 					{/if}
@@ -495,6 +672,15 @@
 		onCreatePR={handleCreatePR}
 	/>
 
+	<FinishModal
+		open={showFinishModal}
+		pr={branchPR}
+		branchName={$gitStatus?.current_branch ?? ''}
+		{isWorktreeMode}
+		onClose={() => showFinishModal = false}
+		onFinish={handleFinish}
+	/>
+
 	<CommitProgressModal
 		open={showProgressModal}
 		action={progressAction}
@@ -504,7 +690,15 @@
 		error={progressError}
 		branchName={$gitStatus?.current_branch ?? ''}
 		isGenerating={progressIsGenerating}
-		onClose={() => showProgressModal = false}
+		hasCleanup={progressHasCleanup}
+		onClose={() => {
+			showProgressModal = false;
+			progressHasCleanup = false;
+			if (progressCompleted && progressMode === 'finish' && _finishedWorktreeTabId) {
+				tabs.closeTab(_finishedWorktreeTabId);
+				_finishedWorktreeTabId = null;
+			}
+		}}
 	/>
 {/if}
 

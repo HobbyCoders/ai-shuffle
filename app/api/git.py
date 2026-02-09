@@ -12,6 +12,7 @@ Provides endpoints for git repository operations including:
 
 import uuid
 import logging
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
@@ -20,6 +21,7 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.core.git_service import git_service
 from app.core.worktree_manager import worktree_manager
+from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
 
@@ -263,7 +265,26 @@ def get_project_path(project_id: str) -> str:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project not found: {project_id}"
         )
-    return str(settings.workspace_dir / project["path"])
+    return get_project_working_dir(project)
+
+
+def get_working_dir(project_id: str, worktree_id: Optional[str] = None) -> str:
+    """
+    Get the working directory for git operations.
+
+    When worktree_id is provided, returns the worktree's path.
+    Otherwise returns the main project path.
+    """
+    if worktree_id:
+        worktree = database.get_worktree(worktree_id)
+        if not worktree:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Worktree not found: {worktree_id}"
+            )
+        return get_worktree_working_dir(worktree)
+
+    return get_project_path(project_id)
 
 
 def check_project_access(request: Request, project_id: str) -> None:
@@ -331,15 +352,17 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
 async def get_git_status(
     request: Request,
     project_id: str,
+    worktree_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
-    Get git repository status for a project.
+    Get git repository status for a project or worktree.
 
     Returns current branch, uncommitted changes, and sync status with remote.
+    When worktree_id is provided, returns status for the worktree directory.
     """
     check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
 
     # Get git status
     status_data = git_service.get_status(working_dir)
@@ -378,6 +401,7 @@ async def list_branches(
     request: Request,
     project_id: str,
     include_remote: bool = True,
+    worktree_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -386,9 +410,10 @@ async def list_branches(
     Args:
         project_id: Project ID
         include_remote: Include remote tracking branches (default: true)
+        worktree_id: Optional worktree ID - marks the worktree's branch as current
     """
     check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
 
     if not git_service.is_git_repo(working_dir):
         raise HTTPException(
@@ -532,6 +557,7 @@ async def checkout_branch(
     request: Request,
     project_id: str,
     body: CheckoutRequest,
+    worktree_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -540,8 +566,17 @@ async def checkout_branch(
     Args:
         project_id: Project ID
         body: Checkout request with ref (branch name or commit SHA)
+        worktree_id: If provided, returns error (checkout not allowed in worktrees)
     """
     check_project_access(request, project_id)
+
+    # Checkout is not allowed in worktrees - they are bound to their branch
+    if worktree_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot checkout branches in a worktree. Worktrees are bound to their branch."
+        )
+
     working_dir = get_project_path(project_id)
 
     if not git_service.is_git_repo(working_dir):
@@ -640,6 +675,7 @@ async def fetch_from_remote(
     request: Request,
     project_id: str,
     remote: str = "origin",
+    worktree_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -648,9 +684,10 @@ async def fetch_from_remote(
     Args:
         project_id: Project ID
         remote: Remote name (default: origin)
+        worktree_id: Optional worktree ID (fetch works from any worktree)
     """
     check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
 
     if not git_service.is_git_repo(working_dir):
         raise HTTPException(
@@ -695,6 +732,7 @@ async def get_diff_stats(
     request: Request,
     project_id: str,
     include_unstaged: bool = True,
+    worktree_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
@@ -703,9 +741,10 @@ async def get_diff_stats(
     Args:
         project_id: Project ID
         include_unstaged: Include unstaged changes (default: true)
+        worktree_id: Optional worktree ID to get diff stats for worktree
     """
     check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
 
     if not git_service.is_git_repo(working_dir):
         raise HTTPException(
@@ -727,15 +766,17 @@ async def create_commit(
     request: Request,
     project_id: str,
     body: CommitRequest,
+    worktree_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
     Create a commit.
 
     Optionally stages all changes (including unstaged) before committing.
+    When worktree_id is provided, commits in the worktree directory.
     """
     check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
 
     if not git_service.is_git_repo(working_dir):
         raise HTTPException(
@@ -781,13 +822,16 @@ async def push_commits(
     request: Request,
     project_id: str,
     body: PushRequest,
+    worktree_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
     Push commits to remote.
+
+    When worktree_id is provided, pushes from the worktree directory.
     """
     check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
 
     if not git_service.is_git_repo(working_dir):
         raise HTTPException(
@@ -833,15 +877,18 @@ async def generate_commit_message(
     request: Request,
     project_id: str,
     body: GenerateCommitMessageRequest,
+    worktree_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
     Generate a commit message using AI based on the current diff.
+
+    When worktree_id is provided, generates message based on worktree's diff.
     """
     from app.api.generation import generate_with_claude
 
     check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
 
     if not git_service.is_git_repo(working_dir):
         raise HTTPException(
@@ -883,16 +930,19 @@ async def generate_pr_description(
     request: Request,
     project_id: str,
     body: GeneratePRDescriptionRequest,
+    worktree_id: Optional[str] = None,
     token: str = Depends(require_auth)
 ):
     """
     Generate a PR title and description using AI based on branch commits.
+
+    When worktree_id is provided, generates description from worktree's branch.
     """
     import json as json_module
     from app.api.generation import generate_with_claude, extract_json_from_response
 
     check_project_access(request, project_id)
-    working_dir = get_project_path(project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
 
     if not git_service.is_git_repo(working_dir):
         raise HTTPException(
@@ -1059,7 +1109,7 @@ async def list_worktrees(
     if include_status:
         for wt in worktrees:
             if wt.get("exists", True):  # Only fetch status for existing worktrees
-                worktree_full_path = str(settings.workspace_dir / wt["worktree_path"])
+                worktree_full_path = get_worktree_working_dir(wt)
                 try:
                     wt["git_status"] = git_service.get_status(worktree_full_path)
                 except Exception as e:
@@ -1244,7 +1294,7 @@ async def create_worktree(
     # Copy uncommitted files if requested
     copy_result = None
     if body.copy_uncommitted and worktree:
-        worktree_abs_path = str(settings.workspace_dir / worktree["worktree_path"])
+        worktree_abs_path = get_worktree_working_dir(worktree)
         copy_result = _copy_uncommitted_files(working_dir, worktree_abs_path)
 
     # Get full worktree details for response
@@ -1469,7 +1519,7 @@ async def list_worktree_files(
         )
 
     # Build full path to worktree directory
-    worktree_base = settings.workspace_dir / worktree["worktree_path"]
+    worktree_base = Path(get_worktree_working_dir(worktree))
 
     if not worktree_base.exists():
         raise HTTPException(

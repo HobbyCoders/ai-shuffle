@@ -2,6 +2,7 @@
  * Git Store for AI Hub
  *
  * Manages git repository state including branches, commits, and worktrees.
+ * Features per-key caching for instant tab switches and deferred remote fetch.
  */
 
 import { writable, derived } from 'svelte/store';
@@ -21,8 +22,12 @@ export type {
 // Store State
 // ============================================================================
 
+export type GitMode = 'project' | 'worktree';
+
 interface GitState {
     projectId: string | null;
+    worktreeId: string | null;
+    mode: GitMode;
     status: gitApi.GitStatus | null;
     branches: gitApi.Branch[];
     commits: gitApi.CommitNode[];
@@ -32,26 +37,185 @@ interface GitState {
     error: string | null;
 }
 
+// Subset of GitState that we cache per key
+interface CachedState {
+    status: gitApi.GitStatus | null;
+    branches: gitApi.Branch[];
+    commits: gitApi.CommitNode[];
+    worktrees: gitApi.Worktree[];
+    diffStats: gitApi.DiffStats | null;
+}
+
+const EMPTY_STATE: GitState = {
+    projectId: null,
+    worktreeId: null,
+    mode: 'project',
+    status: null,
+    branches: [],
+    commits: [],
+    worktrees: [],
+    diffStats: null,
+    loading: false,
+    error: null
+};
+
+const MAX_CACHE_ENTRIES = 10;
+
 // ============================================================================
 // Git Store
 // ============================================================================
 
 function createGitStore() {
-    const { subscribe, set, update } = writable<GitState>({
-        projectId: null,
-        status: null,
-        branches: [],
-        commits: [],
-        worktrees: [],
-        diffStats: null,
-        loading: false,
-        error: null
-    });
+    const { subscribe, set, update } = writable<GitState>({ ...EMPTY_STATE });
 
-    /** Track which projectId is currently loaded to skip redundant reloads. */
-    let _loadedProjectId: string | null = null;
-    /** Guard against concurrent loadRepository calls. */
-    let _loadInFlight = false;
+    /** Track which projectId+worktreeId is currently loaded to skip redundant reloads. */
+    let _loadedKey: string | null = null;
+    /**
+     * Track which key is currently being loaded.
+     * Uses a key string (not boolean) so a load for a DIFFERENT key can supersede
+     * the current in-flight load.
+     */
+    let _loadInFlight: string | null = null;
+
+    /** Per-key state cache for instant tab switches. */
+    const _cache = new Map<string, CachedState>();
+
+    function _makeKey(projectId: string, worktreeId?: string | null): string {
+        return worktreeId ? `${projectId}:${worktreeId}` : projectId;
+    }
+
+    function _saveToCache(key: string, state: CachedState) {
+        // Evict oldest if at capacity
+        if (_cache.size >= MAX_CACHE_ENTRIES && !_cache.has(key)) {
+            const oldest = _cache.keys().next().value;
+            if (oldest !== undefined) _cache.delete(oldest);
+        }
+        _cache.set(key, state);
+    }
+
+    function _restoreFromCache(key: string): CachedState | null {
+        const cached = _cache.get(key);
+        if (!cached) return null;
+        // Move to end (most recently used)
+        _cache.delete(key);
+        _cache.set(key, cached);
+        return cached;
+    }
+
+    /**
+     * Core load logic shared by loadRepository and loadForWorktree.
+     * Loads data in optimal order: status → parallel(branches, commits, worktrees, diffStats) → background fetch.
+     */
+    async function _loadCore(
+        key: string,
+        projectId: string,
+        worktreeId: string | undefined,
+        mode: GitMode
+    ) {
+        // Restore cached state instantly if available
+        const cached = _restoreFromCache(key);
+        if (cached) {
+            update(s => ({
+                ...s,
+                projectId,
+                worktreeId: worktreeId ?? null,
+                mode,
+                ...cached,
+                loading: true,
+                error: null
+            }));
+        } else {
+            update(s => ({
+                ...s,
+                projectId,
+                worktreeId: worktreeId ?? null,
+                mode,
+                loading: true,
+                error: null
+            }));
+        }
+
+        try {
+            const status = await gitApi.getGitStatus(projectId, worktreeId);
+            if (_loadInFlight !== key) return;
+
+            update(s => ({ ...s, status }));
+
+            if (status.is_git_repo) {
+                // Load all data in parallel — don't wait for fetchRemote
+                const [branches, graphResponse, worktrees, diffStats] = await Promise.all([
+                    gitApi.getBranches(projectId, true, worktreeId),
+                    gitApi.getCommitGraph(projectId, 50),
+                    gitApi.getWorktrees(projectId),
+                    gitApi.getDiffStats(projectId, true, worktreeId).catch(() => null)
+                ]);
+                if (_loadInFlight !== key) return;
+
+                const newState: CachedState = {
+                    status,
+                    branches,
+                    commits: graphResponse.commits,
+                    worktrees,
+                    diffStats: diffStats ?? null
+                };
+
+                update(s => ({
+                    ...s,
+                    ...newState,
+                    loading: false
+                }));
+
+                _loadedKey = key;
+                _saveToCache(key, newState);
+
+                // Background fetch — update ahead/behind counts after network completes
+                _backgroundFetch(key, projectId, worktreeId);
+            } else {
+                update(s => ({ ...s, loading: false }));
+                _loadedKey = key;
+            }
+        } catch (e) {
+            if (_loadInFlight !== key) return;
+            console.error('Failed to load git repository:', e);
+            const error = e as { detail?: string; message?: string };
+            update(s => ({
+                ...s,
+                loading: false,
+                error: error.detail || error.message || 'Failed to load repository'
+            }));
+        } finally {
+            if (_loadInFlight === key) _loadInFlight = null;
+        }
+    }
+
+    /**
+     * Background fetch from remote + silent refresh of status/branches.
+     * Runs after the UI is already populated, so the user sees data instantly.
+     */
+    function _backgroundFetch(key: string, projectId: string, worktreeId?: string) {
+        gitApi.fetchRemote(projectId, worktreeId).then(async () => {
+            // Only update if we're still on the same key
+            if (_loadedKey !== key) return;
+            try {
+                const [status, branches] = await Promise.all([
+                    gitApi.getGitStatus(projectId, worktreeId),
+                    gitApi.getBranches(projectId, true, worktreeId)
+                ]);
+                if (_loadedKey !== key) return;
+                update(s => ({ ...s, status, branches }));
+                // Update cache too
+                const cached = _cache.get(key);
+                if (cached) {
+                    cached.status = status;
+                    cached.branches = branches;
+                }
+            } catch {
+                // Silent — background refresh is non-critical
+            }
+        }).catch(() => {
+            // fetchRemote failed — not critical, user already has local data
+        });
+    }
 
     return {
         subscribe,
@@ -61,71 +225,31 @@ function createGitStore() {
          * Skips if already loaded for the same project (use forceReload to override).
          */
         async loadRepository(projectId: string, forceReload = false) {
-            // Skip if already loaded for this project
-            if (!forceReload && _loadedProjectId === projectId) return;
-            // Prevent concurrent loads
-            if (_loadInFlight) return;
-            _loadInFlight = true;
+            const key = _makeKey(projectId);
+            if (!forceReload && _loadedKey === key) return;
+            if (_loadInFlight === key) return;
+            _loadInFlight = key;
+            await _loadCore(key, projectId, undefined, 'project');
+        },
 
-            update(s => ({ ...s, projectId, loading: true, error: null }));
-
-            try {
-                // Load status first to check if it's a git repo
-                const status = await gitApi.getGitStatus(projectId);
-
-                // Update status immediately
-                update(s => ({ ...s, status }));
-
-                // If it's a git repo, fetch remote first then load data
-                if (status.is_git_repo) {
-                    // Fetch from remote to discover new branches (ignore errors)
-                    await gitApi.fetchRemote(projectId).catch(() => {});
-
-                    const [branches, graphResponse, worktrees] = await Promise.all([
-                        gitApi.getBranches(projectId, true),
-                        gitApi.getCommitGraph(projectId, 50),
-                        gitApi.getWorktrees(projectId)
-                    ]);
-
-                    update(s => ({
-                        ...s,
-                        branches,
-                        commits: graphResponse.commits,
-                        worktrees,
-                        loading: false
-                    }));
-                } else {
-                    update(s => ({ ...s, loading: false }));
-                }
-                _loadedProjectId = projectId;
-            } catch (e) {
-                console.error('Failed to load git repository:', e);
-                const error = e as { detail?: string; message?: string };
-                update(s => ({
-                    ...s,
-                    loading: false,
-                    error: error.detail || error.message || 'Failed to load repository'
-                }));
-            } finally {
-                _loadInFlight = false;
-            }
+        /**
+         * Load repository data in worktree mode.
+         * Status, branches, and diff stats are loaded from the worktree's perspective.
+         */
+        async loadForWorktree(projectId: string, worktreeId: string, forceReload = false) {
+            const key = _makeKey(projectId, worktreeId);
+            if (!forceReload && _loadedKey === key) return;
+            if (_loadInFlight === key) return;
+            _loadInFlight = key;
+            await _loadCore(key, projectId, worktreeId, 'worktree');
         },
 
         /**
          * Clear repository data (used when switching to a tab with no project)
          */
         clearRepository() {
-            _loadedProjectId = null;
-            set({
-                projectId: null,
-                status: null,
-                branches: [],
-                commits: [],
-                worktrees: [],
-                diffStats: null,
-                loading: false,
-                error: null
-            });
+            _loadedKey = null;
+            set({ ...EMPTY_STATE });
         },
 
         /**
@@ -136,7 +260,7 @@ function createGitStore() {
             if (!state.projectId) return;
 
             try {
-                const status = await gitApi.getGitStatus(state.projectId);
+                const status = await gitApi.getGitStatus(state.projectId, state.worktreeId ?? undefined);
                 update(s => ({ ...s, status }));
             } catch (e) {
                 const error = e as { detail?: string };
@@ -152,7 +276,7 @@ function createGitStore() {
             if (!state.projectId) return;
 
             try {
-                const branches = await gitApi.getBranches(state.projectId, true);
+                const branches = await gitApi.getBranches(state.projectId, true, state.worktreeId ?? undefined);
                 update(s => ({ ...s, branches }));
             } catch (e) {
                 const error = e as { detail?: string };
@@ -277,7 +401,7 @@ function createGitStore() {
             update(s => ({ ...s, loading: true, error: null }));
 
             try {
-                await gitApi.fetchRemote(state.projectId);
+                await gitApi.fetchRemote(state.projectId, state.worktreeId ?? undefined);
                 await this.loadBranches();
                 await this.loadGraph();
                 update(s => ({ ...s, loading: false }));
@@ -331,14 +455,14 @@ function createGitStore() {
         /**
          * Delete a worktree
          */
-        async deleteWorktree(worktreeId: string) {
+        async deleteWorktree(worktreeId: string, keepBranch: boolean = true) {
             const state = getCurrentState();
             if (!state.projectId) return;
 
             update(s => ({ ...s, loading: true, error: null }));
 
             try {
-                await gitApi.deleteWorktree(state.projectId, worktreeId);
+                await gitApi.deleteWorktree(state.projectId, worktreeId, keepBranch);
                 await this.loadWorktrees();
                 await this.loadBranches();
                 update(s => ({ ...s, loading: false }));
@@ -361,7 +485,7 @@ function createGitStore() {
             if (!state.projectId) return;
 
             try {
-                const diffStats = await gitApi.getDiffStats(state.projectId);
+                const diffStats = await gitApi.getDiffStats(state.projectId, true, state.worktreeId ?? undefined);
                 update(s => ({ ...s, diffStats }));
             } catch (e) {
                 // Silently fail - diff stats are non-critical
@@ -383,7 +507,7 @@ function createGitStore() {
                 const response = await gitApi.commitChanges(state.projectId, {
                     message,
                     include_unstaged: includeUnstaged
-                });
+                }, state.worktreeId ?? undefined);
 
                 // Refresh status and diff stats after commit
                 await Promise.all([
@@ -416,7 +540,7 @@ function createGitStore() {
                 const response = await gitApi.pushCommits(state.projectId, {
                     branch,
                     set_upstream: setUpstream
-                });
+                }, state.worktreeId ?? undefined);
 
                 // Refresh status after push
                 await this.refreshStatus();
@@ -443,31 +567,14 @@ function createGitStore() {
          * Clear store state
          */
         clear() {
-            set({
-                projectId: null,
-                status: null,
-                branches: [],
-                commits: [],
-                worktrees: [],
-                diffStats: null,
-                loading: false,
-                error: null
-            });
+            _loadedKey = null;
+            set({ ...EMPTY_STATE });
         }
     };
 
     // Helper to get current state synchronously
     function getCurrentState(): GitState {
-        let state: GitState = {
-            projectId: null,
-            status: null,
-            branches: [],
-            commits: [],
-            worktrees: [],
-            diffStats: null,
-            loading: false,
-            error: null
-        };
+        let state: GitState = { ...EMPTY_STATE };
         subscribe(s => { state = s; })();
         return state;
     }
@@ -486,6 +593,7 @@ export const gitStatus = derived(git, $git => $git.status);
 export const diffStats = derived(git, $git => $git.diffStats);
 export const gitLoading = derived(git, $git => $git.loading);
 export const gitError = derived(git, $git => $git.error);
+export const gitMode = derived(git, $git => $git.mode);
 
 // Derived store for current branch
 export const currentBranch = derived(git, $git =>

@@ -20,9 +20,11 @@ from fastapi.websockets import WebSocketState
 
 from app.core.sync_engine import sync_engine
 from app.core.live_session_store import live_session_store
+from app.core.config import settings
 from app.db import database
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
 from app.core.cli_bridge import CLIBridge, RewindParser
+from app.core.project_utils import get_project_working_dir
 from app.core.permission_handler import permission_handler
 from app.core.user_question_handler import user_question_handler
 
@@ -239,11 +241,11 @@ async def chat_websocket(
         if session_data:
             sdk_session_id = session_data.get("sdk_session_id")
             if sdk_session_id:
-                working_dir = "/workspace"
+                working_dir = str(settings.workspace_dir)
                 if project_id:
                     project = database.get_project(project_id)
                     if project:
-                        working_dir = str(settings.workspace_dir / project["path"])
+                        working_dir = get_project_working_dir(project)
                 try:
                     initial_messages, _usage = parse_session_history(sdk_session_id, working_dir)
                 except Exception as e:
@@ -712,12 +714,12 @@ async def chat_websocket(
                         live_data = live_session_store.get_session_dict(session_id)
                         if live_data and live_data.get("messages"):
                             # Build working_dir for JSONL path lookup
-                            seed_working_dir = "/workspace"
+                            seed_working_dir = str(settings.workspace_dir)
                             seed_project_id = session_row.get("project_id") if session_row else None
                             if seed_project_id:
                                 seed_project = database.get_project(seed_project_id)
                                 if seed_project:
-                                    seed_working_dir = str(settings.workspace_dir / seed_project["path"])
+                                    seed_working_dir = get_project_working_dir(seed_project)
 
                             # Build usage_data from final metadata + live store
                             live_usage = live_data.get("usage", {})
@@ -1158,13 +1160,12 @@ async def chat_websocket(
                                     logger.info(f"Using live_session_store for session {session_id} with {len(messages)} messages")
 
                                 # Get working dir from project if available
-                                working_dir = "/workspace"
+                                working_dir = str(settings.workspace_dir)
                                 project_id = session.get("project_id")
                                 if project_id:
                                     project = database.get_project(project_id)
                                     if project:
-                                        from app.core.config import settings
-                                        working_dir = str(settings.workspace_dir / project["path"])
+                                        working_dir = get_project_working_dir(project)
 
                                 # Fall back to JSONL if live store didn't have data
                                 if not messages and sdk_session_id:
@@ -1812,13 +1813,12 @@ async def cli_websocket(
         return
 
     # Get working directory from project or profile
-    working_dir = "/workspace"
+    working_dir = str(settings.workspace_dir)
     project_id = session.get("project_id")
     if project_id:
         project = database.get_project(project_id)
         if project:
-            from app.core.config import settings
-            working_dir = str(settings.workspace_dir / project["path"])
+            working_dir = get_project_working_dir(project)
 
     logger.info(f"CLI WebSocket connected for session {session_id}, sdk_session={sdk_session_id}")
 

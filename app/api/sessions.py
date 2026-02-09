@@ -16,6 +16,7 @@ from app.core.models import (
 )
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
+from app.core.project_utils import get_project_working_dir
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 
@@ -373,7 +374,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             if project_id:
                 project = database.get_project(project_id)
                 if project:
-                    working_dir = str(settings.workspace_dir / project["path"])
+                    working_dir = get_project_working_dir(project)
 
             jsonl_messages, usage_data = parse_session_history(sdk_session_id, working_dir)
             if jsonl_messages:
@@ -553,7 +554,7 @@ async def get_live_session(
             if project_id:
                 project = database.get_project(project_id)
                 if project:
-                    working_dir = str(settings.workspace_dir / project["path"])
+                    working_dir = get_project_working_dir(project)
 
             jsonl_messages, usage_data = parse_session_history(sdk_session_id, working_dir)
             if jsonl_messages:
@@ -900,7 +901,7 @@ async def export_session(
             if project_id:
                 project = database.get_project(project_id)
                 if project:
-                    working_dir = str(settings.workspace_dir / project["path"])
+                    working_dir = get_project_working_dir(project)
 
             jsonl_messages, _usage = parse_session_history(sdk_session_id, working_dir)
             if jsonl_messages:
@@ -1251,7 +1252,7 @@ async def import_session(
         if session_data.get('project_id'):
             project = database.get_project(session_data['project_id'])
             if project:
-                working_dir = str(settings.workspace_dir / project["path"])
+                working_dir = get_project_working_dir(project)
 
         # Convert working dir to Claude's project directory format
         project_dir_name = get_project_dir_name(working_dir)
@@ -1625,7 +1626,7 @@ async def fork_session(
     if project_id:
         project = database.get_project(project_id)
         if project:
-            working_dir = str(settings.workspace_dir / project["path"])
+            working_dir = get_project_working_dir(project)
 
     # Find the original JSONL file
     original_jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)

@@ -4222,7 +4222,7 @@ function createTabsStore() {
 			await this.loadProfiles();
 		},
 
-		async createProject(data: { id: string; name: string; description?: string }) {
+		async createProject(data: { id: string; name: string; description?: string; path?: string }) {
 			await api.post('/projects', data);
 			await this.loadProjects();
 		},
