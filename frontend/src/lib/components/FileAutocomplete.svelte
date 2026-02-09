@@ -30,12 +30,13 @@
   const CHAT_HISTORY_FOLDER = 'Chat History';
   const NOTES_FOLDER = 'Notes';
   const SUBAGENTS_FOLDER = 'Subagents';
+  const VIRTUAL_FOLDER_NAMES = [CHAT_HISTORY_FOLDER, NOTES_FOLDER, SUBAGENTS_FOLDER];
 
   interface Props {
     inputValue: string;
     projectId?: string;
-    profileId?: string;  // Required for fetching profile-enabled agents
-    worktreeId?: string;  // If provided, use worktree file API instead of project file API
+    profileId?: string;
+    worktreeId?: string;
     onSelect: (file: FileItem) => void;
     onClose: () => void;
     visible: boolean;
@@ -53,13 +54,11 @@
   let inChatHistoryFolder = $state(false);
   let inNotesFolder = $state(false);
   let inSubagentsFolder = $state(false);
-  let fetchCounter = 0; // For cancelling stale fetches
+  let fetchCounter = 0;
 
   // Get the directory path from query
-  // Handles paths with spaces like "Chat History/"
   function getPathFromQuery(query: string): string {
     if (!query.includes('/')) return '';
-    // Find the last slash position
     const lastSlashIndex = query.lastIndexOf('/');
     return query.slice(0, lastSlashIndex);
   }
@@ -71,45 +70,82 @@
     return query.slice(lastSlashIndex + 1);
   }
 
+  // Current filter query for match highlighting
+  let currentFilterQuery = $derived.by(() => {
+    const atInfo = extractAtMentionQuery(inputValue);
+    if (!atInfo) return '';
+    return getFilterFromQuery(atInfo.query);
+  });
+
+  // Section grouping: virtual folders vs regular files (root level only)
+  let isAtRoot = $derived(!currentPath && !inChatHistoryFolder && !inNotesFolder && !inSubagentsFolder);
+  let quickAccessItems = $derived(
+    isAtRoot ? filteredFiles.filter(f => VIRTUAL_FOLDER_NAMES.includes(f.name)) : []
+  );
+  let fileItems = $derived(
+    isAtRoot ? filteredFiles.filter(f => !VIRTUAL_FOLDER_NAMES.includes(f.name)) : filteredFiles
+  );
+  let showSectionHeaders = $derived(quickAccessItems.length > 0 && fileItems.length > 0);
+
+  // Breadcrumb segments from current path
+  let breadcrumbSegments = $derived.by(() => {
+    if (!currentPath) return [];
+    const parts = currentPath.split('/').filter(Boolean);
+    return parts.map((part, i) => ({
+      name: part,
+      path: parts.slice(0, i + 1).join('/')
+    }));
+  });
+
+  // Highlight matching text in a name
+  function highlightMatch(text: string, query: string): Array<{text: string, matched: boolean}> {
+    if (!query) return [{ text, matched: false }];
+    const lowerText = text.toLowerCase();
+    const lowerQuery = query.toLowerCase();
+    const idx = lowerText.indexOf(lowerQuery);
+    if (idx === -1) return [{ text, matched: false }];
+    return [
+      { text: text.slice(0, idx), matched: false },
+      { text: text.slice(idx, idx + query.length), matched: true },
+      { text: text.slice(idx + query.length), matched: false }
+    ].filter(s => s.text.length > 0);
+  }
+
   // Track previous visibility to detect transitions
   let wasVisible = $state(false);
 
   // Handle visibility changes and initial load
   $effect(() => {
-    // Detect visibility transition
     if (!visible && wasVisible) {
-      // Going invisible - reset state
       lastFetchedPath = null;
       currentPath = '';
       files = [];
       filteredFiles = [];
       inChatHistoryFolder = false;
       inNotesFolder = false;
+      inSubagentsFolder = false;
     } else if (visible && !wasVisible && projectId) {
-      // Going visible - fetch initial files
       fetchFiles('');
     }
     wasVisible = visible;
   });
 
-  // Handle path changes from query - separate effect to avoid loops
+  // Handle path changes from query
   $effect(() => {
     if (!visible || !projectId) return;
 
     const atInfo = extractAtMentionQuery(inputValue);
     if (!atInfo) return;
 
-    // Don't lowercase the path - file systems can be case-sensitive
     const query = atInfo.query;
     const targetPath = getPathFromQuery(query);
 
-    // Only fetch if path actually changed and we haven't fetched this path yet
     if (targetPath !== currentPath && targetPath !== lastFetchedPath) {
       fetchFiles(targetPath);
     }
   });
 
-  // Filter files based on @ query - pure filtering, no fetching
+  // Filter files based on @ query
   $effect(() => {
     const atInfo = extractAtMentionQuery(inputValue);
     if (!atInfo) {
@@ -117,11 +153,9 @@
       return;
     }
 
-    // Keep original query for path, but use lowercase for filtering
     const query = atInfo.query;
     const filterPart = getFilterFromQuery(query).toLowerCase();
 
-    // Filter files by name
     let filtered: FileItem[];
     if (!filterPart) {
       filtered = [...files];
@@ -133,89 +167,60 @@
 
     // Sort: Virtual folders first, then directories, then by match relevance
     filteredFiles = filtered.sort((a, b) => {
-      // Chat History folder always first
       if (a.name === CHAT_HISTORY_FOLDER && b.name !== CHAT_HISTORY_FOLDER) return -1;
       if (b.name === CHAT_HISTORY_FOLDER && a.name !== CHAT_HISTORY_FOLDER) return 1;
-
-      // Notes folder second
       if (a.name === NOTES_FOLDER && b.name !== NOTES_FOLDER) return -1;
       if (b.name === NOTES_FOLDER && a.name !== NOTES_FOLDER) return 1;
-
-      // Subagents folder third
       if (a.name === SUBAGENTS_FOLDER && b.name !== SUBAGENTS_FOLDER) return -1;
       if (b.name === SUBAGENTS_FOLDER && a.name !== SUBAGENTS_FOLDER) return 1;
 
-      // Directories before files (but not for chat_history/note/subagent items which have their own order)
       if (a.type === 'directory' && b.type !== 'directory' && b.type !== 'chat_history' && b.type !== 'note' && b.type !== 'subagent') return -1;
       if (b.type === 'directory' && a.type !== 'directory' && a.type !== 'chat_history' && a.type !== 'note' && a.type !== 'subagent') return 1;
 
-      // Chat history and note items: preserve backend order (most recent first by updated_at)
-      // Don't re-sort them - the backend already sorted by date
       if ((a.type === 'chat_history' && b.type === 'chat_history') ||
           (a.type === 'note' && b.type === 'note')) {
-        return 0; // Preserve original order from backend
+        return 0;
       }
 
       const aName = a.name.toLowerCase();
       const bName = b.name.toLowerCase();
 
-      // Exact match first
       if (aName === filterPart && bName !== filterPart) return -1;
       if (bName === filterPart && aName !== filterPart) return 1;
 
-      // Prefix match second
       const aStarts = aName.startsWith(filterPart);
       const bStarts = bName.startsWith(filterPart);
       if (aStarts && !bStarts) return -1;
       if (bStarts && !aStarts) return 1;
 
-      // Alphabetical for files/directories
       return aName.localeCompare(bName);
     });
 
     selectedIndex = 0;
   });
 
-  /**
-   * Check if the path indicates we're in the Chat History virtual folder
-   */
   function isChatHistoryPath(path: string): boolean {
     return path === CHAT_HISTORY_FOLDER || path.startsWith(CHAT_HISTORY_FOLDER + '/');
   }
 
-  /**
-   * Get the search filter from a Chat History path
-   */
   function getChatHistoryFilter(path: string): string {
     if (path === CHAT_HISTORY_FOLDER) return '';
     return path.slice(CHAT_HISTORY_FOLDER.length + 1);
   }
 
-  /**
-   * Check if the path indicates we're in the Notes virtual folder
-   */
   function isNotesPath(path: string): boolean {
     return path === NOTES_FOLDER || path.startsWith(NOTES_FOLDER + '/');
   }
 
-  /**
-   * Get the search filter from a Notes path
-   */
   function getNotesFilter(path: string): string {
     if (path === NOTES_FOLDER) return '';
     return path.slice(NOTES_FOLDER.length + 1);
   }
 
-  /**
-   * Check if the path indicates we're in the Subagents virtual folder
-   */
   function isSubagentsPath(path: string): boolean {
     return path === SUBAGENTS_FOLDER || path.startsWith(SUBAGENTS_FOLDER + '/');
   }
 
-  /**
-   * Get the search filter from a Subagents path
-   */
   function getSubagentsFilter(path: string): string {
     if (path === SUBAGENTS_FOLDER) return '';
     return path.slice(SUBAGENTS_FOLDER.length + 1);
@@ -229,7 +234,6 @@
     lastFetchedPath = path;
     currentPath = path;
 
-    // Check if we're in the Chat History virtual folder
     if (isChatHistoryPath(path)) {
       inChatHistoryFolder = true;
       inNotesFolder = false;
@@ -238,7 +242,6 @@
       return;
     }
 
-    // Check if we're in the Notes virtual folder
     if (isNotesPath(path)) {
       inNotesFolder = true;
       inChatHistoryFolder = false;
@@ -247,7 +250,6 @@
       return;
     }
 
-    // Check if we're in the Subagents virtual folder
     if (isSubagentsPath(path)) {
       inSubagentsFolder = true;
       inChatHistoryFolder = false;
@@ -261,8 +263,6 @@
     inSubagentsFolder = false;
 
     try {
-      // If we have a worktreeId, use the worktree file API
-      // This allows browsing files in the worktree's directory instead of the main project
       let fetchedFiles: FileItem[];
       if (worktreeId) {
         const response = await getWorktreeFiles(projectId, worktreeId, path);
@@ -273,7 +273,6 @@
           size: f.size
         }));
       } else {
-        // Use the standard project file API
         const params = new URLSearchParams();
         if (path) {
           params.set('path', path);
@@ -291,10 +290,8 @@
         }
       }
 
-      // Check if this fetch is still valid (not superseded by a newer fetch)
       if (thisFetchId !== fetchCounter) return;
 
-      // Add virtual folders at root level
       if (!path) {
         files = [
           {
@@ -342,7 +339,6 @@
         credentials: 'include'
       });
 
-      // Check if this fetch is still valid
       if (fetchId !== fetchCounter) return;
 
       if (response.ok) {
@@ -372,13 +368,12 @@
     try {
       const notes = await getNotesAutocomplete(search || undefined, 30);
 
-      // Check if this fetch is still valid
       if (fetchId !== fetchCounter) return;
 
       files = notes.map((note) => ({
         name: note.title,
         type: 'note' as const,
-        path: `${NOTES_FOLDER}/${note.id}`,
+        path: note.absolute_path || `${NOTES_FOLDER}/${note.id}`,
         note_id: note.id,
         preview: note.preview,
         note_tags: note.tags
@@ -393,7 +388,6 @@
 
   async function fetchSubagents(search: string = '', fetchId: number) {
     if (!profileId) {
-      // No profile - can't fetch subagents
       if (fetchId === fetchCounter) {
         files = [];
         loading = false;
@@ -404,7 +398,6 @@
     try {
       const subagents = await getSubagentsForAutocomplete(profileId, projectId, search || undefined, 30);
 
-      // Check if this fetch is still valid
       if (fetchId !== fetchCounter) return;
 
       files = subagents.map((agent) => ({
@@ -426,10 +419,6 @@
     }
   }
 
-  /**
-   * Handle keyboard events for the autocomplete.
-   * Returns true if the event was handled.
-   */
   export function handleKeyDown(event: KeyboardEvent): boolean {
     if (!visible || filteredFiles.length === 0) return false;
 
@@ -452,10 +441,8 @@
         const selected = filteredFiles[selectedIndex];
         if (selected) {
           if (selected.type === 'directory') {
-            // For directories, navigate into them
             navigateToDirectory(selected);
           } else {
-            // For files, select them
             onSelect(selected);
           }
         }
@@ -476,19 +463,14 @@
         return true;
 
       case 'Backspace':
-        // If the input ends with a path (trailing /), go back to parent directory
         const backspaceAtInfo = extractAtMentionQuery(inputValue);
         if (backspaceAtInfo && backspaceAtInfo.query.endsWith('/')) {
           event.preventDefault();
-          // Get the parent path - remove trailing slash and last path component
           const pathWithoutTrailingSlash = backspaceAtInfo.query.slice(0, -1);
           const lastSlashIdx = pathWithoutTrailingSlash.lastIndexOf('/');
           if (lastSlashIdx === -1) {
-            // At root level - use a special marker to tell parent to just show @
-            // We use type 'directory' with empty path, parent will handle it
             onSelect({ name: '', type: 'directory', path: '' });
           } else {
-            // Go to parent directory (keep trailing slash)
             const parentPath = pathWithoutTrailingSlash.slice(0, lastSlashIdx + 1);
             onSelect({ name: '', type: 'directory', path: parentPath });
           }
@@ -502,14 +484,12 @@
   }
 
   function navigateToDirectory(dir: FileItem) {
-    // This will be handled by updating the input in the parent
-    // For now, we'll select the directory which should update the path
     onSelect({ ...dir, path: dir.path + '/' });
   }
 
   function scrollToSelected() {
     if (listElement) {
-      const selected = listElement.children[selectedIndex] as HTMLElement;
+      const selected = listElement.querySelector(`[data-index="${selectedIndex}"]`) as HTMLElement;
       if (selected) {
         selected.scrollIntoView({ block: 'nearest' });
       }
@@ -530,7 +510,16 @@
   function goToRoot() {
     inChatHistoryFolder = false;
     inNotesFolder = false;
+    inSubagentsFolder = false;
     fetchFiles('');
+  }
+
+  function navigateToPath(path: string) {
+    if (!path) {
+      goToRoot();
+      return;
+    }
+    onSelect({ name: '', type: 'directory', path: path + '/' });
   }
 
   function formatRelativeDate(isoDate: string): string {
@@ -591,9 +580,23 @@
     if (file.type === 'subagent') return 'agent';
     return '';
   }
+
+  /**
+   * Compute the flat index for a file item, accounting for section headers.
+   * Quick access items come first, then file items.
+   */
+  function getFlatIndex(file: FileItem): number {
+    if (isAtRoot && showSectionHeaders) {
+      const qaIdx = quickAccessItems.indexOf(file);
+      if (qaIdx !== -1) return qaIdx;
+      const fIdx = fileItems.indexOf(file);
+      if (fIdx !== -1) return quickAccessItems.length + fIdx;
+    }
+    return filteredFiles.indexOf(file);
+  }
 </script>
 
-{#if visible && (filteredFiles.length > 0 || loading)}
+{#if visible}
   <div class="autocomplete-panel file-autocomplete-panel">
     <!-- Header -->
     <div class="autocomplete-header">
@@ -608,19 +611,22 @@
           {filteredFiles.length} agent{filteredFiles.length !== 1 ? 's' : ''}
         {:else}
           {filteredFiles.length} item{filteredFiles.length !== 1 ? 's' : ''}
-          {#if currentPath}
-            <span class="file-path-indicator">/{currentPath}</span>
-          {/if}
         {/if}
       </span>
       {#if currentPath}
-        <button
-          type="button"
-          class="autocomplete-back-btn"
-          onclick={goToRoot}
-        >
-          ← root
-        </button>
+        <nav class="autocomplete-breadcrumb">
+          <button type="button" class="autocomplete-breadcrumb-segment" onclick={goToRoot}>@</button>
+          {#each breadcrumbSegments as segment, i}
+            <span class="autocomplete-breadcrumb-separator">/</span>
+            {#if i < breadcrumbSegments.length - 1}
+              <button type="button" class="autocomplete-breadcrumb-segment" onclick={() => navigateToPath(segment.path)}>
+                {segment.name}
+              </button>
+            {:else}
+              <span class="autocomplete-breadcrumb-current">{segment.name}</span>
+            {/if}
+          {/each}
+        </nav>
       {/if}
     </div>
 
@@ -630,21 +636,31 @@
         <div class="autocomplete-loading-spinner"></div>
         <span>Loading...</span>
       </div>
+    {:else if filteredFiles.length === 0}
+      <!-- Empty state -->
+      <div class="autocomplete-empty">
+        <svg class="autocomplete-empty-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+        </svg>
+        <span>No matching items</span>
+      </div>
     {:else}
       <!-- File list -->
-      <ul bind:this={listElement} class="autocomplete-list file-autocomplete-list">
-        {#each filteredFiles as file, index}
-          <li>
-            <button
-              type="button"
-              class="autocomplete-item"
-              class:selected={index === selectedIndex}
-              onclick={() => handleSelect(file)}
-              onmouseenter={() => selectedIndex = index}
-            >
-              <!-- Icon -->
-              <div class="autocomplete-item-icon {getIconClass(file)}">
-                {#if file.type === 'directory'}
+      <ul bind:this={listElement} class="autocomplete-list file-autocomplete-list" role="listbox" aria-label="Files">
+        {#if showSectionHeaders}
+          <!-- Quick Access section -->
+          <li class="autocomplete-section-header" role="presentation">Quick Access</li>
+          {#each quickAccessItems as file}
+            {@const index = getFlatIndex(file)}
+            <li data-index={index} role="option" aria-selected={index === selectedIndex}>
+              <button
+                type="button"
+                class="autocomplete-item"
+                class:selected={index === selectedIndex}
+                onclick={() => handleSelect(file)}
+                onmouseenter={() => selectedIndex = index}
+              >
+                <div class="autocomplete-item-icon {getIconClass(file)}">
                   {#if file.name === CHAT_HISTORY_FOLDER}
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
@@ -654,7 +670,6 @@
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
                   {:else if file.name === SUBAGENTS_FOLDER}
-                    <!-- Robot/Agent icon -->
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                     </svg>
@@ -663,70 +678,163 @@
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                     </svg>
                   {/if}
+                </div>
+                <div class="autocomplete-item-content">
+                  <span class="autocomplete-item-name">
+                    {#each highlightMatch(file.name, currentFilterQuery) as segment}
+                      {#if segment.matched}<span class="autocomplete-match">{segment.text}</span>{:else}{segment.text}{/if}
+                    {/each}/
+                  </span>
+                </div>
+                {#if getBadgeText(file)}
+                  <span class="autocomplete-badge {getBadgeClass(file)}">{getBadgeText(file)}</span>
+                {/if}
+              </button>
+            </li>
+          {/each}
+
+          <!-- Files section -->
+          {#if fileItems.length > 0}
+            <li class="autocomplete-section-header" role="presentation">Files</li>
+            {#each fileItems as file}
+              {@const index = getFlatIndex(file)}
+              <li data-index={index} role="option" aria-selected={index === selectedIndex}>
+                <button
+                  type="button"
+                  class="autocomplete-item"
+                  class:selected={index === selectedIndex}
+                  onclick={() => handleSelect(file)}
+                  onmouseenter={() => selectedIndex = index}
+                >
+                  <div class="autocomplete-item-icon {getIconClass(file)}">
+                    {#if file.type === 'directory'}
+                      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                      </svg>
+                    {:else}
+                      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                    {/if}
+                  </div>
+                  <div class="autocomplete-item-content">
+                    <span class="autocomplete-item-name">
+                      {#each highlightMatch(file.name, currentFilterQuery) as segment}
+                        {#if segment.matched}<span class="autocomplete-match">{segment.text}</span>{:else}{segment.text}{/if}
+                      {/each}{file.type === 'directory' ? '/' : ''}
+                    </span>
+                  </div>
+                  {#if file.type === 'file' && file.size}
+                    <span class="autocomplete-item-meta">{formatSize(file.size)}</span>
+                  {/if}
+                  {#if getBadgeText(file)}
+                    <span class="autocomplete-badge {getBadgeClass(file)}">{getBadgeText(file)}</span>
+                  {/if}
+                </button>
+              </li>
+            {/each}
+          {/if}
+        {:else}
+          <!-- Flat list (inside folder or no section split needed) -->
+          {#each filteredFiles as file, index}
+            <li data-index={index} role="option" aria-selected={index === selectedIndex}>
+              <button
+                type="button"
+                class="autocomplete-item"
+                class:selected={index === selectedIndex}
+                onclick={() => handleSelect(file)}
+                onmouseenter={() => selectedIndex = index}
+              >
+                <!-- Icon -->
+                <div class="autocomplete-item-icon {getIconClass(file)}">
+                  {#if file.type === 'directory'}
+                    {#if file.name === CHAT_HISTORY_FOLDER}
+                      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                      </svg>
+                    {:else if file.name === NOTES_FOLDER}
+                      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                    {:else if file.name === SUBAGENTS_FOLDER}
+                      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                      </svg>
+                    {:else}
+                      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                      </svg>
+                    {/if}
+                  {:else if file.type === 'chat_history'}
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                    </svg>
+                  {:else if file.type === 'note'}
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                  {:else if file.type === 'subagent'}
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                    </svg>
+                  {:else}
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                  {/if}
+                </div>
+
+                <!-- Content -->
+                <div class="autocomplete-item-content">
+                  <span class="autocomplete-item-name">
+                    {#each highlightMatch(file.name, currentFilterQuery) as segment}
+                      {#if segment.matched}<span class="autocomplete-match">{segment.text}</span>{:else}{segment.text}{/if}
+                    {/each}{file.type === 'directory' ? '/' : ''}
+                  </span>
+                  {#if (file.type === 'chat_history' || file.type === 'note') && file.preview}
+                    <span class="autocomplete-item-description">
+                      {file.preview}
+                    </span>
+                  {:else if file.type === 'subagent' && file.subagent_description}
+                    <span class="autocomplete-item-description">
+                      {file.subagent_description}
+                    </span>
+                  {/if}
+                </div>
+
+                <!-- Meta info -->
+                {#if file.type === 'file' && file.size}
+                  <span class="autocomplete-item-meta">
+                    {formatSize(file.size)}
+                  </span>
                 {:else if file.type === 'chat_history'}
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                  </svg>
-                {:else if file.type === 'note'}
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                {:else if file.type === 'subagent'}
-                  <!-- Robot/Agent icon for subagent item -->
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                  </svg>
-                {:else}
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                {/if}
-              </div>
-
-              <!-- Content -->
-              <div class="autocomplete-item-content">
-                <span class="autocomplete-item-name">
-                  {file.name}{file.type === 'directory' ? '/' : ''}
-                </span>
-                {#if (file.type === 'chat_history' || file.type === 'note') && file.preview}
-                  <span class="autocomplete-item-description">
-                    {file.preview}
+                  <span class="autocomplete-item-meta">
+                    <span>{file.message_count} msgs</span>
+                    {#if file.modified_at}
+                      <span>·</span>
+                      <span>{formatRelativeDate(file.modified_at)}</span>
+                    {/if}
                   </span>
-                {:else if file.type === 'subagent' && file.subagent_description}
-                  <span class="autocomplete-item-description">
-                    {file.subagent_description}
+                {:else if file.type === 'note' && file.note_tags && file.note_tags.length > 0}
+                  <span class="autocomplete-item-meta file-note-tags">
+                    {file.note_tags.slice(0, 2).join(', ')}{file.note_tags.length > 2 ? '...' : ''}
+                  </span>
+                {:else if file.type === 'subagent' && file.subagent_source}
+                  <span class="autocomplete-item-meta">
+                    {file.subagent_source}
                   </span>
                 {/if}
-              </div>
 
-              <!-- Meta info -->
-              {#if file.type === 'file' && file.size}
-                <span class="autocomplete-item-meta">
-                  {formatSize(file.size)}
-                </span>
-              {:else if file.type === 'chat_history'}
-                <span class="autocomplete-item-meta">
-                  {file.message_count} msgs{file.modified_at ? ` · ${formatRelativeDate(file.modified_at)}` : ''}
-                </span>
-              {:else if file.type === 'note' && file.note_tags && file.note_tags.length > 0}
-                <span class="autocomplete-item-meta file-note-tags">
-                  {file.note_tags.slice(0, 2).join(', ')}{file.note_tags.length > 2 ? '...' : ''}
-                </span>
-              {:else if file.type === 'subagent' && file.subagent_source}
-                <span class="autocomplete-item-meta">
-                  {file.subagent_source}
-                </span>
-              {/if}
-
-              <!-- Type badge -->
-              {#if getBadgeText(file)}
-                <span class="autocomplete-badge {getBadgeClass(file)}">
-                  {getBadgeText(file)}
-                </span>
-              {/if}
-            </button>
-          </li>
-        {/each}
+                <!-- Type badge -->
+                {#if getBadgeText(file)}
+                  <span class="autocomplete-badge {getBadgeClass(file)}">
+                    {getBadgeText(file)}
+                  </span>
+                {/if}
+              </button>
+            </li>
+          {/each}
+        {/if}
       </ul>
     {/if}
 
@@ -740,7 +848,6 @@
 {/if}
 
 <style>
-  /* FileAutocomplete-specific positioning and sizing */
   .file-autocomplete-panel {
     position: absolute;
     bottom: 100%;
@@ -749,19 +856,20 @@
     margin-bottom: 8px;
     max-height: 20rem;
     z-index: 50;
+    background: var(--popover, var(--card));
+  }
 
-    /* Solid background since we're not portaled to body like CommandAutocomplete */
-    background: var(--card);
+  /* Mobile: break out of textarea-wrapper to span full chat island width */
+  @media (max-width: 640px) {
+    .file-autocomplete-panel {
+      left: -21px; /* -(input-inner padding 16px + input-wrapper padding 4px + border 1px) */
+      right: auto;
+      width: calc(100vw - 1.5rem); /* viewport minus chat-input-wrapper horizontal padding */
+    }
   }
 
   .file-autocomplete-list {
     max-height: 14rem;
-  }
-
-  .file-path-indicator {
-    opacity: 0.6;
-    font-family: var(--card-font-mono, 'JetBrains Mono', ui-monospace, monospace);
-    margin-left: 4px;
   }
 
   .file-note-tags {

@@ -91,13 +91,52 @@
 		return (lastSpace > 80 ? truncated.substring(0, lastSpace) : truncated) + '…';
 	}
 
-	function renderMarkdown(text: string): string {
-		try {
-			return marked.parse(text) as string;
-		} catch {
-			return text;
+	// ── Incremental markdown rendering ──────────────────────────────────────
+	// During streaming, thinking content is only appended. Cache the rendered
+	// HTML for completed paragraphs and only re-parse the tail.
+	let _prevContent = '';
+	let _prevHtml = '';
+	let _stablePrefixContent = '';
+	let _stablePrefixHtml = '';
+
+	function renderMarkdownMemoized(text: string): string {
+		if (!text) return '';
+		if (text === _prevContent) return _prevHtml;
+
+		// Incremental: if content was only appended
+		if (_prevContent.length > 0 && text.startsWith(_prevContent)) {
+			const lastBoundary = text.lastIndexOf('\n\n');
+			if (lastBoundary > 0) {
+				const stableContent = text.substring(0, lastBoundary);
+				const tailContent = text.substring(lastBoundary);
+
+				let prefixHtml: string;
+				if (stableContent === _stablePrefixContent) {
+					prefixHtml = _stablePrefixHtml;
+				} else {
+					try { prefixHtml = marked.parse(stableContent) as string; } catch { prefixHtml = stableContent; }
+					_stablePrefixContent = stableContent;
+					_stablePrefixHtml = prefixHtml;
+				}
+
+				let tailHtml: string;
+				try { tailHtml = marked.parse(tailContent) as string; } catch { tailHtml = tailContent; }
+
+				_prevContent = text;
+				_prevHtml = prefixHtml + tailHtml;
+				return _prevHtml;
+			}
 		}
+
+		// Full render
+		_stablePrefixContent = '';
+		_stablePrefixHtml = '';
+		_prevContent = text;
+		try { _prevHtml = marked.parse(text) as string; } catch { _prevHtml = text; }
+		return _prevHtml;
 	}
+
+	const renderedHtml = $derived(renderMarkdownMemoized(content));
 
 	// Derived: should show summary when collapsed
 	const showSummary = $derived(!isExpanded && prefs.showThinkingSummary && content);
@@ -148,7 +187,7 @@
 	<!-- Expandable Content -->
 	{#if isExpanded && content}
 		<div class="thinking-content prose prose-sm max-w-none">
-			{@html renderMarkdown(content)}
+			{@html renderedHtml}
 		</div>
 	{/if}
 </div>

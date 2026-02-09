@@ -59,6 +59,7 @@
 	let shouldAutoScroll = $state(true); // Start with auto-scroll enabled
 	let isScrollingProgrammatically = $state(false);
 	let isMounted = $state(false);
+	let scrollRafPending = false; // Throttle scroll handler to one per frame
 
 	// Current profile for message settings (uses current UI selection)
 	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
@@ -184,22 +185,30 @@
 	function handleScroll() {
 		if (!containerRef || isScrollingProgrammatically) return;
 
-		// Save scroll position to non-reactive cache (doesn't trigger effects)
-		scrollPositionCache.set(tab.id, containerRef.scrollTop);
-		// Also save to tab store for cross-session persistence
-		tabs.setTabScrollTop(tab.id, containerRef.scrollTop);
+		// Throttle to one handler per animation frame to prevent main thread blocking
+		if (scrollRafPending) return;
+		scrollRafPending = true;
+		requestAnimationFrame(() => {
+			scrollRafPending = false;
+			if (!containerRef) return;
 
-		// Check current position
-		const nearBottom = isNearBottom();
+			// Save scroll position to non-reactive cache (doesn't trigger effects)
+			scrollPositionCache.set(tab.id, containerRef.scrollTop);
+			// Also save to tab store for cross-session persistence
+			tabs.setTabScrollTop(tab.id, containerRef.scrollTop);
 
-		if (nearBottom) {
-			// User is at/near the bottom - enable auto-scroll
-			shouldAutoScroll = true;
-		} else {
-			// User scrolled away from bottom - disable auto-scroll
-			// This allows reading older messages without being pulled back
-			shouldAutoScroll = false;
-		}
+			// Check current position
+			const nearBottom = isNearBottom();
+
+			if (nearBottom) {
+				// User is at/near the bottom - enable auto-scroll
+				shouldAutoScroll = true;
+			} else {
+				// User scrolled away from bottom - disable auto-scroll
+				// This allows reading older messages without being pulled back
+				shouldAutoScroll = false;
+			}
+		});
 	}
 
 	// Restore scroll position only on mount - not on every reactive update
@@ -372,6 +381,8 @@
 		<!-- Messages -->
 		<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
 			{#each tab.messages as message, messageIndex (message.id)}
+				<!-- content-visibility: auto lets the browser skip paint/layout for off-screen messages -->
+				<div class="msg-virtualized">
 				{#if message.type === 'command'}
 					<!-- Slash command invocation (e.g., /commit, /ralph-loop) -->
 					<CommandMessage
@@ -456,6 +467,7 @@
 						</div>
 					</div>
 				{/if}
+			</div>
 			{/each}
 
 			<!-- Error -->
@@ -468,3 +480,13 @@
 		</div>
 	{/if}
 </div>
+
+<style>
+	/* Browser-native virtualization: skip paint/layout for off-screen messages.
+	   `auto` in contain-intrinsic-size remembers the last rendered height so
+	   the scrollbar stays stable when scrolling back through history. */
+	.msg-virtualized {
+		content-visibility: auto;
+		contain-intrinsic-size: auto 80px;
+	}
+</style>

@@ -289,6 +289,10 @@ class SyncEngine:
         self._user_connections: Dict[str, Dict[str, UserDeviceConnection]] = {}
         # Lock for user connection management
         self._user_lock = asyncio.Lock()
+        # Map streaming session_id -> user_id for user-level broadcasts
+        self._session_user_map: Dict[str, str] = {}
+        # Map streaming session_id -> project_id for workspace-level streaming awareness
+        self._session_project_map: Dict[str, Optional[str]] = {}
 
     async def register_device(
         self,
@@ -374,6 +378,8 @@ class SyncEngine:
         """
         self._streaming_sessions.discard(session_id)
         self._streaming_buffers.pop(session_id, None)
+        self._session_user_map.pop(session_id, None)
+        self._session_project_map.pop(session_id, None)
 
     async def acquire_session_lock(self, session_id: str, device_id: str) -> tuple[bool, Optional[str]]:
         """Acquire exclusive lock on a session for a device.
@@ -447,6 +453,8 @@ class SyncEngine:
             event: The event to broadcast
             exclude_device_id: Device ID to exclude (usually the source device)
         """
+        import json
+
         session_id = event.session_id
 
         if session_id not in self._connections:
@@ -457,6 +465,13 @@ class SyncEngine:
         connections = list(self._connections[session_id].values())
         logger.info(f"Broadcasting {event.event_type} to {len(connections)} devices for session {session_id[:8]}...")
 
+        # Pre-serialize once so a serialization error doesn't disconnect all devices
+        try:
+            event_text = json.dumps(event.to_dict())
+        except (TypeError, ValueError) as e:
+            logger.error(f"Failed to serialize event {event.event_type} for session {session_id[:8]}: {e}")
+            return
+
         # Send to all devices except the excluded one
         failed_devices = []
         for conn in connections:
@@ -465,13 +480,14 @@ class SyncEngine:
                 continue
 
             logger.debug(f"Sending {event.event_type} to device {conn.device_id[:8]}")
-            success = await conn.send_event(event)
-            if not success:
+            try:
+                await conn.websocket.send_text(event_text)
+                conn.last_activity = datetime.utcnow()
+            except Exception as e:
+                logger.warning(f"Failed to send event to device {conn.device_id}: {e}")
                 failed_devices.append(conn.device_id)
-            else:
-                logger.debug(f"Successfully sent {event.event_type} to device {conn.device_id[:8]}")
 
-        # Clean up failed connections
+        # Clean up failed connections (only actual send failures, not serialization)
         if failed_devices:
             async with self._lock:
                 for device_id in failed_devices:
@@ -483,7 +499,9 @@ class SyncEngine:
         session_id: str,
         message_id: str,
         source_device_id: Optional[str] = None,
-        usage: Optional[Dict[str, Any]] = None
+        usage: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
+        project_id: Optional[str] = None
     ):
         """Notify all devices that streaming has started for a session.
 
@@ -495,6 +513,8 @@ class SyncEngine:
             message_id: The assistant message ID
             source_device_id: Device that originated the event (will be excluded from broadcast)
             usage: Token usage data from message_start event (input_tokens, cache_creation_input_tokens, cache_read_input_tokens)
+            user_id: Optional user ID for user-level broadcast (notifies all user devices)
+            project_id: Optional project ID for workspace-level streaming awareness
         """
         # Only create buffer if not already streaming (idempotent)
         if session_id not in self._streaming_sessions:
@@ -503,6 +523,13 @@ class SyncEngine:
         elif usage and session_id in self._streaming_buffers:
             # Update usage if buffer already exists (e.g., reconnection during streaming)
             self._streaming_buffers[session_id].usage = usage
+
+        # Store user_id mapping so broadcast_stream_end can look it up
+        if user_id:
+            self._session_user_map[session_id] = user_id
+        # Store project_id mapping for workspace-level streaming awareness
+        if project_id is not None:
+            self._session_project_map[session_id] = project_id
 
         data = {"message_id": message_id}
         if usage:
@@ -515,6 +542,20 @@ class SyncEngine:
             source_device_id=source_device_id
         )
         await self.broadcast_event(event, exclude_device_id=source_device_id)
+
+        # Broadcast to all user devices so side panels update streaming indicators
+        stored_user_id = self._session_user_map.get(session_id)
+        if stored_user_id:
+            await self._broadcast_user_message(
+                user_id=stored_user_id,
+                message={
+                    "type": "user_streaming_changed",
+                    "session_id": session_id,
+                    "is_streaming": True,
+                    "project_id": self._session_project_map.get(session_id),
+                },
+                source_device_id=source_device_id
+            )
 
     async def broadcast_usage_update(
         self,
@@ -623,6 +664,10 @@ class SyncEngine:
         self._streaming_sessions.discard(session_id)
         # Clear the streaming buffer
         self._streaming_buffers.pop(session_id, None)
+        # Pop user_id mapping (used for user-level broadcast below)
+        stored_user_id = self._session_user_map.pop(session_id, None)
+        # Pop project_id mapping (used for user-level broadcast below)
+        stored_project_id = self._session_project_map.pop(session_id, None)
 
         event = SyncEvent(
             event_type="stream_end",
@@ -635,6 +680,19 @@ class SyncEngine:
             source_device_id=source_device_id
         )
         await self.broadcast_event(event, exclude_device_id=source_device_id)
+
+        # Broadcast to all user devices so side panels update streaming indicators
+        if stored_user_id:
+            await self._broadcast_user_message(
+                user_id=stored_user_id,
+                message={
+                    "type": "user_streaming_changed",
+                    "session_id": session_id,
+                    "is_streaming": False,
+                    "project_id": stored_project_id,
+                },
+                source_device_id=source_device_id
+            )
 
     async def broadcast_message_added(
         self,
@@ -835,6 +893,82 @@ class SyncEngine:
             sent_count = len(user_devices) - len(failed_devices) - (1 if source_device_id in user_devices else 0)
             if sent_count > 0:
                 logger.debug(f"Broadcast tabs_sync to {sent_count} devices for user {user_id[:8]}...")
+
+    async def _broadcast_user_message(
+        self,
+        user_id: str,
+        message: Dict[str, Any],
+        source_device_id: Optional[str] = None
+    ):
+        """Send a message to all devices for a user, excluding source device.
+
+        Private helper used by user-level broadcast methods.
+        """
+        async with self._user_lock:
+            user_devices = self._user_connections.get(user_id, {})
+            if not user_devices:
+                return
+
+            failed_devices = []
+            for device_id, conn in user_devices.items():
+                if device_id == source_device_id:
+                    continue
+                success = await conn.send_json(message)
+                if not success:
+                    failed_devices.append(device_id)
+
+            for device_id in failed_devices:
+                if device_id in self._user_connections.get(user_id, {}):
+                    del self._user_connections[user_id][device_id]
+            if self._user_connections.get(user_id) and not self._user_connections[user_id]:
+                del self._user_connections[user_id]
+
+    async def broadcast_user_session_created(
+        self,
+        user_id: str,
+        session_id: str,
+        source_device_id: Optional[str] = None
+    ):
+        """Broadcast that a new session was created to all user's devices.
+
+        This allows other devices to update their session list without polling.
+        """
+        await self._broadcast_user_message(
+            user_id=user_id,
+            message={"type": "user_session_created", "session_id": session_id},
+            source_device_id=source_device_id
+        )
+
+    async def broadcast_branch_changed(
+        self,
+        user_id: str,
+        project_id: str,
+        branch_name: str
+    ):
+        """Broadcast that a branch was checked out to all user's devices.
+
+        Allows other devices viewing the same project to refresh their git state.
+        """
+        await self._broadcast_user_message(
+            user_id=user_id,
+            message={
+                "type": "user_branch_changed",
+                "project_id": project_id,
+                "branch_name": branch_name,
+            }
+        )
+
+    def get_user_streaming_sessions(self, user_id: str) -> List[Dict[str, Any]]:
+        """Get all currently streaming sessions for a user with their project IDs.
+
+        Used to send an initial snapshot when a device connects.
+        Returns list of dicts with session_id and project_id.
+        """
+        return [
+            {"session_id": sid, "project_id": self._session_project_map.get(sid)}
+            for sid in self._streaming_sessions
+            if self._session_user_map.get(sid) == user_id
+        ]
 
 
 # Global sync engine instance

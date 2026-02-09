@@ -614,7 +614,7 @@
 		width: 100%;
 		padding: 12px;
 		font-size: 0.8rem;
-		font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+		font-family: var(--font-mono);
 		color: var(--foreground);
 		background: var(--background);
 		border: 1px solid var(--border);

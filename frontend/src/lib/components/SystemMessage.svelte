@@ -24,13 +24,15 @@
 	}
 
 	// Get formatted content based on subtype
-	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string } {
+	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string; hidden?: boolean } {
 		const subtype = message.systemSubtype || 'system';
 		const data: Record<string, unknown> = message.systemData || {};
 
 		switch (subtype) {
 			case 'status': {
-				const status = data.status as string || 'unknown';
+				const status = data.status as string | null;
+				const permissionMode = data.permissionMode as string | undefined;
+
 				if (status === 'compacting') {
 					return {
 						title: 'Auto Compacting',
@@ -39,9 +41,41 @@
 						badgeColor: 'amber'
 					};
 				}
+
+				// Permission mode change (plan mode, delegate mode, etc.)
+				if (permissionMode) {
+					const modeLabels: Record<string, string> = {
+						plan: 'Plan Mode',
+						default: 'Default Mode',
+						acceptEdits: 'Accept Edits',
+						bypassPermissions: 'Bypass Permissions',
+						delegate: 'Delegate Mode',
+						dontAsk: 'Auto-Approve'
+					};
+					const label = modeLabels[permissionMode] || permissionMode;
+					return {
+						title: label,
+						content: `Switched to ${label.toLowerCase()}.`,
+						badge: permissionMode,
+						badgeColor: permissionMode === 'plan' ? 'purple' : 'blue'
+					};
+				}
+
+				// status: null with no permissionMode = clearing status (e.g., compaction ended)
+				// Hide these since they carry no useful information
+				if (!status) {
+					return {
+						title: 'Status Cleared',
+						content: 'Previous status has been cleared.',
+						badge: 'cleared',
+						badgeColor: 'green',
+						hidden: true
+					};
+				}
+
 				return {
 					title: 'Status',
-					content: status || 'Status update',
+					content: status,
 					badge: status,
 					badgeColor: 'blue'
 				};
@@ -70,6 +104,28 @@
 					title: 'Context Compacted',
 					content,
 					badge: preTokens ? `${Math.round(preTokens / 1000)}k → compacted` : (trigger === 'auto' ? 'auto' : 'manual'),
+					badgeColor: 'green'
+				};
+			}
+
+			case 'microcompact_boundary': {
+				const metadata = data.microcompactMetadata as Record<string, unknown> || {};
+				const trigger = metadata.trigger as string || 'auto';
+				const tokensSaved = metadata.tokensSaved as number;
+
+				let content = 'Context was microcompacted.';
+				if (tokensSaved) {
+					const formatTokens = (n: number) => {
+						if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+						return n.toLocaleString();
+					};
+					content += ` Saved ${formatTokens(tokensSaved)} tokens.`;
+				}
+
+				return {
+					title: 'Microcompacted',
+					content,
+					badge: trigger,
 					badgeColor: 'green'
 				};
 			}
@@ -137,6 +193,44 @@
 					content: content || 'Command executed',
 					badge,
 					badgeColor
+				};
+			}
+
+			case 'informational': {
+				// General informational messages from the SDK
+				const content = (data.content as string) || message.content || 'Info';
+				const level = data.level as string || 'info';
+				return {
+					title: 'Info',
+					content,
+					badge: level,
+					badgeColor: level === 'warning' ? 'amber' : 'blue'
+				};
+			}
+
+			case 'turn_duration': {
+				// Turn timing info - hide these as they're internal metrics
+				const durationMs = (data.durationMs as number) || 0;
+				const seconds = (durationMs / 1000).toFixed(1);
+				return {
+					title: 'Turn Duration',
+					content: `Turn completed in ${seconds}s.`,
+					badge: `${seconds}s`,
+					badgeColor: 'gray',
+					hidden: true
+				};
+			}
+
+			case 'stop_hook_summary': {
+				// Stop hook completion summary
+				const hookCount = data.hookCount as number || 0;
+				const hasOutput = data.hasOutput as boolean;
+				return {
+					title: 'Hook Summary',
+					content: `${hookCount} hook${hookCount !== 1 ? 's' : ''} executed.${hasOutput ? ' Output was produced.' : ''}`,
+					badge: `${hookCount} hooks`,
+					badgeColor: 'gray',
+					hidden: true
 				};
 			}
 
@@ -283,6 +377,7 @@
 	}
 </script>
 
+{#if !formatted.hidden}
 <div class="w-full border border-border rounded-lg overflow-hidden shadow-s bg-card">
 	<div class="px-4 py-2 bg-muted/30 flex items-center gap-2">
 		<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -305,6 +400,7 @@
 		{/if}
 	</div>
 </div>
+{/if}
 
 <style>
 	/* Custom styles for system message markdown content */

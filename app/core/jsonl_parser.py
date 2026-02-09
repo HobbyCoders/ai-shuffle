@@ -20,7 +20,9 @@ Key fields that affect parsing:
 
 import json
 import logging
+import threading
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Generator
 from datetime import datetime
@@ -28,6 +30,19 @@ from datetime import datetime
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# ─── Parse Result Cache ─────────────────────────────────────────────────────
+# Cache parsed JSONL results to avoid re-reading files on every poll/load.
+# Validated by file mtime + size - if file changes, cache entry is invalidated.
+_PARSE_CACHE_MAX_SIZE = 50
+
+# Cache: sdk_session_id -> (file_mtime, file_size, messages_copy, usage_data_copy)
+_parse_cache: OrderedDict = OrderedDict()
+_parse_cache_lock = threading.Lock()
+
+# Cache: sdk_session_id -> (dir_mtime, agent_files_dict)
+_agent_paths_cache: OrderedDict = OrderedDict()
+_agent_paths_cache_lock = threading.Lock()
 
 # Maximum display size for tool output content (matches streaming behavior)
 MAX_DISPLAY_OUTPUT_SIZE = 2000
@@ -407,6 +422,19 @@ def get_agent_jsonl_paths(sdk_session_id: str, working_dir: str = "/workspace") 
                         project_dirs_to_search.append(proj_dir)
                         break
 
+    # Check cache - validated by project directory mtime
+    for search_dir in project_dirs_to_search:
+        try:
+            dir_mtime = search_dir.stat().st_mtime
+            with _agent_paths_cache_lock:
+                cached = _agent_paths_cache.get(sdk_session_id)
+                if cached and cached[0] == dir_mtime:
+                    _agent_paths_cache.move_to_end(sdk_session_id)
+                    logger.debug(f"Agent paths cache hit for session {sdk_session_id}")
+                    return dict(cached[1])  # Return copy to prevent mutation of cached data
+        except OSError:
+            pass
+
     for search_dir in project_dirs_to_search:
         for agent_file in search_dir.glob("agent-*.jsonl"):
             # Extract agent_id from filename (agent-{id}.jsonl)
@@ -423,6 +451,17 @@ def get_agent_jsonl_paths(sdk_session_id: str, working_dir: str = "/workspace") 
                             logger.debug(f"Found agent file {agent_id} for session {sdk_session_id}")
             except Exception as e:
                 logger.warning(f"Failed to check agent file {agent_file}: {e}")
+
+    # Cache the results (with LRU eviction)
+    if project_dirs_to_search:
+        try:
+            dir_mtime = project_dirs_to_search[0].stat().st_mtime
+            with _agent_paths_cache_lock:
+                _agent_paths_cache[sdk_session_id] = (dir_mtime, agent_files)
+                while len(_agent_paths_cache) > _PARSE_CACHE_MAX_SIZE:
+                    _agent_paths_cache.popitem(last=False)
+        except OSError:
+            pass
 
     return agent_files
 
@@ -521,9 +560,137 @@ def parse_agent_history(agent_path: Path) -> List[Dict[str, Any]]:
 def parse_session_history(
     sdk_session_id: str,
     working_dir: str = "/workspace"
-) -> List[Dict[str, Any]]:
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
-    Parse a session's JSONL history file and return messages in streaming format.
+    Parse a session's JSONL history file and return messages + usage data.
+
+    Results are cached in memory and validated by file mtime + size.
+    Cache is invalidated when the file changes on disk.
+    """
+    jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)
+    if not jsonl_path:
+        logger.warning(f"JSONL file not found for session {sdk_session_id}")
+        return [], {}
+
+    # Check file stats for cache validation
+    try:
+        stat = jsonl_path.stat()
+        file_mtime = stat.st_mtime
+        file_size = stat.st_size
+    except OSError:
+        return [], {}
+
+    # Check cache
+    with _parse_cache_lock:
+        cached = _parse_cache.get(sdk_session_id)
+        if cached is not None:
+            c_mtime, c_size, c_messages_json, c_usage_json = cached
+            if c_mtime == file_mtime and c_size == file_size:
+                _parse_cache.move_to_end(sdk_session_id)
+                logger.debug(f"Parse cache hit for session {sdk_session_id}")
+                # Deserialize from JSON strings (much faster than deepcopy under lock)
+                return json.loads(c_messages_json), json.loads(c_usage_json)
+
+    # Cache miss - do full parse
+    logger.info(f"Parse cache miss for session {sdk_session_id}, parsing JSONL")
+    messages, usage_data = _parse_session_history_uncached(sdk_session_id, working_dir, jsonl_path)
+
+    # Store in cache as serialized JSON strings (fast to copy on read, no deepcopy needed)
+    with _parse_cache_lock:
+        _parse_cache[sdk_session_id] = (file_mtime, file_size, json.dumps(messages), json.dumps(usage_data))
+        while len(_parse_cache) > _PARSE_CACHE_MAX_SIZE:
+            _parse_cache.popitem(last=False)
+
+    return messages, usage_data
+
+
+def invalidate_parse_cache(sdk_session_id: str = None) -> None:
+    """
+    Invalidate cached parse results.
+
+    Args:
+        sdk_session_id: If provided, invalidate only this session. If None, clear all.
+    """
+    with _parse_cache_lock:
+        if sdk_session_id:
+            _parse_cache.pop(sdk_session_id, None)
+            logger.debug(f"Invalidated parse cache for session {sdk_session_id}")
+        else:
+            _parse_cache.clear()
+            logger.debug("Cleared entire parse cache")
+
+    with _agent_paths_cache_lock:
+        if sdk_session_id:
+            _agent_paths_cache.pop(sdk_session_id, None)
+        else:
+            _agent_paths_cache.clear()
+
+
+def pre_seed_parse_cache(
+    sdk_session_id: str,
+    messages: List[Dict[str, Any]],
+    usage_data: Dict[str, Any],
+    working_dir: str = "/workspace"
+) -> bool:
+    """
+    Pre-seed the parse cache with messages from the live session store.
+
+    Called after end_streaming() to avoid JSONL re-parsing on the next load.
+    Instead of invalidating the cache (forcing an expensive JSONL re-parse),
+    we update it with the messages already in memory.
+
+    The cache entry is stored with the current JSONL file's mtime/size so it
+    will be treated as valid on the next read. If the JSONL file changes again
+    (e.g., another query starts), the mtime check will detect the change and
+    the cache will be re-populated normally.
+
+    Args:
+        sdk_session_id: The Claude SDK session ID
+        messages: Final messages from live_session_store
+        usage_data: Usage data dict
+        working_dir: Working directory for finding the JSONL file
+
+    Returns:
+        True if cache was pre-seeded, False on failure (falls back to invalidation)
+    """
+    try:
+        jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)
+        if not jsonl_path:
+            logger.warning(f"Cannot pre-seed cache: JSONL path not found for {sdk_session_id}")
+            invalidate_parse_cache(sdk_session_id)
+            return False
+
+        stat = jsonl_path.stat()
+        file_mtime = stat.st_mtime
+        file_size = stat.st_size
+
+        with _parse_cache_lock:
+            _parse_cache[sdk_session_id] = (
+                file_mtime,
+                file_size,
+                json.dumps(messages),
+                json.dumps(usage_data)
+            )
+            _parse_cache.move_to_end(sdk_session_id)
+            while len(_parse_cache) > _PARSE_CACHE_MAX_SIZE:
+                _parse_cache.popitem(last=False)
+
+        logger.info(f"Pre-seeded parse cache for session {sdk_session_id} with {len(messages)} messages")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to pre-seed parse cache for {sdk_session_id}: {e}")
+        invalidate_parse_cache(sdk_session_id)
+        return False
+
+
+def _parse_session_history_uncached(
+    sdk_session_id: str,
+    working_dir: str,
+    jsonl_path: Path
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Parse a session's JSONL history file and return messages + usage data in a single pass.
 
     This transforms the JSONL format to match the format used by live streaming,
     ensuring visual consistency between resumed and live sessions.
@@ -534,26 +701,19 @@ def parse_session_history(
     Args:
         sdk_session_id: The Claude SDK session ID
         working_dir: The working directory for finding the project
+        jsonl_path: Path to the JSONL file (caller is responsible for resolving this)
 
     Returns:
-        List of messages in the same format as WebSocket streaming events
-        Each message has: id, role, content, type, toolName, toolId, toolInput, metadata, streaming
+        Tuple of (messages, usage_data):
+        - messages: List of messages in the same format as WebSocket streaming events
+        - usage_data: Dict with total_tokens_in, total_tokens_out, cache_creation_tokens,
+          cache_read_tokens, last_input_tokens, model (empty dict if no usage found)
     """
-    jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)
-    if not jsonl_path:
-        logger.warning(f"JSONL file not found for session {sdk_session_id}")
-        return []
-
     logger.info(f"Parsing JSONL history from {jsonl_path}")
 
-    # Find all agent files for this session
+    # Find agent file paths (lazy — files are parsed on-demand when needed)
     agent_files = get_agent_jsonl_paths(sdk_session_id, working_dir)
     agent_children_cache: Dict[str, List[Dict[str, Any]]] = {}
-
-    # Pre-parse all agent files
-    for agent_id, agent_path in agent_files.items():
-        agent_children_cache[agent_id] = parse_agent_history(agent_path)
-        logger.debug(f"Parsed {len(agent_children_cache[agent_id])} messages from agent {agent_id}")
 
     messages: List[Dict[str, Any]] = []
     msg_counter = 0
@@ -561,9 +721,18 @@ def parse_session_history(
     # Track tool names by ID for matching tool_result to tool_use
     tool_names_by_id: Dict[str, str] = {}
 
+    # Dict-based index: toolId → index in messages list for O(1) lookup
+    messages_by_tool_id: Dict[str, int] = {}
+
     # Track Task tool uses that have been converted to subagent messages
     # Maps tool_use_id to agent info for matching with tool_result
     task_tool_uses: Dict[str, Dict[str, Any]] = {}
+
+    # Usage accumulation (replaces separate get_session_cost_from_jsonl call)
+    total_input_tokens = 0
+    total_output_tokens = 0
+    usage_model = None
+    last_usage = {}
 
     for entry in parse_jsonl_file(jsonl_path):
         entry_type = entry.get("type")
@@ -571,6 +740,17 @@ def parse_session_history(
         # Skip non-message entries
         if entry_type in ("queue-operation", "file-history-snapshot"):
             continue
+
+        # Accumulate usage data from all assistant entries (before meta/sidechain skip)
+        if entry_type == "assistant":
+            message_data_for_usage = entry.get("message", {})
+            usage = message_data_for_usage.get("usage", {})
+            if not usage_model:
+                usage_model = message_data_for_usage.get("model")
+            total_input_tokens += usage.get("input_tokens", 0)
+            total_output_tokens += usage.get("output_tokens", 0)
+            if usage:
+                last_usage = usage
 
         # Skip meta messages (slash commands, system prompts, etc.)
         if entry.get("isMeta"):
@@ -590,8 +770,30 @@ def parse_session_history(
         if entry_type == "system":
             subtype = entry.get("subtype")
             system_content = entry.get("content", "")
-            system_data = entry.get("data", {})
+            # SDK system messages store fields at the top level of the entry,
+            # not under a nested "data" key. Pass the entire entry as systemData
+            # so the frontend has access to all fields (e.g., compactMetadata,
+            # durationMs, permissionMode, etc.)
+            system_data = entry.get("data") or entry
             msg_counter += 1
+
+            # Normalize field names: JSONL uses camelCase (compactMetadata),
+            # but the frontend expects snake_case (compact_metadata)
+            if subtype == "compact_boundary" and "compactMetadata" in system_data:
+                cm = system_data["compactMetadata"]
+                system_data = dict(system_data)
+                system_data["compact_metadata"] = {
+                    "trigger": cm.get("trigger"),
+                    "pre_tokens": cm.get("preTokens")
+                }
+            elif subtype == "microcompact_boundary" and "microcompactMetadata" in system_data:
+                mm = system_data["microcompactMetadata"]
+                system_data = dict(system_data)
+                system_data["microcompactMetadata"] = {
+                    "trigger": mm.get("trigger"),
+                    "tokensSaved": mm.get("tokensSaved"),
+                    "preTokens": mm.get("preTokens")
+                }
 
             messages.append({
                 "id": uuid,
@@ -729,39 +931,41 @@ def parse_session_history(
                             # Check if this is a result for a Task tool (subagent)
                             if tool_use_id in task_tool_uses:
                                 # This is a subagent result - update the existing subagent message
-                                # task_info available for future extended metadata handling
                                 _task_info = task_tool_uses[tool_use_id]
 
                                 # Extract agentId from toolUseResult if available
                                 tool_use_result = entry.get("toolUseResult", {})
                                 agent_id = tool_use_result.get("agentId") if isinstance(tool_use_result, dict) else None
 
-                                # Find and update the subagent message
-                                for msg in messages:
-                                    if msg.get("type") == "subagent" and msg.get("toolId") == tool_use_id:
-                                        msg["content"] = output[:2000] if output else ""
-                                        msg["agentStatus"] = "error" if is_error else "completed"
+                                # O(1) lookup for the subagent message
+                                msg_idx = messages_by_tool_id.get(tool_use_id)
+                                if msg_idx is not None and msg_idx < len(messages):
+                                    msg = messages[msg_idx]
+                                    msg["content"] = output[:2000] if output else ""
+                                    msg["agentStatus"] = "error" if is_error else "completed"
 
-                                        # Use agentId from toolUseResult to find the right agent children
-                                        if agent_id and agent_id in agent_children_cache:
+                                    # Lazy-load agent children on demand
+                                    if agent_id:
+                                        if agent_id not in agent_children_cache and agent_id in agent_files:
+                                            agent_children_cache[agent_id] = parse_agent_history(agent_files[agent_id])
+                                        if agent_id in agent_children_cache:
                                             msg["agentId"] = agent_id
                                             msg["agentChildren"] = agent_children_cache[agent_id]
-                                            # Clear from cache to avoid double-assignment
                                             agent_children_cache[agent_id] = []
-                                        break
 
                                 # Don't add a separate tool_result message for Task tools
                                 continue
 
                             # Group tool result with its corresponding tool_use message
-                            # Find the matching tool_use and embed the result
+                            # O(1) lookup instead of linear scan
                             found_tool_use = False
-                            for msg in messages:
-                                if msg.get("type") == "tool_use" and msg.get("toolId") == tool_use_id:
+                            msg_idx = messages_by_tool_id.get(tool_use_id)
+                            if msg_idx is not None and msg_idx < len(messages):
+                                msg = messages[msg_idx]
+                                if msg.get("type") == "tool_use":
                                     msg["toolResult"] = output[:2000] if output else ""
                                     msg["toolStatus"] = "error" if is_error else "complete"
                                     found_tool_use = True
-                                    break
 
                             # Only create separate tool_result if no matching tool_use found
                             if not found_tool_use:
@@ -854,7 +1058,7 @@ def parse_session_history(
 
                         elif block_type == "text":
                             text = block.get("text", "")
-                            if text:  # Only add non-empty text blocks
+                            if text and text.strip():  # Only add non-empty, non-whitespace text blocks
                                 msg_counter += 1
                                 messages.append({
                                     "id": f"text-{uuid}-{msg_counter}",
@@ -911,6 +1115,8 @@ def parse_session_history(
                                     "metadata": {"timestamp": timestamp},
                                     "streaming": False
                                 })
+                                if tool_id:
+                                    messages_by_tool_id[tool_id] = len(messages) - 1
                             else:
                                 messages.append({
                                     "id": f"tool-{uuid}-{tool_id or msg_counter}",
@@ -925,6 +1131,8 @@ def parse_session_history(
                                     "metadata": {"timestamp": timestamp},
                                     "streaming": False
                                 })
+                                if tool_id:
+                                    messages_by_tool_id[tool_id] = len(messages) - 1
 
             elif isinstance(content, str) and content:
                 # Plain string content (less common)
@@ -944,24 +1152,40 @@ def parse_session_history(
 
     logger.info(f"Parsed {len(messages)} messages from JSONL history")
 
-    # Merge plugin warning messages from hooks JSONL file
+    # Merge plugin warning messages from hooks JSONL file using O(N+M) merge
     hook_messages = parse_hooks_jsonl(sdk_session_id, working_dir)
     if hook_messages:
         logger.info(f"Merging {len(hook_messages)} hook messages from hooks.jsonl")
-        # Insert hook messages at their correct positions based on timestamp
-        for hook_msg in hook_messages:
-            hook_ts = hook_msg.get("metadata", {}).get("timestamp", "")
-            # Find insertion point - after the last message with earlier timestamp
-            insert_idx = len(messages)  # Default to end
-            for i, msg in enumerate(messages):
-                msg_ts = msg.get("metadata", {}).get("timestamp", "")
-                if msg_ts and hook_ts and msg_ts > hook_ts:
-                    insert_idx = i
-                    break
-            messages.insert(insert_idx, hook_msg)
+        # Both lists are roughly in timestamp order — merge them
+        merged = []
+        mi, hi = 0, 0
+        while mi < len(messages) and hi < len(hook_messages):
+            msg_ts = messages[mi].get("metadata", {}).get("timestamp", "")
+            hook_ts = hook_messages[hi].get("metadata", {}).get("timestamp", "")
+            if hook_ts and msg_ts and hook_ts < msg_ts:
+                merged.append(hook_messages[hi])
+                hi += 1
+            else:
+                merged.append(messages[mi])
+                mi += 1
+        merged.extend(messages[mi:])
+        merged.extend(hook_messages[hi:])
+        messages = merged
         logger.info(f"Total messages after merging hooks: {len(messages)}")
 
-    return messages
+    # Build usage_data from accumulated values
+    usage_data = {}
+    if total_input_tokens or total_output_tokens or last_usage:
+        usage_data = {
+            "total_tokens_in": total_input_tokens,
+            "total_tokens_out": total_output_tokens,
+            "cache_creation_tokens": last_usage.get("cache_creation_input_tokens", 0),
+            "cache_read_tokens": last_usage.get("cache_read_input_tokens", 0),
+            "last_input_tokens": last_usage.get("input_tokens", 0),
+            "model": usage_model
+        }
+
+    return messages, usage_data
 
 
 def get_session_cost_from_jsonl(

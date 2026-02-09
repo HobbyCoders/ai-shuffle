@@ -258,9 +258,14 @@ async def upload_file(
     project_id: str,
     file: UploadFile = File(...),
     path: str = Form(default=""),
+    session_id: str = Form(default=""),
     token: str = Depends(require_auth)
 ):
-    """Upload a file to a specific path within the project. API users can only access their assigned project."""
+    """Upload a file to a specific path within the project. API users can only access their assigned project.
+
+    If session_id is provided and the session is linked to a worktree, the file
+    is uploaded to the worktree's working directory instead of the main project path.
+    """
     check_project_access(request, project_id)
     project = database.get_project(project_id)
     if not project:
@@ -269,12 +274,22 @@ async def upload_file(
             detail=f"Project not found: {project_id}"
         )
 
+    # Determine base path: use worktree path if session is linked to one
+    base_project_path = project["path"]
+    if session_id:
+        worktree = database.get_worktree_by_session(session_id)
+        if worktree and worktree.get("worktree_path"):
+            # Verify the worktree directory actually exists on disk
+            worktree_full = settings.workspace_dir / worktree["worktree_path"]
+            if worktree_full.exists():
+                base_project_path = worktree["worktree_path"]
+
     # Build target directory path
     if path:
-        target_dir = validate_project_path(f"{project['path']}/{path}")
+        target_dir = validate_project_path(f"{base_project_path}/{path}")
     else:
         # Default to uploads subdirectory to keep project root clean
-        target_dir = validate_project_path(f"{project['path']}/uploads")
+        target_dir = validate_project_path(f"{base_project_path}/uploads")
 
     # Ensure directory exists
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -309,8 +324,8 @@ async def upload_file(
             detail=f"Failed to save file: {str(e)}"
         )
 
-    # Return relative path for reference
-    base_path = settings.workspace_dir / project["path"]
+    # Return relative path for reference (relative to the effective base path)
+    base_path = settings.workspace_dir / base_project_path
     relative_path = file_path.relative_to(base_path)
 
     return {

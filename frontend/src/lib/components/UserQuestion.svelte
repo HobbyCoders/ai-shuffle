@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { createEventDispatcher } from 'svelte';
 	import './deck/cards/card-design-system.css';
 
 	export interface QuestionOption {
@@ -22,17 +21,14 @@
 
 	interface Props {
 		data: UserQuestionData;
-	}
-
-	let { data }: Props = $props();
-
-	const dispatch = createEventDispatcher<{
-		respond: {
+		onRespond?: (detail: {
 			request_id: string;
 			tool_use_id: string;
 			answers: Record<string, string | string[]>;
-		};
-	}>();
+		}) => void;
+	}
+
+	let { data, onRespond }: Props = $props();
 
 	// Wizard state
 	let currentStep = $state(0);
@@ -191,7 +187,7 @@
 			}
 		});
 
-		dispatch('respond', {
+		onRespond?.({
 			request_id: data.request_id,
 			tool_use_id: data.tool_use_id,
 			answers: finalAnswers
@@ -214,7 +210,7 @@
 	}
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} />
 
 <!-- User Question Panel -->
 <div
@@ -332,7 +328,7 @@
 							<button
 								type="button"
 								onclick={() => goToQuestion(idx)}
-								class="uq-edit-btn flex-shrink-0 p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors opacity-0 group-hover:opacity-100"
+								class="uq-edit-btn flex-shrink-0 p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors opacity-0 group-hover:opacity-100 hover-actions"
 								aria-label="Edit answer"
 							>
 								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -613,8 +609,9 @@
 	}
 
 	.option-card.selected {
-		border-color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 8%, var(--card));
+		border-color: var(--selection-ring);
+		background: color-mix(in oklch, var(--selection) 8%, var(--card));
+		box-shadow: var(--selection-shadow-subtle);
 	}
 
 	.option-card:focus-visible {
@@ -761,5 +758,12 @@
 	.uq-edit-btn:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: 2px;
+	}
+
+	/* Touch devices: always show action buttons since hover is not available */
+	@media (hover: none) {
+		.hover-actions {
+			opacity: 1 !important;
+		}
 	}
 </style>

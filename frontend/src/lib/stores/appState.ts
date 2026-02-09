@@ -310,8 +310,12 @@ function createChatStore() {
 				pingTimer = null;
 			}
 
-			// Reconnect after delay with exponential backoff (unless intentionally closed)
-			if (event.code !== 1000) {
+			// Reconnect after delay with exponential backoff (unless intentionally closed or auth failed)
+			if (event.code === 4001) {
+				// Auth failure - don't retry, redirect to login
+				console.warn('[Chat] WebSocket auth failed (4001), redirecting to login');
+				import('$app/navigation').then(({ goto }) => goto('/login'));
+			} else if (event.code !== 1000) {
 				if (reconnectTimer) clearTimeout(reconnectTimer);
 				const delay = getReconnectDelay();
 				console.log(`[Chat] Scheduling reconnect in ${Math.round(delay / 1000)}s...`);
@@ -375,19 +379,13 @@ function createChatStore() {
 		switch (eventType) {
 			case 'stream_start': {
 				// Another device started streaming
+				// Don't create an empty assistant message - the poller will bring
+				// in the actual messages from live_session_store.
 				console.log('[Chat] Another device started streaming');
-				const messageId = eventData.message_id as string;
 
 				update(s => ({
 					...s,
 					isStreaming: true,
-					messages: [...s.messages, {
-						id: messageId || `assistant-${Date.now()}`,
-						role: 'assistant',
-						content: '',
-						type: 'text',
-						streaming: true
-					}]
 				}));
 				break;
 			}
@@ -593,9 +591,10 @@ function createChatStore() {
 						role: 'assistant',
 						content: (m.content as string) || '',
 						type: (m.type || m.chunk_type) as MessageType,
-						toolName: m.tool_name as string | undefined,
-						toolId: m.tool_id as string | undefined,
-						toolInput: m.tool_input as Record<string, unknown> | undefined,
+						toolName: (m.tool_name || m.toolName) as string | undefined,
+						toolId: (m.tool_id || m.toolId) as string | undefined,
+						toolInput: (m.tool_input || m.toolInput) as Record<string, unknown> | undefined,
+						metadata: m.metadata as Record<string, unknown> | undefined,
 						streaming: m.streaming as boolean || true
 					}));
 
@@ -618,21 +617,17 @@ function createChatStore() {
 
 			case 'start': {
 				// Query started, streaming begins
+				// Don't create an empty assistant message here! The first content
+				// might be a thinking block, not text. Creating an empty text message
+				// causes a phantom "Claude [time]" header before real content arrives.
+				// The poller will bring in actual messages from live_session_store.
 				const sessionId = data.session_id as string;
-				const assistantMsgId = `assistant-${Date.now()}`;
 
 				update(s => ({
 					...s,
 					sessionId,
 					isStreaming: true,
 					streamStartTime: Date.now(),
-					messages: [...s.messages, {
-						id: assistantMsgId,
-						role: 'assistant',
-						content: '',
-						type: 'text',
-						streaming: true
-					}]
 				}));
 				break;
 			}

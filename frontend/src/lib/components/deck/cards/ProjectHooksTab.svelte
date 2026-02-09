@@ -271,9 +271,9 @@
 		{#if activeTab === 'custom'}
 			<div class="card-footer">
 				<div class="card-footer-content">
-					<button onclick={() => (showForm = true)} class="card-btn-primary">
+					<button onclick={() => (showForm = true)} class="card-btn-primary" title="New Hook">
 						<Plus />
-						New Hook
+						<span class="hidden sm:inline">New Hook</span>
 					</button>
 				</div>
 			</div>
@@ -328,7 +328,7 @@
 	}
 
 	.tab-btn.active .tab-badge {
-		background: var(--primary);
+		background: var(--selection);
 		color: var(--primary-foreground);
 	}
 

@@ -14,7 +14,8 @@ export type CardType =
   | 'mcp'
   | 'notes'
   | 'hooks'
-  | 'stats';
+  | 'stats'
+  | 'api-user-sessions';
 
 export interface DeckCard {
   id: string;
@@ -49,6 +50,7 @@ export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: numbe
   notes: { width: 600, height: 550 },
   hooks: { width: 650, height: 550 },
   stats: { width: 700, height: 600 },
+  'api-user-sessions': { width: 700, height: 600 },
 };
 
 export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
@@ -64,6 +66,7 @@ export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }>
   notes: { width: 400, height: 350 },
   hooks: { width: 500, height: 400 },
   stats: { width: 500, height: 400 },
+  'api-user-sessions': { width: 500, height: 400 },
 };
 
 /**

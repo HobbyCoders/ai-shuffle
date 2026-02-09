@@ -444,7 +444,7 @@
 
 	.btn-primary {
 		background: var(--color-primary);
-		color: white;
+		color: var(--primary-foreground);
 		border: none;
 	}
 
@@ -494,7 +494,7 @@
 
 	.secret-key code {
 		flex: 1;
-		font-family: monospace;
+		font-family: var(--font-mono);
 		font-size: 0.875rem;
 		word-break: break-all;
 	}
@@ -525,7 +525,7 @@
 	}
 
 	.code-input {
-		font-family: monospace;
+		font-family: var(--font-mono);
 		font-size: 1.5rem;
 		text-align: center;
 		letter-spacing: 0.25rem;
@@ -587,7 +587,7 @@
 		padding: 0.5rem 0.75rem;
 		background: var(--color-bg-tertiary);
 		border-radius: 0.375rem;
-		font-family: monospace;
+		font-family: var(--font-mono);
 	}
 
 	.code-number {

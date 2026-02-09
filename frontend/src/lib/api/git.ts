@@ -18,6 +18,8 @@ export interface GitStatus {
     staged: number;
     modified: number;
     untracked: number;
+    ahead: number;
+    behind: number;
 }
 
 // ============================================================================
@@ -334,7 +336,7 @@ export interface WorktreeSyncResult {
 /**
  * Sync worktree database records with actual state on disk.
  * Cleans up stale records where worktrees were deleted outside the app.
- * Should be called when loading a chat card for a project.
+ * Should be called when loading a chat session for a project.
  */
 export async function syncWorktrees(projectId: string): Promise<WorktreeSyncResult> {
     return api.post<WorktreeSyncResult>(`${BASE}/${projectId}/sync-worktrees`);
@@ -386,4 +388,106 @@ export async function getWorktreeFiles(
     const url = `${BASE}/${projectId}/git/worktrees/${worktreeId}/files${queryString ? `?${queryString}` : ''}`;
 
     return api.get<WorktreeFilesResponse>(url);
+}
+
+// ============================================================================
+// Diff Stats API
+// ============================================================================
+
+export interface DiffStats {
+    additions: number;
+    deletions: number;
+    files_changed: number;
+}
+
+/**
+ * Get diff statistics (lines added/removed)
+ */
+export async function getDiffStats(projectId: string, includeUnstaged: boolean = true): Promise<DiffStats> {
+    const params = includeUnstaged ? '' : '?include_unstaged=false';
+    return api.get<DiffStats>(`${BASE}/${projectId}/git/diff-stats${params}`);
+}
+
+// ============================================================================
+// Commit API
+// ============================================================================
+
+export interface CommitRequest {
+    message: string;
+    include_unstaged?: boolean;
+}
+
+export interface CommitResponse {
+    success: boolean;
+    message: string;
+    commit_sha: string | null;
+}
+
+/**
+ * Create a commit
+ */
+export async function commitChanges(projectId: string, request: CommitRequest): Promise<CommitResponse> {
+    return api.post<CommitResponse>(`${BASE}/${projectId}/git/commit`, request);
+}
+
+// ============================================================================
+// Push API
+// ============================================================================
+
+export interface PushRequest {
+    remote?: string;
+    branch?: string;
+    set_upstream?: boolean;
+}
+
+/**
+ * Push commits to remote
+ */
+export async function pushCommits(projectId: string, request: PushRequest = {}): Promise<{ success: boolean; message: string }> {
+    return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/push`, request);
+}
+
+// ============================================================================
+// AI Generation API
+// ============================================================================
+
+export interface GenerateCommitMessageRequest {
+    include_unstaged?: boolean;
+}
+
+export interface GenerateCommitMessageResponse {
+    message: string;
+}
+
+export interface GeneratePRDescriptionRequest {
+    base_branch?: string;
+}
+
+export interface GeneratePRDescriptionResponse {
+    title: string;
+    body: string;
+}
+
+/**
+ * Generate a commit message using AI based on the current diff
+ */
+export async function generateCommitMessage(
+    projectId: string,
+    request: GenerateCommitMessageRequest = {}
+): Promise<GenerateCommitMessageResponse> {
+    return api.post<GenerateCommitMessageResponse>(
+        `${BASE}/${projectId}/git/generate-commit-message`, request
+    );
+}
+
+/**
+ * Generate a PR title and description using AI based on branch commits
+ */
+export async function generatePRDescription(
+    projectId: string,
+    request: GeneratePRDescriptionRequest = {}
+): Promise<GeneratePRDescriptionResponse> {
+    return api.post<GeneratePRDescriptionResponse>(
+        `${BASE}/${projectId}/git/generate-pr-description`, request
+    );
 }

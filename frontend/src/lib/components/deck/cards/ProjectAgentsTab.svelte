@@ -577,8 +577,6 @@
 	/* Centered content wrapper */
 	.centered-content {
 		width: 100%;
-		max-width: 800px;
-		margin: 0 auto;
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-4, 16px);
@@ -684,9 +682,10 @@
 	}
 
 	.tool-chip.active {
-		background: var(--primary);
-		color: var(--primary-foreground);
-		border-color: var(--primary);
+		background: var(--selection-bg-emphasis);
+		color: var(--selection-text);
+		border-color: var(--selection-ring);
+		box-shadow: var(--selection-shadow);
 	}
 
 	/* Required indicator */

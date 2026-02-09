@@ -182,6 +182,31 @@ def cleanup_agents_directory(agents_dir: Path, agent_ids: list) -> None:
                 logger.warning(f"Failed to remove subagent file {agent_file}: {e}")
 
 
+def resolve_note_references(prompt: str) -> str:
+    """Resolve legacy @Notes/note-id references in a prompt.
+
+    New notes use physical file paths that the SDK reads natively.
+    This handles legacy virtual references from older messages by
+    redirecting to the physical file or inlining the content.
+    """
+    def replace_note(match):
+        note_id = match.group(1)
+        note = database.get_note(note_id)
+        if note:
+            # If the note has a physical file, redirect to it
+            if note.get("file_path"):
+                from app.core.note_files import get_absolute_file_path
+                abs_path = str(get_absolute_file_path(note["file_path"]))
+                return f"@{abs_path}"
+            # Otherwise inline the content (pre-migration fallback)
+            title = note.get("title", "Untitled")
+            content = note.get("content", "")
+            return f"[Note: {title}]\n{content}"
+        return match.group(0)  # Keep original if not found
+
+    return re.sub(r'@Notes/(note-[a-f0-9]+)', replace_note, prompt)
+
+
 def _build_plugins_list(
     profile_enabled_plugins: Optional[list],
     setting_sources: Optional[list] = None
@@ -1396,6 +1421,9 @@ async def execute_query(
     if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
         _agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
 
+    # Resolve virtual @Notes/note-id references to actual content
+    prompt = resolve_note_references(prompt)
+
     # Execute query and collect response
     response_text = []
     tool_messages = []  # Collect tool use/result messages for storage
@@ -1680,7 +1708,8 @@ async def stream_query(
     await sync_engine.broadcast_stream_start(
         session_id=session_id,
         message_id=assistant_msg_id,
-        source_device_id=device_id
+        source_device_id=device_id,
+        user_id=api_user_id
     )
 
     # Log stream start for polling fallback
@@ -2047,7 +2076,8 @@ async def _run_background_query(
         await sync_engine.broadcast_stream_start(
             session_id=session_id,
             message_id=assistant_msg_id,
-            source_device_id=None  # Don't exclude any device - all should see it
+            source_device_id=None,  # Don't exclude any device - all should see it
+            user_id=api_user_id
         )
 
     # Log stream start for polling fallback
@@ -2328,7 +2358,8 @@ async def start_background_query(
     await sync_engine.broadcast_stream_start(
         session_id=session_id,
         message_id=assistant_msg_id,
-        source_device_id=None  # Don't exclude any device - all should see it
+        source_device_id=None,  # Don't exclude any device - all should see it
+        user_id=api_user_id
     )
     logger.info(f"[Background] Broadcast stream_start for session {session_id}")
 
@@ -2702,14 +2733,16 @@ async def stream_to_websocket(
         return messages
 
     try:
+        # Resolve virtual @Notes/note-id references to actual content
+        prompt = resolve_note_references(prompt)
+
         await state.client.query(prompt)
 
         async for message in state.client.receive_response():
-            # Check for interrupt request as a failsafe
-            if state.interrupt_requested:
-                logger.info(f"[WS] Interrupt flag detected for session {session_id}, breaking out of loop")
-                interrupted = True
-                break
+            # Don't break immediately on interrupt_requested — let receive_response()
+            # end naturally so remaining in-flight tool calls reach the UI.
+            # The SDK's client.interrupt() causes receive_response() to end after
+            # completing any in-progress operations.
 
             # Drain stderr queue and yield any plugin messages
             for stderr_msg in await drain_stderr_queue():
@@ -2754,19 +2787,50 @@ async def stream_to_websocket(
                                 }
                             )
                 else:
-                    # Forward other system messages (like /context output) to frontend
-                    logger.info(f"[WS] Forwarding SystemMessage to frontend: subtype={message.subtype}")
-                    yield {
-                        "type": "system",
-                        "subtype": message.subtype,
-                        "data": message.data
+                    # Only forward system messages with known user-visible subtypes
+                    # Filter out internal SDK messages that would show as "unknown" in the UI
+                    KNOWN_SUBTYPES = {
+                        'status', 'compact_boundary', 'microcompact_boundary',
+                        'context', 'local_command', 'local_command_output',
+                        'informational', 'turn_duration', 'stop_hook_summary',
+                        'agent_launched', 'agent_error',
+                        'api_error', 'plugin_warning', 'rewind_warning',
+                        'worktree_context', 'worktree_created', 'worktree_selected',
+                        'error', 'exception', 'validation_error', 'permission_error', 'timeout_error'
                     }
+                    if message.subtype in KNOWN_SUBTYPES:
+                        logger.info(f"[WS] Forwarding SystemMessage to frontend: subtype={message.subtype}")
+                        yield {
+                            "type": "system",
+                            "subtype": message.subtype,
+                            "data": message.data
+                        }
+                    else:
+                        logger.info(f"[WS] Filtering unknown SystemMessage subtype: {message.subtype}, data_keys={list(message.data.keys()) if message.data else []}")
 
             elif isinstance(message, StreamEvent):
                 # StreamEvent is sent when include_partial_messages=True
                 # Contains real-time streaming events for character-by-character display
                 event = message.event
                 event_type = event.get("type") if event else None
+                parent_tool_id = getattr(message, 'parent_tool_use_id', None)
+
+                # Route subagent StreamEvents — don't mix into main agent stream
+                # The SDK (0.1.30+) sets parent_tool_use_id on subagent events
+                if parent_tool_id and parent_tool_id in task_tool_uses:
+                    # Only forward text deltas as subagent_chunk for real-time display
+                    if event_type == "content_block_delta":
+                        delta = event.get("delta", {})
+                        if delta.get("type") == "text_delta" and delta.get("text"):
+                            yield {
+                                "type": "subagent_chunk",
+                                "agent_id": parent_tool_id,
+                                "content": delta["text"]
+                            }
+                    # Skip all other subagent stream events (block_start, block_stop,
+                    # message_start, message_delta, thinking_delta, input_json_delta)
+                    # The AssistantMessage handler already handles final subagent content
+                    continue
 
                 if event_type == "content_block_delta":
                     delta = event.get("delta", {})
@@ -2835,12 +2899,6 @@ async def stream_to_websocket(
                     }
 
             elif isinstance(message, AssistantMessage):
-                # Check interrupt before processing each message block
-                if state.interrupt_requested:
-                    logger.info(f"[WS] Interrupt flag detected during message processing for session {session_id}")
-                    interrupted = True
-                    break
-
                 # Check for synthetic API error messages (model is "<synthetic>")
                 # These are generated by the SDK when an API error occurs
                 if message.model == "<synthetic>" or message.error:
@@ -3073,6 +3131,15 @@ async def stream_to_websocket(
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
 
+            else:
+                logger.warning(f"[WS] Unhandled message type: {type(message).__name__}")
+
+        # Check if the loop ended due to an interrupt request
+        # (SDK's receive_response() ended naturally after client.interrupt())
+        if state.interrupt_requested:
+            interrupted = True
+            logger.info(f"[WS] Streaming loop ended after interrupt for session {session_id}")
+
         # Final drain of stderr queue after streaming loop completes
         for stderr_msg in await drain_stderr_queue():
             # Write hook message to JSONL file for persistence across app restarts
@@ -3115,12 +3182,19 @@ async def stream_to_websocket(
             state.is_connected = False
 
         # Remove from active sessions and cleanup agent files
-        if session_id in _active_sessions:
+        # Only delete if we're still the registered state (avoids race with interrupt_and_query
+        # where a new query may have already replaced our state)
+        if _active_sessions.get(session_id) is state:
             if state.agents_dir and state.written_agent_ids:
                 cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
                 logger.info(f"[WS] Cleaned up agent files for session {session_id}")
             del _active_sessions[session_id]
             logger.info(f"[WS] Removed session {session_id} from active sessions")
+        else:
+            # Another query has already taken over this session - just cleanup our agent files
+            if state.agents_dir and state.written_agent_ids:
+                cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
+                logger.info(f"[WS] Cleaned up agent files for superseded session {session_id}")
 
     # Update session in database
     # Only set title for new sessions (when resume_id was None, meaning first message)

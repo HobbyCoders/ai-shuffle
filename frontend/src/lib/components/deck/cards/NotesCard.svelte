@@ -6,8 +6,10 @@
 	 */
 
 	import BaseCard from './BaseCard.svelte';
+	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import type { DeckCard } from './types';
 	import './card-design-system.css';
+	import { StickyNote, Search as SearchIcon, Plus } from 'lucide-svelte';
 	import {
 		getNotes,
 		createNote,
@@ -29,9 +31,10 @@
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
 		mobile?: boolean;
+		embedded?: boolean;
 	}
 
-	let { card, onClose, onMaximize, onFocus, onMove, onResize, onDragEnd, onResizeEnd, mobile = false }: Props = $props();
+	let { card, onClose, onMaximize, onFocus, onMove, onResize, onDragEnd, onResizeEnd, mobile = false, embedded = false }: Props = $props();
 
 	// State
 	let notes = $state<Note[]>([]);
@@ -53,6 +56,7 @@
 	let saving = $state(false);
 	let showPreview = $state(false);
 	let newTagInput = $state('');
+	let textareaEl = $state<HTMLTextAreaElement | null>(null);
 
 	// Debounce for auto-save
 	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -199,6 +203,21 @@
 		}
 	}
 
+	// Auto-resize textarea to fit content
+	function autoResizeTextarea() {
+		if (!textareaEl) return;
+		textareaEl.style.height = 'auto';
+		textareaEl.style.height = textareaEl.scrollHeight + 'px';
+	}
+
+	// Auto-resize when textarea is bound or content changes externally (e.g. opening a note)
+	$effect(() => {
+		if (textareaEl && editorContent !== undefined) {
+			// Tick delay so the DOM has updated
+			requestAnimationFrame(autoResizeTextarea);
+		}
+	});
+
 	// Mark as having unsaved changes and trigger autosave
 	function markDirty() {
 		hasUnsavedChanges = true;
@@ -276,29 +295,6 @@
 
 {#snippet listView()}
 	<div class="notes-list">
-		<!-- Search and New Button -->
-		<div class="notes-toolbar">
-			<div class="search-box">
-				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<circle cx="11" cy="11" r="8"/>
-					<path d="M21 21l-4.35-4.35"/>
-				</svg>
-				<input
-					type="text"
-					placeholder="Search notes..."
-					bind:value={searchQuery}
-					class="search-input"
-				/>
-			</div>
-			<button class="new-note-btn" onclick={startNewNote}>
-				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<line x1="12" y1="5" x2="12" y2="19"/>
-					<line x1="5" y1="12" x2="19" y2="12"/>
-				</svg>
-				New Note
-			</button>
-		</div>
-
 		<!-- Tag Filter -->
 		{#if tags.length > 0}
 			<div class="tag-filter">
@@ -481,7 +477,8 @@
 					class="content-textarea"
 					placeholder="Write your note in Markdown..."
 					bind:value={editorContent}
-					oninput={markDirty}
+					bind:this={textareaEl}
+					oninput={() => { markDirty(); autoResizeTextarea(); }}
 				></textarea>
 			{/if}
 		</div>
@@ -489,7 +486,45 @@
 	</div>
 {/snippet}
 
-{#if mobile}
+{#if embedded}
+	<FeaturePageLayout
+		icon={StickyNote}
+		title="Notes"
+		itemCount={notes.length}
+		itemLabel={notes.length === 1 ? 'note' : 'notes'}
+		breadcrumbs={editingNote || isCreatingNew ? [
+			{ label: 'Notes', onclick: closeEditor },
+			{ label: editingNote ? editorTitle || 'Untitled' : 'New Note' }
+		] : undefined}
+	>
+		{#snippet headerActions()}
+			{#if !(editingNote || isCreatingNew)}
+				<div class="fph-search-wrapper">
+					<SearchIcon size={14} />
+					<input
+						type="text"
+						placeholder="Search notes..."
+						bind:value={searchQuery}
+						class="fph-search-input"
+					/>
+				</div>
+				<button class="fp-btn fp-btn--primary" onclick={startNewNote} title="New Note">
+					<Plus size={14} />
+					<span class="hidden sm:inline">New Note</span>
+				</button>
+			{/if}
+		{/snippet}
+		{#snippet children()}
+			<div class="notes-card-content card-system">
+				{#if editingNote || isCreatingNew}
+					{@render editorView()}
+				{:else}
+					{@render listView()}
+				{/if}
+			</div>
+		{/snippet}
+	</FeaturePageLayout>
+{:else if mobile}
 	<div class="notes-card-content card-system mobile">
 		{#if editingNote || isCreatingNew}
 			{@render editorView()}
@@ -625,8 +660,9 @@
 	}
 
 	.tag-pill.active {
-		background: var(--primary);
-		color: var(--primary-foreground);
+		background: var(--selection-bg-emphasis);
+		color: var(--selection-text);
+		box-shadow: var(--selection-shadow);
 	}
 
 	.tag-count {
@@ -770,8 +806,8 @@
 		background: var(--surface-active);
 	}
 
-	/* Touch devices: always show pin button with larger target */
-	@media (pointer: coarse) {
+	/* Touch devices / mobile: always show pin button with larger target */
+	@media (pointer: coarse), (max-width: 639px) {
 		.pin-btn {
 			opacity: 1;
 			min-width: 44px;
@@ -1055,12 +1091,14 @@
 	   ============================================ */
 	.content-area {
 		flex: 1;
-		overflow: hidden;
+		overflow-y: auto;
 		display: flex;
+		flex-direction: column;
 	}
 
 	.content-textarea {
-		flex: 1;
+		width: 100%;
+		min-height: 120px;
 		padding: var(--space-3);
 		background: none;
 		border: none;
@@ -1070,6 +1108,7 @@
 		line-height: 1.6;
 		resize: none;
 		outline: none;
+		overflow: hidden;
 	}
 
 	.content-textarea::placeholder {
@@ -1123,4 +1162,6 @@
 		color: var(--text-secondary);
 		font-style: italic;
 	}
+
+
 </style>

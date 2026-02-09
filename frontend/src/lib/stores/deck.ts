@@ -39,7 +39,8 @@ export type DeckCardType =
 	| 'hooks'
 	| 'notes'
 	| 'stats'
-	| 'mcp';
+	| 'mcp'
+	| 'api-user-sessions';
 
 export type SnapZone =
 	| 'left'
@@ -91,7 +92,6 @@ export interface DeckState {
 	cards: DeckCard[];
 	focusedCardId: string | null;
 	nextZIndex: number;
-	contextPanelCollapsed: boolean;
 	workspaceBounds: { width: number; height: number };
 	snapEnabled: boolean;
 	gridSnapEnabled: boolean;
@@ -122,7 +122,6 @@ const MIN_CARD_SIZE: DeckCardSize = { width: 320, height: 200 };
 interface PersistedDeckState {
 	activeMode: DeckMode;
 	cards: Array<Omit<DeckCard, 'createdAt'> & { createdAt: string }>;
-	contextPanelCollapsed: boolean;
 	snapEnabled: boolean;
 	gridSnapEnabled: boolean;
 	layoutMode?: LayoutMode;
@@ -189,7 +188,6 @@ function parsePersistedState(parsed: PersistedDeckState): Partial<DeckState> {
 			...c,
 			createdAt: new Date(c.createdAt)
 		})),
-		contextPanelCollapsed: parsed.contextPanelCollapsed,
 		snapEnabled: parsed.snapEnabled,
 		gridSnapEnabled: parsed.gridSnapEnabled,
 		layoutMode: parsed.layoutMode || 'freeflow'
@@ -203,7 +201,6 @@ function createPersistedState(state: DeckState): PersistedDeckState {
 			...c,
 			createdAt: c.createdAt.toISOString()
 		})),
-		contextPanelCollapsed: state.contextPanelCollapsed,
 		snapEnabled: state.snapEnabled,
 		gridSnapEnabled: state.gridSnapEnabled,
 		layoutMode: state.layoutMode,
@@ -403,6 +400,8 @@ function getDefaultTitle(type: DeckCardType): string {
 			return 'Notes';
 		case 'stats':
 			return 'Stats';
+		case 'api-user-sessions':
+			return 'API User Sessions';
 		default:
 			return 'Card';
 	}
@@ -420,7 +419,6 @@ function createDeckStore() {
 		cards: persisted?.cards || [],
 		focusedCardId: null,
 		nextZIndex: persisted?.cards ? Math.max(...persisted.cards.map((c) => c.zIndex), 0) + 1 : 1,
-		contextPanelCollapsed: persisted?.contextPanelCollapsed ?? false,
 		workspaceBounds: { width: 1920, height: 1080 },
 		snapEnabled: persisted?.snapEnabled ?? true,
 		gridSnapEnabled: persisted?.gridSnapEnabled ?? false,
@@ -1119,36 +1117,6 @@ function createDeckStore() {
 		},
 
 		/**
-		 * Toggle context panel collapsed state
-		 */
-		toggleContextPanel(): void {
-			updateAndPersist((state) => ({
-				...state,
-				contextPanelCollapsed: !state.contextPanelCollapsed
-			}));
-		},
-
-		/**
-		 * Expand context panel (set collapsed to false)
-		 */
-		expandContextPanel(): void {
-			updateAndPersist((state) => ({
-				...state,
-				contextPanelCollapsed: false
-			}));
-		},
-
-		/**
-		 * Collapse context panel (set collapsed to true)
-		 */
-		collapseContextPanel(): void {
-			updateAndPersist((state) => ({
-				...state,
-				contextPanelCollapsed: true
-			}));
-		},
-
-		/**
 		 * Set snap enabled
 		 */
 		setSnapEnabled(enabled: boolean): void {
@@ -1301,7 +1269,6 @@ function createDeckStore() {
 				cards: [],
 				focusedCardId: null,
 				nextZIndex: 1,
-				contextPanelCollapsed: false,
 				workspaceBounds: { width: 1920, height: 1080 },
 				snapEnabled: true,
 				gridSnapEnabled: false,
@@ -1856,9 +1823,6 @@ export const focusedCard = derived(deck, ($deck) => {
 
 // Focused card ID
 export const focusedCardId = derived(deck, ($deck) => $deck.focusedCardId);
-
-// Context panel state
-export const contextPanelCollapsed = derived(deck, ($deck) => $deck.contextPanelCollapsed);
 
 // Workspace bounds
 export const workspaceBounds = derived(deck, ($deck) => $deck.workspaceBounds);

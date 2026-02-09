@@ -257,7 +257,7 @@
 		background: var(--muted);
 		border: 1px solid var(--border);
 		border-radius: 3px;
-		font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, monospace;
+		font-family: var(--font-mono);
 		font-size: 10px;
 		font-weight: 600;
 		color: var(--muted-foreground);

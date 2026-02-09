@@ -63,6 +63,17 @@ const initialState: McpState = {
 };
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+/** Extract a human-readable error message from ApiError or Error objects */
+function extractError(e: unknown, fallback: string): string {
+	if (e && typeof e === 'object' && 'detail' in e) return (e as any).detail;
+	if (e instanceof Error) return e.message;
+	return fallback;
+}
+
+// ============================================================================
 // Store Creation
 // ============================================================================
 
@@ -86,7 +97,7 @@ function createMcpStore() {
 				const servers = await mcpApi.getGlobalMcpServers();
 				update((state) => ({ ...state, globalServers: servers, loading: false }));
 			} catch (e) {
-				const error = e instanceof Error ? e.message : 'Failed to load global MCP servers';
+				const error = extractError(e, 'Failed to load global MCP servers');
 				update((state) => ({ ...state, error, loading: false }));
 				throw e;
 			}
@@ -107,7 +118,7 @@ function createMcpStore() {
 				}));
 				return server;
 			} catch (e) {
-				const error = e instanceof Error ? e.message : 'Failed to add MCP server';
+				const error = extractError(e, 'Failed to add MCP server');
 				update((state) => ({ ...state, error, loading: false }));
 				throw e;
 			}
@@ -131,7 +142,7 @@ function createMcpStore() {
 				}));
 				return server;
 			} catch (e) {
-				const error = e instanceof Error ? e.message : 'Failed to update MCP server';
+				const error = extractError(e, 'Failed to update MCP server');
 				update((state) => ({ ...state, error, loading: false }));
 				throw e;
 			}
@@ -151,7 +162,7 @@ function createMcpStore() {
 					loading: false
 				}));
 			} catch (e) {
-				const error = e instanceof Error ? e.message : 'Failed to remove MCP server';
+				const error = extractError(e, 'Failed to remove MCP server');
 				update((state) => ({ ...state, error, loading: false }));
 				throw e;
 			}
@@ -179,7 +190,7 @@ function createMcpStore() {
 					loading: false
 				}));
 			} catch (e) {
-				const error = e instanceof Error ? e.message : 'Failed to load project MCP servers';
+				const error = extractError(e, 'Failed to load project MCP servers');
 				update((state) => ({ ...state, error, loading: false }));
 				throw e;
 			}
@@ -209,7 +220,7 @@ function createMcpStore() {
 				});
 				return server;
 			} catch (e) {
-				const error = e instanceof Error ? e.message : 'Failed to add MCP server';
+				const error = extractError(e, 'Failed to add MCP server');
 				update((state) => ({ ...state, error, loading: false }));
 				throw e;
 			}
@@ -240,7 +251,7 @@ function createMcpStore() {
 				}));
 				return server;
 			} catch (e) {
-				const error = e instanceof Error ? e.message : 'Failed to update MCP server';
+				const error = extractError(e, 'Failed to update MCP server');
 				update((state) => ({ ...state, error, loading: false }));
 				throw e;
 			}
@@ -287,7 +298,7 @@ function createMcpStore() {
 				const tools = await mcpApi.getMcpTools(refresh);
 				update((state) => ({ ...state, tools, loading: false }));
 			} catch (e) {
-				const error = e instanceof Error ? e.message : 'Failed to load MCP tools';
+				const error = extractError(e, 'Failed to load MCP tools');
 				update((state) => ({ ...state, error, loading: false }));
 				throw e;
 			}

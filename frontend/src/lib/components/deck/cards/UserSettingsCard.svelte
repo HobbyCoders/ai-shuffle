@@ -9,10 +9,12 @@
 	 * - GitHub connection and configuration
 	 */
 	import BaseCard from './BaseCard.svelte';
+	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import type { DeckCard } from './types';
 	import { onMount } from 'svelte';
 	import './card-design-system.css';
 	import { auth, apiUser, isAdmin } from '$lib/stores/auth';
+	import { UserCog } from 'lucide-svelte';
 	import {
 		getMyProfile,
 		updateMyProfile,
@@ -45,6 +47,7 @@
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
 		mobile?: boolean;
+		embedded?: boolean;
 	}
 
 	let {
@@ -56,7 +59,8 @@
 		onResize,
 		onDragEnd,
 		onResizeEnd,
-		mobile = false
+		mobile = false,
+		embedded = false
 	}: Props = $props();
 
 	// Navigation
@@ -384,73 +388,83 @@
 	}
 </script>
 
-<BaseCard
-	{card}
-	{onClose}
-	{onMaximize}
-	{onFocus}
-	{onMove}
-	{onResize}
-	{onDragEnd}
-	{onResizeEnd}
->
-	<div class="card-system flex h-full">
-		<!-- Sidebar Navigation -->
-		<div class="w-48 border-r border-border p-2 flex-shrink-0">
-			<div class="space-y-1">
-				{#each sections as section}
-					<button
-						onclick={() => activeSection = section.id}
-						class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors
-							{activeSection === section.id
-								? 'bg-primary/15 text-primary'
-								: 'text-muted-foreground user-settings-btn'}"
-					>
-						<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-							<path d={section.icon} />
-						</svg>
-						{section.label}
-						{#if section.id === 'credentials' && hasMissingRequired}
-							<span class="ml-auto w-2 h-2 bg-destructive rounded-full"></span>
-						{/if}
-					</button>
-				{/each}
+{#snippet settingsContent()}
+	<div class="card-system flex-1 overflow-y-auto p-4">
+		{#if loading}
+			<div class="flex items-center justify-center h-full">
+				<div class="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
 			</div>
-		</div>
+		{:else if activeSection === 'profile'}
+			<!-- Profile Section -->
+			<div class="space-y-6">
+				{#if !embedded}<h3 class="text-lg font-semibold text-foreground">Profile</h3>{/if}
 
-		<!-- Content Area -->
-		<div class="flex-1 overflow-y-auto p-4">
-			{#if loading}
-				<div class="flex items-center justify-center h-full">
-					<div class="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-				</div>
-			{:else if activeSection === 'profile'}
-				<!-- Profile Section -->
-				<div class="space-y-6">
-					<h3 class="text-lg font-semibold text-foreground">Profile</h3>
+				{#if profileSuccess}
+					<div class="p-3 bg-status-success border border-status-success text-success rounded-lg text-sm">
+						{profileSuccess}
+					</div>
+				{/if}
+				{#if profileError}
+					<div class="p-3 bg-status-error border border-status-error text-destructive rounded-lg text-sm">
+						{profileError}
+					</div>
+				{/if}
 
-					{#if profileSuccess}
-						<div class="p-3 bg-status-success border border-status-success text-success rounded-lg text-sm">
-							{profileSuccess}
-						</div>
-					{/if}
-					{#if profileError}
-						<div class="p-3 bg-status-error border border-status-error text-destructive rounded-lg text-sm">
-							{profileError}
-						</div>
-					{/if}
+				{#if profile}
+					<!-- Name -->
+					<div class="space-y-2">
+						<label class="block text-sm font-medium text-muted-foreground">Name</label>
+						{#if editingName}
+							<div class="flex gap-2">
+								<input
+									type="text"
+									bind:value={nameInput}
+									class="flex-1 px-3 py-2 border rounded-lg bg-input border-border"
+								/>
+								<button
+									onclick={handleSaveProfile}
+									disabled={savingProfile}
+									class="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50"
+								>
+									{savingProfile ? 'Saving...' : 'Save'}
+								</button>
+								<button
+									onclick={() => { editingName = false; nameInput = profile!.name; }}
+									class="px-4 py-2 border rounded-lg user-settings-btn"
+								>
+									Cancel
+								</button>
+							</div>
+						{:else}
+							<div class="flex items-center gap-2">
+								<span class="text-foreground">{profile.name}</span>
+								<button
+									onclick={() => editingName = true}
+									class="text-primary hover:text-primary/80 text-sm"
+								>
+									Edit
+								</button>
+							</div>
+						{/if}
+					</div>
 
-					{#if profile}
-						<!-- Name -->
-						<div class="space-y-2">
-							<label class="block text-sm font-medium text-muted-foreground">Name</label>
-							{#if editingName}
+					<!-- Username -->
+					<div class="space-y-2">
+						<label class="block text-sm font-medium text-muted-foreground">Username</label>
+						<span class="text-foreground">{profile.username || 'Not set'}</span>
+					</div>
+
+					<!-- Description -->
+					<div class="space-y-2">
+						<label class="block text-sm font-medium text-muted-foreground">Description</label>
+						{#if editingDescription}
+							<div class="space-y-2">
+								<textarea
+									bind:value={descriptionInput}
+									rows="3"
+									class="w-full px-3 py-2 border rounded-lg bg-input border-border"
+								></textarea>
 								<div class="flex gap-2">
-									<input
-										type="text"
-										bind:value={nameInput}
-										class="flex-1 px-3 py-2 border rounded-lg bg-input border-border"
-									/>
 									<button
 										onclick={handleSaveProfile}
 										disabled={savingProfile}
@@ -459,458 +473,475 @@
 										{savingProfile ? 'Saving...' : 'Save'}
 									</button>
 									<button
-										onclick={() => { editingName = false; nameInput = profile!.name; }}
+										onclick={() => { editingDescription = false; descriptionInput = profile!.description || ''; }}
 										class="px-4 py-2 border rounded-lg user-settings-btn"
 									>
 										Cancel
 									</button>
 								</div>
-							{:else}
-								<div class="flex items-center gap-2">
-									<span class="text-foreground">{profile.name}</span>
-									<button
-										onclick={() => editingName = true}
-										class="text-primary hover:text-primary/80 text-sm"
-									>
-										Edit
-									</button>
-								</div>
-							{/if}
-						</div>
-
-						<!-- Username -->
-						<div class="space-y-2">
-							<label class="block text-sm font-medium text-muted-foreground">Username</label>
-							<span class="text-foreground">{profile.username || 'Not set'}</span>
-						</div>
-
-						<!-- Description -->
-						<div class="space-y-2">
-							<label class="block text-sm font-medium text-muted-foreground">Description</label>
-							{#if editingDescription}
-								<div class="space-y-2">
-									<textarea
-										bind:value={descriptionInput}
-										rows="3"
-										class="w-full px-3 py-2 border rounded-lg bg-input border-border"
-									></textarea>
-									<div class="flex gap-2">
-										<button
-											onclick={handleSaveProfile}
-											disabled={savingProfile}
-											class="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50"
-										>
-											{savingProfile ? 'Saving...' : 'Save'}
-										</button>
-										<button
-											onclick={() => { editingDescription = false; descriptionInput = profile!.description || ''; }}
-											class="px-4 py-2 border rounded-lg user-settings-btn"
-										>
-											Cancel
-										</button>
-									</div>
-								</div>
-							{:else}
-								<div class="flex items-center gap-2">
-									<span class="text-foreground">{profile.description || 'No description'}</span>
-									<button
-										onclick={() => editingDescription = true}
-										class="text-primary hover:text-primary/80 text-sm"
-									>
-										Edit
-									</button>
-								</div>
-							{/if}
-						</div>
-
-						<!-- Password Change -->
-						<div class="pt-4 border-t border-border">
-							<h4 class="text-sm font-medium text-muted-foreground mb-3">Security</h4>
-
-							{#if passwordSuccess}
-								<div class="p-3 bg-status-success border border-status-success text-success rounded-lg text-sm mb-3">
-									{passwordSuccess}
-								</div>
-							{/if}
-
-							{#if showPasswordChange}
-								<div class="space-y-3">
-									{#if passwordError}
-										<div class="p-3 bg-status-error border border-status-error text-destructive rounded-lg text-sm">
-											{passwordError}
-										</div>
-									{/if}
-									<input
-										type="password"
-										bind:value={currentPassword}
-										placeholder="Current password"
-										class="w-full px-3 py-2 border rounded-lg bg-input border-border"
-									/>
-									<input
-										type="password"
-										bind:value={newPassword}
-										placeholder="New password"
-										class="w-full px-3 py-2 border rounded-lg bg-input border-border"
-									/>
-									<input
-										type="password"
-										bind:value={confirmPassword}
-										placeholder="Confirm new password"
-										class="w-full px-3 py-2 border rounded-lg bg-input border-border"
-									/>
-									<div class="flex gap-2">
-										<button
-											onclick={handleChangePassword}
-											disabled={changingPassword}
-											class="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50"
-										>
-											{changingPassword ? 'Changing...' : 'Change Password'}
-										</button>
-										<button
-											onclick={() => { showPasswordChange = false; currentPassword = ''; newPassword = ''; confirmPassword = ''; passwordError = ''; }}
-											class="px-4 py-2 border rounded-lg user-settings-btn"
-										>
-											Cancel
-										</button>
-									</div>
-								</div>
-							{:else}
+							</div>
+						{:else}
+							<div class="flex items-center gap-2">
+								<span class="text-foreground">{profile.description || 'No description'}</span>
 								<button
-									onclick={() => showPasswordChange = true}
-									class="px-4 py-2 border rounded-lg user-settings-btn"
+									onclick={() => editingDescription = true}
+									class="text-primary hover:text-primary/80 text-sm"
 								>
-									Change Password
+									Edit
 								</button>
-							{/if}
-						</div>
-					{/if}
-				</div>
-
-			{:else if activeSection === 'credentials'}
-				<!-- Credentials Section -->
-				<div class="space-y-6">
-					<div class="flex items-center justify-between">
-						<h3 class="text-lg font-semibold text-foreground">API Keys</h3>
-						{#if hasMissingRequired}
-							<span class="px-2 py-1 bg-status-error border border-status-error text-destructive rounded text-xs">
-								Missing required keys
-							</span>
+							</div>
 						{/if}
 					</div>
 
-					{#if credentialSuccess}
-						<div class="p-3 bg-status-success border border-status-success text-success rounded-lg text-sm">
-							{credentialSuccess}
-						</div>
-					{/if}
-					{#if credentialError}
-						<div class="p-3 bg-status-error border border-status-error text-destructive rounded-lg text-sm">
-							{credentialError}
-						</div>
-					{/if}
+					<!-- Password Change -->
+					<div class="pt-4 border-t border-border">
+						<h4 class="text-sm font-medium text-muted-foreground mb-3">Security</h4>
 
-					{#if loadingCredentials}
-						<div class="flex justify-center py-8">
-							<div class="animate-spin rounded-full h-6 w-6 border-b-2 border-primary"></div>
-						</div>
-					{:else}
-						<div class="space-y-4">
-							{#each credentials as cred}
-								<div class="p-4 border rounded-lg border-border">
-									<div class="flex items-start gap-3">
-										<svg class="w-5 h-5 text-muted-foreground mt-0.5" fill="currentColor" viewBox="0 0 24 24">
-											<path d={getCredentialIcon(cred.credential_type)} />
-										</svg>
-										<div class="flex-1">
-											<div class="flex items-center gap-2 mb-1">
-												<h4 class="font-medium text-foreground">{cred.name}</h4>
-												<span class="px-2 py-0.5 text-xs rounded-full {getPolicyBadge(cred.policy).class}">
-													{getPolicyBadge(cred.policy).text}
-												</span>
-											</div>
-											<p class="text-sm text-muted-foreground mb-2">{cred.description}</p>
-
-											{#if cred.policy === 'admin_provided'}
-												<p class="text-sm text-info">
-													This key is provided by the administrator.
-												</p>
-											{:else if editingCredential === cred.credential_type}
-												<div class="space-y-2">
-													<input
-														type="password"
-														bind:value={credentialInput}
-														placeholder="Enter {cred.name}"
-														class="w-full px-3 py-2 border rounded-lg bg-input border-border text-sm"
-													/>
-													<div class="flex gap-2">
-														<button
-															onclick={() => handleSaveCredential(cred.credential_type)}
-															disabled={savingCredential}
-															class="px-3 py-1.5 bg-primary text-primary-foreground rounded text-sm hover:bg-primary/90 disabled:opacity-50"
-														>
-															{savingCredential ? 'Saving...' : 'Save'}
-														</button>
-														<button
-															onclick={() => { editingCredential = null; credentialInput = ''; credentialError = ''; }}
-															class="px-3 py-1.5 border rounded text-sm user-settings-btn"
-														>
-															Cancel
-														</button>
-													</div>
-												</div>
-											{:else if cred.is_set}
-												<div class="flex items-center gap-2">
-													<span class="text-sm text-muted-foreground font-mono">{cred.masked_value}</span>
-													<span class="text-success text-xs">✓ Set</span>
-													<button
-														onclick={() => { editingCredential = cred.credential_type; credentialInput = ''; }}
-														class="text-primary hover:text-primary/80 text-sm ml-2"
-													>
-														Update
-													</button>
-													<button
-														onclick={() => handleDeleteCredential(cred.credential_type)}
-														class="text-destructive hover:text-destructive/80 text-sm"
-													>
-														Remove
-													</button>
-												</div>
-											{:else}
-												<div class="flex items-center gap-2">
-													{#if cred.admin_available && cred.policy === 'optional'}
-														<span class="text-sm text-muted-foreground">Using admin key (you can override)</span>
-													{:else}
-														<span class="text-sm text-warning">Not set</span>
-													{/if}
-													<button
-														onclick={() => { editingCredential = cred.credential_type; credentialInput = ''; }}
-														class="text-primary hover:text-primary/80 text-sm"
-													>
-														{cred.is_set ? 'Update' : 'Set'}
-													</button>
-												</div>
-											{/if}
-										</div>
-									</div>
-								</div>
-							{/each}
-						</div>
-					{/if}
-				</div>
-
-			{:else if activeSection === 'github'}
-				<!-- GitHub Section -->
-				<div class="space-y-6">
-					<h3 class="text-lg font-semibold text-foreground">GitHub Connection</h3>
-
-					{#if gitHubSuccess}
-						<div class="p-3 bg-status-success border border-status-success text-success rounded-lg text-sm">
-							{gitHubSuccess}
-						</div>
-					{/if}
-					{#if gitHubError}
-						<div class="p-3 bg-status-error border border-status-error text-destructive rounded-lg text-sm">
-							{gitHubError}
-						</div>
-					{/if}
-
-					{#if loadingGitHub}
-						<div class="flex justify-center py-8">
-							<div class="animate-spin rounded-full h-6 w-6 border-b-2 border-primary"></div>
-						</div>
-					{:else if githubConfig?.connected}
-						<!-- Connected State -->
-						<div class="p-4 bg-status-success border border-status-success rounded-lg">
-							<div class="flex items-center gap-3">
-								{#if githubConfig.github_avatar_url}
-									<img src={githubConfig.github_avatar_url} alt="" class="w-10 h-10 rounded-full" />
-								{/if}
-								<div class="flex-1">
-									<p class="font-medium text-success">
-										Connected as @{githubConfig.github_username}
-									</p>
-								</div>
-								<button
-									onclick={handleDisconnectGitHub}
-									class="px-3 py-1.5 text-sm text-destructive hover:text-destructive/80 border border-destructive/30 rounded hover:bg-status-error"
-								>
-									Disconnect
-								</button>
+						{#if passwordSuccess}
+							<div class="p-3 bg-status-success border border-status-success text-success rounded-lg text-sm mb-3">
+								{passwordSuccess}
 							</div>
-						</div>
+						{/if}
 
-						<!-- Default Repository Selection -->
-						<div class="space-y-4">
-							<h4 class="text-sm font-medium text-muted-foreground">Default Repository</h4>
-
-							{#if githubRepos.length === 0}
-								<button
-									onclick={handleLoadRepos}
-									disabled={loadingRepos}
-									class="px-4 py-2 border rounded-lg user-settings-btn disabled:opacity-50"
-								>
-									{loadingRepos ? 'Loading...' : 'Load Repositories'}
-								</button>
-							{:else}
-								<div class="space-y-3">
-									<select
-										bind:value={selectedRepo}
-										onchange={handleRepoChange}
-										class="w-full px-3 py-2 border rounded-lg bg-input border-border"
+						{#if showPasswordChange}
+							<div class="space-y-3">
+								{#if passwordError}
+									<div class="p-3 bg-status-error border border-status-error text-destructive rounded-lg text-sm">
+										{passwordError}
+									</div>
+								{/if}
+								<input
+									type="password"
+									bind:value={currentPassword}
+									placeholder="Current password"
+									class="w-full px-3 py-2 border rounded-lg bg-input border-border"
+								/>
+								<input
+									type="password"
+									bind:value={newPassword}
+									placeholder="New password"
+									class="w-full px-3 py-2 border rounded-lg bg-input border-border"
+								/>
+								<input
+									type="password"
+									bind:value={confirmPassword}
+									placeholder="Confirm new password"
+									class="w-full px-3 py-2 border rounded-lg bg-input border-border"
+								/>
+								<div class="flex gap-2">
+									<button
+										onclick={handleChangePassword}
+										disabled={changingPassword}
+										class="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50"
 									>
-										<option value="">Select a repository</option>
-										{#each githubRepos as repo}
-											<option value={repo.full_name}>
-												{repo.full_name} {repo.private ? '🔒' : ''}
-											</option>
-										{/each}
-									</select>
-
-									{#if selectedRepo && branches.length > 0}
-										<select
-											bind:value={selectedBranch}
-											class="w-full px-3 py-2 border rounded-lg bg-input border-border"
-										>
-											{#each branches as branch}
-												<option value={branch.name}>
-													{branch.name} {branch.is_default ? '(default)' : ''}
-												</option>
-											{/each}
-										</select>
-									{/if}
-
-									{#if selectedRepo}
-										<button
-											onclick={handleSaveGitHubDefaults}
-											disabled={savingGitHubDefaults}
-											class="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50"
-										>
-											{savingGitHubDefaults ? 'Saving...' : 'Save as Default'}
-										</button>
-									{/if}
+										{changingPassword ? 'Changing...' : 'Change Password'}
+									</button>
+									<button
+										onclick={() => { showPasswordChange = false; currentPassword = ''; newPassword = ''; confirmPassword = ''; passwordError = ''; }}
+										class="px-4 py-2 border rounded-lg user-settings-btn"
+									>
+										Cancel
+									</button>
 								</div>
-							{/if}
-						</div>
-					{:else}
-						<!-- Not Connected State -->
-						<div class="p-4 bg-muted border border-border rounded-lg">
-							<p class="text-muted-foreground mb-4">
-								Connect your GitHub account to access your repositories.
-							</p>
+							</div>
+						{:else}
+							<button
+								onclick={() => showPasswordChange = true}
+								class="px-4 py-2 border rounded-lg user-settings-btn"
+							>
+								Change Password
+							</button>
+						{/if}
+					</div>
+				{/if}
+			</div>
 
-							{#if showGitHubConnect}
-								<div class="space-y-3">
-									<div>
-										<label class="block text-sm font-medium text-muted-foreground mb-1">
-											Personal Access Token
-										</label>
-										<input
-											type="password"
-											bind:value={gitHubPAT}
-											placeholder="ghp_..."
-											class="w-full px-3 py-2 border rounded-lg bg-input border-border"
-										/>
-										<p class="text-xs text-muted-foreground mt-1">
-											Create a token at <a href="https://github.com/settings/tokens" target="_blank" class="text-primary hover:underline">github.com/settings/tokens</a> with 'repo' scope.
-										</p>
-									</div>
-									<div class="flex gap-2">
-										<button
-											onclick={handleConnectGitHub}
-											disabled={connectingGitHub}
-											class="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50"
-										>
-											{connectingGitHub ? 'Connecting...' : 'Connect'}
-										</button>
-										<button
-											onclick={() => { showGitHubConnect = false; gitHubPAT = ''; gitHubError = ''; }}
-											class="px-4 py-2 border rounded-lg user-settings-btn"
-										>
-											Cancel
-										</button>
-									</div>
-								</div>
-							{:else}
-								<button
-									onclick={() => showGitHubConnect = true}
-									class="px-4 py-2 bg-secondary-foreground text-secondary rounded-lg hover:bg-foreground/90 flex items-center gap-2"
-								>
-									<svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-										<path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.6.11.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/>
-									</svg>
-									Connect GitHub
-								</button>
-							{/if}
-						</div>
+		{:else if activeSection === 'credentials'}
+			<!-- Credentials Section -->
+			<div class="space-y-6">
+				<div class="flex items-center justify-between">
+					{#if !embedded}<h3 class="text-lg font-semibold text-foreground">API Keys</h3>{/if}
+					{#if hasMissingRequired}
+						<span class="px-2 py-1 bg-status-error border border-status-error text-destructive rounded text-xs">
+							Missing required keys
+						</span>
 					{/if}
 				</div>
 
-			{:else if activeSection === 'hotkeys'}
-				<!-- Hotkeys Section -->
-				<div class="space-y-6">
-					<h3 class="text-lg font-semibold text-foreground">Keyboard Shortcuts</h3>
+				{#if credentialSuccess}
+					<div class="p-3 bg-status-success border border-status-success text-success rounded-lg text-sm">
+						{credentialSuccess}
+					</div>
+				{/if}
+				{#if credentialError}
+					<div class="p-3 bg-status-error border border-status-error text-destructive rounded-lg text-sm">
+						{credentialError}
+					</div>
+				{/if}
 
-					<!-- Global Voice Input -->
-					<div class="p-4 border rounded-lg border-border space-y-4">
-						<div class="flex items-center justify-between">
-							<div>
-								<h4 class="font-medium text-foreground">Global Voice Input</h4>
-								<p class="text-sm text-muted-foreground">
-									Press hotkey anywhere to start voice-to-text
+				{#if loadingCredentials}
+					<div class="flex justify-center py-8">
+						<div class="animate-spin rounded-full h-6 w-6 border-b-2 border-primary"></div>
+					</div>
+				{:else}
+					<div class="space-y-4">
+						{#each credentials as cred}
+							<div class="p-4 border rounded-lg border-border">
+								<div class="flex items-start gap-3">
+									<svg class="w-5 h-5 text-muted-foreground mt-0.5" fill="currentColor" viewBox="0 0 24 24">
+										<path d={getCredentialIcon(cred.credential_type)} />
+									</svg>
+									<div class="flex-1">
+										<div class="flex items-center gap-2 mb-1">
+											<h4 class="font-medium text-foreground">{cred.name}</h4>
+											<span class="px-2 py-0.5 text-xs rounded-full {getPolicyBadge(cred.policy).class}">
+												{getPolicyBadge(cred.policy).text}
+											</span>
+										</div>
+										<p class="text-sm text-muted-foreground mb-2">{cred.description}</p>
+
+										{#if cred.policy === 'admin_provided'}
+											<p class="text-sm text-info">
+												This key is provided by the administrator.
+											</p>
+										{:else if editingCredential === cred.credential_type}
+											<div class="space-y-2">
+												<input
+													type="password"
+													bind:value={credentialInput}
+													placeholder="Enter {cred.name}"
+													class="w-full px-3 py-2 border rounded-lg bg-input border-border text-sm"
+												/>
+												<div class="flex gap-2">
+													<button
+														onclick={() => handleSaveCredential(cred.credential_type)}
+														disabled={savingCredential}
+														class="px-3 py-1.5 bg-primary text-primary-foreground rounded text-sm hover:bg-primary/90 disabled:opacity-50"
+													>
+														{savingCredential ? 'Saving...' : 'Save'}
+													</button>
+													<button
+														onclick={() => { editingCredential = null; credentialInput = ''; credentialError = ''; }}
+														class="px-3 py-1.5 border rounded text-sm user-settings-btn"
+													>
+														Cancel
+													</button>
+												</div>
+											</div>
+										{:else if cred.is_set}
+											<div class="flex items-center gap-2">
+												<span class="text-sm text-muted-foreground font-mono">{cred.masked_value}</span>
+												<span class="text-success text-xs">✓ Set</span>
+												<button
+													onclick={() => { editingCredential = cred.credential_type; credentialInput = ''; }}
+													class="text-primary hover:text-primary/80 text-sm ml-2"
+												>
+													Update
+												</button>
+												<button
+													onclick={() => handleDeleteCredential(cred.credential_type)}
+													class="text-destructive hover:text-destructive/80 text-sm"
+												>
+													Remove
+												</button>
+											</div>
+										{:else}
+											<div class="flex items-center gap-2">
+												{#if cred.admin_available && cred.policy === 'optional'}
+													<span class="text-sm text-muted-foreground">Using admin key (you can override)</span>
+												{:else}
+													<span class="text-sm text-warning">Not set</span>
+												{/if}
+												<button
+													onclick={() => { editingCredential = cred.credential_type; credentialInput = ''; }}
+													class="text-primary hover:text-primary/80 text-sm"
+												>
+													{cred.is_set ? 'Update' : 'Set'}
+												</button>
+											</div>
+										{/if}
+									</div>
+								</div>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+
+		{:else if activeSection === 'github'}
+			<!-- GitHub Section -->
+			<div class="space-y-6">
+				{#if !embedded}<h3 class="text-lg font-semibold text-foreground">GitHub Connection</h3>{/if}
+
+				{#if gitHubSuccess}
+					<div class="p-3 bg-status-success border border-status-success text-success rounded-lg text-sm">
+						{gitHubSuccess}
+					</div>
+				{/if}
+				{#if gitHubError}
+					<div class="p-3 bg-status-error border border-status-error text-destructive rounded-lg text-sm">
+						{gitHubError}
+					</div>
+				{/if}
+
+				{#if loadingGitHub}
+					<div class="flex justify-center py-8">
+						<div class="animate-spin rounded-full h-6 w-6 border-b-2 border-primary"></div>
+					</div>
+				{:else if githubConfig?.connected}
+					<!-- Connected State -->
+					<div class="p-4 bg-status-success border border-status-success rounded-lg">
+						<div class="flex items-center gap-3">
+							{#if githubConfig.github_avatar_url}
+								<img src={githubConfig.github_avatar_url} alt="" class="w-10 h-10 rounded-full" />
+							{/if}
+							<div class="flex-1">
+								<p class="font-medium text-success">
+									Connected as @{githubConfig.github_username}
 								</p>
 							</div>
 							<button
-								role="switch"
-								aria-checked={$hotkeyPreferences.globalSttEnabled}
-								onclick={() => hotkeyPreferences.setGlobalSttEnabled(!$hotkeyPreferences.globalSttEnabled)}
-								class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
-									{$hotkeyPreferences.globalSttEnabled ? 'bg-primary' : 'bg-muted'}"
+								onclick={handleDisconnectGitHub}
+								class="px-3 py-1.5 text-sm text-destructive hover:text-destructive/80 border border-destructive/30 rounded hover:bg-status-error"
 							>
-								<span class="inline-block h-4 w-4 transform rounded-full bg-white transition
-									{$hotkeyPreferences.globalSttEnabled ? 'translate-x-6' : 'translate-x-1'}" />
+								Disconnect
 							</button>
 						</div>
+					</div>
 
-						{#if $hotkeyPreferences.globalSttEnabled}
-							<div class="pt-3 border-t border-border">
-								<label class="block text-sm font-medium text-muted-foreground mb-2">Hotkey</label>
-								<HotkeyCapture
-									value={$hotkeyPreferences.globalSttHotkey}
-									onChange={(v) => hotkeyPreferences.setGlobalSttHotkey(v)}
-								/>
-								<p class="text-xs text-muted-foreground mt-2">
-									Click the box above, then press your desired key combination
-								</p>
+					<!-- Default Repository Selection -->
+					<div class="space-y-4">
+						<h4 class="text-sm font-medium text-muted-foreground">Default Repository</h4>
+
+						{#if githubRepos.length === 0}
+							<button
+								onclick={handleLoadRepos}
+								disabled={loadingRepos}
+								class="px-4 py-2 border rounded-lg user-settings-btn disabled:opacity-50"
+							>
+								{loadingRepos ? 'Loading...' : 'Load Repositories'}
+							</button>
+						{:else}
+							<div class="space-y-3">
+								<select
+									bind:value={selectedRepo}
+									onchange={handleRepoChange}
+									class="w-full px-3 py-2 border rounded-lg bg-input border-border"
+								>
+									<option value="">Select a repository</option>
+									{#each githubRepos as repo}
+										<option value={repo.full_name}>
+											{repo.full_name} {repo.private ? '🔒' : ''}
+										</option>
+									{/each}
+								</select>
+
+								{#if selectedRepo && branches.length > 0}
+									<select
+										bind:value={selectedBranch}
+										class="w-full px-3 py-2 border rounded-lg bg-input border-border"
+									>
+										{#each branches as branch}
+											<option value={branch.name}>
+												{branch.name} {branch.is_default ? '(default)' : ''}
+											</option>
+										{/each}
+									</select>
+								{/if}
+
+								{#if selectedRepo}
+									<button
+										onclick={handleSaveGitHubDefaults}
+										disabled={savingGitHubDefaults}
+										class="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50"
+									>
+										{savingGitHubDefaults ? 'Saving...' : 'Save as Default'}
+									</button>
+								{/if}
 							</div>
 						{/if}
 					</div>
+				{:else}
+					<!-- Not Connected State -->
+					<div class="p-4 bg-muted border border-border rounded-lg">
+						<p class="text-muted-foreground mb-4">
+							Connect your GitHub account to access your repositories.
+						</p>
 
-					<div class="p-4 bg-muted/50 rounded-lg">
-						<h4 class="text-sm font-medium text-foreground mb-2">How it works</h4>
-						<ul class="text-sm text-muted-foreground space-y-1.5">
-							<li class="flex items-start gap-2">
-								<span class="text-primary mt-0.5">1.</span>
-								Press the hotkey to start recording
-							</li>
-							<li class="flex items-start gap-2">
-								<span class="text-primary mt-0.5">2.</span>
-								Speak your message
-							</li>
-							<li class="flex items-start gap-2">
-								<span class="text-primary mt-0.5">3.</span>
-								Press the hotkey again to stop
-							</li>
-							<li class="flex items-start gap-2">
-								<span class="text-primary mt-0.5">4.</span>
-								Text is copied to clipboard and pasted into any focused input
-							</li>
-						</ul>
+						{#if showGitHubConnect}
+							<div class="space-y-3">
+								<div>
+									<label class="block text-sm font-medium text-muted-foreground mb-1">
+										Personal Access Token
+									</label>
+									<input
+										type="password"
+										bind:value={gitHubPAT}
+										placeholder="ghp_..."
+										class="w-full px-3 py-2 border rounded-lg bg-input border-border"
+									/>
+									<p class="text-xs text-muted-foreground mt-1">
+										Create a token at <a href="https://github.com/settings/tokens" target="_blank" class="text-primary hover:underline">github.com/settings/tokens</a> with 'repo' scope.
+									</p>
+								</div>
+								<div class="flex gap-2">
+									<button
+										onclick={handleConnectGitHub}
+										disabled={connectingGitHub}
+										class="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50"
+									>
+										{connectingGitHub ? 'Connecting...' : 'Connect'}
+									</button>
+									<button
+										onclick={() => { showGitHubConnect = false; gitHubPAT = ''; gitHubError = ''; }}
+										class="px-4 py-2 border rounded-lg user-settings-btn"
+									>
+										Cancel
+									</button>
+								</div>
+							</div>
+						{:else}
+							<button
+								onclick={() => showGitHubConnect = true}
+								class="px-4 py-2 bg-secondary-foreground text-secondary rounded-lg hover:bg-foreground/90 flex items-center gap-2"
+							>
+								<svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+									<path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.6.11.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/>
+								</svg>
+								Connect GitHub
+							</button>
+						{/if}
 					</div>
+				{/if}
+			</div>
+
+		{:else if activeSection === 'hotkeys'}
+			<!-- Hotkeys Section -->
+			<div class="space-y-6">
+				{#if !embedded}<h3 class="text-lg font-semibold text-foreground">Keyboard Shortcuts</h3>{/if}
+
+				<!-- Global Voice Input -->
+				<div class="p-4 border rounded-lg border-border space-y-4">
+					<div class="flex items-center justify-between">
+						<div>
+							<h4 class="font-medium text-foreground">Global Voice Input</h4>
+							<p class="text-sm text-muted-foreground">
+								Press hotkey anywhere to start voice-to-text
+							</p>
+						</div>
+						<button
+							role="switch"
+							aria-checked={$hotkeyPreferences.globalSttEnabled}
+							onclick={() => hotkeyPreferences.setGlobalSttEnabled(!$hotkeyPreferences.globalSttEnabled)}
+							class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+								{$hotkeyPreferences.globalSttEnabled ? 'bg-primary' : 'bg-muted'}"
+						>
+							<span class="inline-block h-4 w-4 transform rounded-full bg-white transition
+								{$hotkeyPreferences.globalSttEnabled ? 'translate-x-6' : 'translate-x-1'}" />
+						</button>
+					</div>
+
+					{#if $hotkeyPreferences.globalSttEnabled}
+						<div class="pt-3 border-t border-border">
+							<label class="block text-sm font-medium text-muted-foreground mb-2">Hotkey</label>
+							<HotkeyCapture
+								value={$hotkeyPreferences.globalSttHotkey}
+								onChange={(v) => hotkeyPreferences.setGlobalSttHotkey(v)}
+							/>
+							<p class="text-xs text-muted-foreground mt-2">
+								Click the box above, then press your desired key combination
+							</p>
+						</div>
+					{/if}
 				</div>
-			{/if}
-		</div>
+
+				<div class="p-4 bg-muted/50 rounded-lg">
+					<h4 class="text-sm font-medium text-foreground mb-2">How it works</h4>
+					<ul class="text-sm text-muted-foreground space-y-1.5">
+						<li class="flex items-start gap-2">
+							<span class="text-primary mt-0.5">1.</span>
+							Press the hotkey to start recording
+						</li>
+						<li class="flex items-start gap-2">
+							<span class="text-primary mt-0.5">2.</span>
+							Speak your message
+						</li>
+						<li class="flex items-start gap-2">
+							<span class="text-primary mt-0.5">3.</span>
+							Press the hotkey again to stop
+						</li>
+						<li class="flex items-start gap-2">
+							<span class="text-primary mt-0.5">4.</span>
+							Text is copied to clipboard and pasted into any focused input
+						</li>
+					</ul>
+				</div>
+			</div>
+		{/if}
 	</div>
-</BaseCard>
+{/snippet}
+
+{#if embedded}
+	<FeaturePageLayout icon={UserCog} title="My Settings">
+		{#snippet headerTabs()}
+			<div class="fp-tab-bar">
+				{#each sections as section}
+					<button
+						class="fp-tab"
+						class:active={activeSection === section.id}
+						onclick={() => activeSection = section.id}
+					>
+						{section.label}
+						{#if section.id === 'credentials' && hasMissingRequired}
+							<span class="us-missing-dot"></span>
+						{/if}
+					</button>
+				{/each}
+			</div>
+		{/snippet}
+		{#snippet children()}
+			{@render settingsContent()}
+		{/snippet}
+	</FeaturePageLayout>
+{:else}
+	<BaseCard
+		{card}
+		{onClose}
+		{onMaximize}
+		{onFocus}
+		{onMove}
+		{onResize}
+		{onDragEnd}
+		{onResizeEnd}
+	>
+		<div class="card-system flex h-full">
+			<!-- Sidebar Navigation -->
+			<div class="w-48 border-r border-border p-2 flex-shrink-0">
+				<div class="space-y-1">
+					{#each sections as section}
+						<button
+							onclick={() => activeSection = section.id}
+							class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors
+								{activeSection === section.id
+									? 'bg-primary/15 text-primary'
+									: 'text-muted-foreground user-settings-btn'}"
+						>
+							<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+								<path d={section.icon} />
+							</svg>
+							{section.label}
+							{#if section.id === 'credentials' && hasMissingRequired}
+								<span class="ml-auto w-2 h-2 bg-destructive rounded-full"></span>
+							{/if}
+						</button>
+					{/each}
+				</div>
+			</div>
+
+			{@render settingsContent()}
+		</div>
+	</BaseCard>
+{/if}
 
 <style>
 	:global(.user-settings-btn:hover) {
@@ -920,5 +951,13 @@
 	:global(.user-settings-btn:focus-visible) {
 		outline: 2px solid var(--ring);
 		outline-offset: 2px;
+	}
+
+	.us-missing-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--destructive);
+		flex-shrink: 0;
 	}
 </style>

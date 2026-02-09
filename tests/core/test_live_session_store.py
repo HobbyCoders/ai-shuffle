@@ -248,6 +248,37 @@ class TestThinkingTextSeparation:
         assert len(tool_msgs) == 1
 
     @pytest.mark.asyncio
+    async def test_text_before_thinking_reorders_correctly(self, streaming_session):
+        """CRITICAL: When SDK emits text before thinking, thinking should still appear first.
+
+        The SDK sometimes emits text blocks (e.g., '\\n\\n') before thinking blocks.
+        When append_thinking creates a new message, it must be inserted before any
+        trailing streaming text messages to maintain correct visual ordering.
+        """
+        # Simulate SDK's out-of-order emission: text arrives before thinking
+        await streaming_session.append_text("session-1", "\n\n")
+        await streaming_session.append_thinking("session-1", "Let me analyze this...")
+
+        session = streaming_session.get_session("session-1")
+        assert len(session.messages) == 2
+        # Thinking must come BEFORE text in the array
+        assert session.messages[0].type == "thinking"
+        assert session.messages[0].content == "Let me analyze this..."
+        assert session.messages[1].type == "text"
+        assert session.messages[1].content == "\n\n"
+
+    @pytest.mark.asyncio
+    async def test_text_before_thinking_with_real_content(self, streaming_session):
+        """When text with real content arrives before thinking, thinking should still come first."""
+        await streaming_session.append_text("session-1", "Some early text")
+        await streaming_session.append_thinking("session-1", "Thinking...")
+
+        session = streaming_session.get_session("session-1")
+        assert len(session.messages) == 2
+        assert session.messages[0].type == "thinking"
+        assert session.messages[1].type == "text"
+
+    @pytest.mark.asyncio
     async def test_concurrent_append_operations(self, streaming_session):
         """Should handle concurrent appends without mixing."""
         # Simulate interleaved operations (as might happen with race conditions)

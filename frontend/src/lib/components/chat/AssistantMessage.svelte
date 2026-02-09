@@ -89,63 +89,139 @@
 		return `$${cost.toFixed(4)}`;
 	}
 
+	// ── Incremental markdown rendering ──────────────────────────────────────
+	// During streaming, content is only appended. We cache the rendered HTML
+	// for completed paragraph blocks and only re-parse the tail, reducing
+	// marked() work from O(full_content) to O(last_paragraph) per update.
+
 	// Streaming cursor HTML to inject inline with text
 	const STREAMING_CURSOR = '<span class="streaming-cursor inline-block w-2 h-4 ml-0.5 bg-primary animate-pulse align-middle"></span>';
+
+	// Memoization state for incremental rendering
+	let _prevContent = '';
+	let _prevHtml = '';
+	let _prevWasStreaming = false;
+	// Cached HTML for the "stable prefix" (all content up to the last \n\n boundary)
+	let _stablePrefixContent = '';
+	let _stablePrefixHtml = '';
+
+	const renderedHtml = $derived(renderMarkdownMemoized(content, streaming));
+
+	function renderMarkdownMemoized(text: string, isStreaming: boolean): string {
+		// Fast path: content and streaming flag unchanged
+		if (text === _prevContent && isStreaming === _prevWasStreaming) return _prevHtml;
+
+		// Transition from streaming→not-streaming: full re-render for final media processing
+		if (_prevWasStreaming && !isStreaming) {
+			_stablePrefixContent = '';
+			_stablePrefixHtml = '';
+			_prevContent = text;
+			_prevWasStreaming = false;
+			_prevHtml = renderMarkdownFull(text, false);
+			return _prevHtml;
+		}
+
+		// During streaming: incremental render if content was only appended
+		if (isStreaming && _prevContent.length > 0 && text.startsWith(_prevContent)) {
+			const result = renderMarkdownIncremental(text);
+			_prevContent = text;
+			_prevWasStreaming = true;
+			_prevHtml = result;
+			return result;
+		}
+
+		// Full render (first render, content rewritten, or non-streaming)
+		_stablePrefixContent = '';
+		_stablePrefixHtml = '';
+		_prevContent = text;
+		_prevWasStreaming = isStreaming;
+		_prevHtml = renderMarkdownFull(text, isStreaming);
+		return _prevHtml;
+	}
+
+	/**
+	 * Incremental render: reuse cached HTML for completed paragraphs,
+	 * only re-parse from the last paragraph boundary onwards.
+	 */
+	function renderMarkdownIncremental(text: string): string {
+		// Find the last paragraph boundary (\n\n) in the text.
+		// Everything before it is "stable" — its markdown structure is complete.
+		const lastBoundary = text.lastIndexOf('\n\n');
+
+		if (lastBoundary <= 0) {
+			// No paragraph boundary yet — full parse (content is short)
+			let html = marked(replaceMediaWithPlaceholders(text), { breaks: true }) as string;
+			return injectStreamingCursor(html);
+		}
+
+		const stableContent = text.substring(0, lastBoundary);
+		const tailContent = text.substring(lastBoundary);
+
+		// If the stable prefix hasn't changed, reuse its cached HTML
+		let prefixHtml: string;
+		if (stableContent === _stablePrefixContent) {
+			prefixHtml = _stablePrefixHtml;
+		} else {
+			// Stable prefix grew — re-parse it and cache
+			prefixHtml = marked(replaceMediaWithPlaceholders(stableContent), { breaks: true }) as string;
+			_stablePrefixContent = stableContent;
+			_stablePrefixHtml = prefixHtml;
+		}
+
+		// Always re-parse the tail (last incomplete paragraph + new content)
+		let tailHtml = marked(replaceMediaWithPlaceholders(tailContent), { breaks: true }) as string;
+		tailHtml = injectStreamingCursor(tailHtml);
+
+		return prefixHtml + tailHtml;
+	}
+
+	/**
+	 * Replace media markdown with placeholders during streaming to prevent flickering.
+	 */
+	function replaceMediaWithPlaceholders(text: string): string {
+		const placeholder = '<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">';
+		let result = text;
+		result = result.replace(/!\[([^\]]*)\]\((data:image\/[^;]+;base64,[^)]+)\)/g, placeholder + 'Image loading...</div>');
+		result = result.replace(/!\[([^\]]*)\]\((\/api\/generated-images\/[^)]+)\)/g, placeholder + 'Image loading...</div>');
+		result = result.replace(/\[([^\]]*)\]\((\/api\/generated-videos\/[^)]+)\)/g, placeholder + 'Video loading...</div>');
+		result = result.replace(/"image_base64"\s*:\s*"([A-Za-z0-9+/=]{100,})"/g, placeholder + 'Image loading...</div>');
+		result = result.replace(/[^\]]+\]\((\/api\/files\/[^)]+)\)/g, placeholder + 'File preparing...</div>');
+		return result;
+	}
 
 	/**
 	 * Inject the streaming cursor inside the last text-containing element
 	 * so it appears inline with the text instead of below block elements.
 	 */
 	function injectStreamingCursor(html: string): string {
-		// Find the last closing tag that can contain inline content
-		// Priority: look for common inline/text containers from the end
 		const inlineClosingTags = ['</p>', '</li>', '</td>', '</th>', '</span>', '</strong>', '</em>', '</a>', '</code>'];
 
 		let lastIndex = -1;
-		let lastTag = '';
-
 		for (const tag of inlineClosingTags) {
 			const idx = html.lastIndexOf(tag);
 			if (idx > lastIndex) {
 				lastIndex = idx;
-				lastTag = tag;
 			}
 		}
 
 		if (lastIndex !== -1) {
-			// Insert cursor just before the last closing tag
 			return html.slice(0, lastIndex) + STREAMING_CURSOR + html.slice(lastIndex);
 		}
-
-		// Fallback: append cursor at the end
 		return html + STREAMING_CURSOR;
 	}
 
-	function renderMarkdown(text: string, isStreaming: boolean = false): string {
-		// If streaming, hide media content to prevent flickering - show placeholder instead
+	/**
+	 * Full markdown render (non-streaming or first render).
+	 */
+	function renderMarkdownFull(text: string, isStreaming: boolean): string {
 		if (isStreaming) {
-			// Replace image markdown with placeholder
-			let processedContent = text.replace(/!\[([^\]]*)\]\((data:image\/[^;]+;base64,[^)]+)\)/g,
-				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
-			processedContent = processedContent.replace(/!\[([^\]]*)\]\((\/api\/generated-images\/[^)]+)\)/g,
-				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
-			processedContent = processedContent.replace(/\[([^\]]*)\]\((\/api\/generated-videos\/[^)]+)\)/g,
-				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Video loading...</div>');
-			processedContent = processedContent.replace(/"image_base64"\s*:\s*"([A-Za-z0-9+/=]{100,})"/g,
-				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">Image loading...</div>');
-			// Replace file download links with placeholder
-			processedContent = processedContent.replace(/[^\]]+\]\((\/api\/files\/[^)]+)\)/g,
-				'<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">File preparing...</div>');
-			let html = marked(processedContent, { breaks: true }) as string;
-			// Inject streaming cursor inside the last element so it flows inline with text
-			html = injectStreamingCursor(html);
-			return html;
+			let html = marked(replaceMediaWithPlaceholders(text), { breaks: true }) as string;
+			return injectStreamingCursor(html);
 		}
 
 		// Process base64 images with download capability and overlay buttons
 		const base64ImagePattern = /!\[([^\]]*)\]\((data:image\/[^;]+;base64,[^)]+)\)/g;
 
-		// Replace base64 image markdown with custom HTML that includes overlay buttons
 		let processedContent = text.replace(base64ImagePattern, (match, alt, dataUrl) => {
 			return `<div class="generated-media-container relative my-4 inline-block">
 				<img src="${dataUrl}" alt="${alt || 'Generated image'}" class="max-w-full rounded-lg shadow-md border border-border" />
@@ -164,7 +240,6 @@
 			</div>`;
 		});
 
-		// Render generated-images markdown with overlay buttons
 		const generatedImagePattern = /!\[([^\]]*)\]\((\/api\/generated-images\/[^)]+)\)/g;
 		processedContent = processedContent.replace(generatedImagePattern, (match, alt, imageUrl) => {
 			const filename = imageUrl.split('/').pop() || 'generated-image.png';
@@ -180,7 +255,6 @@
 			</div>`;
 		});
 
-		// Render generated-videos markdown links as video player with overlay buttons
 		const generatedVideoPattern = /\[([^\]]*)\]\((\/api\/generated-videos\/[^)]+)\)/g;
 		processedContent = processedContent.replace(generatedVideoPattern, (match, _text, videoUrl) => {
 			const filename = videoUrl.split('/').pop() || 'generated-video.mp4';
@@ -367,7 +441,7 @@
 		<div class="overflow-hidden max-w-full">
 			<div class="prose prose-sm max-w-none break-words" style="overflow-wrap: anywhere; word-break: break-word;">
 				{#if content}
-					{@html renderMarkdown(content, streaming)}
+					{@html renderedHtml}
 				{:else if streaming && !hasPartialMessages}
 					<!-- Only show placeholder dots when partial messages is disabled -->
 					<div class="flex gap-1 py-2">
@@ -380,7 +454,7 @@
 		</div>
 		{#if metadata && !streaming}
 			<div class="mt-2 text-xs text-muted-foreground flex items-center gap-3">
-				{#if metadata.is_final_message && metadata.total_cost_usd}
+				{#if metadata.total_cost_usd}
 					<span>{formatCost(metadata.total_cost_usd as number)}</span>
 				{:else if metadata.cost_usd}
 					<span>{formatCost(metadata.cost_usd as number)}</span>

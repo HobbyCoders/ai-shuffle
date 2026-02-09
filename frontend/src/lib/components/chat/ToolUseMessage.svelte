@@ -189,7 +189,6 @@
 
 		// Simple diff: show all old lines as removed, all new lines as added
 		// For a more sophisticated diff, we'd use a proper diff algorithm
-		const maxLen = Math.max(oldLines.length, newLines.length);
 		let i = 0, j = 0;
 
 		// Find common prefix
@@ -217,7 +216,10 @@
 			result.push({ type: 'added', line: newLines[k] });
 		}
 
-		result.push(...suffixLines);
+		// Use loop instead of spread to avoid V8's ~65K argument limit on push(...arr)
+		for (const line of suffixLines) {
+			result.push(line);
+		}
 		return result;
 	}
 
@@ -245,6 +247,8 @@
 		Task: 'bot', Skill: 'bot',
 		// Todo
 		TodoWrite: 'list',
+		// Plan mode / Questions
+		EnterPlanMode: 'list', ExitPlanMode: 'list', AskUserQuestion: 'bot',
 	};
 
 	function getToolIconType(toolName: string): IconType {
@@ -412,7 +416,7 @@
 				<span class="text-sm font-medium text-foreground flex-shrink-0">{name}</span>
 				<!-- Summary (if available) -->
 				{#if summary}
-					<span class="text-muted-foreground flex-shrink-0">•</span>
+					<span class="text-muted-foreground flex-shrink-0">&bull;</span>
 					<span
 						class="text-sm text-muted-foreground truncate min-w-0"
 						title={summary}
@@ -427,11 +431,20 @@
 				{#if isEditTool && status !== 'error'}
 					<!-- Side-by-side diff view for Edit tool (only shown on success) -->
 					<div class="px-3 py-2">
+						{#if streaming && !result && !oldString && !newString}
+							<!-- Loading state while content fields stream in -->
+							<div class="rounded border border-border bg-muted/30 p-3">
+								<div class="flex items-center gap-2">
+									<span class="inline-block w-1.5 h-3 bg-primary/50 animate-pulse rounded-sm"></span>
+									<span class="text-[10px] text-muted-foreground">Preparing changes...</span>
+								</div>
+							</div>
+						{:else}
 						<div class="grid grid-cols-1 gap-2">
 							<!-- Old (removed) -->
 							<div class="min-w-0">
 								<div class="text-[10px] text-red-400 mb-1 font-medium flex items-center gap-1">
-									<span>−</span>
+									<span>&minus;</span>
 									<span>Removed</span>
 								</div>
 								<div class="rounded border border-red-500/20 bg-red-500/5 p-2">
@@ -453,6 +466,7 @@
 								</div>
 							</div>
 						</div>
+						{/if}
 					</div>
 				{:else if isEditTool && status === 'error'}
 					<!-- Show error result for failed Edit tool -->
@@ -491,11 +505,21 @@
 							</svg>
 							<span>Content</span>
 						</div>
+						{#if streaming && !result && !writeContent}
+							<!-- Loading state while content field streams in -->
+							<div class="rounded border border-green-500/20 bg-green-500/5 p-3">
+								<div class="flex items-center gap-2">
+									<span class="inline-block w-1.5 h-3 bg-green-400/50 animate-pulse rounded-sm"></span>
+									<span class="text-[10px] text-muted-foreground">Preparing content...</span>
+								</div>
+							</div>
+						{:else}
 						<div class="rounded border border-green-500/20 bg-green-500/5 p-2">
 							<div class="max-h-60 overflow-auto">
 								<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{writeContent || ' '}{#if streaming && !result}<span class="inline-block w-1.5 h-3 ml-0.5 bg-green-400 animate-pulse"></span>{/if}</pre>
 							</div>
 						</div>
+						{/if}
 					</div>
 				{:else if isBashTool}
 					<!-- Stacked on mobile, side-by-side on desktop for Bash tool -->
@@ -566,7 +590,7 @@
 									<div class="max-h-60 overflow-auto">
 										{#if result}
 											{#if toolResultHasMedia(result)}
-												<span class="text-[10px] text-green-500">✓ {toolResultHasVideo(result) ? 'Video' : 'Image'} generated</span>
+												<span class="text-[10px] text-green-500">&#10003; {toolResultHasVideo(result) ? 'Video' : 'Image'} generated</span>
 											{:else}
 												<pre class="text-[10px] font-mono text-foreground/80 m-0 w-max !bg-transparent !p-0 !rounded-none">{result}</pre>
 											{/if}

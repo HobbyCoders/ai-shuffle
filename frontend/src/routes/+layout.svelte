@@ -9,12 +9,14 @@
 	import { chatPreferences } from '$lib/stores/chatPreferences';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
 	import { files } from '$lib/stores/files';
+	import { onDestroy } from 'svelte';
 	import { syncNotificationsFromServer } from '$lib/services/notifications';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 	import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
 	import OfflineBanner from '$lib/components/OfflineBanner.svelte';
 
 	let initialized = false;
+	let authPollInterval: ReturnType<typeof setInterval> | null = null;
 
 	onMount(async () => {
 		// Initialize theme on mount (applies from localStorage immediately to prevent flash)
@@ -55,6 +57,19 @@
 			console.error('Auth check failed:', e);
 			initialized = true;
 		}
+
+		// Poll auth status to detect gh login/logout changes during the session
+		authPollInterval = setInterval(async () => {
+			try {
+				await auth.checkAuth();
+			} catch (e) {
+				console.debug('Auth poll failed:', e);
+			}
+		}, 30000);
+	});
+
+	onDestroy(() => {
+		if (authPollInterval) clearInterval(authPollInterval);
 	});
 </script>
 

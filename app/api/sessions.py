@@ -365,7 +365,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
 
     if sdk_session_id:
         try:
-            from app.core.jsonl_parser import parse_session_history, get_session_cost_from_jsonl
+            from app.core.jsonl_parser import parse_session_history
             from app.core.config import settings
 
             # Get working dir from project if available
@@ -375,27 +375,17 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                 if project:
                     working_dir = str(settings.workspace_dir / project["path"])
 
-            jsonl_messages = parse_session_history(sdk_session_id, working_dir)
+            jsonl_messages, usage_data = parse_session_history(sdk_session_id, working_dir)
             if jsonl_messages:
-                # Get profile_id from database messages to merge with JSONL
-                # JSONL files don't contain profile_id, but we need it for per-query profile tracking
-                # Use content-based matching for user messages (more robust than index-based)
-                db_messages = database.get_session_messages(session_id)
-                db_profile_map = {}
-                for db_msg in db_messages:
-                    if db_msg.get("role") == "user" and db_msg.get("profile_id"):
-                        # Use content as key for matching (unique per user message)
-                        content = db_msg.get("content", "")
-                        db_profile_map[content] = db_msg["profile_id"]
+                # Get profile_id map (cached to avoid loading all DB messages every time)
+                from app.core.cost_utils import get_cached_profile_map
+                db_profile_map = get_cached_profile_map(session_id)
 
                 # Transform to expected format for SessionWithMessages
                 # Use camelCase for frontend compatibility (toolName, toolInput, toolId)
                 for i, m in enumerate(jsonl_messages):
-                    # Get timestamp from metadata, ensuring it's properly formatted
-                    # Note: timestamp extracted but not passed to Pydantic to avoid format issues
-                    _timestamp = m.get("metadata", {}).get("timestamp")
-                    # Don't pass raw timestamp strings to Pydantic datetime field
-                    # The frontend handles timestamp display from metadata anyway
+                    # Timestamps live in metadata (not Pydantic datetime fields);
+                    # the frontend reads them directly from metadata for display.
                     msg_data = {
                         "id": m.get("id", i),
                         "role": m.get("role", "user"),
@@ -424,9 +414,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                         msg_data["agentChildren"] = m.get("agentChildren")
                     messages.append(msg_data)
 
-            # Get token usage from JSONL - always load cache tokens since they're not in DB
-            # Also load input/output tokens if database doesn't have them
-            usage_data = get_session_cost_from_jsonl(sdk_session_id, working_dir)
+            # Token usage from JSONL (extracted in same pass as messages)
             logger.info(f"[Session API] JSONL usage_data for {session_id}: {usage_data}")
             if usage_data:
                 # Cache tokens are only in JSONL, always use those
@@ -464,45 +452,9 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                 msg["type"] = "text"
             messages.append(msg)
 
-    # Attach cost/duration metadata to ALL final assistant messages
-    # (JSONL files don't store cost/duration, so we get it from usage_log)
-    if messages:
-        # Find all final assistant messages (last text msg before each user msg or end)
-        final_indices = []
-        for i, msg in enumerate(messages):
-            if msg.get("role") == "assistant" and msg.get("type") in ("text", None):
-                # Check if this is final for this turn
-                is_final = True
-                for j in range(i + 1, len(messages)):
-                    next_msg = messages[j]
-                    if next_msg.get("role") == "user":
-                        break  # Next turn started, this was final
-                    if next_msg.get("role") == "assistant" and next_msg.get("type") in ("text", None):
-                        is_final = False  # There's another text message after
-                        break
-                if is_final:
-                    final_indices.append(i)
-
-        # Get all usage entries and match to final messages
-        usage_entries = database.get_all_session_usage(session_id)
-        for turn_idx, msg_idx in enumerate(final_indices):
-            if turn_idx < len(usage_entries):
-                usage = usage_entries[turn_idx]
-                is_absolute_final = (turn_idx == len(final_indices) - 1)
-                existing_metadata = messages[msg_idx].get("metadata") or {}
-
-                metadata = {
-                    **existing_metadata,
-                    "cost_usd": usage["cost_usd"],
-                    "duration_ms": usage["duration_ms"],
-                    "is_final_message": is_absolute_final
-                }
-                # Only add cumulative cost to the absolute final message
-                if is_absolute_final:
-                    metadata["total_cost_usd"] = usage["cumulative_cost_usd"]
-
-                messages[msg_idx]["metadata"] = metadata
-                logger.debug(f"Attached cost/duration to message {msg_idx}: ${usage['cost_usd']}, {usage['duration_ms']}ms, final={is_absolute_final}")
+    # Attach cost/duration metadata to final assistant messages (cached, O(N))
+    from app.core.cost_utils import attach_cost_metadata
+    attach_cost_metadata(messages, session_id)
 
     session["messages"] = messages
     session["tags"] = database.get_session_tags(session_id)
@@ -594,7 +546,7 @@ async def get_live_session(
 
     if sdk_session_id:
         try:
-            from app.core.jsonl_parser import parse_session_history, get_session_cost_from_jsonl
+            from app.core.jsonl_parser import parse_session_history
             from app.core.config import settings
 
             project_id = session.get("project_id")
@@ -603,8 +555,16 @@ async def get_live_session(
                 if project:
                     working_dir = str(settings.workspace_dir / project["path"])
 
-            jsonl_messages = parse_session_history(sdk_session_id, working_dir)
+            jsonl_messages, usage_data = parse_session_history(sdk_session_id, working_dir)
             if jsonl_messages:
+                # Optional fields to include when present (system, tool, subagent, metadata)
+                _OPTIONAL_LIVE_FIELDS = (
+                    "subtype", "systemSubtype", "systemData",
+                    "toolName", "toolId", "toolInput", "toolResult", "toolStatus",
+                    "agentId", "agentType", "agentDescription", "agentStatus", "agentChildren",
+                    "metadata",
+                )
+
                 # Transform to live format
                 for m in jsonl_messages:
                     msg = {
@@ -614,43 +574,12 @@ async def get_live_session(
                         "content": m.get("content", ""),
                         "streaming": False,
                     }
-                    # System message fields
-                    if m.get("subtype"):
-                        msg["subtype"] = m.get("subtype")
-                    if m.get("systemSubtype"):
-                        msg["systemSubtype"] = m.get("systemSubtype")
-                    if m.get("systemData"):
-                        msg["systemData"] = m.get("systemData")
-                    # Tool fields
-                    if m.get("toolName"):
-                        msg["toolName"] = m.get("toolName")
-                    if m.get("toolId"):
-                        msg["toolId"] = m.get("toolId")
-                    if m.get("toolInput"):
-                        msg["toolInput"] = m.get("toolInput")
-                    if m.get("toolResult"):
-                        msg["toolResult"] = m.get("toolResult")
-                    if m.get("toolStatus"):
-                        msg["toolStatus"] = m.get("toolStatus")
-                    # Subagent fields
-                    if m.get("agentId"):
-                        msg["agentId"] = m.get("agentId")
-                    if m.get("agentType"):
-                        msg["agentType"] = m.get("agentType")
-                    if m.get("agentDescription"):
-                        msg["agentDescription"] = m.get("agentDescription")
-                    if m.get("agentStatus"):
-                        msg["agentStatus"] = m.get("agentStatus")
-                    if m.get("agentChildren"):
-                        msg["agentChildren"] = m.get("agentChildren")
-                    # Metadata
-                    if m.get("metadata"):
-                        msg["metadata"] = m.get("metadata")
+                    for field in _OPTIONAL_LIVE_FIELDS:
+                        value = m.get(field)
+                        if value:
+                            msg[field] = value
 
                     messages.append(msg)
-
-            # Get usage data
-            usage_data = get_session_cost_from_jsonl(sdk_session_id, working_dir)
 
         except Exception as e:
             logger.error(f"Failed to parse JSONL for live session {session_id}: {e}")
@@ -673,6 +602,11 @@ async def get_live_session(
             if m.get("tool_input"):
                 msg["toolInput"] = m.get("tool_input")
             messages.append(msg)
+
+    # Attach cost/duration metadata to final assistant messages (cached, O(N))
+    # This ensures the poller gets cost data on the first poll after streaming ends
+    from app.core.cost_utils import attach_cost_metadata
+    attach_cost_metadata(messages, session_id)
 
     # Build response in live format
     input_tokens = session.get("total_tokens_in", 0)
@@ -968,7 +902,7 @@ async def export_session(
                 if project:
                     working_dir = str(settings.workspace_dir / project["path"])
 
-            jsonl_messages = parse_session_history(sdk_session_id, working_dir)
+            jsonl_messages, _usage = parse_session_history(sdk_session_id, working_dir)
             if jsonl_messages:
                 messages = jsonl_messages
         except Exception as e:
@@ -1089,6 +1023,9 @@ async def export_session(
 
                     # Format tool result
                     if tool_result:
+                        # Coerce to string (tool_result can be a dict from JSONL)
+                        if not isinstance(tool_result, str):
+                            tool_result = json.dumps(tool_result, indent=2, default=str)
                         md_lines.append("**Result:**")
                         # Check if result looks like code or file content
                         if "\n" in tool_result or len(tool_result) > 100:
@@ -1197,14 +1134,32 @@ async def import_session(
             detail="Invalid file type. Please upload a JSON file."
         )
 
-    # Read and parse file content
+    # Read and parse file content (with size limit to prevent memory exhaustion)
+    max_size = 50 * 1024 * 1024  # 50MB limit
     try:
-        content = await file.read()
-        if len(content) > 50 * 1024 * 1024:  # 50MB limit
+        # Check Content-Length header first (fast reject)
+        content_length = file.size
+        if content_length and content_length > max_size:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail="File too large. Maximum size is 50MB."
             )
+
+        # Stream-read with size cap to avoid unbounded memory use
+        chunks = []
+        total = 0
+        while True:
+            chunk = await file.read(1024 * 1024)  # 1MB chunks
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_size:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="File too large. Maximum size is 50MB."
+                )
+            chunks.append(chunk)
+        content = b"".join(chunks)
 
         import_data = json.loads(content.decode('utf-8'))
     except json.JSONDecodeError as e:

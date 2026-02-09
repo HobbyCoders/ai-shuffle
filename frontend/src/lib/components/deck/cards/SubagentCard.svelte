@@ -15,10 +15,11 @@
 	 */
 	import BaseCard from './BaseCard.svelte';
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
+	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import type { DeckCard } from './types';
 	import { api, type SubagentExport } from '$lib/api/client';
 	import { groups } from '$lib/stores/groups';
-	import { Search, Plus, Trash2, Download, Upload, X, ArrowLeft, Monitor, User, Settings, Terminal, Check, Lock, RotateCcw, Zap } from 'lucide-svelte';
+	import { Bot, Search, Plus, Trash2, Download, Upload, X, ArrowLeft, Monitor, User, Settings, Terminal, Check, Lock, RotateCcw, Zap, Sparkles } from 'lucide-svelte';
 	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
 	import './card-design-system.css';
 
@@ -64,6 +65,7 @@
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
 		mobile?: boolean;
+		embedded?: boolean;
 	}
 
 	let {
@@ -75,7 +77,8 @@
 		onResize,
 		onDragEnd,
 		onResizeEnd,
-		mobile = false
+		mobile = false,
+		embedded = false
 	}: Props = $props();
 
 	// View mode state
@@ -996,7 +999,510 @@
 	</div>
 {/snippet}
 
-{#if mobile}
+{#if embedded}
+	<!-- Embedded: FeaturePageLayout wrapper -->
+	{#if viewMode === 'list'}
+		<FeaturePageLayout
+			icon={Bot}
+			title="Subagents"
+			itemCount={subagents.length}
+			itemLabel="subagents"
+		>
+			{#snippet headerActions()}
+				{#if subagents.length > 3}
+					<div class="fph-search-wrapper">
+						<Search />
+						<input
+							type="text"
+							bind:value={searchQuery}
+							placeholder="Search subagents..."
+							class="fph-search-input"
+						/>
+					</div>
+				{/if}
+				<button
+					onclick={() => showGenerateDialog = true}
+					class="fp-btn fp-btn--secondary"
+					title="Generate with AI"
+				>
+					<Sparkles />
+				</button>
+				<button
+					onclick={triggerImport}
+					disabled={importing}
+					class="fp-btn fp-btn--secondary"
+					title="Import from file"
+				>
+					{#if importing}
+						<div class="card-spinner card-spinner--small"></div>
+					{:else}
+						<Upload />
+					{/if}
+				</button>
+				<button
+					onclick={handleCreate}
+					class="fp-btn fp-btn--primary"
+				>
+					<Plus />
+					<span class="btn-label-hide-mobile">New Subagent</span>
+				</button>
+			{/snippet}
+
+			{#if error}
+				<div class="card-error-banner">
+					<span class="flex-1">{error}</span>
+					<button onclick={() => (error = null)}>
+						<X class="w-4 h-4" />
+					</button>
+				</div>
+			{/if}
+
+			{#if loading}
+				<div class="loading-container">
+					<div class="card-spinner"></div>
+				</div>
+			{:else if filteredSubagents().length === 0}
+				<div class="card-empty-state">
+					{#if searchQuery}
+						<Search class="card-empty-icon" />
+						<p class="card-empty-title">No subagents match "{searchQuery}"</p>
+						<button onclick={() => (searchQuery = '')} class="card-empty-action">
+							Clear search
+						</button>
+					{:else}
+						<Bot class="card-empty-icon" />
+						<p class="card-empty-title">No subagents configured yet</p>
+						<p class="card-empty-description">
+							Subagents are specialized AI assistants that can be delegated to for specific tasks.
+						</p>
+					{/if}
+				</div>
+			{:else}
+				<div class="fp-list">
+					{#each filteredSubagents() as agent (agent.id)}
+						{#if deletingId === agent.id}
+							<div class="fp-list-item" style="border-color: color-mix(in oklch, var(--destructive) 40%, transparent);">
+								<div class="fp-item-icon" style="background: color-mix(in oklch, var(--destructive) 12%, transparent); color: var(--destructive);">
+									<Trash2 />
+								</div>
+								<div class="fp-item-content">
+									<p class="fp-item-name">
+										Delete <strong>{agent.name}</strong>? This cannot be undone.
+									</p>
+									<div style="display: flex; gap: var(--space-2); margin-top: var(--space-2);">
+										<button
+											onclick={() => (deletingId = null)}
+											disabled={deleteLoading}
+											class="fp-btn fp-btn--secondary"
+										>
+											Cancel
+										</button>
+										<button
+											onclick={confirmDelete}
+											disabled={deleteLoading}
+											class="fp-btn fp-btn--primary"
+											style="background: var(--destructive);"
+										>
+											{#if deleteLoading}
+												<div class="card-spinner card-spinner--small"></div>
+											{/if}
+											Delete
+										</button>
+									</div>
+								</div>
+							</div>
+						{:else if revertingId === agent.id}
+							<div class="fp-list-item" style="border-color: color-mix(in oklch, var(--warning) 40%, transparent);">
+								<div class="fp-item-icon" style="background: color-mix(in oklch, var(--warning) 12%, transparent); color: var(--warning);">
+									<RotateCcw />
+								</div>
+								<div class="fp-item-content">
+									<p class="fp-item-name">
+										Revert <strong>{agent.name}</strong> to original defaults? Your customizations will be lost.
+									</p>
+									<div style="display: flex; gap: var(--space-2); margin-top: var(--space-2);">
+										<button
+											onclick={() => (revertingId = null)}
+											disabled={revertLoading}
+											class="fp-btn fp-btn--secondary"
+										>
+											Cancel
+										</button>
+										<button
+											onclick={confirmRevert}
+											disabled={revertLoading}
+											class="fp-btn fp-btn--primary"
+										>
+											{#if revertLoading}
+												<div class="card-spinner card-spinner--small"></div>
+											{/if}
+											Revert
+										</button>
+									</div>
+								</div>
+							</div>
+						{:else}
+							<div
+								class="fp-list-item"
+								onclick={() => handleEdit(agent)}
+								role="button"
+								tabindex="0"
+								onkeydown={(e) => e.key === 'Enter' && handleEdit(agent)}
+							>
+								<div class="fp-item-icon fp-item-icon--primary">
+									<Bot />
+								</div>
+								<div class="fp-item-content">
+									<div class="fp-item-header">
+										<span class="fp-item-name">{agent.name}</span>
+									</div>
+									<p class="fp-item-description">{agent.description}</p>
+									<div class="fp-item-meta">
+										<span class="fp-meta-chip">{agent.id}</span>
+										<span class="fp-meta-dot"></span>
+										<span class="fp-meta-chip">{getModelDisplay(agent.model)}</span>
+										{#if agent.tools && agent.tools.length > 0}
+											<span class="fp-meta-dot"></span>
+											<span class="fp-meta-chip">{agent.tools.length} tools</span>
+										{/if}
+										{#if agent.is_builtin}
+											<span class="fp-meta-dot"></span>
+											<span class="fp-meta-chip">
+												<Lock style="width: 10px; height: 10px;" />
+												Built-in
+											</span>
+											{#if agent.is_modified}
+												<span class="fp-meta-dot"></span>
+												<span class="fp-meta-chip" style="color: var(--warning);">Modified</span>
+											{/if}
+										{/if}
+										{#if $groups.subagents.assignments[agent.id]}
+											<span class="fp-meta-dot"></span>
+											<span class="fp-meta-chip" style="color: var(--primary);">{$groups.subagents.assignments[agent.id]}</span>
+										{/if}
+									</div>
+								</div>
+								<div class="fp-item-actions">
+									<GroupDropdown entityType="subagents" entityId={agent.id} />
+									{#if agent.is_builtin && agent.is_modified}
+										<button
+											onclick={(e) => handleRevert(agent.id, e)}
+											class="fp-action-btn"
+											title="Revert to defaults"
+										>
+											<RotateCcw />
+										</button>
+									{/if}
+									<button
+										onclick={(e) => exportSubagent(agent.id, e)}
+										class="fp-action-btn"
+										title="Export"
+									>
+										<Download />
+									</button>
+									{#if !agent.is_builtin}
+										<button
+											onclick={(e) => handleDeleteClick(agent.id, e)}
+											class="fp-action-btn fp-action-btn--destructive"
+											title="Delete"
+										>
+											<Trash2 />
+										</button>
+									{/if}
+								</div>
+							</div>
+						{/if}
+					{/each}
+				</div>
+			{/if}
+
+			<!-- AI Generate Dialog -->
+			<AIGenerateDialog
+				type="subagent"
+				isOpen={showGenerateDialog}
+				onClose={() => showGenerateDialog = false}
+				onGenerated={handleGeneratedSubagent}
+			/>
+		</FeaturePageLayout>
+	{:else}
+		<!-- EDITOR VIEW (embedded) -->
+		<FeaturePageLayout
+			icon={Bot}
+			title="Subagents"
+			breadcrumbs={[
+				{ label: 'Subagents', onclick: handleBack },
+				{ label: isEditMode ? (editingSubagent?.name || 'Edit') : 'New Subagent' }
+			]}
+		>
+			{#snippet headerActions()}
+				<button
+					onclick={handleBack}
+					class="fp-btn fp-btn--secondary"
+				>
+					Cancel
+				</button>
+				<button
+					onclick={handleSave}
+					disabled={!isValid() || saving}
+					class="fp-btn fp-btn--primary"
+				>
+					{#if saving}
+						<div class="card-spinner card-spinner--small"></div>
+						Saving...
+					{:else}
+						{isEditMode ? 'Save Changes' : 'Create'}
+					{/if}
+				</button>
+			{/snippet}
+
+			{#snippet headerTabs()}
+				<div class="fp-tab-bar">
+					{#each tabs as tab}
+						<button
+							onclick={() => activeTab = tab.id}
+							class="fp-tab"
+							class:active={activeTab === tab.id}
+						>
+							<tab.icon />
+							{tab.label}
+						</button>
+					{/each}
+				</div>
+			{/snippet}
+
+			{#if error}
+				<div class="card-error-banner">
+					<span class="flex-1">{error}</span>
+					<button onclick={() => (error = null)}>
+						<X class="w-4 h-4" />
+					</button>
+				</div>
+			{/if}
+
+			<!-- Identity Tab -->
+			{#if activeTab === 'identity'}
+				<div class="editor-tab-content">
+					{#if !isEditMode}
+						<div class="card-form-section">
+							<label for="agent-id" class="card-form-label">
+								ID <span class="required">*</span>
+							</label>
+							<input
+								id="agent-id"
+								type="text"
+								bind:value={formId}
+								placeholder="my-agent-id"
+								class="card-form-input card-form-input--mono"
+							/>
+							<p class="card-form-hint">
+								Lowercase letters, numbers, and hyphens only.
+							</p>
+						</div>
+					{/if}
+
+					<div class="card-form-section">
+						<label for="agent-name" class="card-form-label">
+							Display Name <span class="required">*</span>
+						</label>
+						<input
+							id="agent-name"
+							type="text"
+							bind:value={formName}
+							placeholder="Research Assistant"
+							class="card-form-input"
+						/>
+					</div>
+
+					<div class="card-form-section">
+						<label for="agent-description" class="card-form-label">
+							Description <span class="required">*</span>
+						</label>
+						<textarea
+							id="agent-description"
+							bind:value={formDescription}
+							placeholder="Use this agent when you need to research topics..."
+							rows={3}
+							class="card-form-input card-form-textarea"
+						></textarea>
+						<p class="card-form-hint">
+							Describes when Claude should invoke this subagent.
+						</p>
+					</div>
+				</div>
+			{/if}
+
+			<!-- Config Tab -->
+			{#if activeTab === 'config'}
+				<div class="editor-tab-content">
+					<!-- Model Selection -->
+					<div class="card-form-section">
+						<label class="card-form-label">Model — {#if formModel === ''}use profile default{:else if formModel === 'haiku'}fastest and most compact{:else if formModel === 'sonnet'}balanced performance{:else if formModel === 'sonnet-1m'}extended context (1M tokens){:else if formModel === 'opus'}most capable{/if}</label>
+						<div class="card-mode-selector">
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={formModel === ''}
+								onclick={() => formModel = ''}
+							>
+								Inherit
+							</button>
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={formModel === 'haiku'}
+								onclick={() => formModel = 'haiku'}
+							>
+								Haiku
+							</button>
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={formModel === 'sonnet'}
+								onclick={() => formModel = 'sonnet'}
+							>
+								Sonnet
+							</button>
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={formModel === 'sonnet-1m'}
+								onclick={() => formModel = 'sonnet-1m'}
+							>
+								Sonnet 1M
+							</button>
+							<button
+								type="button"
+								class="card-mode-btn"
+								class:card-mode-btn--active={formModel === 'opus'}
+								onclick={() => formModel = 'opus'}
+							>
+								Opus
+							</button>
+						</div>
+					</div>
+
+					<!-- Tool Access -->
+					<div class="card-form-section">
+						<div class="section-header">
+							<h3 class="card-form-title">Tool Access</h3>
+							<span class="card-badge card-badge--primary">{availableTools.all_tools.length} available</span>
+						</div>
+
+						<div class="card-mode-selector">
+							<button
+								type="button"
+								onclick={() => { toolSelectionMode = 'all'; formTools = []; }}
+								class="card-mode-btn"
+								class:card-mode-btn--active={toolSelectionMode === 'all'}
+							>
+								All Tools
+							</button>
+							<button
+								type="button"
+								onclick={() => toolSelectionMode = 'select'}
+								class="card-mode-btn"
+								class:card-mode-btn--active={toolSelectionMode === 'select'}
+							>
+								Custom
+							</button>
+						</div>
+
+						<p class="card-form-hint">
+							{#if toolSelectionMode === 'all'}
+								Subagent can use all tools available in the profile.
+							{:else}
+								Subagent can ONLY use selected tools.
+							{/if}
+						</p>
+
+						{#if toolSelectionMode === 'select'}
+							<div class="tools-list">
+								{#each availableTools.categories as category}
+									{#if category.tools.length > 0}
+										{@const state = getCategorySelectionState(category)}
+										<div class="tool-category">
+											<button
+												type="button"
+												class="category-header"
+												onclick={() => selectAllInCategory(category)}
+											>
+												<div
+													class="category-checkbox"
+													class:checked={state !== 'none'}
+													class:partial={state === 'partial'}
+												>
+													{#if state === 'all'}
+														<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+														</svg>
+													{:else if state === 'partial'}
+														<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
+														</svg>
+													{/if}
+												</div>
+												<span class="category-name">{category.name}</span>
+												<span class="category-count">{category.tools.length}</span>
+											</button>
+											<div class="category-tools">
+												{#each category.tools as tool}
+													<label class="tool-item">
+														<input
+															type="checkbox"
+															checked={formTools.includes(tool.name)}
+															onchange={() => toggleTool(tool.name)}
+															class="tool-checkbox"
+														/>
+														<span class="tool-name" title={tool.description}>{tool.name}</span>
+													</label>
+												{/each}
+											</div>
+										</div>
+									{/if}
+								{/each}
+							</div>
+
+							<div class="selection-count">
+								{formTools.length} tool{formTools.length !== 1 ? 's' : ''} selected
+							</div>
+						{/if}
+					</div>
+				</div>
+			{/if}
+
+			<!-- Prompt Tab -->
+			{#if activeTab === 'prompt'}
+				<div class="editor-tab-content prompt-tab">
+					<div class="prompt-header">
+						<label for="agent-prompt" class="card-form-label">
+							System Prompt <span class="required">*</span>
+						</label>
+						<span class="char-count">
+							{formPrompt.length} characters
+						</span>
+					</div>
+					<textarea
+						id="agent-prompt"
+						bind:value={formPrompt}
+						placeholder="You are a specialized agent that helps users with..."
+						class="card-form-input card-form-textarea prompt-textarea"
+					></textarea>
+					<p class="card-form-hint">
+						Instructions that define the subagent's behavior and capabilities.
+					</p>
+				</div>
+			{/if}
+
+			<!-- AI Generate Dialog -->
+			<AIGenerateDialog
+				type="subagent"
+				isOpen={showGenerateDialog}
+				onClose={() => showGenerateDialog = false}
+				onGenerated={handleGeneratedSubagent}
+			/>
+		</FeaturePageLayout>
+	{/if}
+{:else if mobile}
 	<!-- Mobile: No BaseCard wrapper, just the content -->
 	{@render content()}
 {:else}
@@ -1022,35 +1528,11 @@
 		height: 100%;
 		background: var(--card);
 		overflow: hidden;
-		/* Set footer max-width to match centered-content */
-		--card-footer-max-width: 800px;
 	}
 
-	/* Maximized state - constrain width and center content */
-	.subagent-card.maximized {
-		--card-max-width: 900px;
-		--card-footer-max-width: var(--card-max-width);
-	}
-
-	.subagent-card.maximized :global(.card-tabs),
-	.subagent-card.maximized :global(.card-header),
-	.subagent-card.maximized .card-search-wrapper,
-	.subagent-card.maximized :global(.card-footer) {
-		max-width: var(--card-max-width);
-		margin-left: auto;
-		margin-right: auto;
-		width: 100%;
-	}
-
-	.subagent-card.maximized .centered-content {
-		max-width: var(--card-max-width);
-	}
-
-	/* Centered content wrapper - prevents content from stretching too wide on large screens */
+	/* Centered content wrapper */
 	.centered-content {
 		width: 100%;
-		max-width: 800px;
-		margin: 0 auto;
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-4, 16px);
@@ -1291,5 +1773,12 @@
 	/* Responsive footer */
 	.subagent-card :global(.card-footer) {
 		flex-wrap: wrap;
+	}
+
+	/* Hide button label text on mobile to save space */
+	@media (max-width: 639px) {
+		.btn-label-hide-mobile {
+			display: none;
+		}
 	}
 </style>

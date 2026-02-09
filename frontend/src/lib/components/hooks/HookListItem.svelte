@@ -185,7 +185,7 @@
 	.hook-matcher {
 		padding: 2px 6px;
 		font-size: 0.6875rem;
-		font-family: monospace;
+		font-family: var(--font-mono);
 		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		background: var(--muted);
 		color: var(--muted-foreground);
@@ -197,7 +197,7 @@
 	}
 
 	.hook-command {
-		font-family: monospace;
+		font-family: var(--font-mono);
 		font-size: 0.6875rem;
 		padding: 2px 4px;
 		background: var(--muted);

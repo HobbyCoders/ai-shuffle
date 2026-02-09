@@ -12,10 +12,11 @@
 	 * - Glassmorphism styling
 	 */
 
-	import { MessageSquare, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban, Puzzle, FolderOpen, StickyNote, Zap, BarChart3, Server } from 'lucide-svelte';
+	import { MessageSquare, Square, X, Maximize2, Copy, Settings, User, Users, FolderKanban, Puzzle, FolderOpen, StickyNote, Zap, BarChart3, Server, KeyRound } from 'lucide-svelte';
 	import type { DeckCard, CardType } from './types';
 	import type { Snippet } from 'svelte';
 	import { layoutMode } from '$lib/stores/deck';
+	import { isInPanelMode } from '$lib/stores/layout';
 
 	interface Props {
 		card: DeckCard;
@@ -75,6 +76,7 @@
 		notes: StickyNote,
 		hooks: Zap,
 		stats: BarChart3,
+		'api-user-sessions': KeyRound,
 	};
 
 	const CardIcon = $derived(cardIcons[card.type]);
@@ -82,6 +84,7 @@
 	// In managed layout modes, cards are positioned by the layout system
 	// Only freeflow allows free dragging, resizing, and maximize toggle
 	const isManagedLayout = $derived($layoutMode !== 'freeflow');
+	const hideChrome = $derived($isInPanelMode);
 
 	// Title editing
 	function handleTitleDoubleClick() {
@@ -328,68 +331,71 @@
 	class:maximized={card.maximized}
 	class:dragging={isDragging}
 	class:resizing={isResizing}
+	class:panel-mode={hideChrome}
 	onclick={handleCardClick}
 >
-	<!-- Header / Title Bar -->
-	<div
-		class="card-header"
-		onpointerdown={handlePointerDown}
-		onpointermove={handlePointerMove}
-		onpointerup={handlePointerUp}
-		onpointercancel={handlePointerCancel}
-		ondblclick={handleHeaderDoubleClick}
-	>
-		<div class="header-left">
-			<div class="card-icon">
-				<CardIcon size={16} />
+	{#if !hideChrome}
+		<!-- Header / Title Bar -->
+		<div
+			class="card-header"
+			onpointerdown={handlePointerDown}
+			onpointermove={handlePointerMove}
+			onpointerup={handlePointerUp}
+			onpointercancel={handlePointerCancel}
+			ondblclick={handleHeaderDoubleClick}
+		>
+			<div class="header-left">
+				<div class="card-icon">
+					<CardIcon size={16} />
+				</div>
+				{#if isEditingTitle}
+					<input
+						bind:this={titleInput}
+						type="text"
+						bind:value={editedTitle}
+						onkeydown={handleTitleKeydown}
+						onblur={finishTitleEdit}
+						class="title-input"
+					/>
+				{:else}
+					<span
+						class="card-title"
+						ondblclick={handleTitleDoubleClick}
+						role="button"
+						tabindex="0"
+					>
+						{card.title}
+					</span>
+				{/if}
 			</div>
-			{#if isEditingTitle}
-				<input
-					bind:this={titleInput}
-					type="text"
-					bind:value={editedTitle}
-					onkeydown={handleTitleKeydown}
-					onblur={finishTitleEdit}
-					class="title-input"
-				/>
-			{:else}
-				<span
-					class="card-title"
-					ondblclick={handleTitleDoubleClick}
-					role="button"
-					tabindex="0"
-				>
-					{card.title}
-				</span>
-			{/if}
-		</div>
 
-		<div class="window-controls">
-			<!-- Hide maximize button in managed layouts since layout controls positioning -->
-			{#if !isManagedLayout}
+			<div class="window-controls">
+				<!-- Hide maximize button in managed layouts since layout controls positioning -->
+				{#if !isManagedLayout}
+					<button
+						class="control-btn maximize"
+						onclick={(e) => { e.stopPropagation(); onMaximize(); }}
+						title={card.maximized ? 'Restore' : 'Maximize'}
+						aria-label={card.maximized ? 'Restore' : 'Maximize'}
+					>
+						{#if card.maximized}
+							<Copy size={12} />
+						{:else}
+							<Square size={12} />
+						{/if}
+					</button>
+				{/if}
 				<button
-					class="control-btn maximize"
-					onclick={(e) => { e.stopPropagation(); onMaximize(); }}
-					title={card.maximized ? 'Restore' : 'Maximize'}
-					aria-label={card.maximized ? 'Restore' : 'Maximize'}
+					class="control-btn close"
+					onclick={(e) => { e.stopPropagation(); onClose(); }}
+					title="Close"
+					aria-label="Close"
 				>
-					{#if card.maximized}
-						<Copy size={12} />
-					{:else}
-						<Square size={12} />
-					{/if}
+					<X size={14} />
 				</button>
-			{/if}
-			<button
-				class="control-btn close"
-				onclick={(e) => { e.stopPropagation(); onClose(); }}
-				title="Close"
-				aria-label="Close"
-			>
-				<X size={14} />
-			</button>
+			</div>
 		</div>
-	</div>
+	{/if}
 
 	<!-- Content Area -->
 	<div class="card-content">
@@ -399,7 +405,7 @@
 	</div>
 
 	<!-- Resize Handles (hidden when maximized or in managed layouts) -->
-	{#if !card.maximized && !isManagedLayout}
+	{#if !card.maximized && !isManagedLayout && !hideChrome}
 		<div
 			class="resize-handle n"
 			onpointerdown={(e) => handleResizeStart(e, 'n')}
@@ -496,6 +502,19 @@
 		box-shadow: none;
 	}
 
+	.base-card.panel-mode {
+		border-radius: 0;
+		border: none;
+		box-shadow: none;
+		background: transparent;
+		backdrop-filter: none;
+		-webkit-backdrop-filter: none;
+	}
+
+	.base-card.panel-mode .card-content {
+		border-radius: 0;
+	}
+
 	.base-card.dragging,
 	.base-card.resizing {
 		transition: none;
@@ -564,9 +583,16 @@
 	.header-left {
 		display: flex;
 		align-items: center;
+		justify-content: center;
 		gap: 10px;
-		flex: 1;
-		min-width: 0;
+		position: absolute;
+		left: 0;
+		right: 0;
+		pointer-events: none;
+	}
+
+	.header-left > :global(*) {
+		pointer-events: auto;
 	}
 
 	.card-icon {
@@ -624,6 +650,9 @@
 	.window-controls {
 		display: flex;
 		gap: 4px;
+		margin-left: auto;
+		position: relative;
+		z-index: 1;
 	}
 
 	.control-btn {

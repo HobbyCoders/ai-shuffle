@@ -446,10 +446,10 @@ class TestListBranches:
         service = GitService()
 
         git_output = (
-            "main|abc1234|Initial commit|*|origin/main|[ahead 1, behind 2]\n"
-            "feature/test|def5678|Add feature|||[ahead 3]\n"
-            "origin/main|abc1234|Initial commit|||\n"
-            "origin/develop|ghi9012|Dev commit|||\n"
+            "refs/heads/main|main|abc1234|Initial commit|*|origin/main|[ahead 1, behind 2]\n"
+            "refs/heads/feature/test|feature/test|def5678|Add feature|||[ahead 3]\n"
+            "refs/remotes/origin/main|origin/main|abc1234|Initial commit|||\n"
+            "refs/remotes/origin/develop|origin/develop|ghi9012|Dev commit|||\n"
         )
 
         with patch.object(service, "_run_git") as mock_run:
@@ -592,7 +592,7 @@ class TestListBranches:
         """Should parse behind-only track info."""
         service = GitService()
 
-        git_output = "main|abc1234|Commit message|*|origin/main|[behind 5]\n"
+        git_output = "refs/heads/main|main|abc1234|Commit message|*|origin/main|[behind 5]\n"
 
         with patch.object(service, "_run_git") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
@@ -670,7 +670,7 @@ class TestCreateBranch:
             assert result is True
             mock_run.assert_called_once_with(
                 "/test/repo",
-                ["branch", "new-feature"],
+                ["branch", "--", "new-feature"],
                 timeout=10
             )
 
@@ -691,7 +691,7 @@ class TestCreateBranch:
             assert result is True
             mock_run.assert_called_once_with(
                 "/test/repo",
-                ["branch", "new-feature", "develop"],
+                ["branch", "--", "new-feature", "develop"],
                 timeout=10
             )
 
@@ -743,7 +743,7 @@ class TestDeleteBranch:
             assert result is True
             mock_run.assert_called_once_with(
                 "/test/repo",
-                ["branch", "-d", "old-feature"],
+                ["branch", "-d", "--", "old-feature"],
                 timeout=10
             )
 
@@ -764,7 +764,7 @@ class TestDeleteBranch:
             assert result is True
             mock_run.assert_called_once_with(
                 "/test/repo",
-                ["branch", "-D", "unmerged-feature"],
+                ["branch", "-D", "--", "unmerged-feature"],
                 timeout=10
             )
 
@@ -1048,7 +1048,7 @@ class TestAddWorktree:
             assert error is None
             mock_run.assert_called_once_with(
                 "/main/repo",
-                ["worktree", "add", "/path/to/worktree", "feature"],
+                ["worktree", "add", "--", "/path/to/worktree", "feature"],
                 timeout=30
             )
 
@@ -1075,7 +1075,7 @@ class TestAddWorktree:
             assert error is None
             mock_run.assert_called_once_with(
                 "/main/repo",
-                ["worktree", "add", "-b", "new-feature", "/path/to/worktree"],
+                ["worktree", "add", "-b", "new-feature", "--", "/path/to/worktree"],
                 timeout=30
             )
 
@@ -1114,7 +1114,7 @@ class TestAddWorktree:
 
             # Verify worktree add uses origin/develop (not local develop)
             worktree_call = mock_run.call_args_list[2]
-            assert worktree_call[0][1] == ["worktree", "add", "-b", "new-feature", "/path/to/worktree", "origin/develop"]
+            assert worktree_call[0][1] == ["worktree", "add", "-b", "new-feature", "--", "/path/to/worktree", "origin/develop"]
 
     def test_add_worktree_new_branch_with_base_no_remote(self):
         """Should fall back to local branch when remote doesn't exist."""
@@ -1140,7 +1140,7 @@ class TestAddWorktree:
             assert success is True
             # Final call should use local 'develop' since origin/develop doesn't exist
             worktree_call = mock_run.call_args_list[-1]
-            assert worktree_call[0][1] == ["worktree", "add", "-b", "new-feature", "/path/to/worktree", "develop"]
+            assert worktree_call[0][1] == ["worktree", "add", "-b", "new-feature", "--", "/path/to/worktree", "develop"]
 
     def test_add_worktree_failure(self):
         """Should return error message on failure."""
@@ -1724,9 +1724,9 @@ class TestBranchSorting:
         service = GitService()
 
         git_output = (
-            "develop|abc123|Commit||||\n"
-            "main|def456|Commit|*|||\n"
-            "feature|ghi789|Commit||||\n"
+            "refs/heads/develop|develop|abc123|Commit|||\n"
+            "refs/heads/main|main|def456|Commit|*||\n"
+            "refs/heads/feature|feature|ghi789|Commit|||\n"
         )
 
         with patch.object(service, "_run_git") as mock_run:
@@ -1747,8 +1747,8 @@ class TestBranchSorting:
         service = GitService()
 
         git_output = (
-            "origin/main|abc123|Commit||||\n"
-            "main|def456|Commit||||\n"
+            "refs/remotes/origin/main|origin/main|abc123|Commit|||\n"
+            "refs/heads/main|main|def456|Commit|||\n"
         )
 
         with patch.object(service, "_run_git") as mock_run:

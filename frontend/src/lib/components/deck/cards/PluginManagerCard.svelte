@@ -10,6 +10,7 @@
 	 * - Batch install selection
 	 */
 	import BaseCard from './BaseCard.svelte';
+	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import type { DeckCard } from './types';
 	import { onMount } from 'svelte';
 	import {
@@ -42,6 +43,7 @@
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
 		mobile?: boolean;
+		embedded?: boolean;
 	}
 
 	let {
@@ -53,7 +55,8 @@
 		onResize,
 		onDragEnd,
 		onResizeEnd,
-		mobile = false
+		mobile = false,
+		embedded = false
 	}: Props = $props();
 
 	type Tab = 'marketplaces' | 'available' | 'installed' | 'details';
@@ -175,91 +178,9 @@
 	]);
 </script>
 
-<BaseCard
-	{card}
-	{onClose}
-	{onMaximize}
-	{onFocus}
-	{onMove}
-	{onResize}
-	{onDragEnd}
-	{onResizeEnd}
->
-	{#snippet children()}
-		<div class="plugin-card card-system" class:mobile class:maximized={card.maximized}>
-			<!-- Tabs -->
-			<div class="plugin-tabs">
-				{#each tabs as tab}
-					<button
-						onclick={() => {
-							activeTab = tab.id;
-							if (tab.id !== 'details') {
-								plugins.clearSelectedPlugin();
-							}
-						}}
-						class="plugin-tab"
-						class:active={activeTab === tab.id}
-					>
-						{tab.label}
-						<span class="plugin-tab-count" class:active={activeTab === tab.id}>
-							{tab.count}
-						</span>
-					</button>
-				{/each}
-
-				{#if $selectedPlugin}
-					<button
-						onclick={() => activeTab = 'details'}
-						class="plugin-tab"
-						class:active={activeTab === 'details'}
-					>
-						Details
-					</button>
-				{/if}
-			</div>
-
-			<!-- Search bar (for available/installed tabs) -->
-			{#if activeTab === 'available' || activeTab === 'installed'}
-				<div class="plugin-search-bar">
-					<div class="search-input-wrapper">
-						<Search size={16} class="search-icon" />
-						<input
-							type="text"
-							bind:value={searchQuery}
-							placeholder="Search plugins..."
-							class="search-input"
-						/>
-					</div>
-
-					{#if activeTab === 'available'}
-						<select
-							bind:value={selectedMarketplaceFilter}
-							class="marketplace-select"
-						>
-							<option value="">All Sources</option>
-							{#each $marketplaces as marketplace}
-								<option value={marketplace.id}>{marketplace.id}</option>
-							{/each}
-						</select>
-
-						{#if selectedForInstall.size > 0}
-							<button
-								onclick={handleBatchInstall}
-								disabled={batchInstalling}
-								class="batch-install-btn"
-							>
-								{#if batchInstalling}
-									<Loader2 size={16} class="animate-spin" />
-								{/if}
-								Install ({selectedForInstall.size})
-							</button>
-						{/if}
-					{/if}
-				</div>
-			{/if}
-
-			<!-- Content -->
-			<div class="plugin-content">
+{#snippet pluginMainContent()}
+	<!-- Content -->
+	<div class="plugin-content">
 				{#if $pluginsError}
 					<div class="plugin-error">
 						<AlertCircle size={16} />
@@ -379,74 +300,216 @@
 				{/if}
 			</div>
 
-			<!-- Footer -->
-			<div class="plugin-footer">
-				<div class="footer-info">
-					{$pluginStats.totalFileBasedAgents} agents
+	<!-- Add Marketplace Modal -->
+	{#if showAddMarketplace}
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<!-- svelte-ignore a11y_click_events_have_key_events -->
+		<div
+			class="add-marketplace-overlay"
+			onclick={(e) => e.target === e.currentTarget && (showAddMarketplace = false)}
+		>
+			<div class="add-marketplace-modal">
+				<h3>Add Plugin Source</h3>
+
+				<div class="form-group">
+					<label>Name</label>
+					<input
+						type="text"
+						bind:value={newMarketplaceName}
+						placeholder="e.g., my-plugins"
+						class="form-input"
+					/>
 				</div>
-				<div class="footer-stats">
-					{$pluginStats.totalEnabled} plugins enabled
+
+				<div class="form-group">
+					<label>Git URL</label>
+					<input
+						type="text"
+						bind:value={newMarketplaceUrl}
+						placeholder="https://github.com/user/plugins.git"
+						class="form-input"
+					/>
+					<p class="form-hint">
+						Enter the git repository URL containing plugins
+					</p>
+				</div>
+
+				<div class="modal-actions">
+					<button
+						onclick={() => showAddMarketplace = false}
+						class="btn-secondary"
+					>
+						Cancel
+					</button>
+					<button
+						onclick={handleAddMarketplace}
+						disabled={!newMarketplaceUrl.trim() || !newMarketplaceName.trim() || addingMarketplace}
+						class="btn-primary"
+					>
+						{#if addingMarketplace}
+							<Loader2 size={16} class="animate-spin" />
+						{/if}
+						Add Source
+					</button>
 				</div>
 			</div>
 		</div>
+	{/if}
+{/snippet}
 
-		<!-- Add Marketplace Modal -->
-		{#if showAddMarketplace}
-			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<!-- svelte-ignore a11y_click_events_have_key_events -->
-			<div
-				class="add-marketplace-overlay"
-				onclick={(e) => e.target === e.currentTarget && (showAddMarketplace = false)}
-			>
-				<div class="add-marketplace-modal">
-					<h3>Add Plugin Source</h3>
-
-					<div class="form-group">
-						<label>Name</label>
-						<input
-							type="text"
-							bind:value={newMarketplaceName}
-							placeholder="e.g., my-plugins"
-							class="form-input"
-						/>
-					</div>
-
-					<div class="form-group">
-						<label>Git URL</label>
-						<input
-							type="text"
-							bind:value={newMarketplaceUrl}
-							placeholder="https://github.com/user/plugins.git"
-							class="form-input"
-						/>
-						<p class="form-hint">
-							Enter the git repository URL containing plugins
-						</p>
-					</div>
-
-					<div class="modal-actions">
+{#if embedded}
+	<FeaturePageLayout
+		icon={Package}
+		title="Plugins"
+		itemCount={$pluginStats.totalInstalled}
+		itemLabel="installed"
+	>
+		{#snippet headerTabs()}
+			<div class="fp-tab-bar">
+				{#each tabs as tab}
+					<button
+						class="fp-tab"
+						class:active={activeTab === tab.id}
+						onclick={() => {
+							activeTab = tab.id;
+							if (tab.id !== 'details') {
+								plugins.clearSelectedPlugin();
+							}
+						}}
+					>
+						{tab.label}
+						<span class="fp-tab-count">{tab.count}</span>
+					</button>
+				{/each}
+				{#if $selectedPlugin}
+					<button
+						class="fp-tab"
+						class:active={activeTab === 'details'}
+						onclick={() => activeTab = 'details'}
+					>
+						Details
+					</button>
+				{/if}
+			</div>
+		{/snippet}
+		{#snippet headerActions()}
+			{#if activeTab === 'available' || activeTab === 'installed'}
+				<div class="fph-search-wrapper">
+					<Search size={14} />
+					<input
+						type="text"
+						bind:value={searchQuery}
+						placeholder="Search plugins..."
+						class="fph-search-input"
+					/>
+				</div>
+			{/if}
+		{/snippet}
+		{#snippet children()}
+			<div class="plugin-card card-system" style="position: relative;">
+				{@render pluginMainContent()}
+			</div>
+		{/snippet}
+	</FeaturePageLayout>
+{:else}
+	<BaseCard
+		{card}
+		{onClose}
+		{onMaximize}
+		{onFocus}
+		{onMove}
+		{onResize}
+		{onDragEnd}
+		{onResizeEnd}
+	>
+		{#snippet children()}
+			<div class="plugin-card card-system" class:mobile class:maximized={card.maximized}>
+				<!-- Tabs -->
+				<div class="plugin-tabs">
+					{#each tabs as tab}
 						<button
-							onclick={() => showAddMarketplace = false}
-							class="btn-secondary"
+							onclick={() => {
+								activeTab = tab.id;
+								if (tab.id !== 'details') {
+									plugins.clearSelectedPlugin();
+								}
+							}}
+							class="plugin-tab"
+							class:active={activeTab === tab.id}
 						>
-							Cancel
+							{tab.label}
+							<span class="plugin-tab-count" class:active={activeTab === tab.id}>
+								{tab.count}
+							</span>
 						</button>
+					{/each}
+
+					{#if $selectedPlugin}
 						<button
-							onclick={handleAddMarketplace}
-							disabled={!newMarketplaceUrl.trim() || !newMarketplaceName.trim() || addingMarketplace}
-							class="btn-primary"
+							onclick={() => activeTab = 'details'}
+							class="plugin-tab"
+							class:active={activeTab === 'details'}
 						>
-							{#if addingMarketplace}
-								<Loader2 size={16} class="animate-spin" />
+							Details
+						</button>
+					{/if}
+				</div>
+
+				<!-- Search bar (for available/installed tabs) -->
+				{#if activeTab === 'available' || activeTab === 'installed'}
+					<div class="plugin-search-bar">
+						<div class="search-input-wrapper">
+							<Search size={16} class="search-icon" />
+							<input
+								type="text"
+								bind:value={searchQuery}
+								placeholder="Search plugins..."
+								class="search-input"
+							/>
+						</div>
+
+						{#if activeTab === 'available'}
+							<select
+								bind:value={selectedMarketplaceFilter}
+								class="marketplace-select"
+							>
+								<option value="">All Sources</option>
+								{#each $marketplaces as marketplace}
+									<option value={marketplace.id}>{marketplace.id}</option>
+								{/each}
+							</select>
+
+							{#if selectedForInstall.size > 0}
+								<button
+									onclick={handleBatchInstall}
+									disabled={batchInstalling}
+									class="batch-install-btn"
+								>
+									{#if batchInstalling}
+										<Loader2 size={16} class="animate-spin" />
+									{/if}
+									Install ({selectedForInstall.size})
+								</button>
 							{/if}
-							Add Source
-						</button>
+						{/if}
+					</div>
+				{/if}
+
+				{@render pluginMainContent()}
+
+				<!-- Footer -->
+				<div class="plugin-footer">
+					<div class="footer-info">
+						{$pluginStats.totalFileBasedAgents} agents
+					</div>
+					<div class="footer-stats">
+						{$pluginStats.totalEnabled} plugins enabled
 					</div>
 				</div>
 			</div>
-		{/if}
-	{/snippet}
-</BaseCard>
+		{/snippet}
+	</BaseCard>
+{/if}
 
 <style>
 	.plugin-card {
@@ -454,21 +517,6 @@
 		flex-direction: column;
 		height: 100%;
 		overflow: hidden;
-	}
-
-	/* Maximized state - constrain width and center content */
-	.plugin-card.maximized {
-		--card-max-width: 850px;
-	}
-
-	.plugin-card.maximized .plugin-tabs,
-	.plugin-card.maximized .plugin-search-bar,
-	.plugin-card.maximized .plugin-content,
-	.plugin-card.maximized .plugin-footer {
-		max-width: var(--card-max-width);
-		margin-left: auto;
-		margin-right: auto;
-		width: 100%;
 	}
 
 	/* Tabs */
@@ -511,9 +559,10 @@
 	}
 
 	.plugin-tab.active {
-		background: var(--primary);
-		color: var(--primary-foreground);
-		border-color: var(--primary);
+		background: var(--selection-bg-emphasis);
+		color: var(--selection-text);
+		border-color: var(--selection-ring);
+		box-shadow: var(--selection-shadow);
 	}
 
 	.plugin-tab-count {
@@ -525,8 +574,8 @@
 	}
 
 	.plugin-tab-count.active {
-		background: color-mix(in oklch, var(--primary-foreground) 20%, transparent);
-		color: var(--primary-foreground);
+		background: color-mix(in oklch, var(--selection) 20%, transparent);
+		color: var(--selection-text);
 	}
 
 	/* Search bar */
@@ -884,12 +933,31 @@
 
 	/* Mobile adjustments */
 	.plugin-card.mobile .plugin-tabs {
-		padding: 8px 12px;
+		padding: 6px 8px;
+		gap: 2px;
+		scrollbar-width: none;
+	}
+
+	.plugin-card.mobile .plugin-tabs::-webkit-scrollbar {
+		display: none;
+	}
+
+	.plugin-card.mobile .plugin-tab {
+		padding: 5px 8px;
+		font-size: 0.75rem;
+		gap: 4px;
+		flex-shrink: 0;
+	}
+
+	.plugin-card.mobile .plugin-tab-count {
+		font-size: 0.625rem;
+		padding: 0 4px;
 	}
 
 	.plugin-card.mobile .plugin-search-bar {
 		flex-wrap: wrap;
-		padding: 12px;
+		padding: 8px;
+		gap: 8px;
 	}
 
 	.plugin-card.mobile .search-input-wrapper {
@@ -899,4 +967,5 @@
 	.plugin-card.mobile .marketplace-select {
 		flex: 1;
 	}
+
 </style>

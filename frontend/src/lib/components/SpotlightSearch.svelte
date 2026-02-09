@@ -367,7 +367,7 @@
   }
 
   .spotlight-item.selected {
-    background: color-mix(in oklch, var(--primary) 10%, var(--card));
+    background: color-mix(in oklch, var(--selection) 10%, var(--card));
   }
 
   .spotlight-item:focus-visible {

@@ -3,17 +3,21 @@
 	 * McpToolList - Displays discovered MCP tools
 	 *
 	 * Shows tools grouped by their source MCP server.
-	 * Read-only display of available tools.
+	 * Supports removing MCP servers (uninstalling tools installed via CLI).
 	 */
 	import type { McpTool } from '$lib/api/mcp';
+	import { X } from 'lucide-svelte';
 
 	interface Props {
 		tools: McpTool[];
 		loading?: boolean;
 		onRefresh?: () => void;
+		onRemoveServer?: (serverName: string) => void;
 	}
 
-	let { tools, loading = false, onRefresh }: Props = $props();
+	let { tools, loading = false, onRefresh, onRemoveServer }: Props = $props();
+
+	let confirmingRemove = $state<string | null>(null);
 
 	// Group tools by server
 	let toolsByServer = $derived(() => {
@@ -82,10 +86,36 @@
 						<svg class="w-4 h-4 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
 						</svg>
-						<span class="font-medium text-sm text-foreground">{serverName}</span>
+						<span class="font-medium text-sm text-foreground flex-1">{serverName}</span>
 						<span class="text-xs text-muted-foreground">
 							({toolsByServer()[serverName].length} tool{toolsByServer()[serverName].length !== 1 ? 's' : ''})
 						</span>
+						{#if onRemoveServer}
+							{#if confirmingRemove === serverName}
+								<div class="flex items-center gap-1.5 ml-2">
+									<button
+										onclick={() => { onRemoveServer(serverName); confirmingRemove = null; }}
+										class="text-xs px-2 py-0.5 rounded bg-destructive text-destructive-foreground hover:opacity-90 transition-opacity"
+									>
+										Remove
+									</button>
+									<button
+										onclick={() => confirmingRemove = null}
+										class="text-xs px-2 py-0.5 rounded bg-muted text-muted-foreground hover:text-foreground transition-colors"
+									>
+										Cancel
+									</button>
+								</div>
+							{:else}
+								<button
+									onclick={() => confirmingRemove = serverName}
+									class="p-1 hover:bg-muted rounded transition-colors text-muted-foreground hover:text-destructive ml-1"
+									title="Remove MCP server"
+								>
+									<X size={14} />
+								</button>
+							{/if}
+						{/if}
 					</div>
 
 					<!-- Tools -->

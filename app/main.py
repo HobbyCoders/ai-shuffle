@@ -110,6 +110,16 @@ async def lifespan(app: FastAPI):
     # Run database migrations
     run_migrations()
 
+    # Materialize notes as physical markdown files
+    from app.core.note_files import materialize_all_notes, get_notes_dir
+    notes_dir = get_notes_dir()
+    unmaterialized = database.get_notes_without_file_path()
+    if unmaterialized:
+        logger.info(f"Materializing {len(unmaterialized)} notes as markdown files...")
+        path_updates = materialize_all_notes(unmaterialized)
+        database.bulk_update_note_file_paths(path_updates)
+        logger.info(f"Materialized {len(path_updates)} note files to {notes_dir}")
+
     # Seed built-in subagents
     from app.core.builtin_subagents import seed_builtin_subagents
     seed_results = seed_builtin_subagents()

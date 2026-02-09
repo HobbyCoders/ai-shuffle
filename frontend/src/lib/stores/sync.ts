@@ -138,8 +138,11 @@ function createSyncStore() {
 				console.log(`[Sync] Disconnected from session ${sessionId}:`, event.code, event.reason);
 				update((s) => ({ ...s, connected: false }));
 
-				// Attempt reconnect unless intentionally closed
-				if (event.code !== 1000) {
+				// Attempt reconnect unless intentionally closed or auth failed
+				if (event.code === 4001) {
+					console.warn('[Sync] WebSocket auth failed (4001), redirecting to login');
+					import('$app/navigation').then(({ goto }) => goto('/login'));
+				} else if (event.code !== 1000) {
 					scheduleReconnect(sessionId);
 				}
 			};

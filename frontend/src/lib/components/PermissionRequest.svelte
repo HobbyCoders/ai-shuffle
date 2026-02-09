@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { createEventDispatcher } from 'svelte';
 	import './deck/cards/card-design-system.css';
 
 	export interface PermissionRequestData {
@@ -15,18 +14,15 @@
 		isFirst?: boolean;
 		queueCount?: number;
 		compact?: boolean;
-	}
-
-	let { request, isFirst = true, queueCount = 1, compact = false }: Props = $props();
-
-	const dispatch = createEventDispatcher<{
-		respond: {
+		onRespond?: (detail: {
 			request_id: string;
 			decision: 'allow' | 'deny';
 			remember?: 'none' | 'session' | 'profile';
 			pattern?: string;
-		};
-	}>();
+		}) => void;
+	}
+
+	let { request, isFirst = true, queueCount = 1, compact = false, onRespond }: Props = $props();
 
 	let showDetails = $state(false);
 	let rememberChoice = $state<'none' | 'session' | 'profile'>('none');
@@ -205,7 +201,7 @@
 	}
 
 	function handleAllow() {
-		dispatch('respond', {
+		onRespond?.({
 			request_id: request.request_id,
 			decision: 'allow',
 			remember: rememberChoice,
@@ -214,7 +210,7 @@
 	}
 
 	function handleDeny() {
-		dispatch('respond', {
+		onRespond?.({
 			request_id: request.request_id,
 			decision: 'deny',
 			remember: rememberChoice,
@@ -239,7 +235,7 @@
 	const suggestedPattern = $derived(getSuggestedPattern());
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} />
 
 <!-- Permission Request Panel -->
 <div
@@ -554,8 +550,9 @@
 	}
 
 	.remember-option.selected {
-		border-color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 8%, var(--card));
+		border-color: var(--selection-ring);
+		background: color-mix(in oklch, var(--selection) 8%, var(--card));
+		box-shadow: var(--selection-shadow-subtle);
 	}
 
 	.remember-option:focus-within {
@@ -576,7 +573,7 @@
 	}
 
 	.remember-option.selected .radio-indicator {
-		border-color: var(--primary);
+		border-color: var(--selection);
 	}
 
 	.radio-dot {
@@ -625,14 +622,14 @@
 	}
 
 	.pattern-badge code {
-		font-family: ui-monospace, 'Monaco', 'Menlo', monospace;
+		font-family: var(--font-mono);
 	}
 
 	.pattern-input {
 		width: 120px;
 		padding: 0.25rem 0.5rem;
 		font-size: 0.7rem;
-		font-family: ui-monospace, 'Monaco', 'Menlo', monospace;
+		font-family: var(--font-mono);
 		background: var(--input);
 		border: 1px solid var(--ring);
 		border-radius: 0.5rem;

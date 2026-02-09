@@ -124,6 +124,16 @@
 		--glow-color: color-mix(in srgb, var(--primary) 40%, transparent);
 		--glow-color-soft: color-mix(in srgb, var(--primary) 30%, transparent);
 
+		/* Selection state system - derived from --ring for preset compatibility */
+		--selection: var(--ring);
+		--selection-bg: color-mix(in oklch, var(--selection) 10%, transparent);
+		--selection-bg-emphasis: color-mix(in oklch, var(--selection) 15%, transparent);
+		--selection-ring: color-mix(in oklch, var(--selection) 70%, transparent);
+		--selection-glow: color-mix(in oklch, var(--selection) 25%, transparent);
+		--selection-text: var(--selection);
+		--selection-shadow: 0 0 0 1.5px var(--selection-ring), 0 0 10px var(--selection-glow);
+		--selection-shadow-subtle: 0 0 8px var(--selection-glow);
+
 		/* Interactive hover overlay */
 		--hover-overlay: oklch(1 0 0 / 0.1);
 		--active-overlay: oklch(1 0 0 / 0.15);
@@ -313,6 +323,16 @@
 		/* Glow effect - uses theme primary color */
 		--glow-color: color-mix(in srgb, var(--primary) 30%, transparent);
 		--glow-color-soft: color-mix(in srgb, var(--primary) 20%, transparent);
+
+		/* Selection state system - light theme adjustments */
+		--selection: var(--ring);
+		--selection-bg: color-mix(in oklch, var(--selection) 8%, transparent);
+		--selection-bg-emphasis: color-mix(in oklch, var(--selection) 12%, transparent);
+		--selection-ring: color-mix(in oklch, var(--selection) 55%, transparent);
+		--selection-glow: color-mix(in oklch, var(--selection) 18%, transparent);
+		--selection-text: var(--selection);
+		--selection-shadow: 0 0 0 1.5px var(--selection-ring), 0 0 8px var(--selection-glow);
+		--selection-shadow-subtle: 0 0 6px var(--selection-glow);
 
 		/* Interactive hover overlay */
 		--hover-overlay: oklch(0 0 0 / 0.05);

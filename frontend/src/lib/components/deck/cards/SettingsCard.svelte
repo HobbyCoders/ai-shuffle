@@ -32,6 +32,8 @@
 	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
 	import HotkeyCapture from '$lib/components/settings/HotkeyCapture.svelte';
+	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import { Settings } from 'lucide-svelte';
 	import {
 		getUserCredentialPolicies,
 		setUserCredentialPolicy,
@@ -61,6 +63,7 @@
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
 		mobile?: boolean;
+		embedded?: boolean;
 	}
 
 	let {
@@ -72,12 +75,19 @@
 		onResize,
 		onDragEnd,
 		onResizeEnd,
-		mobile = false
+		mobile = false,
+		embedded = false
 	}: Props = $props();
 
 	// Navigation - simplified to 3 main tabs
 	type Tab = 'account' | 'ai' | 'system';
 	let activeTab: Tab = $state('account');
+
+	const settingsTabs = $derived([
+		{ id: 'account' as Tab, label: 'Account' },
+		{ id: 'ai' as Tab, label: 'AI Models' },
+		...($isAdmin ? [{ id: 'system' as Tab, label: 'System' }] : [])
+	]);
 
 	// Collapsible sections state
 	let expandedSections: Set<string> = $state(new Set(['general']));
@@ -1984,8 +1994,24 @@
 			</div>
 {/snippet}
 
-<!-- Conditional wrapper: Mobile uses no BaseCard, Desktop uses BaseCard -->
-{#if mobile}
+<!-- Conditional wrapper: Embedded uses FeaturePageLayout, Mobile uses no BaseCard, Desktop uses BaseCard -->
+{#if embedded}
+	<FeaturePageLayout icon={Settings} title="Settings">
+		{#snippet headerTabs()}
+			<div class="fp-tab-bar">
+				{#each settingsTabs as tab}
+					<button class="fp-tab" class:active={activeTab === tab.id} onclick={() => activeTab = tab.id}>
+						{tab.label}
+					</button>
+				{/each}
+			</div>
+		{/snippet}
+
+		<div class="settings card-system embedded">
+			{@render settingsContent()}
+		</div>
+	</FeaturePageLayout>
+{:else if mobile}
 	<div class="settings card-system mobile">
 		{@render settingsContent()}
 	</div>
@@ -2011,7 +2037,7 @@
 		height: 100%;
 		background: var(--card);
 		color: var(--card-foreground);
-		font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+		font-family: var(--font-sans);
 	}
 
 	/* Tab Bar */
@@ -2050,9 +2076,9 @@
 	}
 
 	.tab-btn.active {
-		background: var(--primary);
-		color: var(--primary-foreground);
-		box-shadow: var(--shadow-s);
+		background: var(--selection-bg-emphasis);
+		color: var(--selection-text);
+		box-shadow: var(--selection-shadow);
 	}
 
 	.tab-btn svg {
@@ -2110,6 +2136,19 @@
 		font-size: 0.9375rem;
 		font-weight: 600;
 		color: var(--foreground);
+	}
+
+	/* Center section header text on desktop */
+	@media (min-width: 640px) {
+		.section-header {
+			justify-content: center;
+			position: relative;
+		}
+
+		.section-header .chevron {
+			position: absolute;
+			right: 16px;
+		}
 	}
 
 	.chevron {
@@ -2413,7 +2452,7 @@
 	.security-textarea {
 		width: 100%;
 		min-height: 200px;
-		font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+		font-family: var(--font-mono);
 		font-size: 0.8125rem;
 		line-height: 1.5;
 		resize: vertical;
@@ -2800,7 +2839,7 @@
 		padding: 8px;
 		background: var(--muted);
 		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		font-family: monospace;
+		font-family: var(--font-mono);
 		font-size: 0.75rem;
 		word-break: break-all;
 	}
@@ -2852,4 +2891,15 @@
 	.settings.mobile .oauth-flow {
 		flex-direction: column;
 	}
+
+	/* -----------------------------------------------------------------------
+	   EMBEDDED MODE
+	   ----------------------------------------------------------------------- */
+
+	/* Hide the original tab bar when embedded (replaced by fp-tab-bar in header) */
+	.settings.embedded .tab-bar {
+		display: none;
+	}
+
+
 </style>

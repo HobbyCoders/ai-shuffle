@@ -1,49 +1,45 @@
 <script lang="ts">
 	import PermissionRequest, { type PermissionRequestData } from './PermissionRequest.svelte';
-	import { createEventDispatcher } from 'svelte';
 
 	interface Props {
 		requests: PermissionRequestData[];
-	}
-
-	let { requests }: Props = $props();
-
-	const dispatch = createEventDispatcher<{
-		respond: {
+		onRespond?: (detail: {
 			request_id: string;
 			decision: 'allow' | 'deny';
 			remember?: 'none' | 'session' | 'profile';
 			pattern?: string;
-		};
-		dismissAll: void;
-	}>();
+		}) => void;
+		onDismissAll?: () => void;
+	}
+
+	let { requests, onRespond, onDismissAll }: Props = $props();
 
 	let showPendingList = $state(false);
 
-	function handleRespond(event: CustomEvent<{
+	function handleRespond(detail: {
 		request_id: string;
 		decision: 'allow' | 'deny';
 		remember?: 'none' | 'session' | 'profile';
 		pattern?: string;
-	}>) {
-		dispatch('respond', event.detail);
+	}) {
+		onRespond?.(detail);
 	}
 
 	function handleDenyAll() {
 		for (const req of requests) {
-			dispatch('respond', {
+			onRespond?.({
 				request_id: req.request_id,
 				decision: 'deny',
 				remember: 'none'
 			});
 		}
-		dispatch('dismissAll');
+		onDismissAll?.();
 	}
 
 	function handleAllowAll() {
 		// Allow all pending permission requests
 		for (const req of requests) {
-			dispatch('respond', {
+			onRespond?.({
 				request_id: req.request_id,
 				decision: 'allow',
 				remember: 'none'
@@ -185,7 +181,7 @@
 			request={requests[0]}
 			isFirst={true}
 			queueCount={requests.length}
-			on:respond={handleRespond}
+			onRespond={handleRespond}
 		/>
 	</div>
 {/if}

@@ -29,27 +29,19 @@
 	});
 
 	// Get status display
-	const statusInfo = $derived(() => {
-		switch (message.agentStatus) {
-			case 'running':
-				return { text: 'Executing...', color: 'text-primary', isRunning: true, isError: false };
-			case 'completed':
-				return { text: 'Complete', color: 'text-green-500', isRunning: false, isError: false };
-			case 'error':
-				return { text: 'Error', color: 'text-red-500', isRunning: false, isError: true };
-			default:
-				return { text: 'Pending', color: 'text-muted-foreground', isRunning: false, isError: false };
-		}
-	});
+	const statusInfo = $derived(() => ({
+		isRunning: message.agentStatus === 'running',
+		isError: message.agentStatus === 'error'
+	}));
 
 	// Get model display name
 	function getModelBadge(agentType?: string): { label: string; color: string } {
 		switch (agentType?.toLowerCase()) {
 			case 'explore':
 			case 'plan':
-				return { label: 'Fast', color: 'bg-blue-500/20 text-blue-500' };
+				return { label: 'Fast', color: 'bg-primary/20 text-primary' };
 			default:
-				return { label: agentType || 'Agent', color: 'bg-purple-500/20 text-purple-500' };
+				return { label: agentType || 'Agent', color: 'bg-primary/20 text-primary' };
 		}
 	}
 
@@ -114,7 +106,7 @@
 </script>
 
 <details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
-	<summary class="subagent-summary w-full px-4 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
+	<summary class="subagent-summary w-full min-w-0 px-4 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
 		<!-- Status icon -->
 		{#if statusInfo().isRunning}
 			<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -131,32 +123,27 @@
 		{/if}
 
 		<!-- Subagent icon -->
-		<svg class="w-4 h-4 text-indigo-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+		<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
 		</svg>
 
 		<!-- Agent type badge -->
 		{#if message.agentType}
 			{@const badge = getModelBadge(message.agentType)}
-			<span class="px-1.5 py-0.5 text-xs font-medium {badge.color} rounded-full">
+			<span class="px-1.5 py-0.5 text-xs font-medium {badge.color} rounded-full flex-shrink-0">
 				{badge.label}
 			</span>
 		{/if}
 
 		<!-- Description or default label -->
-		<span class="text-sm font-medium text-foreground truncate">
+		<span class="text-sm font-medium text-foreground truncate min-w-0">
 			{message.agentDescription || 'Subagent'}
 		</span>
 
-		<span class="text-muted-foreground">•</span>
-
-		<!-- Status text -->
-		<span class="{statusInfo().color} text-sm">{statusInfo().text}</span>
-
 		<!-- Tool count (if any) -->
 		{#if childCounts().toolUse > 0}
-			<span class="text-muted-foreground">•</span>
-			<span class="text-xs text-muted-foreground">
+			<span class="text-muted-foreground flex-shrink-0">•</span>
+			<span class="text-xs text-muted-foreground flex-shrink-0">
 				{childCounts().completedTools}/{childCounts().toolUse} tools
 			</span>
 		{/if}
@@ -258,7 +245,7 @@
 						<!-- Text child (subagent's text output) -->
 						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
 							<div class="flex items-start gap-2">
-								<svg class="w-4 h-4 text-purple-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<svg class="w-4 h-4 text-primary flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
 								</svg>
 								<div class="text-sm text-foreground whitespace-pre-wrap break-words">

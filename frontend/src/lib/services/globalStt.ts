@@ -171,7 +171,12 @@ async function startRecording(): Promise<void> {
 	}));
 
 	try {
-		// Get microphone access
+		// Get microphone access - check for secure context (HTTPS or localhost)
+		if (!navigator.mediaDevices) {
+			throw new Error(
+				'Microphone requires a secure context (HTTPS or localhost). In Chrome, you can allow this origin at chrome://flags/#unsafely-treat-insecure-origin-as-secure'
+			);
+		}
 		mediaStream = await navigator.mediaDevices.getUserMedia({
 			audio: {
 				echoCancellation: true,

@@ -202,8 +202,8 @@
 	}
 
 	.card-action-btn.active {
-		background: color-mix(in oklch, var(--primary) 15%, transparent);
-		color: var(--primary);
+		background: var(--selection-bg-emphasis);
+		color: var(--selection-text);
 	}
 
 	.card-action-btn:focus-visible {
@@ -270,8 +270,8 @@
 	}
 
 	:global(.group-dropdown-portal .dropdown-item.selected) {
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		color: var(--primary);
+		background: var(--selection-bg);
+		color: var(--selection-text);
 	}
 
 	:global(.group-dropdown-portal .dropdown-item:focus-visible) {

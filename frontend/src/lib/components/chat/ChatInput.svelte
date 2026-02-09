@@ -6,15 +6,16 @@
 	 * Layer 2: Context Bar - inline profile/project dropdown selectors
 	 */
 	import { tick, onDestroy, onMount } from 'svelte';
-	import { tabs, profiles, projects, allTabs, type ChatTab } from '$lib/stores/tabs';
+	import { tabs, profiles, allTabs, type ChatTab } from '$lib/stores/tabs';
 	import { claudeAuthenticated, apiUser } from '$lib/stores/auth';
 	import { canUseOpenAI, credentialsLoaded } from '$lib/stores/credentials';
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import { AUTO_COMPACTION_BASE, CONTEXT_MAX } from '$lib/constants/chat';
+	import { sessionStateManager } from '$lib/stores/session/session-state.svelte';
 	import TiptapEditor from './TiptapEditor.svelte';
-	import { hasAtMention, findLastAtMentionIndex } from './tiptap/serialization';
+	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery } from './tiptap/serialization';
 
 	interface Command {
 		name: string;
@@ -66,10 +67,19 @@
 	);
 	const autoCompactionReserve = $derived(AUTO_COMPACTION_BASE + maxOutputTokens);
 
-	// Context usage: use real-time tracked value, or calculate from token counts for resumed sessions
-	// Add auto-compaction reserve to show effective context usage
-	// Use liveTab for reactivity - ensures updates propagate in mobile context
-	const baseContextUsed = $derived(liveTab.contextUsed ?? (liveTab.totalTokensIn + liveTab.totalCacheCreationTokens + liveTab.totalCacheReadTokens));
+	// Context usage: prefer real-time session state (updated by poller during streaming),
+	// fall back to tab store values for idle/resumed sessions.
+	// Session state is the source of truth during streaming; tab store only updates at stream end.
+	const sessionUsage = $derived(
+		liveTab.sessionId
+			? sessionStateManager.getSession(liveTab.sessionId)?.usage
+			: undefined
+	);
+	const baseContextUsed = $derived(
+		(sessionUsage && sessionUsage.contextUsed > 0)
+			? sessionUsage.contextUsed
+			: (liveTab.contextUsed ?? (liveTab.totalTokensIn + liveTab.totalCacheCreationTokens + liveTab.totalCacheReadTokens))
+	);
 	const contextUsed = $derived(baseContextUsed + autoCompactionReserve);
 	const contextPercent = $derived(Math.min((contextUsed / CONTEXT_MAX) * 100, 100));
 
@@ -173,9 +183,7 @@
 
 	// Dropdown state for profile/project selection
 	let showProfileDropdown = $state(false);
-	let showProjectDropdown = $state(false);
 	let profileDropdownRef = $state<HTMLDivElement | null>(null);
-	let projectDropdownRef = $state<HTMLDivElement | null>(null);
 
 	// Override dropdown state
 	let showThinkingDropdown = $state(false);
@@ -211,24 +219,14 @@
 
 	// Get selected profile/project names for display
 	const selectedProfileName = $derived($profiles.find(p => p.id === liveTab.profile)?.name || 'Profile');
-	const selectedProjectName = $derived($projects.find(p => p.id === liveTab.project)?.name || 'Project');
 
 	// Mobile-optimized names: show only first word to save space
 	const selectedProfileNameMobile = $derived(selectedProfileName.split(' ')[0]);
-	const selectedProjectNameMobile = $derived(selectedProjectName.split(' ')[0]);
 
 	// Toggle profile dropdown
 	function handleProfileClick(e: MouseEvent) {
 		e.stopPropagation();
-		showProjectDropdown = false;
 		showProfileDropdown = !showProfileDropdown;
-	}
-
-	// Toggle project dropdown
-	function handleProjectClick(e: MouseEvent) {
-		e.stopPropagation();
-		showProfileDropdown = false;
-		showProjectDropdown = !showProjectDropdown;
 	}
 
 	// Select a profile
@@ -237,18 +235,11 @@
 		showProfileDropdown = false;
 	}
 
-	// Select a project
-	function selectProject(projectId: string) {
-		tabs.setTabProject(tab.id, projectId);
-		showProjectDropdown = false;
-	}
-
 	// Toggle override dropdowns
 	function handleThinkingClick(e: MouseEvent) {
 		e.stopPropagation();
 		showPermissionDropdown = false;
 		showProfileDropdown = false;
-		showProjectDropdown = false;
 		showThinkingDropdown = !showThinkingDropdown;
 	}
 
@@ -256,7 +247,6 @@
 		e.stopPropagation();
 		showThinkingDropdown = false;
 		showProfileDropdown = false;
-		showProjectDropdown = false;
 		showPermissionDropdown = !showPermissionDropdown;
 	}
 
@@ -277,9 +267,6 @@
 		if (profileDropdownRef && !profileDropdownRef.contains(target)) {
 			showProfileDropdown = false;
 		}
-		if (projectDropdownRef && !projectDropdownRef.contains(target)) {
-			showProjectDropdown = false;
-		}
 		if (thinkingDropdownRef && !thinkingDropdownRef.contains(target)) {
 			showThinkingDropdown = false;
 		}
@@ -292,7 +279,6 @@
 	function handleEscape(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
 			showProfileDropdown = false;
-			showProjectDropdown = false;
 			showThinkingDropdown = false;
 			showPermissionDropdown = false;
 		}
@@ -309,10 +295,42 @@
 
 	// Handle input changes for autocomplete
 	function handleInputChange() {
-		showCommandAutocomplete = inputValue.startsWith('/') && inputValue.length > 0;
-		// Use plain text for @ mention detection to avoid false positives from chip @paths
-		// inputValue contains serialized content where chips are @path, which would trigger autocomplete incorrectly
-		showFileAutocomplete = hasAtMention(plainTextValue) && !!liveTab.project;
+		// Slash command autocomplete
+		if (inputValue.startsWith('/')) {
+			const slashContent = inputValue.slice(1);
+			const spaceIndex = slashContent.indexOf(' ');
+			// Dismiss once user types text after a space (they've moved past command selection)
+			// e.g., "/compact " still shows (trailing space only), but "/compact arg" dismisses
+			showCommandAutocomplete = spaceIndex === -1 || slashContent.slice(spaceIndex + 1).trim().length === 0;
+		} else {
+			showCommandAutocomplete = false;
+		}
+
+		// File autocomplete (@mentions)
+		// Use plain text for detection to avoid false positives from chip @paths
+		if (!!liveTab.project && hasAtMention(plainTextValue)) {
+			const atInfo = extractAtMentionQuery(plainTextValue);
+			if (atInfo) {
+				const query = atInfo.query;
+				if (query.length > 0 && /^\s/.test(query)) {
+					// @ followed immediately by whitespace → not a mention
+					showFileAutocomplete = false;
+				} else if (!query.includes('/') && query.includes(' ')) {
+					// Root level query contains a space → only keep open if user is typing
+					// a known virtual folder name (e.g., "Chat History")
+					const knownFolders = ['Chat History', 'Notes', 'Subagents'];
+					showFileAutocomplete = knownFolders.some(
+						folder => folder.toLowerCase().startsWith(query.toLowerCase())
+					);
+				} else {
+					showFileAutocomplete = true;
+				}
+			} else {
+				showFileAutocomplete = false;
+			}
+		} else {
+			showFileAutocomplete = false;
+		}
 	}
 
 	// Handle form submission
@@ -454,7 +472,7 @@
 		isUploading = true;
 		try {
 			for (const file of Array.from(files)) {
-				const result = await api.uploadFile(`/projects/${liveTab.project}/upload`, file);
+				const result = await api.uploadFile(`/projects/${liveTab.project}/upload`, file, liveTab.sessionId ?? undefined);
 				// Insert as inline chip at cursor position
 				editorRef?.insertFileChip({
 					path: result.path,
@@ -568,6 +586,11 @@
 		isPreparing = true; // Show preparing state while getting mic and initializing audio
 
 		try {
+			if (!navigator.mediaDevices) {
+				throw new Error(
+					'Microphone requires a secure context (HTTPS or localhost). In Chrome, you can allow this origin at chrome://flags/#unsafely-treat-insecure-origin-as-secure'
+				);
+			}
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
 			// Determine best supported mime type
@@ -814,19 +837,67 @@
 							/>
 						</div>
 
-						<!-- Send button only -->
+						<!-- Voice + Send buttons -->
 						<div class="send-button-wrapper">
+							<!-- Voice Input Button -->
+							<div class="voice-btn-wrapper">
+								<button
+									type="button"
+									onclick={toggleRecording}
+									disabled={!$claudeAuthenticated || isUploading || isTranscribing || isPreparing || !canRecord}
+									class="voice-btn"
+									class:preparing={isPreparing}
+									class:recording={isRecording}
+									class:transcribing={isTranscribing}
+									title={!canRecord ? 'Configure OpenAI API key in Settings to use voice input' : isPreparing ? 'Preparing...' : isRecording ? 'Tap to stop' : isTranscribing ? 'Transcribing...' : 'Voice input'}
+									style="--audio-level: {audioLevel}"
+								>
+									{#if isRecording}
+										<div class="voice-rings">
+											<div class="voice-ring voice-ring-1" style="transform: scale({1 + audioLevel * 0.3}); opacity: {0.3 + audioLevel * 0.4}"></div>
+											<div class="voice-ring voice-ring-2" style="transform: scale({1 + audioLevel * 0.5}); opacity: {0.2 + audioLevel * 0.3}"></div>
+											<div class="voice-ring voice-ring-3" style="transform: scale({1 + audioLevel * 0.7}); opacity: {0.1 + audioLevel * 0.2}"></div>
+										</div>
+									{/if}
+									<div class="voice-btn-content">
+										{#if isTranscribing}
+											<div class="voice-processing">
+												<span class="processing-dot"></span>
+												<span class="processing-dot"></span>
+												<span class="processing-dot"></span>
+											</div>
+										{:else if isPreparing}
+											<svg class="voice-icon voice-icon-preparing" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+											</svg>
+										{:else if isRecording}
+											<div class="voice-waveform">
+												<span class="waveform-bar" style="height: {20 + audioLevel * 60}%"></span>
+												<span class="waveform-bar" style="height: {40 + audioLevel * 50}%"></span>
+												<span class="waveform-bar" style="height: {30 + audioLevel * 70}%"></span>
+												<span class="waveform-bar" style="height: {50 + audioLevel * 40}%"></span>
+												<span class="waveform-bar" style="height: {25 + audioLevel * 55}%"></span>
+											</div>
+										{:else}
+											<svg class="voice-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+											</svg>
+										{/if}
+									</div>
+								</button>
+							</div>
+
 							{#if liveTab.isCreatingWorktree}
 								<!-- Creating worktree - show spinner -->
 								<button type="button" class="send-btn creating-worktree" disabled title="Creating worktree...">
-									<svg class="w-[14px] h-[14px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
 									</svg>
 								</button>
 							{:else if liveTab.isStreaming}
 								{#if inputValue.trim()}
 									<button type="submit" class="send-btn" title="Send message (interrupts current response)">
-										<svg class="w-[14px] h-[14px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
 										</svg>
 									</button>
@@ -849,7 +920,7 @@
 									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing}
 									title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
 								>
-									<svg class="w-[14px] h-[14px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
 									</svg>
 								</button>
@@ -870,7 +941,7 @@
 						</div>
 					</div>
 
-					<!-- Center: Profile selector + Project selector OR Worktree badge -->
+					<!-- Center: Profile selector -->
 					<div class="controls-center">
 						<!-- Profile Selector - always visible -->
 						<div class="selector-wrapper" bind:this={profileDropdownRef}>
@@ -885,8 +956,7 @@
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 									</svg>
 								</div>
-								<span class="selector-text desktop">{selectedProfileName}</span>
-								<span class="selector-text mobile">{selectedProfileNameMobile}</span>
+								<span class="selector-text">{selectedProfileName}</span>
 								<svg class="w-3 h-3 opacity-50 chevron" class:open={showProfileDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 								</svg>
@@ -919,75 +989,6 @@
 								</div>
 							{/if}
 						</div>
-
-						{#if liveTab.executionMode === 'worktree' && liveTab.messages.length > 0}
-							<!-- Worktree Badge - replaces project selector after session starts -->
-							<div class="context-badge worktree" title="Working in git worktree">
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<circle cx="6" cy="6" r="2" stroke-width="2"/>
-									<circle cx="18" cy="6" r="2" stroke-width="2"/>
-									<circle cx="12" cy="18" r="2" stroke-width="2"/>
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4m6-8v4c0 2-2 4-6 4" />
-								</svg>
-								<span class="context-badge-text">{liveTab.selectedWorktreeBranch || liveTab.worktreeBranch || 'worktree'}</span>
-							</div>
-						{:else if liveTab.executionMode === 'local' && liveTab.messages.length > 0}
-							<!-- Locked Project Badge - replaces project selector after session starts in local mode -->
-							<div class="context-badge locked" title="Project locked for this session">
-								<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-								</svg>
-								<span class="context-badge-text">{selectedProjectName}</span>
-							</div>
-						{:else}
-							<!-- Project Selector -->
-							<div class="selector-wrapper" bind:this={projectDropdownRef}>
-								<button
-									type="button"
-									class="context-selector-btn {liveTab.project ? '' : 'unset'}"
-									onclick={handleProjectClick}
-									title="Change project"
-								>
-									<div class="selector-icon">
-										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-										</svg>
-									</div>
-									<span class="selector-text desktop">{selectedProjectName}</span>
-									<span class="selector-text mobile">{selectedProjectNameMobile}</span>
-									<svg class="w-3 h-3 opacity-50 chevron" class:open={showProjectDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-									</svg>
-								</button>
-
-								{#if showProjectDropdown}
-									<div class="selector-dropdown">
-										{#if $projects.length === 0}
-											<div class="dropdown-empty">No projects available</div>
-										{:else}
-											{#each $projects as project}
-												<button
-													type="button"
-													class="dropdown-item"
-													class:selected={project.id === liveTab.project}
-													onclick={() => selectProject(project.id)}
-												>
-													<svg class="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-													</svg>
-													<span>{project.name}</span>
-													{#if project.id === liveTab.project}
-														<svg class="w-3.5 h-3.5 ml-auto text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-															<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-														</svg>
-													{/if}
-												</button>
-											{/each}
-										{/if}
-									</div>
-								{/if}
-							</div>
-						{/if}
 					</div>
 
 					<!-- Right: Override buttons, Attach & Mic buttons -->
@@ -1076,9 +1077,9 @@
 						<button
 							type="button"
 							onclick={triggerFileUpload}
-							disabled={liveTab.isStreaming || !$claudeAuthenticated || isUploading}
+							disabled={liveTab.isStreaming || !$claudeAuthenticated || isUploading || (liveTab.executionMode === 'worktree' && !liveTab.worktreeId)}
 							class="dock-action-btn"
-							title={isUploading ? 'Uploading...' : liveTab.project ? 'Attach file' : 'Select a project to attach files'}
+							title={isUploading ? 'Uploading...' : (liveTab.executionMode === 'worktree' && !liveTab.worktreeId) ? 'Select a branch first to attach files' : liveTab.project ? 'Attach file' : 'Select a project to attach files'}
 						>
 							{#if isUploading}
 								<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1092,61 +1093,6 @@
 							{/if}
 						</button>
 
-						<!-- Voice Input Button with Rich Visual Feedback -->
-						<!-- Wrapper contains overflow:hidden to clip animation rings without affecting sibling dropdowns -->
-						<div class="voice-btn-wrapper">
-							<button
-								type="button"
-								onclick={toggleRecording}
-								disabled={!$claudeAuthenticated || isUploading || isTranscribing || isPreparing || !canRecord}
-								class="voice-btn"
-								class:preparing={isPreparing}
-								class:recording={isRecording}
-								class:transcribing={isTranscribing}
-								title={!canRecord ? 'Configure OpenAI API key in Settings to use voice input' : isPreparing ? 'Preparing...' : isRecording ? 'Tap to stop' : isTranscribing ? 'Transcribing...' : 'Voice input'}
-								style="--audio-level: {audioLevel}"
-							>
-								<!-- Audio level rings (visible when recording) -->
-								{#if isRecording}
-									<div class="voice-rings">
-										<div class="voice-ring voice-ring-1" style="transform: scale({1 + audioLevel * 0.3}); opacity: {0.3 + audioLevel * 0.4}"></div>
-										<div class="voice-ring voice-ring-2" style="transform: scale({1 + audioLevel * 0.5}); opacity: {0.2 + audioLevel * 0.3}"></div>
-										<div class="voice-ring voice-ring-3" style="transform: scale({1 + audioLevel * 0.7}); opacity: {0.1 + audioLevel * 0.2}"></div>
-									</div>
-								{/if}
-
-								<!-- Button content -->
-								<div class="voice-btn-content">
-									{#if isTranscribing}
-										<!-- Processing: animated dots -->
-										<div class="voice-processing">
-											<span class="processing-dot"></span>
-											<span class="processing-dot"></span>
-											<span class="processing-dot"></span>
-										</div>
-									{:else if isPreparing}
-										<!-- Preparing: pulsing mic -->
-										<svg class="voice-icon voice-icon-preparing" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-										</svg>
-									{:else if isRecording}
-										<!-- Recording: live waveform indicator -->
-										<div class="voice-waveform">
-											<span class="waveform-bar" style="height: {20 + audioLevel * 60}%"></span>
-											<span class="waveform-bar" style="height: {40 + audioLevel * 50}%"></span>
-											<span class="waveform-bar" style="height: {30 + audioLevel * 70}%"></span>
-											<span class="waveform-bar" style="height: {50 + audioLevel * 40}%"></span>
-											<span class="waveform-bar" style="height: {25 + audioLevel * 55}%"></span>
-										</div>
-									{:else}
-										<!-- Idle: mic icon -->
-										<svg class="voice-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-										</svg>
-									{/if}
-								</div>
-							</button>
-						</div>
 					</div>
 				</div>
 			</div>
@@ -1316,7 +1262,7 @@
 		outline: none !important;
 		box-shadow: none !important;
 		resize: none;
-		font-family: 'Outfit', -apple-system, sans-serif;
+		font-family: var(--font-sans);
 		font-size: 15px;
 		font-weight: 400;
 		line-height: 1.5;
@@ -1348,6 +1294,7 @@
 		align-items: center;
 		align-self: center;
 		flex-shrink: 0;
+		gap: 4px;
 	}
 
 	/* ===== SEND BUTTON - COMPACT ===== */
@@ -1355,8 +1302,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 32px;
-		height: 32px;
+		width: 28px;
+		height: 28px;
 		background: var(--button-primary-gradient);
 		border: none;
 		border-radius: calc(var(--radius, 0.75rem) * 0.67);
@@ -1418,8 +1365,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 32px;
-		height: 32px;
+		width: 28px;
+		height: 28px;
 		background: var(--status-error-bg);
 		color: var(--destructive);
 		border-radius: calc(var(--radius, 0.75rem) * 0.67);
@@ -1534,7 +1481,7 @@
 	}
 
 	.usage-text {
-		font-family: ui-monospace, 'Monaco', 'Menlo', monospace;
+		font-family: var(--font-mono);
 		font-size: 11px;
 		font-weight: 500;
 		color: var(--muted-foreground);
@@ -1598,24 +1545,10 @@
 		white-space: nowrap;
 	}
 
-	/* Mobile: hide text, show icons only */
-	.selector-text.mobile,
-	.selector-text.desktop {
-		display: none;
-	}
-
-	/* Desktop: show full name */
+	/* Desktop: allow wider name */
 	@media (min-width: 640px) {
 		.selector-text {
 			max-width: 120px;
-		}
-
-		.selector-text.mobile {
-			display: none;
-		}
-
-		.selector-text.desktop {
-			display: block;
 		}
 	}
 
@@ -1732,7 +1665,7 @@
 	}
 
 	.dropdown-item.selected {
-		background: var(--chip-primary-bg);
+		background: var(--selection-bg);
 	}
 
 	.dropdown-item span {
@@ -1773,10 +1706,8 @@
 			gap: 0;
 		}
 
-		/* Show selector text on mobile (profile/project names) */
+		/* Slightly smaller text on mobile */
 		.selector-text {
-			display: block;
-			max-width: 80px;
 			font-size: 11px;
 		}
 
@@ -1829,8 +1760,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 36px;
-		height: 36px;
+		width: 28px;
+		height: 28px;
 		background: transparent;
 		border: none;
 		/* Use theme radius with max 50% for circular, 0 for square themes */
@@ -1898,8 +1829,8 @@
 
 	/* Mic icon */
 	.voice-icon {
-		width: 18px;
-		height: 18px;
+		width: 15px;
+		height: 15px;
 		transition: transform 0.2s ease;
 	}
 
@@ -1937,7 +1868,7 @@
 		align-items: center;
 		justify-content: center;
 		gap: 2px;
-		height: 18px;
+		height: 15px;
 	}
 
 	.waveform-bar {
@@ -2010,12 +1941,12 @@
 	}
 
 	.override-btn.active {
-		background: var(--chip-primary-bg);
-		color: var(--primary);
+		background: var(--selection-bg);
+		color: var(--selection-text);
 	}
 
 	.override-btn.active:hover {
-		background: color-mix(in oklch, var(--primary) 20%, transparent);
+		background: var(--selection-bg-emphasis);
 	}
 
 	/* Active indicator dot */
@@ -2086,7 +2017,7 @@
 	}
 
 	.override-dropdown-item.selected {
-		background: var(--chip-primary-bg);
+		background: var(--selection-bg);
 	}
 
 	.override-item-label {

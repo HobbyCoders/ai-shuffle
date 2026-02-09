@@ -10,6 +10,7 @@
 	 * - Animated transitions and hover states
 	 */
 	import BaseCard from './BaseCard.svelte';
+	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import type { DeckCard } from './types';
 	import { onMount } from 'svelte';
 	import { fly, fade } from 'svelte/transition';
@@ -24,7 +25,7 @@
 		type TrendDataPoint,
 		type TopSession
 	} from '$lib/api/client';
-	import { Download, RefreshCw, Loader2, TrendingUp, TrendingDown, Zap, DollarSign, MessageSquare, Activity, ChevronRight, Calendar } from 'lucide-svelte';
+	import { Download, RefreshCw, Loader2, TrendingUp, TrendingDown, Zap, DollarSign, MessageSquare, Activity, ChevronRight, Calendar, BarChart3 } from 'lucide-svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -37,6 +38,7 @@
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
 		mobile?: boolean;
+		embedded?: boolean;
 		onSessionClick?: (sessionId: string) => void;
 	}
 
@@ -50,6 +52,7 @@
 		onDragEnd,
 		onResizeEnd,
 		mobile = false,
+		embedded = false,
 		onSessionClick
 	}: Props = $props();
 
@@ -369,7 +372,47 @@
 	</div>
 {/snippet}
 
-{#if mobile}
+{#if embedded}
+	<FeaturePageLayout icon={BarChart3} title="Stats">
+		{#snippet headerActions()}
+			<div class="fp-date-pills">
+				{#each ['7d', '30d', '90d'] as preset}
+					<button
+						class="fp-date-pill"
+						class:active={selectedPreset === preset}
+						onclick={() => selectPreset(preset as PresetRange)}
+					>
+						{preset === '7d' ? '7D' : preset === '30d' ? '30D' : '90D'}
+					</button>
+				{/each}
+			</div>
+			<button
+				class="fp-btn fp-btn--ghost"
+				onclick={handleRefresh}
+				disabled={refreshing}
+				title="Refresh"
+			>
+				<RefreshCw class="w-4 h-4 {refreshing ? 'spin' : ''}" />
+			</button>
+			<button
+				class="fp-btn fp-btn--secondary"
+				onclick={handleExport}
+				disabled={exportLoading}
+				title="Export CSV"
+			>
+				{#if exportLoading}
+					<Loader2 class="w-4 h-4 spin" />
+				{:else}
+					<Download class="w-4 h-4" />
+				{/if}
+				<span class="hidden sm:inline">Export</span>
+			</button>
+		{/snippet}
+		{#snippet children()}
+			{@render statsContent()}
+		{/snippet}
+	</FeaturePageLayout>
+{:else if mobile}
 	{@render statsContent()}
 {:else}
 	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
@@ -884,5 +927,16 @@
 		.session-item {
 			min-height: 48px;
 		}
+	}
+
+	/* Embedded mode styles */
+	.fp-date-pills { display: flex; gap: 2px; padding: 3px; background: var(--surface-1); border-radius: var(--radius-md); }
+	.fp-date-pill { padding: 4px 12px; border-radius: calc(var(--radius-md) - 2px); font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.02em; border: none; background: transparent; color: var(--text-secondary); cursor: pointer; transition: all 100ms; }
+	.fp-date-pill:hover { color: var(--text-primary); }
+	.fp-date-pill.active { color: var(--selection-text); background: var(--selection-bg-emphasis); box-shadow: var(--selection-shadow); }
+
+	@media (max-width: 639px) {
+		.fp-date-pills { padding: 4px; }
+		.fp-date-pill { padding: 8px 14px; font-size: var(--text-sm); min-height: 36px; }
 	}
 </style>

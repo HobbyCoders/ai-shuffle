@@ -15,6 +15,20 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 
+def _parse_mergeable(value: Any) -> Optional[bool]:
+    """Convert GitHub CLI mergeable string to Optional[bool].
+
+    gh CLI returns 'MERGEABLE', 'CONFLICTING', or 'UNKNOWN' (not a bool).
+    """
+    if isinstance(value, bool):
+        return value
+    if value == 'MERGEABLE':
+        return True
+    if value == 'CONFLICTING':
+        return False
+    return None
+
+
 @dataclass
 class PullRequest:
     """Represents a GitHub Pull Request"""
@@ -257,7 +271,7 @@ class GitHubService:
                     url=pr_data.get('url', ''),
                     created_at=pr_data.get('createdAt', ''),
                     updated_at=pr_data.get('updatedAt', ''),
-                    mergeable=pr_data.get('mergeable')
+                    mergeable=_parse_mergeable(pr_data.get('mergeable'))
                 ))
 
             return pulls
@@ -302,7 +316,7 @@ class GitHubService:
                 url=pr_data.get('url', ''),
                 created_at=pr_data.get('createdAt', ''),
                 updated_at=pr_data.get('updatedAt', ''),
-                mergeable=pr_data.get('mergeable')
+                mergeable=_parse_mergeable(pr_data.get('mergeable'))
             )
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse PR: {e}")
@@ -343,7 +357,14 @@ class GitHubService:
             ])
 
             if result.returncode != 0:
-                logger.error(f"Failed to create PR: {result.stderr}")
+                stderr = result.stderr.strip()
+                # If a PR already exists, extract its number and return it
+                existing_match = re.search(r'already exists:\s*https?://\S+/pull/(\d+)', stderr)
+                if existing_match:
+                    existing_number = int(existing_match.group(1))
+                    logger.info(f"PR already exists (#{existing_number}), returning existing PR")
+                    return self.get_pull(repo, existing_number)
+                logger.error(f"Failed to create PR: {stderr}")
                 return None
 
             # Parse the URL from output to get the PR number

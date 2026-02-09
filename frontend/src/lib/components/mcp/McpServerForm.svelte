@@ -214,21 +214,21 @@
 						<button
 							type="button"
 							onclick={() => type = 'stdio'}
-							class="flex-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors {type === 'stdio' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-border text-muted-foreground hover:text-foreground'}"
+							class="flex-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors {type === 'stdio' ? 'bg-selection-emphasis text-selection-text border-selection shadow-selection' : 'bg-background border-border text-muted-foreground hover:text-foreground'}"
 						>
 							Local Process
 						</button>
 						<button
 							type="button"
 							onclick={() => type = 'sse'}
-							class="flex-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors {type === 'sse' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-border text-muted-foreground hover:text-foreground'}"
+							class="flex-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors {type === 'sse' ? 'bg-selection-emphasis text-selection-text border-selection shadow-selection' : 'bg-background border-border text-muted-foreground hover:text-foreground'}"
 						>
 							SSE (Remote)
 						</button>
 						<button
 							type="button"
 							onclick={() => type = 'http'}
-							class="flex-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors {type === 'http' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-border text-muted-foreground hover:text-foreground'}"
+							class="flex-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors {type === 'http' ? 'bg-selection-emphasis text-selection-text border-selection shadow-selection' : 'bg-background border-border text-muted-foreground hover:text-foreground'}"
 						>
 							HTTP
 						</button>
@@ -245,14 +245,14 @@
 							<button
 								type="button"
 								onclick={() => selectedScope = 'local'}
-								class="flex-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors {selectedScope === 'local' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-border text-muted-foreground hover:text-foreground'}"
+								class="flex-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors {selectedScope === 'local' ? 'bg-selection-emphasis text-selection-text border-selection shadow-selection' : 'bg-background border-border text-muted-foreground hover:text-foreground'}"
 							>
 								Local (gitignored)
 							</button>
 							<button
 								type="button"
 								onclick={() => selectedScope = 'project'}
-								class="flex-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors {selectedScope === 'project' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background border-border text-muted-foreground hover:text-foreground'}"
+								class="flex-1 px-3 py-2 rounded-lg border text-sm font-medium transition-colors {selectedScope === 'project' ? 'bg-selection-emphasis text-selection-text border-selection shadow-selection' : 'bg-background border-border text-muted-foreground hover:text-foreground'}"
 							>
 								Project (committed)
 							</button>

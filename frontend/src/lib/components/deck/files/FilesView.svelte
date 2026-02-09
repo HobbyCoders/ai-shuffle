@@ -45,6 +45,7 @@
 	let renameTarget: FileItem | null = $state(null);
 	let renameValue = $state('');
 	let contextMenu: { x: number; y: number; item: FileItem } | null = $state(null);
+	let contextMenuEl: HTMLDivElement | undefined = $state();
 	let uploadInput: HTMLInputElement;
 	let isMobile = $state(false);
 	let isDragging = $state(false);
@@ -127,6 +128,24 @@
 			window.removeEventListener('resize', checkMobile);
 			document.removeEventListener('click', handleClickOutside);
 		};
+	});
+
+	// Clamp context menu within viewport bounds
+	$effect(() => {
+		if (contextMenu && contextMenuEl) {
+			const rect = contextMenuEl.getBoundingClientRect();
+			const pad = 8;
+			let { x, y } = contextMenu;
+			if (x + rect.width > window.innerWidth - pad) {
+				x = window.innerWidth - rect.width - pad;
+			}
+			if (y + rect.height > window.innerHeight - pad) {
+				y = window.innerHeight - rect.height - pad;
+			}
+			if (x !== contextMenu.x || y !== contextMenu.y) {
+				contextMenu = { ...contextMenu, x, y };
+			}
+		}
 	});
 
 	// Handlers
@@ -716,6 +735,7 @@
 	<!-- Context menu -->
 	{#if contextMenu}
 		<div
+			bind:this={contextMenuEl}
 			class="context-menu"
 			style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
 			onclick={(e) => e.stopPropagation()}
@@ -1015,7 +1035,7 @@
 	}
 
 	.dropdown-item.active {
-		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		background: var(--selection-bg-emphasis);
 	}
 
 	.dropdown-item :global(.item-icon) {
@@ -1069,8 +1089,8 @@
 	}
 
 	.action-btn.active {
-		background: color-mix(in oklch, var(--primary) 15%, transparent);
-		color: var(--primary);
+		background: var(--selection-bg-emphasis);
+		color: var(--selection-text);
 	}
 
 	.action-btn.primary-action {
@@ -1519,8 +1539,9 @@
 	}
 
 	.file-card.selected {
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		border-color: color-mix(in oklch, var(--primary) 30%, transparent);
+		background: var(--selection-bg);
+		border-color: var(--selection-ring);
+		box-shadow: var(--selection-shadow-subtle);
 	}
 
 	.file-card.new-folder {

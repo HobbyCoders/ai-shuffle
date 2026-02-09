@@ -1,0 +1,425 @@
+<script lang="ts">
+	/**
+	 * GitHeaderActions - Git controls for the PageHeader
+	 *
+	 * Branch selector dropdown (checkout branches), commit button, and diff stats.
+	 * Branch selector is locked during streaming.
+	 */
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock } from 'lucide-svelte';
+	import { git, diffStats, gitStatus, branches as branchStore } from '$lib/stores/git';
+	import { onMount } from 'svelte';
+
+	interface Props {
+		projectId: string;
+		isStreaming?: boolean;
+		onClickCommit: () => void;
+		onClickCreatePR: () => void;
+		onClickNewBranch: () => void;
+	}
+
+	let { projectId, isStreaming = false, onClickCommit, onClickCreatePR, onClickNewBranch }: Props = $props();
+
+	// --- Dropdown state ---
+	let showDropdown = $state(false);
+	let dropdownRef = $state<HTMLDivElement | null>(null);
+	let checkingOut = $state(false);
+
+	// Refresh diff stats on mount and periodically
+	const DIFF_POLL_INTERVAL_MS = 15_000;
+	let refreshInterval: ReturnType<typeof setInterval> | null = null;
+
+	onMount(() => {
+		if (projectId) {
+			git.refreshDiffStats();
+			refreshInterval = setInterval(() => {
+				git.refreshDiffStats();
+			}, DIFF_POLL_INTERVAL_MS);
+		}
+		return () => {
+			if (refreshInterval) clearInterval(refreshInterval);
+		};
+	});
+
+	// When streaming ends, refresh status to update ahead/behind counts.
+	// Track the transition explicitly to avoid firing on every parent re-render.
+	let _wasStreaming = false;
+	$effect(() => {
+		if (isStreaming) {
+			_wasStreaming = true;
+		} else if (_wasStreaming && projectId) {
+			_wasStreaming = false;
+			git.refreshStatus();
+			git.refreshDiffStats();
+		}
+	});
+
+	const currentBranch = $derived($gitStatus?.current_branch ?? null);
+	const hasChanges = $derived(
+		($diffStats?.additions ?? 0) > 0 ||
+		($diffStats?.deletions ?? 0) > 0 ||
+		($diffStats?.files_changed ?? 0) > 0
+	);
+	const additions = $derived($diffStats?.additions ?? 0);
+	const deletions = $derived($diffStats?.deletions ?? 0);
+	const commitsAhead = $derived($gitStatus?.ahead ?? 0);
+	const canCreatePR = $derived(!hasChanges && commitsAhead > 0);
+
+	// Local branches for the dropdown (exclude remotes)
+	const localBranches = $derived(
+		$branchStore.filter(b => !b.remote)
+	);
+
+	// Can the user interact with the branch selector?
+	const branchLocked = $derived(isStreaming || checkingOut);
+
+	function toggleDropdown() {
+		if (branchLocked) return;
+		showDropdown = !showDropdown;
+		if (showDropdown) {
+			// Refresh branches when opening
+			git.loadBranches();
+		}
+	}
+
+	async function checkoutBranch(branchName: string) {
+		if (branchName === currentBranch) {
+			showDropdown = false;
+			return;
+		}
+		checkingOut = true;
+		showDropdown = false;
+		try {
+			await git.checkout(branchName);
+			// Refresh diff stats after checkout
+			await git.refreshDiffStats();
+		} catch (e) {
+			console.error('Failed to checkout branch:', e);
+		} finally {
+			checkingOut = false;
+		}
+	}
+
+	function handleNewBranch() {
+		showDropdown = false;
+		onClickNewBranch();
+	}
+
+	// Close dropdown on outside click
+	function handleClickOutside(e: MouseEvent) {
+		if (!showDropdown) return;
+		if (dropdownRef && !dropdownRef.contains(e.target as Node)) {
+			showDropdown = false;
+		}
+	}
+
+	function handleKeydown(e: KeyboardEvent) {
+		if (e.key === 'Escape' && showDropdown) {
+			showDropdown = false;
+		}
+	}
+</script>
+
+<svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
+
+<div class="git-actions">
+	<!-- Branch selector -->
+	<div class="branch-selector" bind:this={dropdownRef}>
+		<button
+			class="git-btn branch-btn"
+			class:locked={branchLocked}
+			onclick={toggleDropdown}
+			disabled={branchLocked}
+			title={isStreaming ? 'Branch locked during streaming' : (currentBranch ? `Branch: ${currentBranch}` : 'Select branch')}
+		>
+			<GitBranch size={14} strokeWidth={1.5} />
+			{#if currentBranch}
+				<span class="btn-label branch-name">{currentBranch}</span>
+			{/if}
+			{#if checkingOut}
+				<Loader2 size={11} strokeWidth={2} class="spin" />
+			{:else if isStreaming}
+				<Lock size={10} strokeWidth={1.5} />
+			{:else}
+				<ChevronDown size={11} strokeWidth={1.5} />
+			{/if}
+		</button>
+
+		{#if showDropdown}
+			<div class="branch-dropdown">
+				{#if localBranches.length > 0}
+					<div class="dropdown-section-label">Branches</div>
+					{#each localBranches as branch (branch.name)}
+						<button
+							class="dropdown-item"
+							class:active={branch.name === currentBranch}
+							onclick={() => checkoutBranch(branch.name)}
+						>
+							<GitBranch size={13} strokeWidth={1.5} />
+							<span class="dropdown-item-name">{branch.name}</span>
+							{#if branch.name === currentBranch}
+								<Check size={14} strokeWidth={2} />
+							{/if}
+						</button>
+					{/each}
+				{:else}
+					<p class="dropdown-empty">No local branches</p>
+				{/if}
+
+				<div class="dropdown-divider"></div>
+				<button class="dropdown-item new-branch-item" onclick={handleNewBranch}>
+					<Plus size={13} strokeWidth={1.5} />
+					<span class="dropdown-item-name">New branch...</span>
+				</button>
+			</div>
+		{/if}
+	</div>
+
+	<!-- Commit / Create PR button -->
+	{#if canCreatePR}
+		<button
+			class="git-btn"
+			onclick={onClickCreatePR}
+			disabled={isStreaming}
+			title={isStreaming ? 'Cannot create PR during streaming' : `${commitsAhead} commit${commitsAhead === 1 ? '' : 's'} ahead — create a pull request`}
+		>
+			<GitPullRequest size={14} strokeWidth={1.5} />
+			<span class="btn-label">Create PR</span>
+			<ChevronDown size={11} strokeWidth={1.5} />
+		</button>
+	{:else}
+		<button
+			class="git-btn"
+			onclick={onClickCommit}
+			disabled={!hasChanges || isStreaming}
+			title={isStreaming ? 'Cannot commit during streaming' : hasChanges ? 'Commit changes' : 'No changes to commit'}
+		>
+			<GitCommitHorizontal size={14} strokeWidth={1.5} />
+			<span class="btn-label">Commit</span>
+			<ChevronDown size={11} strokeWidth={1.5} />
+		</button>
+	{/if}
+
+	<!-- Diff stats -->
+	{#if hasChanges}
+		<div class="diff-stats">
+			{#if additions > 0}
+				<span class="stat additions">+{additions}</span>
+			{/if}
+			{#if deletions > 0}
+				<span class="stat deletions">-{deletions}</span>
+			{/if}
+		</div>
+	{/if}
+</div>
+
+<style>
+	.git-actions {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+	}
+
+	.branch-selector {
+		position: relative;
+	}
+
+	.git-btn {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		height: 26px;
+		padding: 0 8px;
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		color: var(--muted-foreground);
+		font-size: 0.6875rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 150ms ease;
+		white-space: nowrap;
+	}
+
+	.git-btn:hover:not(:disabled) {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+
+	.git-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.git-btn.locked {
+		opacity: 0.6;
+	}
+
+	.git-btn :global(svg) {
+		flex-shrink: 0;
+	}
+
+	.btn-label {
+		line-height: 1;
+	}
+
+	.branch-name {
+		max-width: 140px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	/* Branch dropdown */
+	.branch-dropdown {
+		position: absolute;
+		top: calc(100% + 4px);
+		right: 0;
+		min-width: 220px;
+		max-width: 320px;
+		max-height: 320px;
+		overflow-y: auto;
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		box-shadow: var(--shadow-l);
+		padding: 4px;
+		z-index: 100;
+		animation: dropdown-in 120ms cubic-bezier(0.16, 1, 0.3, 1);
+	}
+
+	@keyframes dropdown-in {
+		from { opacity: 0; transform: translateY(-4px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+
+	.dropdown-section-label {
+		padding: 6px 10px 2px;
+		font-size: 0.625rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--muted-foreground);
+	}
+
+	.dropdown-item {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		padding: 7px 10px;
+		background: transparent;
+		border: none;
+		border-radius: 7px;
+		color: var(--foreground);
+		font-size: 0.8125rem;
+		cursor: pointer;
+		text-align: left;
+		transition: background-color 120ms ease;
+	}
+
+	.dropdown-item:hover {
+		background: var(--hover-overlay);
+	}
+
+	.dropdown-item.active {
+		font-weight: 500;
+	}
+
+	.dropdown-item :global(svg) {
+		color: var(--muted-foreground);
+		flex-shrink: 0;
+	}
+
+	.dropdown-item.active :global(svg:last-child) {
+		color: var(--success);
+	}
+
+	.dropdown-item-name {
+		flex: 1;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.dropdown-divider {
+		height: 1px;
+		background: var(--border);
+		margin: 4px 0;
+	}
+
+	.dropdown-empty {
+		padding: 12px;
+		text-align: center;
+		color: var(--muted-foreground);
+		font-size: 0.75rem;
+		margin: 0;
+	}
+
+	.new-branch-item {
+		color: var(--primary) !important;
+	}
+
+	.new-branch-item :global(svg) {
+		color: var(--primary) !important;
+	}
+
+	/* Diff stats */
+	.diff-stats {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 0 4px;
+	}
+
+	.stat {
+		font-size: 0.6875rem;
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+		line-height: 1;
+	}
+
+	.stat.additions {
+		color: var(--success);
+	}
+
+	.stat.deletions {
+		color: var(--destructive);
+	}
+
+	/* Spin animation */
+	:global(.spin) {
+		animation: spin 1s linear infinite;
+	}
+
+	@keyframes spin {
+		from { transform: rotate(0deg); }
+		to { transform: rotate(360deg); }
+	}
+
+	/* Mobile touch targets */
+	@media (max-width: 639px) {
+		.git-actions {
+			flex-wrap: wrap;
+		}
+
+		.git-btn {
+			height: 36px;
+			padding: 0 12px;
+			font-size: 0.75rem;
+		}
+
+		.branch-name {
+			max-width: 80px;
+		}
+
+		.branch-dropdown {
+			right: auto;
+			left: 0;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.branch-dropdown {
+			animation: none;
+		}
+	}
+</style>

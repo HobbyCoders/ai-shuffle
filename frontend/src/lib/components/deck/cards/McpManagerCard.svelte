@@ -9,6 +9,7 @@
 	 * - Server type support: stdio, sse, http
 	 */
 	import BaseCard from './BaseCard.svelte';
+	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import type { DeckCard } from './types';
 	import { onMount } from 'svelte';
 	import {
@@ -21,7 +22,7 @@
 	} from '$lib/stores/mcp';
 	import { McpServerList, McpServerForm, McpToolList } from '$lib/components/mcp';
 	import type { McpServerInfo } from '$lib/api/mcp';
-	import { Server, AlertCircle, X } from 'lucide-svelte';
+	import { Server, AlertCircle, X, Plus } from 'lucide-svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -34,6 +35,7 @@
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
 		mobile?: boolean;
+		embedded?: boolean;
 	}
 
 	let {
@@ -45,7 +47,8 @@
 		onResize,
 		onDragEnd,
 		onResizeEnd,
-		mobile = false
+		mobile = false,
+		embedded = false
 	}: Props = $props();
 
 	// MCP server form state
@@ -86,105 +89,134 @@
 	async function handleRemoveMcpServer(serverName: string) {
 		try {
 			await mcp.removeGlobalServer(serverName);
-		} catch (e) {
-			console.error('Failed to remove MCP server:', e);
+			// Refresh tools list and servers after successful removal
+			await Promise.all([mcp.loadTools(true), mcp.loadGlobalServers()]);
+		} catch (e: any) {
+			console.error('Failed to remove MCP server:', e?.detail || e);
 		}
 	}
 </script>
 
-<BaseCard
-	{card}
-	{onClose}
-	{onMaximize}
-	{onFocus}
-	{onMove}
-	{onResize}
-	{onDragEnd}
-	{onResizeEnd}
->
-	{#snippet children()}
-		<div class="mcp-card card-system" class:mobile class:maximized={card.maximized}>
-			<!-- Header -->
-			<div class="mcp-header">
-				<div class="header-title">
-					<Server size={18} />
-					<h2>MCP Servers</h2>
+{#snippet mcpMainContent()}
+	<!-- Content -->
+	<div class="mcp-content">
+		{#if $mcpError}
+			<div class="mcp-error">
+				<AlertCircle size={16} />
+				<span>{$mcpError}</span>
+				<button onclick={() => mcp.clearError()} class="error-close">
+					<X size={14} />
+				</button>
+			</div>
+		{/if}
+
+		<div class="mcp-sections">
+			<!-- Global MCP Servers -->
+			<div class="mcp-section">
+				<div class="section-header">
+					<div class="section-title-row">
+						<Server size={16} />
+						<h3>Global MCP Servers</h3>
+					</div>
+					<p class="section-description">
+						MCP servers available to all projects
+					</p>
 				</div>
-				<p class="header-description">
-					Manage Model Context Protocol server connections
-				</p>
+				<McpServerList
+					servers={$globalMcpServers}
+					scope="user"
+					loading={$mcpLoading}
+					onAdd={handleAddMcpServer}
+					onEdit={handleEditMcpServer}
+					onRemove={handleRemoveMcpServer}
+				/>
 			</div>
 
-			<!-- Content -->
-			<div class="mcp-content">
-				{#if $mcpError}
-					<div class="mcp-error">
-						<AlertCircle size={16} />
-						<span>{$mcpError}</span>
-						<button onclick={() => mcp.clearError()} class="error-close">
-							<X size={14} />
-						</button>
-					</div>
-				{/if}
-
-				<div class="mcp-sections">
-					<!-- Global MCP Servers -->
-					<div class="mcp-section">
-						<div class="section-header">
-							<div class="section-title-row">
-								<Server size={16} />
-								<h3>Global MCP Servers</h3>
-							</div>
-							<p class="section-description">
-								MCP servers available to all projects
-							</p>
-						</div>
-						<McpServerList
-							servers={$globalMcpServers}
-							scope="user"
-							loading={$mcpLoading}
-							onAdd={handleAddMcpServer}
-							onEdit={handleEditMcpServer}
-							onRemove={handleRemoveMcpServer}
-						/>
-					</div>
-
-					<!-- MCP Tools -->
-					<div class="mcp-section">
-						<McpToolList
-							tools={$mcpTools}
-							loading={$mcpLoading}
-							onRefresh={() => mcp.loadTools(true)}
-						/>
-					</div>
-				</div>
-			</div>
-
-			<!-- Footer -->
-			<div class="mcp-footer">
-				<div class="footer-info">
-					{$mcpDisplayStats.toolCount} tools discovered
-				</div>
-				<div class="footer-stats">
-					{$mcpDisplayStats.globalCount} servers configured
-				</div>
+			<!-- MCP Tools -->
+			<div class="mcp-section">
+				<McpToolList
+					tools={$mcpTools}
+					loading={$mcpLoading}
+					onRefresh={() => mcp.loadTools(true)}
+					onRemoveServer={handleRemoveMcpServer}
+				/>
 			</div>
 		</div>
+	</div>
 
-		<!-- MCP Server Form Modal -->
-		<McpServerForm
-			show={showMcpServerForm}
-			server={editingMcpServer}
-			scope="user"
-			loading={$mcpLoading}
-			onSave={handleSaveMcpServer}
-			onClose={() => {
-				showMcpServerForm = false;
-				editingMcpServer = null;
-			}}
-		/>
-	{/snippet}
-</BaseCard>
+	<!-- MCP Server Form Modal -->
+	<McpServerForm
+		show={showMcpServerForm}
+		server={editingMcpServer}
+		scope="user"
+		loading={$mcpLoading}
+		onSave={handleSaveMcpServer}
+		onClose={() => {
+			showMcpServerForm = false;
+			editingMcpServer = null;
+		}}
+	/>
+{/snippet}
+
+{#if embedded}
+	<FeaturePageLayout
+		icon={Server}
+		title="MCP Servers"
+		subtitle="Manage Model Context Protocol server connections"
+		itemCount={$mcpDisplayStats.globalCount}
+		itemLabel="servers"
+	>
+		{#snippet headerActions()}
+			<button class="fp-btn fp-btn--primary" onclick={handleAddMcpServer} title="Add Server">
+				<Plus size={14} />
+				<span class="hidden sm:inline">Add Server</span>
+			</button>
+		{/snippet}
+		{#snippet children()}
+			<div class="mcp-card card-system" style="position: relative;">
+				{@render mcpMainContent()}
+			</div>
+		{/snippet}
+	</FeaturePageLayout>
+{:else}
+	<BaseCard
+		{card}
+		{onClose}
+		{onMaximize}
+		{onFocus}
+		{onMove}
+		{onResize}
+		{onDragEnd}
+		{onResizeEnd}
+	>
+		{#snippet children()}
+			<div class="mcp-card card-system" class:mobile class:maximized={card.maximized}>
+				<!-- Header -->
+				<div class="mcp-header">
+					<div class="header-title">
+						<Server size={18} />
+						<h2>MCP Servers</h2>
+					</div>
+					<p class="header-description">
+						Manage Model Context Protocol server connections
+					</p>
+				</div>
+
+				{@render mcpMainContent()}
+
+				<!-- Footer -->
+				<div class="mcp-footer">
+					<div class="footer-info">
+						{$mcpDisplayStats.toolCount} tools discovered
+					</div>
+					<div class="footer-stats">
+						{$mcpDisplayStats.globalCount} servers configured
+					</div>
+				</div>
+			</div>
+		{/snippet}
+	</BaseCard>
+{/if}
 
 <style>
 	.mcp-card {
@@ -192,20 +224,6 @@
 		flex-direction: column;
 		height: 100%;
 		overflow: hidden;
-	}
-
-	/* Maximized state - constrain width and center content */
-	.mcp-card.maximized {
-		--card-max-width: 850px;
-	}
-
-	.mcp-card.maximized .mcp-header,
-	.mcp-card.maximized .mcp-content,
-	.mcp-card.maximized .mcp-footer {
-		max-width: var(--card-max-width);
-		margin-left: auto;
-		margin-right: auto;
-		width: 100%;
 	}
 
 	/* Header */
@@ -335,4 +353,6 @@
 	.mcp-card.mobile .mcp-section {
 		padding: 12px;
 	}
+
+
 </style>

@@ -614,8 +614,9 @@ class TestParseSessionHistory:
         """Should return empty list when JSONL file not found."""
         with patch('app.core.jsonl_parser.get_session_jsonl_path') as mock_path:
             mock_path.return_value = None
-            result = jsonl_parser.parse_session_history("nonexistent-session")
+            result, usage = jsonl_parser.parse_session_history("nonexistent-session")
             assert result == []
+            assert usage == {}
 
     def test_parse_user_message(self):
         """Should parse simple user messages."""
@@ -629,7 +630,7 @@ class TestParseSessionHistory:
             jsonl_file.write_text(json.dumps(entry) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert len(result) == 1
                 assert result[0]["role"] == "user"
                 assert result[0]["content"] == "Hello, Claude!"
@@ -646,7 +647,7 @@ class TestParseSessionHistory:
             jsonl_file.write_text(json.dumps(entry) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert len(result) == 1
                 assert result[0]["role"] == "assistant"
                 assert result[0]["type"] == "text"
@@ -664,7 +665,7 @@ class TestParseSessionHistory:
             jsonl_file.write_text(json.dumps(entry) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert len(result) == 1
                 assert result[0]["content"] == "Plain string response"
 
@@ -681,7 +682,7 @@ class TestParseSessionHistory:
             jsonl_file.write_text(json.dumps(tool_use) + '\n' + json.dumps(tool_result) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert len(result) == 1
                 assert result[0]["type"] == "tool_use"
                 assert result[0]["toolName"] == "Bash"
@@ -700,7 +701,7 @@ class TestParseSessionHistory:
             jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert len(result) == 1
                 assert result[0]["content"] == "Hello"
 
@@ -716,7 +717,7 @@ class TestParseSessionHistory:
             jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert len(result) == 1
 
     def test_skip_meta_messages(self):
@@ -731,7 +732,7 @@ class TestParseSessionHistory:
             jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert len(result) == 1
                 assert result[0]["content"] == "Normal"
 
@@ -747,7 +748,7 @@ class TestParseSessionHistory:
             jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert len(result) == 1
                 assert result[0]["content"] == "Main"
 
@@ -763,7 +764,7 @@ class TestParseSessionHistory:
             jsonl_file.write_text(json.dumps(entry) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert len(result) == 1
                 assert result[0]["role"] == "system"
                 assert result[0]["type"] == "system"
@@ -781,7 +782,7 @@ class TestParseSessionHistory:
             jsonl_file.write_text(json.dumps(entry) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert len(result) == 1
                 assert result[0]["role"] == "system"
                 assert result[0]["subtype"] == "local_command"
@@ -888,7 +889,7 @@ class TestSubagentTaskToolResult:
             jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert len(result) == 1
                 assert result[0]["type"] == "subagent"
                 assert result[0]["content"] == "Task completed successfully"
@@ -909,7 +910,7 @@ class TestSubagentTaskToolResult:
             jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert result[0]["agentStatus"] == "error"
 
 
@@ -931,7 +932,7 @@ class TestToolResultContentVariants:
             jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert result[0]["toolResult"] == "output text\nerror text"
 
     def test_tool_result_with_file_content(self):
@@ -949,7 +950,7 @@ class TestToolResultContentVariants:
             jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert "File: /path/to/file.txt" in result[0]["toolResult"]
                 assert "File contents here" in result[0]["toolResult"]
 
@@ -968,7 +969,7 @@ class TestToolResultContentVariants:
             jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert result[0]["toolResult"] == "Error message string"
                 assert result[0]["toolStatus"] == "error"
 
@@ -987,7 +988,7 @@ class TestToolResultContentVariants:
             jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert result[0]["toolResult"] == "List content extracted"
 
     def test_tool_result_with_result_key(self):
@@ -1005,5 +1006,5 @@ class TestToolResultContentVariants:
             jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
             with patch('app.core.jsonl_parser.settings') as mock_settings:
                 mock_settings.get_claude_projects_dir = projects_dir
-                result = jsonl_parser.parse_session_history(session_id, "/workspace")
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert result[0]["toolResult"] == "Result value here"

@@ -8,8 +8,10 @@
 	 */
 	import BaseCard from './BaseCard.svelte';
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
+	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import type { DeckCard } from './types';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
+	import { Users, Search, Upload, Sparkles, Plus, Download, Trash2, Wrench, Bot, MessageSquare } from 'lucide-svelte';
 	import { profiles as profilesStore, tabs as tabsStore } from '$lib/stores/tabs';
 	import { groups as groupsStore } from '$lib/stores/groups';
 	import { plugins, fileBasedAgents } from '$lib/stores/plugins';
@@ -64,6 +66,7 @@
 		onResizeEnd?: () => void;
 		onOpenPlugins?: () => void;
 		mobile?: boolean;
+		embedded?: boolean;
 	}
 
 	let {
@@ -76,7 +79,8 @@
 		onDragEnd,
 		onResizeEnd,
 		onOpenPlugins,
-		mobile = false
+		mobile = false,
+		embedded = false
 	}: Props = $props();
 
 	// Internal data state - loaded from stores/API
@@ -1871,11 +1875,11 @@
 			<!-- List Footer -->
 			<div class="card-footer">
 				<div class="card-footer-content">
-				<button class="card-btn-primary" onclick={openNewForm}>
+				<button class="card-btn-primary" onclick={openNewForm} title="New Profile">
 					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
 					</svg>
-					New Profile
+					<span class="hidden sm:inline">New Profile</span>
 				</button>
 				<button class="card-btn-secondary" onclick={() => showGenerateDialog = true} title="Generate with AI">
 					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1910,7 +1914,528 @@
 	</div>
 {/snippet}
 
-{#if mobile}
+{#if embedded}
+	<!-- Embedded panel mode: FeaturePageLayout -->
+	{#if viewMode === 'form'}
+		<FeaturePageLayout
+			icon={Users}
+			title="Profiles"
+			breadcrumbs={[
+				{ label: 'Profiles', onclick: backToList },
+				{ label: editingProfile ? editingProfile.name : 'New Profile' }
+			]}
+		>
+			{#snippet headerTabs()}
+				<div class="fp-tab-bar">
+					{#each tabs as tab}
+						<button class="fp-tab" class:active={activeTab === tab.id} onclick={() => (activeTab = tab.id)}>
+							{tab.label}
+						</button>
+					{/each}
+				</div>
+			{/snippet}
+
+			<!-- Tab Content (reuses card-system classes) -->
+			<div class="card-system">
+				{#if activeTab === 'general'}
+					<!-- General Tab -->
+					<div class="card-form-section">
+						<h3 class="card-form-title">Profile Information</h3>
+						<div class="form-grid">
+							<div class="form-field">
+								<label class="card-form-label">ID <span class="required">*</span></label>
+								<input bind:value={profileForm.id} disabled={!!editingProfile} class="card-form-input card-form-input--mono" placeholder="my-profile" />
+							</div>
+							<div class="form-field">
+								<label class="card-form-label">Name <span class="required">*</span></label>
+								<input bind:value={profileForm.name} class="card-form-input" placeholder="My Profile" />
+							</div>
+						</div>
+						<div class="form-field full-width">
+							<label class="card-form-label">Description</label>
+							<input bind:value={profileForm.description} class="card-form-input" placeholder="Optional description" />
+						</div>
+					</div>
+
+					<div class="card-form-section">
+						<h3 class="card-form-title">Core Settings</h3>
+						<div class="form-field">
+							<label class="card-form-label">Model — {#if profileForm.model === 'haiku'}fastest and most compact, ideal for simple tasks{:else if profileForm.model === 'sonnet'}balanced performance, recommended for most use cases{:else if profileForm.model === 'sonnet-1m'}extended context (1M tokens) for large codebases{:else if profileForm.model === 'opus'}most capable, best for complex reasoning{/if}</label>
+							<div class="card-mode-selector">
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'haiku'} onclick={() => profileForm.model = 'haiku'}>Haiku</button>
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'sonnet'} onclick={() => profileForm.model = 'sonnet'}>Sonnet</button>
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'sonnet-1m'} onclick={() => profileForm.model = 'sonnet-1m'}>Sonnet 1M</button>
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'opus'} onclick={() => profileForm.model = 'opus'}>Opus</button>
+							</div>
+						</div>
+						<div class="form-field">
+							<label class="card-form-label">Permission Mode — {#if profileForm.permission_mode === 'default'}ask for confirmation before executing tools{:else if profileForm.permission_mode === 'acceptEdits'}auto-approve file edits, ask for other tools{:else if profileForm.permission_mode === 'plan'}create plans without executing, for review workflows{:else if profileForm.permission_mode === 'bypassPermissions'}execute all tools without confirmation{/if}</label>
+							<div class="card-mode-selector">
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'default'} onclick={() => profileForm.permission_mode = 'default'}>Default</button>
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'acceptEdits'} onclick={() => profileForm.permission_mode = 'acceptEdits'}>Accept Edits</button>
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'plan'} onclick={() => profileForm.permission_mode = 'plan'}>Plan</button>
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'bypassPermissions'} onclick={() => profileForm.permission_mode = 'bypassPermissions'}>Bypass</button>
+							</div>
+						</div>
+						<div class="form-field">
+							<label class="card-form-label">Extended Thinking — {#if profileForm.thinking_mode === 'default'}no extended thinking, standard response mode{:else if profileForm.thinking_mode === 'think'}light reasoning (8K tokens), good for simple tasks{:else if profileForm.thinking_mode === 'think_harder'}substantial reasoning (24K tokens), good for complex tasks{:else if profileForm.thinking_mode === 'ultra_think'}deep reasoning (64K tokens), for multi-step problem solving{/if}</label>
+							<div class="card-mode-selector">
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'default'} onclick={() => updateThinkingMode('default')}>Default</button>
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'think'} onclick={() => updateThinkingMode('think')}>Think</button>
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'think_harder'} onclick={() => updateThinkingMode('think_harder')}>Think Harder</button>
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'ultra_think'} onclick={() => updateThinkingMode('ultra_think')}>Ultra Think</button>
+							</div>
+						</div>
+						<div class="form-field">
+							<label class="card-form-label">Max Turns — maximum agentic turns per query (leave empty for unlimited)</label>
+							<input type="number" bind:value={profileForm.max_turns} class="card-form-input" placeholder="Unlimited" />
+						</div>
+					</div>
+
+					<div class="card-form-section">
+						<h3 class="card-form-title">Behavior</h3>
+						<div class="checkbox-group">
+							<label class="checkbox-item">
+								<input type="checkbox" bind:checked={profileForm.include_partial_messages} class="checkbox-input" />
+								<div class="checkbox-content">
+									<span class="checkbox-label">Include Partial Messages</span>
+									<p class="checkbox-desc">Stream partial text as it's being generated</p>
+								</div>
+							</label>
+							<label class="checkbox-item">
+								<input type="checkbox" bind:checked={profileForm.continue_conversation} class="checkbox-input" />
+								<div class="checkbox-content">
+									<span class="checkbox-label">Continue Conversation</span>
+									<p class="checkbox-desc">Automatically continue most recent conversation</p>
+								</div>
+							</label>
+							<label class="checkbox-item">
+								<input type="checkbox" bind:checked={profileForm.fork_session} class="checkbox-input" />
+								<div class="checkbox-content">
+									<span class="checkbox-label">Fork Session</span>
+									<p class="checkbox-desc">Create new session ID when resuming</p>
+								</div>
+							</label>
+						</div>
+					</div>
+				{:else if activeTab === 'tools'}
+					<!-- Tools Tab -->
+					<div class="card-form-section">
+						<div class="section-header">
+							<h3 class="card-form-title">Claude Tools</h3>
+							<span class="card-badge card-badge--primary">{availableTools.all_tools.length} available</span>
+						</div>
+						<div class="card-mode-selector">
+							<button type="button" class="card-mode-btn" class:card-mode-btn--active={toolSelectionMode === 'all'} onclick={() => { toolSelectionMode = 'all'; profileForm.allowed_tools = []; profileForm.disallowed_tools = []; }}>All Tools</button>
+							<button type="button" class="card-mode-btn" class:card-mode-btn--active={toolSelectionMode === 'allow'} onclick={() => { toolSelectionMode = 'allow'; profileForm.disallowed_tools = []; }}>Allow Only</button>
+							<button type="button" class="card-mode-btn" class:card-mode-btn--active={toolSelectionMode === 'disallow'} onclick={() => { toolSelectionMode = 'disallow'; profileForm.allowed_tools = []; }}>Disallow</button>
+						</div>
+						<p class="card-form-hint">
+							{#if toolSelectionMode === 'all'}Agent can use all available tools.
+							{:else if toolSelectionMode === 'allow'}Agent can ONLY use selected tools.
+							{:else}Agent can use all tools EXCEPT selected ones.{/if}
+						</p>
+						{#if toolSelectionMode !== 'all'}
+							<div class="tools-list">
+								{#each availableTools.categories as category}
+									{#if category.tools.length > 0}
+										{@const state = getCategorySelectionState(category)}
+										<div class="tool-category">
+											<button type="button" class="category-header" onclick={() => toggleCategory(category)}>
+												<div class="category-checkbox" class:checked={state !== 'none'} class:partial={state === 'some'}>
+													{#if state === 'all'}
+														<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
+													{:else if state === 'some'}
+														<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" /></svg>
+													{/if}
+												</div>
+												<span class="category-name">{category.name}</span>
+												<span class="category-count">{category.tools.length}</span>
+											</button>
+											<div class="category-tools">
+												{#each category.tools as tool}
+													{@const isSelected = toolSelectionMode === 'allow' ? profileForm.allowed_tools.includes(tool.name) : profileForm.disallowed_tools.includes(tool.name)}
+													<label class="tool-item">
+														<input type="checkbox" checked={isSelected} onchange={() => toggleTool(tool.name)} class="tool-checkbox" />
+														<span class="tool-name" title={tool.description}>{tool.name}</span>
+													</label>
+												{/each}
+											</div>
+										</div>
+									{/if}
+								{/each}
+							</div>
+							<div class="selection-count">
+								{#if toolSelectionMode === 'allow'}{profileForm.allowed_tools.length} tool{profileForm.allowed_tools.length !== 1 ? 's' : ''} allowed
+								{:else}{profileForm.disallowed_tools.length} tool{profileForm.disallowed_tools.length !== 1 ? 's' : ''} blocked{/if}
+							</div>
+						{/if}
+					</div>
+					<!-- AI Tools Section -->
+					<div class="card-form-section">
+						<div class="section-header">
+							<h3 class="card-form-title">AI Tools</h3>
+							{#if !aiToolsLoading}
+								<span class="card-badge card-badge--primary">{aiToolCount} enabled</span>
+							{/if}
+						</div>
+						<div class="card-mode-selector">
+							<button type="button" class="card-mode-btn" class:card-mode-btn--active={aiToolSelectionMode === 'all'} onclick={() => (aiToolSelectionMode = 'all')}>All Tools</button>
+							<button type="button" class="card-mode-btn" class:card-mode-btn--active={aiToolSelectionMode === 'custom'} onclick={() => (aiToolSelectionMode = 'custom')}>Custom</button>
+						</div>
+						{#if aiToolSelectionMode === 'custom'}
+							{#if aiToolsLoading}
+								<div class="loading-state">Loading AI tools...</div>
+							{:else if aiToolCategories.length === 0}
+								<div class="card-empty-state"><p class="card-empty-description">No AI tools available. Configure API keys in Settings.</p></div>
+							{:else}
+								<div class="tools-list">
+									{#each aiToolCategories as category}
+										{#if category.tools.length > 0}
+											{@const state = getAICategorySelectionState(category)}
+											<div class="tool-category">
+												<button type="button" class="category-header" onclick={() => toggleAIToolCategory(category)}>
+													<div class="category-checkbox" class:checked={state !== 'none'} class:partial={state === 'some'}>
+														{#if state === 'all'}
+															<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
+														{:else if state === 'some'}
+															<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" /></svg>
+														{/if}
+													</div>
+													<span class="category-name">{category.name}</span>
+													<span class="category-count">{category.tools.length}</span>
+												</button>
+												<div class="ai-category-tools">
+													{#each category.tools as tool}
+														{@const isSelected = profileForm.enabled_ai_tools.includes(tool.id)}
+														<label class="ai-tool-row" class:disabled={!tool.available}>
+															<input type="checkbox" checked={isSelected} disabled={!tool.available} onchange={() => toggleAITool(tool.id)} class="tool-checkbox" />
+															<div class="ai-tool-content">
+																<span class="tool-name">{tool.name}</span>
+																{#if !tool.available}<span class="card-badge card-badge--warning">No API key</span>{/if}
+																<p class="ai-tool-description">{tool.description}</p>
+															</div>
+														</label>
+													{/each}
+												</div>
+											</div>
+										{/if}
+									{/each}
+								</div>
+							{/if}
+						{:else}
+							<p class="card-form-hint">All configured AI tools are enabled. Configure API keys in Settings.</p>
+						{/if}
+					</div>
+				{:else if activeTab === 'agents'}
+					<!-- Agents Tab -->
+					<div class="card-form-section">
+						<div class="section-header">
+							<h3 class="card-form-title">Database Subagents</h3>
+							{#if allSubagents.length > 0}
+								<div class="header-actions">
+									<button type="button" class="text-btn muted" onclick={() => (profileForm.enabled_agents = [])}>Clear</button>
+									<button type="button" class="text-btn primary" onclick={() => (profileForm.enabled_agents = allSubagents.map((a) => a.id))}>Select All</button>
+								</div>
+							{/if}
+						</div>
+						{#if allSubagents.length === 0}
+							<div class="card-empty-state"><p class="card-empty-description">No database subagents configured</p></div>
+						{:else}
+							<p class="card-form-hint">Select which subagents this profile can use</p>
+							<div class="agents-grid">
+								{#each allSubagents as agent (agent.id)}
+									{@const isSelected = profileForm.enabled_agents.includes(agent.id)}
+									<label class="agent-item" class:selected={isSelected}>
+										<input type="checkbox" checked={isSelected} onchange={() => toggleAgent(agent.id)} class="agent-checkbox" />
+										<div class="agent-info">
+											<div class="agent-header">
+												<span class="agent-name">{agent.name}</span>
+												<span class="card-badge {getModelBadgeClass(agent.model)}">{getModelDisplay(agent.model)}</span>
+											</div>
+											<p class="agent-desc">{agent.description}</p>
+										</div>
+									</label>
+								{/each}
+							</div>
+							<div class="selection-count">{profileForm.enabled_agents.length} of {allSubagents.length} enabled</div>
+						{/if}
+					</div>
+					<div class="card-form-section">
+						<div class="section-header">
+							<h3 class="card-form-title">Plugin Agents</h3>
+							<button type="button" class="text-btn primary" onclick={() => onOpenPlugins?.()}>Manage Plugins</button>
+						</div>
+						{#if pluginAgents.length === 0}
+							<div class="card-empty-state">
+								<p class="card-empty-description">No plugin agents available</p>
+								<p class="card-empty-description small">Install and enable plugins to get agents</p>
+							</div>
+						{:else}
+							<p class="card-form-hint">Agents from enabled plugins (managed via plugin settings)</p>
+							<div class="plugin-agents-list">
+								{#each pluginAgents as agent (agent.id)}
+									<div class="plugin-agent-item">
+										<div class="plugin-agent-info">
+											<div class="plugin-agent-header">
+												<span class="plugin-agent-name">{agent.name}</span>
+												<span class="card-badge card-badge--muted">{agent.plugin_name}</span>
+												{#if agent.model}<span class="card-badge {getModelBadgeClass(agent.model)}">{getModelDisplay(agent.model)}</span>{/if}
+											</div>
+											<p class="plugin-agent-desc">{agent.description}</p>
+										</div>
+										{#if agent.tools && agent.tools.length > 0}
+											<div class="plugin-agent-tools">
+												{#each agent.tools.slice(0, 3) as tool}<span class="tool-badge">{tool}</span>{/each}
+												{#if agent.tools.length > 3}<span class="tool-badge more">+{agent.tools.length - 3}</span>{/if}
+											</div>
+										{/if}
+									</div>
+								{/each}
+							</div>
+							<div class="selection-count">{pluginAgents.length} plugin agent{pluginAgents.length !== 1 ? 's' : ''} available</div>
+						{/if}
+					</div>
+				{:else if activeTab === 'prompt'}
+					<!-- System Prompt Tab -->
+					<div class="card-form-section">
+						<h3 class="card-form-title">System Prompt Configuration</h3>
+						<div class="card-mode-selector large">
+							<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.system_prompt_type === 'preset'} onclick={() => (profileForm.system_prompt_type = 'preset')}>Claude Code + Append</button>
+							<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.system_prompt_type === 'custom'} onclick={() => (profileForm.system_prompt_type = 'custom')}>Custom Prompt</button>
+						</div>
+						{#if profileForm.system_prompt_type === 'preset'}
+							<div class="form-field full-width">
+								<label class="card-form-label">Append Instructions</label>
+								<textarea bind:value={profileForm.system_prompt_append} class="card-form-input card-form-textarea" rows="8" placeholder="Additional instructions to append to Claude Code's system prompt..."></textarea>
+								<p class="card-form-hint">These instructions will be added after Claude Code's built-in system prompt.</p>
+							</div>
+						{:else}
+							<div class="form-field full-width">
+								<label class="card-form-label">Custom System Prompt</label>
+								<textarea bind:value={profileForm.system_prompt_content} class="card-form-input card-form-textarea" rows="10" placeholder="Enter your custom system prompt (can be blank)..."></textarea>
+							</div>
+							<label class="checkbox-item highlighted">
+								<input type="checkbox" bind:checked={profileForm.system_prompt_inject_env} class="checkbox-input" />
+								<div class="checkbox-content">
+									<span class="checkbox-label">Inject Environment Details</span>
+									<p class="checkbox-desc">Adds working directory, platform, git status, and today's date</p>
+								</div>
+							</label>
+						{/if}
+					</div>
+				{:else if activeTab === 'advanced'}
+					<!-- Advanced Tab -->
+					<div class="card-form-section">
+						<h3 class="card-form-title">Settings Sources</h3>
+						<p class="card-form-hint">Load settings from filesystem locations</p>
+						<div class="inline-checkboxes">
+							{#each [{ id: 'user', label: 'User (~/.claude)' }, { id: 'project', label: 'Project (.claude)' }, { id: 'local', label: 'Local' }] as source}
+								<label class="inline-checkbox">
+									<input type="checkbox" checked={profileForm.setting_sources.includes(source.id)} onchange={() => toggleSettingSource(source.id)} class="checkbox-input" />
+									<span class="checkbox-label">{source.label}</span>
+								</label>
+							{/each}
+						</div>
+					</div>
+					<div class="card-form-section">
+						<h3 class="card-form-title">Environment</h3>
+						<div class="form-grid">
+							<div class="form-field">
+								<label class="card-form-label">Working Directory</label>
+								<input bind:value={profileForm.cwd} class="card-form-input card-form-input--mono" placeholder="/workspace/my-project" />
+							</div>
+							<div class="form-field">
+								<label class="card-form-label">User Identifier</label>
+								<input bind:value={profileForm.user} class="card-form-input" placeholder="user@example.com" />
+							</div>
+						</div>
+						<div class="form-field full-width">
+							<label class="card-form-label">Additional Directories</label>
+							<input bind:value={profileForm.add_dirs} class="card-form-input card-form-input--mono" placeholder="/extra/dir1, /extra/dir2 (comma-separated)" />
+						</div>
+					</div>
+					<div class="card-form-section">
+						<h3 class="card-form-title">Performance</h3>
+						<div class="form-field" style="max-width: 200px;">
+							<label class="card-form-label">Max Buffer Size (bytes)</label>
+							<input type="number" bind:value={profileForm.max_buffer_size} class="card-form-input" placeholder="Default" />
+						</div>
+					</div>
+					<div class="card-form-section">
+						<h3 class="card-form-title">Rewind & Recovery</h3>
+						<div class="checkbox-group">
+							<label class="checkbox-item">
+								<input type="checkbox" bind:checked={profileForm.enable_file_checkpointing} class="checkbox-input" />
+								<div class="checkbox-content">
+									<span class="checkbox-label">Enable File Checkpointing</span>
+									<p class="checkbox-desc">Create file snapshots for rewind operations. Allows restoring both conversation history and file changes. (SDK 0.1.15+)</p>
+								</div>
+							</label>
+						</div>
+					</div>
+					<div class="card-form-section">
+						<h3 class="card-form-title">Environment Variables</h3>
+						<p class="card-form-description">Set environment variables for Claude Code sessions using this profile.</p>
+						<div class="env-var-add">
+							<select class="card-form-input" onchange={(e) => { const target = e.target as HTMLSelectElement; const key = target.value; if (key === '__custom__') { profileForm.env_vars = [...profileForm.env_vars, { key: '', value: '' }]; } else if (key && !profileForm.env_vars.some(v => v.key === key)) { profileForm.env_vars = [...profileForm.env_vars, { key, value: '' }]; } target.value = ''; }}>
+								<option value="">+ Add variable...</option>
+								{#each envVarPresets as preset}
+									{#if !profileForm.env_vars.some(v => v.key === preset.key)}
+										<option value={preset.key}>{preset.key}</option>
+									{/if}
+								{/each}
+								<option value="__custom__">Custom variable...</option>
+							</select>
+						</div>
+						{#if profileForm.env_vars.length > 0}
+							<div class="env-var-list">
+								{#each profileForm.env_vars as envVar, index}
+									{@const preset = envVarPresets.find(p => p.key === envVar.key)}
+									<div class="env-var-row">
+										<input type="text" bind:value={envVar.key} class="card-form-input card-form-input--mono env-var-key" placeholder="VARIABLE_NAME" oninput={(e) => { const target = e.target as HTMLInputElement; if (target.value.includes(',')) { target.value = target.value.replace(/,/g, ''); envVar.key = target.value; } }} />
+										<input type="text" bind:value={envVar.value} class="card-form-input card-form-input--mono env-var-value" placeholder={preset?.placeholder || 'value'} oninput={(e) => { const target = e.target as HTMLInputElement; if (target.value.includes(',')) { target.value = target.value.replace(/,/g, ''); envVar.value = target.value; } }} />
+										<button type="button" class="env-var-remove" title="Remove variable" onclick={() => { profileForm.env_vars = profileForm.env_vars.filter((_, i) => i !== index); }}>
+											<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+										</button>
+									</div>
+								{/each}
+							</div>
+						{:else}
+							<p class="env-var-empty">No environment variables configured.</p>
+						{/if}
+					</div>
+				{/if}
+			</div>
+
+			{#snippet footer()}
+				<button class="fp-btn fp-btn--secondary" onclick={backToList}>Cancel</button>
+				<button class="fp-btn fp-btn--primary" onclick={saveProfile} disabled={!profileForm.id || !profileForm.name}>
+					{editingProfile ? 'Save Changes' : 'Create Profile'}
+				</button>
+			{/snippet}
+		</FeaturePageLayout>
+	{:else}
+		<!-- Embedded List View -->
+		<FeaturePageLayout
+			icon={Users}
+			title="Profiles"
+			itemCount={profiles.length}
+			itemLabel="profiles"
+		>
+			{#snippet headerActions()}
+				<div class="fph-search-wrapper">
+					<Search size={14} />
+					<input type="text" bind:value={searchQuery} placeholder="Search..." class="fph-search-input" />
+				</div>
+				<button class="fp-btn fp-btn--ghost" onclick={triggerImport} disabled={profileImporting} title="Import">
+					<Upload size={14} />
+				</button>
+				<button class="fp-btn fp-btn--ghost" onclick={() => showGenerateDialog = true} title="AI Generate">
+					<Sparkles size={14} />
+				</button>
+				<button class="fp-btn fp-btn--primary" onclick={openNewForm} title="New Profile">
+					<Plus size={14} /> <span class="hidden sm:inline">New Profile</span>
+				</button>
+			{/snippet}
+
+			<input type="file" accept=".json" bind:this={profileImportInput} onchange={handleImport} class="hidden" />
+
+			{#if filteredProfiles.length === 0}
+				<div class="card-empty-state">
+					{#if searchQuery}
+						<p class="card-empty-title">No profiles match your search</p>
+					{:else}
+						<svg class="card-empty-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+						</svg>
+						<p class="card-empty-title">No profiles yet</p>
+						<p class="card-empty-description">Create your first profile to get started</p>
+					{/if}
+				</div>
+			{:else}
+				<div class="fp-list">
+					{#each filteredProfiles as profile}
+						{#if deletingId === profile.id}
+							<!-- Inline delete confirmation -->
+							<div class="fp-list-item fp-list-item--deleting">
+								<div class="fp-item-icon fp-item-icon--destructive">
+									<Trash2 size={18} />
+								</div>
+								<div class="fp-item-content">
+									<p class="delete-confirm-text">
+										Delete <strong>{profile.name}</strong>? This cannot be undone.
+									</p>
+									<div class="delete-confirm-actions">
+										<button onclick={() => (deletingId = null)} disabled={deleteLoading} class="fp-btn fp-btn--secondary fp-btn--sm">Cancel</button>
+										<button onclick={confirmDeleteProfile} disabled={deleteLoading} class="fp-btn fp-btn--destructive fp-btn--sm">
+											{#if deleteLoading}<div class="card-spinner card-spinner--small"></div>{/if}
+											Delete
+										</button>
+									</div>
+								</div>
+							</div>
+						{:else}
+							<div
+								class="fp-list-item"
+								onclick={() => !profile.is_builtin && openEditForm(profile)}
+								role="button"
+								tabindex="0"
+								onkeydown={(e) => e.key === 'Enter' && !profile.is_builtin && openEditForm(profile)}
+							>
+								<div class="fp-item-icon fp-item-icon--{profile.config?.model || 'sonnet'}">
+									<span class="fp-model-initial">{getModelDisplay(profile.config?.model).charAt(0)}</span>
+								</div>
+								<div class="fp-item-content">
+									<div class="fp-item-header">
+										<span class="fp-item-name">{profile.name}</span>
+										<span class="card-badge {getModelBadgeClass(profile.config?.model)}">{getModelDisplay(profile.config?.model)}</span>
+										{#if profile.is_builtin}
+											<span class="card-badge card-badge--muted">Built-in</span>
+										{/if}
+										{#if groups?.profiles?.assignments?.[profile.id]}
+											<span class="card-badge card-badge--primary">{groups.profiles.assignments[profile.id]}</span>
+										{/if}
+									</div>
+									{#if profile.description}
+										<span class="fp-item-description">{profile.description}</span>
+									{/if}
+									<div class="fp-item-meta">
+										<span class="fp-meta-chip"><Wrench size={12} /> {profile.config?.allowed_tools?.length || profile.config?.disallowed_tools?.length || 0} tools</span>
+										<span class="fp-meta-dot"></span>
+										<span class="fp-meta-chip"><Bot size={12} /> {profile.config?.enabled_agents?.length || 0} agents</span>
+										<span class="fp-meta-dot"></span>
+										<span class="fp-meta-chip"><MessageSquare size={12} /> {profile.session_count || 0}</span>
+									</div>
+								</div>
+								<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()}>
+									<GroupDropdown entityType="profiles" entityId={profile.id} />
+									<button class="fp-action-btn" onclick={(e) => { e.stopPropagation(); handleExportProfile(profile.id); }} title="Export">
+										<Download size={14} />
+									</button>
+									{#if !profile.is_builtin}
+										<button class="fp-action-btn fp-action-btn--destructive" onclick={(e) => { e.stopPropagation(); deletingId = profile.id; }} title="Delete">
+											<Trash2 size={14} />
+										</button>
+									{/if}
+								</div>
+							</div>
+						{/if}
+					{/each}
+				</div>
+			{/if}
+		</FeaturePageLayout>
+	{/if}
+
+	<!-- AI Generate Dialog (embedded) -->
+	<AIGenerateDialog
+		type="profile"
+		isOpen={showGenerateDialog}
+		onClose={() => showGenerateDialog = false}
+		onGenerated={handleGeneratedProfile}
+	/>
+{:else if mobile}
 	<!-- Mobile: No BaseCard wrapper, just the content -->
 	<div class="profile-card-mobile">
 		{@render content()}
@@ -1940,28 +2465,6 @@
 		height: 100%;
 		min-height: 0;
 		overflow: hidden;
-		/* Set footer max-width to match centered-content */
-		--card-footer-max-width: 900px;
-	}
-
-	/* Maximized state - constrain width and center content */
-	.profile-card.maximized {
-		--card-max-width: 900px;
-		--card-footer-max-width: var(--card-max-width);
-	}
-
-	.profile-card.maximized :global(.card-tabs),
-	.profile-card.maximized :global(.card-header),
-	.profile-card.maximized .card-search-wrapper,
-	.profile-card.maximized :global(.card-footer) {
-		max-width: var(--card-max-width);
-		margin-left: auto;
-		margin-right: auto;
-		width: 100%;
-	}
-
-	.profile-card.maximized .centered-content {
-		max-width: var(--card-max-width);
 	}
 
 	.profile-card-mobile {
@@ -1974,11 +2477,9 @@
 		display: none;
 	}
 
-	/* Centered content wrapper - prevents content from stretching too wide on large screens */
+	/* Centered content wrapper */
 	.centered-content {
 		width: 100%;
-		max-width: 900px;
-		margin: 0 auto;
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-4, 16px);
@@ -2365,8 +2866,9 @@
 	}
 
 	.agent-item.selected {
-		border-color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 8%, transparent);
+		border-color: var(--selection-ring);
+		background: var(--selection-bg);
+		box-shadow: var(--selection-shadow-subtle);
 	}
 
 	.agent-checkbox {
@@ -2595,5 +3097,52 @@
 	.plugin-agents-list::-webkit-scrollbar-thumb:hover,
 	.ai-tools-list::-webkit-scrollbar-thumb:hover {
 		background-color: var(--text-tertiary);
+	}
+
+	/* ═══════════════════════════════════════════════════════════════════════════
+	   FEATURE PAGE (fp-) EMBEDDED MODE STYLES — ProfileCard-specific overrides
+	   ═══════════════════════════════════════════════════════════════════════════ */
+
+	.fp-btn--sm {
+		padding: 4px 10px;
+		font-size: 0.75rem;
+	}
+
+	/* --- Model-color item icons --- */
+	.fp-item-icon--haiku {
+		background: color-mix(in oklch, oklch(0.68 0.18 155) 15%, transparent);
+		color: oklch(0.68 0.18 155);
+		border: 1px solid color-mix(in oklch, oklch(0.68 0.18 155) 30%, transparent);
+	}
+
+	.fp-item-icon--sonnet {
+		background: color-mix(in oklch, oklch(0.62 0.17 240) 15%, transparent);
+		color: oklch(0.62 0.17 240);
+		border: 1px solid color-mix(in oklch, oklch(0.62 0.17 240) 30%, transparent);
+	}
+
+	.fp-item-icon--sonnet-1m {
+		background: color-mix(in oklch, oklch(0.65 0.20 290) 15%, transparent);
+		color: oklch(0.65 0.20 290);
+		border: 1px solid color-mix(in oklch, oklch(0.65 0.20 290) 30%, transparent);
+	}
+
+	.fp-item-icon--opus {
+		background: color-mix(in oklch, oklch(0.70 0.18 55) 15%, transparent);
+		color: oklch(0.70 0.18 55);
+		border: 1px solid color-mix(in oklch, oklch(0.70 0.18 55) 30%, transparent);
+	}
+
+	.fp-model-initial {
+		font-size: 1rem;
+		font-weight: 700;
+		line-height: 1;
+	}
+
+	/* --- Responsive adjustments for ProfileCard-specific classes --- */
+	@media (max-width: 639px) {
+		.fp-model-initial {
+			font-size: 0.875rem;
+		}
 	}
 </style>

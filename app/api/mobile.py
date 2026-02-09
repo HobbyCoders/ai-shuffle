@@ -3,7 +3,6 @@ Mobile device API routes for push notifications and action confirmations
 """
 
 import secrets
-import hashlib
 import logging
 from datetime import datetime, timedelta
 from typing import List
@@ -95,7 +94,7 @@ async def register_device(request: MobileDeviceRegisterRequest):
 
     # Create device record
     capabilities_dict = device_info.capabilities.model_dump()
-    device = db.create_mobile_device(
+    db.create_mobile_device(
         device_id=device_info.device_id,
         device_name=device_info.device_name,
         platform=device_info.platform,
@@ -228,7 +227,7 @@ async def confirm_action(
 
     # Update status
     new_status = "approved" if confirm_request.approved else "rejected"
-    updated = db.update_pending_action_status(action_id, new_status)
+    db.update_pending_action_status(action_id, new_status)
 
     logger.info(f"Action {action_id} {new_status} by device {device['device_id']}")
 

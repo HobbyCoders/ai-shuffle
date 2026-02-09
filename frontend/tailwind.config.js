@@ -49,6 +49,12 @@ export default {
 				card: {
 					DEFAULT: 'var(--card)',
 					foreground: 'var(--card-foreground)'
+				},
+				selection: {
+					DEFAULT: 'var(--selection)',
+					ring: 'var(--selection-ring)',
+					glow: 'var(--selection-glow)',
+					text: 'var(--selection-text)'
 				}
 			},
 			borderRadius: {
@@ -59,7 +65,9 @@ export default {
 			boxShadow: {
 				s: 'var(--shadow-s)',
 				m: 'var(--shadow-m)',
-				l: 'var(--shadow-l)'
+				l: 'var(--shadow-l)',
+				selection: 'var(--selection-shadow)',
+				'selection-subtle': 'var(--selection-shadow-subtle)'
 			},
 			backgroundColor: {
 				'hover-overlay': 'var(--hover-overlay)',
@@ -70,7 +78,9 @@ export default {
 				'status-success': 'var(--status-success-bg)',
 				'status-warning': 'var(--status-warning-bg)',
 				'status-error': 'var(--status-error-bg)',
-				'status-info': 'var(--status-info-bg)'
+				'status-info': 'var(--status-info-bg)',
+				'selection': 'var(--selection-bg)',
+				'selection-emphasis': 'var(--selection-bg-emphasis)'
 			},
 			borderColor: {
 				'subtle': 'var(--border-subtle)',
@@ -79,7 +89,8 @@ export default {
 				'status-success': 'var(--status-success-border)',
 				'status-warning': 'var(--status-warning-border)',
 				'status-error': 'var(--status-error-border)',
-				'status-info': 'var(--status-info-border)'
+				'status-info': 'var(--status-info-border)',
+				'selection': 'var(--selection-ring)'
 			},
 			textColor: {
 				'placeholder': 'var(--input-placeholder)'

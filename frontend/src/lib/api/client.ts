@@ -81,9 +81,12 @@ export class ApiClient {
 		return response.json();
 	}
 
-	async uploadFile(path: string, file: File): Promise<FileUploadResponse> {
+	async uploadFile(path: string, file: File, sessionId?: string): Promise<FileUploadResponse> {
 		const formData = new FormData();
 		formData.append('file', file);
+		if (sessionId) {
+			formData.append('session_id', sessionId);
+		}
 
 		const response = await fetch(`${API_BASE}${path}`, {
 			method: 'POST',
@@ -135,6 +138,7 @@ export interface ProfileConfig {
 	include_partial_messages?: boolean;
 	enable_file_checkpointing?: boolean;  // SDK 0.1.15+ - enable file snapshots for rewind
 	thinking_mode?: 'default' | 'think' | 'think_harder' | 'ultra_think';  // Extended thinking configuration
+	enabled_agents?: string[];  // Subagents enabled for this profile
 	system_prompt?: {
 		type: string;
 		preset?: string;
@@ -1247,6 +1251,7 @@ export interface Note {
 	content: string;
 	tags: string[];
 	is_pinned: boolean;
+	file_path: string | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -1276,6 +1281,8 @@ export interface NoteAutocomplete {
 	title: string;
 	preview: string;
 	tags: string[];
+	file_path: string | null;
+	absolute_path: string | null;
 }
 
 /**

@@ -291,4 +291,23 @@
 	.toggle-switch.enabled .toggle-knob {
 		transform: translateX(20px);
 	}
+
+	/* Mobile: larger touch targets */
+	@media (max-width: 639px) {
+		.card-btn-primary--small {
+			padding: 8px 16px;
+			min-height: 40px;
+		}
+
+		.toggle-switch {
+			width: 48px;
+			height: 28px;
+			border-radius: 14px;
+		}
+
+		.toggle-knob {
+			width: 20px;
+			height: 20px;
+		}
+	}
 </style>

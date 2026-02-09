@@ -248,7 +248,7 @@
 		outline: none;
 		width: 100%;
 		min-height: 24px;
-		font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+		font-family: var(--font-sans);
 		font-size: 15px;
 		font-weight: 400;
 		line-height: 1.5;

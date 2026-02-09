@@ -2,10 +2,11 @@
 Git management API routes
 
 Provides endpoints for git repository operations including:
-- Repository status
+- Repository status and diff stats
 - Branch management (list, create, delete, checkout)
-- Worktree management (list, create, delete)
-- Commit graph for visualization
+- Worktree management (list, create, delete, file browsing)
+- Commit, push, and commit graph visualization
+- AI-powered commit message and PR description generation
 - Fetch from remote
 """
 
@@ -118,6 +119,54 @@ class OperationResponse(BaseModel):
     """Generic operation response"""
     success: bool
     message: str
+
+
+class DiffStatsResponse(BaseModel):
+    """Response for diff stats endpoint"""
+    additions: int
+    deletions: int
+    files_changed: int
+
+
+class CommitRequest(BaseModel):
+    """Request to create a commit"""
+    message: str = Field(..., min_length=1, max_length=5000)
+    include_unstaged: bool = Field(default=True, description="Stage unstaged files before committing")
+
+
+class CommitResponse(BaseModel):
+    """Response for commit endpoint"""
+    success: bool
+    message: str
+    commit_sha: Optional[str] = None
+
+
+class PushRequest(BaseModel):
+    """Request to push commits"""
+    remote: str = Field(default="origin", pattern=r'^[a-zA-Z0-9._-]+$')
+    branch: Optional[str] = None
+    set_upstream: bool = Field(default=False)
+
+
+class GenerateCommitMessageRequest(BaseModel):
+    """Request to generate a commit message using AI"""
+    include_unstaged: bool = Field(default=True)
+
+
+class GenerateCommitMessageResponse(BaseModel):
+    """Response for AI-generated commit message"""
+    message: str
+
+
+class GeneratePRDescriptionRequest(BaseModel):
+    """Request to generate a PR title and description using AI"""
+    base_branch: str = Field(default="main")
+
+
+class GeneratePRDescriptionResponse(BaseModel):
+    """Response for AI-generated PR description"""
+    title: str
+    body: str
 
 
 # =============================================================================
@@ -260,8 +309,8 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
                     parts = remote_url.replace(".git", "").split("github.com/")
                     if len(parts) > 1:
                         github_repo_name = parts[1]
-            except Exception:
-                pass
+            except (IndexError, ValueError) as e:
+                logger.warning(f"Failed to parse GitHub repo name from URL '{remote_url}': {e}")
 
     repo = database.create_git_repository(
         repository_id=repo_id,
@@ -517,6 +566,19 @@ async def checkout_branch(
             detail=f"Failed to checkout '{body.ref}'. It may not exist."
         )
 
+    # Broadcast branch change to all user devices so they can refresh git state
+    api_user = get_api_user_from_request(request)
+    user_id = api_user["id"] if api_user else "admin"
+    try:
+        from app.core.sync_engine import sync_engine
+        await sync_engine.broadcast_branch_changed(
+            user_id=user_id,
+            project_id=project_id,
+            branch_name=body.ref
+        )
+    except Exception as e:
+        logger.warning(f"Failed to broadcast branch change: {e}")
+
     return OperationResponse(
         success=True,
         message=f"Checked out '{body.ref}'"
@@ -596,6 +658,14 @@ async def fetch_from_remote(
             detail="Project is not a git repository"
         )
 
+    # Validate remote name to prevent argument injection
+    import re
+    if not re.match(r'^[a-zA-Z0-9._-]+$', remote):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid remote name"
+        )
+
     success = git_service.fetch(working_dir, remote=remote)
 
     # Update last_synced_at if we have a repository record
@@ -614,6 +684,267 @@ async def fetch_from_remote(
         success=True,
         message=f"Fetched from '{remote}'"
     )
+
+
+# =============================================================================
+# Diff Stats, Commit, Push Endpoints
+# =============================================================================
+
+@router.get("/diff-stats", response_model=DiffStatsResponse)
+async def get_diff_stats(
+    request: Request,
+    project_id: str,
+    include_unstaged: bool = True,
+    token: str = Depends(require_auth)
+):
+    """
+    Get diff statistics (lines added/removed).
+
+    Args:
+        project_id: Project ID
+        include_unstaged: Include unstaged changes (default: true)
+    """
+    check_project_access(request, project_id)
+    working_dir = get_project_path(project_id)
+
+    if not git_service.is_git_repo(working_dir):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project is not a git repository"
+        )
+
+    stats = git_service.get_diff_stats(working_dir, include_unstaged=include_unstaged)
+
+    return DiffStatsResponse(
+        additions=stats["additions"],
+        deletions=stats["deletions"],
+        files_changed=stats["files_changed"]
+    )
+
+
+@router.post("/commit", response_model=CommitResponse)
+async def create_commit(
+    request: Request,
+    project_id: str,
+    body: CommitRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Create a commit.
+
+    Optionally stages all changes (including unstaged) before committing.
+    """
+    check_project_access(request, project_id)
+    working_dir = get_project_path(project_id)
+
+    if not git_service.is_git_repo(working_dir):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project is not a git repository"
+        )
+
+    # Stage files if requested
+    if body.include_unstaged:
+        success = git_service.stage_files(working_dir, ["."])
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to stage files"
+            )
+    else:
+        # Check if there are staged changes
+        status_data = git_service.get_status(working_dir)
+        if not status_data["staged"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No staged changes to commit"
+            )
+
+    # Create commit
+    success, commit_sha = git_service.commit(working_dir, body.message)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to create commit. There may be no changes to commit."
+        )
+
+    return CommitResponse(
+        success=True,
+        message=f"Created commit {commit_sha}" if commit_sha else "Created commit",
+        commit_sha=commit_sha
+    )
+
+
+@router.post("/push", response_model=OperationResponse)
+async def push_commits(
+    request: Request,
+    project_id: str,
+    body: PushRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Push commits to remote.
+    """
+    check_project_access(request, project_id)
+    working_dir = get_project_path(project_id)
+
+    if not git_service.is_git_repo(working_dir):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project is not a git repository"
+        )
+
+    # Get current branch if not specified
+    branch = body.branch
+    if not branch:
+        branch = git_service.get_current_branch(working_dir)
+        if not branch:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Could not determine current branch"
+            )
+
+    success, error_msg = git_service.push(
+        working_dir,
+        remote=body.remote,
+        branch=branch,
+        set_upstream=body.set_upstream
+    )
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=error_msg or "Failed to push commits"
+        )
+
+    return OperationResponse(
+        success=True,
+        message=f"Pushed to {body.remote}/{branch}"
+    )
+
+
+# =============================================================================
+# AI Generation Endpoints
+# =============================================================================
+
+@router.post("/generate-commit-message", response_model=GenerateCommitMessageResponse)
+async def generate_commit_message(
+    request: Request,
+    project_id: str,
+    body: GenerateCommitMessageRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Generate a commit message using AI based on the current diff.
+    """
+    from app.api.generation import generate_with_claude
+
+    check_project_access(request, project_id)
+    working_dir = get_project_path(project_id)
+
+    if not git_service.is_git_repo(working_dir):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project is not a git repository"
+        )
+
+    diff_text = git_service.get_diff_text(working_dir, include_unstaged=body.include_unstaged)
+    if not diff_text.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No changes to generate a commit message for"
+        )
+
+    prompt = f"""Based on the following git diff, write a concise commit message.
+Use conventional commit format (e.g., "feat:", "fix:", "refactor:", "docs:", "chore:", "perf:", "style:", "test:").
+The first line should be under 72 characters.
+If the change is complex, add a blank line followed by 1-3 bullet points.
+Return ONLY the commit message text, nothing else.
+
+<diff>
+{diff_text}
+</diff>"""
+
+    response_text = await generate_with_claude(prompt, model="sonnet")
+
+    # Clean up: remove any markdown code blocks the model may have wrapped around the message
+    message = response_text.strip()
+    if message.startswith("```"):
+        lines = message.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        message = "\n".join(lines).strip()
+
+    return GenerateCommitMessageResponse(message=message)
+
+
+@router.post("/generate-pr-description", response_model=GeneratePRDescriptionResponse)
+async def generate_pr_description(
+    request: Request,
+    project_id: str,
+    body: GeneratePRDescriptionRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Generate a PR title and description using AI based on branch commits.
+    """
+    import json as json_module
+    from app.api.generation import generate_with_claude, extract_json_from_response
+
+    check_project_access(request, project_id)
+    working_dir = get_project_path(project_id)
+
+    if not git_service.is_git_repo(working_dir):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project is not a git repository"
+        )
+
+    commit_log, diff_stat = git_service.get_branch_log(
+        working_dir, base_branch=body.base_branch
+    )
+
+    if not commit_log.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No commits found ahead of the base branch"
+        )
+
+    prompt = f"""Based on the following git commits and change summary, generate a pull request title and description.
+Return a JSON object with "title" and "body" keys.
+
+The title should be concise (under 72 characters) and descriptive.
+The body should have a "## Summary" section with 2-4 bullet points describing what changed and why.
+
+<commits>
+{commit_log}
+</commits>
+
+<changes>
+{diff_stat}
+</changes>
+
+Return ONLY the JSON object, no markdown code blocks or explanation."""
+
+    response_text = await generate_with_claude(prompt, model="sonnet")
+
+    try:
+        parsed = extract_json_from_response(response_text)
+        title = parsed.get("title", "").strip()
+        pr_body = parsed.get("body", "").strip()
+    except (ValueError, KeyError) as e:
+        logger.warning(f"Failed to parse AI PR description, using fallback: {e}")
+        # Fallback: use first commit message as title
+        first_line = commit_log.split("\n")[0] if commit_log else "Update"
+        # Remove short SHA prefix if present
+        title = " ".join(first_line.split()[1:]) if " " in first_line else first_line
+        pr_body = ""
+
+    if not title:
+        first_line = commit_log.split("\n")[0] if commit_log else "Update"
+        title = " ".join(first_line.split()[1:]) if " " in first_line else first_line
+
+    return GeneratePRDescriptionResponse(title=title, body=pr_body)
 
 
 # =============================================================================

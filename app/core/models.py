@@ -3,7 +3,7 @@ Pydantic models for API requests and responses
 """
 
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field
 
 
@@ -240,7 +240,7 @@ class SubagentChildMessage(BaseModel):
 
 class SessionMessage(BaseModel):
     """A message in a session"""
-    id: Any  # Can be int from DB or string from JSONL
+    id: Union[int, str]  # int from DB, string from JSONL
     role: str  # user, assistant, system, tool
     content: str
     type: Optional[str] = None  # text, tool_use, tool_result, subagent, system - critical for rendering
@@ -984,6 +984,7 @@ class NoteUpdate(BaseModel):
 class Note(NoteBase):
     """Full note response"""
     id: str
+    file_path: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -1001,6 +1002,8 @@ class NoteAutocomplete(BaseModel):
     title: str
     preview: str  # First ~100 chars of content
     tags: List[str]
+    file_path: Optional[str] = None
+    absolute_path: Optional[str] = None
 
 
 # ============================================================================

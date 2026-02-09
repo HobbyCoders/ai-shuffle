@@ -170,7 +170,7 @@
 		background: var(--muted);
 		border: 1px solid var(--border);
 		border-radius: 6px;
-		font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, 'Cascadia Code', 'Roboto Mono', monospace;
+		font-family: var(--font-mono);
 		font-size: 13px;
 		font-weight: 600;
 		color: var(--foreground);

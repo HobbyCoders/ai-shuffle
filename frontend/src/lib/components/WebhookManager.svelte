@@ -243,7 +243,7 @@
 			{#if !showCreateForm}
 				<button
 					onclick={() => { showCreateForm = true; }}
-					class="px-3 py-1.5 bg-primary hover:bg-primary/90 text-white text-sm rounded-md transition-colors"
+					class="px-3 py-1.5 bg-primary hover:bg-primary/90 text-primary-foreground text-sm rounded-md transition-colors"
 				>
 					Add Webhook
 				</button>
@@ -324,7 +324,7 @@
 						<button
 							onclick={editingWebhook ? updateWebhook : createWebhook}
 							disabled={saving}
-							class="px-3 py-1.5 bg-primary hover:bg-primary/90 disabled:bg-primary/50 text-white text-sm rounded-md transition-colors"
+							class="px-3 py-1.5 bg-primary hover:bg-primary/90 disabled:bg-primary/50 text-primary-foreground text-sm rounded-md transition-colors"
 						>
 							{saving ? 'Saving...' : (editingWebhook ? 'Update' : 'Create')}
 						</button>

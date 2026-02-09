@@ -7,8 +7,10 @@
 	 */
 
 	import BaseCard from './BaseCard.svelte';
+	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import { FilesView } from '../files';
 	import type { DeckCard } from './types';
+	import { FolderTree } from 'lucide-svelte';
 
 	interface Props {
 		card: DeckCard;
@@ -20,12 +22,21 @@
 		onDragEnd?: () => void;
 		onResizeEnd?: () => void;
 		mobile?: boolean;
+		embedded?: boolean;
 	}
 
-	let { card, onClose, onMaximize, onFocus, onMove, onResize, onDragEnd, onResizeEnd, mobile = false }: Props = $props();
+	let { card, onClose, onMaximize, onFocus, onMove, onResize, onDragEnd, onResizeEnd, mobile = false, embedded = false }: Props = $props();
 </script>
 
-{#if mobile}
+{#if embedded}
+	<FeaturePageLayout icon={FolderTree} title="Files" noPadding={true}>
+		{#snippet children()}
+			<div class="files-card-content">
+				<FilesView />
+			</div>
+		{/snippet}
+	</FeaturePageLayout>
+{:else if mobile}
 	<!-- Mobile: Full-screen without BaseCard wrapper -->
 	<div class="files-card-content mobile">
 		<FilesView />

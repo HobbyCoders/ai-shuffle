@@ -29,16 +29,14 @@ export * from './theme';
 // Canvas store removed
 
 // =============================================================================
-// The Deck - Phase 3 Stores
+// Deck Stores (legacy, used by feature page components)
 // =============================================================================
 
-// Deck - Main card-based workspace
 // Note: Uses explicit exports to avoid conflicts with workspace store
 export {
 	deck,
 	allCards,
 	focusedCard,
-	contextPanelCollapsed,
 	workspaceBounds,
 	isMobile,
 	mobileActiveCardIndex,

@@ -25,11 +25,10 @@ interface ThemeState {
 
 const STORAGE_KEY = 'ai-shuffle-theme';
 const PRESET_STORAGE_KEY = 'ai-shuffle-theme-preset';
+const DIRTY_FLAG_KEY = 'ai-shuffle-theme-dirty';
 const SERVER_PREFERENCE_KEY = 'theme';
-const SERVER_SYNC_DEBOUNCE_MS = 500;
 
 // Server sync state
-let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
 let hasSyncedFromServer = false;
 let pendingThemeState: { preference: Theme; presetId: string | null } | null = null;
 
@@ -53,13 +52,33 @@ async function loadFromServer(): Promise<ServerThemePreference | null> {
 }
 
 /**
- * Save theme preference to server (debounced)
+ * Mark local theme state as dirty (unsaved to server).
+ * Checked by syncFromServer to avoid overwriting local changes with stale server data.
+ */
+function markDirty() {
+	if (browser) localStorage.setItem(DIRTY_FLAG_KEY, 'true');
+}
+
+function clearDirty() {
+	if (browser) localStorage.removeItem(DIRTY_FLAG_KEY);
+}
+
+function isDirty(): boolean {
+	if (!browser) return false;
+	return localStorage.getItem(DIRTY_FLAG_KEY) === 'true';
+}
+
+/**
+ * Save theme preference to server immediately.
+ * Sets a dirty flag before saving so syncFromServer won't overwrite
+ * local changes if the save fails (e.g., during a container restart).
  */
 function saveToServer(preference: Theme, presetId: string | null) {
 	if (!browser) return;
 
 	// Track pending state for flush on unload
 	pendingThemeState = { preference, presetId };
+	markDirty();
 
 	// Don't write to server until initial sync is complete
 	// This prevents localStorage data from overwriting newer server data
@@ -68,20 +87,17 @@ function saveToServer(preference: Theme, presetId: string | null) {
 		return;
 	}
 
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-	}
-
-	serverSyncTimer = setTimeout(async () => {
+	// Save immediately — theme changes are infrequent user actions
+	(async () => {
 		try {
 			await setPreference(SERVER_PREFERENCE_KEY, { preference, presetId });
 			console.log('[Theme] Synced to server');
+			clearDirty();
 			pendingThemeState = null;
 		} catch (e) {
 			console.error('[Theme] Failed to save to server:', e);
 		}
-		serverSyncTimer = null;
-	}, SERVER_SYNC_DEBOUNCE_MS);
+	})();
 }
 
 /**
@@ -89,11 +105,6 @@ function saveToServer(preference: Theme, presetId: string | null) {
  */
 function flushPendingThemeSave() {
 	if (!pendingThemeState || !hasSyncedFromServer || !browser) return;
-
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-		serverSyncTimer = null;
-	}
 
 	// Use sendBeacon for reliable delivery during page unload
 	const data = JSON.stringify({
@@ -418,17 +429,26 @@ function createThemeStore() {
 
 		/**
 		 * Sync theme from server (call after authentication)
-		 * Server is the source of truth - if server has different data, update local
-		 * If server is empty but local has data, push local to server (migration)
+		 * Server is the source of truth UNLESS local has unsaved changes (dirty flag).
+		 * If server is empty but local has data, push local to server (migration).
 		 */
 		async syncFromServer() {
 			if (!browser) return;
 
 			const serverState = await loadFromServer();
 			const localState = get({ subscribe });
+			const localIsDirty = isDirty();
+
+			if (localIsDirty) {
+				// Local has unsaved changes — local wins, push to server
+				console.log('[Theme] Local has unsaved changes, pushing to server');
+				hasSyncedFromServer = true;
+				saveToServer(localState.preference, localState.presetId);
+				return;
+			}
 
 			if (serverState) {
-				// Server has data - it's the source of truth
+				// Server has data and local is clean — server is source of truth
 				const { preference, presetId } = serverState;
 
 				// Check if server differs from local
@@ -461,7 +481,7 @@ function createThemeStore() {
 			// Mark sync as complete - now server writes are allowed
 			hasSyncedFromServer = true;
 
-			// If there was pending local data and no server data, save it now
+			// If there was no server data and local has non-default state, save it now
 			if (!serverState && (localState.preference !== 'system' || localState.presetId)) {
 				saveToServer(localState.preference, localState.presetId);
 			}

@@ -23,7 +23,7 @@ from app.db import database
 DEFAULT_PROFILE_CONFIG: Dict[str, Any] = {
     "model": "sonnet",
     "allowed_tools": [],
-    "permission_mode": "bypassPermissions",
+    "permission_mode": "default",
     "system_prompt": {
         "type": "preset",
         "preset": "claude_code"

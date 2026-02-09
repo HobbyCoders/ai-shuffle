@@ -284,7 +284,7 @@
 
 	.form-input.mono,
 	.form-textarea.mono {
-		font-family: monospace;
+		font-family: var(--font-mono);
 		font-size: 0.8125rem;
 	}
 
@@ -334,9 +334,10 @@
 	}
 
 	.type-btn.active {
-		background: var(--primary);
-		border-color: var(--primary);
-		color: var(--primary-foreground);
+		background: var(--selection-bg-emphasis);
+		border-color: var(--selection-ring);
+		color: var(--selection-text);
+		box-shadow: var(--selection-shadow);
 	}
 
 	.checkbox-group {

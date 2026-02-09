@@ -9,7 +9,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
@@ -68,8 +68,6 @@ class ProactiveScheduler:
 
         try:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
-            from apscheduler.triggers.cron import CronTrigger
-            from apscheduler.triggers.date import DateTrigger
 
             self._scheduler = AsyncIOScheduler()
             self._scheduler.start()
@@ -209,8 +207,10 @@ class ProactiveScheduler:
         if self._use_apscheduler and self._scheduler:
             try:
                 self._scheduler.remove_job(schedule_id)
-            except Exception:
-                pass  # Job might not exist in APScheduler
+            except (KeyError, LookupError):
+                pass  # Job doesn't exist in APScheduler
+            except Exception as e:
+                logger.warning(f"Unexpected error removing APScheduler job {schedule_id}: {e}")
 
         del self._schedules[schedule_id]
         await self._delete_schedule_from_db(schedule_id)

@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 # v30: Add profile_id to session_messages for per-query profile tracking
 # v31: Make notes global (remove project_id FK), remove linked_sessions
 # v32: Add mobile device tables (mobile_devices, pending_actions, trusted_actions)
-SCHEMA_VERSION = 32
+# v33: Add file_path to notes for physical markdown files
+SCHEMA_VERSION = 33
 
 
 # =============================================================================
@@ -234,6 +235,11 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(worktree_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_sdk_session_id ON sessions(sdk_session_id)")
         migrations_applied.append("sessions.profile_id_nullable")
+
+    # Add file_path column to notes for physical markdown files (v33)
+    if table_exists(cursor, "notes") and not column_exists(cursor, "notes", "file_path"):
+        cursor.execute("ALTER TABLE notes ADD COLUMN file_path TEXT")
+        migrations_applied.append("notes.file_path")
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -851,6 +857,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             content TEXT DEFAULT '',
             tags JSON DEFAULT '[]',
             is_pinned BOOLEAN DEFAULT FALSE,
+            file_path TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -1269,8 +1276,12 @@ def create_auth_session(token: str, expires_at: datetime) -> Dict[str, Any]:
         return {"token": token, "expires_at": expires_at}
 
 
+_auth_session_empty_logged = False  # Rate-limit the verbose empty-table diagnostic
+
+
 def get_auth_session(token: str) -> Optional[Dict[str, Any]]:
     """Get an auth session by token"""
+    global _auth_session_empty_logged
     with get_db() as conn:
         cursor = conn.cursor()
         now_iso = datetime.utcnow().isoformat()
@@ -1293,8 +1304,8 @@ def get_auth_session(token: str) -> Optional[Dict[str, Any]]:
             )
             exact_match = cursor.fetchone()
 
-            # Log database path and state for debugging
-            logger.warning(
+            # Log concise summary at debug level (avoid spamming on repeated WebSocket retries)
+            logger.debug(
                 f"get_auth_session FAILED for ...{token[-4:]}: "
                 f"total_tokens_in_db={total_count}, "
                 f"token_exists={exact_match is not None}, "
@@ -1307,13 +1318,14 @@ def get_auth_session(token: str) -> Optional[Dict[str, Any]]:
                     f"expires_at={exact_match['expires_at']}, created_at={exact_match['created_at']}"
                 )
 
-            # CRITICAL: If total_tokens_in_db is 0, something catastrophic happened
-            # Log extensive diagnostics to help trace the root cause
-            if total_count == 0:
+            # If table is empty, log verbose diagnostics only ONCE to avoid log spam
+            # (This is expected before first login since sessions are cleared on startup)
+            if total_count == 0 and not _auth_session_empty_logged:
+                _auth_session_empty_logged = True
                 import traceback
                 import os
-                logger.error(
-                    f"CRITICAL: auth_sessions table is EMPTY! This should never happen during runtime.\n"
+                logger.warning(
+                    f"auth_sessions table is empty (expected before first login).\n"
                     f"Stack trace:\n{''.join(traceback.format_stack())}\n"
                     f"Database file exists: {settings.db_path.exists()}\n"
                     f"Database file size: {settings.db_path.stat().st_size if settings.db_path.exists() else 'N/A'}\n"
@@ -1324,9 +1336,14 @@ def get_auth_session(token: str) -> Optional[Dict[str, Any]]:
                 sessions_count = cursor.fetchone()["cnt"]
                 cursor.execute("SELECT COUNT(*) as cnt FROM profiles")
                 profiles_count = cursor.fetchone()["cnt"]
-                logger.error(
+                logger.warning(
                     f"Other table counts - sessions: {sessions_count}, profiles: {profiles_count}"
                 )
+
+        # Reset the flag when a session is successfully created/found
+        # so the diagnostic fires again if sessions unexpectedly disappear later
+        if result is not None:
+            _auth_session_empty_logged = False
 
         return result
 
@@ -2023,7 +2040,7 @@ def add_session_message(
              profile_id,
              now)
         )
-        return {
+        msg = {
             "id": cursor.lastrowid,
             "session_id": session_id,
             "role": role,
@@ -2034,6 +2051,13 @@ def add_session_message(
             "profile_id": profile_id,
             "created_at": now
         }
+
+    # Update in-memory profile map cache (avoids DB re-read on next load)
+    if role == "user" and profile_id and content:
+        from app.core.cost_utils import update_profile_map
+        update_profile_map(session_id, content, profile_id)
+
+    return msg
 
 
 def delete_session_message(session_id: str, message_id: int) -> bool:
@@ -2427,6 +2451,11 @@ def log_usage(
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (session_id, profile_id, model, tokens_in, tokens_out, cost_usd, duration_ms)
         )
+
+    # Update in-memory usage cache (avoids DB re-read on next load)
+    if session_id:
+        from app.core.cost_utils import append_usage_entry
+        append_usage_entry(session_id, cost_usd, duration_ms, tokens_in, tokens_out, model)
 
 
 def get_last_session_usage(session_id: str) -> Optional[Dict[str, Any]]:
@@ -3899,7 +3928,8 @@ def add_session_tag(session_id: str, tag_id: str) -> bool:
                 (session_id, tag_id, now)
             )
             return cursor.rowcount > 0
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to add tag {tag_id} to session {session_id}: {e}")
         return False
 
 
@@ -5134,21 +5164,23 @@ def create_note(
     title: str,
     content: str = "",
     tags: Optional[List[str]] = None,
-    is_pinned: bool = False
+    is_pinned: bool = False,
+    file_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """Create a new note"""
     now = datetime.utcnow().isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO notes (id, title, content, tags, is_pinned, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO notes (id, title, content, tags, is_pinned, file_path, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 note_id,
                 title,
                 content,
                 json.dumps(tags or []),
                 is_pinned,
+                file_path,
                 now,
                 now
             )
@@ -5161,7 +5193,8 @@ def update_note(
     title: Optional[str] = None,
     content: Optional[str] = None,
     tags: Optional[List[str]] = None,
-    is_pinned: Optional[bool] = None
+    is_pinned: Optional[bool] = None,
+    file_path: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """Update a note"""
     existing = get_note(note_id)
@@ -5183,6 +5216,9 @@ def update_note(
     if is_pinned is not None:
         updates.append("is_pinned = ?")
         values.append(is_pinned)
+    if file_path is not None:
+        updates.append("file_path = ?")
+        values.append(file_path)
 
     if updates:
         updates.append("updated_at = ?")
@@ -5243,7 +5279,7 @@ def get_notes_autocomplete(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        query = "SELECT id, title, content, tags FROM notes WHERE 1=1"
+        query = "SELECT id, title, content, tags, file_path FROM notes WHERE 1=1"
         params: List[Any] = []
 
         if search:
@@ -5266,7 +5302,8 @@ def get_notes_autocomplete(
                 "id": row["id"],
                 "title": row["title"],
                 "preview": preview,
-                "tags": tags
+                "tags": tags,
+                "file_path": row["file_path"]
             })
 
         return result
@@ -5279,6 +5316,41 @@ def count_all_notes() -> int:
         cursor.execute("SELECT COUNT(*) as count FROM notes")
         row = cursor.fetchone()
         return row["count"] if row else 0
+
+
+def get_all_note_filenames() -> set:
+    """Get the set of all note filenames (extracted from file_path) for collision detection."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT file_path FROM notes WHERE file_path IS NOT NULL")
+        filenames = set()
+        for row in cursor.fetchall():
+            if row["file_path"]:
+                # file_path is stored as 'notes/{filename}', extract just the filename
+                filenames.add(row["file_path"].split("/")[-1])
+        return filenames
+
+
+def get_notes_without_file_path() -> List[Dict[str, Any]]:
+    """Get all notes that don't have a file_path set (need materialization)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM notes WHERE file_path IS NULL")
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            row["tags"] = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+        return rows
+
+
+def bulk_update_note_file_paths(updates: Dict[str, str]) -> None:
+    """Bulk update file_path for multiple notes. updates is {note_id: file_path}."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for note_id, file_path in updates.items():
+            cursor.execute(
+                "UPDATE notes SET file_path = ? WHERE id = ?",
+                (file_path, note_id)
+            )
 
 
 # ============================================================================

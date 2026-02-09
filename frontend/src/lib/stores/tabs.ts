@@ -3,197 +3,47 @@
  *
  * Each tab has its own WebSocket connection and independent state.
  * Tabs can run queries simultaneously without interfering with each other.
+ *
+ * Types, persistence, and utilities are in ./tabs/ sub-modules.
  */
 
 import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile, PermissionRequest as PermissionRequestType, UserQuestionRequest, PaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
 import { api, searchSessionsPaginated } from '$lib/api/client';
-import { isNotificationsEnabled, notifySessionComplete, notifyWaitingForResponse, getPermission, type SessionCompleteInfo } from '$lib/services/notifications';
+import { isNotificationsEnabled, notifySessionComplete, notifyWaitingForResponse, getPermission } from '$lib/services/notifications';
 import { deck } from './deck';
 import { getDeviceIdSync } from './device';
 import {
-	initStreamingBuffer,
-	pushEvent,
-	flushNow,
-	clearBuffer,
-	removeBuffer,
-	findLastStreamingTextIndex,
-	findLastStreamingThinkingIndex,
-	invalidateStreamingIndexCache,
-	appendToStreamingText,
-	appendToStreamingThinking,
-	appendToToolInput,
-	hasPendingData,
-	setActiveBlockType,
-	type BatchedUpdate,
-	type BufferedEvent
+	setActiveBlockType
 } from './streaming-buffer';
 
-export interface ApiUser {
-	id: string;
-	name: string;
-	description?: string;
-	project_id?: string;
-	profile_ids?: string[];
-	is_active: boolean;
-	web_login_allowed?: boolean;
-	username?: string;
-	created_at: string;
-	updated_at: string;
-	last_used_at?: string;
-}
+// New polling-primary architecture (polling delegated to sessionPoller)
+import { sessionPoller } from './session/session-poller';
+import { sessionNotifier } from './session/session-notifier';
+import { sessionState } from './session/session-state';
 
-export type MessageType = 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'system' | 'subagent' | 'command' | 'plugin_warning';
+// Extracted modules (Phase 6)
+import type {
+	ApiUser, MessageType, SubagentChildMessage, TodoItem, ChatMessage,
+	Project, ExecutionMode, ChatTab, TabsState, PersistedTab, PersistedTabsState
+} from './tabs/types';
+import {
+	formatWorktreeError, getOrCreateDeviceId, generateTabId
+} from './tabs/utils';
+import { git } from './git';
 
-// Subagent child message - represents a single tool call or text from a subagent
-export interface SubagentChildMessage {
-	id: string;
-	type: 'text' | 'tool_use' | 'tool_result';
-	content: string;
-	toolName?: string;
-	toolId?: string;
-	toolInput?: Record<string, unknown>;
-	toolResult?: string; // Result content for tool_use (grouped with tool call)
-	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
-	timestamp?: string;
-}
+// Re-export types for backwards compatibility
+export type {
+	ApiUser, MessageType, SubagentChildMessage, TodoItem, ChatMessage,
+	Project, ExecutionMode, ChatTab
+};
 
-// Todo item for task tracking
-export interface TodoItem {
-	content: string;
-	status: 'pending' | 'in_progress' | 'completed';
-	activeForm: string; // Present continuous form shown when in_progress
-}
+// Types are defined in ./tabs/types.ts and re-exported above.
 
-export interface ChatMessage {
-	id: string;
-	jsonlUuid?: string; // Raw UUID from JSONL file - used for rewind (id may be preserved for Svelte keying)
-	role: 'user' | 'assistant' | 'system';
-	content: string;
-	type?: MessageType;
-	toolName?: string;
-	toolId?: string;
-	toolInput?: Record<string, unknown>;
-	toolResult?: string; // Result content for tool_use messages (grouped with tool call)
-	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
-	metadata?: Record<string, unknown>;
-	streaming?: boolean;
-	partialToolInput?: string; // Accumulator for streaming tool input JSON
-	systemSubtype?: string; // For system messages (e.g., 'context' for /context command)
-	systemData?: Record<string, unknown>; // Raw data from system message
-	profileId?: string; // Profile ID that was active when this message was created (for per-query tracking)
-	// Subagent-specific fields
-	agentId?: string; // The subagent's unique ID (e.g., '00ed8f4d')
-	agentType?: string; // The subagent type (e.g., 'Explore', 'Plan')
-	agentDescription?: string; // Task description from the Task tool
-	agentPrompt?: string; // The initial prompt sent to the subagent
-	agentStatus?: 'pending' | 'running' | 'completed' | 'error'; // Current status
-	agentChildren?: SubagentChildMessage[]; // Nested messages from subagent execution
-	// Command-specific fields (for slash commands like /commit, /ralph-loop)
-	commandId?: string; // Internal command identifier (e.g., 'commit-commands:commit')
-	commandName?: string; // Display name with slash (e.g., '/commit')
-	commandArgs?: string; // Arguments passed to the command
-}
-
-export interface Project {
-	id: string;
-	name: string;
-	description?: string;
-	path: string;
-	settings: Record<string, unknown>;
-	session_count?: number;  // Number of sessions in this project
-	created_at: string;
-	updated_at: string;
-}
-
-// Execution mode for chat sessions
-export type ExecutionMode = 'local' | 'worktree';
-
-export interface ChatTab {
-	id: string;
-	title: string;
-	sessionId: string | null;
-	messages: ChatMessage[];
-	isStreaming: boolean;
-	wsConnected: boolean;
-	error: string | null;
-	profile: string;  // Current UI selection for next query
-	sessionProfileId: string | null;  // Profile that created the session (for fallback display)
-	currentQueryProfileId: string | null;  // Profile for the current streaming query
-	project: string;
-	totalTokensIn: number;
-	totalTokensOut: number;
-	totalCacheCreationTokens: number;
-	totalCacheReadTokens: number;
-	// Actual context window usage from /context command (source of truth)
-	contextUsed: number | null;
-	contextMax: number;
-	// Session overrides (override profile settings for this session)
-	modelOverride: string | null;  // null = use profile default
-	permissionModeOverride: string | null;  // null = use profile default
-	thinkingModeOverride: string | null;  // null = use profile default
-	// Permission requests queue
-	pendingPermissions: PermissionRequestType[];
-	// User questions queue (for AskUserQuestion tool)
-	pendingQuestions: UserQuestionRequest[];
-	// Todo list for task tracking
-	todos: TodoItem[];
-	// Draft input text (preserved when switching cards)
-	draft: string;
-	// Scroll position (preserved when switching cards)
-	scrollTop: number;
-	// Stream start time for duration tracking (notifications)
-	streamStartTime: number | null;
-	// Execution mode settings (per-tab)
-	executionMode: ExecutionMode;
-	worktreeBranch: string;      // The branch name for worktree mode
-	worktreeBaseBranch: string;  // Branch to base from (and PR target)
-	worktreeCreateNewBranch: boolean;  // True if creating a new branch, false if using existing
-	// New worktree model: existing worktree selection
-	worktreeId: string | null;   // Selected existing worktree ID (null = create new)
-	worktreeMode: 'new' | 'existing';  // Whether creating new worktree or using existing worktree
-	selectedWorktreeBranch: string | null;  // Branch name of selected existing worktree (for display)
-	// Worktree creation state (for deferred creation on message send)
-	isCreatingWorktree: boolean;  // True while creating worktree before first message
-	worktreeError: string | null; // Specific error for worktree creation
-	// Session lock state (multi-device conflict)
-	sessionLocked: boolean;      // True if session is locked by another device
-	sessionLockedBy: string | undefined;  // Device ID that has the lock
-}
-
-interface TabsState {
-	tabs: ChatTab[];
-	activeTabId: string | null;
-	profiles: Profile[];
-	projects: Project[];
-	sessions: Session[];
-	adminSessions: Session[];
-	apiUsers: ApiUser[];
-	adminSessionsFilter: string | null; // null = all, '' = admin only, 'user_id' = specific user
-	// Selection state for batch operations
-	selectedSessionIds: Set<string>;
-	selectedAdminSessionIds: Set<string>;
-	selectionMode: boolean;
-	adminSelectionMode: boolean;
-	// Loading state to prevent race conditions
-	sessionsLoading: boolean;
-	// Tag filter state
-	sessionsTagFilter: string | null; // null = all, 'tag_id' = filter by tag
-	adminSessionsTagFilter: string | null;
-	// Pagination state for sessions
-	sessionsTotal: number;
-	sessionsOffset: number;
-	sessionsHasMore: boolean;
-	sessionsLoadingMore: boolean;
-	// Search state
-	searchQuery: string;
-	searchResults: SessionSearchResult[];
-	searchTotal: number;
-	searchOffset: number;
-	searchHasMore: boolean;
-	searchLoading: boolean;
-	searchLoadingMore: boolean;
-}
+// Track which sessions are currently streaming across all user devices (user-level)
+// Updated by user_streaming_changed and user_streaming_sessions WebSocket messages
+// Maps sessionId → projectId for workspace-level streaming awareness
+export const streamingSessions = writable<Map<string, string | null>>(new Map());
 
 // WebSocket connections per tab
 const tabConnections: Map<string, WebSocket> = new Map();
@@ -213,41 +63,34 @@ const tabLastMessageTime: Map<string, number> = new Map();
 //   (messages should arrive frequently during streaming)
 // - Tool execution: if tool is pending, use longer timeout (tools can take a while)
 const CONNECTION_HEALTH_TIMEOUT_MS = 90000;
-const STREAMING_HEALTH_TIMEOUT_MS = 15000;
+const STREAMING_HEALTH_TIMEOUT_MS = 45000; // 45s - generous to survive SDK compaction pauses (heartbeats may be delayed during auto-compact)
 const TOOL_EXECUTION_TIMEOUT_MS = 120000; // 2 minutes for tool execution (Bash, etc. can take a while)
 
 // Track pending tool executions per tab - when tools are running, we expect longer gaps between messages
 // This prevents false disconnects when Claude SDK is waiting for tool results
 const tabPendingTools: Map<string, Set<string>> = new Map();
 
-// Server-authoritative polling for streaming sessions
-// When streaming, poll /sessions/{id}/live for ground truth state
-const tabPollingTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
-const tabLastUpdateId: Map<string, number> = new Map();
-const POLLING_INTERVAL_MS = 500; // Poll every 500ms during streaming
+// Track sessions where onStreamEnd already ran (prevents redundant safety timeout load_session)
+const tabStreamEndCleanedUp: Map<string, boolean> = new Map();
 
-// Interface for persisted tab state (only what we need to restore tabs)
-interface PersistedTab {
-	id: string;
-	title: string;
-	sessionId: string | null;
-	profile: string;
-	project: string;
-	modelOverride: string | null;
-	permissionModeOverride: string | null;
-	thinkingModeOverride: string | null;
-	// Worktree fields for restoring worktree mode on app resume
-	executionMode?: ExecutionMode;
-	worktreeId?: string | null;
-	worktreeBranch?: string;
-	selectedWorktreeBranch?: string | null;
-	worktreeMode?: 'new' | 'existing';
-}
+// Track tabs that were streaming when WebSocket disconnected.
+// Used to prevent premature polling stop on reconnect — if load_session returns isStreaming: false
+// during a brief race (e.g., SDK compaction gap), we keep polling for a grace period instead of
+// immediately killing the poller.
+const tabStreamingOnDisconnect: Map<string, string> = new Map(); // tabId → sessionId
 
-interface PersistedTabsState {
-	tabs: PersistedTab[];
-	activeTabId: string | null;
-}
+// Track tabs that sent interrupt_and_query and are waiting for the new stream to start.
+// Prevents the 'interrupted'/'stopped' handler from resetting isStreaming and scheduling
+// cleanup that would destroy the incoming new stream's polling and session state.
+const tabInterruptPending: Map<string, boolean> = new Map();
+
+// NOTE: Old polling maps (tabPollingTimers, tabLastUpdateId) removed in Phase 4.
+// Polling is now handled by sessionPoller (session/session-poller.ts).
+// Types (PersistedTab, PersistedTabsState, etc.) moved to ./tabs/types.ts
+// Persistence (saveTabsToServer, loadTabsFromServer, etc.) moved to ./tabs/tabs-persistence.ts
+// Utilities (formatWorktreeError, generateTabId, etc.) moved to ./tabs/utils.ts
+
+// formatWorktreeError, getOrCreateDeviceId, generateTabId → imported from ./tabs/utils
 
 // Debounce timer for saving tabs
 let saveTabsTimer: ReturnType<typeof setTimeout> | null = null;
@@ -255,65 +98,6 @@ const SAVE_DEBOUNCE_MS = 1000;
 
 // Flag to prevent saving during initial load
 let isInitializing = false;
-
-/**
- * Format worktree error messages into user-friendly text
- * Parses common git/worktree errors and provides helpful context
- */
-function formatWorktreeError(rawError: string, branchName: string): string {
-	const lowerError = rawError.toLowerCase();
-
-	// Branch already has a worktree
-	if (lowerError.includes('already checked out') || lowerError.includes('is already used by worktree')) {
-		return `A worktree already exists for branch '${branchName}'. Select it from Active Worktrees instead.`;
-	}
-
-	// Branch doesn't exist
-	if (lowerError.includes('not a valid branch') || lowerError.includes('branch not found') ||
-	    lowerError.includes('unknown revision') || lowerError.includes('pathspec') && lowerError.includes('did not match')) {
-		return `Branch '${branchName}' doesn't exist. Try fetching from remote first or create a new branch.`;
-	}
-
-	// Path conflict - folder already exists
-	if (lowerError.includes('already exists') && (lowerError.includes('path') || lowerError.includes('folder') || lowerError.includes('directory'))) {
-		return `Cannot create worktree: a folder already exists at the target path. Try a different branch name.`;
-	}
-
-	// Git lock error
-	if (lowerError.includes('.lock') || lowerError.includes('unable to lock') || lowerError.includes('index.lock')) {
-		return `Git operation in progress. Please wait a moment and try again.`;
-	}
-
-	// Permission errors
-	if (lowerError.includes('permission denied') || lowerError.includes('access denied')) {
-		return `Permission denied while creating worktree. Check folder permissions.`;
-	}
-
-	// Network/fetch errors
-	if (lowerError.includes('could not resolve') || lowerError.includes('connection refused') ||
-	    lowerError.includes('network') || lowerError.includes('timeout')) {
-		return `Network error while creating worktree. Check your connection and try again.`;
-	}
-
-	// Generic fallback with original message
-	return `Failed to create worktree: ${rawError}`;
-}
-
-// Persistent device ID for multi-device sync
-// This ensures the same browser/device keeps the same ID across reconnections
-function getOrCreateDeviceId(): string {
-	if (typeof window === 'undefined') {
-		return `device-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-	}
-
-	let deviceId = localStorage.getItem('aihub_device_id');
-	if (!deviceId) {
-		deviceId = `device-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-		localStorage.setItem('aihub_device_id', deviceId);
-		console.log('[Tabs] Generated new device ID:', deviceId);
-	}
-	return deviceId;
-}
 
 // Track pending tabs state for flush on unload
 let pendingTabsState: TabsState | null = null;
@@ -591,13 +375,11 @@ async function saveSelectionToBackend(profile: string, project: string) {
 	}, SELECTION_SYNC_DEBOUNCE_MS);
 }
 
-function generateTabId(): string {
-	return `tab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-}
+// generateTabId → imported from ./tabs/utils
 
 function createTabsStore() {
 	// Start with no tabs - will be populated from server or user creates one
-	const { subscribe, set, update } = writable<TabsState>({
+	const { subscribe: _rawSubscribe, set, update } = writable<TabsState>({
 		tabs: [],
 		activeTabId: null,
 		profiles: [],
@@ -630,6 +412,41 @@ function createTabsStore() {
 		searchLoading: false,
 		searchLoadingMore: false
 	});
+
+	// ── Derived merge: overlay session data onto tabs at read-time ────────
+	// Replaces the old bridge subscription (sessionState.subscribe → tabs.update)
+	// which caused synchronous cascading updates and RangeError during autocompact.
+	const _merged = derived(
+		[{ subscribe: _rawSubscribe }, sessionState],
+		([$raw, $session]) => {
+			if ($session.sessions.size === 0) return $raw;
+
+			let changed = false;
+			const mergedTabs = $raw.tabs.map(tab => {
+				if (!tab.sessionId) return tab;
+				const s = $session.sessions.get(tab.sessionId);
+				if (!s || s.messages.length === 0) return tab;
+
+				// Skip re-creation if this tab's session hasn't changed.
+				// Returning the same object reference prevents downstream
+				// $derived consumers (ChatView, MessageArea) from re-rendering.
+				if (tab._lastMergedUpdateId === s.lastUpdateId) return tab;
+
+				changed = true;
+				return {
+					...tab,
+					messages: s.messages,
+					isStreaming: s.isStreaming,
+					todos: s.todos.length > 0 ? s.todos : tab.todos,
+					_lastMergedUpdateId: s.lastUpdateId,
+				};
+			});
+
+			return changed ? { ...$raw, tabs: mergedTabs } : $raw;
+		}
+	);
+
+	const subscribe = _merged.subscribe;
 
 	/**
 	 * Get WebSocket URL with device_id for multi-device sync
@@ -678,190 +495,13 @@ function createTabsStore() {
 
 	/**
 	 * Check if WebSocket is healthy (connected and receiving messages recently)
-	 * Used to skip polling when WS is working well.
-	 * Threshold increased to match STREAMING_HEALTH_TIMEOUT_MS to prevent race conditions
-	 * where both polling and WebSocket update state simultaneously.
+	 * NOTE: isWebSocketHealthy() removed in Phase 4.
+	 * The new architecture uses polling-primary via sessionPoller.
+	 * WebSocket is notification-only - no need to check its health for polling decisions.
 	 */
-	const WEBSOCKET_HEALTHY_THRESHOLD_MS = 10000; // 10 seconds - generous to avoid race conditions
 
-	function isWebSocketHealthy(tabId: string): boolean {
-		// First check if WebSocket is actually connected
-		const ws = tabConnections.get(tabId);
-		if (!ws || ws.readyState !== WebSocket.OPEN) {
-			return false;
-		}
-		// Then check if we've received messages recently
-		const lastMessage = tabLastMessageTime.get(tabId);
-		if (!lastMessage) return false;
-		return Date.now() - lastMessage < WEBSOCKET_HEALTHY_THRESHOLD_MS;
-	}
-
-	/**
-	 * Process a discrete event from the buffer and apply it to messages array.
-	 * This handles non-delta events like stream_block_start, stream_block_stop, etc.
-	 */
-	function processDiscreteEvent(messages: ChatMessage[], event: BufferedEvent, tab: ChatTab): void {
-		const { type, data } = event;
-
-		switch (type) {
-			case 'stream_block_start': {
-				const blockType = data.block_type as string;
-				if (blockType === 'thinking') {
-					// Don't finalize existing thinking here - the thinking message will be
-					// created/appended by appendToStreamingThinking when deltas arrive.
-					// Finalizing here would cause fragmentation when batch contains both
-					// thinking deltas and stream_block_start(thinking) in the same batch.
-				} else if (blockType === 'text') {
-					// When text block starts, finalize any existing streaming thinking message
-					const thinkingIdx = findLastStreamingThinkingIndex(messages);
-					if (thinkingIdx !== -1) {
-						messages[thinkingIdx] = { ...messages[thinkingIdx], streaming: false };
-					}
-				} else if (blockType === 'tool_use') {
-					const contentBlock = data.content_block as { id?: string; name?: string };
-					// Handle any existing streaming text message
-					const streamingIdx = messages.findLastIndex(
-						m => m.type === 'text' && m.role === 'assistant' && m.streaming
-					);
-					if (streamingIdx !== -1) {
-						if (messages[streamingIdx].content) {
-							messages[streamingIdx] = { ...messages[streamingIdx], streaming: false };
-						} else {
-							messages.splice(streamingIdx, 1);
-						}
-					}
-					// Also finalize any streaming thinking message
-					const thinkingIdx = findLastStreamingThinkingIndex(messages);
-					if (thinkingIdx !== -1) {
-						messages[thinkingIdx] = { ...messages[thinkingIdx], streaming: false };
-					}
-					// Add tool use message with profileId for per-query tracking
-					messages.push({
-						id: `tool-${Date.now()}-${contentBlock.id || ''}`,
-						role: 'assistant',
-						content: '',
-						type: 'tool_use',
-						toolName: contentBlock.name || '',
-						toolId: contentBlock.id || '',
-						toolInput: {},
-						toolStatus: 'running',
-						streaming: true,
-						profileId: tab.currentQueryProfileId || undefined
-					});
-				}
-				break;
-			}
-
-			case 'stream_block_stop': {
-				// Block complete - finalize streaming text and thinking messages immediately
-				// so indicators don't linger while waiting for the next block to start.
-				// Tool_use messages are NOT finalized here because they remain "streaming"
-				// until the tool_result arrives (tool execution could take time).
-
-				// Finalize streaming text message
-				const streamingTextIdx = messages.findLastIndex(
-					m => m.type === 'text' && m.role === 'assistant' && m.streaming
-				);
-				if (streamingTextIdx !== -1) {
-					if (messages[streamingTextIdx].content) {
-						messages[streamingTextIdx] = { ...messages[streamingTextIdx], streaming: false };
-					} else {
-						// Remove empty streaming text messages
-						messages.splice(streamingTextIdx, 1);
-					}
-				}
-
-				// Finalize streaming thinking message
-				const streamingThinkingIdx = findLastStreamingThinkingIndex(messages);
-				if (streamingThinkingIdx !== -1) {
-					messages[streamingThinkingIdx] = { ...messages[streamingThinkingIdx], streaming: false };
-				}
-				break;
-			}
-
-			case 'stream_message_delta': {
-				// Final message metadata with output token usage
-				// This is handled separately via usageUpdate in batch
-				break;
-			}
-		}
-	}
-
-	/**
-	 * Apply a batched update from the streaming buffer to the store.
-	 * This is called by the streaming-buffer module when it flushes.
-	 *
-	 * IMPORTANT: Discrete events (block_start, block_stop) are processed FIRST
-	 * to ensure proper state transitions before deltas are applied. The streaming
-	 * buffer ensures that blocks are flushed before transitions, so within a single
-	 * batch, all deltas belong to the same block type.
-	 */
-	function applyBatchedUpdate(tabId: string, batch: BatchedUpdate): void {
-		update(s => {
-			const tabIndex = s.tabs.findIndex(t => t.id === tabId);
-			if (tabIndex === -1) return s;
-
-			const tab = s.tabs[tabIndex];
-			const messages = [...tab.messages]; // Single copy per flush
-
-			// CRITICAL: Process discrete events FIRST to handle block transitions
-			// This ensures streaming state is properly set before deltas are applied
-			for (const event of batch.discreteEvents) {
-				processDiscreteEvent(messages, event, tab);
-			}
-
-			// Apply all thinking deltas at once (with profileId for per-query tracking)
-			if (batch.thinkingDelta) {
-				appendToStreamingThinking(messages, batch.thinkingDelta, tab.currentQueryProfileId || undefined);
-			}
-
-			// Apply all text deltas at once (with profileId for per-query tracking)
-			if (batch.textDelta) {
-				appendToStreamingText(messages, batch.textDelta, tab.currentQueryProfileId || undefined);
-			}
-
-			// Apply all tool input deltas
-			for (const [toolId, delta] of batch.toolInputDeltas) {
-				appendToToolInput(messages, toolId, delta);
-			}
-
-			// Apply usage updates
-			let newTotalTokensIn = tab.totalTokensIn;
-			let newTotalTokensOut = tab.totalTokensOut;
-			let newCacheCreation = tab.totalCacheCreationTokens;
-			let newCacheRead = tab.totalCacheReadTokens;
-
-			if (batch.usageUpdate) {
-				if (batch.usageUpdate.inputTokens !== undefined) {
-					newTotalTokensIn = batch.usageUpdate.inputTokens;
-				}
-				if (batch.usageUpdate.outputTokens !== undefined) {
-					newTotalTokensOut = batch.usageUpdate.outputTokens;
-				}
-				if (batch.usageUpdate.cacheCreationTokens !== undefined) {
-					newCacheCreation = batch.usageUpdate.cacheCreationTokens;
-				}
-				if (batch.usageUpdate.cacheReadTokens !== undefined) {
-					newCacheRead = batch.usageUpdate.cacheReadTokens;
-				}
-			}
-
-			// Single new object creation
-			const newTabs = [...s.tabs];
-			newTabs[tabIndex] = {
-				...tab,
-				messages,
-				totalTokensIn: newTotalTokensIn,
-				totalTokensOut: newTotalTokensOut,
-				totalCacheCreationTokens: newCacheCreation,
-				totalCacheReadTokens: newCacheRead
-			};
-			return { ...s, tabs: newTabs };
-		});
-	}
-
-	// Initialize the streaming buffer with our callback
-	initStreamingBuffer(applyBatchedUpdate);
+	// NOTE: processDiscreteEvent, applyBatchedUpdate, and initStreamingBuffer removed in Phase 7.
+	// Streaming buffer is no longer used — all state updates come from the poller.
 
 	/**
 	 * Connect WebSocket for a specific tab
@@ -947,9 +587,17 @@ function createTabsStore() {
 					const lastMessageTime = tabLastMessageTime.get(tabId) || 0;
 					const timeSinceLastMessage = Date.now() - lastMessageTime;
 					if (timeSinceLastMessage > healthTimeout) {
-						console.warn(`[Tab ${tabId}] Connection appears stale (${Math.round(timeSinceLastMessage / 1000)}s since last message, streaming=${currentTab?.isStreaming}, toolsPending=${hasToolsPending ? pendingTools?.size : 0}), forcing reconnect`);
-						// Force close to trigger reconnect
-						currentWs.close(4000, 'Connection health timeout');
+						// During streaming, if the poller is successfully fetching data,
+						// the WebSocket is just a notification channel — don't force-close it.
+						// This prevents false disconnects during SDK operations like auto-compaction
+						// where heartbeats may be delayed but the poller still works fine.
+						if (currentTab?.isStreaming && currentTab?.sessionId && sessionPoller.isPolling(currentTab.sessionId)) {
+							console.log(`[Tab ${tabId}] WebSocket stale but poller is active for ${currentTab.sessionId} — skipping force-close`);
+						} else {
+							console.warn(`[Tab ${tabId}] Connection appears stale (${Math.round(timeSinceLastMessage / 1000)}s since last message, streaming=${currentTab?.isStreaming}, toolsPending=${hasToolsPending ? pendingTools?.size : 0}), forcing reconnect`);
+							// Force close to trigger reconnect
+							currentWs.close(4000, 'Connection health timeout');
+						}
 					}
 				}
 			}, 10000); // Check every 10s instead of 25s for faster detection
@@ -972,10 +620,12 @@ function createTabsStore() {
 			// This provides continuity even when WebSocket is disconnected
 			if (wasStreaming && sessionId) {
 				console.log(`[Tab ${tabId}] WebSocket closed during streaming - starting fallback polling`);
-				// Start polling if not already polling
-				if (!tabPollingTimers.has(tabId)) {
-					startPolling(tabId, sessionId);
-				}
+				// sessionPoller.startStreaming() is idempotent — safe to call even if already polling
+				startPolling(tabId, sessionId);
+				// Track that this tab was streaming on disconnect so the reconnect handler
+				// doesn't prematurely stop polling if load_session returns isStreaming: false
+				// (brief race during SDK compaction)
+				tabStreamingOnDisconnect.set(tabId, sessionId);
 			}
 
 			// Clear any pending stop timeout
@@ -991,8 +641,12 @@ function createTabsStore() {
 				tabPingTimers.delete(tabId);
 			}
 
-			// Reconnect after delay (unless intentionally closed or tab removed)
-			if (event.code !== 1000) {
+			// Reconnect after delay (unless intentionally closed, auth failed, or tab removed)
+			if (event.code === 4001) {
+				// Auth failure - don't retry, redirect to login
+				console.warn(`[Tab ${tabId}] WebSocket auth failed (4001), redirecting to login`);
+				import('$app/navigation').then(({ goto }) => goto('/login'));
+			} else if (event.code !== 1000) {
 				const existingReconnect = tabReconnectTimers.get(tabId);
 				if (existingReconnect) clearTimeout(existingReconnect);
 
@@ -1049,6 +703,8 @@ function createTabsStore() {
 		tabExpectedSessionId.delete(tabId);
 		tabLastMessageTime.delete(tabId);
 		tabPendingTools.delete(tabId);
+		tabStreamingOnDisconnect.delete(tabId);
+		tabInterruptPending.delete(tabId);
 
 		const ws = tabConnections.get(tabId);
 		if (ws) {
@@ -1060,212 +716,80 @@ function createTabsStore() {
 	}
 
 	/**
-	 * Start polling server for live session state.
-	 * This is the server-authoritative approach - frontend state is replaced
-	 * with server state, no merging required.
+	 * Start polling for a tab's session via the new sessionPoller.
+	 * Thin wrapper that delegates to session/session-poller.ts.
 	 */
 	function startPolling(tabId: string, sessionId: string) {
-		// Don't start if already polling
-		if (tabPollingTimers.has(tabId)) {
-			console.log(`[Tab ${tabId}] Already polling, skipping start`);
-			return;
-		}
-
-		console.log(`[Tab ${tabId}] Starting server-authoritative polling for session ${sessionId}`);
-		tabLastUpdateId.set(tabId, 0);
-
-		const pollLiveState = async () => {
-			// Skip polling if WebSocket is actively receiving events
-			// This prevents double updates and reduces memory churn
-			if (isWebSocketHealthy(tabId)) {
-				return;
-			}
-
-			const tab = getTab(tabId);
-			if (!tab || tab.sessionId !== sessionId) {
-				// Tab closed or switched sessions
-				stopPolling(tabId);
-				return;
-			}
-
-			try {
-				const lastUpdateId = tabLastUpdateId.get(tabId) || 0;
-				const response = await fetch(
-					`/api/v1/sessions/${sessionId}/live?since_update_id=${lastUpdateId}`,
-					{ credentials: 'include' }
-				);
-
-				if (response.status === 304) {
-					// No updates since last check
-					return;
-				}
-
-				if (!response.ok) {
-					console.warn(`[Tab ${tabId}] Polling failed: ${response.status}`);
-					return;
-				}
-
-				const data = await response.json();
-				const newUpdateId = data.last_update_id as number;
-				tabLastUpdateId.set(tabId, newUpdateId);
-
-				// Convert server messages to ChatMessage format
-				// IMPORTANT: Preserve existing message IDs to prevent Svelte component recreation
-				// This keeps expanded/collapsed state stable for ThinkingBlocks, etc.
-				const serverMessages = (data.messages as Array<Record<string, unknown>>) || [];
-				const tab = getTab(tabId);
-				const existingMessages = tab?.messages || [];
-
-				const messages: ChatMessage[] = serverMessages.map((m, i) => {
-					const serverType = (m.type as MessageType) || 'text';
-					const serverRole = (m.role as 'user' | 'assistant' | 'system') || 'assistant';
-
-					// Try to match with existing message by index and type
-					// This preserves the frontend's ID so Svelte doesn't recreate the component
-					const existingMsg = existingMessages[i];
-					const canPreserveId = existingMsg &&
-						existingMsg.type === serverType &&
-						existingMsg.role === serverRole;
-
-					const msg: ChatMessage = {
-						// Preserve existing ID if message matches, otherwise use server ID
-						id: canPreserveId ? existingMsg.id : ((m.id as string) || `live-${i}`),
-						role: serverRole,
-						content: (m.content as string) || '',
-						type: serverType,
-						streaming: (m.streaming as boolean) || false,
-					};
-
-					// Tool fields
-					if (m.toolName) msg.toolName = m.toolName as string;
-					if (m.toolId) msg.toolId = m.toolId as string;
-					if (m.toolInput) msg.toolInput = m.toolInput as Record<string, unknown>;
-					if (m.toolResult !== undefined) msg.toolResult = m.toolResult as string;
-					if (m.toolStatus) msg.toolStatus = m.toolStatus as 'running' | 'complete' | 'error';
-
-					// Subagent fields
-					if (m.agentId) msg.agentId = m.agentId as string;
-					if (m.agentType) msg.agentType = m.agentType as string;
-					if (m.agentDescription) msg.agentDescription = m.agentDescription as string;
-					if (m.agentPrompt) msg.agentPrompt = m.agentPrompt as string;
-					if (m.agentStatus) msg.agentStatus = m.agentStatus as 'pending' | 'running' | 'completed' | 'error';
-					if (m.agentChildren) msg.agentChildren = m.agentChildren as SubagentChildMessage[];
-
-					// System message fields
-					if (m.systemSubtype) msg.systemSubtype = m.systemSubtype as string;
-					if (m.systemData) msg.systemData = m.systemData as Record<string, unknown>;
-
-					// Metadata
-					if (m.metadata) msg.metadata = m.metadata as Record<string, unknown>;
-
-					return msg;
-				});
-
-				// Extract todos from messages (look for TodoWrite)
-				let latestTodos: TodoItem[] = [];
-				for (const msg of messages) {
-					if (msg.type === 'tool_use' && msg.toolName === 'TodoWrite' && msg.toolInput?.todos) {
-						const todos = msg.toolInput.todos as TodoItem[];
-						if (Array.isArray(todos)) {
-							latestTodos = todos.map(todo => ({
-								content: todo.content || '',
-								status: todo.status || 'pending',
-								activeForm: todo.activeForm || todo.content || ''
-							}));
-						}
-					}
-				}
-
-				// Extract token usage
-				const usage = data.usage as Record<string, number> || {};
-				const inputTokens = usage.input_tokens || 0;
-				const outputTokens = usage.output_tokens || 0;
-				const cacheCreationTokens = usage.cache_creation_tokens || 0;
-				const cacheReadTokens = usage.cache_read_tokens || 0;
-
-				// Replace tab state with server state - NO MERGING!
-				update(s => ({
-					...s,
-					tabs: s.tabs.map(t => {
-						if (t.id !== tabId) return t;
-
-						// Calculate new context from server usage
-						const serverContextUsed = inputTokens + cacheCreationTokens + cacheReadTokens;
-
-						// Don't reset context to 0 if we already have a value and server returns 0
-						// This happens when polling starts before stream_start arrives with usage
-						const shouldUpdateContext = serverContextUsed > 0 || t.contextUsed === null || t.contextUsed === 0;
-
-						return {
-							...t,
-							messages,
-							isStreaming: data.is_streaming as boolean,
-							todos: latestTodos.length > 0 ? latestTodos : t.todos,
-							totalTokensIn: shouldUpdateContext ? inputTokens : t.totalTokensIn,
-							totalTokensOut: shouldUpdateContext ? outputTokens : t.totalTokensOut,
-							totalCacheCreationTokens: shouldUpdateContext ? cacheCreationTokens : t.totalCacheCreationTokens,
-							totalCacheReadTokens: shouldUpdateContext ? cacheReadTokens : t.totalCacheReadTokens,
-							contextUsed: shouldUpdateContext ? serverContextUsed : t.contextUsed
-						};
-					})
-				}));
-
-				// Flush any pending deltas before clearing buffer (prevents losing characters)
-				if (hasPendingData(tabId)) {
-					flushNow(tabId);
-				}
-				// Clear streaming buffer after poll replaces state (avoid stale data)
-				clearBuffer(tabId);
-				invalidateStreamingIndexCache();
-
-				// Stop polling if streaming ended
-				if (!data.is_streaming) {
-					console.log(`[Tab ${tabId}] Streaming ended, stopping polling`);
-					stopPolling(tabId);
-
-					// Trigger notification if enabled
-					const currentTab = getTab(tabId);
-					if (currentTab && isNotificationsEnabled() && getPermission() === 'granted') {
-						const durationSeconds = currentTab.streamStartTime
-							? (Date.now() - currentTab.streamStartTime) / 1000
-							: undefined;
-
-						notifySessionComplete({
-							sessionId: sessionId,
-							sessionTitle: currentTab.title,
-							durationSeconds,
-							tokensIn: inputTokens,
-							tokensOut: outputTokens
-						});
-					}
-
-					// Refresh sessions list (use internal function since we're inside store creation)
-					loadSessionsInternal();
-				}
-
-			} catch (e) {
-				console.error(`[Tab ${tabId}] Polling error:`, e);
-			}
-		};
-
-		// Start polling immediately, then on interval
-		pollLiveState();
-		const timer = setInterval(pollLiveState, POLLING_INTERVAL_MS);
-		tabPollingTimers.set(tabId, timer);
+		console.log(`[Tab ${tabId}] Starting polling via sessionPoller for ${sessionId}`);
+		sessionPoller.startStreaming(sessionId);
 	}
 
 	/**
-	 * Stop polling for a tab
+	 * Stop polling for a tab's session via the new sessionPoller.
+	 * Thin wrapper that delegates to session/session-poller.ts.
 	 */
 	function stopPolling(tabId: string) {
-		const timer = tabPollingTimers.get(tabId);
-		if (timer) {
-			clearInterval(timer);
-			tabPollingTimers.delete(tabId);
-			tabLastUpdateId.delete(tabId);
-			console.log(`[Tab ${tabId}] Stopped polling`);
+		const tab = getTab(tabId);
+		if (tab?.sessionId) {
+			sessionPoller.stop(tab.sessionId);
 		}
 	}
+
+	// Wire up stream-end callback for cleanup and JSONL refresh.
+	// Note: Notifications are handled by the 'done' handler (which fires before onStreamEnd).
+	// This callback focuses on: sessionState cleanup + authoritative JSONL refresh.
+	sessionPoller.onStreamEnd((sessionId, usage) => {
+		// If a tab with this session is in interrupt_and_query transition, skip cleanup.
+		// The new stream is about to start and we don't want to interfere.
+		const interruptTab = get({ subscribe }).tabs.find(t => t.sessionId === sessionId);
+		if (interruptTab && tabInterruptPending.get(interruptTab.id)) {
+			console.log(`[onStreamEnd] Skipping cleanup for ${sessionId} — interrupt_and_query pending`);
+			return;
+		}
+
+		// Refresh sessions list
+		loadSessionsInternal();
+
+		// Flush final messages AND usage from sessionState to the raw store BEFORE
+		// removing the session. The derived merge store overlays sessionState onto
+		// tabs, but once the session is removed, it falls back to the raw store.
+		// Without this flush, the raw store still has pre-streaming messages (just
+		// the user message) and assistant messages would disappear. Similarly,
+		// context usage would revert to stale pre-streaming values.
+		const finalSession = sessionState.getSession(sessionId);
+		if (finalSession && finalSession.messages.length > 0) {
+			const finalUsage = finalSession.usage;
+			update(s => ({
+				...s,
+				tabs: s.tabs.map(tab => {
+					if (tab.sessionId !== sessionId) return tab;
+					return {
+						...tab,
+						messages: finalSession.messages,
+						isStreaming: false,
+						todos: finalSession.todos.length > 0 ? finalSession.todos : tab.todos,
+						// Flush usage data so context indicator doesn't revert to stale values
+						// after sessionState cleanup removes the real-time usage source
+						...(finalUsage.contextUsed > 0 ? {
+							totalTokensIn: finalUsage.inputTokens,
+							totalTokensOut: finalUsage.outputTokens,
+							totalCacheCreationTokens: finalUsage.cacheCreationTokens,
+							totalCacheReadTokens: finalUsage.cacheReadTokens,
+							contextUsed: finalUsage.contextUsed,
+						} : {}),
+					};
+				})
+			}));
+		}
+
+		// Clean up sessionState now that final messages are persisted in the raw store.
+		// Delay slightly to let the reactive cycle complete.
+		setTimeout(() => sessionState.removeSession(sessionId), 100);
+
+		// Mark this session's stream-end as handled so the safety timeout
+		// doesn't send a redundant load_session (which can race with JSONL writes)
+		tabStreamEndCleanedUp.set(sessionId, true);
+	});
 
 	/**
 	 * Handle tabs_sync message from another device
@@ -1380,6 +904,23 @@ function createTabsStore() {
 			connectTab(newTab.id);
 		}
 
+		// Send load_session for existing tabs whose sessionId was just set
+		// This handles the case where Device A creates a tab (sessionId: null initially),
+		// then gets sessionId from session_created response, and sends a second tabs_sync.
+		// Device B already has the tab connected but never loaded the session.
+		for (const mergedTab of mergedTabs) {
+			const existing = currentTabsMap.get(mergedTab.id);
+			if (existing && !existing.sessionId && mergedTab.sessionId) {
+				const ws = tabConnections.get(mergedTab.id);
+				if (ws?.readyState === WebSocket.OPEN) {
+					console.log(`[Tabs] Tab ${mergedTab.id} sessionId updated via tabs_sync, loading session: ${mergedTab.sessionId}`);
+					tabExpectedSessionId.set(mergedTab.id, mergedTab.sessionId);
+					tabsWaitingForHistory.set(mergedTab.id, []);
+					ws.send(JSON.stringify({ type: 'load_session', session_id: mergedTab.sessionId }));
+				}
+			}
+		}
+
 		// Update state
 		update(s => ({
 			...s,
@@ -1486,7 +1027,14 @@ function createTabsStore() {
 			}
 
 			case 'stream_chunk': {
-				// Content chunk from another device
+				// If poller is active, let it handle message updates via server-authoritative state.
+				// This prevents dual update paths from creating inconsistencies.
+				if (sessionPoller.isPolling(sessionId)) {
+					sessionPoller.pollNow(sessionId);
+					break;
+				}
+
+				// Content chunk from another device (fallback when polling isn't active)
 				const chunkType = eventData.chunk_type as string;
 				const content = eventData.content as string;
 				console.log(`[Tab ${tabId}] stream_chunk: type=${chunkType}, content="${content?.substring(0, 50)}..."`);
@@ -2130,6 +1678,22 @@ function createTabsStore() {
 		const msgType = data.type as string;
 		const eventType = data.event_type as string;
 
+		// ── Phase 2: Forward to new notification system (parallel) ────────
+		// The notifier triggers polls in the new session-poller.
+		// Both old and new systems run simultaneously during transition.
+		const tab = getTab(tabId);
+		if (tab?.sessionId) {
+			// During interrupt_and_query transitions, skip notifier for interrupted/stopped events.
+			// We already stopped the poller and removed session state in sendMessage() — a stale
+			// pollNow() here would recreate session state with is_streaming: false, causing the
+			// derived merge store to briefly show the tab as not-streaming (UI flicker).
+			const isInterruptTransition = tabInterruptPending.get(tabId) &&
+				(msgType === 'interrupted' || msgType === 'stopped');
+			if (!isInterruptTransition) {
+				sessionNotifier.handleMessage(tab.sessionId, data);
+			}
+		}
+
 		// Handle sync events from other devices
 		if (eventType) {
 			handleSyncEvent(tabId, data);
@@ -2140,6 +1704,66 @@ function createTabsStore() {
 		// This is NOT tab-specific, it updates all tabs for the user
 		if (msgType === 'tabs_sync') {
 			handleTabsSyncMessage(data);
+			return;
+		}
+
+		// Handle user-level session list update from another device
+		if (msgType === 'user_session_created') {
+			console.log('[Tabs] New session created on another device:', data.session_id);
+			loadSessionsInternal();
+			return;
+		}
+
+		// Handle user-level streaming status change from another device
+		if (msgType === 'user_streaming_changed') {
+			const sessionId = data.session_id as string;
+			const isStreaming = data.is_streaming as boolean;
+			const projectId = (data.project_id as string | null) ?? null;
+			console.log(`[Tabs] Streaming changed for session ${sessionId}: ${isStreaming} (project: ${projectId})`);
+			streamingSessions.update(map => {
+				const newMap = new Map(map);
+				if (isStreaming) {
+					newMap.set(sessionId, projectId);
+				} else {
+					newMap.delete(sessionId);
+				}
+				return newMap;
+			});
+			return;
+		}
+
+		// Handle initial streaming sessions snapshot on connection
+		if (msgType === 'user_streaming_sessions') {
+			const sessions = data.sessions as Array<{ session_id: string; project_id: string | null }> | undefined;
+			const sessionIds = data.session_ids as string[] | undefined;
+			const newMap = new Map<string, string | null>();
+			if (sessions) {
+				// New format with project_id
+				for (const s of sessions) {
+					newMap.set(s.session_id, s.project_id ?? null);
+				}
+			} else if (sessionIds) {
+				// Backward compat: old format without project_id
+				for (const sid of sessionIds) {
+					newMap.set(sid, null);
+				}
+			}
+			console.log('[Tabs] Initial streaming sessions snapshot:', [...newMap.keys()]);
+			streamingSessions.set(newMap);
+			return;
+		}
+
+		// Handle branch change from another device — refresh git state
+		if (msgType === 'user_branch_changed') {
+			const projectId = data.project_id as string;
+			const branchName = data.branch_name as string;
+			console.log(`[Tabs] Branch changed on another device: project=${projectId}, branch=${branchName}`);
+			// Refresh git state if we're currently viewing this project
+			const gitState = get(git);
+			if (gitState.projectId === projectId) {
+				git.refreshStatus();
+				git.refreshDiffStats();
+			}
 			return;
 		}
 
@@ -2195,6 +1819,9 @@ function createTabsStore() {
 					}
 				}
 
+				// Extract streaming state early so message conversion can preserve streaming flags
+				const isStreaming = data.isStreaming as boolean || false;
+
 				const messages: ChatMessage[] = [];
 				const seenToolResults = new Set<string>(); // Track which tool_results we've merged
 
@@ -2249,7 +1876,8 @@ function createTabsStore() {
 						toolResult: m.toolResult as string | undefined,
 						toolStatus: m.toolStatus as 'running' | 'complete' | 'error' | undefined,
 						metadata: m.metadata as Record<string, unknown>,
-						streaming: false
+						// Preserve streaming flag from live_session_store during active streaming
+						streaming: isStreaming ? ((m.streaming as boolean) ?? false) : false
 					};
 
 					// For tool_use messages, try to merge the corresponding tool_result
@@ -2278,8 +1906,7 @@ function createTabsStore() {
 					messages.push(chatMessage);
 				}
 
-				// Handle streaming state from backend
-				const isStreaming = data.isStreaming as boolean || false;
+				// Handle streaming state from backend (isStreaming already extracted above for message conversion)
 				const streamingBuffer = data.streamingBuffer as Array<Record<string, unknown>> | undefined;
 				console.log(`[Tab ${tabId}] History response - isStreaming:`, isStreaming, 'bufferLen:', streamingBuffer?.length || 0);
 
@@ -2463,11 +2090,19 @@ function createTabsStore() {
 					}
 				}
 
-				// DEFENSIVE CHECK: Don't replace existing messages with empty array
-				// This can happen if the client reconnects right after stop, before JSONL is written.
-				// In that case, keep the existing messages to prevent "chat history disappearing" bug.
+				// DEFENSIVE CHECK: Don't replace existing messages with fewer/empty data.
+				// This can happen if JSONL has partial snapshots (stop_reason: null) or
+				// if the client reconnects before JSONL is fully written by the SDK.
+				// Preserve existing messages to prevent "chat history disappearing" bug.
 				const currentTab = getTab(tabId);
-				const shouldPreserveMessages = finalMessages.length === 0 && currentTab && currentTab.messages.length > 0;
+				const currentAssistantMsgs = currentTab?.messages.filter(m => m.role === 'assistant' && m.type === 'text') || [];
+				const incomingAssistantMsgs = finalMessages.filter(m => m.role === 'assistant' && m.type === 'text');
+				const shouldPreserveMessages = currentTab && currentTab.messages.length > 0 && !isStreaming && (
+					finalMessages.length === 0 ||
+					(currentAssistantMsgs.length > incomingAssistantMsgs.length) ||
+					// Guard against large message count drops (e.g., stale JSONL with partial data)
+					(finalMessages.length > 0 && currentTab.messages.length > finalMessages.length * 1.5)
+				);
 
 				if (shouldPreserveMessages) {
 					console.warn(`[Tab ${tabId}] Received empty history but tab has ${currentTab.messages.length} messages - preserving existing messages`);
@@ -2513,6 +2148,17 @@ function createTabsStore() {
 						tabUpdate.worktreeMode = 'existing';  // Session already has worktree
 					}
 
+					// Restore pending permissions/questions on reconnect
+					// Backend includes these in the history response when session has pending requests
+					const pendingPerms = data.pendingPermissions as PermissionRequestType[] | undefined;
+					const pendingQs = data.pendingQuestions as UserQuestionRequest[] | undefined;
+					if (pendingPerms && pendingPerms.length > 0) {
+						tabUpdate.pendingPermissions = pendingPerms;
+					}
+					if (pendingQs && pendingQs.length > 0) {
+						tabUpdate.pendingQuestions = pendingQs;
+					}
+
 					updateTab(tabId, tabUpdate);
 
 					// Update tab title based on first message
@@ -2527,10 +2173,45 @@ function createTabsStore() {
 				const receivedSession = data.session_id as string;
 				if (isStreaming && receivedSession) {
 					console.log(`[Tab ${tabId}] Session is streaming, starting server-authoritative polling`);
+					tabStreamingOnDisconnect.delete(tabId); // Clear — reconnect confirmed streaming
 					startPolling(tabId, receivedSession);
+
+					// Request pending permissions/questions as fallback
+					// The history response may include them, but if it doesn't (e.g., request
+					// arrived after load_session was processed), this ensures we pick them up
+					const currentWs = tabConnections.get(tabId);
+					if (currentWs?.readyState === WebSocket.OPEN) {
+						currentWs.send(JSON.stringify({ type: 'get_pending_permissions' }));
+						currentWs.send(JSON.stringify({ type: 'get_pending_questions' }));
+					}
 				} else {
-					// Not streaming - stop any existing polling (e.g., from a previous disconnect)
-					stopPolling(tabId);
+					// Not streaming according to load_session response.
+					// Check if this tab was streaming when it disconnected — if so, the
+					// isStreaming: false may be a brief race during SDK compaction.
+					// Keep polling for a grace period and let the poller verify the real state.
+					const disconnectSessionId = tabStreamingOnDisconnect.get(tabId);
+					if (disconnectSessionId && disconnectSessionId === receivedSession) {
+						console.log(`[Tab ${tabId}] load_session says !isStreaming but tab was streaming on disconnect — keeping poller for grace period`);
+						tabStreamingOnDisconnect.delete(tabId);
+						// Let the poller run for a few more cycles. If the backend truly
+						// stopped streaming, the poller's own streamingJustEnded logic will
+						// stop it and fire onStreamEnd. If streaming resumes (post-compaction),
+						// the poller will pick it up seamlessly.
+						// After 10s grace period, if poller is still running but never got
+						// isStreaming: true, force-stop it to avoid infinite idle polling.
+						setTimeout(() => {
+							const gracedSession = sessionState.getSession(disconnectSessionId);
+							if (gracedSession && !gracedSession.isStreaming && sessionPoller.isPolling(disconnectSessionId)) {
+								console.log(`[Tab ${tabId}] Grace period expired — streaming never resumed for ${disconnectSessionId}, stopping poller`);
+								sessionPoller.stop(disconnectSessionId);
+								sessionState.removeSession(disconnectSessionId);
+							}
+						}, 10000);
+					} else {
+						// Normal case: not streaming, stop any existing polling
+						tabStreamingOnDisconnect.delete(tabId);
+						stopPolling(tabId);
+					}
 				}
 
 				// Process any queued sync events that arrived while waiting for history
@@ -2567,14 +2248,18 @@ function createTabsStore() {
 
 				// Save immediately - critical for reconnection on refresh
 				saveTabsToServer(get({ subscribe }));
+
+				// Refresh sessions list so new session appears in sidebar immediately
+				loadSessionsInternal();
 				break;
 			}
 
 			case 'start': {
-				// Mark streaming as started, but DON'T create empty message yet
-				// Messages will be created when we get actual content (stream_delta for text, stream_block_start for tools)
-				// This prevents empty message boxes from appearing when Claude starts with a tool call
+				// Phase 5: Mark streaming started. Notifier handles sessionPoller.startStreaming().
 				const sessionId = data.session_id as string;
+
+				// Clear interrupt pending flag — new stream has started successfully
+				tabInterruptPending.delete(tabId);
 
 				update(s => ({
 					...s,
@@ -2585,133 +2270,42 @@ function createTabsStore() {
 							sessionId,
 							isStreaming: true,
 							streamStartTime: Date.now()
-							// NO empty message added here - wait for actual content
 						};
 					})
 				}));
 
-				// Start server-authoritative polling for this streaming session
-				// Polling ensures we always have correct state even if WebSocket events are missed
-				if (sessionId) {
-					startPolling(tabId, sessionId);
-				}
-
-				// Save again in case session_created wasn't received (backwards compat)
+				// Save in case session_created wasn't received (backwards compat)
 				saveTabsToServer(get({ subscribe }));
 				break;
 			}
 
 			case 'chunk': {
-				// 'chunk' is the final complete text from AssistantMessage
-				// When include_partial_messages=True, we already have this text from stream_delta events
-				// So we REPLACE the streaming message content (don't append) to avoid duplication
-				console.log(`[WS] Chunk received: len=${(data.content as string).length}`);
-				update(s => ({
-					...s,
-					tabs: s.tabs.map(tab => {
-						if (tab.id !== tabId) return tab;
-
-						const messages = [...tab.messages];
-						const streamingIdx = messages.findLastIndex(
-							m => m.type === 'text' && m.role === 'assistant' && m.streaming
-						);
-
-						if (streamingIdx !== -1) {
-							// REPLACE content - this is the final version from AssistantMessage
-							// Don't append, as stream_delta already accumulated the text
-							messages[streamingIdx] = {
-								...messages[streamingIdx],
-								content: data.content as string,
-								streaming: false // Mark as complete
-							};
-						} else {
-							// No streaming message exists - this is the first/only chunk
-							// (happens when include_partial_messages=False)
-							messages.push({
-								id: `text-${Date.now()}`,
-								role: 'assistant',
-								content: data.content as string,
-								type: 'text',
-								streaming: true
-							});
-						}
-
-						return { ...tab, messages };
-					})
-				}));
+				// Phase 5: Notification-only — notifier triggers pollNow(), poller updates sessionState
+				console.log(`[WS] Chunk received (notification-only): len=${(data.content as string).length}`);
 				break;
 			}
 
-			// StreamEvent handlers for real-time character-by-character streaming
+			// StreamEvent handlers — Phase 5: notification-only
+			// The notifier at the top of this function already forwarded the event to
+			// sessionPoller.pollNow(), which fetches authoritative state from the server.
+			// No local state updates needed here.
 			case 'stream_start': {
-				// Start of a new streaming response
-				// DON'T create empty message here - wait for actual content via stream_delta
-				// This prevents empty message boxes when Claude's response starts with a tool call
-				// BUT we can extract input token usage from the message_start event
-				// NOTE: REPLACE values, not add - SDK sends total context for current turn
-				const message = data.message as { usage?: Record<string, number> } | undefined;
-				const usage = message?.usage;
-				if (usage) {
-					console.log('[WS] Stream start with input usage (REPLACING):', usage);
-					update(s => ({
-						...s,
-						tabs: s.tabs.map(tab => {
-							if (tab.id !== tabId) return tab;
-
-							// Extract input token counts from message_start
-							// These represent the FULL context sent to Claude for this turn
-							const inputTokens = usage.input_tokens || 0;
-							const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
-							const cacheReadTokens = usage.cache_read_input_tokens || 0;
-
-							// REPLACE values - SDK sends total context, not increments
-							return {
-								...tab,
-								totalTokensIn: inputTokens,
-								totalCacheCreationTokens: cacheCreationTokens,
-								totalCacheReadTokens: cacheReadTokens,
-								// Update context used based on current turn's input tokens
-								contextUsed: inputTokens + cacheCreationTokens + cacheReadTokens
-							};
-						})
-					}));
-				} else {
-					console.log('[WS] Stream start received (no usage data)');
-				}
+				console.log('[WS] Stream start (notification-only)');
 				break;
 			}
 
-			case 'stream_block_start': {
-				// Batch non-critical block start events
-				pushEvent(tabId, 'stream_block_start', data);
-				break;
-			}
-
-			case 'stream_delta': {
-				// Use buffer for batched updates - dramatically reduces store updates
-				// from 50-100/sec to ~60/sec (RAF-based)
-				pushEvent(tabId, 'stream_delta', data);
-				break;
-			}
-
-			case 'stream_block_stop': {
-				// Batch block stop events
-				pushEvent(tabId, 'stream_block_stop', data);
-				break;
-			}
-
+			case 'stream_block_start':
+			case 'stream_delta':
+			case 'stream_block_stop':
 			case 'stream_message_delta': {
-				// Batch message delta (usage updates) - buffer handles accumulation
-				pushEvent(tabId, 'stream_message_delta', data);
+				// Streaming data events — handled by poller via sessionState
 				break;
 			}
 
 			case 'tool_use': {
-				// tool_use is the final event from AssistantMessage
-				// When include_partial_messages=True, stream_block_start may have already created this tool
+				// Phase 5: Notification-only — state updated by poller.
+				// Keep tabPendingTools tracking for WS health timeout management.
 				const toolId = data.id as string;
-
-				// Track this tool as pending - extends connection timeout while tool executes
 				if (toolId) {
 					let pending = tabPendingTools.get(tabId);
 					if (!pending) {
@@ -2719,139 +2313,41 @@ function createTabsStore() {
 						tabPendingTools.set(tabId, pending);
 					}
 					pending.add(toolId);
-					console.log(`[Tab ${tabId}] Tool started: ${data.name} (${toolId}), pending tools: ${pending.size}`);
+					console.log(`[Tab ${tabId}] Tool started: ${data.name} (${toolId}), pending: ${pending.size}`);
 				}
-
-				update(s => ({
-					...s,
-					tabs: s.tabs.map(tab => {
-						if (tab.id !== tabId) return tab;
-
-						let messages = [...tab.messages];
-
-						// Check if this tool already exists (from stream_block_start)
-						const existingToolIdx = messages.findIndex(
-							m => m.type === 'tool_use' && m.toolId === toolId
-						);
-
-						if (existingToolIdx !== -1) {
-							// Update existing tool message with final data
-							messages[existingToolIdx] = {
-								...messages[existingToolIdx],
-								toolName: data.name as string,
-								toolInput: data.input as Record<string, unknown>,
-								toolStatus: 'running'
-							};
-							return { ...tab, messages };
-						}
-
-						// No existing tool - create new one
-						const streamingIdx = messages.findLastIndex(
-							m => m.type === 'text' && m.role === 'assistant' && m.streaming
-						);
-						if (streamingIdx !== -1) {
-							if (messages[streamingIdx].content) {
-								// Mark text message as complete if it has content
-								messages[streamingIdx] = {
-									...messages[streamingIdx],
-									streaming: false
-								};
-							} else {
-								// Remove empty streaming text messages to avoid leaving empty cards
-								messages = messages.filter((_, i) => i !== streamingIdx);
-							}
-						}
-
-						messages.push({
-							id: `tool-${Date.now()}-${toolId || ''}`,
-							role: 'assistant',
-							content: '',
-							type: 'tool_use',
-							toolName: data.name as string,
-							toolId: toolId,
-							toolInput: data.input as Record<string, unknown>,
-							toolStatus: 'running',
-							streaming: true,
-							profileId: tab.currentQueryProfileId || undefined
-						});
-
-						return { ...tab, messages };
-					})
-				}));
 				break;
 			}
 
 			case 'tool_result': {
-				// Group tool result with its corresponding tool_use message
+				// Phase 5: Notification-only — state updated by poller.
+				// Keep tabPendingTools tracking for WS health timeout management.
 				const toolUseId = data.tool_use_id as string;
-				const output = data.output as string;
-				const isError = data.is_error as boolean;
-
-				// Remove this tool from pending - no longer waiting for it
 				if (toolUseId) {
 					const pending = tabPendingTools.get(tabId);
 					if (pending) {
 						pending.delete(toolUseId);
-						console.log(`[Tab ${tabId}] Tool completed: ${toolUseId}, pending tools: ${pending.size}`);
+						console.log(`[Tab ${tabId}] Tool completed: ${toolUseId}, pending: ${pending.size}`);
 					}
 				}
-
-				update(s => ({
-					...s,
-					tabs: s.tabs.map(tab => {
-						if (tab.id !== tabId) return tab;
-
-						let messages = [...tab.messages];
-
-						// Find the matching tool_use message and embed the result
-						let found = false;
-						for (let i = messages.length - 1; i >= 0; i--) {
-							const m = messages[i];
-							if (m.type === 'tool_use' && m.toolId === toolUseId) {
-								messages[i] = {
-									...m,
-									toolResult: output,
-									toolStatus: isError ? 'error' : 'complete',
-									streaming: false
-								};
-								found = true;
-								break;
-							}
-						}
-
-						// Fallback: if not found by toolId, try any running tool_use
-						if (!found) {
-							for (let i = messages.length - 1; i >= 0; i--) {
-								const m = messages[i];
-								if (m.type === 'tool_use' && m.toolStatus === 'running') {
-									messages[i] = {
-										...m,
-										toolResult: output,
-										toolStatus: isError ? 'error' : 'complete',
-										streaming: false
-									};
-									break;
-								}
-							}
-						}
-
-						// DON'T add empty streaming placeholder here
-						// The stream_delta handler will create a message when text actually arrives
-						// Adding empty placeholders causes lingering empty message boxes
-
-						return { ...tab, messages };
-					})
-				}));
 				break;
 			}
 
 			case 'done': {
+				// Phase 5: Simplified — poller handles messages, we handle control flow & notifications.
 				const metadata = data.metadata as Record<string, unknown>;
 				const sessionId = data.session_id as string;
-				console.log('[WS] Done event received, cleaning up streaming messages');
+				console.log('[WS] Done event received');
 
-				// Stop polling since streaming is complete
-				stopPolling(tabId);
+				// Clear interrupt pending flag (safety — shouldn't still be set at 'done')
+				tabInterruptPending.delete(tabId);
+
+				// CRITICAL: Do NOT stop polling immediately. Instead, trigger one final poll
+				// to fetch the filtered messages from end_streaming(). The poller will detect
+				// the streaming→not-streaming transition and auto-stop + fire onStreamEnd.
+				const doneSessionId = sessionId || getTab(tabId)?.sessionId;
+				if (doneSessionId) {
+					sessionPoller.pollNow(doneSessionId);
+				}
 
 				// Clear any pending stop timeout since streaming is complete
 				const doneStopTimeout = stopTimeouts.get(tabId);
@@ -2864,61 +2360,47 @@ function createTabsStore() {
 				tabPendingTools.delete(tabId);
 
 				// Get current tab state before updating (for notification)
-				const currentTab = getTab(tabId);
-				const durationSeconds = currentTab?.streamStartTime
-					? (Date.now() - currentTab.streamStartTime) / 1000
+				const currentDoneTab = getTab(tabId);
+				const durationSeconds = currentDoneTab?.streamStartTime
+					? (Date.now() - currentDoneTab.streamStartTime) / 1000
 					: undefined;
 
-				let finalTitle: string | null = null;
-
+				// Update tab control state (isStreaming, sessionId) — NOT messages
+				// Messages are managed by sessionState via the poller
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
 
-						let messages = tab.messages.map(m =>
-							m.streaming ? { ...m, streaming: false } : m
-						);
-						messages = messages.filter(
-							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
-						);
-
-						if (messages.length > 0) {
-							const lastIdx = messages.findLastIndex(m => m.role === 'assistant');
-							if (lastIdx !== -1) {
-								messages[lastIdx] = {
-									...messages[lastIdx],
-									metadata
-								};
-							}
-						}
-
 						// Update title if this is the first response
 						let title = tab.title;
-						if (title === 'New Chat' && messages.length > 0) {
-							const firstUserMsg = messages.find(m => m.role === 'user');
+						if (title === 'New Chat' && tab.messages.length > 0) {
+							const firstUserMsg = tab.messages.find(m => m.role === 'user');
 							if (firstUserMsg) {
 								title = firstUserMsg.content.substring(0, 100) + (firstUserMsg.content.length > 100 ? '...' : '');
 							}
 						}
-						finalTitle = title;
 
 						return {
 							...tab,
-							messages,
 							isStreaming: false,
 							streamStartTime: null,
 							sessionId: sessionId || tab.sessionId,
-							title
+							title,
+							// Note: messages are NOT updated here. During streaming, the derived
+							// merge store overlays sessionState messages onto the tab. The final
+							// messages are flushed to the raw store in onStreamEnd, ensuring they
+							// persist after sessionState cleanup.
 						};
 					})
 				}));
 
 				// Trigger browser notification if enabled and permission granted
+				const doneTab = getTab(tabId);
 				if (isNotificationsEnabled() && getPermission() === 'granted') {
 					notifySessionComplete({
 						sessionId: sessionId || '',
-						sessionTitle: finalTitle,
+						sessionTitle: doneTab?.title ?? null,
 						durationSeconds,
 						totalCostUsd: metadata?.total_cost_usd as number | undefined,
 						tokensIn: metadata?.tokens_in as number | undefined,
@@ -2927,77 +2409,76 @@ function createTabsStore() {
 					});
 				}
 
-				// Reload full session with messages from backend
-				// This ensures we have complete JSONL-based message content and token counts.
-				// The metadata from the done event is already applied above, so we need to
-				// preserve it if the reload doesn't include metadata (race condition with JSONL write).
-				// Use longer delay to give SDK time to flush JSONL writes.
-				if (sessionId) {
-					setTimeout(async () => {
-						try {
-							// Get current state to preserve metadata if reload doesn't include it
-							const currentTab = getTab(tabId);
-							const currentLastAssistantIdx = currentTab?.messages.findLastIndex(m => m.role === 'assistant');
-							const currentMetadata = currentLastAssistantIdx !== undefined && currentLastAssistantIdx !== -1
-								? currentTab?.messages[currentLastAssistantIdx]?.metadata
-								: undefined;
-
-							const success = await tabs.loadSessionInTab(tabId, sessionId);
-							if (success) {
-								console.log('[Tab] Reloaded session with messages after streaming:', sessionId);
-
-								// If the reloaded data doesn't have metadata but we had it before,
-								// restore the metadata from the done event
-								const reloadedTab = getTab(tabId);
-								if (reloadedTab && currentMetadata) {
-									const lastAssistantIdx = reloadedTab.messages.findLastIndex(m => m.role === 'assistant');
-									if (lastAssistantIdx !== -1) {
-										const lastMsg = reloadedTab.messages[lastAssistantIdx];
-										// Only restore if the reloaded message doesn't have cost/duration metadata
-										if (!lastMsg.metadata?.cost_usd && !lastMsg.metadata?.total_cost_usd) {
-											console.log('[Tab] Restoring metadata from done event that was lost in reload');
-											update(s => ({
-												...s,
-												tabs: s.tabs.map(t => {
-													if (t.id !== tabId) return t;
-													const messages = [...t.messages];
-													if (messages[lastAssistantIdx]) {
-														messages[lastAssistantIdx] = {
-															...messages[lastAssistantIdx],
-															metadata: { ...messages[lastAssistantIdx].metadata, ...currentMetadata }
-														};
-													}
-													return { ...t, messages };
-												})
-											}));
-										}
-									}
-								}
-							}
-						} catch (err) {
-							// Log but don't fail - we already have the messages from streaming
-							// The metadata from done event is already applied
-							console.warn('[Tab] Failed to reload session after streaming, keeping streamed data:', err);
-						}
-					}, 1000); // 1000ms delay to give SDK more time to flush JSONL
-				}
-
 				// Refresh sessions list
 				loadSessionsInternal();
 
 				// Save tabs state since sessionId may have changed (debounced)
 				saveTabsToServer(get({ subscribe }));
+
+				// Safety: ensure cleanup if the poller pipeline fails (network error, /live down).
+				// The primary cleanup happens in onStreamEnd (fired by poller on streaming→not-streaming),
+				// but if the final poll never completes, stale data would persist.
+				{
+					const cleanupId = sessionId || currentDoneTab?.sessionId;
+					if (cleanupId) {
+						setTimeout(() => {
+							// Check if onStreamEnd already handled cleanup successfully
+							if (tabStreamEndCleanedUp.get(cleanupId)) {
+								console.log(`[Tab ${tabId}] Safety: skipping — onStreamEnd already cleaned up ${cleanupId}`);
+								tabStreamEndCleanedUp.delete(cleanupId);
+								return;
+							}
+
+							console.warn(`[Tab ${tabId}] Safety: onStreamEnd didn't fire for ${cleanupId}, running fallback cleanup`);
+
+							// Force stop polling if still running
+							if (sessionPoller.isPolling(cleanupId)) {
+								console.warn(`[Tab ${tabId}] Safety: forcing poller stop for ${cleanupId}`);
+								sessionPoller.stop(cleanupId);
+							}
+							// Remove stale sessionState
+							const session = sessionState.getSession(cleanupId);
+							if (session) {
+								sessionState.removeSession(cleanupId);
+							}
+							// Trigger JSONL refresh if not already done
+							const refreshTab = getTab(tabId);
+							if (refreshTab && !refreshTab.isStreaming && refreshTab.sessionId === cleanupId) {
+								const ws = tabConnections.get(tabId);
+								if (ws?.readyState === WebSocket.OPEN) {
+									console.log(`[Tab ${tabId}] Safety: auto-refreshing from JSONL for ${cleanupId}`);
+									tabExpectedSessionId.set(tabId, cleanupId);
+									tabsWaitingForHistory.set(tabId, []);
+									ws.send(JSON.stringify({ type: 'load_session', session_id: cleanupId }));
+								}
+							}
+						}, 5000);
+					}
+				}
 				break;
 			}
 
 			case 'stopped':
 			case 'interrupted': {
-				// Both 'stopped' (from task cancellation) and 'interrupted' (from SDK interrupt)
-				// should be handled the same way - stop streaming and mark as stopped
 				console.log(`[Tab ${tabId}] Received ${msgType} message`);
 
-				// Stop polling since streaming is stopped
-				stopPolling(tabId);
+				// If this is from an interrupt_and_query, skip all cleanup.
+				// sendMessage() already stopped the poller, flushed messages to raw store,
+				// and removed session state. A new stream is expected momentarily.
+				if (tabInterruptPending.get(tabId)) {
+					console.log(`[Tab ${tabId}] Skipping cleanup — interrupt_and_query pending, new stream expected`);
+					tabPendingTools.delete(tabId);
+					break;
+				}
+
+				// Phase 5: Simplified — poller handles messages, we handle control flow.
+
+				// Trigger final poll to fetch cleaned-up messages (same pattern as 'done')
+				const stoppedTab = getTab(tabId);
+				const stoppedSessionId = stoppedTab?.sessionId;
+				if (stoppedSessionId) {
+					sessionPoller.pollNow(stoppedSessionId);
+				}
 
 				// Clear the fallback timeout since we received confirmation
 				const stopTimeout = stopTimeouts.get(tabId);
@@ -3009,58 +2490,45 @@ function createTabsStore() {
 				// Clear pending tools tracking since stream is stopped
 				tabPendingTools.delete(tabId);
 
+				// Mark streaming as ended — message state is managed by poller/sessionState
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
-
-						let messages = tab.messages.map(m => {
-							// Mark running tools as error (interrupted)
-							if (m.type === 'tool_use' && m.toolStatus === 'running') {
-								return { ...m, streaming: false, toolStatus: 'error' as const };
-							}
-							// Mark streaming text as not streaming
-							return m.streaming ? { ...m, streaming: false } : m;
-						});
-						messages = messages.filter(
-							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
-						);
-
-						if (messages.length > 0) {
-							const lastIdx = messages.findLastIndex(m => m.role === 'assistant');
-							if (lastIdx !== -1) {
-								messages[lastIdx] = {
-									...messages[lastIdx],
-									content: messages[lastIdx].content + '\n\n[Stopped]'
-								};
-							}
-						}
-
-						return { ...tab, messages, isStreaming: false };
+						return { ...tab, isStreaming: false };
 					})
 				}));
+
+				// Safety: ensure cleanup if the poller pipeline fails
+				{
+					const cleanupId = stoppedSessionId;
+					if (cleanupId) {
+						setTimeout(() => {
+							if (sessionPoller.isPolling(cleanupId)) {
+								console.warn(`[Tab ${tabId}] Safety: forcing poller stop for ${cleanupId}`);
+								sessionPoller.stop(cleanupId);
+							}
+							const session = sessionState.getSession(cleanupId);
+							if (session) {
+								sessionState.removeSession(cleanupId);
+							}
+						}, 5000);
+					}
+				}
 				break;
 			}
 
 			case 'error': {
-				// Stop polling since streaming errored
+				// Phase 5: Simplified — keep error state for UI, poller handles messages.
+				tabInterruptPending.delete(tabId);
 				stopPolling(tabId);
 
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
 						if (tab.id !== tabId) return tab;
-
-						let messages = tab.messages.map(m =>
-							m.streaming ? { ...m, streaming: false } : m
-						);
-						messages = messages.filter(
-							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
-						);
-
 						return {
 							...tab,
-							messages,
 							isStreaming: false,
 							error: data.message as string
 						};
@@ -3148,194 +2616,24 @@ function createTabsStore() {
 			}
 
 			case 'system': {
-				// Handle system messages from SDK (e.g., /context command output, streaming events)
+				// Phase 5: Notification-only — system messages handled by poller.
+				// Log for debugging; state is fetched from /sessions/{id}/live.
 				const subtype = data.subtype as string;
-				const systemData = data.data as Record<string, unknown>;
-
-				console.log('[WS] System message received:', subtype, systemData);
-
-				// Check if this is a streaming event (when include_partial_messages=true)
-				const streamEvent = systemData?.event as { type?: string; delta?: { type?: string; text?: string }; index?: number } | undefined;
-				if (streamEvent?.type) {
-					const eventType = streamEvent.type;
-					console.log(`[WS] Streaming event: ${eventType}`);
-
-					// Handle streaming text deltas
-					if (eventType === 'content_block_delta' && streamEvent.delta?.type === 'text_delta' && streamEvent.delta?.text) {
-						const deltaText = streamEvent.delta.text;
-						console.log(`[WS] Text delta received: len=${deltaText.length}`);
-
-						// Append delta text to the current streaming message
-						update(s => ({
-							...s,
-							tabs: s.tabs.map(tab => {
-								if (tab.id !== tabId) return tab;
-
-								const messages = [...tab.messages];
-								const streamingIdx = messages.findLastIndex(
-									m => m.type === 'text' && m.role === 'assistant' && m.streaming
-								);
-
-								if (streamingIdx !== -1) {
-									messages[streamingIdx] = {
-										...messages[streamingIdx],
-										content: messages[streamingIdx].content + deltaText
-									};
-								} else {
-									// Create new streaming message if none exists
-									messages.push({
-										id: `text-${Date.now()}`,
-										role: 'assistant',
-										content: deltaText,
-										type: 'text',
-										streaming: true
-									});
-								}
-
-								return { ...tab, messages };
-							})
-						}));
-						break;
-					}
-
-					// For other streaming events (message_start, content_block_start, etc.), just log
-					// These are informational and the actual text comes via content_block_delta
-					break;
-				}
-
-				// Filter out spurious status messages with no meaningful status
-				// The SDK sometimes sends empty status messages during compaction
-				if (subtype === 'status') {
-					const status = systemData?.status as string | undefined;
-					if (!status || status === 'unknown') {
-						console.log('[WS] Ignoring empty/unknown status message:', systemData);
-						break;
-					}
-				}
-
-				// Extract content for display - for local_command, the content is in data.content
-				let displayContent = '';
-				if (systemData?.content && typeof systemData.content === 'string') {
-					displayContent = systemData.content;
-				} else if (typeof systemData === 'object') {
-					displayContent = JSON.stringify(systemData, null, 2);
-				}
-
-				// Check if this is a compact_boundary - we need to reset context usage
-				// since the SDK doesn't provide post_tokens, we reset to null so the
-				// next stream_start will set the proper value
-				const isCompactBoundary = subtype === 'compact_boundary';
-
-				update(s => ({
-					...s,
-					tabs: s.tabs.map(tab => {
-						if (tab.id !== tabId) return tab;
-
-						// First, mark any streaming text message as complete
-						let messages = tab.messages.map(m =>
-							m.streaming ? { ...m, streaming: false } : m
-						);
-						// Remove empty streaming text messages
-						messages = messages.filter(
-							m => !(m.type === 'text' && m.role === 'assistant' && !m.content)
-						);
-
-						// Add the system message
-						messages.push({
-							id: `system-${Date.now()}`,
-							role: 'system' as const,
-							content: displayContent,
-							type: 'system' as const,
-							systemSubtype: subtype,
-							systemData: systemData,
-							streaming: false
-						});
-
-						// Reset context usage on compact_boundary - SDK doesn't provide post_tokens
-						// The next stream_start will set the correct compacted value
-						if (isCompactBoundary) {
-							return {
-								...tab,
-								messages,
-								contextUsed: null,
-								totalTokensIn: 0,
-								totalTokensOut: 0,
-								totalCacheCreationTokens: 0,
-								totalCacheReadTokens: 0
-							};
-						}
-
-						return { ...tab, messages };
-					})
-				}));
+				console.log('[WS] System message (notification-only):', subtype);
 				break;
 			}
 
+			// ── Subagent events — Phase 5: notification-only ──────────────────
+			// Subagent state is fetched by the poller from /sessions/{id}/live.
+			// We only keep tabPendingTools tracking for WS health timeouts.
 			case 'subagent_start': {
-				// Subagent task started - create a new subagent message group
-				const agentId = data.agent_id as string;
-				const agentType = data.agent_type as string;
-				const description = data.description as string;
-				const prompt = data.prompt as string;
-				const toolId = data.tool_id as string; // The tool_use ID that launched this subagent
-
-				console.log('[WS] Subagent started:', agentId, agentType, description);
-
-				update(s => ({
-					...s,
-					tabs: s.tabs.map(tab => {
-						if (tab.id !== tabId) return tab;
-
-						let messages = [...tab.messages];
-
-						// Find and mark the Task tool_use as not streaming
-						const toolUseIdx = messages.findIndex(m => m.type === 'tool_use' && m.toolId === toolId);
-						if (toolUseIdx !== -1) {
-							messages[toolUseIdx] = { ...messages[toolUseIdx], streaming: false };
-						}
-
-						// Mark any streaming text message as complete
-						const streamingIdx = messages.findLastIndex(
-							m => m.type === 'text' && m.role === 'assistant' && m.streaming
-						);
-						if (streamingIdx !== -1) {
-							if (messages[streamingIdx].content) {
-								messages[streamingIdx] = { ...messages[streamingIdx], streaming: false };
-							} else {
-								messages = messages.filter((_, i) => i !== streamingIdx);
-							}
-						}
-
-						// Add subagent message group
-						messages.push({
-							id: `subagent-${agentId}`,
-							role: 'assistant',
-							content: '',
-							type: 'subagent',
-							toolId: toolId,
-							agentId: agentId,
-							agentType: agentType,
-							agentDescription: description,
-							agentPrompt: prompt,
-							agentStatus: 'running',
-							agentChildren: [],
-							streaming: true
-						});
-
-						return { ...tab, messages };
-					})
-				}));
+				console.log('[WS] Subagent started (notification-only):', data.agent_id, data.agent_type);
 				break;
 			}
 
 			case 'subagent_tool_use': {
-				// Tool use within a subagent - add to the subagent's children
-				const agentId = data.agent_id as string;
-				const toolName = data.name as string;
+				// Keep tabPendingTools tracking for WS health timeout
 				const toolId = data.id as string;
-				const toolInput = data.input as Record<string, unknown>;
-
-				// Track this subagent tool as pending - extends connection timeout while tool executes
 				if (toolId) {
 					let pending = tabPendingTools.get(tabId);
 					if (!pending) {
@@ -3343,183 +2641,31 @@ function createTabsStore() {
 						tabPendingTools.set(tabId, pending);
 					}
 					pending.add(toolId);
-					console.log(`[Tab ${tabId}] Subagent tool started: ${toolName} (${toolId}), pending tools: ${pending.size}`);
+					console.log(`[Tab ${tabId}] Subagent tool started: ${data.name} (${toolId}), pending: ${pending.size}`);
 				}
-
-				update(s => ({
-					...s,
-					tabs: s.tabs.map(tab => {
-						if (tab.id !== tabId) return tab;
-
-						const messages = tab.messages.map(m => {
-							if (m.type === 'subagent' && m.agentId === agentId) {
-								const children = [...(m.agentChildren || [])];
-								children.push({
-									id: `${agentId}-tool-${toolId}`,
-									type: 'tool_use',
-									content: '',
-									toolName: toolName,
-									toolId: toolId,
-									toolInput: toolInput,
-									toolStatus: 'running'
-								});
-								return { ...m, agentChildren: children };
-							}
-							return m;
-						});
-
-						return { ...tab, messages };
-					})
-				}));
 				break;
 			}
 
 			case 'subagent_tool_result': {
-				// Tool result within a subagent - embed in matching tool_use child
-				const agentId = data.agent_id as string;
+				// Keep tabPendingTools tracking for WS health timeout
 				const toolUseId = data.tool_use_id as string;
-				const output = data.output as string;
-				const isError = data.is_error as boolean;
-
-				// Remove this subagent tool from pending - no longer waiting for it
 				if (toolUseId) {
 					const pending = tabPendingTools.get(tabId);
 					if (pending) {
 						pending.delete(toolUseId);
-						console.log(`[Tab ${tabId}] Subagent tool completed: ${toolUseId}, pending tools: ${pending.size}`);
+						console.log(`[Tab ${tabId}] Subagent tool completed: ${toolUseId}, pending: ${pending.size}`);
 					}
 				}
-
-				update(s => ({
-					...s,
-					tabs: s.tabs.map(tab => {
-						if (tab.id !== tabId) return tab;
-
-						const messages = tab.messages.map(m => {
-							if (m.type === 'subagent' && m.agentId === agentId) {
-								const children = [...(m.agentChildren || [])];
-								// Find matching tool_use and embed result
-								let found = false;
-								for (let i = children.length - 1; i >= 0; i--) {
-									if (children[i].type === 'tool_use' && children[i].toolId === toolUseId) {
-										children[i] = {
-											...children[i],
-											toolResult: output,
-											toolStatus: isError ? 'error' : 'complete'
-										};
-										found = true;
-										break;
-									}
-								}
-								// Fallback: try any running tool_use
-								if (!found) {
-									for (let i = children.length - 1; i >= 0; i--) {
-										if (children[i].type === 'tool_use' && children[i].toolStatus === 'running') {
-											children[i] = {
-												...children[i],
-												toolResult: output,
-												toolStatus: isError ? 'error' : 'complete'
-											};
-											break;
-										}
-									}
-								}
-								return { ...m, agentChildren: children };
-							}
-							return m;
-						});
-
-						return { ...tab, messages };
-					})
-				}));
 				break;
 			}
 
 			case 'subagent_chunk': {
-				// Text chunk from subagent - add to children or update last text child
-				const agentId = data.agent_id as string;
-				const content = data.content as string;
-
-				update(s => ({
-					...s,
-					tabs: s.tabs.map(tab => {
-						if (tab.id !== tabId) return tab;
-
-						const messages = tab.messages.map(m => {
-							if (m.type === 'subagent' && m.agentId === agentId) {
-								const children = [...(m.agentChildren || [])];
-								const lastChild = children[children.length - 1];
-
-								if (lastChild && lastChild.type === 'text') {
-									// Append to existing text child
-									children[children.length - 1] = {
-										...lastChild,
-										content: lastChild.content + content
-									};
-								} else {
-									// Create new text child
-									children.push({
-										id: `${agentId}-text-${Date.now()}`,
-										type: 'text',
-										content: content
-									});
-								}
-								return { ...m, agentChildren: children };
-							}
-							return m;
-						});
-
-						return { ...tab, messages };
-					})
-				}));
+				// Notification-only — poller handles state
 				break;
 			}
 
 			case 'subagent_done': {
-				// Subagent completed - update status and store final result
-				const agentId = data.agent_id as string;
-				const result = data.result as string | undefined;
-				const isError = data.is_error as boolean | undefined;
-
-				console.log('[WS] Subagent done:', agentId, isError ? 'error' : 'success');
-
-				update(s => ({
-					...s,
-					tabs: s.tabs.map(tab => {
-						if (tab.id !== tabId) return tab;
-
-						// Find the subagent to get its linked toolId
-						const subagent = tab.messages.find(m => m.type === 'subagent' && m.agentId === agentId);
-						const linkedToolId = subagent?.toolId;
-
-						const messages = tab.messages.map(m => {
-							// Update the subagent message
-							if (m.type === 'subagent' && m.agentId === agentId) {
-								return {
-									...m,
-									content: result || '',
-									agentStatus: isError ? 'error' as const : 'completed' as const,
-									streaming: false
-								};
-							}
-							// Also mark the linked Task tool_use as complete
-							if (linkedToolId && m.type === 'tool_use' && m.toolId === linkedToolId) {
-								return {
-									...m,
-									toolStatus: 'complete' as const,
-									streaming: false
-								};
-							}
-							return m;
-						});
-
-						// DON'T add empty streaming placeholder here
-						// The stream_delta handler will create a message when text actually arrives
-						// Adding empty placeholders causes lingering empty message boxes
-
-						return { ...tab, messages };
-					})
-				}));
+				console.log('[WS] Subagent done (notification-only):', data.agent_id);
 				break;
 			}
 
@@ -3692,31 +2838,8 @@ function createTabsStore() {
 			}
 
 			case 'plugin_message': {
-				// Plugin hook message (warnings, info from security-guidance, etc.)
-				const plugin = data.plugin as string;
-				const message = data.message as string;
-				const severity = data.severity as string;
-
-				// Add as a system message with plugin_warning subtype
-				// This matches how it's loaded from hooks.jsonl for consistency
-				update(s => ({
-					...s,
-					tabs: s.tabs.map(tab => {
-						if (tab.id !== tabId) return tab;
-						return {
-							...tab,
-							messages: [...tab.messages, {
-								id: `plugin-${Date.now()}`,
-								role: 'system' as const,
-								content: message,
-								type: 'system' as MessageType,
-								systemSubtype: 'plugin_warning',
-								systemData: { plugin, message, severity },
-								metadata: { plugin, severity }
-							}]
-						};
-					})
-				}));
+				// Phase 5: Notification-only — plugin messages handled by poller.
+				console.log('[WS] Plugin message (notification-only):', data.plugin);
 				break;
 			}
 		}
@@ -4072,15 +3195,14 @@ function createTabsStore() {
 			}));
 
 			// Connect WebSocket for new tab
+			// Note: We rely on WebSocket load_session (sent in ws.onopen) to load messages
+			// when sessionId is set. This ensures we get streaming state and buffer for
+			// active sessions. DO NOT call loadSessionInTab here - it uses REST which
+			// doesn't have streaming info and can race/clobber WebSocket streaming state.
 			connectTab(newTabId);
 
-			// If sessionId provided, load that session
-			if (sessionId) {
-				this.loadSessionInTab(newTabId, sessionId);
-			} else {
-				// Save tabs state (debounced)
-				saveTabsToServer(get({ subscribe }));
-			}
+			// Save tabs state (debounced)
+			saveTabsToServer(get({ subscribe }));
 
 			return newTabId;
 		},
@@ -4163,6 +3285,21 @@ function createTabsStore() {
 			if (existingTabId) {
 				// Session already open - switch to that tab
 				this.setActiveTab(existingTabId);
+
+				// Refresh from JSONL if session is not actively streaming.
+				// This ensures stale messages from a previous streaming session
+				// are replaced with the correct historical view from JSONL.
+				const tab = getTab(existingTabId);
+				if (tab && !tab.isStreaming && tab.sessionId) {
+					const ws = tabConnections.get(existingTabId);
+					if (ws?.readyState === WebSocket.OPEN) {
+						console.log(`[Tab ${existingTabId}] Refreshing from JSONL on openSession for ${tab.sessionId}`);
+						tabExpectedSessionId.set(existingTabId, tab.sessionId);
+						tabsWaitingForHistory.set(existingTabId, []);
+						ws.send(JSON.stringify({ type: 'load_session', session_id: tab.sessionId }));
+					}
+				}
+
 				return existingTabId;
 			} else {
 				// Create new tab with this session
@@ -4246,21 +3383,46 @@ function createTabsStore() {
 			if (tab.isStreaming && tab.sessionId) {
 				console.log(`[Tab ${tabId}] Interrupting and sending new message: ${prompt.substring(0, 50)}...`);
 
-				// Immediately mark running tools as interrupted in the UI
-				// This prevents the spinner from showing on old tools while new streaming starts
+				// Get current session state messages (the complete message list during streaming)
+				// before we clean up, so we can flush them to the raw store.
+				const currentSession = sessionState.getSession(tab.sessionId);
+				const streamingMessages = currentSession?.messages || [];
+
+				// Stop poller and remove session state BEFORE the 'interrupted' event arrives.
+				// This prevents the poller from detecting a streaming→not-streaming transition
+				// and firing onStreamEnd (which would remove session state and kill the new stream).
+				sessionPoller.stop(tab.sessionId);
+				sessionState.removeSession(tab.sessionId);
+
+				// Mark that we're expecting a new stream from interrupt_and_query.
+				// The 'interrupted'/'stopped' handler checks this flag to skip cleanup.
+				tabInterruptPending.set(tabId, true);
+
+				// Flush streaming messages to raw store + mark tools as interrupted + add user message.
+				// The user message was already added by the update above (to raw store), but session
+				// state was overlaying it. Now that session state is removed, we need the raw store
+				// to have the full message list (streaming messages + new user message).
+				const updatedMessages = streamingMessages.map(m => {
+					if (m.type === 'tool_use' && m.toolStatus === 'running') {
+						return { ...m, streaming: false, toolStatus: 'error' as const };
+					}
+					return m.streaming ? { ...m, streaming: false } : m;
+				});
+
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(t => {
 						if (t.id !== tabId) return t;
-						const messages = t.messages.map(m => {
-							// Mark running tools as error (interrupted)
-							if (m.type === 'tool_use' && m.toolStatus === 'running') {
-								return { ...m, streaming: false, toolStatus: 'error' as const };
-							}
-							// Mark streaming text as not streaming
-							return m.streaming ? { ...m, streaming: false } : m;
-						});
-						return { ...t, messages };
+						return {
+							...t,
+							messages: [...updatedMessages, {
+								id: userMsgId,
+								role: 'user' as const,
+								content: prompt,
+								profileId: queryProfileId
+							}]
+							// isStreaming already set to true by the update above
+						};
 					})
 				}));
 
@@ -4573,7 +3735,7 @@ function createTabsStore() {
 					}));
 				}
 				stopTimeouts.delete(tabId);
-			}, 5000); // 5 second timeout
+			}, 10000); // 10 second timeout (generous fallback in case backend confirmation is delayed)
 
 			stopTimeouts.set(tabId, timeoutId);
 		},

@@ -52,6 +52,8 @@ class GitService:
                 cwd=working_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 check=check
             )
@@ -71,7 +73,8 @@ class GitService:
         try:
             result = self._run_git(working_dir, ["rev-parse", "--git-dir"], timeout=5)
             return result.returncode == 0
-        except Exception:
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning(f"is_git_repo check failed for '{working_dir}': {e}")
             return False
 
     def get_remote_url(self, working_dir: str) -> Optional[str]:
@@ -81,7 +84,8 @@ class GitService:
             if result.returncode == 0:
                 return result.stdout.strip()
             return None
-        except Exception:
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning(f"get_remote_url failed for '{working_dir}': {e}")
             return None
 
     def get_current_branch(self, working_dir: str) -> Optional[str]:
@@ -92,7 +96,8 @@ class GitService:
                 branch = result.stdout.strip()
                 return branch if branch != "HEAD" else None
             return None
-        except Exception:
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning(f"get_current_branch failed for '{working_dir}': {e}")
             return None
 
     def get_default_branch(self, working_dir: str) -> str:
@@ -122,7 +127,8 @@ class GitService:
                     return branch
 
             return "main"  # Default fallback
-        except Exception:
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning(f"get_default_branch failed for '{working_dir}': {e}")
             return "main"
 
     def fetch(self, working_dir: str, remote: str = "origin") -> bool:
@@ -179,7 +185,8 @@ class GitService:
         """
         try:
             # Use for-each-ref for structured output
-            format_str = "%(refname:short)|%(objectname:short)|%(subject)|%(HEAD)|%(upstream:short)|%(upstream:track)"
+            # Include %(refname) to reliably determine local vs remote
+            format_str = "%(refname)|%(refname:short)|%(objectname:short)|%(subject)|%(HEAD)|%(upstream:short)|%(upstream:track)"
             args = [
                 "for-each-ref",
                 f"--format={format_str}",
@@ -198,22 +205,24 @@ class GitService:
                 if not line:
                     continue
 
-                parts = line.split("|", 5)
-                if len(parts) < 4:
+                parts = line.split("|", 6)
+                if len(parts) < 5:
                     continue
 
-                name = parts[0]
-                commit = parts[1]
-                message = parts[2] if len(parts) > 2 else ""
-                is_current = parts[3] == "*" if len(parts) > 3 else False
-                upstream = parts[4] if len(parts) > 4 else ""
-                track_info = parts[5] if len(parts) > 5 else ""
+                refname = parts[0]
+                name = parts[1]
+                commit = parts[2]
+                message = parts[3] if len(parts) > 3 else ""
+                is_current = parts[4] == "*" if len(parts) > 4 else False
+                upstream = parts[5] if len(parts) > 5 else ""
+                track_info = parts[6] if len(parts) > 6 else ""
 
                 # Skip HEAD reference and bare remote names
                 if name == "origin/HEAD" or name == "origin":
                     continue
 
-                is_remote = name.startswith("origin/") or "/" in name
+                # Determine local vs remote from the full ref path
+                is_remote = refname.startswith("refs/remotes/")
 
                 # Parse ahead/behind from track info like "[ahead 1, behind 2]"
                 ahead = 0
@@ -272,7 +281,7 @@ class GitService:
             True if successful, False otherwise
         """
         try:
-            args = ["branch", name]
+            args = ["branch", "--", name]
             if start_point:
                 args.append(start_point)
 
@@ -306,7 +315,7 @@ class GitService:
         """
         try:
             flag = "-D" if force else "-d"
-            result = self._run_git(working_dir, ["branch", flag, name], timeout=10)
+            result = self._run_git(working_dir, ["branch", flag, "--", name], timeout=10)
             if result.returncode == 0:
                 logger.info(f"Deleted branch: {name}")
                 return True
@@ -329,7 +338,9 @@ class GitService:
             True if successful, False otherwise
         """
         try:
-            result = self._run_git(working_dir, ["checkout", ref], timeout=30)
+            # Use refs/heads/ prefix to prevent flag injection from ref names starting with -
+            safe_ref = f"refs/heads/{ref}" if ref.startswith("-") else ref
+            result = self._run_git(working_dir, ["checkout", safe_ref], timeout=30)
             if result.returncode == 0:
                 logger.info(f"Checked out: {ref}")
                 return True
@@ -446,7 +457,7 @@ class GitService:
             args = ["worktree", "add"]
 
             if new_branch:
-                args.extend(["-b", branch, path])
+                args.extend(["-b", branch, "--", path])
                 if base_branch:
                     # Use origin/{base_branch} to ensure we get the latest remote commits
                     # This prevents creating branches from stale local branches
@@ -461,7 +472,7 @@ class GitService:
                         args.append(base_branch)
                         logger.info(f"Remote {remote_base} not found, using local {base_branch} as base")
             else:
-                args.extend([path, branch])
+                args.extend(["--", path, branch])
 
             result = self._run_git(main_dir, args, timeout=30)
             if result.returncode == 0:
@@ -545,8 +556,13 @@ class GitService:
                 "log",
                 f"--format={format_str}",
                 f"-{limit}",
-                "--all" if not branch else branch
             ]
+            if not branch:
+                args.append("--all")
+            else:
+                # Use refs/heads/ prefix to prevent flag injection from branch names starting with -
+                safe_branch = f"refs/heads/{branch}" if branch.startswith("-") else branch
+                args.append(safe_branch)
 
             result = self._run_git(working_dir, args, timeout=30)
             if result.returncode != 0:
@@ -595,6 +611,164 @@ class GitService:
         except Exception as e:
             logger.error(f"Error getting commit graph: {e}")
             return []
+
+    def get_diff_stats(
+        self,
+        working_dir: str,
+        include_unstaged: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Get diff statistics (lines added/removed).
+
+        Args:
+            working_dir: Repository directory
+            include_unstaged: If True, include both staged and unstaged changes
+
+        Returns:
+            Dictionary with:
+            - additions: Total lines added
+            - deletions: Total lines deleted
+            - files_changed: Number of files changed
+        """
+        try:
+            total_additions = 0
+            total_deletions = 0
+            files = set()
+
+            # Get staged diff stats
+            result = self._run_git(working_dir, ["diff", "--staged", "--numstat"], timeout=10)
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    if not line:
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 3:
+                        added = int(parts[0]) if parts[0] != '-' else 0
+                        deleted = int(parts[1]) if parts[1] != '-' else 0
+                        total_additions += added
+                        total_deletions += deleted
+                        files.add(parts[2])
+
+            # Get unstaged diff stats
+            if include_unstaged:
+                result = self._run_git(working_dir, ["diff", "--numstat"], timeout=10)
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split("\n"):
+                        if not line:
+                            continue
+                        parts = line.split("\t")
+                        if len(parts) >= 3:
+                            added = int(parts[0]) if parts[0] != '-' else 0
+                            deleted = int(parts[1]) if parts[1] != '-' else 0
+                            total_additions += added
+                            total_deletions += deleted
+                            files.add(parts[2])
+
+            return {
+                "additions": total_additions,
+                "deletions": total_deletions,
+                "files_changed": len(files)
+            }
+        except Exception as e:
+            logger.error(f"Error getting diff stats: {e}")
+            return {"additions": 0, "deletions": 0, "files_changed": 0}
+
+    def stage_files(self, working_dir: str, files: List[str]) -> bool:
+        """
+        Stage files for commit.
+
+        Args:
+            working_dir: Repository directory
+            files: List of file paths to stage (use ['.'] for all)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            args = ["add", "--"] + files
+            result = self._run_git(working_dir, args, timeout=30)
+
+            if result.returncode == 0:
+                logger.info(f"Staged {len(files)} file(s)")
+                return True
+
+            logger.warning(f"Failed to stage files: {result.stderr}")
+            return False
+        except Exception as e:
+            logger.error(f"Error staging files: {e}")
+            return False
+
+    def commit(
+        self,
+        working_dir: str,
+        message: str,
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Create a commit.
+
+        Args:
+            working_dir: Repository directory
+            message: Commit message
+
+        Returns:
+            Tuple of (success: bool, commit_sha: Optional[str])
+        """
+        try:
+            args = ["commit", "-m", message]
+            result = self._run_git(working_dir, args, timeout=30)
+
+            if result.returncode == 0:
+                sha_result = self._run_git(working_dir, ["rev-parse", "HEAD"], timeout=5)
+                commit_sha = sha_result.stdout.strip()[:12] if sha_result.returncode == 0 else None
+                logger.info(f"Created commit: {commit_sha}")
+                return True, commit_sha
+
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+            logger.warning(f"Failed to commit: {error_msg}")
+            return False, None
+        except Exception as e:
+            logger.error(f"Error creating commit: {e}")
+            return False, None
+
+    def push(
+        self,
+        working_dir: str,
+        remote: str = "origin",
+        branch: Optional[str] = None,
+        set_upstream: bool = False
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Push commits to remote.
+
+        Args:
+            working_dir: Repository directory
+            remote: Remote name (default: origin)
+            branch: Branch name (default: current branch)
+            set_upstream: Set upstream tracking
+
+        Returns:
+            Tuple of (success: bool, error_message: Optional[str])
+        """
+        try:
+            if set_upstream and branch:
+                args = ["push", "--set-upstream", remote, branch]
+            elif branch:
+                args = ["push", remote, branch]
+            else:
+                args = ["push", remote]
+
+            result = self._run_git(working_dir, args, timeout=120)
+
+            if result.returncode == 0:
+                logger.info(f"Pushed to {remote}/{branch or 'current branch'}")
+                return True, None
+
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+            logger.warning(f"Failed to push: {error_msg}")
+            return False, error_msg
+        except Exception as e:
+            logger.error(f"Error pushing: {e}")
+            return False, str(e)
 
     def get_status(self, working_dir: str) -> Dict[str, Any]:
         """
@@ -653,18 +827,25 @@ class GitService:
             if result.returncode == 0:
                 status["head_commit"] = result.stdout.strip()[:12]
 
-            # Get ahead/behind
+            # Get ahead/behind relative to the default branch (main/master).
+            # This is more useful for the PR workflow than comparing against
+            # the upstream tracking branch (which would be 0 after pushing).
             if status["current_branch"]:
-                result = self._run_git(
-                    working_dir,
-                    ["rev-list", "--left-right", "--count", f"{status['current_branch']}...@{{upstream}}"],
-                    timeout=5
-                )
-                if result.returncode == 0:
-                    parts = result.stdout.strip().split()
-                    if len(parts) >= 2:
-                        status["ahead"] = int(parts[0])
-                        status["behind"] = int(parts[1])
+                default_branch = self.get_default_branch(working_dir)
+                # Try origin/<default> first, fall back to local <default>
+                for ref in [f"origin/{default_branch}", default_branch]:
+                    result = self._run_git(
+                        working_dir,
+                        ["rev-list", "--left-right", "--count",
+                         f"{status['current_branch']}...{ref}"],
+                        timeout=5
+                    )
+                    if result.returncode == 0:
+                        parts = result.stdout.strip().split()
+                        if len(parts) >= 2:
+                            status["ahead"] = int(parts[0])
+                            status["behind"] = int(parts[1])
+                        break
 
             # Get file status using porcelain format
             result = self._run_git(working_dir, ["status", "--porcelain=v1"], timeout=10)
@@ -707,6 +888,83 @@ class GitService:
             logger.error(f"Error getting git status: {e}")
 
         return status
+
+    def get_diff_text(
+        self,
+        working_dir: str,
+        include_unstaged: bool = True,
+        max_chars: int = 8000
+    ) -> str:
+        """
+        Get the actual diff text for AI commit message generation.
+
+        Args:
+            working_dir: Repository directory
+            include_unstaged: Whether to include unstaged changes
+            max_chars: Maximum characters to return (truncates if larger)
+
+        Returns:
+            Combined diff text, truncated to max_chars
+        """
+        parts = []
+
+        # Staged changes
+        result = self._run_git(working_dir, ["diff", "--staged"], timeout=15)
+        if result.returncode == 0 and result.stdout and result.stdout.strip():
+            parts.append(result.stdout.strip())
+
+        # Unstaged changes
+        if include_unstaged:
+            result = self._run_git(working_dir, ["diff"], timeout=15)
+            if result.returncode == 0 and result.stdout and result.stdout.strip():
+                parts.append(result.stdout.strip())
+
+        diff_text = "\n".join(parts)
+
+        if len(diff_text) > max_chars:
+            diff_text = diff_text[:max_chars] + "\n\n[... diff truncated ...]"
+
+        return diff_text
+
+    def get_branch_log(
+        self,
+        working_dir: str,
+        base_branch: str = "main",
+        max_commits: int = 50
+    ) -> tuple:
+        """
+        Get commit log and diff stat between base branch and HEAD.
+
+        Args:
+            working_dir: Repository directory
+            base_branch: Base branch to compare against
+            max_commits: Maximum number of commits to include
+
+        Returns:
+            Tuple of (commit_log, diff_stat) strings
+        """
+        commit_log = ""
+        diff_stat = ""
+
+        # Get commit messages
+        result = self._run_git(
+            working_dir,
+            ["log", f"{base_branch}..HEAD", "--oneline", f"-{max_commits}"],
+            timeout=10
+        )
+        if result.returncode == 0:
+            commit_log = result.stdout.strip()
+
+        # Get diff stat summary
+        result = self._run_git(
+            working_dir,
+            ["diff", f"{base_branch}..HEAD", "--stat"],
+            timeout=10
+        )
+        if result.returncode == 0:
+            diff_stat = result.stdout.strip()
+
+        return (commit_log, diff_stat)
 
 
 # Global instance

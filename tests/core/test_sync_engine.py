@@ -13,6 +13,7 @@ Tests cover:
 - Concurrent operations and error handling
 """
 
+import json
 import pytest
 import asyncio
 from datetime import datetime
@@ -572,7 +573,7 @@ class TestSyncEngineStreaming:
             usage={"input_tokens": 100, "cache_read_input_tokens": 50}
         )
 
-        call_args = mock_ws.send_json.call_args[0][0]
+        call_args = json.loads(mock_ws.send_text.call_args[0][0])
         assert call_args["data"]["usage"] == {"input_tokens": 100, "cache_read_input_tokens": 50}
 
     @pytest.mark.asyncio
@@ -616,7 +617,7 @@ class TestSyncEngineStreaming:
         )
 
         # Get last call (stream_end)
-        call_args = mock_ws.send_json.call_args_list[-1][0][0]
+        call_args = json.loads(mock_ws.send_text.call_args_list[-1][0][0])
         assert call_args["event_type"] == "stream_end"
         assert call_args["data"]["metadata"] == {"tokens": 500}
         assert call_args["data"]["interrupted"] is True
@@ -661,9 +662,10 @@ class TestSyncEngineStreaming:
 
         # Find the stream_chunk call
         chunk_call = None
-        for call in mock_ws.send_json.call_args_list:
-            if call[0][0].get("event_type") == "stream_chunk":
-                chunk_call = call[0][0]
+        for call in mock_ws.send_text.call_args_list:
+            parsed = json.loads(call[0][0])
+            if parsed.get("event_type") == "stream_chunk":
+                chunk_call = parsed
                 break
 
         assert chunk_call is not None
@@ -702,9 +704,9 @@ class TestSyncEngineBroadcast:
 
         await engine.broadcast_event(event)
 
-        ws1.send_json.assert_called_once()
-        ws2.send_json.assert_called_once()
-        ws3.send_json.assert_called_once()
+        ws1.send_text.assert_called_once()
+        ws2.send_text.assert_called_once()
+        ws3.send_text.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_broadcast_event_excludes_source_device(self):
@@ -724,8 +726,8 @@ class TestSyncEngineBroadcast:
 
         await engine.broadcast_event(event, exclude_device_id="device-1")
 
-        ws1.send_json.assert_not_called()
-        ws2.send_json.assert_called_once()
+        ws1.send_text.assert_not_called()
+        ws2.send_text.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_broadcast_event_cleans_failed_connections(self):
@@ -733,7 +735,7 @@ class TestSyncEngineBroadcast:
         engine = SyncEngine()
         ws_good = AsyncMock()
         ws_bad = AsyncMock()
-        ws_bad.send_json.side_effect = Exception("Connection lost")
+        ws_bad.send_text.side_effect = Exception("Connection lost")
 
         await engine.register_device("device-good", "session-1", ws_good)
         await engine.register_device("device-bad", "session-1", ws_bad)
@@ -776,7 +778,7 @@ class TestSyncEngineBroadcast:
             source_device_id="device-2"
         )
 
-        call_args = mock_ws.send_json.call_args[0][0]
+        call_args = json.loads(mock_ws.send_text.call_args[0][0])
         assert call_args["event_type"] == "message_added"
         assert call_args["data"]["message"]["content"] == "Hello"
 
@@ -792,7 +794,7 @@ class TestSyncEngineBroadcast:
             updates={"title": "New Title"}
         )
 
-        call_args = mock_ws.send_json.call_args[0][0]
+        call_args = json.loads(mock_ws.send_text.call_args[0][0])
         assert call_args["event_type"] == "session_updated"
         assert call_args["data"]["updates"]["title"] == "New Title"
 
@@ -813,10 +815,10 @@ class TestSyncEngineBroadcast:
         )
 
         # Both devices should receive rewind event (even source)
-        ws1.send_json.assert_called_once()
-        ws2.send_json.assert_called_once()
+        ws1.send_text.assert_called_once()
+        ws2.send_text.assert_called_once()
 
-        call_args = ws1.send_json.call_args[0][0]
+        call_args = json.loads(ws1.send_text.call_args[0][0])
         assert call_args["event_type"] == "session_rewound"
         assert call_args["data"]["messages_removed"] == 5
 
@@ -836,10 +838,10 @@ class TestSyncEngineBroadcast:
         )
 
         # Source device should be excluded
-        ws1.send_json.assert_not_called()
-        ws2.send_json.assert_called_once()
+        ws1.send_text.assert_not_called()
+        ws2.send_text.assert_called_once()
 
-        call_args = ws2.send_json.call_args[0][0]
+        call_args = json.loads(ws2.send_text.call_args[0][0])
         assert call_args["event_type"] == "session_opened"
         assert call_args["data"]["is_new"] is True
 
@@ -858,10 +860,10 @@ class TestSyncEngineBroadcast:
         )
 
         # Source device should be excluded
-        ws1.send_json.assert_not_called()
-        ws2.send_json.assert_called_once()
+        ws1.send_text.assert_not_called()
+        ws2.send_text.assert_called_once()
 
-        call_args = ws2.send_json.call_args[0][0]
+        call_args = json.loads(ws2.send_text.call_args[0][0])
         assert call_args["event_type"] == "session_closed"
 
 
@@ -948,7 +950,7 @@ class TestSyncEngineConcurrency:
         # Broadcast 10 messages concurrently
         await asyncio.gather(*[broadcast_message(i) for i in range(10)])
 
-        assert mock_ws.send_json.call_count == 10
+        assert mock_ws.send_text.call_count == 10
 
     @pytest.mark.asyncio
     async def test_concurrent_register_unregister(self):
@@ -1069,7 +1071,7 @@ class TestSyncEngineErrorHandling:
         """Should handle websocket send errors gracefully."""
         engine = SyncEngine()
         bad_ws = AsyncMock()
-        bad_ws.send_json.side_effect = ConnectionError("Client disconnected")
+        bad_ws.send_text.side_effect = ConnectionError("Client disconnected")
 
         await engine.register_device("device-1", "session-1", bad_ws)
 
@@ -1100,7 +1102,7 @@ class TestSyncEngineErrorHandling:
         )
 
         # Event should still be broadcast
-        mock_ws.send_json.assert_called_once()
+        mock_ws.send_text.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_stream_end_without_start(self):
@@ -1152,8 +1154,8 @@ class TestSyncEngineIntegration:
             {"content": "Session 1 message"}
         )
 
-        ws1.send_json.assert_called_once()
-        ws2.send_json.assert_not_called()
+        ws1.send_text.assert_called_once()
+        ws2.send_text.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_device_switching_sessions(self):
@@ -1200,4 +1202,4 @@ class TestSyncEngineIntegration:
         )
 
         # Device 2 should have received: stream_start, message_added, stream_end
-        assert ws2.send_json.call_count == 3
+        assert ws2.send_text.call_count == 3

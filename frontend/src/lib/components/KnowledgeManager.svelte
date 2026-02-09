@@ -339,7 +339,7 @@
 										{formatSize(doc.file_size)} | {doc.chunk_count} chunk{doc.chunk_count !== 1 ? 's' : ''}
 									</p>
 								</div>
-								<div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+								<div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity hover-actions">
 									<button
 										on:click={() => showPreview(doc)}
 										class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
@@ -439,3 +439,12 @@
 		</div>
 	</div>
 {/if}
+
+<style>
+	/* Touch devices: always show action buttons since hover is not available */
+	@media (hover: none) {
+		.hover-actions {
+			opacity: 1 !important;
+		}
+	}
+</style>

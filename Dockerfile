@@ -50,9 +50,9 @@ COPY app/ ./app/
 COPY .env.example .
 
 # Build frontend
-COPY frontend/package.json ./frontend/
+COPY frontend/package.json frontend/package-lock.json ./frontend/
 WORKDIR /app/frontend
-RUN npm install
+RUN npm ci
 
 COPY frontend/ ./
 RUN npm run build

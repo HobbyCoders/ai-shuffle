@@ -527,17 +527,15 @@ class TestGetSession:
         ]
 
         with patch("app.core.jsonl_parser.parse_session_history") as mock_parse:
-            with patch("app.core.jsonl_parser.get_session_cost_from_jsonl") as mock_cost:
-                mock_parse.return_value = jsonl_messages
-                mock_cost.return_value = {
-                    "cache_creation_tokens": 100,
-                    "cache_read_tokens": 50,
-                    "last_input_tokens": 200,
-                    "total_tokens_in": 500,
-                    "total_tokens_out": 300
-                }
+            mock_parse.return_value = (jsonl_messages, {
+                "cache_creation_tokens": 100,
+                "cache_read_tokens": 50,
+                "last_input_tokens": 200,
+                "total_tokens_in": 500,
+                "total_tokens_out": 300
+            })
 
-                response = client.get("/api/v1/sessions/test-session-id")
+            response = client.get("/api/v1/sessions/test-session-id")
 
         assert response.status_code == 200
         data = response.json()
