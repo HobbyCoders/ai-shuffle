@@ -557,6 +557,89 @@ function createGitStore() {
         },
 
         /**
+         * Apply a server-pushed git state update from the file watcher via WebSocket.
+         * Updates both the live store and the LRU cache without making API calls.
+         */
+        applyServerUpdate(
+            projectId: string,
+            worktreeId: string | null,
+            changes: {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                status?: Record<string, any>;
+                diff_stats?: gitApi.DiffStats;
+                branches?: {
+                    branches: Array<{
+                        name: string; is_current: boolean; is_remote: boolean;
+                        upstream?: string; ahead?: number; behind?: number;
+                        commit_message?: string; has_worktree?: boolean; worktree_id?: string;
+                    }>;
+                    current_branch: string | null;
+                };
+            }
+        ) {
+            const key = _makeKey(projectId, worktreeId ?? undefined);
+
+            // Only apply if we're currently viewing this project/worktree
+            if (_loadedKey !== key) return;
+
+            update(s => {
+                const updated = { ...s };
+
+                if (changes.status) {
+                    updated.status = s.status
+                        ? { ...s.status, ...changes.status }
+                        : changes.status as gitApi.GitStatus;
+                }
+
+                if (changes.diff_stats) {
+                    updated.diffStats = changes.diff_stats;
+                }
+
+                if (changes.branches) {
+                    updated.branches = changes.branches.branches.map(b => ({
+                        name: b.name,
+                        current: b.is_current,
+                        remote: b.is_remote,
+                        upstream: b.upstream,
+                        ahead: b.ahead,
+                        behind: b.behind,
+                        lastCommit: b.commit_message,
+                        hasWorktree: b.has_worktree,
+                        worktreeId: b.worktree_id
+                    }));
+                }
+
+                return updated;
+            });
+
+            // Update LRU cache too
+            const cached = _cache.get(key);
+            if (cached) {
+                if (changes.status) {
+                    cached.status = cached.status
+                        ? { ...cached.status, ...changes.status }
+                        : changes.status as gitApi.GitStatus;
+                }
+                if (changes.diff_stats) {
+                    cached.diffStats = changes.diff_stats;
+                }
+                if (changes.branches) {
+                    cached.branches = changes.branches.branches.map(b => ({
+                        name: b.name,
+                        current: b.is_current,
+                        remote: b.is_remote,
+                        upstream: b.upstream,
+                        ahead: b.ahead,
+                        behind: b.behind,
+                        lastCommit: b.commit_message,
+                        hasWorktree: b.has_worktree,
+                        worktreeId: b.worktree_id
+                    }));
+                }
+            }
+        },
+
+        /**
          * Clear error
          */
         clearError() {

@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.core.git_service import git_service
+from app.core.git_state_cache import git_state_cache, CachedGitState
 from app.core.worktree_manager import worktree_manager
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.db import database
@@ -362,10 +363,32 @@ async def get_git_status(
     When worktree_id is provided, returns status for the worktree directory.
     """
     check_project_access(request, project_id)
+    cache_key = git_state_cache.make_key(project_id, worktree_id)
+
+    # Check cache first
+    cached_status = await git_state_cache.get_category(cache_key, "status")
+    if cached_status is not None:
+        return GitStatusResponse(**cached_status)
+
     working_dir = get_working_dir(project_id, worktree_id)
 
     # Get git status
     status_data = git_service.get_status(working_dir)
+
+    # Ensure the file watcher is running for this project (lazy start)
+    if status_data.get("is_git_repo"):
+        api_user = get_api_user_from_request(request)
+        user_id = api_user["id"] if api_user else "admin"
+        try:
+            from app.core.git_watcher import git_watcher
+            await git_watcher.watch_project(
+                project_id=project_id,
+                working_dir=working_dir,
+                user_id=user_id,
+                worktree_id=worktree_id,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to start git watcher for {project_id}: {e}")
 
     # Convert staged files to proper format
     staged_files = [
@@ -376,7 +399,7 @@ async def get_git_status(
     # Ensure repository record exists and get additional info
     repo = ensure_git_repository_record(project_id, working_dir)
 
-    return GitStatusResponse(
+    response = GitStatusResponse(
         is_git_repo=status_data["is_git_repo"],
         current_branch=status_data["current_branch"],
         is_detached=status_data["is_detached"],
@@ -394,6 +417,11 @@ async def get_git_status(
         github_repo_name=repo["github_repo_name"] if repo else None,
         last_synced_at=repo["last_synced_at"] if repo else None
     )
+
+    # Cache the response
+    await git_state_cache.set_category(cache_key, "status", response.model_dump())
+
+    return response
 
 
 @router.get("/branches", response_model=BranchListResponse)
@@ -413,6 +441,13 @@ async def list_branches(
         worktree_id: Optional worktree ID - marks the worktree's branch as current
     """
     check_project_access(request, project_id)
+    cache_key = git_state_cache.make_key(project_id, worktree_id)
+
+    # Check cache first
+    cached_branches = await git_state_cache.get_category(cache_key, "branches")
+    if cached_branches is not None:
+        return BranchListResponse(**cached_branches)
+
     working_dir = get_working_dir(project_id, worktree_id)
 
     if not git_service.is_git_repo(working_dir):
@@ -449,10 +484,15 @@ async def list_branches(
         for b in branches
     ]
 
-    return BranchListResponse(
+    response = BranchListResponse(
         branches=branch_infos,
         current_branch=current_branch
     )
+
+    # Cache the response
+    await git_state_cache.set_category(cache_key, "branches", response.model_dump())
+
+    return response
 
 
 @router.post("/branches", response_model=OperationResponse)
@@ -498,6 +538,9 @@ async def create_branch(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to create branch '{body.name}'. Branch may already exist or start point is invalid."
         )
+
+    # Invalidate cache — new branch affects branch list
+    await git_state_cache.invalidate_project(project_id)
 
     return OperationResponse(
         success=True,
@@ -545,6 +588,9 @@ async def delete_branch(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to delete branch '{branch_name}'. It may not exist or is not fully merged (use force=true)."
         )
+
+    # Invalidate cache — deleted branch affects branch list
+    await git_state_cache.invalidate_project(project_id)
 
     return OperationResponse(
         success=True,
@@ -600,6 +646,9 @@ async def checkout_branch(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to checkout '{body.ref}'. It may not exist."
         )
+
+    # Invalidate cache — checkout affects status and branches
+    await git_state_cache.invalidate_project(project_id)
 
     # Broadcast branch change to all user devices so they can refresh git state
     api_user = get_api_user_from_request(request)
@@ -717,6 +766,9 @@ async def fetch_from_remote(
             detail=f"Failed to fetch from remote '{remote}'. Check network connection and authentication."
         )
 
+    # Invalidate cache — fetch updates remote refs and ahead/behind counts
+    await git_state_cache.invalidate_project(project_id)
+
     return FetchResponse(
         success=True,
         message=f"Fetched from '{remote}'"
@@ -744,6 +796,13 @@ async def get_diff_stats(
         worktree_id: Optional worktree ID to get diff stats for worktree
     """
     check_project_access(request, project_id)
+    cache_key = git_state_cache.make_key(project_id, worktree_id)
+
+    # Check cache first
+    cached_diff = await git_state_cache.get_category(cache_key, "diff_stats")
+    if cached_diff is not None:
+        return DiffStatsResponse(**cached_diff)
+
     working_dir = get_working_dir(project_id, worktree_id)
 
     if not git_service.is_git_repo(working_dir):
@@ -754,11 +813,16 @@ async def get_diff_stats(
 
     stats = git_service.get_diff_stats(working_dir, include_unstaged=include_unstaged)
 
-    return DiffStatsResponse(
+    response = DiffStatsResponse(
         additions=stats["additions"],
         deletions=stats["deletions"],
         files_changed=stats["files_changed"]
     )
+
+    # Cache the response
+    await git_state_cache.set_category(cache_key, "diff_stats", response.model_dump())
+
+    return response
 
 
 @router.post("/commit", response_model=CommitResponse)
@@ -809,6 +873,10 @@ async def create_commit(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to create commit. There may be no changes to commit."
         )
+
+    # Invalidate cache — commit affects status and diff stats
+    cache_key = git_state_cache.make_key(project_id, worktree_id)
+    await git_state_cache.invalidate(cache_key)
 
     return CommitResponse(
         success=True,
@@ -861,6 +929,10 @@ async def push_commits(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=error_msg or "Failed to push commits"
         )
+
+    # Invalidate cache — push affects ahead/behind counts
+    cache_key = git_state_cache.make_key(project_id, worktree_id)
+    await git_state_cache.invalidate(cache_key)
 
     return OperationResponse(
         success=True,

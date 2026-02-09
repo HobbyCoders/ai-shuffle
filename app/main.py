@@ -161,10 +161,17 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(f"Admin user: {auth_service.get_admin_username()}")
 
+    # Start git file watcher service
+    from app.core.git_watcher import git_watcher
+    await git_watcher.start()
+
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
     yield
+
+    # Shutdown git file watcher
+    await git_watcher.shutdown()
 
     logger.info("Shutting down AI Hub...")
 

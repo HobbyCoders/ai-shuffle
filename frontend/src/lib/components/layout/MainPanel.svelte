@@ -168,42 +168,62 @@
 		activeTab?.executionMode === 'worktree' ? (activeTab.worktreeId ?? null) : null
 	);
 
+	// Debounce rapid project changes (e.g., clicking through chats quickly)
+	// to prevent cascading git loads that break commit/branch buttons.
+	let _projectDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 	$effect(() => {
 		const project = activeProject;
 		const worktreeId = activeWorktreeId;
-		if (project && $githubAuthenticated) {
-			if (worktreeId) {
-				git.loadForWorktree(project, worktreeId);
-			} else {
-				git.loadRepository(project);
-			}
+		const authenticated = $githubAuthenticated;
+
+		if (_projectDebounceTimer) {
+			clearTimeout(_projectDebounceTimer);
+			_projectDebounceTimer = null;
+		}
+
+		if (project && authenticated) {
+			_projectDebounceTimer = setTimeout(() => {
+				_projectDebounceTimer = null;
+				if (worktreeId) {
+					git.loadForWorktree(project, worktreeId);
+				} else {
+					git.loadRepository(project);
+				}
+			}, 150);
 		} else {
 			git.clearRepository();
 		}
+
+		return () => {
+			if (_projectDebounceTimer) {
+				clearTimeout(_projectDebounceTimer);
+				_projectDebounceTimer = null;
+			}
+		};
 	});
 
 	// =========================================================================
-	// Unified git state poller
+	// Event-driven git state updates
 	// =========================================================================
-	// Single poller for diff stats + PR detection. Only one button state
-	// (Commit / Create PR / Finish) is active at a time, so a single poll
-	// that refreshes everything is simpler and avoids duplicate timers.
+	// Git state is now pushed by the backend file watcher via WebSocket
+	// (git_state_changed events). This replaces the old 15-second poller.
+	// A 60-second safety-net fallback poll catches any missed events.
 
-	const GIT_POLL_INTERVAL_MS = 15_000;
-	let _gitPollTimer: ReturnType<typeof setInterval> | null = null;
+	const GIT_FALLBACK_INTERVAL_MS = 60_000;
+	let _gitFallbackTimer: ReturnType<typeof setInterval> | null = null;
 
 	/**
-	 * Refresh all git state needed for the header action buttons.
-	 * Reads branch from the store at call time — must be called outside
-	 * $effect tracking context (via untrack, setInterval, or event handler)
-	 * to avoid creating reactive loops.
+	 * Refresh diff stats via API (used for fallback poll and after streaming).
 	 */
-	async function refreshGitState(projectId: string) {
-		// Always refresh diff stats (determines hasChanges → Commit button)
+	async function refreshDiffStats(projectId: string) {
 		git.refreshDiffStats();
+	}
 
-		// Check for open PRs when GitHub is authenticated and we know the branch
-		const branch = $gitStatus?.current_branch ?? null;
+	/**
+	 * Check for open PRs matching the current branch.
+	 * Only called when the branch changes (event-driven), not on a timer.
+	 */
+	async function checkPullRequests(projectId: string, branch: string | null) {
 		if (branch && $githubAuthenticated) {
 			try {
 				const prs = await getPullRequests(projectId, 'open', 10);
@@ -217,37 +237,56 @@
 		}
 	}
 
-	// Start/restart the unified poller when project or auth changes.
-	// IMPORTANT: Do NOT read $gitStatus here — refreshGitState updates
-	// the store, which would re-trigger this effect in an infinite loop.
+	// Safety-net fallback poll: refreshes diff stats every 60s when tab is visible.
+	// Real-time updates come via WebSocket from the backend file watcher.
 	$effect(() => {
 		const project = activeProject;
 		const worktreeId = activeWorktreeId; // Track worktree changes for tab switches
 		const authenticated = $githubAuthenticated;
 
 		// Clear stale PR state immediately when any dependency changes.
-		// The async refresh below will set the correct value.
 		branchPR = null;
 
-		if (_gitPollTimer) {
-			clearInterval(_gitPollTimer);
-			_gitPollTimer = null;
+		if (_gitFallbackTimer) {
+			clearInterval(_gitFallbackTimer);
+			_gitFallbackTimer = null;
 		}
 
 		if (project && authenticated) {
-			// Initial refresh — untrack to prevent store reads inside
-			// refreshGitState from becoming effect dependencies
-			untrack(() => refreshGitState(project));
-			// Periodic refresh (setInterval runs outside tracking context)
-			_gitPollTimer = setInterval(() => refreshGitState(project), GIT_POLL_INTERVAL_MS);
+			// Initial refresh on project/auth change
+			untrack(() => refreshDiffStats(project));
+
+			// Fallback poll — only when tab is visible
+			_gitFallbackTimer = setInterval(() => {
+				if (!document.hidden) {
+					refreshDiffStats(project);
+				}
+			}, GIT_FALLBACK_INTERVAL_MS);
 		}
 
 		return () => {
-			if (_gitPollTimer) {
-				clearInterval(_gitPollTimer);
-				_gitPollTimer = null;
+			if (_gitFallbackTimer) {
+				clearInterval(_gitFallbackTimer);
+				_gitFallbackTimer = null;
 			}
 		};
+	});
+
+	// PR detection: runs when the branch changes (event-driven via WebSocket state updates).
+	// Tracks previous branch to avoid redundant GitHub API calls.
+	let _lastCheckedBranch: string | null = null;
+	$effect(() => {
+		const branch = $gitStatus?.current_branch ?? null;
+		const project = activeProject;
+		const authenticated = $githubAuthenticated;
+
+		if (branch !== _lastCheckedBranch && project && authenticated) {
+			_lastCheckedBranch = branch;
+			untrack(() => checkPullRequests(project, branch));
+		} else if (!project || !authenticated) {
+			_lastCheckedBranch = null;
+			branchPR = null;
+		}
 	});
 
 	// When streaming ends, do an immediate refresh so buttons update promptly.
@@ -261,7 +300,7 @@
 			const project = activeProject;
 			if (project) {
 				git.refreshStatus();
-				untrack(() => refreshGitState(project));
+				untrack(() => refreshDiffStats(project));
 			}
 		}
 	});
@@ -422,7 +461,7 @@
 		if (currentBranch && branchPR.head_branch !== currentBranch) {
 			progressError = `PR #${branchPR.number} is for branch "${branchPR.head_branch}" but current branch is "${currentBranch}"`;
 			showFinishModal = false;
-			untrack(() => refreshGitState(projectId));
+			untrack(() => refreshDiffStats(projectId));
 			return;
 		}
 

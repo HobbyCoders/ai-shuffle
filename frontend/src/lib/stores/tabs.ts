@@ -1673,12 +1673,22 @@ function createTabsStore() {
 		// Handle branch change from another device — refresh git state
 		if (msgType === 'user_branch_changed') {
 			const projectId = data.project_id as string;
-			const branchName = data.branch_name as string;
 			// Refresh git state if we're currently viewing this project
 			const gitState = get(git);
 			if (gitState.projectId === projectId) {
 				git.refreshStatus();
 				git.refreshDiffStats();
+			}
+			return;
+		}
+
+		// Handle git state changes pushed by backend file watcher
+		if (msgType === 'git_state_changed') {
+			const projectId = data.project_id as string;
+			const worktreeId = (data.worktree_id as string) || null;
+			const changes = data.changes as Record<string, unknown>;
+			if (projectId && changes) {
+				git.applyServerUpdate(projectId, worktreeId, changes);
 			}
 			return;
 		}
