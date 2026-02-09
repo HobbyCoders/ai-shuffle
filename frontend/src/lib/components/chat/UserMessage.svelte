@@ -54,18 +54,17 @@
 		<div class="flex items-center gap-2 mb-1">
 			<span class="font-semibold text-sm text-blue-400">You</span>
 			<span class="text-xs text-muted-foreground">{formatTime(timestamp)}</span>
-			{#if showActions && !streaming}
-				<div class="ml-auto">
-					<MessageActions
-						{sessionId}
-						messageContent={content}
-						messageRole="user"
-						{messageUuid}
-						{onRewindComplete}
-						{fileCheckpointingEnabled}
-					/>
-				</div>
-			{/if}
+			<div class="ml-auto">
+				<MessageActions
+					{sessionId}
+					messageContent={content}
+					messageRole="user"
+					{messageUuid}
+					{onRewindComplete}
+					{fileCheckpointingEnabled}
+					visible={showActions && !streaming}
+				/>
+			</div>
 		</div>
 		<div class="overflow-hidden max-w-full">
 			<p class="whitespace-pre-wrap break-words text-foreground" style="overflow-wrap: anywhere; word-break: break-word;">{content}</p>

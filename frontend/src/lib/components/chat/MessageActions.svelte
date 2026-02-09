@@ -14,6 +14,7 @@
 		messageUuid?: string | null;  // Direct UUID from JSONL - preferred for rewind
 		canRead?: boolean;
 		isStreaming?: boolean;
+		visible?: boolean;  // Controls button visibility without unmounting (keeps dialog alive)
 		onCopy?: (content: string) => void;
 		onRead?: () => void;
 		isReading?: boolean;
@@ -28,6 +29,7 @@
 		messageUuid = null,  // If provided, use directly for rewind (no text matching needed)
 		canRead = false,
 		isStreaming = false,
+		visible = true,
 		onCopy,
 		onRead,
 		isReading = false,
@@ -222,7 +224,8 @@
 	}
 </script>
 
-<!-- Action buttons - shown via CSS hover on parent -->
+<!-- Action buttons - visibility controlled by prop, component stays mounted for dialog -->
+{#if visible}
 <div class="message-actions flex items-center gap-1">
 	<!-- Copy button -->
 	<button
@@ -274,6 +277,7 @@
 		</button>
 	{/if}
 </div>
+{/if}
 
 <!-- Rewind Confirmation Dialog - portaled to body to escape content-visibility containment -->
 {#if showRewindDialog}
