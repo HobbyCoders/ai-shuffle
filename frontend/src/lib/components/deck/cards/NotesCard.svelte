@@ -203,9 +203,12 @@
 		}
 	}
 
-	// Auto-resize textarea to fit content
+	// Auto-resize textarea to fit content (desktop only)
 	function autoResizeTextarea() {
 		if (!textareaEl) return;
+		// Skip auto-resize on mobile/touch — let the textarea scroll internally
+		// to prevent the view from jumping when the virtual keyboard is open
+		if (mobile || window.matchMedia('(pointer: coarse)').matches) return;
 		textareaEl.style.height = 'auto';
 		textareaEl.style.height = textareaEl.scrollHeight + 'px';
 	}
@@ -1109,6 +1112,20 @@
 		resize: none;
 		outline: none;
 		overflow: hidden;
+	}
+
+	/* On mobile, let the textarea scroll internally instead of auto-resizing.
+	   This prevents the view from jumping when the virtual keyboard is open. */
+	.mobile .content-textarea {
+		flex: 1;
+		overflow-y: auto;
+	}
+
+	@media (pointer: coarse), (max-width: 639px) {
+		.content-textarea {
+			flex: 1;
+			overflow-y: auto;
+		}
 	}
 
 	.content-textarea::placeholder {
