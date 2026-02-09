@@ -43,8 +43,6 @@
 	 * @param warning - Optional warning message for partial success (e.g., file restore failed)
 	 */
 	function handleRewindComplete(warning?: string) {
-		console.log('[MessageArea] Rewind complete, reloading session', warning ? `with warning: ${warning}` : '');
-
 		// If there's a warning (partial success), show it as a system message
 		if (warning) {
 			tabs.addSystemMessage(tab.id, warning, 'rewind_warning');

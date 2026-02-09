@@ -415,7 +415,7 @@ async def login(req: Request, login_data: LoginRequest, response: Response):
         db.create_pending_2fa_session(pending_token, login_data.username, expires_at)
 
         client_ip = get_client_ip(req)
-        logger.info(f"2FA required for user '{login_data.username}' from IP {client_ip}")
+        logger.debug(f"2FA required for user '{login_data.username}' from IP {client_ip}")
 
         return {
             "status": "2fa_required",
@@ -812,7 +812,7 @@ async def verify_2fa(
             remaining = totp_service.get_recovery_codes_count(updated_codes)
             audit_service.log_recovery_code_used(req, username, remaining)
             verified = True
-            logger.info(f"Recovery code used for user '{username}', {remaining} codes remaining")
+            logger.debug(f"Recovery code used for user '{username}', {remaining} codes remaining")
     else:
         # Try TOTP code
         if totp_service.verify_totp(admin.get("totp_secret", ""), verify_data.code):

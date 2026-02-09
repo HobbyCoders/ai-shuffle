@@ -445,7 +445,7 @@ class AuthService:
             try:
                 creds_file.unlink()
                 file_deleted = True
-                logger.info(f"Deleted credentials file: {creds_file}")
+                logger.debug(f"Deleted credentials file: {creds_file}")
             except Exception as e:
                 logger.error(f"Failed to delete credentials file: {e}")
                 if not cli_success:
@@ -680,7 +680,7 @@ class AuthService:
                 if creds_file.exists():
                     try:
                         creds_file.unlink()
-                        logger.info(f"Force reauth: deleted credentials file {creds_file}")
+                        logger.debug(f"Force reauth: deleted credentials file {creds_file}")
                     except Exception as e:
                         logger.warning(f"Failed to delete credentials for force reauth: {e}")
 
@@ -695,7 +695,7 @@ class AuthService:
             # Start the direct OAuth flow
             result = direct_oauth.start_oauth_flow()
 
-            logger.info(f"Started direct OAuth flow, state: {result['state'][:8]}...")
+            logger.debug(f"Started direct OAuth flow, state: {result['state'][:8]}...")
 
             return {
                 "success": True,
@@ -735,7 +735,7 @@ class AuthService:
             if result["success"]:
                 # Also ensure onboarding is marked complete
                 self._ensure_onboarding_complete()
-                logger.info("Direct OAuth login completed successfully")
+                logger.debug("Direct OAuth login completed successfully")
 
             return result
 

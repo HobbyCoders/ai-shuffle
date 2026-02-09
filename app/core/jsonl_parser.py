@@ -592,7 +592,7 @@ def parse_session_history(
                 return json.loads(c_messages_json), json.loads(c_usage_json)
 
     # Cache miss - do full parse
-    logger.info(f"Parse cache miss for session {sdk_session_id}, parsing JSONL")
+    logger.debug(f"Parse cache miss for session {sdk_session_id}, parsing JSONL")
     messages, usage_data = _parse_session_history_uncached(sdk_session_id, working_dir, jsonl_path)
 
     # Store in cache as serialized JSON strings (fast to copy on read, no deepcopy needed)
@@ -675,7 +675,7 @@ def pre_seed_parse_cache(
             while len(_parse_cache) > _PARSE_CACHE_MAX_SIZE:
                 _parse_cache.popitem(last=False)
 
-        logger.info(f"Pre-seeded parse cache for session {sdk_session_id} with {len(messages)} messages")
+        logger.debug(f"Pre-seeded parse cache for session {sdk_session_id} with {len(messages)} messages")
         return True
 
     except Exception as e:
@@ -709,7 +709,7 @@ def _parse_session_history_uncached(
         - usage_data: Dict with total_tokens_in, total_tokens_out, cache_creation_tokens,
           cache_read_tokens, last_input_tokens, model (empty dict if no usage found)
     """
-    logger.info(f"Parsing JSONL history from {jsonl_path}")
+    logger.debug(f"Parsing JSONL history from {jsonl_path}")
 
     # Find agent file paths (lazy — files are parsed on-demand when needed)
     agent_files = get_agent_jsonl_paths(sdk_session_id, working_dir)
@@ -1150,12 +1150,12 @@ def _parse_session_history_uncached(
                     "streaming": False
                 })
 
-    logger.info(f"Parsed {len(messages)} messages from JSONL history")
+    logger.debug(f"Parsed {len(messages)} messages from JSONL history")
 
     # Merge plugin warning messages from hooks JSONL file using O(N+M) merge
     hook_messages = parse_hooks_jsonl(sdk_session_id, working_dir)
     if hook_messages:
-        logger.info(f"Merging {len(hook_messages)} hook messages from hooks.jsonl")
+        logger.debug(f"Merging {len(hook_messages)} hook messages from hooks.jsonl")
         # Both lists are roughly in timestamp order — merge them
         merged = []
         mi, hi = 0, 0
@@ -1171,7 +1171,7 @@ def _parse_session_history_uncached(
         merged.extend(messages[mi:])
         merged.extend(hook_messages[hi:])
         messages = merged
-        logger.info(f"Total messages after merging hooks: {len(messages)}")
+        logger.debug(f"Total messages after merging hooks: {len(messages)}")
 
     # Build usage_data from accumulated values
     usage_data = {}

@@ -255,7 +255,7 @@ class JSONLRewindService:
                 checkpoints.append(checkpoint)
                 checkpoint_index += 1
 
-        logger.info(f"Found {len(checkpoints)} checkpoints for session {sdk_session_id}")
+        logger.debug(f"Found {len(checkpoints)} checkpoints for session {sdk_session_id}")
         return checkpoints
 
     def truncate_to_checkpoint(
@@ -422,7 +422,7 @@ class JSONLRewindService:
                 # Atomic rename
                 shutil.move(temp_path, jsonl_path)
 
-                logger.info(f"Rewound session {sdk_session_id} to checkpoint {target_uuid}, removed {messages_removed} entries")
+                logger.debug(f"Rewound session {sdk_session_id} to checkpoint {target_uuid}, removed {messages_removed} entries")
 
                 return RewindResult(
                     success=True,
@@ -482,7 +482,7 @@ class JSONLRewindService:
 
         try:
             shutil.copy2(jsonl_path, backup_path)
-            logger.info(f"Created JSONL backup at {backup_path}")
+            logger.debug(f"Created JSONL backup at {backup_path}")
             return backup_path
         except Exception as e:
             logger.error(f"Failed to create JSONL backup: {e}")

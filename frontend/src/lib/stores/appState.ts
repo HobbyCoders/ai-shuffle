@@ -271,24 +271,20 @@ function createChatStore() {
 		const url = `${getWsUrl()}?token=${encodeURIComponent(token)}&device_id=${encodeURIComponent(deviceId)}`;
 
 		if (isReconnect) {
-			console.log(`[Chat] Reconnecting (attempt ${reconnectAttempts + 1})...`);
-			update(s => ({ ...s, connectionState: 'reconnecting' }));
+				update(s => ({ ...s, connectionState: 'reconnecting' }));
 		} else {
-			console.log('[Chat] Connecting to WebSocket...');
 			update(s => ({ ...s, connectionState: 'connecting' }));
 		}
 
 		ws = new WebSocket(url);
 
 		ws.onopen = () => {
-			console.log('[Chat] WebSocket connected');
 			reconnectAttempts = 0; // Reset on successful connection
 			update(s => ({ ...s, wsConnected: true, connectionState: 'connected', error: null }));
 
 			// If reconnecting and we have a current session, reload it to get latest state
 			const state = get({ subscribe });
 			if (isReconnect && state.sessionId) {
-				console.log('[Chat] Reloading session after reconnect:', state.sessionId);
 				loadSession(state.sessionId);
 			}
 
@@ -302,7 +298,6 @@ function createChatStore() {
 		};
 
 		ws.onclose = (event) => {
-			console.log('[Chat] WebSocket closed:', event.code, event.reason);
 			update(s => ({ ...s, wsConnected: false, connectionState: 'disconnected' }));
 
 			if (pingTimer) {
@@ -318,7 +313,6 @@ function createChatStore() {
 			} else if (event.code !== 1000) {
 				if (reconnectTimer) clearTimeout(reconnectTimer);
 				const delay = getReconnectDelay();
-				console.log(`[Chat] Scheduling reconnect in ${Math.round(delay / 1000)}s...`);
 				reconnectAttempts++;
 				reconnectTimer = setTimeout(() => {
 					connect(true);
@@ -367,12 +361,9 @@ function createChatStore() {
 		const sessionId = data.session_id as string;
 		const eventData = data.data as Record<string, unknown>;
 
-		console.log('[Chat] Sync event:', eventType, eventData);
-
 		// Only process events for the current session
 		const state = get({ subscribe });
 		if (state.sessionId !== sessionId) {
-			console.log('[Chat] Ignoring sync event for different session:', sessionId);
 			return;
 		}
 
@@ -381,8 +372,6 @@ function createChatStore() {
 				// Another device started streaming
 				// Don't create an empty assistant message - the poller will bring
 				// in the actual messages from live_session_store.
-				console.log('[Chat] Another device started streaming');
-
 				update(s => ({
 					...s,
 					isStreaming: true,
@@ -500,7 +489,6 @@ function createChatStore() {
 
 			case 'stream_end': {
 				// Another device finished streaming
-				console.log('[Chat] Another device finished streaming');
 				const metadata = eventData.metadata as Record<string, unknown>;
 				const interrupted = eventData.interrupted as boolean;
 
@@ -585,7 +573,6 @@ function createChatStore() {
 				const streamingBuffer = data.streamingBuffer as Array<Record<string, unknown>> | undefined;
 
 				if (isStreaming && streamingBuffer && streamingBuffer.length > 0) {
-					console.log('[Chat] Late-joining streaming session, merging buffer:', streamingBuffer.length, 'messages');
 					const bufferMessages: ChatMessage[] = streamingBuffer.map((m) => ({
 						id: `buffer-${Date.now()}-${Math.random()}`,
 						role: 'assistant',
@@ -869,8 +856,6 @@ function createChatStore() {
 				const plugin = data.plugin as string;
 				const message = data.message as string;
 				const severity = data.severity as string;
-
-				console.log(`[Chat] Plugin message from ${plugin} (${severity}):`, message);
 
 				// Add as a system message with plugin_warning type
 				update(s => ({

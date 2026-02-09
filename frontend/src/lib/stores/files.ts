@@ -88,7 +88,6 @@ function saveToServer(prefs: FilesPreferences) {
 	pendingPrefs = prefs;
 
 	if (!hasSyncedFromServer) {
-		console.log('[Files] Skipping server save - initial sync not complete');
 		return;
 	}
 
@@ -99,7 +98,6 @@ function saveToServer(prefs: FilesPreferences) {
 	serverSyncTimer = setTimeout(async () => {
 		try {
 			await setPreference(SERVER_PREFERENCE_KEY, prefs);
-			console.log('[Files] Synced preferences to server');
 			pendingPrefs = null;
 		} catch (e) {
 			console.error('[Files] Failed to save preferences to server:', e);
@@ -127,7 +125,6 @@ function flushPendingFilesSave() {
 		'/api/v1/preferences/' + SERVER_PREFERENCE_KEY,
 		new Blob([data], { type: 'application/json' })
 	);
-	console.log('[Files] Flushed pending preferences on unload');
 	pendingPrefs = null;
 }
 
@@ -618,8 +615,6 @@ function createFilesStore() {
 					serverPrefs.showHidden !== localState.showHidden;
 
 				if (needsUpdate) {
-					console.log('[Files] Server preferences differ, updating local');
-
 					// Update localStorage
 					const toSave = {
 						selectedProjectId: localState.selectedProjectId,
@@ -632,12 +627,9 @@ function createFilesStore() {
 						...state,
 						...serverPrefs
 					}));
-				} else {
-					console.log('[Files] Server and local preferences in sync');
 				}
 			} else {
 				// No server data - push local to server (migration)
-				console.log('[Files] No server preferences, pushing local');
 			}
 
 			hasSyncedFromServer = true;

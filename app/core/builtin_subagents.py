@@ -115,20 +115,20 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
                 is_builtin=True,
                 store_defaults=True  # Store defaults for revert functionality
             )
-            logger.info(f"Created built-in subagent: {subagent_id}")
+            logger.debug(f"Created built-in subagent: {subagent_id}")
             results[subagent_id] = "created"
 
         elif existing.get("is_builtin") and not existing.get("default_prompt"):
             # AUTO-REPAIR: Built-in subagent exists but missing default values
             # This happens when database was created before v26 migration
             _update_builtin_defaults(subagent_id, definition)
-            logger.info(f"Repaired defaults for built-in subagent: {subagent_id}")
+            logger.debug(f"Repaired defaults for built-in subagent: {subagent_id}")
             results[subagent_id] = "repaired"
 
         elif force_update and existing.get("is_builtin"):
             # Update the default values (but not the current values - preserve admin edits)
             _update_builtin_defaults(subagent_id, definition)
-            logger.info(f"Updated defaults for built-in subagent: {subagent_id}")
+            logger.debug(f"Updated defaults for built-in subagent: {subagent_id}")
             results[subagent_id] = "updated"
 
         elif not existing.get("is_builtin"):
@@ -137,7 +137,7 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
             # Mark it as built-in and store defaults for revert functionality
             database.set_subagent_builtin(subagent_id, True)
             _update_builtin_defaults(subagent_id, definition)
-            logger.info(f"Promoted to built-in subagent: {subagent_id}")
+            logger.debug(f"Promoted to built-in subagent: {subagent_id}")
             results[subagent_id] = "promoted"
 
         else:

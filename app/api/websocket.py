@@ -161,12 +161,12 @@ async def chat_websocket(
     api_user_id: Optional[str] = api_user["id"] if api_user else None
     # user_id for user-level broadcasts (admin users use a constant since there's one admin)
     user_id: Optional[str] = api_user_id or "admin"
-    logger.info(f"Chat WebSocket connected and authenticated (api_user_id={api_user_id})")
+    logger.debug(f"Chat WebSocket connected and authenticated (api_user_id={api_user_id})")
 
     # Generate device_id if not provided
     if not device_id:
         device_id = str(uuid.uuid4())
-        logger.info(f"Generated device_id: {device_id}")
+        logger.debug(f"Generated device_id: {device_id}")
 
     # Register user device for tab sync
     await sync_engine.register_user_device(user_id, device_id, websocket)
@@ -232,7 +232,7 @@ async def chat_websocket(
         # This prevents duplicate events (we get direct events via send_json)
         # If the device disconnects and reconnects, it will re-register and get sync events
         await sync_engine.unregister_device(device_id, session_id)
-        logger.info(f"Unregistered device {device_id} during streaming to prevent duplicates")
+        logger.debug(f"Unregistered device {device_id} during streaming to prevent duplicates")
 
         # Initialize LiveSessionStore for server-authoritative state
         # Load existing messages from JSONL first
@@ -276,7 +276,7 @@ async def chat_websocket(
                     await send_json({"type": "heartbeat", "timestamp": asyncio.get_event_loop().time()})
 
         try:
-            logger.info(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, overrides={overrides}")
+            logger.debug(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, overrides={overrides}")
             if not await send_json({"type": "start", "session_id": session_id, "message_id": message_id}):
                 logger.warning(f"Connection lost before query could start for session {session_id}")
                 await live_session_store.cleanup_session(session_id)
@@ -290,7 +290,7 @@ async def chat_websocket(
             # Start heartbeat task
             heartbeat_task = asyncio.create_task(send_heartbeats())
 
-            logger.info(f"Calling stream_to_websocket for session {session_id}, api_user_id={api_user_id}")
+            logger.debug(f"Calling stream_to_websocket for session {session_id}, api_user_id={api_user_id}")
             async for event in stream_to_websocket(
                 prompt=prompt,
                 session_id=session_id,
@@ -302,7 +302,7 @@ async def chat_websocket(
             ):
                 event_type = event.get('type')
                 if event_type == 'plugin_message':
-                    logger.info(f"[WS] Sending plugin_message to frontend: {event}")
+                    logger.debug(f"[WS] Sending plugin_message to frontend: {event}")
                 else:
                     logger.debug(f"Streaming event for session {session_id}: {event_type}")
 
@@ -313,7 +313,7 @@ async def chat_websocket(
                 ws_connected = await send_json(event)
                 if not ws_connected and not connection_lost_logged:
                     connection_lost_logged = True
-                    logger.info(f"WebSocket disconnected during streaming for session {session_id}, updates continue via sync_engine + polling")
+                    logger.debug(f"WebSocket disconnected during streaming for session {session_id}, updates continue via sync_engine + polling")
 
                 # Broadcast to other devices via SyncEngine
                 # Start streaming on first content event
@@ -750,7 +750,7 @@ async def chat_websocket(
                             source_device_id=None
                         )
 
-            logger.info(f"Query completed for session {session_id}")
+            logger.debug(f"Query completed for session {session_id}")
 
             # Dispatch webhook for session completion (non-blocking)
             import time as time_module
@@ -771,7 +771,7 @@ async def chat_websocket(
 
         except asyncio.CancelledError:
             await send_json({"type": "stopped", "session_id": session_id})
-            logger.info(f"Query cancelled for session {session_id}")
+            logger.debug(f"Query cancelled for session {session_id}")
 
             # End live session store with interrupted flag
             # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
@@ -846,7 +846,7 @@ async def chat_websocket(
             # If end_streaming WAS called, the session is kept in memory intentionally
             # for ~30 seconds so reconnecting clients can retrieve messages.
             if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
-                logger.info(f"Cleaning up live session store for session {session_id} (finally block - streaming never ended)")
+                logger.debug(f"Cleaning up live session store for session {session_id} (finally block - streaming never ended)")
                 await live_session_store.cleanup_session(session_id)
 
             # ALWAYS ensure streaming state is cleared, even if stream_started was never set
@@ -854,7 +854,7 @@ async def chat_websocket(
             if sync_engine.is_session_streaming(session_id):
                 if not stream_started:
                     # Stream was marked but never actually started - clean up silently
-                    logger.info(f"Cleaning up streaming state for session {session_id} (never started)")
+                    logger.debug(f"Cleaning up streaming state for session {session_id} (never started)")
                     await sync_engine.broadcast_stream_end(
                         session_id=session_id,
                         message_id=message_id,
@@ -876,12 +876,12 @@ async def chat_websocket(
                 current_connection = sync_engine._connections.get(session_id, {}).get(device_id)
                 if current_connection is not None and current_connection.websocket is not websocket:
                     # A newer connection exists - don't replace it with this old websocket
-                    logger.info(f"Skipping re-register for device {device_id} - newer connection already exists")
+                    logger.debug(f"Skipping re-register for device {device_id} - newer connection already exists")
                 else:
                     await sync_engine.register_device(device_id, session_id, websocket)
-                    logger.info(f"Re-registered device {device_id} after streaming complete")
+                    logger.debug(f"Re-registered device {device_id} after streaming complete")
             else:
-                logger.info(f"Skipping re-register for device {device_id} - websocket disconnected during streaming")
+                logger.debug(f"Skipping re-register for device {device_id} - websocket disconnected during streaming")
 
             # Clean up task reference only if it's still our task (avoid TOCTOU race
             # where a different device started a new query for the same session)
@@ -893,11 +893,11 @@ async def chat_websocket(
             # (don't destroy immediately — user may reopen within 30s)
             remaining_devices = sync_engine.get_device_count(session_id)
             if remaining_devices == 0:
-                logger.info(f"Query finished but no devices connected for session {session_id}, scheduling cleanup")
+                logger.debug(f"Query finished but no devices connected for session {session_id}, scheduling cleanup")
                 if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
                     # Only force-cleanup if still marked as streaming (abnormal state)
                     await live_session_store.cleanup_session(session_id)
-                    logger.info(f"Cleaned up stuck streaming session {session_id}")
+                    logger.debug(f"Cleaned up stuck streaming session {session_id}")
 
     try:
         # Start ping task
@@ -1036,7 +1036,7 @@ async def chat_websocket(
                             # so remaining in-flight tool calls are shown in the UI before
                             # the SDK fully stops and the "interrupted" event is sent.
                             interrupted = await interrupt_session(session_id)
-                            logger.info(f"Interrupt session {session_id}: {interrupted}")
+                            logger.debug(f"Interrupt session {session_id}: {interrupted}")
 
                             # Safety timeout: force-cancel if SDK doesn't stop within 10s
                             if session_id in _active_chat_sessions:
@@ -1073,7 +1073,7 @@ async def chat_websocket(
 
                         # Step 1: Interrupt the SDK-level streaming
                         interrupted = await interrupt_session(session_id)
-                        logger.info(f"Interrupt session {session_id} before new query: {interrupted}")
+                        logger.debug(f"Interrupt session {session_id} before new query: {interrupted}")
 
                         # Step 2: Cancel the asyncio task
                         if session_id in _active_chat_sessions:
@@ -1109,7 +1109,7 @@ async def chat_websocket(
                             run_query(prompt, session_id, profile_id, project_id, overrides)
                         )
                         _active_chat_sessions[session_id] = query_task
-                        logger.info(f"Started new query after interrupt for session {session_id}")
+                        logger.debug(f"Started new query after interrupt for session {session_id}")
 
                     elif msg_type == "load_session":
                         # Load a session's message history from JSONL file
@@ -1123,7 +1123,7 @@ async def chat_websocket(
                             if not session:
                                 session = database.get_session_by_sdk_id(session_id)
                                 if session:
-                                    logger.info(f"Session found via SDK session ID fallback: {session_id} -> {session['id']}")
+                                    logger.debug(f"Session found via SDK session ID fallback: {session_id} -> {session['id']}")
                                     # Update session_id to the actual AI Shuffle ID for consistency
                                     session_id = session['id']
 
@@ -1162,7 +1162,7 @@ async def chat_websocket(
                                 live_data = live_session_store.get_session_dict(session_id)
                                 if live_data and live_data.get("messages"):
                                     messages = live_data["messages"]
-                                    logger.info(f"Using live_session_store for session {session_id} with {len(messages)} messages")
+                                    logger.debug(f"Using live_session_store for session {session_id} with {len(messages)} messages")
 
                                 # Get working dir from project if available
                                 working_dir = str(settings.workspace_dir)
@@ -1178,7 +1178,7 @@ async def chat_websocket(
                                         from app.core.jsonl_parser import parse_session_history
 
                                         messages, usage_data = parse_session_history(sdk_session_id, working_dir)
-                                        logger.info(f"Loaded {len(messages)} messages from JSONL for session {session_id}")
+                                        logger.debug(f"Loaded {len(messages)} messages from JSONL for session {session_id}")
 
                                         # Merge profile_id using cached map (avoids loading all DB messages)
                                         from app.core.cost_utils import get_cached_profile_map
@@ -1203,7 +1203,7 @@ async def chat_websocket(
                                                 session["total_tokens_in"] = usage_data.get("total_tokens_in", 0)
                                                 session["total_tokens_out"] = usage_data.get("total_tokens_out", 0)
 
-                                            logger.info(f"Loaded context tokens for session {session_id}: context={session['context_tokens']}")
+                                            logger.debug(f"Loaded context tokens for session {session_id}: context={session['context_tokens']}")
                                     except Exception as e:
                                         logger.error(f"Failed to parse JSONL for session {session_id}: {e}")
                                         messages = []
@@ -1233,7 +1233,7 @@ async def chat_websocket(
                                             "profile_id": m.get("profile_id"),
                                             "streaming": False
                                         })
-                                    logger.info(f"Loaded {len(messages)} messages from DB for session {session_id}")
+                                    logger.debug(f"Loaded {len(messages)} messages from DB for session {session_id}")
 
                                 # Attach cost/duration metadata to final assistant messages (cached, O(N))
                                 from app.core.cost_utils import attach_cost_metadata
@@ -1242,7 +1242,7 @@ async def chat_websocket(
                                 # Check if session is currently streaming (late-joining device)
                                 is_streaming = sync_engine.is_session_streaming(session_id)
                                 streaming_buffer = None
-                                logger.info(f"Session {session_id} streaming status: {is_streaming}")
+                                logger.debug(f"Session {session_id} streaming status: {is_streaming}")
 
                                 # Also check for queries that are about to stream but haven't
                                 # started yet (gap between session creation and first stream_start
@@ -1252,7 +1252,7 @@ async def chat_websocket(
                                     pending_task = _active_chat_sessions.get(session_id)
                                     if pending_task and not pending_task.done():
                                         is_streaming = True
-                                        logger.info(f"Session {session_id} has pending query task, marking as streaming")
+                                        logger.debug(f"Session {session_id} has pending query task, marking as streaming")
 
                                 # Validate streaming state - if marked streaming but no active task, it's stale
                                 streaming_usage = None
@@ -1283,11 +1283,11 @@ async def chat_websocket(
                                             streaming_usage = live_data.get("usage")
                                             # No streamingBuffer needed - messages already include everything
                                             streaming_buffer = None
-                                            logger.info(f"Session {session_id} is streaming, using live_session_store with {len(messages)} messages, usage: {streaming_usage}")
+                                            logger.debug(f"Session {session_id} is streaming, using live_session_store with {len(messages)} messages, usage: {streaming_usage}")
                                         else:
                                             # Fallback to StreamingBuffer if live store doesn't have session
                                             streaming_buffer, streaming_usage, active_block_type = sync_engine.get_streaming_buffer_with_usage(session_id)
-                                            logger.info(f"Session {session_id} is streaming (live store miss), sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages, usage: {streaming_usage}, activeBlockType: {active_block_type}")
+                                            logger.debug(f"Session {session_id} is streaming (live store miss), sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages, usage: {streaming_usage}, activeBlockType: {active_block_type}")
 
                                 # Add worktree info if session is linked to a worktree
                                 worktree_id = session.get("worktree_id")
@@ -1353,7 +1353,7 @@ async def chat_websocket(
                             )
 
                             current_session_id = None
-                            logger.info(f"Device {device_id} closed session {old_session_id}")
+                            logger.debug(f"Device {device_id} closed session {old_session_id}")
                             # Try to send confirmation, but don't worry if WebSocket is already closed
                             # (common when frontend sends close_session right before disconnecting)
                             await send_json({"type": "session_closed", "session_id": old_session_id})
@@ -1374,7 +1374,7 @@ async def chat_websocket(
                                 pattern=pattern,
                                 broadcast_func=send_json
                             )
-                            logger.info(f"Permission response processed: {result}")
+                            logger.debug(f"Permission response processed: {result}")
 
                             # Send confirmation back
                             await send_json({
@@ -1409,7 +1409,7 @@ async def chat_websocket(
                                 session_id=current_session_id,
                                 answers=answers
                             )
-                            logger.info(f"User question response processed: {request_id} -> {result}")
+                            logger.debug(f"User question response processed: {request_id} -> {result}")
 
                             await send_json({
                                 "type": "user_question_response_ack",
@@ -1462,7 +1462,7 @@ async def chat_websocket(
             # The query will complete naturally and broadcast stream_end to all devices.
             # If the user wants to stop the query, they should use the "stop" message explicitly.
             if query_task and not query_task.done():
-                logger.info("WebSocket closed but query task still running for session - letting it continue for other devices")
+                logger.debug("WebSocket closed but query task still running for session - letting it continue for other devices")
 
             # Unregister user device from tab sync
             await sync_engine.unregister_user_device(user_id, device_id, websocket)
@@ -1472,7 +1472,7 @@ async def chat_websocket(
             # before this cleanup runs (e.g., page reload during streaming)
             if current_session_id:
                 await sync_engine.unregister_device(device_id, current_session_id, websocket)
-                logger.info(f"Cleanup: unregister device {device_id} from session {current_session_id}")
+                logger.debug(f"Cleanup: unregister device {device_id} from session {current_session_id}")
 
                 # Check if this was the last device for this session
                 # If so, and no active query is running, cleanup the session resources
@@ -1484,10 +1484,10 @@ async def chat_websocket(
                     # No more devices watching and no active query
                     # Only cleanup sessions still in streaming state (abnormal);
                     # ended sessions are handled by _delayed_session_cleanup
-                    logger.info(f"Last device disconnected from session {current_session_id}")
+                    logger.debug(f"Last device disconnected from session {current_session_id}")
                     if live_session_store.has_session(current_session_id) and live_session_store.is_streaming(current_session_id):
                         await live_session_store.cleanup_session(current_session_id)
-                        logger.info(f"Cleaned up stuck streaming session {current_session_id}")
+                        logger.debug(f"Cleaned up stuck streaming session {current_session_id}")
 
                     # Remove from active chat sessions tracking
                     _active_chat_sessions.pop(current_session_id, None)
@@ -1495,18 +1495,18 @@ async def chat_websocket(
                     # Clear streaming state in sync engine (no need to broadcast - no devices left)
                     sync_engine.clear_streaming_state(current_session_id)
                 elif remaining_devices > 0:
-                    logger.info(f"Session {current_session_id} still has {remaining_devices} device(s) connected")
+                    logger.debug(f"Session {current_session_id} still has {remaining_devices} device(s) connected")
                 elif not is_task_done:
-                    logger.info(f"Session {current_session_id} has active query, deferring cleanup")
+                    logger.debug(f"Session {current_session_id} has active query, deferring cleanup")
 
     except WebSocketDisconnect:
-        logger.info("Chat WebSocket disconnected")
+        logger.debug("Chat WebSocket disconnected")
 
     except RuntimeError as e:
         # Handle "WebSocket is not connected" error that happens when we try to
         # receive after the connection was closed (e.g., after processing close_session)
         if "not connected" in str(e).lower():
-            logger.info("Chat WebSocket disconnected (connection closed)")
+            logger.debug("Chat WebSocket disconnected (connection closed)")
         else:
             logger.error(f"Chat WebSocket runtime error: {e}")
 
@@ -1564,7 +1564,7 @@ async def session_sync_websocket(
 
     # Accept connection
     await websocket.accept()
-    logger.info(f"WebSocket connected: device={device_id}, session={session_id}")
+    logger.debug(f"WebSocket connected: device={device_id}, session={session_id}")
 
     # Register device with sync engine
     connection = await sync_engine.register_device(
@@ -1631,7 +1631,7 @@ async def session_sync_websocket(
                 pass
 
     except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected: device={device_id}, session={session_id}")
+        logger.debug(f"WebSocket disconnected: device={device_id}, session={session_id}")
 
     except Exception as e:
         logger.error(f"WebSocket error for device={device_id}: {e}")
@@ -1646,7 +1646,7 @@ async def session_sync_websocket(
         is_task_done = active_task is None or active_task.done()
 
         if remaining_devices == 0 and is_task_done:
-            logger.info(f"Last device disconnected from legacy sync session {session_id}")
+            logger.debug(f"Last device disconnected from legacy sync session {session_id}")
 
             if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
                 await live_session_store.cleanup_session(session_id)
@@ -1708,7 +1708,7 @@ async def global_sync_websocket(
         return
 
     await websocket.accept()
-    logger.info(f"Global WebSocket connected: device={device_id}")
+    logger.debug(f"Global WebSocket connected: device={device_id}")
 
     # Track sessions this device is interested in
     watched_sessions: set = set()
@@ -1758,7 +1758,7 @@ async def global_sync_websocket(
                 pass
 
     except WebSocketDisconnect:
-        logger.info(f"Global WebSocket disconnected: device={device_id}")
+        logger.debug(f"Global WebSocket disconnected: device={device_id}")
 
     except Exception as e:
         logger.error(f"Global WebSocket error for device={device_id}: {e}")
@@ -1829,7 +1829,7 @@ async def cli_websocket(
         if project:
             working_dir = get_project_working_dir(project)
 
-    logger.info(f"CLI WebSocket connected for session {session_id}, sdk_session={sdk_session_id}")
+    logger.debug(f"CLI WebSocket connected for session {session_id}, sdk_session={sdk_session_id}")
 
     cli_bridge: Optional[CLIBridge] = None
     output_buffer = ""  # For parsing rewind output
@@ -1943,7 +1943,7 @@ async def cli_websocket(
                 await websocket.send_json({"type": "ping"})
 
     except WebSocketDisconnect:
-        logger.info(f"CLI WebSocket disconnected for session {session_id}")
+        logger.debug(f"CLI WebSocket disconnected for session {session_id}")
 
     except Exception as e:
         logger.error(f"CLI WebSocket error for session {session_id}: {e}", exc_info=True)

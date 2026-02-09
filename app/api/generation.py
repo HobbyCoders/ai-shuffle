@@ -240,7 +240,7 @@ async def _generate_profile_internal(
     prompt = build_profile_generation_prompt(description, clarification_context, reference_material)
 
     # Generate with Claude
-    logger.info(f"Generating profile from description: {description[:100]}...")
+    logger.debug(f"Generating profile from description: {description[:100]}...")
     response_text = await generate_with_claude(prompt, model)
 
     # Parse the response
@@ -301,7 +301,7 @@ async def _generate_profile_internal(
         agent=agent_data
     )
 
-    logger.info(f"Successfully generated profile: {agent_data.name}")
+    logger.debug(f"Successfully generated profile: {agent_data.name}")
     return export_data
 
 
@@ -327,7 +327,7 @@ async def _generate_subagent_internal(
     prompt = build_subagent_generation_prompt(description, clarification_context, reference_material)
 
     # Generate with Claude
-    logger.info(f"Generating subagent from description: {description[:100]}...")
+    logger.debug(f"Generating subagent from description: {description[:100]}...")
     response_text = await generate_with_claude(prompt, model)
 
     # Parse the response
@@ -384,7 +384,7 @@ async def _generate_subagent_internal(
         subagent=subagent_data
     )
 
-    logger.info(f"Successfully generated subagent: {subagent_data.name} ({subagent_data.id})")
+    logger.debug(f"Successfully generated subagent: {subagent_data.name} ({subagent_data.id})")
     return export_data
 
 

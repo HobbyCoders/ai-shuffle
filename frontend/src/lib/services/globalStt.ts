@@ -214,8 +214,6 @@ async function startRecording(): Promise<void> {
 
 		// Start visualization loop
 		startVisualization();
-
-		console.log('[GlobalSTT] Recording started');
 	} catch (error: unknown) {
 		console.error('[GlobalSTT] Failed to start recording:', error);
 		const err = error as { name?: string; message?: string };
@@ -266,8 +264,6 @@ async function stopRecording(): Promise<void> {
 	}
 
 	globalSttState.update((s) => ({ ...s, isRecording: false }));
-
-	console.log('[GlobalSTT] Recording stopped, processing...');
 
 	try {
 		// Use Promise-based approach to ensure all data is collected
@@ -367,7 +363,6 @@ async function transcribeAndOutput(audioBlob: Blob): Promise<void> {
 				...s,
 				lastTranscription: text
 			}));
-			console.log('[GlobalSTT] Transcription complete:', text.substring(0, 50) + '...');
 		} else {
 			globalSttState.update((s) => ({
 				...s,
@@ -393,7 +388,6 @@ async function outputText(text: string): Promise<void> {
 	// Always copy to clipboard first
 	try {
 		await navigator.clipboard.writeText(text);
-		console.log('[GlobalSTT] Text copied to clipboard');
 	} catch (e) {
 		console.error('[GlobalSTT] Failed to copy to clipboard:', e);
 		// Continue anyway - we'll try to paste if possible
@@ -424,7 +418,6 @@ async function outputText(text: string): Promise<void> {
 				}
 			}
 
-			console.log('[GlobalSTT] Text inserted into focused input');
 		} catch (e) {
 			console.error('[GlobalSTT] Failed to insert text:', e);
 			// Text is already on clipboard, user can paste manually
@@ -455,15 +448,12 @@ function registerGlobalSttShortcut(config: HotkeyConfig): void {
 		preventDefault: true,
 		action: toggleRecording
 	});
-
-	console.log('[GlobalSTT] Shortcut registered:', config);
 }
 
 function unregisterGlobalSttShortcut(): void {
 	if (currentRegistration) {
 		currentRegistration.unregister();
 		currentRegistration = null;
-		console.log('[GlobalSTT] Shortcut unregistered');
 	}
 }
 
@@ -490,14 +480,11 @@ export function initGlobalStt(): () => void {
 		}
 	});
 
-	console.log('[GlobalSTT] Initialized');
-
 	// Return cleanup function
 	return () => {
 		unsubscribe();
 		unregisterGlobalSttShortcut();
 		cleanup();
-		console.log('[GlobalSTT] Cleaned up');
 	};
 }
 

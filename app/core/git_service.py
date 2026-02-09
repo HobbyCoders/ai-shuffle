@@ -149,7 +149,7 @@ class GitService:
                 timeout=60
             )
             if result.returncode == 0:
-                logger.info(f"Fetched from {remote}")
+                logger.debug(f"Fetched from {remote}")
                 return True
             logger.warning(f"Fetch failed: {result.stderr}")
             return False
@@ -287,7 +287,7 @@ class GitService:
 
             result = self._run_git(working_dir, args, timeout=10)
             if result.returncode == 0:
-                logger.info(f"Created branch: {name}")
+                logger.debug(f"Created branch: {name}")
                 return True
 
             logger.warning(f"Failed to create branch {name}: {result.stderr}")
@@ -317,7 +317,7 @@ class GitService:
             flag = "-D" if force else "-d"
             result = self._run_git(working_dir, ["branch", flag, "--", name], timeout=10)
             if result.returncode == 0:
-                logger.info(f"Deleted branch: {name}")
+                logger.debug(f"Deleted branch: {name}")
                 return True
 
             logger.warning(f"Failed to delete branch {name}: {result.stderr}")
@@ -342,7 +342,7 @@ class GitService:
             safe_ref = f"refs/heads/{ref}" if ref.startswith("-") else ref
             result = self._run_git(working_dir, ["checkout", safe_ref], timeout=30)
             if result.returncode == 0:
-                logger.info(f"Checked out: {ref}")
+                logger.debug(f"Checked out: {ref}")
                 return True
 
             logger.warning(f"Failed to checkout {ref}: {result.stderr}")
@@ -451,7 +451,7 @@ class GitService:
             # When creating a new branch from a base branch, fetch latest from origin first
             # This ensures the new branch includes all remote commits
             if new_branch and base_branch:
-                logger.info(f"Fetching latest from origin before creating branch from {base_branch}")
+                logger.debug(f"Fetching latest from origin before creating branch from {base_branch}")
                 self.fetch(main_dir, "origin")
 
             args = ["worktree", "add"]
@@ -466,17 +466,17 @@ class GitService:
                     check_result = self._run_git(main_dir, ["rev-parse", "--verify", remote_base], timeout=10)
                     if check_result.returncode == 0:
                         args.append(remote_base)
-                        logger.info(f"Using remote branch {remote_base} as base for new branch {branch}")
+                        logger.debug(f"Using remote branch {remote_base} as base for new branch {branch}")
                     else:
                         # Fall back to local branch if remote doesn't exist
                         args.append(base_branch)
-                        logger.info(f"Remote {remote_base} not found, using local {base_branch} as base")
+                        logger.debug(f"Remote {remote_base} not found, using local {base_branch} as base")
             else:
                 args.extend(["--", path, branch])
 
             result = self._run_git(main_dir, args, timeout=30)
             if result.returncode == 0:
-                logger.info(f"Added worktree at {path} for branch {branch}")
+                logger.debug(f"Added worktree at {path} for branch {branch}")
                 return True, None
 
             error_msg = result.stderr.strip() if result.stderr else "Unknown git error"
@@ -511,7 +511,7 @@ class GitService:
 
             result = self._run_git(main_dir, args, timeout=30)
             if result.returncode == 0:
-                logger.info(f"Removed worktree at {path}")
+                logger.debug(f"Removed worktree at {path}")
                 return True
 
             logger.warning(f"Failed to remove worktree: {result.stderr}")
@@ -689,7 +689,7 @@ class GitService:
             result = self._run_git(working_dir, args, timeout=30)
 
             if result.returncode == 0:
-                logger.info(f"Staged {len(files)} file(s)")
+                logger.debug(f"Staged {len(files)} file(s)")
                 return True
 
             logger.warning(f"Failed to stage files: {result.stderr}")
@@ -720,7 +720,7 @@ class GitService:
             if result.returncode == 0:
                 sha_result = self._run_git(working_dir, ["rev-parse", "HEAD"], timeout=5)
                 commit_sha = sha_result.stdout.strip()[:12] if sha_result.returncode == 0 else None
-                logger.info(f"Created commit: {commit_sha}")
+                logger.debug(f"Created commit: {commit_sha}")
                 return True, commit_sha
 
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
@@ -760,7 +760,7 @@ class GitService:
             result = self._run_git(working_dir, args, timeout=120)
 
             if result.returncode == 0:
-                logger.info(f"Pushed to {remote}/{branch or 'current branch'}")
+                logger.debug(f"Pushed to {remote}/{branch or 'current branch'}")
                 return True, None
 
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"

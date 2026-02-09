@@ -51,14 +51,12 @@ class SessionNotifier {
 
 		if (msgType === 'start' || msgType === 'stream_start' || eventType === 'stream_start') {
 			// Streaming has started - begin fast polling
-			console.log(`[Notifier] Stream started for ${sessionId} (${msgType || eventType})`);
 			sessionPoller.startStreaming(sessionId);
 			return;
 		}
 
 		if (msgType === 'done' || msgType === 'stopped' || msgType === 'interrupted' || eventType === 'stream_end') {
 			// Streaming ended - trigger one final poll, poller will stop itself
-			console.log(`[Notifier] Stream ended for ${sessionId} (${msgType || eventType})`);
 			sessionPoller.pollNow(sessionId);
 			return;
 		}

@@ -199,7 +199,7 @@ class MobileDeviceManager:
         self._devices[device_id] = device
         await self._save_device_to_db(device)
 
-        logger.info(f"Registered new device: {device_id} ({device.platform})")
+        logger.debug(f"Registered new device: {device_id} ({device.platform})")
 
         # Return device info with the API key (only returned once)
         result = self._device_to_dict(device)
@@ -241,7 +241,7 @@ class MobileDeviceManager:
 
         await self._save_device_to_db(device)
 
-        logger.info(f"Updated capabilities for device {device_id}")
+        logger.debug(f"Updated capabilities for device {device_id}")
         return self._device_to_dict(device)
 
     async def get_device(self, device_id: str) -> Optional[Dict[str, Any]]:
@@ -298,7 +298,7 @@ class MobileDeviceManager:
         del self._devices[device_id]
         await self._delete_device_from_db(device_id)
 
-        logger.info(f"Removed device {device_id}")
+        logger.debug(f"Removed device {device_id}")
         return True
 
     async def verify_device_key(self, device_id: str, api_key: str) -> bool:
@@ -352,7 +352,7 @@ class MobileDeviceManager:
 
         await self._save_device_to_db(device)
 
-        logger.info(f"Updated FCM token for device {device_id}")
+        logger.debug(f"Updated FCM token for device {device_id}")
         return self._device_to_dict(device)
 
     async def update_last_seen(self, device_id: str) -> Optional[Dict[str, Any]]:
@@ -406,7 +406,7 @@ class MobileDeviceManager:
 
         await self._save_device_to_db(device)
 
-        logger.info(f"Set device {device_id} active={is_active}")
+        logger.debug(f"Set device {device_id} active={is_active}")
         return self._device_to_dict(device)
 
     async def _save_device_to_db(self, device: MobileDevice) -> None:

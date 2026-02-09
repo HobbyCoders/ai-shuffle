@@ -163,7 +163,7 @@ class ActionQueue:
         self._actions[action_id] = action
         await self._save_action_to_db(action)
 
-        logger.info(f"Queued action {action_id}: {action_type} for device {device_id}")
+        logger.debug(f"Queued action {action_id}: {action_type} for device {device_id}")
 
         return action_id
 
@@ -240,7 +240,7 @@ class ActionQueue:
         if datetime.utcnow() > action.expires_at:
             action.status = ActionStatus.EXPIRED
             await self._save_action_to_db(action)
-            logger.info(f"Action {action_id} was already expired")
+            logger.debug(f"Action {action_id} was already expired")
             return self._action_to_dict(action)
 
         action.confirmed_at = datetime.utcnow()
@@ -248,10 +248,10 @@ class ActionQueue:
         if approved:
             action.status = ActionStatus.APPROVED
             action.executor_result = executor_result
-            logger.info(f"Action {action_id} approved")
+            logger.debug(f"Action {action_id} approved")
         else:
             action.status = ActionStatus.REJECTED
-            logger.info(f"Action {action_id} rejected")
+            logger.debug(f"Action {action_id} rejected")
 
         await self._save_action_to_db(action)
         await self._notify_confirmation(action)
@@ -300,7 +300,7 @@ class ActionQueue:
         await self._save_action_to_db(action)
         await self._notify_completion(action)
 
-        logger.info(f"Action {action_id} completed (success={success})")
+        logger.debug(f"Action {action_id} completed (success={success})")
 
         return self._action_to_dict(action)
 
@@ -325,7 +325,7 @@ class ActionQueue:
                 logger.debug(f"Expired action {action.id}")
 
         if expired_count > 0:
-            logger.info(f"Expired {expired_count} old actions")
+            logger.debug(f"Expired {expired_count} old actions")
 
         return expired_count
 
@@ -349,7 +349,7 @@ class ActionQueue:
         action.status = ActionStatus.EXPIRED  # Use EXPIRED for cancellation
         await self._save_action_to_db(action)
 
-        logger.info(f"Cancelled action {action_id}")
+        logger.debug(f"Cancelled action {action_id}")
         return True
 
     async def cleanup_completed_actions(self, older_than_hours: int = 24) -> int:
@@ -382,7 +382,7 @@ class ActionQueue:
                 removed_count += 1
 
         if removed_count > 0:
-            logger.info(f"Cleaned up {removed_count} old actions")
+            logger.debug(f"Cleaned up {removed_count} old actions")
 
         return removed_count
 
@@ -442,7 +442,7 @@ class ActionQueue:
                 )
                 self._actions[action.id] = action
 
-            logger.info(f"Loaded {len(self._actions)} actions from database")
+            logger.debug(f"Loaded {len(self._actions)} actions from database")
 
         except Exception as e:
             logger.warning(f"Could not load actions from database: {e}")

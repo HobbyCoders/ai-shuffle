@@ -397,7 +397,7 @@ async def advanced_search(
     # Apply pagination
     paginated_results = results[offset:offset + limit]
 
-    logger.info(f"Advanced search '{q}': {len(paginated_results)} results from {sessions_searched} sessions searched")
+    logger.debug(f"Advanced search '{q}': {len(paginated_results)} results from {sessions_searched} sessions searched")
 
     return paginated_results
 

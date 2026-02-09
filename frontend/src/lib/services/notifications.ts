@@ -29,7 +29,6 @@ function saveToServer(enabled: boolean): void {
 	if (typeof window === 'undefined') return;
 
 	if (!hasSyncedFromServer) {
-		console.log('[Notifications] Skipping server save - initial sync not complete');
 		return;
 	}
 
@@ -40,7 +39,6 @@ function saveToServer(enabled: boolean): void {
 	serverSyncTimer = setTimeout(async () => {
 		try {
 			await setPreference(SERVER_PREFERENCE_KEY, { enabled });
-			console.log('[Notifications] Synced to server');
 		} catch (e) {
 			console.error('[Notifications] Failed to save to server:', e);
 		}
@@ -61,13 +59,11 @@ export async function syncNotificationsFromServer(): Promise<void> {
 		if (serverPrefs) {
 			const localEnabled = localStorage.getItem('notifications_enabled') === 'true';
 			if (serverPrefs.enabled !== localEnabled) {
-				console.log('[Notifications] Server preference differs, updating local');
 				localStorage.setItem('notifications_enabled', serverPrefs.enabled ? 'true' : 'false');
 			}
 		} else {
 			// No server data - push local to server
 			const localEnabled = localStorage.getItem('notifications_enabled') === 'true';
-			console.log('[Notifications] No server data, pushing local');
 			hasSyncedFromServer = true;
 			if (localEnabled) {
 				saveToServer(localEnabled);

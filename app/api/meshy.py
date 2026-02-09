@@ -118,7 +118,7 @@ async def receive_meshy_webhook(request: Request):
         body = await request.json()
         payload = MeshyWebhookPayload(**body)
 
-        logger.info(f"Received Meshy webhook for task {payload.id}: status={payload.status}")
+        logger.debug(f"Received Meshy webhook for task {payload.id}: status={payload.status}")
 
         # Optional: Verify webhook signature
         # Meshy may include X-Meshy-Signature header
@@ -201,7 +201,7 @@ async def receive_meshy_webhook(request: Request):
         # Store updated task
         meshy_tasks_db[task_id] = updated_task
 
-        logger.info(f"Updated task {task_id}: {internal_status}")
+        logger.debug(f"Updated task {task_id}: {internal_status}")
 
         # Return 200 OK to acknowledge receipt
         return {"received": True, "task_id": task_id, "status": internal_status}
@@ -299,7 +299,7 @@ async def delete_task(task_id: str, token: str = Depends(require_auth)):
         )
 
     del meshy_tasks_db[task_id]
-    logger.info(f"Deleted task {task_id}")
+    logger.debug(f"Deleted task {task_id}")
 
 
 # ============================================================================
@@ -335,7 +335,7 @@ async def register_task(
     }
 
     meshy_tasks_db[task_id] = task
-    logger.info(f"Registered task {task_id}: type={task_type}")
+    logger.debug(f"Registered task {task_id}: type={task_type}")
 
     return {"registered": True, "task_id": task_id}
 
@@ -428,7 +428,7 @@ async def update_meshy_settings(
                 detail=f"Invalid model. Valid options: {valid_models}"
             )
         database.set_system_setting("model3d_model", request.model)
-        logger.info(f"3D model set to: {request.model}")
+        logger.debug(f"3D model set to: {request.model}")
 
     if request.provider:
         valid_providers = ["meshy"]
@@ -438,7 +438,7 @@ async def update_meshy_settings(
                 detail=f"Invalid provider. Valid options: {valid_providers}"
             )
         database.set_system_setting("model3d_provider", request.provider)
-        logger.info(f"3D provider set to: {request.provider}")
+        logger.debug(f"3D provider set to: {request.provider}")
 
     return {
         "success": True,

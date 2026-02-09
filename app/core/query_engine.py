@@ -153,9 +153,9 @@ def write_agents_to_filesystem(agents_dict: Dict[str, AgentDefinition], cwd: str
         agent_file = agents_dir / f"{agent_id}.md"
         agent_file.write_text(content, encoding="utf-8")
         written_files.append(agent_file)
-        logger.info(f"Wrote subagent file: {agent_file}")
+        logger.debug(f"Wrote subagent file: {agent_file}")
 
-    logger.info(f"Wrote {len(written_files)} subagent files to {agents_dir}")
+    logger.debug(f"Wrote {len(written_files)} subagent files to {agents_dir}")
     return agents_dir
 
 
@@ -260,7 +260,7 @@ def _build_plugins_list(
     # Get plugins enabled in Claude's settings.json (for reference/logging)
     settings_enabled = service.get_enabled_plugins()  # Returns Dict[str, bool]
     settings_plugin_ids = {pid for pid, enabled in settings_enabled.items() if enabled}
-    logger.info(f"Plugins in user settings.json: {list(settings_plugin_ids)}")
+    logger.debug(f"Plugins in user settings.json: {list(settings_plugin_ids)}")
 
     # Build list of plugins to pass explicitly
     all_plugin_entries = []
@@ -268,15 +268,15 @@ def _build_plugins_list(
     if sdk_loads_user_plugins:
         # SDK will auto-load user settings plugins - only add profile-specific plugins
         # that are NOT already in user settings (to avoid duplicates)
-        logger.info("SDK will auto-load user plugins (setting_sources includes 'user')")
+        logger.debug("SDK will auto-load user plugins (setting_sources includes 'user')")
         if profile_enabled_plugins:
             for entry in profile_enabled_plugins:
                 if entry and entry not in settings_plugin_ids:
                     all_plugin_entries.append(entry)
-                    logger.info(f"Adding profile-only plugin (not in user settings): {entry}")
+                    logger.debug(f"Adding profile-only plugin (not in user settings): {entry}")
     else:
         # SDK won't auto-load - we need to pass all plugins explicitly
-        logger.info("SDK won't auto-load plugins - adding all enabled plugins explicitly")
+        logger.debug("SDK won't auto-load plugins - adding all enabled plugins explicitly")
         for plugin_id, is_enabled in settings_enabled.items():
             if is_enabled:
                 all_plugin_entries.append(plugin_id)
@@ -288,7 +288,7 @@ def _build_plugins_list(
                     all_plugin_entries.append(entry)
 
     if not all_plugin_entries:
-        logger.info("No plugins enabled in settings.json or profile config")
+        logger.debug("No plugins enabled in settings.json or profile config")
         return None
 
     plugins = []
@@ -329,14 +329,14 @@ def _build_plugins_list(
                     "path": str(resolved_path)
                 })
                 seen_paths.add(str(resolved_path))
-                logger.info(f"Adding plugin: {resolved_path}")
+                logger.debug(f"Adding plugin: {resolved_path}")
             else:
                 logger.warning(f"Plugin directory not found: {resolved_path}")
 
     if not plugins:
         return None
 
-    logger.info(f"Built plugins list with {len(plugins)} plugin(s)")
+    logger.debug(f"Built plugins list with {len(plugins)} plugin(s)")
     return plugins
 
 
@@ -824,7 +824,7 @@ def _get_hook_tool_names(hooks: Optional[Dict[str, list]]) -> list:
                 tool_name = tool_name.strip()
                 if tool_name and tool_name not in tools:
                     tools.append(tool_name)
-                    logger.info(f"Found hooked tool: '{tool_name}'")
+                    logger.debug(f"Found hooked tool: '{tool_name}'")
 
     return tools
 
@@ -861,7 +861,7 @@ def _build_extra_args(
         for tool in hook_tools:
             if tool not in existing_tools:
                 existing_tools.append(tool)
-                logger.info(f"Adding '{tool}' to --allowed-tools (required for hook handler)")
+                logger.debug(f"Adding '{tool}' to --allowed-tools (required for hook handler)")
 
         if existing_tools:
             extra_args["allowed-tools"] = ",".join(existing_tools)
@@ -1183,7 +1183,7 @@ def build_options_from_profile(
     # The SDK expects AgentDefinition dataclass instances, not raw dicts
     enabled_agent_ids = config.get("enabled_agents", [])
     agents_dict = None
-    logger.info(f"Building agents from enabled_agent_ids: {enabled_agent_ids}")
+    logger.debug(f"Building agents from enabled_agent_ids: {enabled_agent_ids}")
     if enabled_agent_ids:
         agents_dict = {}
         for agent_id in enabled_agent_ids:
@@ -1198,10 +1198,10 @@ def build_options_from_profile(
                     model=subagent.get("model")
                 )
                 agents_dict[agent_id] = agent_def
-                logger.info(f"Loaded subagent '{agent_id}': description='{agent_def.description[:50]}...', tools={agent_def.tools}, model={agent_def.model}")
+                logger.debug(f"Loaded subagent '{agent_id}': description='{agent_def.description[:50]}...', tools={agent_def.tools}, model={agent_def.model}")
             else:
                 logger.warning(f"Subagent not found in database: {agent_id}")
-        logger.info(f"Final agents_dict keys: {list(agents_dict.keys()) if agents_dict else 'None'}")
+        logger.debug(f"Final agents_dict keys: {list(agents_dict.keys()) if agents_dict else 'None'}")
 
     # Inject built-in agent instructions into system prompt (only for enabled built-in agents)
     if enabled_agent_ids:
@@ -1224,7 +1224,7 @@ def build_options_from_profile(
     # typed messages for important events (compact_boundary, api errors via
     # synthetic AssistantMessage with isApiErrorMessage, etc.)
     def stderr_callback(line: str):
-        logger.info(f"[Claude CLI stderr] {line}")
+        logger.debug(f"[Claude CLI stderr] {line}")
 
     # Process model selection - handle special 1M context models
     # Models ending in "-1m" use the base model with 1M context beta header
@@ -1241,7 +1241,7 @@ def build_options_from_profile(
 
     if raw_model in MODEL_1M_MAPPING:
         model_to_use, betas_to_use = MODEL_1M_MAPPING[raw_model]
-        logger.info(f"1M context model selected: {raw_model} -> model={model_to_use}, betas={betas_to_use}")
+        logger.debug(f"1M context model selected: {raw_model} -> model={model_to_use}, betas={betas_to_use}")
 
     # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
     # Priority: tools > tools_preset > allowed_tools (legacy)
@@ -1333,11 +1333,11 @@ def build_options_from_profile(
     )
 
     deployment_mode = detect_deployment_mode()
-    logger.info(f"Built options with model={model_to_use}, betas={betas_to_use}, permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
+    logger.debug(f"Built options with model={model_to_use}, betas={betas_to_use}, permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
     if deployment_mode == DeploymentMode.LOCAL:
-        logger.info(f"Windows local mode: Agents to write to filesystem: {list(agents_dict.keys()) if agents_dict else 'None'}")
+        logger.debug(f"Windows local mode: Agents to write to filesystem: {list(agents_dict.keys()) if agents_dict else 'None'}")
     else:
-        logger.info(f"Docker mode: Agents passed via SDK: {list(agents_dict.keys()) if agents_dict else 'None'}")
+        logger.debug(f"Docker mode: Agents passed via SDK: {list(agents_dict.keys()) if agents_dict else 'None'}")
 
     # Apply working directory (already computed above for env details)
     options.cwd = working_dir
@@ -1590,7 +1590,7 @@ async def stream_query(
             yield {"type": "error", "message": f"Session not found: {session_id}"}
             return
         resume_id = session.get("sdk_session_id")
-        logger.info(f"Resuming session {session_id} with SDK session {resume_id}")
+        logger.debug(f"Resuming session {session_id} with SDK session {resume_id}")
     else:
         session_id = str(uuid.uuid4())
         # Generate title from first message (truncate to 50 chars)
@@ -1605,7 +1605,7 @@ async def stream_query(
             api_user_id=api_user_id
         )
         _is_new_session = True  # Flag available for future analytics/logging
-        logger.info(f"Created new session {session_id} with title: {title}")
+        logger.debug(f"Created new session {session_id} with title: {title}")
 
     # Store user message and broadcast to other devices
     user_msg = database.add_session_message(
@@ -1660,7 +1660,7 @@ async def stream_query(
     # Clean up any existing state for this session
     state = _active_sessions.get(session_id)
     if state:
-        logger.info(f"Cleaning up existing state for session {session_id}")
+        logger.debug(f"Cleaning up existing state for session {session_id}")
         try:
             await state.client.disconnect()
         except Exception:
@@ -1671,16 +1671,16 @@ async def stream_query(
         del _active_sessions[session_id]
 
     # Always create new client
-    logger.info(f"Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
-    logger.info(f"Options cwd: {options.cwd}")
-    logger.info(f"Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
+    logger.debug(f"Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
+    logger.debug(f"Options cwd: {options.cwd}")
+    logger.debug(f"Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
     client = ClaudeSDKClient(options=options)
-    logger.info("ClaudeSDKClient created, attempting connect...")
+    logger.debug("ClaudeSDKClient created, attempting connect...")
 
     # Connect without timeout - Anvil doesn't use timeout for connect()
     try:
         await client.connect()
-        logger.info(f"Connected to Claude SDK for session {session_id}")
+        logger.debug(f"Connected to Claude SDK for session {session_id}")
     except Exception as e:
         import traceback
         logger.error(f"Failed to connect to Claude SDK for session {session_id}: {e}")
@@ -1738,7 +1738,7 @@ async def stream_query(
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]
                     state.sdk_session_id = sdk_session_id
-                    logger.info(f"Captured SDK session ID: {sdk_session_id}")
+                    logger.debug(f"Captured SDK session ID: {sdk_session_id}")
 
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
@@ -1852,7 +1852,7 @@ async def stream_query(
 
     except asyncio.CancelledError:
         interrupted = True
-        logger.info(f"Query interrupted for session {session_id}")
+        logger.debug(f"Query interrupted for session {session_id}")
         yield {"type": "interrupted", "message": "Query was interrupted"}
 
     except Exception as e:
@@ -1885,7 +1885,7 @@ async def stream_query(
             tokens_out_increment=metadata.get("tokens_out", 0),
             turn_increment=metadata.get("num_turns", 0)
         )
-        logger.info(f"Updated session {session_id}, sdk_session_id={sdk_session_id}")
+        logger.debug(f"Updated session {session_id}, sdk_session_id={sdk_session_id}")
 
     # Store tool messages (tool_use and tool_result)
     for tool_msg in tool_messages:
@@ -2023,7 +2023,7 @@ async def _run_background_query(
     # Clean up any existing state for this session
     state = _active_sessions.get(session_id)
     if state:
-        logger.info(f"Cleaning up existing state for session {session_id}")
+        logger.debug(f"Cleaning up existing state for session {session_id}")
         try:
             await state.client.disconnect()
         except Exception:
@@ -2034,14 +2034,14 @@ async def _run_background_query(
         del _active_sessions[session_id]
 
     # Always create new client
-    logger.info(f"[Background] Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
-    logger.info(f"[Background] Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
+    logger.debug(f"[Background] Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
+    logger.debug(f"[Background] Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
     client = ClaudeSDKClient(options=options)
 
     # Connect
     try:
         await client.connect()
-        logger.info(f"[Background] Connected to Claude SDK for session {session_id}")
+        logger.debug(f"[Background] Connected to Claude SDK for session {session_id}")
     except Exception as e:
         logger.error(f"[Background] Failed to connect to Claude SDK for session {session_id}: {e}")
         # Broadcast error
@@ -2105,7 +2105,7 @@ async def _run_background_query(
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]
                     state.sdk_session_id = sdk_session_id
-                    logger.info(f"[Background] Captured SDK session ID: {sdk_session_id}")
+                    logger.debug(f"[Background] Captured SDK session ID: {sdk_session_id}")
 
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
@@ -2207,7 +2207,7 @@ async def _run_background_query(
 
     except asyncio.CancelledError:
         interrupted = True
-        logger.info(f"[Background] Query interrupted for session {session_id}")
+        logger.debug(f"[Background] Query interrupted for session {session_id}")
 
     except Exception as e:
         logger.error(f"[Background] Stream query error for session {session_id}: {e}")
@@ -2238,7 +2238,7 @@ async def _run_background_query(
             tokens_out_increment=metadata.get("tokens_out", 0),
             turn_increment=metadata.get("num_turns", 0)
         )
-        logger.info(f"[Background] Updated session {session_id}, sdk_session_id={sdk_session_id}")
+        logger.debug(f"[Background] Updated session {session_id}, sdk_session_id={sdk_session_id}")
 
     # Store tool messages (tool_use and tool_result)
     for tool_msg in tool_messages:
@@ -2298,7 +2298,7 @@ async def _run_background_query(
             duration_ms=metadata.get("duration_ms", 0)
         )
 
-    logger.info(f"[Background] Query completed for session {session_id}")
+    logger.debug(f"[Background] Query completed for session {session_id}")
 
 
 async def start_background_query(
@@ -2336,7 +2336,7 @@ async def start_background_query(
         if not session:
             raise ValueError(f"Session not found: {session_id}")
         resume_id = session.get("sdk_session_id")
-        logger.info(f"Resuming session {session_id} with SDK session {resume_id}")
+        logger.debug(f"Resuming session {session_id} with SDK session {resume_id}")
     else:
         session_id = str(uuid.uuid4())
         title = prompt[:50].strip()
@@ -2349,7 +2349,7 @@ async def start_background_query(
             title=title,
             api_user_id=api_user_id
         )
-        logger.info(f"Created new session {session_id} with title: {title}")
+        logger.debug(f"Created new session {session_id} with title: {title}")
 
     # Generate a message ID for streaming
     assistant_msg_id = f"streaming-{session_id}-{datetime.now().timestamp()}"
@@ -2362,7 +2362,7 @@ async def start_background_query(
         source_device_id=None,  # Don't exclude any device - all should see it
         user_id=api_user_id
     )
-    logger.info(f"[Background] Broadcast stream_start for session {session_id}")
+    logger.debug(f"[Background] Broadcast stream_start for session {session_id}")
 
     # Start background task
     task = asyncio.create_task(
@@ -2422,13 +2422,13 @@ async def interrupt_session(session_id: str) -> bool:
 
     # Don't check is_streaming too strictly - there might be race conditions
     # and it's better to try to interrupt anyway
-    logger.info(f"Attempting to interrupt session {session_id} (streaming={state.is_streaming})")
+    logger.debug(f"Attempting to interrupt session {session_id} (streaming={state.is_streaming})")
 
     try:
         await state.client.interrupt()
         # Mark as not streaming immediately after interrupt
         state.is_streaming = False
-        logger.info(f"Successfully interrupted session {session_id}")
+        logger.debug(f"Successfully interrupted session {session_id}")
         return True
     except Exception as e:
         logger.error(f"Failed to interrupt session {session_id}: {e}", exc_info=True)
@@ -2511,8 +2511,8 @@ async def stream_to_websocket(
     if not permission_mode:
         permission_mode = config.get("permission_mode", "default")
 
-    logger.info(f"[WS] Permission mode for session {session_id}: {permission_mode} (profile config: {config.get('permission_mode')}, override: {overrides.get('permission_mode') if overrides else None})")
-    logger.info(f"[WS] broadcast_func provided: {broadcast_func is not None}")
+    logger.debug(f"[WS] Permission mode for session {session_id}: {permission_mode} (profile config: {config.get('permission_mode')}, override: {overrides.get('permission_mode') if overrides else None})")
+    logger.debug(f"[WS] broadcast_func provided: {broadcast_func is not None}")
 
     # Get tool restrictions for use in callback
     allowed_tools = config.get("allowed_tools") or []
@@ -2522,7 +2522,7 @@ async def stream_to_websocket(
     # This handles both permission requests (in 'default' mode) and AskUserQuestion (in all modes)
     can_use_tool_callback = None
     if broadcast_func:
-        logger.info(f"[WS] Creating canUseTool callback for session {session_id}")
+        logger.debug(f"[WS] Creating canUseTool callback for session {session_id}")
 
         async def can_use_tool_callback(tool_name: str, tool_input: dict, context):
             """
@@ -2537,10 +2537,10 @@ async def stream_to_websocket(
             # Check profile-level tool restrictions FIRST (applies to all tools including AskUserQuestion)
             # These are set by the user in the profile settings (Allow Only / Disallow modes)
             if disallowed_tools and tool_name in disallowed_tools:
-                logger.info(f"[WS] Tool {tool_name} blocked by profile disallowed_tools")
+                logger.debug(f"[WS] Tool {tool_name} blocked by profile disallowed_tools")
                 return PermissionResultDeny(message=f"Tool '{tool_name}' is disabled in this profile")
             if allowed_tools and tool_name not in allowed_tools:
-                logger.info(f"[WS] Tool {tool_name} blocked by profile allowed_tools (not in whitelist)")
+                logger.debug(f"[WS] Tool {tool_name} blocked by profile allowed_tools (not in whitelist)")
                 return PermissionResultDeny(message=f"Tool '{tool_name}' is not enabled in this profile")
 
             # Handle AskUserQuestion specially - this is how the SDK expects it
@@ -2551,7 +2551,7 @@ async def stream_to_websocket(
                     return PermissionResultAllow(updated_input=tool_input)
 
                 request_id = f"question-{session_id}-{uuid.uuid4().hex[:8]}"
-                logger.info(f"[WS] AskUserQuestion canUseTool triggered: {request_id} with {len(questions)} questions")
+                logger.debug(f"[WS] AskUserQuestion canUseTool triggered: {request_id} with {len(questions)} questions")
 
                 # Get answers from user via WebSocket
                 answers = await user_question_handler.request_answers(
@@ -2562,7 +2562,7 @@ async def stream_to_websocket(
                     broadcast_func=broadcast_func
                 )
 
-                logger.info(f"[WS] Got answers for {request_id}: {list(answers.keys())}")
+                logger.debug(f"[WS] Got answers for {request_id}: {list(answers.keys())}")
 
                 # Return updated input with answers - SDK expects PermissionResultAllow
                 return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
@@ -2571,7 +2571,7 @@ async def stream_to_websocket(
             # This ensures users can review plans before the agent exits planning mode
             if tool_name == "ExitPlanMode" and permission_mode != "bypassPermissions":
                 request_id = f"perm-{session_id}-{uuid.uuid4().hex[:8]}"
-                logger.info(f"[WS] ExitPlanMode requires approval in {permission_mode} mode: {request_id}")
+                logger.debug(f"[WS] ExitPlanMode requires approval in {permission_mode} mode: {request_id}")
 
                 result = await permission_handler.request_permission(
                     request_id=request_id,
@@ -2586,7 +2586,7 @@ async def stream_to_websocket(
             # For other tools in default mode, route through permission handler
             if permission_mode == "default":
                 request_id = f"perm-{session_id}-{uuid.uuid4().hex[:8]}"
-                logger.info(f"[WS] Permission request for {tool_name}: {request_id}")
+                logger.debug(f"[WS] Permission request for {tool_name}: {request_id}")
 
                 # Request permission through the handler
                 # The handler will broadcast to WebSocket and wait for response
@@ -2664,7 +2664,7 @@ async def stream_to_websocket(
     # Clean up any existing state for this session
     state = _active_sessions.get(session_id)
     if state:
-        logger.info(f"[WS] Cleaning up existing state for session {session_id}")
+        logger.debug(f"[WS] Cleaning up existing state for session {session_id}")
         try:
             await state.client.disconnect()
         except Exception:
@@ -2675,16 +2675,16 @@ async def stream_to_websocket(
         del _active_sessions[session_id]
 
     # Create new client
-    logger.info(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None}, include_partial={options.include_partial_messages})")
-    logger.info(f"[WS] Options cwd: {options.cwd}")
-    logger.info(f"[WS] Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
+    logger.debug(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None}, include_partial={options.include_partial_messages})")
+    logger.debug(f"[WS] Options cwd: {options.cwd}")
+    logger.debug(f"[WS] Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
     client = ClaudeSDKClient(options=options)
-    logger.info("[WS] ClaudeSDKClient created, attempting connect...")
+    logger.debug("[WS] ClaudeSDKClient created, attempting connect...")
 
     # Connect
     try:
         await client.connect()
-        logger.info(f"[WS] Connected to Claude SDK for session {session_id}")
+        logger.debug(f"[WS] Connected to Claude SDK for session {session_id}")
     except Exception as e:
         import traceback
         logger.error(f"[WS] Failed to connect for session {session_id}: {e}")
@@ -2760,11 +2760,11 @@ async def stream_to_websocket(
                 yield stderr_msg
 
             if isinstance(message, SystemMessage):
-                logger.info(f"[WS] SystemMessage received: subtype={message.subtype}, data_keys={list(message.data.keys()) if message.data else []}, data_preview={str(message.data)[:500] if message.data else 'None'}")
+                logger.debug(f"[WS] SystemMessage received: subtype={message.subtype}, data_keys={list(message.data.keys()) if message.data else []}, data_preview={str(message.data)[:500] if message.data else 'None'}")
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]
                     state.sdk_session_id = sdk_session_id
-                    logger.info(f"[WS] Captured SDK session ID: {sdk_session_id}")
+                    logger.debug(f"[WS] Captured SDK session ID: {sdk_session_id}")
 
                     # Write worktree context message if this is a worktree session
                     # This creates a persistent record in JSONL that appears first in chat history
@@ -2774,7 +2774,7 @@ async def stream_to_websocket(
                             branch_name = worktree.get("branch_name", "unknown")
                             base_branch = worktree.get("base_branch", "main")
                             worktree_path = worktree.get("worktree_path", "")
-                            logger.info(f"[WS] Writing worktree context for session {session_id}: branch={branch_name}")
+                            logger.debug(f"[WS] Writing worktree context for session {session_id}: branch={branch_name}")
                             write_system_message(
                                 sdk_session_id=sdk_session_id,
                                 working_dir=options.cwd,
@@ -2800,14 +2800,14 @@ async def stream_to_websocket(
                         'error', 'exception', 'validation_error', 'permission_error', 'timeout_error'
                     }
                     if message.subtype in KNOWN_SUBTYPES:
-                        logger.info(f"[WS] Forwarding SystemMessage to frontend: subtype={message.subtype}")
+                        logger.debug(f"[WS] Forwarding SystemMessage to frontend: subtype={message.subtype}")
                         yield {
                             "type": "system",
                             "subtype": message.subtype,
                             "data": message.data
                         }
                     else:
-                        logger.info(f"[WS] Filtering unknown SystemMessage subtype: {message.subtype}, data_keys={list(message.data.keys()) if message.data else []}")
+                        logger.debug(f"[WS] Filtering unknown SystemMessage subtype: {message.subtype}, data_keys={list(message.data.keys()) if message.data else []}")
 
             elif isinstance(message, StreamEvent):
                 # StreamEvent is sent when include_partial_messages=True
@@ -3042,12 +3042,12 @@ async def stream_to_websocket(
                 # 2. Local command output like /context, /compact (TextBlock with <local-command-stdout>)
                 # Check if this message is from a subagent using parent_tool_use_id
                 parent_tool_id = message.parent_tool_use_id
-                logger.info(f"[WS] UserMessage received: content_type={type(message.content).__name__}, parent_tool_id={parent_tool_id}")
+                logger.debug(f"[WS] UserMessage received: content_type={type(message.content).__name__}, parent_tool_id={parent_tool_id}")
 
                 # Handle string content (rare but possible)
                 if isinstance(message.content, str):
                     content = message.content
-                    logger.info(f"[WS] UserMessage string content preview: {content[:200] if content else 'empty'}")
+                    logger.debug(f"[WS] UserMessage string content preview: {content[:200] if content else 'empty'}")
                     # Check for local command output
                     if "<local-command-stdout>" in content:
                         match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
@@ -3139,7 +3139,7 @@ async def stream_to_websocket(
         # (SDK's receive_response() ended naturally after client.interrupt())
         if state.interrupt_requested:
             interrupted = True
-            logger.info(f"[WS] Streaming loop ended after interrupt for session {session_id}")
+            logger.debug(f"[WS] Streaming loop ended after interrupt for session {session_id}")
 
         # Final drain of stderr queue after streaming loop completes
         for stderr_msg in await drain_stderr_queue():
@@ -3156,7 +3156,7 @@ async def stream_to_websocket(
 
     except asyncio.CancelledError:
         interrupted = True
-        logger.info(f"[WS] Query cancelled for session {session_id}")
+        logger.debug(f"[WS] Query cancelled for session {session_id}")
         # Don't re-raise - we handle it gracefully by yielding interrupted message
 
     except Exception as e:
@@ -3177,7 +3177,7 @@ async def stream_to_websocket(
         if state.client:
             try:
                 await state.client.disconnect()
-                logger.info(f"[WS] Disconnected SDK client for session {session_id}")
+                logger.debug(f"[WS] Disconnected SDK client for session {session_id}")
             except Exception as e:
                 logger.warning(f"[WS] Error disconnecting SDK client for session {session_id}: {e}")
             state.is_connected = False
@@ -3188,14 +3188,14 @@ async def stream_to_websocket(
         if _active_sessions.get(session_id) is state:
             if state.agents_dir and state.written_agent_ids:
                 cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
-                logger.info(f"[WS] Cleaned up agent files for session {session_id}")
+                logger.debug(f"[WS] Cleaned up agent files for session {session_id}")
             del _active_sessions[session_id]
-            logger.info(f"[WS] Removed session {session_id} from active sessions")
+            logger.debug(f"[WS] Removed session {session_id} from active sessions")
         else:
             # Another query has already taken over this session - just cleanup our agent files
             if state.agents_dir and state.written_agent_ids:
                 cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
-                logger.info(f"[WS] Cleaned up agent files for superseded session {session_id}")
+                logger.debug(f"[WS] Cleaned up agent files for superseded session {session_id}")
 
     # Update session in database
     # Only set title for new sessions (when resume_id was None, meaning first message)
@@ -3215,7 +3215,7 @@ async def stream_to_websocket(
         tokens_out_increment=metadata.get("tokens_out", 0),
         turn_increment=metadata.get("num_turns", 0)
     )
-    logger.info(f"[WS] Updated session {session_id}, sdk_session_id={sdk_session_id}, title={title_to_set}")
+    logger.debug(f"[WS] Updated session {session_id}, sdk_session_id={sdk_session_id}, title={title_to_set}")
 
     # Store tool messages (tool_use and tool_result)
     for tool_msg in tool_messages:

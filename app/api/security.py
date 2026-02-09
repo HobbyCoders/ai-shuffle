@@ -99,7 +99,7 @@ async def setup_2fa(request: Request, token: str = Depends(require_admin)):
     # Log the setup attempt
     audit_service.log_2fa_setup_started(request, admin["username"])
 
-    logger.info(f"2FA setup started for admin user: {admin['username']}")
+    logger.debug(f"2FA setup started for admin user: {admin['username']}")
 
     return TwoFactorSetupResponse(
         secret=secret,
@@ -265,7 +265,7 @@ async def regenerate_recovery_codes(
     # Log
     audit_service.log_recovery_codes_regenerated(request, admin["username"])
 
-    logger.info(f"Recovery codes regenerated for admin user: {admin['username']}")
+    logger.debug(f"Recovery codes regenerated for admin user: {admin['username']}")
 
     return RecoveryCodesResponse(
         codes=plaintext_codes,

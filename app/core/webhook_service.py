@@ -80,7 +80,7 @@ async def dispatch_webhook(
     # Don't wait for delivery - let it happen in background
     # But log any errors
     if tasks:
-        logger.info(f"Dispatching event '{event_type}' to {len(tasks)} webhook(s)")
+        logger.debug(f"Dispatching event '{event_type}' to {len(tasks)} webhook(s)")
 
 
 async def _deliver_webhook(
@@ -133,7 +133,7 @@ async def _deliver_webhook(
 
             # Check for success (2xx status codes)
             if 200 <= response.status_code < 300:
-                logger.info(
+                logger.debug(
                     f"Webhook delivered successfully: {webhook_id} -> {url} "
                     f"(status={response.status_code})"
                 )
@@ -231,7 +231,7 @@ async def send_test_webhook(webhook: Dict[str, Any]) -> WebhookTestResponse:
         elapsed_ms = int((time.time() - start_time) * 1000)
 
         if 200 <= response.status_code < 300:
-            logger.info(f"Test webhook delivered successfully: {url} (status={response.status_code})")
+            logger.debug(f"Test webhook delivered successfully: {url} (status={response.status_code})")
             return WebhookTestResponse(
                 success=True,
                 status_code=response.status_code,

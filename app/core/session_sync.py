@@ -90,7 +90,7 @@ class SessionSyncService:
         # Sort by modified time, newest first
         unimported.sort(key=lambda x: x["modified_at"], reverse=True)
 
-        logger.info(f"Found {len(unimported)} unimported sessions for project {project_id}")
+        logger.debug(f"Found {len(unimported)} unimported sessions for project {project_id}")
         return unimported
 
     def import_session(
@@ -170,7 +170,7 @@ class SessionSyncService:
                 turn_count=message_count
             )
 
-            logger.info(
+            logger.debug(
                 f"Imported session {new_session_id} (SDK: {sdk_session_id}) "
                 f"with {message_count} messages for project {project_id}"
             )
@@ -242,7 +242,7 @@ class SessionSyncService:
             "sessions": imported_sessions
         }
 
-        logger.info(
+        logger.debug(
             f"Session sync for project {project_id}: "
             f"imported={result['imported_count']}, errors={len(errors)}"
         )
@@ -296,7 +296,7 @@ class SessionSyncService:
                 logger.error(error_msg)
                 all_errors.append(error_msg)
 
-        logger.info(
+        logger.debug(
             f"Global session sync: {total_imported} imported across "
             f"{projects_synced} projects, {len(all_errors)} errors"
         )

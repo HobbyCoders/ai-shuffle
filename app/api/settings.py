@@ -1320,7 +1320,7 @@ async def _transcribe_with_openai(
                         # Try to get retry-after header, otherwise use exponential backoff
                         retry_after = response.headers.get("retry-after")
                         wait_time = int(retry_after) if retry_after else retry_delay * (2 ** attempt)
-                        logger.info(f"Rate limited, waiting {wait_time}s before retry {attempt + 2}/{max_retries}")
+                        logger.debug(f"Rate limited, waiting {wait_time}s before retry {attempt + 2}/{max_retries}")
                         await asyncio.sleep(wait_time)
                         continue
                 else:

@@ -261,7 +261,7 @@ class LiveSessionStore:
                 initial_message_count=len(messages),
             )
             self._sessions[session_id] = session
-            logger.info(f"Started live streaming for session {session_id} with {len(messages)} initial messages")
+            logger.debug(f"Started live streaming for session {session_id} with {len(messages)} initial messages")
             return session
 
     async def add_user_message(self, session_id: str, content: str, message_id: str) -> None:
@@ -840,7 +840,7 @@ class LiveSessionStore:
 
             session.is_streaming = False
             self._increment_update_id(session)
-            logger.info(f"Ended streaming for session {session_id} with {len(session.messages)} messages (kept in memory)")
+            logger.debug(f"Ended streaming for session {session_id} with {len(session.messages)} messages (kept in memory)")
 
             return [m.to_dict() for m in session.messages]
 
@@ -864,10 +864,10 @@ class LiveSessionStore:
             session = self._sessions.get(session_id)
             if session:
                 if session.is_streaming:
-                    logger.info(f"Skipping cleanup of session {session_id}: still streaming (new query took over)")
+                    logger.debug(f"Skipping cleanup of session {session_id}: still streaming (new query took over)")
                     return False
                 del self._sessions[session_id]
-                logger.info(f"Cleaned up ended session {session_id} from memory")
+                logger.debug(f"Cleaned up ended session {session_id} from memory")
                 return True
             return False
 
@@ -931,7 +931,7 @@ class LiveSessionStore:
         """Remove a session from the store (e.g., on error)."""
         async with self._lock:
             self._sessions.pop(session_id, None)
-            logger.info(f"Cleaned up session {session_id} from live store")
+            logger.debug(f"Cleaned up session {session_id} from live store")
 
 
 # Global instance

@@ -83,7 +83,6 @@ function saveToServer(preference: Theme, presetId: string | null) {
 	// Don't write to server until initial sync is complete
 	// This prevents localStorage data from overwriting newer server data
 	if (!hasSyncedFromServer) {
-		console.log('[Theme] Skipping server save - initial sync not complete');
 		return;
 	}
 
@@ -91,7 +90,6 @@ function saveToServer(preference: Theme, presetId: string | null) {
 	(async () => {
 		try {
 			await setPreference(SERVER_PREFERENCE_KEY, { preference, presetId });
-			console.log('[Theme] Synced to server');
 			clearDirty();
 			pendingThemeState = null;
 		} catch (e) {
@@ -115,7 +113,6 @@ function flushPendingThemeSave() {
 		'/api/v1/preferences/' + SERVER_PREFERENCE_KEY,
 		new Blob([data], { type: 'application/json' })
 	);
-	console.log('[Theme] Flushed pending state on unload');
 	pendingThemeState = null;
 }
 
@@ -441,7 +438,6 @@ function createThemeStore() {
 
 			if (localIsDirty) {
 				// Local has unsaved changes — local wins, push to server
-				console.log('[Theme] Local has unsaved changes, pushing to server');
 				hasSyncedFromServer = true;
 				saveToServer(localState.preference, localState.presetId);
 				return;
@@ -453,8 +449,6 @@ function createThemeStore() {
 
 				// Check if server differs from local
 				if (preference !== localState.preference || presetId !== localState.presetId) {
-					console.log('[Theme] Server state differs, updating local');
-
 					// Update localStorage
 					localStorage.setItem(STORAGE_KEY, preference);
 					if (presetId) {
@@ -469,12 +463,9 @@ function createThemeStore() {
 					const preset = presetId ? getPresetById(presetId) : null;
 					applyPresetStyles(preset ?? null, resolved);
 					set({ preference, resolved, presetId });
-				} else {
-					console.log('[Theme] Server and local in sync');
 				}
 			} else {
 				// No server data - push local data to server (migration)
-				console.log('[Theme] No server data, pushing local to server');
 				// Will be saved after hasSyncedFromServer is set
 			}
 

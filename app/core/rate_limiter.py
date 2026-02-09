@@ -374,7 +374,7 @@ class RateLimiter:
         try:
             deleted = database.cleanup_old_request_logs(cutoff)
             if deleted > 0:
-                logger.info(f"Cleaned up {deleted} old request logs")
+                logger.debug(f"Cleaned up {deleted} old request logs")
         except Exception as e:
             logger.warning(f"Failed to cleanup old request logs: {e}")
 

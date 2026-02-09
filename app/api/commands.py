@@ -312,7 +312,7 @@ async def sync_after_rewind(
         except Exception as e:
             logger.error(f"Failed to delete message {msg['id']}: {e}")
 
-    logger.info(f"Synced chat after rewind: deleted {deleted_count} messages after checkpoint")
+    logger.debug(f"Synced chat after rewind: deleted {deleted_count} messages after checkpoint")
 
     return {
         "success": True,
@@ -402,7 +402,7 @@ async def rewind_files_via_sdk(
         try:
             await client.connect()
             await client.rewind_files(target_uuid)
-            logger.info(f"Successfully rewound files for session {sdk_session_id} to {target_uuid}")
+            logger.debug(f"Successfully rewound files for session {sdk_session_id} to {target_uuid}")
             return True, None
         finally:
             try:

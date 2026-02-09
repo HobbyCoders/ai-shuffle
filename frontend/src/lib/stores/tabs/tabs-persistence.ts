@@ -88,7 +88,6 @@ export function broadcastTabsUpdate(
 				type: 'tabs_update',
 				tabs_data: persistedState
 			}));
-			console.log('[Tabs] Broadcast tabs_update via WebSocket');
 			return; // Only need to send once, server will broadcast to all devices
 		}
 	}
@@ -144,8 +143,6 @@ export async function saveTabsToServer(
 				key: 'open_tabs',
 				value: persistedState
 			});
-			console.log('[Tabs] Saved tabs state to server');
-
 			// Also broadcast via WebSocket for real-time sync to other devices
 			broadcastTabsUpdate(persistedState, tabConnections);
 		} catch (error) {
@@ -164,7 +161,6 @@ export async function loadTabsFromServer(): Promise<PersistedTabsState | null> {
 	try {
 		const response = await api.get<{ key: string; value: PersistedTabsState } | null>('/preferences/open_tabs');
 		if (response && response.value) {
-			console.log('[Tabs] Loaded tabs state from server:', response.value);
 			return response.value;
 		}
 	} catch (error) {

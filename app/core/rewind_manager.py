@@ -228,7 +228,7 @@ class RewindManager:
             # and which option number to select
             input_sequence = self._build_rewind_input(checkpoint_index, restore_option)
 
-            logger.info(f"Executing rewind: session={sdk_session_id}, checkpoint={checkpoint_index}, option={restore_option}")
+            logger.debug(f"Executing rewind: session={sdk_session_id}, checkpoint={checkpoint_index}, option={restore_option}")
 
             # Run claude with input piped in
             result = subprocess.run(

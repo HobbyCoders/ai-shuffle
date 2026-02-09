@@ -102,7 +102,7 @@ async def register_device(request: MobileDeviceRegisterRequest):
         capabilities=capabilities_dict
     )
 
-    logger.info(f"Registered mobile device: {device_info.device_name} ({device_info.platform})")
+    logger.debug(f"Registered mobile device: {device_info.device_name} ({device_info.platform})")
 
     return MobileDeviceRegisterResponse(
         api_key=api_key,
@@ -229,7 +229,7 @@ async def confirm_action(
     new_status = "approved" if confirm_request.approved else "rejected"
     db.update_pending_action_status(action_id, new_status)
 
-    logger.info(f"Action {action_id} {new_status} by device {device['device_id']}")
+    logger.debug(f"Action {action_id} {new_status} by device {device['device_id']}")
 
     return {
         "status": "ok",
@@ -266,7 +266,7 @@ async def register_push_token(
             detail="Device not found"
         )
 
-    logger.info(f"Updated FCM token for device {token_request.device_id}")
+    logger.debug(f"Updated FCM token for device {token_request.device_id}")
 
     return {"status": "ok", "message": "Push token registered"}
 
@@ -311,4 +311,4 @@ async def delete_device(device_id: str, token: str = Depends(require_admin)):
             detail="Device not found"
         )
 
-    logger.info(f"Deleted mobile device: {device_id}")
+    logger.debug(f"Deleted mobile device: {device_id}")

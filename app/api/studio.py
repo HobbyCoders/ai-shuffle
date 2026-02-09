@@ -282,7 +282,7 @@ async def generate_image(
 
     # In a real implementation, we would start the generation in background_tasks
     # For MVP, we just mark it as pending
-    logger.info(f"Created image generation {gen_id} with provider {request.provider}")
+    logger.debug(f"Created image generation {gen_id} with provider {request.provider}")
 
     return _create_generation_response(generation)
 
@@ -367,7 +367,7 @@ async def generate_video(
 
     generations_db[gen_id] = generation
 
-    logger.info(f"Created video generation {gen_id} with provider {request.provider}")
+    logger.debug(f"Created video generation {gen_id} with provider {request.provider}")
 
     return _create_generation_response(generation)
 
@@ -440,7 +440,7 @@ async def delete_generation(gen_id: str, token: str = Depends(require_auth)):
         )
 
     del generations_db[gen_id]
-    logger.info(f"Deleted generation {gen_id}")
+    logger.debug(f"Deleted generation {gen_id}")
 
 
 # ============================================================================
@@ -529,7 +529,7 @@ async def save_asset(request: AssetCreateRequest, token: str = Depends(require_a
 
     assets_db[asset_id] = asset
 
-    logger.info(f"Saved asset {asset_id} from generation {request.generation_id}")
+    logger.debug(f"Saved asset {asset_id} from generation {request.generation_id}")
 
     return _create_asset_response(asset)
 
@@ -560,7 +560,7 @@ async def delete_asset(asset_id: str, token: str = Depends(require_auth)):
         )
 
     del assets_db[asset_id]
-    logger.info(f"Deleted asset {asset_id}")
+    logger.debug(f"Deleted asset {asset_id}")
 
 
 @router.patch("/assets/{asset_id}/tags")

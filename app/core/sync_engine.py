@@ -320,7 +320,7 @@ class SyncEngine:
             )
             self._connections[session_id][device_id] = connection
 
-            logger.info(f"Device {device_id} registered to watch session {session_id}")
+            logger.debug(f"Device {device_id} registered to watch session {session_id}")
             return connection
 
     async def unregister_device(self, device_id: str, session_id: str, websocket: Optional[WebSocket] = None):
@@ -340,11 +340,11 @@ class SyncEngine:
                     if websocket is not None:
                         current_conn = self._connections[session_id][device_id]
                         if current_conn.websocket is not websocket:
-                            logger.info(f"Device {device_id} has new connection, skipping unregister for old websocket")
+                            logger.debug(f"Device {device_id} has new connection, skipping unregister for old websocket")
                             return
 
                     del self._connections[session_id][device_id]
-                    logger.info(f"Device {device_id} unregistered from session {session_id}")
+                    logger.debug(f"Device {device_id} unregistered from session {session_id}")
 
                 # Clean up empty session entries
                 if not self._connections[session_id]:
@@ -400,13 +400,13 @@ class SyncEngine:
             if session_id in self._session_locks:
                 current_owner = self._session_locks[session_id]
                 if current_owner != device_id:
-                    logger.info(f"Session {session_id[:8]} lock denied for device {device_id[:8]}, owned by {current_owner[:8]}")
+                    logger.debug(f"Session {session_id[:8]} lock denied for device {device_id[:8]}, owned by {current_owner[:8]}")
                     return False, current_owner
                 # Same device already owns it
                 return True, None
 
             self._session_locks[session_id] = device_id
-            logger.info(f"Session {session_id[:8]} lock acquired by device {device_id[:8]}")
+            logger.debug(f"Session {session_id[:8]} lock acquired by device {device_id[:8]}")
             return True, None
 
     async def release_session_lock(self, session_id: str, device_id: str) -> bool:
@@ -430,7 +430,7 @@ class SyncEngine:
                 return False
 
             del self._session_locks[session_id]
-            logger.info(f"Session {session_id[:8]} lock released by device {device_id[:8]}")
+            logger.debug(f"Session {session_id[:8]} lock released by device {device_id[:8]}")
             return True
 
     def get_session_lock_owner(self, session_id: str) -> Optional[str]:
@@ -463,7 +463,7 @@ class SyncEngine:
 
         # Get connections to broadcast to
         connections = list(self._connections[session_id].values())
-        logger.info(f"Broadcasting {event.event_type} to {len(connections)} devices for session {session_id[:8]}...")
+        logger.debug(f"Broadcasting {event.event_type} to {len(connections)} devices for session {session_id[:8]}...")
 
         # Pre-serialize once so a serialization error doesn't disconnect all devices
         try:

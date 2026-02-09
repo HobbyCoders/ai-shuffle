@@ -134,7 +134,7 @@ class RequestQueue:
             self._user_requests[user_key] = request_id
             self._request_map[request_id] = request
 
-            logger.info(f"Queued request {request_id} for user {user_key} (priority={priority})")
+            logger.debug(f"Queued request {request_id} for user {user_key} (priority={priority})")
             return request_id
 
     async def dequeue(self) -> Optional[QueuedRequest]:
@@ -157,7 +157,7 @@ class RequestQueue:
             if request.id in self._request_map:
                 del self._request_map[request.id]
 
-            logger.info(f"Dequeued request {request.id} for user {user_key}")
+            logger.debug(f"Dequeued request {request.id} for user {user_key}")
             return request
 
     async def remove(self, request_id: str) -> bool:
@@ -186,7 +186,7 @@ class RequestQueue:
                 del self._user_requests[user_key]
             del self._request_map[request_id]
 
-            logger.info(f"Removed request {request_id} from queue")
+            logger.debug(f"Removed request {request_id} from queue")
             return True
 
     async def get_position(
@@ -264,7 +264,7 @@ class RequestQueue:
             self._queue.clear()
             self._user_requests.clear()
             self._request_map.clear()
-            logger.info(f"Cleared {count} requests from queue")
+            logger.debug(f"Cleared {count} requests from queue")
             return count
 
     def set_max_size(self, max_size: int) -> None:

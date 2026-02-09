@@ -109,7 +109,7 @@ async def list_sessions(
                 profile_id=profile_id or "default"
             )
             if sync_result["imported_count"] > 0:
-                logger.info(
+                logger.debug(
                     f"Auto-imported {sync_result['imported_count']} Claude Code sessions "
                     f"for project {project_id}"
                 )
@@ -189,7 +189,7 @@ async def list_sessions_paginated(
                 profile_id=profile_id or "default"
             )
             if sync_result["imported_count"] > 0:
-                logger.info(
+                logger.debug(
                     f"Auto-imported {sync_result['imported_count']} Claude Code sessions "
                     f"for project {project_id}"
                 )
@@ -338,7 +338,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     import traceback
     logger = logging.getLogger(__name__)
 
-    logger.info(f"Loading session: {session_id}")
+    logger.debug(f"Loading session: {session_id}")
 
     # Try direct lookup by AI Shuffle session ID first
     session = database.get_session(session_id)
@@ -348,7 +348,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     if not session:
         session = database.get_session_by_sdk_id(session_id)
         if session:
-            logger.info(f"Session found via SDK session ID fallback: {session_id} -> {session['id']}")
+            logger.debug(f"Session found via SDK session ID fallback: {session_id} -> {session['id']}")
 
     if not session:
         logger.warning(f"Session not found in database: {session_id}")
@@ -416,7 +416,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                     messages.append(msg_data)
 
             # Token usage from JSONL (extracted in same pass as messages)
-            logger.info(f"[Session API] JSONL usage_data for {session_id}: {usage_data}")
+            logger.debug(f"[Session API] JSONL usage_data for {session_id}: {usage_data}")
             if usage_data:
                 # Cache tokens are only in JSONL, always use those
                 cache_creation = usage_data.get("cache_creation_tokens", 0)
@@ -432,7 +432,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                 if session.get("total_tokens_in", 0) == 0 and session.get("total_tokens_out", 0) == 0:
                     session["total_tokens_in"] = usage_data.get("total_tokens_in", 0)
                     session["total_tokens_out"] = usage_data.get("total_tokens_out", 0)
-            logger.info(f"[Session API] Final token values: tokens_in={session.get('total_tokens_in')}, tokens_out={session.get('total_tokens_out')}, cache_creation={session.get('cache_creation_tokens')}, cache_read={session.get('cache_read_tokens')}, context={session.get('context_tokens')}")
+            logger.debug(f"[Session API] Final token values: tokens_in={session.get('total_tokens_in')}, tokens_out={session.get('total_tokens_out')}, cache_creation={session.get('cache_creation_tokens')}, cache_read={session.get('cache_read_tokens')}, context={session.get('context_tokens')}")
         except Exception as e:
             # Log the error but don't fail - fall back to database
             logger.error(f"Failed to parse JSONL for session {session_id}: {e}")
@@ -479,7 +479,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
         # Worktree was fully unlinked (ON DELETE SET NULL) but stored info remains
         session["worktree_deleted"] = True
 
-    logger.info(f"Returning session {session_id} with {len(messages)} messages")
+    logger.debug(f"Returning session {session_id} with {len(messages)} messages")
     try:
         return session
     except Exception as e:
@@ -1388,13 +1388,13 @@ async def import_session(
                     }
                     f.write(json.dumps(entry) + '\n')
 
-        logger.info(f"Created JSONL file for imported session: {jsonl_path}")
+        logger.debug(f"Created JSONL file for imported session: {jsonl_path}")
 
     except Exception as e:
         logger.error(f"Failed to create JSONL file for imported session: {e}")
         # Continue anyway - the session is in the database
 
-    logger.info(f"Imported session {new_session_id} with {len(messages_data)} messages")
+    logger.debug(f"Imported session {new_session_id} with {len(messages_data)} messages")
 
     return SessionImportResponse(
         session_id=new_session_id,
@@ -1549,7 +1549,7 @@ async def import_jsonl_session(
         turn_increment=message_count
     )
 
-    logger.info(f"Imported JSONL session {new_session_id} (SDK: {sdk_session_id}) with {message_count} messages")
+    logger.debug(f"Imported JSONL session {new_session_id} (SDK: {sdk_session_id}) with {message_count} messages")
 
     return ImportJSONLResponse(
         session_id=new_session_id,
@@ -1734,7 +1734,7 @@ async def fork_session(
                     break
                 f.write(json.dumps(entry) + '\n')
 
-        logger.info(f"Created forked JSONL file: {new_jsonl_path} with {fork_entry_index + 1} entries")
+        logger.debug(f"Created forked JSONL file: {new_jsonl_path} with {fork_entry_index + 1} entries")
 
     except Exception as e:
         logger.error(f"Failed to create JSONL file for forked session: {e}")
@@ -1745,7 +1745,7 @@ async def fork_session(
             detail=f"Failed to create forked session: {str(e)}"
         )
 
-    logger.info(f"Forked session {session_id} to {new_session_id} at message index {body.message_index}")
+    logger.debug(f"Forked session {session_id} to {new_session_id} at message index {body.message_index}")
 
     return ForkSessionResponse(
         session_id=new_session_id,
@@ -1848,7 +1848,7 @@ async def create_session_with_worktree(
             detail=f"Unexpected error: {str(e)}"
         )
 
-    logger.info(f"Created worktree session: {session['id']} with worktree: {worktree['id']}")
+    logger.debug(f"Created worktree session: {session['id']} with worktree: {worktree['id']}")
 
     return WorktreeSessionResponse(
         session_id=session["id"],

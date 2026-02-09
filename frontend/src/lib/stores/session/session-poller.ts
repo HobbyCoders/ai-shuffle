@@ -92,8 +92,6 @@ class SessionPoller {
 			}
 		}
 
-		console.log(`[Poller] Starting streaming poll for ${sessionId} (${STREAMING_POLL_INTERVAL_MS}ms)`);
-
 		// Initialize session in state store if needed
 		sessionState.initSession(sessionId);
 
@@ -113,7 +111,6 @@ class SessionPoller {
 	startIdle(sessionId: string): void {
 		if (this._timers.has(sessionId)) return;
 
-		console.log(`[Poller] Starting idle poll for ${sessionId} (${IDLE_POLL_INTERVAL_MS}ms)`);
 		sessionState.initSession(sessionId);
 
 		const timer = setInterval(() => this._poll(sessionId), IDLE_POLL_INTERVAL_MS);
@@ -148,7 +145,6 @@ class SessionPoller {
 		if (entry) {
 			clearInterval(entry.timer);
 			this._timers.delete(sessionId);
-			console.log(`[Poller] Stopped polling for ${sessionId}`);
 		}
 		this._inFlight.delete(sessionId);
 		this._errorCounts.delete(sessionId);
@@ -165,9 +161,8 @@ class SessionPoller {
 	 * Stop all polling (e.g., on logout or page unload).
 	 */
 	stopAll(): void {
-		for (const [sessionId, entry] of this._timers) {
+		for (const [, entry] of this._timers) {
 			clearInterval(entry.timer);
-			console.log(`[Poller] Stopped polling for ${sessionId}`);
 		}
 		this._timers.clear();
 		this._inFlight.clear();
@@ -317,7 +312,6 @@ class SessionPoller {
 			// Streaming→not-streaming transition detected.
 			// Stop timer if still running, and always fire onStreamEnd for cleanup.
 			if (this._timers.has(sessionId)) {
-				console.log(`[Poller] Streaming ended for ${sessionId}, stopping fast poll`);
 				this.stop(sessionId);
 			}
 			if (this._onStreamEnd) {
@@ -328,7 +322,6 @@ class SessionPoller {
 			// marked as streaming (e.g., idle poll detecting a finished session).
 			const entry = this._timers.get(sessionId)!;
 			if (entry.interval === STREAMING_POLL_INTERVAL_MS) {
-				console.log(`[Poller] Streaming ended for ${sessionId}, stopping fast poll`);
 				this.stop(sessionId);
 				if (this._onStreamEnd) {
 					this._onStreamEnd(sessionId, usage);

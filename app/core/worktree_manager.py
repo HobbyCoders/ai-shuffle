@@ -155,7 +155,7 @@ class WorktreeManager:
             default_branch=default_branch,
             github_repo_name=github_repo_name
         )
-        logger.info(f"Created git repository record for project {project_id}: {repo_id}")
+        logger.debug(f"Created git repository record for project {project_id}: {repo_id}")
         return repo
 
     def sync_worktrees_for_project(self, project_id: str) -> Dict[str, Any]:
@@ -195,7 +195,7 @@ class WorktreeManager:
             if not worktree_full_path.exists():
                 # Stale record - worktree was deleted outside the app
                 branch_name = wt["branch_name"]
-                logger.info(f"Cleaning up stale worktree record: {branch_name} (path: {worktree_full_path})")
+                logger.debug(f"Cleaning up stale worktree record: {branch_name} (path: {worktree_full_path})")
                 database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
 
                 # Also try to delete the orphaned branch if it exists and is not the default branch
@@ -210,7 +210,7 @@ class WorktreeManager:
                             # Delete the orphaned branch
                             success = self.git_service.delete_branch(main_dir, branch_name, force=True)
                             if success:
-                                logger.info(f"Deleted orphaned branch: {branch_name}")
+                                logger.debug(f"Deleted orphaned branch: {branch_name}")
                                 branch_deleted = True
                             else:
                                 logger.warning(f"Failed to delete orphaned branch: {branch_name}")
@@ -227,7 +227,7 @@ class WorktreeManager:
                 still_active += 1
 
         if cleaned_up:
-            logger.info(f"Cleaned up {len(cleaned_up)} stale worktree records for project {project_id}")
+            logger.debug(f"Cleaned up {len(cleaned_up)} stale worktree records for project {project_id}")
 
         return {
             "cleaned_up": cleaned_up,
@@ -306,7 +306,7 @@ class WorktreeManager:
         for wt in existing_worktrees:
             worktree_full_path = get_worktree_working_dir_as_path(wt)
             if not worktree_full_path.exists():
-                logger.info(f"Cleaning up stale worktree record: '{wt['worktree_path']}'")
+                logger.debug(f"Cleaning up stale worktree record: '{wt['worktree_path']}'")
                 database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
 
         # Verify the branch exists if not creating a new one
@@ -332,7 +332,7 @@ class WorktreeManager:
         worktree_path = self._get_worktree_path(project["path"], branch_name)
         relative_worktree_path = self._get_relative_worktree_path_from_full(worktree_path, project["path"])
 
-        logger.info(f"Creating worktree at: {worktree_path}")
+        logger.debug(f"Creating worktree at: {worktree_path}")
 
         # Create git worktree
         success, error_msg = self.git_service.add_worktree(
@@ -369,11 +369,11 @@ class WorktreeManager:
                 # Return the existing worktree instead of failing
                 existing = database.get_worktree_by_branch(repo["id"], branch_name)
                 if existing and existing.get("status") == WorktreeStatus.ACTIVE:
-                    logger.info(f"Concurrent creation detected, returning existing worktree for branch '{branch_name}'")
+                    logger.debug(f"Concurrent creation detected, returning existing worktree for branch '{branch_name}'")
                     return existing
             raise WorktreeError(f"Failed to create worktree record: {str(e)}")
 
-        logger.info(f"Created standalone worktree {worktree_id} at {worktree_path} for branch {branch_name}")
+        logger.debug(f"Created standalone worktree {worktree_id} at {worktree_path} for branch {branch_name}")
         return worktree
 
     def get_available_worktrees(self, project_id: str) -> List[Dict]:
@@ -461,7 +461,7 @@ class WorktreeManager:
         existing_worktrees = database.get_active_worktrees_for_repository(repo["id"])
         for wt in existing_worktrees:
             if not self.is_worktree_valid(wt):
-                logger.info(f"Cleaning up stale worktree record: '{wt['worktree_path']}' (invalid worktree)")
+                logger.debug(f"Cleaning up stale worktree record: '{wt['worktree_path']}' (invalid worktree)")
                 database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
 
         # Verify the branch exists if not creating a new one
@@ -488,7 +488,7 @@ class WorktreeManager:
         worktree_path = self._get_worktree_path(project["path"], branch_name)
         relative_worktree_path = self._get_relative_worktree_path_from_full(worktree_path, project["path"])
 
-        logger.info(f"Creating worktree at: {worktree_path}")
+        logger.debug(f"Creating worktree at: {worktree_path}")
 
         # Create git worktree
         success, error_msg = self.git_service.add_worktree(
@@ -561,7 +561,7 @@ class WorktreeManager:
             database.delete_worktree(worktree_id)
             raise WorktreeError(f"Failed to create chat session: {str(e)}")
 
-        logger.info(f"Created worktree {worktree_id} at {worktree_path} for branch {branch_name} with session {session_id}")
+        logger.debug(f"Created worktree {worktree_id} at {worktree_path} for branch {branch_name} with session {session_id}")
         return worktree, session
 
     def get_worktree_by_session(self, session_id: str) -> Optional[Dict]:
@@ -702,7 +702,7 @@ class WorktreeManager:
             default_branch = repo.get("default_branch", "main")
             if branch_name != default_branch:
                 self.git_service.delete_branch(main_dir, branch_name, force=True)
-                logger.info(f"Deleted branch {branch_name}")
+                logger.debug(f"Deleted branch {branch_name}")
 
         # Update database record
         database.update_worktree(worktree_id, status=WorktreeStatus.DELETED)
@@ -710,7 +710,7 @@ class WorktreeManager:
         # Delete the worktree record
         database.delete_worktree(worktree_id)
 
-        logger.info(f"Cleaned up worktree {worktree_id}")
+        logger.debug(f"Cleaned up worktree {worktree_id}")
         return True
 
     def sync_worktrees(self, project_id: str) -> Dict[str, Any]:
@@ -792,13 +792,13 @@ class WorktreeManager:
                         base_branch=None,
                         status=WorktreeStatus.ACTIVE
                     )
-                    logger.info(f"Imported external worktree: {worktree_folder} (branch: {branch_name})")
+                    logger.debug(f"Imported external worktree: {worktree_folder} (branch: {branch_name})")
                     result["imported"] = result.get("imported", 0) + 1
                 except Exception as e:
                     logger.warning(f"Failed to import external worktree {git_path}: {e}")
                     result["errors"].append(f"Failed to import worktree at {git_path}: {str(e)}")
 
-        logger.info(f"Sync complete for project {project_id}: {result}")
+        logger.debug(f"Sync complete for project {project_id}: {result}")
         return result
 
 

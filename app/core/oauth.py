@@ -141,7 +141,7 @@ class DirectOAuth:
 
         oauth_url = f"{OAUTH_AUTHORIZE_URL}?{urlencode(params)}"
 
-        logger.info(f"Generated OAuth URL with state: {state[:8]}...")
+        logger.debug(f"Generated OAuth URL with state: {state[:8]}...")
 
         return {
             "oauth_url": oauth_url,
@@ -228,7 +228,7 @@ class DirectOAuth:
                     scopes=data.get("scope", "").split() or OAUTH_SCOPES,
                 )
 
-                logger.info("Successfully exchanged code for tokens")
+                logger.debug("Successfully exchanged code for tokens")
                 return tokens, None
 
         except httpx.TimeoutException:
@@ -274,7 +274,7 @@ class DirectOAuth:
             if os.name != 'nt':  # Not Windows
                 os.chmod(credentials_file, 0o600)
 
-            logger.info(f"Wrote credentials to {credentials_file}")
+            logger.debug(f"Wrote credentials to {credentials_file}")
             return True
 
         except Exception as e:
@@ -308,7 +308,7 @@ class DirectOAuth:
             # Write back
             settings_file.write_text(json.dumps(settings_data, indent=2))
 
-            logger.info("Marked onboarding as complete")
+            logger.debug("Marked onboarding as complete")
             return True
 
         except Exception as e:
@@ -463,7 +463,7 @@ class DirectOAuth:
                 # Write updated credentials
                 self.write_credentials(tokens)
 
-                logger.info("Successfully refreshed tokens")
+                logger.debug("Successfully refreshed tokens")
                 return tokens, None
 
         except Exception as e:

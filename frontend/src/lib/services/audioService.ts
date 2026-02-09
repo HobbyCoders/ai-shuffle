@@ -167,8 +167,6 @@ export class AudioService {
 			// Start VAD processing loop
 			this.isCapturing = true;
 			this.processVAD();
-
-			console.log('[AudioService] Started audio capture');
 		} catch (error) {
 			console.error('[AudioService] Failed to start:', error);
 			throw error;
@@ -179,8 +177,6 @@ export class AudioService {
 	 * Stop audio capture and cleanup
 	 */
 	stop(): void {
-		console.log('[AudioService] Stopping audio capture, isCapturing:', this.isCapturing);
-
 		// Set flag first to prevent any async callbacks from restarting things
 		this.isCapturing = false;
 
@@ -210,7 +206,6 @@ export class AudioService {
 		// Stop media stream tracks - this is what releases the microphone
 		if (this.mediaStream) {
 			this.mediaStream.getTracks().forEach((track) => {
-				console.log('[AudioService] Stopping track:', track.kind, track.readyState);
 				track.stop();
 			});
 			this.mediaStream = null;
@@ -237,8 +232,6 @@ export class AudioService {
 		this.analyser = null;
 		this.analyserData = null;
 		this.audioChunks = [];
-
-		console.log('[AudioService] Stopped audio capture completely');
 	}
 
 	/**
@@ -336,8 +329,6 @@ export class AudioService {
 	 * Handle speech start (potential interruption)
 	 */
 	private handleSpeechStart(): void {
-		console.log('[AudioService] Speech started');
-
 		// Stop any playing TTS (interruption)
 		this.stopTts();
 
@@ -350,10 +341,6 @@ export class AudioService {
 	 * Handle speech end - collect audio and notify callback
 	 */
 	private handleSpeechEnd(): void {
-		const duration = this.vadState.speechDuration;
-		const chunkCount = this.audioChunks.length;
-		console.log('[AudioService] Speech ended, duration:', duration, 'ms, chunks:', chunkCount);
-
 		// IMMEDIATELY reset VAD state to prevent this being called again
 		this.resetVADState();
 
@@ -377,13 +364,10 @@ export class AudioService {
 			if (chunksToSend.length > 0) {
 				const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
 				const audioBlob = new Blob(chunksToSend, { type: mimeType });
-				console.log('[AudioService] Created audio blob:', audioBlob.size, 'bytes, type:', audioBlob.type);
 
 				if (this.onSpeechEnd && audioBlob.size > 0) {
 					this.onSpeechEnd(audioBlob);
 				}
-			} else {
-				console.log('[AudioService] No audio chunks to send');
 			}
 		}, 150);
 	}
@@ -510,8 +494,6 @@ export class AudioService {
 			audio.pause();
 		});
 		this.ttsAudioQueue = [];
-
-		console.log('[AudioService] TTS stopped (interrupted)');
 	}
 
 	/**

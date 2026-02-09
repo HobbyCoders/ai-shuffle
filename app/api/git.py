@@ -340,7 +340,7 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
         default_branch=default_branch,
         github_repo_name=github_repo_name
     )
-    logger.info(f"Created git repository record for project {project_id}: {repo_id}")
+    logger.debug(f"Created git repository record for project {project_id}: {repo_id}")
     return repo
 
 
@@ -1209,7 +1209,7 @@ def _copy_uncommitted_files(main_dir: str, worktree_path: str) -> dict:
             except Exception as e:
                 result["errors"].append(f"Failed to copy untracked file {file_path}: {str(e)}")
 
-        logger.info(
+        logger.debug(
             f"Copied uncommitted files to worktree: "
             f"{result['modified_copied']} modified, {result['untracked_copied']} untracked"
         )

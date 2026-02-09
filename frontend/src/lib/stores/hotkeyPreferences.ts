@@ -122,7 +122,6 @@ function saveToServer(prefs: HotkeyPreferences): void {
 	// Don't write to server until initial sync is complete
 	// This prevents localStorage data from overwriting newer server data
 	if (!hasSyncedFromServer) {
-		console.log('[HotkeyPreferences] Skipping server save - initial sync not complete');
 		return;
 	}
 
@@ -133,7 +132,6 @@ function saveToServer(prefs: HotkeyPreferences): void {
 	serverSyncTimer = setTimeout(async () => {
 		try {
 			await setPreference(SERVER_PREFERENCE_KEY, prefs);
-			console.log('[HotkeyPreferences] Synced to server');
 			pendingState = null;
 		} catch (e) {
 			console.error('[HotkeyPreferences] Failed to save to server:', e);
@@ -162,7 +160,6 @@ function flushPendingSave(): void {
 		'/api/v1/preferences/' + SERVER_PREFERENCE_KEY,
 		new Blob([data], { type: 'application/json' })
 	);
-	console.log('[HotkeyPreferences] Flushed pending state on unload');
 	pendingState = null;
 }
 
@@ -245,17 +242,13 @@ async function syncFromServer(): Promise<void> {
 			merged.globalSttHotkey.alt !== localState.globalSttHotkey.alt;
 
 		if (isDifferent) {
-			console.log('[HotkeyPreferences] Server state differs, updating local');
 			// Update localStorage
 			saveToLocalStorage(merged);
 			// Update store
 			set(merged);
-		} else {
-			console.log('[HotkeyPreferences] Server and local in sync');
 		}
 	} else {
 		// No server data - push local data to server (migration)
-		console.log('[HotkeyPreferences] No server data, will push local to server');
 	}
 
 	// Mark sync as complete - now server writes are allowed

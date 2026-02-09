@@ -165,7 +165,7 @@ class PushNotificationService:
         self._sent_notifications.append(notification_data)
         self._notify_callbacks(notification_data)
 
-        logger.info(
+        logger.debug(
             f"[MOCK] Push notification: {notification_data['title']} -> {notification_data['device_id'][:20]}..."
         )
 
@@ -209,7 +209,7 @@ class PushNotificationService:
             notification_data["message_id"] = response
             self._notify_callbacks(notification_data)
 
-            logger.info(f"FCM notification sent: {response}")
+            logger.debug(f"FCM notification sent: {response}")
             return NotificationResult(
                 success=True,
                 message_id=response,
@@ -253,7 +253,7 @@ class PushNotificationService:
             ]
 
         if not device_tokens:
-            logger.info("No devices to broadcast to")
+            logger.debug("No devices to broadcast to")
             return []
 
         results = []
@@ -267,7 +267,7 @@ class PushNotificationService:
             results.append(result)
 
         successful = sum(1 for r in results if r.success)
-        logger.info(f"Broadcast sent: {successful}/{len(results)} successful")
+        logger.debug(f"Broadcast sent: {successful}/{len(results)} successful")
 
         return results
 

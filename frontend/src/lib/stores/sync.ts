@@ -80,7 +80,6 @@ function createSyncStore() {
 
 		// Already connected to this session - just request fresh state
 		if (state.connected && state.sessionId === sessionId && websocket?.readyState === WebSocket.OPEN) {
-			console.log(`[Sync] Already connected to session ${sessionId}, requesting state update`);
 			requestState();
 			return true;
 		}
@@ -108,7 +107,6 @@ function createSyncStore() {
 			websocket = new WebSocket(wsUrl);
 
 			websocket.onopen = () => {
-				console.log(`[Sync] Connected to session ${sessionId}`);
 				update((s) => ({
 					...s,
 					connected: true,
@@ -135,7 +133,6 @@ function createSyncStore() {
 			};
 
 			websocket.onclose = (event) => {
-				console.log(`[Sync] Disconnected from session ${sessionId}:`, event.code, event.reason);
 				update((s) => ({ ...s, connected: false }));
 
 				// Attempt reconnect unless intentionally closed or auth failed
@@ -183,11 +180,8 @@ function createSyncStore() {
 	function handleSyncEvent(event: SyncEvent) {
 		const deviceId = getDeviceIdSync();
 
-		console.log('[Sync] Received event:', event.event_type, 'source:', event.source_device_id, 'my device:', deviceId);
-
 		// Ignore events from our own device (but NOT events with null/undefined source - those are from background tasks)
 		if (event.source_device_id && event.source_device_id === deviceId) {
-			console.log('[Sync] Ignoring event from own device');
 			return;
 		}
 
@@ -256,7 +250,6 @@ function createSyncStore() {
 		}
 
 		reconnectTimeout = setTimeout(() => {
-			console.log('[Sync] Attempting reconnect...');
 			connect(sessionId);
 		}, 3000);
 	}
@@ -269,7 +262,6 @@ function createSyncStore() {
 			return; // Already polling
 		}
 
-		console.log('[Sync] Starting polling fallback');
 		const token = authToken || getCookieToken();
 
 		pollingInterval = setInterval(async () => {

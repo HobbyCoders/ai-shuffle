@@ -128,7 +128,7 @@ def log_event(
             user_agent=user_agent,
             details=details
         )
-        logger.info(f"Audit log: {event_type} for user {user_id} from {ip_address}")
+        logger.debug(f"Audit log: {event_type} for user {user_id} from {ip_address}")
         return entry
     except Exception as e:
         logger.error(f"Failed to create audit log entry: {e}")

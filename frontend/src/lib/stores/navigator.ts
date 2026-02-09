@@ -139,7 +139,6 @@ async function saveToServer(state: NavigatorPersistedState) {
 	// Don't write to server until we've completed initial sync
 	// This prevents empty local state from overwriting server data on first load
 	if (!hasSyncedFromServer) {
-		console.log('[Navigator] Skipping server save - initial sync not complete');
 		return;
 	}
 
@@ -150,7 +149,6 @@ async function saveToServer(state: NavigatorPersistedState) {
 	serverSyncTimer = setTimeout(async () => {
 		try {
 			await setPreference(SERVER_PREFERENCE_KEY, state);
-			console.log('[Navigator] Synced state to server');
 		} catch (e) {
 			console.error('[Navigator] Failed to sync state to server:', e);
 		}
@@ -166,7 +164,6 @@ async function loadFromServer(): Promise<NavigatorPersistedState | null> {
 		const response = await getPreference<NavigatorPersistedState>(SERVER_PREFERENCE_KEY);
 
 		if (response && response.value) {
-			console.log('[Navigator] Loaded state from server');
 			return response.value as NavigatorPersistedState;
 		}
 	} catch (e) {
@@ -249,7 +246,6 @@ function createNavigatorStore() {
 				if (serverState && !serverIsEmpty) {
 					if (localIsEmpty) {
 						// Local is empty, use server state entirely
-						console.log('[Navigator] Local empty, using server state');
 						mergedState = {
 							...state,
 							...serverState,
@@ -268,7 +264,6 @@ function createNavigatorStore() {
 						const serverCardOrderSet = new Set(serverCardOrder);
 						const localOnlyCards = localCardOrder.filter(id => !serverCardOrderSet.has(id));
 
-						console.log('[Navigator] Merging local and server state');
 						mergedState = {
 							...state,
 							...serverState,
@@ -280,7 +275,6 @@ function createNavigatorStore() {
 					}
 				} else {
 					// No server state or server is empty - keep local
-					console.log('[Navigator] No server state, keeping local');
 					mergedState = { ...state, initialized: true };
 				}
 
@@ -298,7 +292,6 @@ function createNavigatorStore() {
 
 			// Mark sync as complete - now server writes are allowed
 			hasSyncedFromServer = true;
-			console.log('[Navigator] Initial sync complete, server writes enabled');
 		},
 
 		/**
@@ -309,7 +302,6 @@ function createNavigatorStore() {
 			const persisted = getPersistedState(state);
 			try {
 				await setPreference(SERVER_PREFERENCE_KEY, persisted);
-				console.log('[Navigator] Force synced state to server');
 			} catch (e) {
 				console.error('[Navigator] Failed to force sync to server:', e);
 			}

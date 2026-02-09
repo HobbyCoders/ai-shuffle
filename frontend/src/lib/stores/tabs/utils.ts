@@ -72,14 +72,12 @@ export function getOrCreateDeviceId(): string {
 	if (legacyId) {
 		localStorage.setItem(CANONICAL_KEY, legacyId);
 		localStorage.removeItem(LEGACY_KEY);
-		console.log('[Tabs] Migrated device ID from legacy key:', legacyId);
 		return legacyId;
 	}
 
 	// Generate new ID
 	deviceId = `device-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 	localStorage.setItem(CANONICAL_KEY, deviceId);
-	console.log('[Tabs] Generated new device ID:', deviceId);
 	return deviceId;
 }
 

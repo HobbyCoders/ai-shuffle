@@ -44,7 +44,6 @@ function createPWAStore() {
   // Register service worker
   async function registerServiceWorker() {
     if (!browser || !('serviceWorker' in navigator)) {
-      console.log('[PWA] Service workers not supported');
       return null;
     }
 
@@ -54,18 +53,14 @@ function createPWAStore() {
         updateViaCache: 'none' // Always check for SW updates
       });
 
-      console.log('[PWA] Service worker registered:', registration.scope);
-
       update(state => ({ ...state, serviceWorkerRegistration: registration }));
 
       // Check for updates
       registration.addEventListener('updatefound', () => {
         const newWorker = registration.installing;
         if (newWorker) {
-          console.log('[PWA] New service worker installing...');
           newWorker.addEventListener('statechange', () => {
             if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-              console.log('[PWA] New version installed, will activate shortly');
               // The SW will skipWaiting and send SW_UPDATED message
               update(state => ({ ...state, hasUpdate: true }));
             }
@@ -76,7 +71,6 @@ function createPWAStore() {
       // Handle controller change (new service worker activated) - auto reload
       let refreshing = false;
       navigator.serviceWorker.addEventListener('controllerchange', () => {
-        console.log('[PWA] New service worker activated, reloading...');
         if (!refreshing) {
           refreshing = true;
           window.location.reload();
@@ -86,7 +80,6 @@ function createPWAStore() {
       // Listen for SW_UPDATED message from service worker
       navigator.serviceWorker.addEventListener('message', (event) => {
         if (event.data?.type === 'SW_UPDATED') {
-          console.log('[PWA] Received SW_UPDATED message, version:', event.data.version);
           // The controllerchange event will handle reload, but this is a backup
           if (!refreshing) {
             refreshing = true;
@@ -133,7 +126,6 @@ function createPWAStore() {
     });
 
     if (!state.installPromptEvent) {
-      console.log('[PWA] No install prompt available');
       return false;
     }
 
@@ -142,7 +134,6 @@ function createPWAStore() {
       const { outcome } = await state.installPromptEvent.userChoice;
 
       if (outcome === 'accepted') {
-        console.log('[PWA] App installed');
         update(s => ({
           ...s,
           isInstalled: true,
@@ -151,7 +142,6 @@ function createPWAStore() {
         }));
         return true;
       } else {
-        console.log('[PWA] Install dismissed');
         // Store dismissal in localStorage to not prompt again for a while
         localStorage.setItem('ai-shuffle-install-dismissed', Date.now().toString());
         update(s => ({ ...s, installPromptEvent: null, isInstallable: false }));
@@ -185,9 +175,8 @@ function createPWAStore() {
     if (state.serviceWorkerRegistration) {
       try {
         await state.serviceWorkerRegistration.update();
-        console.log('[PWA] Checked for updates');
       } catch (error) {
-        console.log('[PWA] Update check failed:', error);
+        // Update check failed silently
       }
     }
   }
@@ -227,11 +216,9 @@ function createPWAStore() {
 
       // Don't show if recently dismissed
       if (wasRecentlyDismissed()) {
-        console.log('[PWA] Install prompt recently dismissed, skipping');
         return;
       }
 
-      console.log('[PWA] Install prompt available');
       update(state => ({
         ...state,
         isInstallable: true,
@@ -241,7 +228,6 @@ function createPWAStore() {
 
     // Listen for app installed event
     window.addEventListener('appinstalled', () => {
-      console.log('[PWA] App was installed');
       update(state => ({
         ...state,
         isInstalled: true,
@@ -262,7 +248,6 @@ function createPWAStore() {
 
     if (state.serviceWorkerRegistration?.active) {
       state.serviceWorkerRegistration.active.postMessage({ type: 'CLEAR_CACHE' });
-      console.log('[PWA] Cache cleared');
     }
   }
 

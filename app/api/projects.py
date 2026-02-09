@@ -371,7 +371,7 @@ async def upload_file(
     # Use forward slashes for consistent cross-platform path references
     relative_path_str = relative_path.as_posix()
 
-    logger.info(f"Upload complete: original='{file.filename}' -> saved='{file_path.name}', path='{relative_path_str}'")
+    logger.debug(f"Upload complete: original='{file.filename}' -> saved='{file_path.name}', path='{relative_path_str}'")
 
     return {
         "filename": file_path.name,

@@ -157,7 +157,6 @@ function broadcastTabsUpdate(persistedState: PersistedTabsState) {
 				type: 'tabs_update',
 				tabs_data: persistedState
 			}));
-			console.log('[Tabs] Broadcast tabs_update via WebSocket');
 			return; // Only need to send once, server will broadcast to all devices
 		}
 	}
@@ -209,8 +208,6 @@ async function saveTabsToServer(state: TabsState) {
 				key: 'open_tabs',
 				value: persistedState
 			});
-			console.log('[Tabs] Saved tabs state to server');
-
 			// Also broadcast via WebSocket for real-time sync to other devices
 			broadcastTabsUpdate(persistedState);
 		} catch (error) {
@@ -229,7 +226,6 @@ async function loadTabsFromServer(): Promise<PersistedTabsState | null> {
 	try {
 		const response = await api.get<{ key: string; value: PersistedTabsState } | null>('/preferences/open_tabs');
 		if (response && response.value) {
-			console.log('[Tabs] Loaded tabs state from server:', response.value);
 			return response.value;
 		}
 	} catch (error) {
@@ -520,21 +516,16 @@ function createTabsStore() {
 		if (token) {
 			url = `${url}&token=${encodeURIComponent(token)}`;
 		}
-		console.log(`[Tab ${tabId}] ${isReconnect ? 'Reconnecting' : 'Connecting'} to WebSocket...`);
-
 		const ws = new WebSocket(url);
 		tabConnections.set(tabId, ws);
 
 		ws.onopen = () => {
-			console.log(`[Tab ${tabId}] WebSocket connected`);
 			updateTab(tabId, { wsConnected: true, error: null });
 
 			// Always register with SyncEngine by sending load_session if tab has a session
 			// This is critical for multi-device sync - devices must be registered to receive events
 			const tab = getTab(tabId);
 			if (tab?.sessionId) {
-				console.log(`[Tab ${tabId}] Registering with session via load_session:`, tab.sessionId);
-
 				// Track expected session ID to prevent race conditions when switching sessions
 				tabExpectedSessionId.set(tabId, tab.sessionId);
 
@@ -593,7 +584,6 @@ function createTabsStore() {
 						// This prevents false disconnects during SDK operations like auto-compaction
 						// where heartbeats may be delayed but the poller still works fine.
 						if (currentTab?.isStreaming && currentTab?.sessionId && sessionPoller.isPolling(currentTab.sessionId)) {
-							console.log(`[Tab ${tabId}] WebSocket stale but poller is active for ${currentTab.sessionId} — skipping force-close`);
 						} else {
 							console.warn(`[Tab ${tabId}] Connection appears stale (${Math.round(timeSinceLastMessage / 1000)}s since last message, streaming=${currentTab?.isStreaming}, toolsPending=${hasToolsPending ? pendingTools?.size : 0}), forcing reconnect`);
 							// Force close to trigger reconnect
@@ -606,8 +596,6 @@ function createTabsStore() {
 		};
 
 		ws.onclose = (event) => {
-			console.log(`[Tab ${tabId}] WebSocket closed:`, event.code, event.reason);
-
 			// Check if tab was streaming when connection dropped
 			const tab = getTab(tabId);
 			const wasStreaming = tab?.isStreaming;
@@ -620,7 +608,6 @@ function createTabsStore() {
 			// If we were streaming, start polling immediately to keep getting updates
 			// This provides continuity even when WebSocket is disconnected
 			if (wasStreaming && sessionId) {
-				console.log(`[Tab ${tabId}] WebSocket closed during streaming - starting fallback polling`);
 				// sessionPoller.startStreaming() is idempotent — safe to call even if already polling
 				startPolling(tabId, sessionId);
 				// Track that this tab was streaming on disconnect so the reconnect handler
@@ -655,7 +642,6 @@ function createTabsStore() {
 					// Check if tab still exists
 					const currentTab = getTab(tabId);
 					if (currentTab) {
-						console.log(`[Tab ${tabId}] Attempting reconnect...`);
 						connectTab(tabId, true); // Pass isReconnect flag
 					}
 				}, 3000);
@@ -721,7 +707,6 @@ function createTabsStore() {
 	 * Thin wrapper that delegates to session/session-poller.ts.
 	 */
 	function startPolling(tabId: string, sessionId: string) {
-		console.log(`[Tab ${tabId}] Starting polling via sessionPoller for ${sessionId}`);
 		sessionPoller.startStreaming(sessionId);
 	}
 
@@ -744,7 +729,6 @@ function createTabsStore() {
 		// The new stream is about to start and we don't want to interfere.
 		const interruptTab = get({ subscribe }).tabs.find(t => t.sessionId === sessionId);
 		if (interruptTab && tabInterruptPending.get(interruptTab.id)) {
-			console.log(`[onStreamEnd] Skipping cleanup for ${sessionId} — interrupt_and_query pending`);
 			return;
 		}
 
@@ -813,7 +797,6 @@ function createTabsStore() {
 		// Get our device ID to ignore messages from ourselves (shouldn't happen, but safety check)
 		const ourDeviceId = getDeviceIdSync();
 		if (sourceDeviceId === ourDeviceId) {
-			console.log('[Tabs] Ignoring tabs_sync from our own device');
 			return;
 		}
 
@@ -821,8 +804,6 @@ function createTabsStore() {
 			console.warn('[Tabs] Received tabs_sync with no tabs data');
 			return;
 		}
-
-		console.log(`[Tabs] Received tabs_sync from device ${sourceDeviceId?.slice(0, 8)}..., ${tabs.length} tabs`);
 
 		// Get current state to preserve messages and streaming state
 		const currentState = get({ subscribe });
@@ -895,14 +876,12 @@ function createTabsStore() {
 
 		// Disconnect WebSocket for closed tabs
 		for (const closedTab of closedTabs) {
-			console.log(`[Tabs] Tab ${closedTab.id} was closed on another device, disconnecting`);
 			disconnectTab(closedTab.id);
 		}
 
 		// Connect WebSocket for new tabs
 		const newTabs = mergedTabs.filter(t => !currentTabsMap.has(t.id));
 		for (const newTab of newTabs) {
-			console.log(`[Tabs] Tab ${newTab.id} was created on another device, connecting`);
 			connectTab(newTab.id);
 		}
 
@@ -915,7 +894,6 @@ function createTabsStore() {
 			if (existing && !existing.sessionId && mergedTab.sessionId) {
 				const ws = tabConnections.get(mergedTab.id);
 				if (ws?.readyState === WebSocket.OPEN) {
-					console.log(`[Tabs] Tab ${mergedTab.id} sessionId updated via tabs_sync, loading session: ${mergedTab.sessionId}`);
 					tabExpectedSessionId.set(mergedTab.id, mergedTab.sessionId);
 					tabsWaitingForHistory.set(mergedTab.id, []);
 					ws.send(JSON.stringify({ type: 'load_session', session_id: mergedTab.sessionId }));
@@ -949,19 +927,14 @@ function createTabsStore() {
 		// This prevents race conditions where sync events arrive before history
 		const queuedEvents = tabsWaitingForHistory.get(tabId);
 		if (queuedEvents !== undefined) {
-			console.log(`[Tab ${tabId}] Queueing sync event (waiting for history):`, eventType);
 			queuedEvents.push(data);
 			return;
 		}
-
-		console.log(`[Tab ${tabId}] Sync event:`, eventType, eventData);
 
 		switch (eventType) {
 			case 'message_added': {
 				// A new message was added by another device (e.g., user message)
 				const message = eventData.message as Record<string, unknown>;
-				console.log(`[Tab ${tabId}] Message added from another device:`, message);
-
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(t => {
@@ -985,7 +958,6 @@ function createTabsStore() {
 				// Another device started streaming
 				// DON'T create empty message here - wait for actual content via stream_chunk events
 				// This prevents empty "Claude [time] ●●●" headers appearing before content arrives
-				console.log(`[Tab ${tabId}] Another device started streaming`);
 				const usage = eventData.usage as Record<string, number> | undefined;
 
 				update(s => ({
@@ -1007,15 +979,6 @@ function createTabsStore() {
 							totalCacheReadTokens: cacheReadTokens,
 							contextUsed: inputTokens + cacheCreationTokens + cacheReadTokens
 						} : {};
-
-						if (usage) {
-							console.log(`[Tab ${tabId}] Sync stream_start with usage (REPLACING):`, {
-								inputTokens,
-								cacheCreationTokens,
-								cacheReadTokens,
-								contextUsed: inputTokens + cacheCreationTokens + cacheReadTokens
-							});
-						}
 
 						// Just mark as streaming - messages will be created when content arrives
 						return {
@@ -1039,8 +1002,6 @@ function createTabsStore() {
 				// Content chunk from another device (fallback when polling isn't active)
 				const chunkType = eventData.chunk_type as string;
 				const content = eventData.content as string;
-				console.log(`[Tab ${tabId}] stream_chunk: type=${chunkType}, content="${content?.substring(0, 50)}..."`);
-
 				if (chunkType === 'thinking') {
 					// Thinking chunk - append to existing thinking message or create new one
 					// This keeps thinking separate from text messages
@@ -1104,8 +1065,6 @@ function createTabsStore() {
 				} else if (chunkType === 'tool_input') {
 					// Tool input streaming - accumulate JSON in the current tool_use message
 					const partialJson = content;
-					console.log(`[Tab ${tabId}] tool_input sync: ${partialJson?.length} chars`);
-
 					update(s => ({
 						...s,
 						tabs: s.tabs.map(t => {
@@ -1154,8 +1113,6 @@ function createTabsStore() {
 					const toolId = eventData.tool_id as string;
 					const toolName = eventData.tool_name as string;
 					const toolInput = eventData.tool_input as Record<string, unknown>;
-					console.log(`[Tab ${tabId}] tool_use sync:`, { toolName, toolId, toolInput });
-
 					update(s => ({
 						...s,
 						tabs: s.tabs.map(t => {
@@ -1171,7 +1128,6 @@ function createTabsStore() {
 									status: todo.status || 'pending',
 									activeForm: todo.activeForm || todo.content || ''
 								}));
-								console.log(`[Tab ${tabId}] TodoWrite: Updated todos`, todos);
 							}
 
 							// Check if this tool_use already exists (from history or buffer)
@@ -1180,7 +1136,6 @@ function createTabsStore() {
 							);
 							if (existingToolIdx !== -1) {
 								// Tool already exists - just update it if needed
-								console.log(`[Tab ${tabId}] tool_use already exists, updating:`, toolId);
 								messages[existingToolIdx] = {
 									...messages[existingToolIdx],
 									toolName: toolName || messages[existingToolIdx].toolName,
@@ -1222,10 +1177,6 @@ function createTabsStore() {
 					}));
 				} else if (chunkType === 'tool_result') {
 					const toolId = eventData.tool_id as string;
-					console.log(`[Tab ${tabId}] tool_result sync:`, {
-						tool_id: toolId,
-						content: content?.substring(0, 100)
-					});
 					update(s => ({
 						...s,
 						tabs: s.tabs.map(t => {
@@ -1248,7 +1199,6 @@ function createTabsStore() {
 							if (toolUseIdx !== -1) {
 								// Only update if tool doesn't already have this result
 								if (!messages[toolUseIdx].toolResult) {
-									console.log(`[Tab ${tabId}] Attaching result to tool at index ${toolUseIdx}`);
 									messages[toolUseIdx] = {
 										...messages[toolUseIdx],
 										toolResult: content,
@@ -1256,10 +1206,7 @@ function createTabsStore() {
 										streaming: false
 									};
 								} else {
-									console.log(`[Tab ${tabId}] Tool already has result, skipping duplicate`);
 								}
-							} else {
-								console.log(`[Tab ${tabId}] No matching tool_use found for result, toolId:`, toolId);
 							}
 
 							return { ...t, messages };
@@ -1269,8 +1216,6 @@ function createTabsStore() {
 					// System message from another device
 					const subtype = eventData.subtype as string;
 					const systemData = eventData.data as Record<string, unknown>;
-					console.log(`[Tab ${tabId}] system sync:`, { subtype, systemData });
-
 					// Extract content for display
 					let displayContent = '';
 					if (systemData?.content && typeof systemData.content === 'string') {
@@ -1314,8 +1259,6 @@ function createTabsStore() {
 					const description = eventData.description as string;
 					const prompt = eventData.prompt as string;
 					const toolId = eventData.tool_id as string;
-					console.log(`[Tab ${tabId}] subagent_start sync:`, { agentId, agentType, description });
-
 					update(s => ({
 						...s,
 						tabs: s.tabs.map(t => {
@@ -1459,8 +1402,6 @@ function createTabsStore() {
 					const agentId = eventData.agent_id as string;
 					const result = eventData.result as string | undefined;
 					const isError = eventData.is_error as boolean | undefined;
-					console.log(`[Tab ${tabId}] subagent_done sync:`, { agentId, isError });
-
 					update(s => ({
 						...s,
 						tabs: s.tabs.map(t => {
@@ -1488,17 +1429,14 @@ function createTabsStore() {
 					// The 'tool_use' event has the full data (name, id, input) anyway.
 					const blockType = eventData.block_type as string;
 					const contentBlock = eventData.content_block as { id?: string; name?: string };
-					console.log(`[Tab ${tabId}] stream_block_start sync (ignored for tool_use):`, { blockType, contentBlock });
 					// No action needed - tool_use event will create the message
 				} else if (chunkType === 'stream_block_stop') {
 					// End of a content block - just log for now
-					console.log(`[Tab ${tabId}] stream_block_stop sync:`, { index: eventData.index });
 				} else if (chunkType === 'stream_message_delta') {
 					// Final message metadata with output token usage (synced from another device)
 					// NOTE: These are TOTAL values for the current turn, not increments!
 					const usage = eventData.usage as Record<string, number> | undefined;
 					if (usage && usage.output_tokens) {
-						console.log(`[Tab ${tabId}] Sync stream_message_delta with output usage (REPLACING):`, usage);
 						update(s => ({
 							...s,
 							tabs: s.tabs.map(t => {
@@ -1529,13 +1467,6 @@ function createTabsStore() {
 					const cacheReadTokens = usage.cache_read_input_tokens || 0;
 					const newContextUsed = inputTokens + cacheCreationTokens + cacheReadTokens;
 
-					console.log(`[Tab ${tabId}] Sync usage_update (REPLACING not adding):`, {
-						inputTokens,
-						cacheCreationTokens,
-						cacheReadTokens,
-						contextUsed: newContextUsed
-					});
-
 					update(s => ({
 						...s,
 						tabs: s.tabs.map(t => {
@@ -1557,7 +1488,6 @@ function createTabsStore() {
 
 			case 'stream_end': {
 				// Another device finished streaming
-				console.log(`[Tab ${tabId}] Another device finished streaming`);
 				const metadata = eventData.metadata as Record<string, unknown>;
 				const interrupted = eventData.interrupted as boolean;
 
@@ -1609,14 +1539,6 @@ function createTabsStore() {
 							const percentDiff = currentContext > 0 ? Math.abs(newContextUsed - currentContext) / currentContext : 1;
 
 							if (percentDiff > 0.1 || currentContext === 0) {
-								console.log(`[Tab ${tabId}] Reconciling context from stream_end metadata:`, {
-									newContextUsed,
-									currentContext,
-									percentDiff,
-									tokensIn,
-									cacheCreation,
-									cacheRead
-								});
 								tokenUpdates = {
 									contextUsed: newContextUsed,
 									totalCacheCreationTokens: cacheCreation,
@@ -1638,8 +1560,6 @@ function createTabsStore() {
 				// Another device rewound the session - reload to get updated messages
 				const targetUuid = eventData.target_uuid as string;
 				const messagesRemoved = eventData.messages_removed as number;
-				console.log(`[Tab ${tabId}] Session rewound by another device:`, { targetUuid, messagesRemoved });
-
 				// Reload the session to get the updated message list
 				const tab = getTab(tabId);
 				if (tab?.sessionId) {
@@ -1658,16 +1578,14 @@ function createTabsStore() {
 				// Another device opened/resumed this session
 				const deviceId = eventData.device_id as string;
 				const isNew = eventData.is_new as boolean;
-				console.log(`[Tab ${tabId}] Session opened by another device:`, { deviceId, isNew });
-				// Just log for now - could show a notification or indicator
+				// Could show a notification or indicator
 				break;
 			}
 
 			case 'session_closed': {
 				// Another device closed this session
 				const deviceId = eventData.device_id as string;
-				console.log(`[Tab ${tabId}] Session closed by another device:`, { deviceId });
-				// Just log for now - could show a notification or indicator
+				// Could show a notification or indicator
 				break;
 			}
 		}
@@ -1711,7 +1629,6 @@ function createTabsStore() {
 
 		// Handle user-level session list update from another device
 		if (msgType === 'user_session_created') {
-			console.log('[Tabs] New session created on another device:', data.session_id);
 			loadSessionsInternal();
 			return;
 		}
@@ -1721,7 +1638,6 @@ function createTabsStore() {
 			const sessionId = data.session_id as string;
 			const isStreaming = data.is_streaming as boolean;
 			const projectId = (data.project_id as string | null) ?? null;
-			console.log(`[Tabs] Streaming changed for session ${sessionId}: ${isStreaming} (project: ${projectId})`);
 			streamingSessions.update(map => {
 				const newMap = new Map(map);
 				if (isStreaming) {
@@ -1750,7 +1666,6 @@ function createTabsStore() {
 					newMap.set(sid, null);
 				}
 			}
-			console.log('[Tabs] Initial streaming sessions snapshot:', [...newMap.keys()]);
 			streamingSessions.set(newMap);
 			return;
 		}
@@ -1759,7 +1674,6 @@ function createTabsStore() {
 		if (msgType === 'user_branch_changed') {
 			const projectId = data.project_id as string;
 			const branchName = data.branch_name as string;
-			console.log(`[Tabs] Branch changed on another device: project=${projectId}, branch=${branchName}`);
 			// Refresh git state if we're currently viewing this project
 			const gitState = get(git);
 			if (gitState.projectId === projectId) {
@@ -1775,7 +1689,6 @@ function createTabsStore() {
 				const receivedSessionId = data.session_id as string;
 				const expectedSessionId = tabExpectedSessionId.get(tabId);
 				if (expectedSessionId && receivedSessionId !== expectedSessionId) {
-					console.log(`[Tab ${tabId}] Ignoring stale history for session ${receivedSessionId}, expected ${expectedSessionId}`);
 					// Clear the waiting state for this stale response
 					tabsWaitingForHistory.delete(tabId);
 					break;
@@ -1910,13 +1823,9 @@ function createTabsStore() {
 
 				// Handle streaming state from backend (isStreaming already extracted above for message conversion)
 				const streamingBuffer = data.streamingBuffer as Array<Record<string, unknown>> | undefined;
-				console.log(`[Tab ${tabId}] History response - isStreaming:`, isStreaming, 'bufferLen:', streamingBuffer?.length || 0);
-
 				// If session is actively streaming and has buffered content, merge it intelligently
 				let finalMessages = messages;
 				if (isStreaming && streamingBuffer && streamingBuffer.length > 0) {
-					console.log(`[Tab ${tabId}] Late-joining streaming session, merging buffer:`, streamingBuffer.length, 'messages');
-
 					// Create a set of existing message content hashes for deduplication
 					const existingContentHashes = new Set<string>();
 					for (const msg of messages) {
@@ -1949,13 +1858,11 @@ function createTabsStore() {
 
 						// Skip standalone tool_result messages - they should be grouped with tool_use
 						if (bufferType === 'tool_result') {
-							console.log(`[Tab ${tabId}] Skipping standalone tool_result, will merge with tool_use:`, bufferToolId);
 							continue;
 						}
 
 						// Skip if we already have similar content in history
 						if (existingContentHashes.has(hash)) {
-							console.log(`[Tab ${tabId}] Skipping duplicate buffer message:`, hash.substring(0, 50));
 							continue;
 						}
 
@@ -2034,12 +1941,9 @@ function createTabsStore() {
 					// This ensures incoming streaming deltas are routed to the correct content block
 					const activeBlockType = data.activeBlockType as 'thinking' | 'text' | 'tool_use' | null | undefined;
 					if (activeBlockType) {
-						console.log(`[Tab ${tabId}] Setting activeBlockType for late-joiner:`, activeBlockType);
 						setActiveBlockType(tabId, activeBlockType);
 					}
 				}
-
-				console.log(`[Tab ${tabId}] Updating tab state - isStreaming:`, isStreaming, 'messageCount:', finalMessages.length, 'todoCount:', latestTodos.length);
 
 				// Extract token counts and profile from session data if available
 				const session = data.session as Record<string, unknown> | undefined;
@@ -2064,7 +1968,6 @@ function createTabsStore() {
 					if (typeof session.profile_id === 'string') {
 						tokenUpdates.sessionProfileId = session.profile_id;
 					}
-					console.log(`[Tab ${tabId}] Token counts from session:`, tokenUpdates);
 				}
 
 				// For late-joining devices during streaming, also update context from streamingUsage
@@ -2075,13 +1978,6 @@ function createTabsStore() {
 					const cacheCreationTokens = streamingUsage.cache_creation_input_tokens || 0;
 					const cacheReadTokens = streamingUsage.cache_read_input_tokens || 0;
 					const streamContextUsed = inputTokens + cacheCreationTokens + cacheReadTokens;
-
-					console.log(`[Tab ${tabId}] Streaming usage for late-joiner:`, {
-						inputTokens,
-						cacheCreationTokens,
-						cacheReadTokens,
-						streamContextUsed
-					});
 
 					// Only update if streamingUsage provides more recent data than session
 					// (which it should during active streaming)
@@ -2185,7 +2081,6 @@ function createTabsStore() {
 				// This ensures we get the correct state regardless of any buffer merging issues
 				const receivedSession = data.session_id as string;
 				if (isStreaming && receivedSession) {
-					console.log(`[Tab ${tabId}] Session is streaming, starting server-authoritative polling`);
 					tabStreamingOnDisconnect.delete(tabId); // Clear — reconnect confirmed streaming
 					startPolling(tabId, receivedSession);
 
@@ -2204,7 +2099,6 @@ function createTabsStore() {
 					// Keep polling for a grace period and let the poller verify the real state.
 					const disconnectSessionId = tabStreamingOnDisconnect.get(tabId);
 					if (disconnectSessionId && disconnectSessionId === receivedSession) {
-						console.log(`[Tab ${tabId}] load_session says !isStreaming but tab was streaming on disconnect — keeping poller for grace period`);
 						tabStreamingOnDisconnect.delete(tabId);
 						// Let the poller run for a few more cycles. If the backend truly
 						// stopped streaming, the poller's own streamingJustEnded logic will
@@ -2215,7 +2109,6 @@ function createTabsStore() {
 						setTimeout(() => {
 							const gracedSession = sessionState.getSession(disconnectSessionId);
 							if (gracedSession && !gracedSession.isStreaming && sessionPoller.isPolling(disconnectSessionId)) {
-								console.log(`[Tab ${tabId}] Grace period expired — streaming never resumed for ${disconnectSessionId}, stopping poller`);
 								sessionPoller.stop(disconnectSessionId);
 								sessionState.removeSession(disconnectSessionId);
 							}
@@ -2230,7 +2123,6 @@ function createTabsStore() {
 				// Process any queued sync events that arrived while waiting for history
 				const queuedEvents = tabsWaitingForHistory.get(tabId);
 				if (queuedEvents && queuedEvents.length > 0) {
-					console.log(`[Tab ${tabId}] Processing ${queuedEvents.length} queued sync events`);
 					// Remove from waiting map first to prevent re-queueing
 					tabsWaitingForHistory.delete(tabId);
 					// Process each queued event
@@ -2248,8 +2140,6 @@ function createTabsStore() {
 				// New session was created - save sessionId immediately so it persists on refresh
 				// This is sent BEFORE streaming starts, ensuring we can reconnect if page refreshes
 				const sessionId = data.session_id as string;
-				console.log(`[Tab ${tabId}] New session created:`, sessionId);
-
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -2294,7 +2184,6 @@ function createTabsStore() {
 
 			case 'chunk': {
 				// Phase 5: Notification-only — notifier triggers pollNow(), poller updates sessionState
-				console.log(`[WS] Chunk received (notification-only): len=${(data.content as string).length}`);
 				break;
 			}
 
@@ -2303,7 +2192,6 @@ function createTabsStore() {
 			// sessionPoller.pollNow(), which fetches authoritative state from the server.
 			// No local state updates needed here.
 			case 'stream_start': {
-				console.log('[WS] Stream start (notification-only)');
 				break;
 			}
 
@@ -2326,7 +2214,6 @@ function createTabsStore() {
 						tabPendingTools.set(tabId, pending);
 					}
 					pending.add(toolId);
-					console.log(`[Tab ${tabId}] Tool started: ${data.name} (${toolId}), pending: ${pending.size}`);
 				}
 				break;
 			}
@@ -2339,7 +2226,6 @@ function createTabsStore() {
 					const pending = tabPendingTools.get(tabId);
 					if (pending) {
 						pending.delete(toolUseId);
-						console.log(`[Tab ${tabId}] Tool completed: ${toolUseId}, pending: ${pending.size}`);
 					}
 				}
 				break;
@@ -2349,8 +2235,6 @@ function createTabsStore() {
 				// Phase 5: Simplified — poller handles messages, we handle control flow & notifications.
 				const metadata = data.metadata as Record<string, unknown>;
 				const sessionId = data.session_id as string;
-				console.log('[WS] Done event received');
-
 				// Clear interrupt pending flag (safety — shouldn't still be set at 'done')
 				tabInterruptPending.delete(tabId);
 
@@ -2437,7 +2321,6 @@ function createTabsStore() {
 						setTimeout(() => {
 							// Check if onStreamEnd already handled cleanup successfully
 							if (tabStreamEndCleanedUp.get(cleanupId)) {
-								console.log(`[Tab ${tabId}] Safety: skipping — onStreamEnd already cleaned up ${cleanupId}`);
 								tabStreamEndCleanedUp.delete(cleanupId);
 								return;
 							}
@@ -2459,7 +2342,6 @@ function createTabsStore() {
 							if (refreshTab && !refreshTab.isStreaming && refreshTab.sessionId === cleanupId) {
 								const ws = tabConnections.get(tabId);
 								if (ws?.readyState === WebSocket.OPEN) {
-									console.log(`[Tab ${tabId}] Safety: auto-refreshing from JSONL for ${cleanupId}`);
 									tabExpectedSessionId.set(tabId, cleanupId);
 									tabsWaitingForHistory.set(tabId, []);
 									ws.send(JSON.stringify({ type: 'load_session', session_id: cleanupId }));
@@ -2473,13 +2355,10 @@ function createTabsStore() {
 
 			case 'stopped':
 			case 'interrupted': {
-				console.log(`[Tab ${tabId}] Received ${msgType} message`);
-
 				// If this is from an interrupt_and_query, skip all cleanup.
 				// sendMessage() already stopped the poller, flushed messages to raw store,
 				// and removed session state. A new stream is expected momentarily.
 				if (tabInterruptPending.get(tabId)) {
-					console.log(`[Tab ${tabId}] Skipping cleanup — interrupt_and_query pending, new stream expected`);
 					tabPendingTools.delete(tabId);
 					break;
 				}
@@ -2554,15 +2433,13 @@ function createTabsStore() {
 				// Message was successfully queued for streaming input
 				const queuePosition = data.queue_position as number;
 				const prompt = data.prompt as string;
-				console.log(`[Tab ${tabId}] Message queued at position ${queuePosition}: ${prompt.substring(0, 50)}...`);
-				// The message was already added to the UI by sendMessage, just log
+				// The message was already added to the UI by sendMessage
 				break;
 			}
 
 			case 'queued_message_processing': {
 				// A queued message is now being processed
 				const prompt = data.prompt as string;
-				console.log(`[Tab ${tabId}] Processing queued message: ${prompt.substring(0, 50)}...`);
 				// The message should already be in the UI, no action needed
 				break;
 			}
@@ -2632,7 +2509,6 @@ function createTabsStore() {
 				// Phase 5: Notification-only — system messages handled by poller.
 				// Log for debugging; state is fetched from /sessions/{id}/live.
 				const subtype = data.subtype as string;
-				console.log('[WS] System message (notification-only):', subtype);
 				break;
 			}
 
@@ -2640,7 +2516,6 @@ function createTabsStore() {
 			// Subagent state is fetched by the poller from /sessions/{id}/live.
 			// We only keep tabPendingTools tracking for WS health timeouts.
 			case 'subagent_start': {
-				console.log('[WS] Subagent started (notification-only):', data.agent_id, data.agent_type);
 				break;
 			}
 
@@ -2654,7 +2529,6 @@ function createTabsStore() {
 						tabPendingTools.set(tabId, pending);
 					}
 					pending.add(toolId);
-					console.log(`[Tab ${tabId}] Subagent tool started: ${data.name} (${toolId}), pending: ${pending.size}`);
 				}
 				break;
 			}
@@ -2666,7 +2540,6 @@ function createTabsStore() {
 					const pending = tabPendingTools.get(tabId);
 					if (pending) {
 						pending.delete(toolUseId);
-						console.log(`[Tab ${tabId}] Subagent tool completed: ${toolUseId}, pending: ${pending.size}`);
 					}
 				}
 				break;
@@ -2678,7 +2551,6 @@ function createTabsStore() {
 			}
 
 			case 'subagent_done': {
-				console.log('[WS] Subagent done (notification-only):', data.agent_id);
 				break;
 			}
 
@@ -2691,8 +2563,6 @@ function createTabsStore() {
 					queue_position: data.queue_position as number | undefined,
 					queue_total: data.queue_total as number | undefined
 				};
-
-				console.log('[WS] Permission request:', request.tool_name, request.request_id);
 
 				// Send desktop notification if user is not focused on the window
 				if (isNotificationsEnabled()) {
@@ -2718,8 +2588,6 @@ function createTabsStore() {
 				const resolvedIds = data.resolved_ids as string[];
 				const remainingCount = data.remaining_count as number;
 
-				console.log('[WS] Permission queue update:', resolvedIds.length, 'resolved,', remainingCount, 'remaining');
-
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -2739,8 +2607,6 @@ function createTabsStore() {
 				const requestId = data.request_id as string;
 				const result = data.result as Record<string, unknown>;
 
-				console.log('[WS] Permission response acknowledged:', requestId, result);
-
 				// Remove this permission from the queue
 				update(s => ({
 					...s,
@@ -2758,8 +2624,6 @@ function createTabsStore() {
 			case 'pending_permissions': {
 				// Response to get_pending_permissions request - sync queue state
 				const requests = data.requests as PermissionRequestType[];
-
-				console.log('[WS] Pending permissions sync:', requests.length, 'requests');
 
 				update(s => ({
 					...s,
@@ -2791,9 +2655,6 @@ function createTabsStore() {
 					questions: normalizedQuestions
 				};
 
-				console.log('[WS] User question request:', request.request_id, request.questions.length, 'questions');
-				console.log('[WS] User question data (full):', JSON.stringify(request.questions, null, 2));
-
 				// Send desktop notification if user is not focused on the window
 				if (isNotificationsEnabled()) {
 					notifyWaitingForResponse('question', {
@@ -2818,8 +2679,6 @@ function createTabsStore() {
 				const requestId = data.request_id as string;
 				const success = data.success as boolean;
 
-				console.log('[WS] User question response acknowledged:', requestId, success);
-
 				// Remove this question from the queue
 				update(s => ({
 					...s,
@@ -2838,8 +2697,6 @@ function createTabsStore() {
 				// Response to get_pending_questions request - sync queue state
 				const questions = data.questions as UserQuestionRequest[];
 
-				console.log('[WS] Pending questions sync:', questions.length, 'questions');
-
 				update(s => ({
 					...s,
 					tabs: s.tabs.map(tab => {
@@ -2852,7 +2709,6 @@ function createTabsStore() {
 
 			case 'plugin_message': {
 				// Phase 5: Notification-only — plugin messages handled by poller.
-				console.log('[WS] Plugin message (notification-only):', data.plugin);
 				break;
 			}
 		}
@@ -3123,10 +2979,8 @@ function createTabsStore() {
 						connectTab(tab.id);
 					}
 
-					console.log('[Tabs] Restored', restoredTabs.length, 'tabs from server');
 				} else {
 					// No persisted state at all - start with empty tabs (user can create one)
-					console.log('[Tabs] No persisted state, starting with empty tabs');
 				}
 			} catch (error) {
 				console.error('[Tabs] Failed to initialize from server:', error);
@@ -3237,7 +3091,6 @@ function createTabsStore() {
 			// Before closing, save this tab's profile/project as the default selection
 			// This ensures the selection persists even when all tabs are closed
 			if (tab?.profile || tab?.project) {
-				console.log('[Tabs] closeTab - saving selection:', tab.profile, tab.project);
 				saveSelectionToBackend(tab.profile, tab.project);
 			}
 
@@ -3317,7 +3170,6 @@ function createTabsStore() {
 				if (tab && !tab.isStreaming && tab.sessionId) {
 					const ws = tabConnections.get(existingTabId);
 					if (ws?.readyState === WebSocket.OPEN) {
-						console.log(`[Tab ${existingTabId}] Refreshing from JSONL on openSession for ${tab.sessionId}`);
 						tabExpectedSessionId.set(existingTabId, tab.sessionId);
 						tabsWaitingForHistory.set(existingTabId, []);
 						ws.send(JSON.stringify({ type: 'load_session', session_id: tab.sessionId }));
@@ -3405,8 +3257,6 @@ function createTabsStore() {
 			// If currently streaming, send interrupt_and_query to stop current response
 			// and immediately process the new message
 			if (tab.isStreaming && tab.sessionId) {
-				console.log(`[Tab ${tabId}] Interrupting and sending new message: ${prompt.substring(0, 50)}...`);
-
 				// Get current session state messages (the complete message list during streaming)
 				// before we clean up, so we can flush them to the raw store.
 				const currentSession = sessionState.getSession(tab.sessionId);
@@ -3538,8 +3388,6 @@ function createTabsStore() {
 					create_new_branch: tab.worktreeCreateNewBranch
 				});
 
-				console.log(`[Tab ${tabId}] Created worktree session: ${response.session_id}`);
-
 				// Update tab with new session ID and clear loading state
 				updateTab(tabId, { sessionId: response.session_id, isCreatingWorktree: false });
 
@@ -3623,8 +3471,6 @@ function createTabsStore() {
 				updateTab(tabId, { error: 'Not connected. Please try again.' });
 				return;
 			}
-
-			console.log(`[Tab ${tabId}] Starting session on existing worktree: ${tab.worktreeId}`);
 
 			// Add system message about using existing worktree
 			const branchDisplay = tab.selectedWorktreeBranch || 'existing branch';
@@ -3719,7 +3565,6 @@ function createTabsStore() {
 
 			const ws = tabConnections.get(tabId);
 			if (ws?.readyState === WebSocket.OPEN && tab.sessionId) {
-				console.log(`[Tab ${tabId}] Sending stop request for session ${tab.sessionId}`);
 				ws.send(JSON.stringify({
 					type: 'stop',
 					session_id: tab.sessionId
@@ -3770,16 +3615,6 @@ function createTabsStore() {
 		async loadSessionInTab(tabId: string, sessionId: string) {
 			try {
 				const session = await api.get<Session & { messages: Array<Record<string, unknown>> }>(`/sessions/${sessionId}`);
-				// Debug: log subagent messages from API response
-				const subagentMsgs = session.messages.filter(m => m.type === 'subagent');
-				if (subagentMsgs.length > 0) {
-					console.log('[tabs] Subagent messages from API:', subagentMsgs.map(m => ({
-						type: m.type,
-						agentId: m.agentId,
-						agentStatus: m.agentStatus,
-						agentChildrenCount: (m.agentChildren as unknown[])?.length || 0
-					})));
-				}
 				const messages: ChatMessage[] = session.messages.map((m, i) => {
 					// Determine message type - JSONL messages have explicit 'type' field
 					let msgType: MessageType | undefined = m.type as MessageType | undefined;
@@ -4411,7 +4246,6 @@ function createTabsStore() {
 					remember: remember || 'none',
 					pattern
 				}));
-				console.log(`[Tab ${tabId}] Sent permission response: ${decision} for ${requestId}`);
 			} else {
 				console.error(`[Tab ${tabId}] Cannot send permission response: WebSocket not connected`);
 			}
@@ -4453,7 +4287,6 @@ function createTabsStore() {
 					tool_use_id: toolUseId,
 					answers
 				}));
-				console.log(`[Tab ${tabId}] Sent user question response for ${requestId}`);
 			} else {
 				console.error(`[Tab ${tabId}] Cannot send user question response: WebSocket not connected`);
 			}

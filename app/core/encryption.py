@@ -221,7 +221,7 @@ def re_encrypt_all_secrets(old_password: str, new_password: str, db_module) -> b
         encrypted = new_fernet.encrypt(plaintext.encode())
         encrypted_value = f"enc:{base64.b64encode(encrypted).decode()}"
         db_module.set_system_setting(setting_name, encrypted_value)
-        logger.info(f"Re-encrypted {setting_name}")
+        logger.debug(f"Re-encrypted {setting_name}")
 
     # Update in-memory key
     _encryption_key = new_key
@@ -255,7 +255,7 @@ def encrypt_existing_plaintext_keys(db_module) -> int:
             # This is a plaintext key, encrypt it
             encrypted = encrypt_value(value)
             db_module.set_system_setting(setting_name, encrypted)
-            logger.info(f"Encrypted existing plaintext key: {setting_name}")
+            logger.debug(f"Encrypted existing plaintext key: {setting_name}")
             count += 1
 
     return count

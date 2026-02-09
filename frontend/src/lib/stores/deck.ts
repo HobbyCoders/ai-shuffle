@@ -167,7 +167,6 @@ function flushPendingDeckSave() {
 	const data = JSON.stringify({ key: SERVER_PREFERENCE_KEY, value: persisted });
 	navigator.sendBeacon('/api/v1/preferences/' + SERVER_PREFERENCE_KEY, new Blob([data], { type: 'application/json' }));
 
-	console.log('[Deck] Flushed pending state on unload');
 	pendingDeckState = null;
 }
 
@@ -257,7 +256,6 @@ async function saveToServer(state: DeckState) {
 	// Don't write to server until we've completed initial sync
 	// This prevents empty local state from overwriting server data on first load
 	if (!hasSyncedFromServer) {
-		console.log('[Deck] Skipping server save - initial sync not complete');
 		return;
 	}
 
@@ -273,7 +271,6 @@ async function saveToServer(state: DeckState) {
 			const persisted = createPersistedState(state);
 			await setPreference(SERVER_PREFERENCE_KEY, persisted);
 			lastServerSync = Date.now();
-			console.log('[Deck] Synced state to server');
 		} catch (e) {
 			console.error('[Deck] Failed to sync state to server:', e);
 		}
@@ -298,7 +295,6 @@ async function loadFromServer(): Promise<Partial<DeckState> | null> {
 
 		if (response && response.value) {
 			const serverState = response.value as PersistedDeckState;
-			console.log('[Deck] Loaded state from server');
 			return parsePersistedState(serverState);
 		}
 	} catch (e) {
@@ -472,7 +468,6 @@ function createDeckStore() {
 				if (serverState && !serverIsEmpty) {
 					if (localIsEmpty) {
 						// Local is empty, use server state entirely
-						console.log('[Deck] Local empty, using server state');
 						newState = {
 							...state,
 							...serverState,
@@ -483,7 +478,6 @@ function createDeckStore() {
 						// Both have data - merge them
 						const merged = mergeStates({ ...state }, serverState);
 						if (merged) {
-							console.log('[Deck] Merging local and server state');
 							newState = {
 								...state,
 								...merged,
@@ -497,7 +491,6 @@ function createDeckStore() {
 					}
 				} else {
 					// No server state or server is empty - keep local
-					console.log('[Deck] No server state, keeping local');
 					newState = state;
 				}
 
@@ -508,7 +501,6 @@ function createDeckStore() {
 
 			// Mark sync as complete - now server writes are allowed
 			hasSyncedFromServer = true;
-			console.log('[Deck] Initial sync complete, server writes enabled');
 		},
 
 		/**
@@ -519,7 +511,6 @@ function createDeckStore() {
 			const persisted = createPersistedState(state);
 			try {
 				await setPreference(SERVER_PREFERENCE_KEY, persisted);
-				console.log('[Deck] Force synced state to server');
 			} catch (e) {
 				console.error('[Deck] Failed to force sync to server:', e);
 			}

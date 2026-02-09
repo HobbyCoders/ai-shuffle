@@ -112,7 +112,6 @@ function saveToServer(prefs: ChatPreferences): void {
 	// Don't write to server until initial sync is complete
 	// This prevents localStorage data from overwriting newer server data
 	if (!hasSyncedFromServer) {
-		console.log('[ChatPreferences] Skipping server save - initial sync not complete');
 		return;
 	}
 
@@ -123,7 +122,6 @@ function saveToServer(prefs: ChatPreferences): void {
 	serverSyncTimer = setTimeout(async () => {
 		try {
 			await setPreference(SERVER_PREFERENCE_KEY, prefs);
-			console.log('[ChatPreferences] Synced to server');
 			pendingState = null;
 		} catch (e) {
 			console.error('[ChatPreferences] Failed to save to server:', e);
@@ -152,7 +150,6 @@ function flushPendingSave(): void {
 		'/api/v1/preferences/' + SERVER_PREFERENCE_KEY,
 		new Blob([data], { type: 'application/json' })
 	);
-	console.log('[ChatPreferences] Flushed pending state on unload');
 	pendingState = null;
 }
 
@@ -225,17 +222,13 @@ async function syncFromServer(): Promise<void> {
 		);
 
 		if (isDifferent) {
-			console.log('[ChatPreferences] Server state differs, updating local');
 			// Update localStorage
 			saveToLocalStorage(merged);
 			// Update store
 			set(merged);
-		} else {
-			console.log('[ChatPreferences] Server and local in sync');
 		}
 	} else {
 		// No server data - push local data to server (migration)
-		console.log('[ChatPreferences] No server data, will push local to server');
 	}
 
 	// Mark sync as complete - now server writes are allowed

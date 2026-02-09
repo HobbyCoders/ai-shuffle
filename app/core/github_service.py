@@ -362,7 +362,7 @@ class GitHubService:
                 existing_match = re.search(r'already exists:\s*https?://\S+/pull/(\d+)', stderr)
                 if existing_match:
                     existing_number = int(existing_match.group(1))
-                    logger.info(f"PR already exists (#{existing_number}), returning existing PR")
+                    logger.debug(f"PR already exists (#{existing_number}), returning existing PR")
                     return self.get_pull(repo, existing_number)
                 logger.error(f"Failed to create PR: {stderr}")
                 return None

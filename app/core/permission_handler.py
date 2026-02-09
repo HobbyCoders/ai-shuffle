@@ -153,7 +153,7 @@ class PermissionHandler:
         # Check saved rules first
         rule = self._check_rules(session_id, profile_id, tool_name, tool_input)
         if rule:
-            logger.info(f"Permission for {tool_name} auto-resolved by rule: {rule.decision}")
+            logger.debug(f"Permission for {tool_name} auto-resolved by rule: {rule.decision}")
             if rule.decision == PermissionDecision.ALLOW:
                 return PermissionResultAllow(updated_input=tool_input)
             else:
@@ -186,7 +186,7 @@ class PermissionHandler:
             "queue_total": queue_position
         })
 
-        logger.info(f"Permission request queued: {request_id} for {tool_name}")
+        logger.debug(f"Permission request queued: {request_id} for {tool_name}")
 
         # Wait for response (with timeout)
         try:
@@ -318,7 +318,7 @@ class PermissionHandler:
             del self._pending_requests[session_id][req_id]
             resolved_ids.append(req_id)
 
-            logger.info(f"Auto-resolved request {req_id} for {req.tool_name} by new rule")
+            logger.debug(f"Auto-resolved request {req_id} for {req.tool_name} by new rule")
 
         # Broadcast updated queue if any were resolved
         if resolved_ids and broadcast_func:

@@ -78,7 +78,7 @@ class UserQuestionHandler:
             "questions": questions
         })
 
-        logger.info(f"User question request sent: {request_id} with {len(questions)} questions")
+        logger.debug(f"User question request sent: {request_id} with {len(questions)} questions")
 
         # Wait for response (with timeout)
         try:
@@ -133,7 +133,7 @@ class UserQuestionHandler:
 
         # Signal that we have a response
         request.response_event.set()
-        logger.info(f"User question answered: {request_id}")
+        logger.debug(f"User question answered: {request_id}")
 
         return True
 
@@ -159,7 +159,7 @@ class UserQuestionHandler:
                 for request in self._pending_questions[session_id].values():
                     request.response_event.set()  # Unblock waiting coroutines
                 del self._pending_questions[session_id]
-                logger.info(f"Cancelled all pending questions for session {session_id}")
+                logger.debug(f"Cancelled all pending questions for session {session_id}")
 
 
 # Global singleton instance

@@ -150,7 +150,7 @@ class ProactiveScheduler:
         )
 
         await self._add_schedule(task)
-        logger.info(f"Scheduled daily briefing {schedule_id} for {hour:02d}:{minute:02d}")
+        logger.debug(f"Scheduled daily briefing {schedule_id} for {hour:02d}:{minute:02d}")
 
         return schedule_id
 
@@ -187,7 +187,7 @@ class ProactiveScheduler:
         )
 
         await self._add_schedule(task)
-        logger.info(f"Scheduled reminder {schedule_id} for {trigger_time.isoformat()}")
+        logger.debug(f"Scheduled reminder {schedule_id} for {trigger_time.isoformat()}")
 
         return schedule_id
 
@@ -215,7 +215,7 @@ class ProactiveScheduler:
         del self._schedules[schedule_id]
         await self._delete_schedule_from_db(schedule_id)
 
-        logger.info(f"Cancelled schedule {schedule_id}")
+        logger.debug(f"Cancelled schedule {schedule_id}")
         return True
 
     async def get_schedules(self, device_id: str) -> List[Dict[str, Any]]:
@@ -303,7 +303,7 @@ class ProactiveScheduler:
         task.last_triggered_at = datetime.utcnow()
         await self._save_schedule_to_db(task)
 
-        logger.info(f"Triggered schedule {schedule_id}")
+        logger.debug(f"Triggered schedule {schedule_id}")
         await self._notify_trigger(task)
 
         # Remove one-time schedules after triggering
@@ -371,7 +371,7 @@ class ProactiveScheduler:
                 if self._use_apscheduler:
                     self._add_apscheduler_job(task)
 
-            logger.info(f"Loaded {len(self._schedules)} schedules from database")
+            logger.debug(f"Loaded {len(self._schedules)} schedules from database")
 
         except Exception as e:
             logger.warning(f"Could not load schedules from database: {e}")

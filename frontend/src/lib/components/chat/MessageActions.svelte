@@ -110,12 +110,10 @@
 		try {
 			// If we have a direct UUID, use it (preferred - no text matching needed)
 			if (messageUuid) {
-				console.log('[Rewind] Using direct UUID:', messageUuid, 'restoreFiles:', restoreFiles);
 				const includeResponse = messageRole === 'assistant';
 				const result = await executeRewind(sessionId, messageUuid, includeResponse, messageRole, restoreFiles);
 
 				if (result.success || result.chat_rewound) {
-					console.log('[Rewind] Success - removed', result.messages_removed, 'messages, files_rewound:', result.files_rewound, 'partial_success:', result.partial_success);
 					showRewindDialog = false;
 					// Pass warning to parent to show as system message (for partial success)
 					onRewindComplete?.(result.warning ?? undefined);
@@ -126,7 +124,6 @@
 			}
 
 			// Fallback: text-based matching (for streaming messages without UUID)
-			console.log('[Rewind] No UUID available, falling back to text matching');
 
 			// Get all checkpoints
 			const checkpointsResponse = await getRewindCheckpoints(sessionId);
@@ -185,7 +182,6 @@
 			const result = await executeRewind(sessionId, targetCheckpoint.uuid, includeResponse, messageRole, restoreFiles);
 
 			if (result.success || result.chat_rewound) {
-				console.log('[Rewind] Success - removed', result.messages_removed, 'messages, files_rewound:', result.files_rewound, 'partial_success:', result.partial_success);
 				showRewindDialog = false;
 				// Pass warning to parent to show as system message (for partial success)
 				onRewindComplete?.(result.warning ?? undefined);

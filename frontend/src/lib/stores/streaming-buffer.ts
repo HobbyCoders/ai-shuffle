@@ -147,10 +147,6 @@ export function pushEvent(tabId: string, type: string, data: Record<string, unkn
 			buffer.activeBlockType = 'tool_use';
 		}
 
-		if (DEBUG_BUFFER) {
-			console.log(`[Buffer ${tabId}] Block start: ${blockType}, activeBlockType set to: ${buffer.activeBlockType}`);
-		}
-
 		// Store the event for processing
 		buffer.discreteEvents.push(event);
 		scheduleFlush(tabId, true); // Immediate flush for block transitions
@@ -162,10 +158,6 @@ export function pushEvent(tabId: string, type: string, data: Record<string, unkn
 		// Flush any pending deltas first
 		if (buffer.pendingTextDelta || buffer.pendingThinkingDelta || buffer.pendingToolInput.size > 0) {
 			flushNow(tabId);
-		}
-
-		if (DEBUG_BUFFER) {
-			console.log(`[Buffer ${tabId}] Block stop, clearing activeBlockType (was: ${buffer.activeBlockType})`);
 		}
 
 		// Clear active block type since the block is complete
@@ -196,10 +188,6 @@ export function pushEvent(tabId: string, type: string, data: Record<string, unkn
 
 		buffer.pendingTextDelta += text;
 
-		if (DEBUG_BUFFER) {
-			console.log(`[Buffer ${tabId}] Text delta: +${text.length} chars, total: ${buffer.pendingTextDelta.length}, activeBlock: ${buffer.activeBlockType}`);
-		}
-
 		// Flush on threshold to ensure smooth updates
 		if (buffer.pendingTextDelta.length >= TEXT_BATCH_THRESHOLD) {
 			scheduleFlush(tabId, true); // Immediate
@@ -227,10 +215,6 @@ export function pushEvent(tabId: string, type: string, data: Record<string, unkn
 
 		buffer.pendingThinkingDelta += thinking;
 
-		if (DEBUG_BUFFER) {
-			console.log(`[Buffer ${tabId}] Thinking delta: +${thinking.length} chars, total: ${buffer.pendingThinkingDelta.length}, activeBlock: ${buffer.activeBlockType}`);
-		}
-
 		// Flush on threshold to ensure smooth updates
 		if (buffer.pendingThinkingDelta.length >= TEXT_BATCH_THRESHOLD) {
 			scheduleFlush(tabId, true); // Immediate
@@ -246,10 +230,6 @@ export function pushEvent(tabId: string, type: string, data: Record<string, unkn
 		const content = data.content as string;
 		const existing = buffer.pendingToolInput.get(toolId) || '';
 		buffer.pendingToolInput.set(toolId, existing + content);
-
-		if (DEBUG_BUFFER) {
-			console.log(`[Buffer ${tabId}] Tool input delta for ${toolId}: +${content.length} chars`);
-		}
 
 		scheduleFlush(tabId);
 		return;
@@ -276,10 +256,6 @@ export function pushEvent(tabId: string, type: string, data: Record<string, unkn
 
 	// Store discrete event
 	buffer.discreteEvents.push(event);
-
-	if (DEBUG_BUFFER) {
-		console.log(`[Buffer ${tabId}] Discrete event: ${type}, queue size: ${buffer.discreteEvents.length}`);
-	}
 
 	// Force immediate flush for critical events or when queue is full
 	if (isCriticalEvent(type) || buffer.discreteEvents.length >= MAX_DISCRETE_EVENTS) {
@@ -356,10 +332,6 @@ export function flushNow(tabId: string): void {
 	buffer.usageUpdate = null;
 	buffer.lastFlushTime = Date.now();
 
-	if (DEBUG_BUFFER) {
-		console.log(`[Buffer ${tabId}] Flushing: text=${batch.textDelta.length}, thinking=${batch.thinkingDelta.length}, tools=${batch.toolInputDeltas.size}, events=${batch.discreteEvents.length}`);
-	}
-
 	// Apply to store
 	if (applyBatchedUpdateCallback) {
 		applyBatchedUpdateCallback(tabId, batch);
@@ -389,9 +361,6 @@ export function clearBuffer(tabId: string): void {
 	buffer.usageUpdate = null;
 	buffer.activeBlockType = null;
 
-	if (DEBUG_BUFFER) {
-		console.log(`[Buffer ${tabId}] Cleared`);
-	}
 }
 
 /**
@@ -404,9 +373,6 @@ export function removeBuffer(tabId: string): void {
 	}
 	buffers.delete(tabId);
 
-	if (DEBUG_BUFFER) {
-		console.log(`[Buffer ${tabId}] Removed`);
-	}
 }
 
 /**

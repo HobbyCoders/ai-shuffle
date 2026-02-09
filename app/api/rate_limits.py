@@ -295,7 +295,7 @@ async def create_rate_limit_config(
     # Clear cache
     rate_limiter.clear_cache()
 
-    logger.info(f"Created rate limit config {rate_limit_id} for user={config.user_id}, api_key={config.api_key_id}")
+    logger.debug(f"Created rate limit config {rate_limit_id} for user={config.user_id}, api_key={config.api_key_id}")
     return RateLimitConfigModel(**created)
 
 
@@ -330,7 +330,7 @@ async def update_rate_limit_config(
     # Clear cache
     rate_limiter.clear_cache()
 
-    logger.info(f"Updated rate limit config {config_id}")
+    logger.debug(f"Updated rate limit config {config_id}")
     return RateLimitConfigModel(**updated)
 
 
@@ -357,7 +357,7 @@ async def delete_rate_limit_config(
     # Clear cache
     rate_limiter.clear_cache()
 
-    logger.info(f"Deleted rate limit config {config_id}")
+    logger.debug(f"Deleted rate limit config {config_id}")
     return None
 
 

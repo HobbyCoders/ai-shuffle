@@ -154,7 +154,7 @@ class CLIBridge:
             creds_path = os.path.join(home_dir, ".claude", ".credentials.json")
 
             if os.path.exists(creds_path) and os.path.getsize(creds_path) > 0:
-                logger.info(f"Credentials found at {creds_path}, ensuring onboarding is complete")
+                logger.debug(f"Credentials found at {creds_path}, ensuring onboarding is complete")
                 auth_service._ensure_onboarding_complete()
             else:
                 logger.warning(f"Credentials not found or empty at {creds_path} - CLI may prompt for login")
@@ -221,7 +221,7 @@ class CLIBridge:
                 # The actual command will be sent after theme selection is handled
                 # (see _handle_theme_selection in _read_output)
 
-                logger.info(f"Started CLI bridge for session {self.session_id}, pid={pid}, sdk_session={self.sdk_session_id}")
+                logger.debug(f"Started CLI bridge for session {self.session_id}, pid={pid}, sdk_session={self.sdk_session_id}")
                 return True
 
         except Exception as e:
@@ -245,7 +245,7 @@ class CLIBridge:
         # Check if we see the theme selection prompt
         # The prompt shows "Choose the text style" with numbered options
         if "Choose the text style" in self._output_buffer and "Dark mode" in self._output_buffer:
-            logger.info(f"Detected theme selection prompt for session {self.session_id}, auto-confirming...")
+            logger.debug(f"Detected theme selection prompt for session {self.session_id}, auto-confirming...")
 
             # Mark as handled so we don't try again
             self._theme_prompt_handled = True
@@ -262,7 +262,7 @@ class CLIBridge:
             # Now send the actual command if we have one
             if self._pending_command and not self._command_sent:
                 self._command_sent = True
-                logger.info(f"Sending pending command: {self._pending_command}")
+                logger.debug(f"Sending pending command: {self._pending_command}")
                 await self.send_input(self._pending_command + "\n")
 
         # Also check for ready prompt (in case theme selection was already done)
@@ -278,7 +278,7 @@ class CLIBridge:
             if self._pending_command:
                 self._command_sent = True
                 await asyncio.sleep(0.5)
-                logger.info(f"CLI ready, sending pending command: {self._pending_command}")
+                logger.debug(f"CLI ready, sending pending command: {self._pending_command}")
                 await self.send_input(self._pending_command + "\n")
 
     async def resize(self, cols: int, rows: int):
@@ -375,7 +375,7 @@ class CLIBridge:
                 await asyncio.sleep(0.01)
 
         except asyncio.CancelledError:
-            logger.info(f"Read task cancelled for session {self.session_id}")
+            logger.debug(f"Read task cancelled for session {self.session_id}")
         except Exception as e:
             logger.error(f"Error reading CLI output: {e}", exc_info=True)
         finally:
@@ -408,7 +408,7 @@ class CLIBridge:
         if self.on_exit:
             await self.on_exit(exit_code)
 
-        logger.info(f"CLI bridge cleaned up for session {self.session_id}, exit_code={exit_code}")
+        logger.debug(f"CLI bridge cleaned up for session {self.session_id}, exit_code={exit_code}")
 
     async def stop(self):
         """Stop the CLI process"""
