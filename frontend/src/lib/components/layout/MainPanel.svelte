@@ -153,7 +153,7 @@
 	let showFinishModal = $state(false);
 
 	// PR detection for current branch
-	let branchPR = $state<{ number: number; title: string; url: string } | null>(null);
+	let branchPR = $state<{ number: number; title: string; url: string; head_branch: string } | null>(null);
 	let _finishedWorktreeTabId: string | null = null;
 
 	const isWorktreeMode = $derived(
@@ -208,7 +208,7 @@
 			try {
 				const prs = await getPullRequests(projectId, 'open', 10);
 				const match = prs.find(pr => pr.head_branch === branch);
-				branchPR = match ? { number: match.number, title: match.title, url: match.url } : null;
+				branchPR = match ? { number: match.number, title: match.title, url: match.url, head_branch: match.head_branch } : null;
 			} catch {
 				branchPR = null;
 			}
@@ -222,7 +222,12 @@
 	// the store, which would re-trigger this effect in an infinite loop.
 	$effect(() => {
 		const project = activeProject;
+		const worktreeId = activeWorktreeId; // Track worktree changes for tab switches
 		const authenticated = $githubAuthenticated;
+
+		// Clear stale PR state immediately when any dependency changes.
+		// The async refresh below will set the correct value.
+		branchPR = null;
 
 		if (_gitPollTimer) {
 			clearInterval(_gitPollTimer);
@@ -235,8 +240,6 @@
 			untrack(() => refreshGitState(project));
 			// Periodic refresh (setInterval runs outside tracking context)
 			_gitPollTimer = setInterval(() => refreshGitState(project), GIT_POLL_INTERVAL_MS);
-		} else {
-			branchPR = null;
 		}
 
 		return () => {
@@ -411,6 +414,15 @@
 		const projectId = activeTab?.project;
 		if (!projectId) {
 			progressError = 'No project selected';
+			return;
+		}
+
+		// Safety check: verify the PR's branch matches the current branch
+		const currentBranch = $gitStatus?.current_branch;
+		if (currentBranch && branchPR.head_branch !== currentBranch) {
+			progressError = `PR #${branchPR.number} is for branch "${branchPR.head_branch}" but current branch is "${currentBranch}"`;
+			showFinishModal = false;
+			untrack(() => refreshGitState(projectId));
 			return;
 		}
 
