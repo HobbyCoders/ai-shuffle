@@ -69,7 +69,13 @@
 	 * Create a new chat session and navigate to it
 	 */
 	function handleNewSession() {
-		const tabId = tabs.createTab();
+		const existingEmptyTabId = tabs.findEmptyTab();
+		const tabId = existingEmptyTabId ?? tabs.createTab();
+
+		if (existingEmptyTabId) {
+			tabs.setActiveTab(existingEmptyTabId);
+		}
+
 		if ($sidebarOverlay && !$sidebarCollapsed) {
 			layout.setSidebarCollapsed(true);
 			requestAnimationFrame(() => layout.openChat(null, tabId));

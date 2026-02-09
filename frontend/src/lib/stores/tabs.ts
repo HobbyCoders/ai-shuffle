@@ -3293,6 +3293,15 @@ function createTabsStore() {
 		},
 
 		/**
+		 * Find an existing empty tab (no session, no messages) — singleton pattern
+		 */
+		findEmptyTab(): string | null {
+			const state = get({ subscribe });
+			const tab = state.tabs.find(t => t.sessionId === null && t.messages.length === 0);
+			return tab?.id ?? null;
+		},
+
+		/**
 		 * Open a session - switches to existing tab if already open, otherwise creates new tab
 		 */
 		openSession(sessionId: string) {
