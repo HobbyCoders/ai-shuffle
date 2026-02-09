@@ -484,16 +484,22 @@ async def delete_profile_agent(
 @router.post("", response_model=Profile, status_code=status.HTTP_201_CREATED)
 async def create_profile(request: ProfileCreate, token: str = Depends(require_admin)):
     """Create a custom profile - Admin only"""
-    # Check if ID already exists
-    existing = database.get_profile(request.id)
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Profile already exists: {request.id}"
-        )
+    # Derive ID from name if not provided
+    if request.id:
+        profile_id = request.id
+    else:
+        profile_id = re.sub(r'[^a-z0-9-]', '-', request.name.lower())
+        profile_id = re.sub(r'-+', '-', profile_id).strip('-')
+
+    # Ensure uniqueness
+    base_id = profile_id
+    counter = 1
+    while database.get_profile(profile_id):
+        profile_id = f"{base_id}-{counter}"
+        counter += 1
 
     profile = database.create_profile(
-        profile_id=request.id,
+        profile_id=profile_id,
         name=request.name,
         description=request.description,
         config=request.config.model_dump(exclude_none=True),

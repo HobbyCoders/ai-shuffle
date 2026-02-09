@@ -162,8 +162,8 @@ class ProfileBase(BaseModel):
 
 
 class ProfileCreate(ProfileBase):
-    """Profile creation request"""
-    id: str = Field(..., pattern=r'^[a-z0-9-]+$', min_length=1, max_length=50)
+    """Profile creation request - id is optional; if omitted, derived from name"""
+    id: Optional[str] = Field(None, pattern=r'^[a-z0-9-]+$', min_length=1, max_length=50)
 
 
 class ProfileUpdate(BaseModel):

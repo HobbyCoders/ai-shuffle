@@ -147,8 +147,6 @@
 		disallowed_tools: [] as string[],
 		enabled_agents: [] as string[],
 		include_partial_messages: true,
-		continue_conversation: false,
-		fork_session: false,
 		thinking_mode: 'default' as 'default' | 'think' | 'think_harder' | 'ultra_think',
 		system_prompt_type: 'preset',
 		system_prompt_preset: 'claude_code',
@@ -265,8 +263,6 @@
 			disallowed_tools: [],
 			enabled_agents: [],
 			include_partial_messages: true,
-			continue_conversation: false,
-			fork_session: false,
 			thinking_mode: 'default' as 'default' | 'think' | 'think_harder' | 'ultra_think',
 			system_prompt_type: 'preset',
 			system_prompt_preset: 'claude_code',
@@ -351,8 +347,6 @@
 			disallowed_tools: disallowedTools,
 			enabled_agents: (config as any).enabled_agents || [],
 			include_partial_messages: config.include_partial_messages !== false,
-			continue_conversation: (config as any).continue_conversation || false,
-			fork_session: (config as any).fork_session || false,
 			thinking_mode: (config as any).thinking_mode || 'default',
 			system_prompt_type: sp.type || 'preset',
 			system_prompt_preset: sp.preset || 'claude_code',
@@ -564,14 +558,12 @@
 
 	// Save profile
 	async function saveProfile() {
-		if (!profileForm.id || !profileForm.name) return;
+		if (!profileForm.name) return;
 
 		const config: any = {
 			model: profileForm.model,
 			permission_mode: profileForm.permission_mode,
 			include_partial_messages: profileForm.include_partial_messages,
-			continue_conversation: profileForm.continue_conversation,
-			fork_session: profileForm.fork_session,
 			thinking_mode: profileForm.thinking_mode,
 			// SDK 0.1.15+ file checkpointing for rewind
 			enable_file_checkpointing: profileForm.enable_file_checkpointing
@@ -654,8 +646,9 @@
 			};
 		}
 
+		const derivedId = profileForm.name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 		const data = {
-			id: profileForm.id.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
+			id: editingProfile ? editingProfile.id : derivedId,
 			name: profileForm.name,
 			description: profileForm.description || undefined,
 			config
@@ -792,8 +785,6 @@
 			disallowed_tools: disallowedTools,
 			enabled_agents: agent.enabled_agents || [],
 			include_partial_messages: agent.include_partial_messages !== false,
-			continue_conversation: agent.continue_conversation || false,
-			fork_session: agent.fork_session || false,
 			thinking_mode: (agent as any).thinking_mode || 'default',
 			system_prompt_type: spType,
 			system_prompt_preset: spPreset,
@@ -926,28 +917,15 @@
 					<!-- General Tab -->
 					<div class="card-form-section">
 						<h3 class="card-form-title">Profile Information</h3>
-						<div class="form-grid">
-							<div class="form-field">
-								<label class="card-form-label"
-									>ID <span class="required">*</span></label
-								>
-								<input
-									bind:value={profileForm.id}
-									disabled={!!editingProfile}
-									class="card-form-input card-form-input--mono"
-									placeholder="my-profile"
-								/>
-							</div>
-							<div class="form-field">
-								<label class="card-form-label"
-									>Name <span class="required">*</span></label
-								>
-								<input
-									bind:value={profileForm.name}
-									class="card-form-input"
-									placeholder="My Profile"
-								/>
-							</div>
+						<div class="form-field">
+							<label class="card-form-label"
+								>Name <span class="required">*</span></label
+							>
+							<input
+								bind:value={profileForm.name}
+								class="card-form-input"
+								placeholder="My Profile"
+							/>
 						</div>
 						<div class="form-field full-width">
 							<label class="card-form-label">Description</label>
@@ -1105,28 +1083,7 @@
 									<p class="checkbox-desc">Stream partial text as it's being generated</p>
 								</div>
 							</label>
-							<label class="checkbox-item">
-								<input
-									type="checkbox"
-									bind:checked={profileForm.continue_conversation}
-									class="checkbox-input"
-								/>
-								<div class="checkbox-content">
-									<span class="checkbox-label">Continue Conversation</span>
-									<p class="checkbox-desc">Automatically continue most recent conversation</p>
-								</div>
-							</label>
-							<label class="checkbox-item">
-								<input
-									type="checkbox"
-									bind:checked={profileForm.fork_session}
-									class="checkbox-input"
-								/>
-								<div class="checkbox-content">
-									<span class="checkbox-label">Fork Session</span>
-									<p class="checkbox-desc">Create new session ID when resuming</p>
-								</div>
-							</label>						</div>
+							</div>
 					</div>
 				{:else if activeTab === 'tools'}
 					<!-- Tools Tab -->
@@ -1690,7 +1647,7 @@
 				<button
 					type="button"
 					class="card-btn-primary"
-					disabled={!profileForm.id || !profileForm.name}
+					disabled={!profileForm.name}
 					onclick={saveProfile}
 				>
 					{editingProfile ? 'Save Changes' : 'Create Profile'}
@@ -1941,15 +1898,9 @@
 					<!-- General Tab -->
 					<div class="card-form-section">
 						<h3 class="card-form-title">Profile Information</h3>
-						<div class="form-grid">
-							<div class="form-field">
-								<label class="card-form-label">ID <span class="required">*</span></label>
-								<input bind:value={profileForm.id} disabled={!!editingProfile} class="card-form-input card-form-input--mono" placeholder="my-profile" />
-							</div>
-							<div class="form-field">
-								<label class="card-form-label">Name <span class="required">*</span></label>
-								<input bind:value={profileForm.name} class="card-form-input" placeholder="My Profile" />
-							</div>
+						<div class="form-field">
+							<label class="card-form-label">Name <span class="required">*</span></label>
+							<input bind:value={profileForm.name} class="card-form-input" placeholder="My Profile" />
 						</div>
 						<div class="form-field full-width">
 							<label class="card-form-label">Description</label>
@@ -2000,20 +1951,6 @@
 								<div class="checkbox-content">
 									<span class="checkbox-label">Include Partial Messages</span>
 									<p class="checkbox-desc">Stream partial text as it's being generated</p>
-								</div>
-							</label>
-							<label class="checkbox-item">
-								<input type="checkbox" bind:checked={profileForm.continue_conversation} class="checkbox-input" />
-								<div class="checkbox-content">
-									<span class="checkbox-label">Continue Conversation</span>
-									<p class="checkbox-desc">Automatically continue most recent conversation</p>
-								</div>
-							</label>
-							<label class="checkbox-item">
-								<input type="checkbox" bind:checked={profileForm.fork_session} class="checkbox-input" />
-								<div class="checkbox-content">
-									<span class="checkbox-label">Fork Session</span>
-									<p class="checkbox-desc">Create new session ID when resuming</p>
 								</div>
 							</label>
 						</div>
@@ -2310,7 +2247,7 @@
 
 			{#snippet footer()}
 				<button class="fp-btn fp-btn--secondary" onclick={backToList}>Cancel</button>
-				<button class="fp-btn fp-btn--primary" onclick={saveProfile} disabled={!profileForm.id || !profileForm.name}>
+				<button class="fp-btn fp-btn--primary" onclick={saveProfile} disabled={!profileForm.name}>
 					{editingProfile ? 'Save Changes' : 'Create Profile'}
 				</button>
 			{/snippet}
