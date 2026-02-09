@@ -954,13 +954,18 @@ async def chat_websocket(
                             title = prompt[:100].strip()
                             if len(prompt) > 100:
                                 title = title.rsplit(' ', 1)[0] + "..."
+                            # Get worktree info for persistent storage on session
+                            wt_branch = worktree.get("branch_name") if worktree_id and worktree else None
+                            wt_path = worktree.get("worktree_path") if worktree_id and worktree else None
                             database.create_session(
                                 session_id=session_id,
                                 profile_id=profile_id,
                                 project_id=project_id,
                                 api_user_id=api_user_id,
                                 title=title,
-                                worktree_id=worktree_id  # Link to worktree if provided
+                                worktree_id=worktree_id,  # Link to worktree if provided
+                                worktree_branch=wt_branch,
+                                worktree_path=wt_path
                             )
                             # Immediately notify frontend of new session_id so it persists on refresh
                             await send_json({
@@ -1292,11 +1297,15 @@ async def chat_websocket(
                                         session["worktree_id"] = worktree_id
                                         session["worktree_branch"] = worktree.get("branch_name")
                                         session["worktree_path"] = worktree.get("worktree_path")
+                                        session["worktree_deleted"] = False
                                     else:
-                                        # Worktree was deleted but session still has reference
+                                        # Worktree was deleted - use stored values from session columns
                                         session["worktree_id"] = None
-                                        session["worktree_branch"] = None
-                                        session["worktree_path"] = None
+                                        # worktree_branch and worktree_path are already in session from DB columns
+                                        session["worktree_deleted"] = True
+                                elif session.get("worktree_branch"):
+                                    # Worktree was fully unlinked (ON DELETE SET NULL) but stored info remains
+                                    session["worktree_deleted"] = True
 
                                 # Build response with optional streamingUsage and activeBlockType for late-joiners
                                 history_response = {

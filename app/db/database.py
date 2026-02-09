@@ -195,6 +195,8 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
                 api_user_id TEXT,
                 sdk_session_id TEXT,
                 worktree_id TEXT,
+                worktree_branch TEXT,
+                worktree_path TEXT,
                 title TEXT,
                 status TEXT DEFAULT 'active',
                 is_favorite BOOLEAN DEFAULT FALSE,
@@ -339,6 +341,8 @@ def _create_schema(cursor: sqlite3.Cursor):
             api_user_id TEXT,
             sdk_session_id TEXT,
             worktree_id TEXT,
+            worktree_branch TEXT,
+            worktree_path TEXT,
             title TEXT,
             status TEXT DEFAULT 'active',
             is_favorite BOOLEAN DEFAULT FALSE,
@@ -511,6 +515,32 @@ def _create_schema(cursor: sqlite3.Cursor):
         else:
             logger.error(f"Failed to migrate worktree-session relationships: {e}")
             raise  # Re-raise unexpected errors
+
+    # Add worktree_branch and worktree_path columns to sessions for persistent worktree info
+    # These columns store worktree info directly on the session so it survives worktree deletion
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN worktree_branch TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN worktree_path TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    # Backfill worktree_branch/worktree_path for existing sessions with active worktrees
+    try:
+        cursor.execute("""
+            UPDATE sessions SET
+                worktree_branch = (SELECT w.branch_name FROM worktrees w WHERE w.id = sessions.worktree_id),
+                worktree_path = (SELECT w.worktree_path FROM worktrees w WHERE w.id = sessions.worktree_id)
+            WHERE worktree_id IS NOT NULL AND worktree_branch IS NULL
+        """)
+        backfilled = cursor.rowcount
+        if backfilled > 0:
+            logger.info(f"Backfilled worktree_branch/worktree_path for {backfilled} sessions")
+    except sqlite3.OperationalError as e:
+        if "no such table" not in str(e).lower():
+            logger.error(f"Failed to backfill worktree info: {e}")
 
     # Login attempts tracking for brute force protection
     cursor.execute("""
@@ -1799,7 +1829,9 @@ def create_session(
     api_user_id: Optional[str] = None,
     parent_session_id: Optional[str] = None,
     fork_point_message_index: Optional[int] = None,
-    worktree_id: Optional[str] = None
+    worktree_id: Optional[str] = None,
+    worktree_branch: Optional[str] = None,
+    worktree_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """Create a new session
 
@@ -1812,14 +1844,16 @@ def create_session(
         parent_session_id: For forked sessions
         fork_point_message_index: Fork point index
         worktree_id: Optional worktree to link this session to
+        worktree_branch: Optional branch name (persisted for display after worktree deletion)
+        worktree_path: Optional worktree path (persisted for display after worktree deletion)
     """
     now = datetime.utcnow().isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, now, now)
+            """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, now, now)
         )
     return get_session(session_id)
 

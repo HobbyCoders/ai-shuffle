@@ -338,7 +338,7 @@
 		// Get serialized message from editor (includes inline @path references)
 		const finalPrompt = editorRef?.getMessage() ?? '';
 
-		if (!finalPrompt.trim() || !liveTab || isUploading) return;
+		if (!finalPrompt.trim() || !liveTab || isUploading || liveTab.worktreeDeleted) return;
 
 		// Require profile and project to be selected
 		if (!liveTab.profile) {
@@ -793,6 +793,16 @@
 			</div>
 		{/if}
 
+		<!-- Worktree Deleted Banner (read-only mode) -->
+		{#if liveTab.worktreeDeleted}
+			<div class="error-banner worktree-completed">
+				<svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+				</svg>
+				<span>This worktree session has been completed. Chat history is read-only.</span>
+			</div>
+		{/if}
+
 		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
 			<!-- Main Island -->
 			<div class="chat-island" bind:this={islandRef}>
@@ -826,7 +836,7 @@
 								bind:this={editorRef}
 								placeholder="Message {selectedProfileName}..."
 								initialContent={tab.draft || ''}
-								disabled={!$claudeAuthenticated}
+								disabled={!$claudeAuthenticated || liveTab.worktreeDeleted}
 								onTextChange={(text) => {
 									inputValue = text;
 									// Also update plain text for autocomplete (without chip @path serialization)
@@ -844,7 +854,7 @@
 								<button
 									type="button"
 									onclick={toggleRecording}
-									disabled={!$claudeAuthenticated || isUploading || isTranscribing || isPreparing || !canRecord}
+									disabled={!$claudeAuthenticated || isUploading || isTranscribing || isPreparing || !canRecord || liveTab.worktreeDeleted}
 									class="voice-btn"
 									class:preparing={isPreparing}
 									class:recording={isRecording}
@@ -917,8 +927,8 @@
 								<button
 									type="submit"
 									class="send-btn"
-									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing}
-									title={isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
+									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing || liveTab.worktreeDeleted}
+									title={liveTab.worktreeDeleted ? "This worktree session has been completed" : isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
 								>
 									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
@@ -1077,7 +1087,7 @@
 						<button
 							type="button"
 							onclick={triggerFileUpload}
-							disabled={liveTab.isStreaming || !$claudeAuthenticated || isUploading || (liveTab.executionMode === 'worktree' && !liveTab.worktreeId)}
+							disabled={liveTab.isStreaming || !$claudeAuthenticated || isUploading || (liveTab.executionMode === 'worktree' && !liveTab.worktreeId) || liveTab.worktreeDeleted}
 							class="dock-action-btn"
 							title={isUploading ? 'Uploading...' : (liveTab.executionMode === 'worktree' && !liveTab.worktreeId) ? 'Select a branch first to attach files' : liveTab.project ? 'Attach file' : 'Select a project to attach files'}
 						>
@@ -1150,6 +1160,17 @@
 
 	.error-banner.worktree-error svg {
 		color: var(--warning);
+	}
+
+	/* Worktree completed (read-only) styling */
+	.error-banner.worktree-completed {
+		background: color-mix(in srgb, var(--muted-foreground) 8%, transparent);
+		border-color: color-mix(in srgb, var(--muted-foreground) 20%, transparent);
+		color: var(--muted-foreground);
+	}
+
+	.error-banner.worktree-completed svg {
+		color: var(--success);
 	}
 
 	.error-close:hover {

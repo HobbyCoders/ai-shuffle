@@ -193,13 +193,11 @@
 	{:else}
 		<button
 			class="git-btn"
-			onclick={onClickCommit}
-			disabled={isStreaming}
-			title={isStreaming ? 'Cannot commit during streaming' : 'No changes to commit'}
+			disabled={true}
+			title="No changes to commit"
 		>
 			<GitCommitHorizontal size={14} strokeWidth={1.5} />
 			<span class="btn-label">Commit</span>
-			<ChevronDown size={11} strokeWidth={1.5} />
 		</button>
 	{/if}
 

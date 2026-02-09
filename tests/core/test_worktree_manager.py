@@ -115,7 +115,8 @@ def mock_database():
         mock.get_all_profiles.return_value = [{"id": "profile-default", "name": "Default"}]
 
         def create_session_side_effect(
-            session_id, profile_id, project_id, title, worktree_id=None
+            session_id, profile_id, project_id, title, worktree_id=None,
+            worktree_branch=None, worktree_path=None
         ):
             return {
                 "id": session_id,
@@ -123,6 +124,8 @@ def mock_database():
                 "project_id": project_id,
                 "title": title,
                 "worktree_id": worktree_id,
+                "worktree_branch": worktree_branch,
+                "worktree_path": worktree_path,
                 "status": "active",
                 "created_at": "2024-01-01T00:00:00"
             }

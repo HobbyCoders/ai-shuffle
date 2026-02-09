@@ -550,7 +550,9 @@ class WorktreeManager:
                 profile_id=profile_id,
                 project_id=project_id,
                 title=session_title,
-                worktree_id=worktree_id  # Link session to worktree via new model
+                worktree_id=worktree_id,  # Link session to worktree via new model
+                worktree_branch=branch_name,
+                worktree_path=relative_worktree_path
             )
         except Exception as e:
             logger.error(f"Failed to create session: {e}")

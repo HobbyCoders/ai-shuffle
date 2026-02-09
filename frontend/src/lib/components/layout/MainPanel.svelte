@@ -478,7 +478,7 @@
 				hideGlobalStt={$activeView?.type === 'chat'}
 			>
 				{#snippet actions()}
-					{#if $activeView?.type === 'chat' && activeTab?.project && $githubAuthenticated}
+					{#if $activeView?.type === 'chat' && activeTab?.project && $githubAuthenticated && !activeTab?.worktreeDeleted}
 						<GitHeaderActions
 							projectId={activeTab.project}
 							isStreaming={$gitControlsStreaming}
@@ -695,7 +695,7 @@
 			showProgressModal = false;
 			progressHasCleanup = false;
 			if (progressCompleted && progressMode === 'finish' && _finishedWorktreeTabId) {
-				tabs.closeTab(_finishedWorktreeTabId);
+				tabs.updateTab(_finishedWorktreeTabId, { worktreeDeleted: true, worktreeId: null });
 				_finishedWorktreeTabId = null;
 			}
 		}}

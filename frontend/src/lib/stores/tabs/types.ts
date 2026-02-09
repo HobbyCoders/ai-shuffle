@@ -140,6 +140,7 @@ export interface ChatTab {
 	// Worktree creation state (for deferred creation on message send)
 	isCreatingWorktree: boolean;  // True while creating worktree before first message
 	worktreeError: string | null; // Specific error for worktree creation
+	worktreeDeleted: boolean;     // True if worktree was cleaned up after Finish (chat is read-only)
 	// Session lock state (multi-device conflict)
 	sessionLocked: boolean;      // True if session is locked by another device
 	sessionLockedBy: string | undefined;  // Device ID that has the lock
@@ -203,6 +204,7 @@ export interface PersistedTab {
 	worktreeBranch?: string;
 	selectedWorktreeBranch?: string | null;
 	worktreeMode?: 'new' | 'existing';
+	worktreeDeleted?: boolean;
 }
 
 export interface PersistedTabsState {

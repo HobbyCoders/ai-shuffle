@@ -310,6 +310,7 @@ class Session(SessionBase):
     worktree_id: Optional[str] = None  # ID of linked worktree (if any)
     worktree_branch: Optional[str] = None  # Branch name of linked worktree
     worktree_path: Optional[str] = None  # Path to worktree directory
+    worktree_deleted: bool = False  # True if worktree was cleaned up (chat is read-only)
     created_at: datetime
     updated_at: datetime
 

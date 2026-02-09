@@ -469,11 +469,15 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             session["worktree_id"] = worktree_id
             session["worktree_branch"] = worktree.get("branch_name")
             session["worktree_path"] = worktree.get("worktree_path")
+            session["worktree_deleted"] = False
         else:
-            # Worktree was deleted but session still has reference
+            # Worktree was deleted - use stored values from session columns
             session["worktree_id"] = None
-            session["worktree_branch"] = None
-            session["worktree_path"] = None
+            # worktree_branch and worktree_path are already in session from DB columns
+            session["worktree_deleted"] = True
+    elif session.get("worktree_branch"):
+        # Worktree was fully unlinked (ON DELETE SET NULL) but stored info remains
+        session["worktree_deleted"] = True
 
     logger.info(f"Returning session {session_id} with {len(messages)} messages")
     try:

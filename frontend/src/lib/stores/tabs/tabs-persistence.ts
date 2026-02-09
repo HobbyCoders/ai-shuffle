@@ -60,7 +60,8 @@ export function flushPendingTabsSave(): void {
 			worktreeId: tab.worktreeId,
 			worktreeBranch: tab.worktreeBranch,
 			selectedWorktreeBranch: tab.selectedWorktreeBranch,
-			worktreeMode: tab.worktreeMode
+			worktreeMode: tab.worktreeMode,
+			worktreeDeleted: tab.worktreeDeleted
 		})),
 		activeTabId: pendingTabsState.activeTabId
 	};
@@ -132,7 +133,8 @@ export async function saveTabsToServer(
 					worktreeId: tab.worktreeId,
 					worktreeBranch: tab.worktreeBranch,
 					selectedWorktreeBranch: tab.selectedWorktreeBranch,
-					worktreeMode: tab.worktreeMode
+					worktreeMode: tab.worktreeMode,
+					worktreeDeleted: tab.worktreeDeleted
 				})),
 				activeTabId: pendingTabsState.activeTabId
 			};

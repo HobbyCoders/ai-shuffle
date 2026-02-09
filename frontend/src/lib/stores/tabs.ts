@@ -198,7 +198,8 @@ async function saveTabsToServer(state: TabsState) {
 					worktreeId: tab.worktreeId,
 					worktreeBranch: tab.worktreeBranch,
 					selectedWorktreeBranch: tab.selectedWorktreeBranch,
-					worktreeMode: tab.worktreeMode
+					worktreeMode: tab.worktreeMode,
+					worktreeDeleted: tab.worktreeDeleted
 				})),
 				activeTabId: pendingTabsState.activeTabId
 			};
@@ -881,6 +882,7 @@ function createTabsStore() {
 					selectedWorktreeBranch: null,
 					isCreatingWorktree: false,
 					worktreeError: null,
+					worktreeDeleted: false,
 					sessionLocked: false,
 					sessionLockedBy: undefined
 				};
@@ -2140,12 +2142,23 @@ function createTabsStore() {
 					const session = data.session as Record<string, unknown> | undefined;
 					const worktreeId = session?.worktree_id as string | undefined;
 					const worktreeBranch = session?.worktree_branch as string | undefined;
+					const worktreeDeletedFlag = session?.worktree_deleted as boolean | undefined;
 					if (worktreeId && worktreeBranch) {
+						// Active worktree
 						tabUpdate.executionMode = 'worktree';
 						tabUpdate.worktreeId = worktreeId;
 						tabUpdate.worktreeBranch = worktreeBranch;
 						tabUpdate.selectedWorktreeBranch = worktreeBranch;
-						tabUpdate.worktreeMode = 'existing';  // Session already has worktree
+						tabUpdate.worktreeMode = 'existing';
+						tabUpdate.worktreeDeleted = false;
+					} else if (worktreeDeletedFlag && worktreeBranch) {
+						// Worktree was cleaned up - restore display info but mark as read-only
+						tabUpdate.executionMode = 'worktree';
+						tabUpdate.worktreeId = null;
+						tabUpdate.worktreeBranch = worktreeBranch;
+						tabUpdate.selectedWorktreeBranch = worktreeBranch;
+						tabUpdate.worktreeMode = 'existing';
+						tabUpdate.worktreeDeleted = true;
 					}
 
 					// Restore pending permissions/questions on reconnect
@@ -3091,6 +3104,7 @@ function createTabsStore() {
 						selectedWorktreeBranch: pt.selectedWorktreeBranch ?? null,
 						isCreatingWorktree: false,
 						worktreeError: null,
+						worktreeDeleted: pt.worktreeDeleted ?? false,
 						sessionLocked: false,
 						sessionLockedBy: undefined
 					}));
@@ -3184,6 +3198,7 @@ function createTabsStore() {
 				selectedWorktreeBranch: null,
 				isCreatingWorktree: false,
 				worktreeError: null,
+				worktreeDeleted: false,
 				sessionLocked: false,
 				sessionLockedBy: undefined
 			};
@@ -3857,12 +3872,23 @@ function createTabsStore() {
 				// Restore worktree state if session was created in worktree mode
 				const worktreeId = (session as unknown as Record<string, unknown>).worktree_id as string | undefined;
 				const worktreeBranch = (session as unknown as Record<string, unknown>).worktree_branch as string | undefined;
+				const worktreeDeletedFlag = (session as unknown as Record<string, unknown>).worktree_deleted as boolean | undefined;
 				if (worktreeId && worktreeBranch) {
+					// Active worktree
 					tabUpdate.executionMode = 'worktree';
 					tabUpdate.worktreeId = worktreeId;
 					tabUpdate.worktreeBranch = worktreeBranch;
 					tabUpdate.selectedWorktreeBranch = worktreeBranch;
-					tabUpdate.worktreeMode = 'existing';  // Session already has worktree
+					tabUpdate.worktreeMode = 'existing';
+					tabUpdate.worktreeDeleted = false;
+				} else if (worktreeDeletedFlag && worktreeBranch) {
+					// Worktree was cleaned up - restore display info but mark as read-only
+					tabUpdate.executionMode = 'worktree';
+					tabUpdate.worktreeId = null;
+					tabUpdate.worktreeBranch = worktreeBranch;
+					tabUpdate.selectedWorktreeBranch = worktreeBranch;
+					tabUpdate.worktreeMode = 'existing';
+					tabUpdate.worktreeDeleted = true;
 				}
 
 				updateTab(tabId, tabUpdate);
@@ -4135,6 +4161,7 @@ function createTabsStore() {
 				selectedWorktreeBranch: null,
 				isCreatingWorktree: false,
 				worktreeError: null,
+				worktreeDeleted: false,
 				sessionLocked: false,
 				sessionLockedBy: undefined
 			});

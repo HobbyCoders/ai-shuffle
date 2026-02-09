@@ -194,6 +194,11 @@ export interface Session {
 	parent_session_id: string | null;  // ID of parent session if this is a fork
 	fork_point_message_index: number | null;  // Message index where fork occurred
 	has_forks: boolean;  // True if this session has forked children
+	// Worktree fields - for restoring worktree mode on session resume
+	worktree_id?: string | null;
+	worktree_branch?: string | null;
+	worktree_path?: string | null;
+	worktree_deleted?: boolean;
 	created_at: string;
 	updated_at: string;
 }
