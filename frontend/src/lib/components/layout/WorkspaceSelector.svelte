@@ -78,21 +78,23 @@
 		{#if showDropdown}
 			<div class="picker-dropdown">
 				<p class="dropdown-label">Select your workspace</p>
-				{#each $projects as project (project.id)}
-					<button
-						class="dropdown-item"
-						class:selected={selectedProject === project.id}
-						onclick={() => handleSelect(project.id)}
-					>
-						<FolderClosed size={16} strokeWidth={1.5} />
-						<span class="item-name">{project.name}</span>
-						{#if selectedProject === project.id}
-							<Check size={16} strokeWidth={2} class="check-icon" />
-						{/if}
-					</button>
-				{:else}
-					<p class="dropdown-empty">No workspaces available</p>
-				{/each}
+				<div class="dropdown-scroll">
+					{#each $projects as project (project.id)}
+						<button
+							class="dropdown-item"
+							class:selected={selectedProject === project.id}
+							onclick={() => handleSelect(project.id)}
+						>
+							<FolderClosed size={16} strokeWidth={1.5} />
+							<span class="item-name">{project.name}</span>
+							{#if selectedProject === project.id}
+								<Check size={16} strokeWidth={2} class="check-icon" />
+							{/if}
+						</button>
+					{:else}
+						<p class="dropdown-empty">No workspaces available</p>
+					{/each}
+				</div>
 				<div class="dropdown-divider"></div>
 				<button class="dropdown-item new-project-item" onclick={openAddModal}>
 					<FolderPlus size={16} strokeWidth={1.5} />
@@ -199,6 +201,12 @@
 			opacity: 1;
 			transform: translateX(-50%) translateY(0) scale(1);
 		}
+	}
+
+	.dropdown-scroll {
+		max-height: min(40vh, 320px);
+		overflow-y: auto;
+		overscroll-behavior: contain;
 	}
 
 	.dropdown-label {
