@@ -2,6 +2,7 @@
 Project management API routes
 """
 
+import logging
 import shutil
 from datetime import datetime
 from typing import List
@@ -17,6 +18,8 @@ from app.core.project_utils import get_project_working_dir, get_project_working_
 from app.core.platform import is_local_mode
 from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
+
+logger = logging.getLogger(__name__)
 
 
 # File operation request models
@@ -365,9 +368,14 @@ async def upload_file(
     base_path = get_project_working_dir_as_path(base_project_path)
     relative_path = file_path.relative_to(base_path)
 
+    # Use forward slashes for consistent cross-platform path references
+    relative_path_str = relative_path.as_posix()
+
+    logger.info(f"Upload complete: original='{file.filename}' -> saved='{file_path.name}', path='{relative_path_str}'")
+
     return {
         "filename": file_path.name,
-        "path": str(relative_path),
+        "path": relative_path_str,
         "full_path": str(file_path),
         "size": len(content),
         "sizeFormatted": format_file_size(len(content))

@@ -198,8 +198,17 @@ export const FileChipNode = Node.create({
 						return false;
 					}
 					const newAttrs = updatedNode.attrs as FileChipAttributes;
+					// Only reuse this DOM element if it represents the same file.
+					// Returning false forces ProseMirror to destroy and recreate the
+					// node view, preventing one chip from displaying another's data
+					// during editor reconciliation after rapid sequential insertions.
+					if (newAttrs.path !== attrs.path) {
+						return false;
+					}
 					nameSpan.textContent = newAttrs.filename;
 					iconSpan.innerHTML = getFileIcon(newAttrs.type);
+					dom.setAttribute('data-path', newAttrs.path);
+					dom.setAttribute('data-type', newAttrs.type);
 					return true;
 				},
 				destroy: () => {
