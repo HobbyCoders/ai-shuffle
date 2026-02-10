@@ -5,7 +5,7 @@
 	 * Branch selector dropdown (checkout branches), commit button, and diff stats.
 	 * Branch selector is locked during streaming.
 	 */
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2 } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine } from 'lucide-svelte';
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode } from '$lib/stores/git';
 
 	interface Props {
@@ -20,9 +20,10 @@
 		onClickCreatePR: () => void;
 		onClickFinish: () => void;
 		onClickNewBranch: () => void;
+		onClickPull: () => void;
 	}
 
-	let { projectId, isStreaming = false, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch }: Props = $props();
+	let { projectId, isStreaming = false, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPull }: Props = $props();
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
@@ -43,6 +44,11 @@
 	const deletions = $derived($diffStats?.deletions ?? 0);
 	const commitsAhead = $derived($gitStatus?.ahead ?? 0);
 	const canCreatePR = $derived(!hasChanges && commitsAhead > 0);
+
+	// Behind upstream tracking branch (for pull button)
+	const currentBranchInfo = $derived($branchStore.find(b => b.current));
+	const commitsBehindUpstream = $derived(currentBranchInfo?.behind ?? 0);
+	const hasUpstream = $derived(!!currentBranchInfo?.upstream);
 
 	// Local branches for the dropdown (exclude remotes)
 	const localBranches = $derived(
@@ -157,6 +163,22 @@
 		{/if}
 	</div>
 
+	<!-- Pull button (when behind upstream) -->
+	{#if commitsBehindUpstream > 0 && hasUpstream}
+		<button
+			class="git-btn pull-btn"
+			onclick={onClickPull}
+			disabled={isStreaming}
+			title={isStreaming
+				? 'Cannot pull during streaming'
+				: `${commitsBehindUpstream} commit${commitsBehindUpstream === 1 ? '' : 's'} behind upstream — pull latest`}
+		>
+			<ArrowDownToLine size={14} strokeWidth={1.5} />
+			<span class="btn-label">Pull</span>
+			<span class="behind-badge">{commitsBehindUpstream}</span>
+		</button>
+	{/if}
+
 	<!-- Commit / Create PR / Finish button -->
 	{#if hasChanges}
 		<button
@@ -268,6 +290,23 @@
 		max-width: 140px;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+
+	/* Pull behind badge */
+	.behind-badge {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 16px;
+		height: 16px;
+		padding: 0 4px;
+		border-radius: 8px;
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		color: var(--primary);
+		font-size: 0.625rem;
+		font-weight: 700;
+		font-variant-numeric: tabular-nums;
+		line-height: 1;
 	}
 
 	/* Branch dropdown */

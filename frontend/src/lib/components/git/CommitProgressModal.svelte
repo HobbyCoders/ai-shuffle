@@ -7,8 +7,8 @@
 	 */
 	import { Check, Loader2, X, AlertCircle } from 'lucide-svelte';
 
-	type CommitAction = 'commit' | 'push' | 'pr' | 'finish';
-	type ModalMode = 'commit' | 'pr-only' | 'finish';
+	type CommitAction = 'commit' | 'push' | 'pr' | 'finish' | 'pull';
+	type ModalMode = 'commit' | 'pr-only' | 'finish' | 'pull';
 
 	interface ProgressStep {
 		label: string;
@@ -32,6 +32,10 @@
 	let { open, action, mode = 'commit', currentStep, completed, error, branchName = '', isGenerating = false, hasCleanup = false, onClose }: Props = $props();
 
 	const steps = $derived.by((): ProgressStep[] => {
+		if (mode === 'pull') {
+			return [{ label: 'Pulling latest changes' }];
+		}
+
 		if (mode === 'finish') {
 			const result: ProgressStep[] = [];
 			result.push({ label: 'Merging pull request' });
@@ -75,6 +79,10 @@
 	const title = $derived.by(() => {
 		if (error) return 'Error';
 		if (completed) return 'Done';
+
+		if (mode === 'pull') {
+			return 'Pulling changes';
+		}
 
 		if (mode === 'finish') {
 			if (currentStep === 1) return 'Merging PR';

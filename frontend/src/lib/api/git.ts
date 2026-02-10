@@ -460,6 +460,34 @@ export async function pushCommits(projectId: string, request: PushRequest = {}, 
 }
 
 // ============================================================================
+// Pull API
+// ============================================================================
+
+export interface PullRequest {
+    remote?: string;
+    strategy?: 'merge' | 'rebase';
+}
+
+export interface PullResponse {
+    success: boolean;
+    message: string;
+    conflicts: string[];
+    has_conflicts: boolean;
+}
+
+/**
+ * Pull from remote (fetch + merge/rebase)
+ */
+export async function pullFromRemote(
+    projectId: string,
+    request: PullRequest = {},
+    worktreeId?: string
+): Promise<PullResponse> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+    return api.post<PullResponse>(`${BASE}/${projectId}/git/pull${params}`, request);
+}
+
+// ============================================================================
 // AI Generation API
 // ============================================================================
 

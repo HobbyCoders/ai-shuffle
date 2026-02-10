@@ -15,7 +15,8 @@ export type {
     Worktree,
     GitStatus,
     CreateWorktreeRequest,
-    DiffStats
+    DiffStats,
+    PullResponse
 } from '$lib/api/git';
 
 // ============================================================================
@@ -411,6 +412,41 @@ function createGitStore() {
                     ...s,
                     loading: false,
                     error: error.detail || 'Failed to fetch'
+                }));
+                throw e;
+            }
+        },
+
+        /**
+         * Pull from remote (fetch + merge/rebase)
+         */
+        async pull(
+            strategy: 'merge' | 'rebase' = 'merge'
+        ): Promise<gitApi.PullResponse> {
+            const state = getCurrentState();
+            if (!state.projectId) throw new Error('No project selected');
+
+            try {
+                const response = await gitApi.pullFromRemote(
+                    state.projectId,
+                    { strategy },
+                    state.worktreeId ?? undefined
+                );
+
+                // Refresh all state after pull
+                await Promise.all([
+                    this.refreshStatus(),
+                    this.loadBranches(),
+                    this.refreshDiffStats(),
+                    this.loadGraph()
+                ]);
+
+                return response;
+            } catch (e) {
+                const error = e as { detail?: string };
+                update(s => ({
+                    ...s,
+                    error: error.detail || 'Failed to pull'
                 }));
                 throw e;
             }

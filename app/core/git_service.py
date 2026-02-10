@@ -770,6 +770,77 @@ class GitService:
             logger.error(f"Error pushing: {e}")
             return False, str(e)
 
+    def pull(
+        self,
+        working_dir: str,
+        remote: str = "origin",
+        strategy: str = "merge",
+    ) -> Tuple[bool, Optional[str], List[str]]:
+        """
+        Pull from remote (fetch + merge/rebase).
+
+        Args:
+            working_dir: Repository directory
+            remote: Remote name (default: origin)
+            strategy: "merge" or "rebase"
+
+        Returns:
+            Tuple of (success, error_message, conflicted_files)
+        """
+        try:
+            # Get current branch
+            branch = self.get_current_branch(working_dir)
+            if not branch:
+                return False, "Cannot pull: HEAD is detached", []
+
+            # Fetch first
+            if not self.fetch(working_dir, remote):
+                return False, f"Failed to fetch from '{remote}'", []
+
+            # Merge or rebase
+            if strategy == "rebase":
+                args = ["rebase", f"{remote}/{branch}"]
+            else:
+                args = ["merge", f"{remote}/{branch}"]
+
+            result = self._run_git(working_dir, args, timeout=120)
+
+            if result.returncode == 0:
+                logger.debug(f"Pulled from {remote}/{branch} using {strategy}")
+                return True, None, []
+
+            # Check for merge conflicts
+            conflicts = self._get_conflict_files(working_dir)
+            if conflicts:
+                # Auto-abort to keep repo clean
+                if strategy == "rebase":
+                    self._run_git(working_dir, ["rebase", "--abort"], timeout=10)
+                else:
+                    self._run_git(working_dir, ["merge", "--abort"], timeout=10)
+                return False, "Merge conflicts detected", conflicts
+
+            # Non-conflict error
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+            logger.warning(f"Pull failed: {error_msg}")
+            return False, error_msg, []
+        except Exception as e:
+            logger.error(f"Error pulling: {e}")
+            return False, str(e), []
+
+    def _get_conflict_files(self, working_dir: str) -> List[str]:
+        """Get list of files with merge conflicts."""
+        try:
+            result = self._run_git(
+                working_dir,
+                ["diff", "--name-only", "--diff-filter=U"],
+                timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return [f.strip() for f in result.stdout.strip().split("\n") if f.strip()]
+            return []
+        except Exception:
+            return []
+
     def get_status(self, working_dir: str) -> Dict[str, Any]:
         """
         Get repository status.

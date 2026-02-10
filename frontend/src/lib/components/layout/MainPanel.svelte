@@ -10,7 +10,7 @@
 	import type { ViewType } from '$lib/stores/layout';
 	import type { CardType, DeckCard } from '$lib/components/deck/cards/types';
 	import { allTabs, projects, tabs } from '$lib/stores/tabs';
-	import { git, gitStatus } from '$lib/stores/git';
+	import { git, gitStatus, branches as branchStore, diffStats } from '$lib/stores/git';
 	import { githubAuthenticated } from '$lib/stores/auth';
 	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming';
 	import { createPullRequest, getPullRequests, mergePullRequest } from '$lib/api/github';
@@ -22,6 +22,7 @@
 	import CommitModal from '$lib/components/git/CommitModal.svelte';
 	import CommitProgressModal from '$lib/components/git/CommitProgressModal.svelte';
 	import FinishModal from '$lib/components/git/FinishModal.svelte';
+	import PullModal from '$lib/components/git/PullModal.svelte';
 
 	// Feature page components
 	import SettingsCard from '$lib/components/deck/cards/SettingsCard.svelte';
@@ -141,8 +142,8 @@
 	let showCommitModal = $state(false);
 	let showCommitModalMode = $state<'commit' | 'pr-only'>('commit');
 	let showProgressModal = $state(false);
-	let progressAction = $state<'commit' | 'push' | 'pr' | 'finish'>('commit');
-	let progressMode = $state<'commit' | 'pr-only' | 'finish'>('commit');
+	let progressAction = $state<'commit' | 'push' | 'pr' | 'finish' | 'pull'>('commit');
+	let progressMode = $state<'commit' | 'pr-only' | 'finish' | 'pull'>('commit');
 	let progressStep = $state(1);
 	let progressCompleted = $state(false);
 	let progressError = $state<string | null>(null);
@@ -151,6 +152,9 @@
 
 	// Finish modal state
 	let showFinishModal = $state(false);
+
+	// Pull modal state
+	let showPullModal = $state(false);
 
 	// PR detection for current branch
 	let branchPR = $state<{ number: number; title: string; url: string; head_branch: string } | null>(null);
@@ -523,6 +527,53 @@
 			progressError = e?.detail || e?.message || 'An error occurred';
 		}
 	}
+
+	// Pull modal derived state
+	const commitsBehindForPull = $derived.by(() => {
+		const current = $branchStore.find(b => b.current);
+		return current?.behind ?? 0;
+	});
+	const pullHasChanges = $derived(
+		($diffStats?.additions ?? 0) > 0 ||
+		($diffStats?.deletions ?? 0) > 0 ||
+		($diffStats?.files_changed ?? 0) > 0
+	);
+
+	async function handlePull(strategy: 'merge' | 'rebase') {
+		progressAction = 'pull';
+		progressMode = 'pull';
+		progressStep = 1;
+		progressCompleted = false;
+		progressError = null;
+		progressIsGenerating = false;
+		progressHasCleanup = false;
+		showProgressModal = true;
+
+		const projectId = activeTab?.project;
+		if (!projectId) {
+			progressError = 'No project selected';
+			return;
+		}
+
+		try {
+			const result = await git.pull(strategy);
+
+			if (result.has_conflicts) {
+				const fileList = result.conflicts.join(', ');
+				progressError = `Merge conflicts in ${result.conflicts.length} file(s): ${fileList}. Resolve conflicts manually using your editor or CLI.`;
+				return;
+			}
+
+			if (!result.success) {
+				progressError = result.message || 'Failed to pull';
+				return;
+			}
+
+			progressCompleted = true;
+		} catch (e: any) {
+			progressError = e?.detail || e?.message || 'Failed to pull';
+		}
+	}
 </script>
 
 <div class="main-panel">
@@ -548,6 +599,7 @@
 							onClickCreatePR={() => { showCommitModalMode = 'pr-only'; showCommitModal = true; }}
 							onClickFinish={() => showFinishModal = true}
 							onClickNewBranch={() => showCreateBranchModal = true}
+							onClickPull={() => showPullModal = true}
 						/>
 					{/if}
 				{/snippet}
@@ -739,6 +791,15 @@
 		{isWorktreeMode}
 		onClose={() => showFinishModal = false}
 		onFinish={handleFinish}
+	/>
+
+	<PullModal
+		open={showPullModal}
+		branchName={$gitStatus?.current_branch ?? ''}
+		commitsBehind={commitsBehindForPull}
+		hasChanges={pullHasChanges}
+		onClose={() => showPullModal = false}
+		onPull={(strategy) => { showPullModal = false; handlePull(strategy); }}
 	/>
 
 	<CommitProgressModal

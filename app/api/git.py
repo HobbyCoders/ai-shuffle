@@ -152,6 +152,20 @@ class PushRequest(BaseModel):
     set_upstream: bool = Field(default=False)
 
 
+class PullRequest(BaseModel):
+    """Request to pull from remote"""
+    remote: str = Field(default="origin", pattern=r'^[a-zA-Z0-9._-]+$')
+    strategy: str = Field(default="merge", pattern=r'^(merge|rebase)$')
+
+
+class PullResponse(BaseModel):
+    """Response for pull endpoint"""
+    success: bool
+    message: str
+    conflicts: List[str] = []
+    has_conflicts: bool = False
+
+
 class GenerateCommitMessageRequest(BaseModel):
     """Request to generate a commit message using AI"""
     include_unstaged: bool = Field(default=True)
@@ -978,6 +992,72 @@ async def push_commits(
     return OperationResponse(
         success=True,
         message=f"Pushed to {body.remote}/{branch}"
+    )
+
+
+# =============================================================================
+# Pull Endpoint
+# =============================================================================
+
+@router.post("/pull", response_model=PullResponse)
+async def pull_from_remote(
+    request: Request,
+    project_id: str,
+    body: PullRequest,
+    worktree_id: Optional[str] = None,
+    token: str = Depends(require_auth)
+):
+    """
+    Pull from remote (fetch + merge/rebase).
+
+    Fetches from the remote, then merges or rebases. If merge conflicts are
+    detected, the operation is auto-aborted and conflicted files are returned.
+
+    Args:
+        project_id: Project ID
+        body: Pull request with remote and strategy
+        worktree_id: Optional worktree ID
+    """
+    check_project_access(request, project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
+
+    if not git_service.is_git_repo(working_dir):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project is not a git repository"
+        )
+
+    # Check for uncommitted changes
+    status_data = git_service.get_status(working_dir)
+    if not status_data["is_clean"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot pull: you have uncommitted changes. Commit or stash them first."
+        )
+
+    success, error_msg, conflicts = git_service.pull(
+        working_dir,
+        remote=body.remote,
+        strategy=body.strategy
+    )
+
+    # Invalidate cache and broadcast — pull affects status, branches, and diff stats
+    await git_state_cache.invalidate_project(project_id)
+    await _broadcast_git_update(
+        request, project_id, working_dir, {"status", "branches", "diff_stats"}, worktree_id
+    )
+
+    if not success:
+        return PullResponse(
+            success=False,
+            message=error_msg or "Failed to pull",
+            conflicts=conflicts,
+            has_conflicts=len(conflicts) > 0
+        )
+
+    return PullResponse(
+        success=True,
+        message=f"Pulled from {body.remote} using {body.strategy}"
     )
 
 
