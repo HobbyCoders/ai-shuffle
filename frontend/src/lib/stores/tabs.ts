@@ -31,6 +31,7 @@ import {
 	formatWorktreeError, getOrCreateDeviceId, generateTabId
 } from './tabs/utils';
 import { git } from './git';
+import { messageCache } from './message-cache';
 
 // Re-export types for backwards compatibility
 export type {
@@ -765,6 +766,11 @@ function createTabsStore() {
 					};
 				})
 			}));
+		}
+
+		// Update cache with final post-streaming messages
+		if (finalSession && finalSession.messages.length > 0) {
+			messageCache.set(sessionId, finalSession.messages);
 		}
 
 		// Clean up sessionState now that final messages are persisted in the raw store.
@@ -2087,6 +2093,11 @@ function createTabsStore() {
 					}
 				}
 
+				// Cache messages for instant rendering on next page load (fire-and-forget)
+				if (finalMessages.length > 0 && data.session_id) {
+					messageCache.set(data.session_id as string, finalMessages);
+				}
+
 				// If session is streaming, start server-authoritative polling
 				// This ensures we get the correct state regardless of any buffer merging issues
 				const receivedSession = data.session_id as string;
@@ -2997,6 +3008,16 @@ function createTabsStore() {
 						worktreeDeleted: pt.worktreeDeleted ?? false,
 						sessionLocked: false,
 						sessionLockedBy: undefined
+					}));
+
+					// Hydrate tabs with cached messages for instant rendering (best-effort)
+					await Promise.all(restoredTabs.map(async (tab) => {
+						if (tab.sessionId) {
+							const cached = await messageCache.get(tab.sessionId);
+							if (cached && cached.length > 0) {
+								tab.messages = cached;
+							}
+						}
 					}));
 
 					update(s => ({
@@ -4141,6 +4162,9 @@ function createTabsStore() {
 			await api.delete(`/sessions/${sessionId}`);
 			await this.loadSessions();
 
+			// Clear cached messages
+			messageCache.delete(sessionId);
+
 			// Clear any tabs that had this session
 			update(s => ({
 				...s,
@@ -4243,6 +4267,11 @@ function createTabsStore() {
 			await this.loadSessions();
 			if (isAdmin) {
 				await loadAdminSessionsInternal(state.adminSessionsFilter);
+			}
+
+			// Clear cached messages for deleted sessions
+			for (const id of sessionIds) {
+				messageCache.delete(id);
 			}
 
 			// Clear any tabs that had deleted sessions
