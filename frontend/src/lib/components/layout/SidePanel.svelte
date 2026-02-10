@@ -220,7 +220,10 @@
 		const tab = $allTabs.find(
 			(t) => t.sessionId === sessionId
 		);
-		if (tab?.isStreaming) return true;
+		// If a tab is watching this session, its isStreaming flag is authoritative
+		// (set by done/stopped/error/stream_end/history events)
+		if (tab) return tab.isStreaming;
+		// For sessions without a tab open, use cross-device streaming tracker
 		return $streamingSessions.has(sessionId);
 	}
 

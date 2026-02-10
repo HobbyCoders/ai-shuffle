@@ -1557,6 +1557,17 @@ function createTabsStore() {
 					})
 				}));
 
+				// Clear from cross-device streaming tracker to prevent stale sidebar dots
+				const endedSessionId = getTab(tabId)?.sessionId;
+				if (endedSessionId) {
+					streamingSessions.update(map => {
+						if (!map.has(endedSessionId)) return map;
+						const newMap = new Map(map);
+						newMap.delete(endedSessionId);
+						return newMap;
+					});
+				}
+
 				// Refresh sessions list
 				loadSessionsInternal();
 				break;
@@ -2314,6 +2325,17 @@ function createTabsStore() {
 					})
 				}));
 
+				// Clear from cross-device streaming tracker to prevent stale sidebar dots
+				const doneCleanupId = sessionId || getTab(tabId)?.sessionId;
+				if (doneCleanupId) {
+					streamingSessions.update(map => {
+						if (!map.has(doneCleanupId)) return map;
+						const newMap = new Map(map);
+						newMap.delete(doneCleanupId);
+						return newMap;
+					});
+				}
+
 				// Trigger browser notification (showNotification checks permission internally)
 				const doneTab = getTab(tabId);
 				notifySessionComplete({
@@ -2411,6 +2433,16 @@ function createTabsStore() {
 					})
 				}));
 
+				// Clear from cross-device streaming tracker to prevent stale sidebar dots
+				if (stoppedSessionId) {
+					streamingSessions.update(map => {
+						if (!map.has(stoppedSessionId)) return map;
+						const newMap = new Map(map);
+						newMap.delete(stoppedSessionId);
+						return newMap;
+					});
+				}
+
 				// Safety: ensure cleanup if the poller pipeline fails
 				{
 					const cleanupId = stoppedSessionId;
@@ -2446,6 +2478,17 @@ function createTabsStore() {
 						};
 					})
 				}));
+
+				// Clear from cross-device streaming tracker to prevent stale sidebar dots
+				const errorSessionId = getTab(tabId)?.sessionId;
+				if (errorSessionId) {
+					streamingSessions.update(map => {
+						if (!map.has(errorSessionId)) return map;
+						const newMap = new Map(map);
+						newMap.delete(errorSessionId);
+						return newMap;
+					});
+				}
 				break;
 			}
 
