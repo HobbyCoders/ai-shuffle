@@ -30,6 +30,11 @@
 	// Non-reactive scroll position cache to avoid triggering effects
 	// This is module-level so it persists across component instances
 	const scrollPositionCache = new Map<string, number>();
+	// Persist auto-scroll state across component mount/destroy cycles (e.g.
+	// navigating away from chat to settings and returning, or transitioning
+	// between empty and active states) so the component scrolls to bottom
+	// instead of restoring a now-stale scroll position
+	const autoScrollCache = new Map<string, boolean>();
 
 	interface Props {
 		tab: ChatTab;
@@ -216,20 +221,35 @@
 		requestAnimationFrame(() => {
 			if (!containerRef) return;
 
-			// Check non-reactive cache first (fastest, for switching between cards)
-			const cachedPosition = scrollPositionCache.get(tab.id);
-			// Fall back to tab store (for page reload persistence)
-			const storedPosition = cachedPosition ?? tab.scrollTop;
+			// Check if user had explicitly scrolled up before this component
+			// was destroyed. autoScrollCache tracks shouldAutoScroll state:
+			//   true      = was at/near bottom (auto-scroll active)
+			//   false     = user had scrolled up (auto-scroll paused)
+			//   undefined = no prior state (first mount)
+			// Default to scrolling to bottom for true and undefined.
+			const wasAutoScrolling = autoScrollCache.get(tab.id);
+			const userScrolledUp = wasAutoScrolling === false;
 
-			if (storedPosition > 0) {
-				isScrollingProgrammatically = true;
-				containerRef.scrollTop = storedPosition;
-				shouldAutoScroll = isNearBottom();
-				requestAnimationFrame(() => {
-					isScrollingProgrammatically = false;
-				});
+			if (userScrolledUp) {
+				// User intentionally scrolled up - restore their position
+				const cachedPosition = scrollPositionCache.get(tab.id);
+				const storedPosition = cachedPosition ?? tab.scrollTop;
+
+				if (storedPosition > 0) {
+					isScrollingProgrammatically = true;
+					containerRef.scrollTop = storedPosition;
+					shouldAutoScroll = false;
+					requestAnimationFrame(() => {
+						isScrollingProgrammatically = false;
+					});
+				} else {
+					// No saved position even though they scrolled up - scroll to bottom
+					shouldAutoScroll = true;
+					scrollToBottom();
+				}
 			} else if (tab.messages.length > 0) {
-				// New tab with messages but no saved position - scroll to bottom
+				// Auto-scroll was on, or first visit - always show latest content
+				shouldAutoScroll = true;
 				scrollToBottom();
 			}
 		});
@@ -242,6 +262,9 @@
 		if (containerRef) {
 			scrollPositionCache.set(tab.id, containerRef.scrollTop);
 			tabs.setTabScrollTop(tab.id, containerRef.scrollTop);
+			// Persist auto-scroll state so remounting this component
+			// (e.g. returning from settings) resumes at the right position
+			autoScrollCache.set(tab.id, shouldAutoScroll);
 		}
 		// Clean up resize observer
 		if (resizeObserver) {
@@ -297,12 +320,13 @@
 		return lastMsg.content || '';
 	});
 
-	// Get last message metadata for tracking changes (cost/duration appear here)
+	// Get metadata for the last assistant message that has metadata (cost/duration
+	// rendered there). This message may not be the absolute last in the array
+	// (e.g. a TodoWrite tool_use could follow it).
 	const lastMessageMetadata = $derived(() => {
-		const lastMsg = tab.messages[tab.messages.length - 1];
-		if (!lastMsg?.metadata) return null;
-		// Only track specific fields that affect rendering
-		const m = lastMsg.metadata as Record<string, unknown>;
+		const msg = tab.messages.findLast(m => m.role === 'assistant' && m.metadata);
+		if (!msg?.metadata) return null;
+		const m = msg.metadata as Record<string, unknown>;
 		return JSON.stringify({
 			cost: m.cost_usd ?? m.total_cost_usd,
 			duration: m.duration_ms
