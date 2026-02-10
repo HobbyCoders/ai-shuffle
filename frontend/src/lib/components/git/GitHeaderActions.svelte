@@ -171,7 +171,7 @@
 		</button>
 	{:else if openPR}
 		<button
-			class="git-btn finish-btn"
+			class="git-btn"
 			onclick={onClickFinish}
 			disabled={isStreaming}
 			title={isStreaming ? 'Cannot finish during streaming' : `PR #${openPR.number}: ${openPR.title} — Merge and finish`}
@@ -254,16 +254,6 @@
 
 	.git-btn.locked {
 		opacity: 0.6;
-	}
-
-	.finish-btn {
-		border-color: color-mix(in oklch, var(--success) 40%, var(--border));
-		color: var(--success);
-	}
-
-	.finish-btn:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--success) 10%, transparent);
-		color: var(--success);
 	}
 
 	.git-btn :global(svg) {

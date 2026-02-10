@@ -376,6 +376,8 @@
 							head: currentBranch,
 							base: 'main'
 						});
+						// Detect the new PR so UI transitions to Finish state
+						await checkPullRequests(projectId, currentBranch);
 					}
 				}
 			}
@@ -441,6 +443,8 @@
 					head: branch,
 					base: 'main'
 				});
+				// Detect the new PR so UI transitions to Finish state
+				await checkPullRequests(projectId, branch);
 			}
 
 			progressCompleted = true;
