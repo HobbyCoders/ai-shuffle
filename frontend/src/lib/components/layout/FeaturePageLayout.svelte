@@ -108,6 +108,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-5);
+		min-height: 100%;
 	}
 
 	.feature-page-content.no-padding .feature-page-content-inner {
