@@ -195,20 +195,22 @@ function createGitStore() {
      */
     function _backgroundFetch(key: string, projectId: string, worktreeId?: string) {
         gitApi.fetchRemote(projectId, worktreeId).then(async () => {
-            // Only update if we're still on the same key
-            if (_loadedKey !== key) return;
             try {
                 const [status, branches] = await Promise.all([
                     gitApi.getGitStatus(projectId, worktreeId),
                     gitApi.getBranches(projectId, true, worktreeId)
                 ]);
-                if (_loadedKey !== key) return;
-                update(s => ({ ...s, status, branches }));
-                // Update cache too
+
+                // Always update cache, even if we switched away
                 const cached = _cache.get(key);
                 if (cached) {
                     cached.status = status;
                     cached.branches = branches;
+                }
+
+                // Only update live store if still the active key
+                if (_loadedKey === key) {
+                    update(s => ({ ...s, status, branches }));
                 }
             } catch {
                 // Silent — background refresh is non-critical
@@ -227,7 +229,8 @@ function createGitStore() {
          */
         async loadRepository(projectId: string, forceReload = false) {
             const key = _makeKey(projectId);
-            if (!forceReload && _loadedKey === key) return;
+            // Only skip if we're already actively loading this same key.
+            // Don't skip when _loadedKey matches — data may be stale from time on another tab.
             if (_loadInFlight === key) return;
             _loadInFlight = key;
             await _loadCore(key, projectId, undefined, 'project');
@@ -239,10 +242,39 @@ function createGitStore() {
          */
         async loadForWorktree(projectId: string, worktreeId: string, forceReload = false) {
             const key = _makeKey(projectId, worktreeId);
-            if (!forceReload && _loadedKey === key) return;
+            // Only skip if we're already actively loading this same key.
             if (_loadInFlight === key) return;
             _loadInFlight = key;
             await _loadCore(key, projectId, worktreeId, 'worktree');
+        },
+
+        /**
+         * Immediately restore cached state for a key, or show empty with loading.
+         * Does NOT trigger any network requests or change _loadedKey/_loadInFlight.
+         * Used for instant tab-switch display before the debounced network load fires.
+         */
+        restoreCacheImmediate(projectId: string, worktreeId?: string | null, mode: GitMode = 'project') {
+            const key = _makeKey(projectId, worktreeId ?? undefined);
+            const cached = _cache.get(key); // peek only, don't LRU-reorder
+            if (cached) {
+                set({
+                    projectId,
+                    worktreeId: worktreeId ?? null,
+                    mode,
+                    ...cached,
+                    loading: true,
+                    error: null
+                });
+            } else {
+                set({
+                    ...EMPTY_STATE,
+                    projectId,
+                    worktreeId: worktreeId ?? null,
+                    mode,
+                    loading: true,
+                    error: null
+                });
+            }
         },
 
         /**
@@ -614,9 +646,40 @@ function createGitStore() {
             }
         ) {
             const key = _makeKey(projectId, worktreeId ?? undefined);
+            const isActive = (_loadedKey === key);
 
-            // Only apply if we're currently viewing this project/worktree
-            if (_loadedKey !== key) return;
+            // Helper to map branch data from server format to store format
+            const mapBranches = (branches: NonNullable<typeof changes.branches>) =>
+                branches.branches.map(b => ({
+                    name: b.name,
+                    current: b.is_current,
+                    remote: b.is_remote,
+                    upstream: b.upstream,
+                    ahead: b.ahead,
+                    behind: b.behind,
+                    lastCommit: b.commit_message,
+                    hasWorktree: b.has_worktree,
+                    worktreeId: b.worktree_id
+                }));
+
+            // Phase 1: Always update LRU cache (even for background tabs)
+            const cached = _cache.get(key);
+            if (cached) {
+                if (changes.status) {
+                    cached.status = cached.status
+                        ? { ...cached.status, ...changes.status }
+                        : changes.status as gitApi.GitStatus;
+                }
+                if (changes.diff_stats) {
+                    cached.diffStats = changes.diff_stats;
+                }
+                if (changes.branches) {
+                    cached.branches = mapBranches(changes.branches);
+                }
+            }
+
+            // Phase 2: Only update live store if this is the active key
+            if (!isActive) return;
 
             update(s => {
                 const updated = { ...s };
@@ -632,47 +695,11 @@ function createGitStore() {
                 }
 
                 if (changes.branches) {
-                    updated.branches = changes.branches.branches.map(b => ({
-                        name: b.name,
-                        current: b.is_current,
-                        remote: b.is_remote,
-                        upstream: b.upstream,
-                        ahead: b.ahead,
-                        behind: b.behind,
-                        lastCommit: b.commit_message,
-                        hasWorktree: b.has_worktree,
-                        worktreeId: b.worktree_id
-                    }));
+                    updated.branches = mapBranches(changes.branches);
                 }
 
                 return updated;
             });
-
-            // Update LRU cache too
-            const cached = _cache.get(key);
-            if (cached) {
-                if (changes.status) {
-                    cached.status = cached.status
-                        ? { ...cached.status, ...changes.status }
-                        : changes.status as gitApi.GitStatus;
-                }
-                if (changes.diff_stats) {
-                    cached.diffStats = changes.diff_stats;
-                }
-                if (changes.branches) {
-                    cached.branches = changes.branches.branches.map(b => ({
-                        name: b.name,
-                        current: b.is_current,
-                        remote: b.is_remote,
-                        upstream: b.upstream,
-                        ahead: b.ahead,
-                        behind: b.behind,
-                        lastCommit: b.commit_message,
-                        hasWorktree: b.has_worktree,
-                        worktreeId: b.worktree_id
-                    }));
-                }
-            }
         },
 
         /**

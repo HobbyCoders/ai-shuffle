@@ -186,6 +186,11 @@
 		}
 
 		if (project && authenticated) {
+			// IMMEDIATE: restore cached state so UI updates within the same frame
+			const mode = worktreeId ? 'worktree' : 'project';
+			git.restoreCacheImmediate(project, worktreeId, mode);
+
+			// DEBOUNCED: network fetch for fresh data
 			_projectDebounceTimer = setTimeout(() => {
 				_projectDebounceTimer = null;
 				if (worktreeId) {
@@ -283,17 +288,18 @@
 
 	// PR detection: runs when the branch changes (event-driven via WebSocket state updates).
 	// Tracks previous branch to avoid redundant GitHub API calls.
-	let _lastCheckedBranch: string | null = null;
+	let _lastCheckedPRKey: string | null = null;
 	$effect(() => {
 		const branch = $gitStatus?.current_branch ?? null;
 		const project = activeProject;
 		const authenticated = $githubAuthenticated;
+		const prKey = (project && branch) ? `${project}:${branch}` : null;
 
-		if (branch !== _lastCheckedBranch && project && authenticated) {
-			_lastCheckedBranch = branch;
+		if (prKey !== _lastCheckedPRKey && project && authenticated && branch) {
+			_lastCheckedPRKey = prKey;
 			untrack(() => checkPullRequests(project, branch));
 		} else if (!project || !authenticated) {
-			_lastCheckedBranch = null;
+			_lastCheckedPRKey = null;
 			branchPR = null;
 		}
 	});
