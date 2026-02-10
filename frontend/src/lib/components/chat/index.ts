@@ -12,6 +12,7 @@ export { default as StreamingIndicator } from './StreamingIndicator.svelte';
 // Container components
 export { default as MessageArea } from './MessageArea.svelte';
 export { default as ChatInput } from './ChatInput.svelte';
+export { default as QueuedMessages } from './QueuedMessages.svelte';
 
 // Re-export existing components that are already in lib/components
 // These are already available from their original locations

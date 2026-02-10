@@ -334,7 +334,7 @@
 	}
 
 	// Handle form submission
-	async function handleSubmit() {
+	async function handleSubmit(sendLater: boolean = false) {
 		// Get serialized message from editor (includes inline @path references)
 		const finalPrompt = editorRef?.getMessage() ?? '';
 
@@ -359,11 +359,11 @@
 		}
 
 		// Send the message
-		sendMessage(messageToSend);
+		sendMessage(messageToSend, sendLater);
 	}
 
-	// Actually send the message
-	function sendMessage(finalPrompt: string) {
+	// Actually send the message (or queue it for later)
+	function sendMessage(finalPrompt: string, sendLater: boolean = false) {
 		// Mark that we're sending - prevents onDestroy from overwriting the cleared draft
 		// This is critical for the first message when the component gets destroyed/recreated
 		messageSent = true;
@@ -378,7 +378,13 @@
 		// the component may be destroyed/recreated when isEmptyState changes
 		saveDraftImmediately(tab.id, '');
 
-		tabs.sendMessage(tab.id, finalPrompt);
+		if (sendLater && liveTab.isStreaming) {
+			// Queue for when current stream completes naturally
+			tabs.queueMessage(tab.id, finalPrompt);
+		} else {
+			// Send immediately (interrupt_and_query if streaming, normal query if not)
+			tabs.sendMessage(tab.id, finalPrompt);
+		}
 	}
 
 	// Handle keydown for textarea
@@ -401,9 +407,14 @@
 		const isMobile = isTouchDevice || (hasNoFinePointer && ('ontouchstart' in window));
 
 		// On desktop, Enter sends; on mobile, let Enter create newlines
+		// Ctrl/Cmd+Enter during streaming = Send Later (queue for after completion)
 		if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
 			e.preventDefault();
-			handleSubmit();
+			if ((e.ctrlKey || e.metaKey) && liveTab.isStreaming) {
+				handleSubmit(true); // Send Later
+			} else {
+				handleSubmit(false); // Send Now
+			}
 		}
 	}
 
@@ -916,9 +927,19 @@
 								</button>
 							{:else if liveTab.isStreaming}
 								{#if inputValue.trim()}
-									<button type="submit" class="send-btn" title="Send message (interrupts current response)">
+									<!-- Send Now: interrupts current response -->
+									<button type="submit" class="send-btn" title="Send now (interrupts) — Enter">
 										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
+										</svg>
+									</button>
+									<!-- Send Later: queues for after completion -->
+									<button type="button" class="send-btn send-later-btn"
+										onclick={() => handleSubmit(true)}
+										title="Send later (after response) — {navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl'}+Enter"
+									>
+										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
 										</svg>
 									</button>
 								{:else}
@@ -1391,6 +1412,30 @@
 
 	.send-btn.creating-worktree svg {
 		color: var(--primary-foreground);
+	}
+
+	/* Send Later button - secondary/muted style to distinguish from Send Now */
+	.send-btn.send-later-btn {
+		background: var(--muted);
+		border: 1px solid var(--border-subtle);
+	}
+
+	.send-btn.send-later-btn::before {
+		display: none;
+	}
+
+	.send-btn.send-later-btn svg {
+		color: var(--muted-foreground);
+	}
+
+	.send-btn.send-later-btn:hover:not(:disabled) {
+		background: color-mix(in oklch, var(--muted) 80%, var(--foreground) 10%);
+		transform: translateY(-1px);
+		box-shadow: none;
+	}
+
+	.send-btn.send-later-btn:hover:not(:disabled) svg {
+		color: var(--foreground);
 	}
 
 	.stop-btn {

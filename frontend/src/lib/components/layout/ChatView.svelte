@@ -10,7 +10,7 @@
 	 */
 	import { untrack } from 'svelte';
 	import { tabs, allTabs } from '$lib/stores/tabs';
-	import { MessageArea, ChatInput } from '$lib/components/chat';
+	import { MessageArea, ChatInput, QueuedMessages } from '$lib/components/chat';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth';
@@ -127,6 +127,11 @@
 					<MessageArea {tab} />
 				{/key}
 			</div>
+
+			<!-- Queued Messages Bar (Send Later) -->
+			{#if tab.queuedMessages && tab.queuedMessages.length > 0}
+				<QueuedMessages {tab} />
+			{/if}
 
 			<div class="input-wrapper">
 				<ChatInput {tab} compact />

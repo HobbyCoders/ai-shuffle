@@ -45,6 +45,13 @@ export interface TodoItem {
 	activeForm: string; // Present continuous form shown when in_progress
 }
 
+// Queued message for "Send Later" feature
+export interface QueuedMessage {
+	id: string;
+	content: string;
+	queuedAt: number;
+}
+
 export interface ChatMessage {
 	id: string;
 	jsonlUuid?: string; // Raw UUID from JSONL file - used for rewind (id may be preserved for Svelte keying)
@@ -122,6 +129,8 @@ export interface ChatTab {
 	pendingQuestions: UserQuestionRequest[];
 	// Todo list for task tracking
 	todos: TodoItem[];
+	// Queued messages for "Send Later" (sent when current stream completes naturally)
+	queuedMessages: QueuedMessage[];
 	// Draft input text (preserved when switching tabs)
 	draft: string;
 	// Scroll position (preserved when switching tabs)
@@ -205,6 +214,7 @@ export interface PersistedTab {
 	selectedWorktreeBranch?: string | null;
 	worktreeMode?: 'new' | 'existing';
 	worktreeDeleted?: boolean;
+	queuedMessages?: QueuedMessage[];
 }
 
 export interface PersistedTabsState {

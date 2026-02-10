@@ -25,7 +25,8 @@ import { sessionState } from './session/session-state';
 // Extracted modules (Phase 6)
 import type {
 	ApiUser, MessageType, SubagentChildMessage, TodoItem, ChatMessage,
-	Project, ExecutionMode, ChatTab, TabsState, PersistedTab, PersistedTabsState
+	Project, ExecutionMode, ChatTab, TabsState, PersistedTab, PersistedTabsState,
+	QueuedMessage
 } from './tabs/types';
 import {
 	formatWorktreeError, getOrCreateDeviceId, generateTabId
@@ -36,7 +37,7 @@ import { messageCache } from './message-cache';
 // Re-export types for backwards compatibility
 export type {
 	ApiUser, MessageType, SubagentChildMessage, TodoItem, ChatMessage,
-	Project, ExecutionMode, ChatTab
+	Project, ExecutionMode, ChatTab, QueuedMessage
 };
 
 // Types are defined in ./tabs/types.ts and re-exported above.
@@ -199,7 +200,8 @@ async function saveTabsToServer(state: TabsState) {
 					worktreeBranch: tab.worktreeBranch,
 					selectedWorktreeBranch: tab.selectedWorktreeBranch,
 					worktreeMode: tab.worktreeMode,
-					worktreeDeleted: tab.worktreeDeleted
+					worktreeDeleted: tab.worktreeDeleted,
+					queuedMessages: tab.queuedMessages.length > 0 ? tab.queuedMessages : undefined
 				})),
 				activeTabId: pendingTabsState.activeTabId
 			};
@@ -722,6 +724,75 @@ function createTabsStore() {
 		}
 	}
 
+	/**
+	 * Process the next queued "Send Later" message for a tab.
+	 * Called after a natural 'done' event (NOT on interrupt/stop/error).
+	 * Dequeues the first message and sends it as a normal query.
+	 */
+	function processNextQueuedMessage(tabId: string) {
+		const tab = getTab(tabId);
+		if (!tab || tab.queuedMessages.length === 0) return;
+
+		const ws = tabConnections.get(tabId);
+		if (!ws || ws.readyState !== WebSocket.OPEN) return;
+		if (!tab.sessionId) return;
+
+		// Dequeue the first message
+		const nextQueued = tab.queuedMessages[0];
+
+		// Remove from queue
+		update(s => ({
+			...s,
+			tabs: s.tabs.map(t => {
+				if (t.id !== tabId) return t;
+				return {
+					...t,
+					queuedMessages: t.queuedMessages.slice(1)
+				};
+			})
+		}));
+		saveTabsToServer(get({ subscribe }));
+
+		// Add user message to UI and mark as streaming
+		const userMsgId = `user-${Date.now()}`;
+		update(s => ({
+			...s,
+			tabs: s.tabs.map(t => {
+				if (t.id !== tabId) return t;
+				return {
+					...t,
+					messages: [...t.messages, {
+						id: userMsgId,
+						role: 'user' as const,
+						content: nextQueued.content,
+						profileId: t.currentQueryProfileId || t.profile
+					}],
+					isStreaming: true,
+					error: null,
+					streamStartTime: Date.now()
+				};
+			})
+		}));
+
+		// Build overrides
+		const currentTab = getTab(tabId);
+		const overrides: Record<string, string> = {};
+		if (currentTab?.modelOverride) overrides.model = currentTab.modelOverride;
+		if (currentTab?.permissionModeOverride) overrides.permission_mode = currentTab.permissionModeOverride;
+		if (currentTab?.thinkingModeOverride) overrides.thinking_mode = currentTab.thinkingModeOverride;
+
+		// Send query via WebSocket
+		tabLastMessageTime.set(tabId, Date.now());
+		ws.send(JSON.stringify({
+			type: 'query',
+			prompt: nextQueued.content,
+			session_id: tab.sessionId,
+			profile: tab.profile,
+			project: tab.project || undefined,
+			...(Object.keys(overrides).length > 0 ? { overrides } : {})
+		}));
+	}
+
 	// Wire up stream-end callback for cleanup and JSONL refresh.
 	// Note: Notifications are handled by the 'done' handler (which fires before onStreamEnd).
 	// This callback focuses on: sessionState cleanup + authoritative JSONL refresh.
@@ -796,6 +867,7 @@ function createTabsStore() {
 			modelOverride?: string | null;
 			permissionModeOverride?: string | null;
 			thinkingModeOverride?: string | null;
+			queuedMessages?: QueuedMessage[];
 		}> | undefined;
 		const activeTabId = data.activeTabId as string | undefined;
 		const sourceDeviceId = data.source_device_id as string | undefined;
@@ -857,6 +929,7 @@ function createTabsStore() {
 					pendingPermissions: [],
 					pendingQuestions: [],
 					todos: [],
+					queuedMessages: syncedTab.queuedMessages || [],
 					draft: '',
 					scrollTop: 0,
 					streamStartTime: null,
@@ -2354,6 +2427,10 @@ function createTabsStore() {
 				// Save tabs state since sessionId may have changed (debounced)
 				saveTabsToServer(get({ subscribe }));
 
+				// Process queued "Send Later" messages (only on natural done, NOT on interrupt/stop/error).
+				// Delay to let the done cleanup pipeline (final poll, session state flush) complete.
+				setTimeout(() => processNextQueuedMessage(tabId), 500);
+
 				// Safety: ensure cleanup if the poller pipeline fails (network error, /live down).
 				// The primary cleanup happens in onStreamEnd (fired by poller on streaming→not-streaming),
 				// but if the final poll never completes, stale data would persist.
@@ -3030,6 +3107,7 @@ function createTabsStore() {
 						pendingPermissions: [],
 						pendingQuestions: [],
 						todos: [],
+						queuedMessages: pt.queuedMessages || [],
 						draft: '',
 						scrollTop: 0,
 						streamStartTime: null,
@@ -3133,6 +3211,7 @@ function createTabsStore() {
 				pendingPermissions: [],
 				pendingQuestions: [],
 				todos: [],
+				queuedMessages: [],
 				draft: '',
 				scrollTop: 0,
 				streamStartTime: null,
@@ -3960,6 +4039,55 @@ function createTabsStore() {
 		},
 
 		/**
+		 * Queue a message for "Send Later" (sent when current stream completes naturally)
+		 */
+		queueMessage(tabId: string, content: string) {
+			const id = `queued-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+			update(s => ({
+				...s,
+				tabs: s.tabs.map(tab => {
+					if (tab.id !== tabId) return tab;
+					return {
+						...tab,
+						queuedMessages: [...tab.queuedMessages, { id, content, queuedAt: Date.now() }]
+					};
+				})
+			}));
+			saveTabsToServer(get({ subscribe }));
+		},
+
+		/**
+		 * Remove a queued message by ID
+		 */
+		removeQueuedMessage(tabId: string, messageId: string) {
+			update(s => ({
+				...s,
+				tabs: s.tabs.map(tab => {
+					if (tab.id !== tabId) return tab;
+					return {
+						...tab,
+						queuedMessages: tab.queuedMessages.filter(m => m.id !== messageId)
+					};
+				})
+			}));
+			saveTabsToServer(get({ subscribe }));
+		},
+
+		/**
+		 * Clear all queued messages for a tab
+		 */
+		clearQueuedMessages(tabId: string) {
+			update(s => ({
+				...s,
+				tabs: s.tabs.map(tab => {
+					if (tab.id !== tabId) return tab;
+					return { ...tab, queuedMessages: [] };
+				})
+			}));
+			saveTabsToServer(get({ subscribe }));
+		},
+
+		/**
 		 * Set execution mode for a tab
 		 */
 		setTabExecutionMode(tabId: string, mode: ExecutionMode) {
@@ -4086,6 +4214,7 @@ function createTabsStore() {
 				pendingPermissions: [],
 				pendingQuestions: [],
 				todos: [],
+				queuedMessages: [],
 				draft: '',
 				scrollTop: 0,
 				streamStartTime: null,
