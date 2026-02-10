@@ -4,6 +4,7 @@ Main FastAPI application entry point
 """
 
 import logging
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -214,6 +215,47 @@ class LimitRequestBodyMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(LimitRequestBodyMiddleware)
 
+
+class AccessLogMiddleware(BaseHTTPMiddleware):
+    """Log only error responses (4xx/5xx) and slow requests.
+
+    Replaces uvicorn's default access log (disabled via access_log=False)
+    to eliminate noise from frequent successful polling requests.
+    """
+
+    SLOW_REQUEST_THRESHOLD_MS = 5000
+
+    SKIP_PATHS = frozenset({"/health", "/api/v1/health", "/favicon.ico", "/favicon.svg"})
+    SKIP_PREFIXES = ("/_app/", "/static/")
+
+    async def dispatch(self, request: Request, call_next):
+        start = time.monotonic()
+        response = await call_next(request)
+        duration_ms = (time.monotonic() - start) * 1000
+
+        path = request.url.path
+        status_code = response.status_code
+
+        if path in self.SKIP_PATHS or path.startswith(self.SKIP_PREFIXES):
+            return response
+
+        if status_code >= 400:
+            logger.warning(
+                '%s - "%s %s" %d (%.0fms)',
+                request.client.host if request.client else "-",
+                request.method, path, status_code, duration_ms,
+            )
+        elif duration_ms >= self.SLOW_REQUEST_THRESHOLD_MS:
+            logger.warning(
+                'SLOW %s - "%s %s" %d (%.0fms)',
+                request.client.host if request.client else "-",
+                request.method, path, status_code, duration_ms,
+            )
+
+        return response
+
+app.add_middleware(AccessLogMiddleware)
+
 # Rate limit middleware - enforce per-user rate limits
 app.add_middleware(RateLimitMiddleware)
 
@@ -343,6 +385,7 @@ if __name__ == "__main__":
         port=settings.port,
         log_level=settings.log_level.lower(),
         reload=False,
+        access_log=False,  # Replaced by AccessLogMiddleware (only logs errors/slow requests)
         # Increase WebSocket max message size from default 1MB to 10MB
         # This is a safety net - payloads should be truncated before hitting this limit
         ws_max_size=10 * 1024 * 1024  # 10MB
