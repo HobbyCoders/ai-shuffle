@@ -124,6 +124,7 @@ export const isAdmin = derived(auth, $auth => $auth.status?.is_admin ?? false);
 export const setupRequired = derived(auth, $auth => $auth.status?.setup_required ?? false);
 export const claudeAuthenticated = derived(auth, $auth => $auth.status?.claude_authenticated ?? false);
 export const githubAuthenticated = derived(auth, $auth => $auth.status?.github_authenticated ?? false);
+export const onboardingComplete = derived(auth, $auth => $auth.status?.onboarding_complete ?? true);
 export const username = derived(auth, $auth => $auth.status?.username ?? null);
 export const apiUser = derived(auth, $auth => $auth.status?.api_user ?? null);
 export const authLoading = derived(auth, $auth => $auth.loading);

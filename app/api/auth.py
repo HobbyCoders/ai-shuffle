@@ -341,6 +341,7 @@ async def get_auth_status(request: Request):
         "setup_required": auth_service.is_setup_required(),
         "claude_authenticated": auth_service.is_claude_authenticated(),
         "github_authenticated": auth_service.is_github_authenticated(),
+        "onboarding_complete": auth_service.is_onboarding_complete(),
         "username": username,
         "api_user": api_user_info
     }
@@ -1077,10 +1078,38 @@ async def github_login(request: Request, token: str = Depends(require_admin)):
         )
 
 
+@router.post("/github/login/web")
+async def github_login_web(request: Request, token: str = Depends(require_admin)):
+    """
+    Start GitHub CLI device flow authentication (gh auth login --web).
+    Returns a one-time code and verification URL for the user.
+    Poll GET /auth/github/status for completion.
+    """
+    try:
+        return await auth_service.github_login_web()
+    except Exception as e:
+        logger.error(f"GitHub web login error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
 @router.post("/github/logout")
 async def github_logout(token: str = Depends(require_admin)):
     """Logout from GitHub CLI"""
     return auth_service.github_logout()
+
+
+# =========================================================================
+# Onboarding
+# =========================================================================
+
+@router.post("/onboarding/complete")
+async def complete_onboarding(token: str = Depends(require_admin)):
+    """Mark the onboarding flow as complete"""
+    auth_service.set_onboarding_complete()
+    return {"status": "ok", "message": "Onboarding completed"}
 
 
 @router.get("/diagnostics")

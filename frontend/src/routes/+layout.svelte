@@ -3,7 +3,7 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { auth, isAuthenticated, setupRequired, claudeAuthenticated } from '$lib/stores/auth';
+	import { auth, isAuthenticated, setupRequired, claudeAuthenticated, onboardingComplete } from '$lib/stores/auth';
 	import { theme } from '$lib/stores/theme';
 	import { pwa, hasUpdate, isOnline } from '$lib/stores/pwa';
 	import { chatPreferences } from '$lib/stores/chatPreferences';
@@ -48,9 +48,13 @@
 
 			if ($setupRequired && path !== '/setup') {
 				goto('/setup');
+			} else if ($isAuthenticated && !$onboardingComplete && path !== '/setup') {
+				goto('/setup');
 			} else if (!$isAuthenticated && !$setupRequired && path !== '/login') {
 				goto('/login');
-			} else if ($isAuthenticated && (path === '/login' || path === '/setup')) {
+			} else if ($isAuthenticated && path === '/login') {
+				goto('/');
+			} else if ($isAuthenticated && path === '/setup' && $onboardingComplete) {
 				goto('/');
 			}
 		} catch (e) {

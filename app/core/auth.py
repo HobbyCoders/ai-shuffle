@@ -123,6 +123,9 @@ class AuthService:
         else:
             self.gh_config_dir = home / '.config' / 'gh'
 
+        # Background process for GitHub web login device flow
+        self._gh_web_login_process: Optional[subprocess.Popen] = None
+
         # Note: OAuth state is now managed by direct_oauth module (app/core/oauth.py)
 
     # =========================================================================
@@ -649,6 +652,144 @@ class AuthService:
             }
 
     # =========================================================================
+    # GitHub Device Flow (gh auth login --web)
+    # =========================================================================
+
+    async def github_login_web(self) -> Dict[str, Any]:
+        """
+        Start GitHub CLI device flow authentication (gh auth login --web).
+        Runs gh in a background subprocess, parses the one-time code from output,
+        and returns it to the caller. The frontend polls GET /auth/github/status
+        for completion.
+        """
+        import re
+        import threading
+
+        # Clean up any existing process
+        if self._gh_web_login_process is not None:
+            try:
+                self._gh_web_login_process.kill()
+            except Exception:
+                pass
+            self._gh_web_login_process = None
+
+        try:
+            gh_cmd = find_gh_executable()
+            if not gh_cmd:
+                return {
+                    "success": False,
+                    "error": "GitHub CLI (gh) is not installed. Install it from https://cli.github.com/",
+                    "install_url": "https://cli.github.com/"
+                }
+
+            home_env = os.environ.get('HOME', str(Path.home()))
+            self.gh_config_dir.mkdir(parents=True, exist_ok=True)
+
+            env = {**os.environ, 'HOME': home_env}
+            # Prevent gh from trying to open a browser automatically
+            env['BROWSER'] = ''
+            env['GH_BROWSER'] = ' '
+
+            cmd = [gh_cmd, 'auth', 'login', '--hostname', 'github.com',
+                   '--git-protocol', 'https', '--web']
+
+            # On Windows, .cmd files need shell=True
+            use_shell = sys.platform == 'win32' and gh_cmd.endswith('.cmd')
+            if use_shell:
+                cmd_str = ' '.join(f'"{c}"' if ' ' in c else c for c in cmd)
+            else:
+                cmd_str = cmd
+
+            proc = subprocess.Popen(
+                cmd_str,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+                shell=use_shell,
+            )
+            self._gh_web_login_process = proc
+
+            # Read stderr in a thread to capture the device code
+            output_lines: list[str] = []
+
+            def read_output():
+                try:
+                    for stream in [proc.stderr, proc.stdout]:
+                        if stream is None:
+                            continue
+                        for line in stream:
+                            output_lines.append(line)
+                except Exception:
+                    pass
+
+            reader = threading.Thread(target=read_output, daemon=True)
+            reader.start()
+            reader.join(timeout=15)
+
+            # Parse the one-time code from output
+            all_output = ''.join(output_lines)
+            code_match = re.search(r'([A-Z0-9]{4}-[A-Z0-9]{4})', all_output)
+
+            if not code_match:
+                # Clean up the process
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                self._gh_web_login_process = None
+                logger.warning(f"Could not parse device code from gh output: {all_output[:200]}")
+                return {
+                    "success": False,
+                    "error": "Could not start GitHub device flow. Try using a personal access token instead."
+                }
+
+            user_code = code_match.group(1)
+            logger.info(f"GitHub device flow started, code: {user_code}")
+
+            # Send Enter to stdin to proceed (gh waits for Enter before opening browser)
+            try:
+                if proc.stdin:
+                    proc.stdin.write('\n')
+                    proc.stdin.flush()
+            except Exception:
+                pass
+
+            return {
+                "success": True,
+                "user_code": user_code,
+                "verification_url": "https://github.com/login/device"
+            }
+
+        except Exception as e:
+            logger.error(f"GitHub web login error: {e}")
+            if self._gh_web_login_process is not None:
+                try:
+                    self._gh_web_login_process.kill()
+                except Exception:
+                    pass
+                self._gh_web_login_process = None
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    # =========================================================================
+    # Onboarding
+    # =========================================================================
+
+    def is_onboarding_complete(self) -> bool:
+        """Check if the full onboarding flow has been completed"""
+        val = database.get_system_setting("onboarding_complete")
+        return val == "true"
+
+    def set_onboarding_complete(self) -> None:
+        """Mark the onboarding flow as complete"""
+        database.set_system_setting("onboarding_complete", "true")
+        logger.info("Onboarding marked as complete")
+
+    # =========================================================================
     # Claude Code OAuth Login (Direct OAuth - no PTY/CLI interaction needed)
     # =========================================================================
 
@@ -785,6 +926,7 @@ class AuthService:
             "authenticated": False,  # Set by middleware based on session
             "claude_authenticated": claude_auth,
             "github_authenticated": github_auth,
+            "onboarding_complete": self.is_onboarding_complete(),
             "username": self.get_admin_username() if not setup_required else None
         }
 

@@ -125,6 +125,7 @@ export interface AuthStatus {
 	setup_required: boolean;
 	claude_authenticated: boolean;
 	github_authenticated: boolean;
+	onboarding_complete: boolean;
 	username: string | null;
 	api_user: ApiUserInfo | null;
 }

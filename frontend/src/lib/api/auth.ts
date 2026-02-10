@@ -70,6 +70,70 @@ export async function getClaudeLoginInstructions(): Promise<{
 	return api.get('/auth/claude/login-instructions');
 }
 
+// Claude OAuth flow
+export async function startClaudeLogin(forceReauth: boolean = false): Promise<{
+	success: boolean;
+	oauth_url?: string;
+	state?: string;
+	already_authenticated?: boolean;
+	message?: string;
+	requires_code?: boolean;
+	error?: string;
+}> {
+	return api.post('/auth/claude/login', { force_reauth: forceReauth });
+}
+
+export async function completeClaudeLogin(code: string, state: string): Promise<{
+	success: boolean;
+	message: string;
+	error?: string;
+}> {
+	return api.post('/auth/claude/complete', { code, state });
+}
+
+export async function pollClaudeLogin(): Promise<{
+	success: boolean;
+	authenticated: boolean;
+	message: string;
+}> {
+	return api.get('/auth/claude/login/poll');
+}
+
+// GitHub auth
+export async function startGithubWebLogin(): Promise<{
+	success: boolean;
+	user_code?: string;
+	verification_url?: string;
+	error?: string;
+	install_url?: string;
+}> {
+	return api.post('/auth/github/login/web');
+}
+
+export async function loginGithubWithToken(token: string): Promise<{
+	success: boolean;
+	message: string;
+	error?: string;
+}> {
+	return api.post('/auth/github/login', { token });
+}
+
+export async function getGithubAuthStatus(): Promise<{
+	authenticated: boolean;
+	user: string | null;
+	config_dir: string;
+}> {
+	return api.get('/auth/github/status');
+}
+
+// Onboarding
+export async function completeOnboarding(): Promise<{
+	status: string;
+	message: string;
+}> {
+	return api.post('/auth/onboarding/complete');
+}
+
 // Workspace configuration (for local mode setup)
 export async function getWorkspaceConfig(): Promise<import('./client').WorkspaceConfig> {
 	return api.get('/workspace/config');
