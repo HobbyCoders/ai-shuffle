@@ -117,7 +117,8 @@ const UPDATE_EVENTS = new Set([
 	'error',
 	// Plugin events
 	'plugin_message',
-	// Sync events
+	// Sync engine broadcast events
+	'stream_chunk',
 	'message_added',
 	'messages_updated',
 	'streaming_update',
