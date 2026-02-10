@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
-	import { auth, authLoading, authError } from '$lib/stores/auth';
+	import { auth, authLoading, authError, setupRequired } from '$lib/stores/auth';
 	import {
 		getWorkspaceConfig,
 		setWorkspaceConfig,
@@ -84,6 +84,14 @@
 			console.error('Failed to load workspace config:', e);
 		} finally {
 			loadingConfig = false;
+		}
+
+		// If admin already exists, skip the admin creation step.
+		// This handles the case where a user lands on setup after upgrading
+		// from a version before the setup flow existed.
+		if (!$setupRequired && currentStep === 'admin') {
+			completedSteps.add('admin');
+			advanceStep();
 		}
 	});
 

@@ -359,6 +359,10 @@ async def setup_admin(request: SetupRequest, response: Response):
     try:
         result = auth_service.setup_admin(request.username, request.password)
 
+        # Mark that onboarding was started via the setup flow so
+        # is_onboarding_complete() can distinguish new installs from upgrades
+        db.set_system_setting("onboarding_started", "true")
+
         # Set encryption key in memory (derived from password)
         try:
             encryption.set_encryption_key(request.password, db)

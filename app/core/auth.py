@@ -782,7 +782,19 @@ class AuthService:
     def is_onboarding_complete(self) -> bool:
         """Check if the full onboarding flow has been completed"""
         val = database.get_system_setting("onboarding_complete")
-        return val == "true"
+        if val == "true":
+            return True
+        # If admin exists but the onboarding flow was never started via the
+        # setup page, this is a user who created their admin before the setup
+        # flow was introduced. Auto-mark onboarding as complete so they aren't
+        # stuck on a setup screen that won't let them re-create an admin.
+        if not self.is_setup_required():
+            onboarding_started = database.get_system_setting("onboarding_started")
+            if onboarding_started is None:
+                logger.info("Admin exists but onboarding was never started — auto-completing onboarding for upgraded user")
+                self.set_onboarding_complete()
+                return True
+        return False
 
     def set_onboarding_complete(self) -> None:
         """Mark the onboarding flow as complete"""
