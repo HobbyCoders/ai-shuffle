@@ -221,9 +221,10 @@
 	//    with 500ms debounce.
 	// 3. Programmatic broadcast — API mutation endpoints (commit, push, checkout, etc.)
 	//    immediately recompute and broadcast state after operations complete.
-	// A 60-second safety-net fallback poll catches any missed events.
+	// A 10-second safety-net fallback poll catches any missed events
+	// (e.g. working-tree edits made outside the app, which don't touch .git/).
 
-	const GIT_FALLBACK_INTERVAL_MS = 60_000;
+	const GIT_FALLBACK_INTERVAL_MS = 10_000;
 	let _gitFallbackTimer: ReturnType<typeof setInterval> | null = null;
 
 	/**
@@ -251,7 +252,7 @@
 		}
 	}
 
-	// Safety-net fallback poll: refreshes diff stats every 60s when tab is visible.
+	// Safety-net fallback poll: refreshes diff stats every 10s when tab is visible.
 	// Real-time updates come via WebSocket from git hooks, file watcher, and API broadcasts.
 	$effect(() => {
 		const project = activeProject;
