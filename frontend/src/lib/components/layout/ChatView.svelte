@@ -120,7 +120,12 @@
 		{:else}
 			<!-- Active chat: Messages + input at bottom -->
 			<div class="message-area-wrapper">
-				<MessageArea {tab} />
+				<!-- Key by tabId so MessageArea is destroyed/recreated on tab switch.
+				     Without this, Svelte reuses the same component instance and the
+				     onMount/onDestroy scroll-position save/restore logic never fires. -->
+				{#key tabId}
+					<MessageArea {tab} />
+				{/key}
 			</div>
 
 			<div class="input-wrapper">
