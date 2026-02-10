@@ -248,8 +248,10 @@
 		50% { opacity: 0.6; }
 	}
 
-	/* Desktop centering */
-	@media (min-width: 640px) {
+	/* Desktop centering — raised to 1024px so foldable/tablet touch devices
+	   (640–1023px) use the simpler space-between flexbox instead of absolute
+	   positioning, which causes header-left / header-right overlap on those screens. */
+	@media (min-width: 1024px) {
 		.page-header {
 			position: relative;
 		}

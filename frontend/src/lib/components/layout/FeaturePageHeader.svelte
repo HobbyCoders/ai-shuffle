@@ -326,9 +326,11 @@
 	}
 
 	/* -----------------------------------------------------------------------
-	   DESKTOP CENTERING
+	   DESKTOP CENTERING — raised to 1024px so foldable/tablet touch devices
+	   (640–1023px) use simpler space-between flexbox instead of absolute
+	   positioning, which causes overlap on those screens.
 	   ----------------------------------------------------------------------- */
-	@media (min-width: 640px) {
+	@media (min-width: 1024px) {
 		.fph-main {
 			position: relative;
 		}
