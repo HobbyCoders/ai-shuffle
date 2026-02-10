@@ -299,12 +299,15 @@ async def upload_file(
     file: UploadFile = File(...),
     path: str = Form(default=""),
     session_id: str = Form(default=""),
+    worktree_id: str = Form(default=""),
     token: str = Depends(require_auth)
 ):
     """Upload a file to a specific path within the project. API users can only access their assigned project.
 
     If session_id is provided and the session is linked to a worktree, the file
     is uploaded to the worktree's working directory instead of the main project path.
+    If worktree_id is provided directly (e.g. before a session exists), it is used
+    as a fallback to resolve the worktree.
     """
     check_project_access(request, project_id)
     project = database.get_project(project_id)
@@ -314,15 +317,18 @@ async def upload_file(
             detail=f"Project not found: {project_id}"
         )
 
-    # Determine base path: use worktree path if session is linked to one
+    # Determine base path: use worktree path if session or worktree_id resolves one
     base_project_path = project["path"]
+    worktree = None
     if session_id:
         worktree = database.get_worktree_by_session(session_id)
-        if worktree and worktree.get("worktree_path"):
-            # Verify the worktree directory actually exists on disk
-            worktree_full = Path(get_worktree_working_dir(worktree))
-            if worktree_full.exists():
-                base_project_path = worktree["worktree_path"]
+    if not worktree and worktree_id:
+        worktree = database.get_worktree(worktree_id)
+    if worktree and worktree.get("worktree_path"):
+        # Verify the worktree directory actually exists on disk
+        worktree_full = Path(get_worktree_working_dir(worktree))
+        if worktree_full.exists():
+            base_project_path = worktree["worktree_path"]
 
     # Build target directory path
     if path:

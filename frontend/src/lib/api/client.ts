@@ -81,11 +81,14 @@ export class ApiClient {
 		return response.json();
 	}
 
-	async uploadFile(path: string, file: File, sessionId?: string): Promise<FileUploadResponse> {
+	async uploadFile(path: string, file: File, sessionId?: string, worktreeId?: string): Promise<FileUploadResponse> {
 		const formData = new FormData();
 		formData.append('file', file);
 		if (sessionId) {
 			formData.append('session_id', sessionId);
+		}
+		if (worktreeId) {
+			formData.append('worktree_id', worktreeId);
 		}
 
 		const response = await fetch(`${API_BASE}${path}`, {

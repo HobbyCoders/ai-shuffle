@@ -473,7 +473,12 @@
 		try {
 			for (const file of Array.from(files)) {
 				console.debug(`[Upload] Uploading file: "${file.name}" (${file.size} bytes)`);
-				const result = await api.uploadFile(`/projects/${liveTab.project}/upload`, file, liveTab.sessionId ?? undefined);
+				const result = await api.uploadFile(
+					`/projects/${liveTab.project}/upload`,
+					file,
+					liveTab.sessionId ?? undefined,
+					liveTab.executionMode === 'worktree' ? liveTab.worktreeId ?? undefined : undefined
+				);
 				console.debug(`[Upload] Response for "${file.name}": filename="${result.filename}", path="${result.path}"`);
 				if (result.filename !== file.name && !result.filename.startsWith(file.name.replace(/\.[^.]+$/, ''))) {
 					console.warn(`[Upload] Filename mismatch! Uploaded "${file.name}" but server returned "${result.filename}"`);
