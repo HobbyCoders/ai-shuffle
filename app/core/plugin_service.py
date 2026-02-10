@@ -739,6 +739,76 @@ class PluginService:
             readme=readme
         )
 
+    def get_available_plugin_details(self, plugin_id: str) -> Optional[PluginDetails]:
+        """Get detailed information about an available (not-yet-installed) plugin from its marketplace path."""
+        available = self.get_available_plugins()
+        plugin = next((p for p in available if p.id == plugin_id), None)
+        if not plugin:
+            return None
+
+        plugin_path = Path(plugin.marketplace_path)
+        if not plugin_path.exists():
+            return None
+
+        parts = plugin_id.rsplit("@", 1)
+        name = parts[0]
+        marketplace = parts[1] if len(parts) > 1 else "unknown"
+
+        # Collect commands
+        commands = []
+        commands_dir = plugin_path / "commands"
+        if commands_dir.exists():
+            for cmd_file in commands_dir.glob("**/*.md"):
+                commands.append(cmd_file.stem)
+
+        # Collect agents
+        agents = []
+        agents_dir = plugin_path / "agents"
+        if agents_dir.exists():
+            for agent_file in agents_dir.glob("**/*.md"):
+                agents.append(agent_file.stem)
+
+        # Collect skills
+        skills = []
+        skills_dir = plugin_path / "skills"
+        if skills_dir.exists():
+            for skill_dir in skills_dir.iterdir():
+                if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
+                    skills.append(skill_dir.name)
+
+        has_hooks = (plugin_path / "hooks").exists() or (plugin_path / "hooks.json").exists()
+        has_mcp = (plugin_path / ".mcp.json").exists()
+
+        # Read README
+        readme = None
+        readme_path = plugin_path / "README.md"
+        if readme_path.exists():
+            try:
+                readme = readme_path.read_text(encoding='utf-8')
+            except (IOError, UnicodeDecodeError):
+                pass
+
+        return PluginDetails(
+            id=plugin_id,
+            name=name,
+            marketplace=marketplace,
+            description=plugin.description,
+            version="available",
+            scope="marketplace",
+            install_path=str(plugin_path),
+            installed_at=None,
+            enabled=False,
+            has_commands=bool(commands),
+            has_agents=bool(agents),
+            has_skills=bool(skills),
+            has_hooks=has_hooks,
+            has_mcp=has_mcp,
+            commands=commands,
+            agents=agents,
+            skills=skills,
+            readme=readme
+        )
+
     # =========================================================================
     # Plugin Installation
     # =========================================================================

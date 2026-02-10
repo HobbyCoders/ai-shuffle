@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * PluginListItem - Individual plugin display component
+	 * PluginListItem - Individual plugin display as an App Store-style grid card
 	 *
 	 * Displays plugin information with different modes:
 	 * - available: Shows install button, selection for batch install
@@ -41,47 +41,51 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 <div
-	class="card-list-item card-system {selected ? 'ring-2 ring-primary' : ''}"
+	class="plugin-grid-card card-system {selected ? 'plugin-grid-card--selected' : ''}"
 	onclick={onDetails}
 >
-	<!-- Checkbox for batch selection (available mode only) -->
-	{#if mode === 'available' && !availablePlugin?.installed}
-		<button
-			onclick={(e) => { e.stopPropagation(); onSelect?.(); }}
-			class="batch-checkbox {selected ? 'selected' : ''}"
-		>
-			{#if selected}
-				<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
-				</svg>
-			{/if}
-		</button>
-	{/if}
+	<!-- Card header: icon + info -->
+	<div class="plugin-grid-card-header">
+		{#if mode === 'available' && !availablePlugin?.installed}
+			<button
+				onclick={(e) => { e.stopPropagation(); onSelect?.(); }}
+				class="batch-checkbox {selected ? 'selected' : ''}"
+			>
+				{#if selected}
+					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+					</svg>
+				{/if}
+			</button>
+		{/if}
 
-	<!-- Plugin icon -->
-	<div class="card-item-icon">
-		<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-		</svg>
+		<div class="plugin-grid-card-icon">
+			<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+			</svg>
+		</div>
+
+		<div class="plugin-grid-card-info">
+			<span class="plugin-grid-card-name">{plugin.name}</span>
+			<div class="plugin-grid-card-chips">
+				<span class="card-badge card-badge--muted">{plugin.marketplace}</span>
+				{#if mode === 'installed' && installedPlugin}
+					<span class="card-badge {installedPlugin.enabled ? 'card-badge--success' : 'card-badge--muted'}">
+						{installedPlugin.enabled ? 'Enabled' : 'Disabled'}
+					</span>
+				{:else if mode === 'available' && availablePlugin?.installed}
+					<span class="card-badge card-badge--success">Installed</span>
+				{/if}
+			</div>
+		</div>
 	</div>
 
-	<!-- Plugin info -->
-	<div class="card-item-content">
-		<div class="card-item-header">
-			<span class="card-item-name">{plugin.name}</span>
-			<span class="card-badge card-badge--muted">{plugin.marketplace}</span>
-			{#if mode === 'installed' && installedPlugin}
-				<span class="card-badge {installedPlugin.enabled ? 'card-badge--success' : 'card-badge--muted'}">
-					{installedPlugin.enabled ? 'Enabled' : 'Disabled'}
-				</span>
-			{:else if mode === 'available' && availablePlugin?.installed}
-				<span class="card-badge card-badge--success">Installed</span>
-			{/if}
-		</div>
-		<p class="card-item-description">{plugin.description || 'No description available'}</p>
+	<!-- Description -->
+	<p class="plugin-grid-card-description">{plugin.description || 'No description available'}</p>
 
-		<!-- Feature badges -->
-		<div class="feature-badges">
+	<!-- Feature badges -->
+	{#if plugin.has_commands || plugin.has_agents || plugin.has_skills || plugin.has_hooks || plugin.has_mcp}
+		<div class="plugin-grid-card-features">
 			{#if plugin.has_commands}
 				<span class="card-badge card-badge--feature-commands">Commands</span>
 			{/if}
@@ -97,15 +101,12 @@
 			{#if plugin.has_mcp}
 				<span class="card-badge card-badge--feature-mcp">MCP</span>
 			{/if}
-			{#if mode === 'installed' && installedPlugin}
-				<span class="card-badge card-badge--muted">v{installedPlugin.version}</span>
-			{/if}
 		</div>
-	</div>
+	{/if}
 
-	<!-- Actions -->
+	<!-- Actions row -->
 	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-	<div class="card-item-actions" onclick={(e) => e.stopPropagation()}>
+	<div class="plugin-grid-card-actions" onclick={(e) => e.stopPropagation()}>
 		{#if mode === 'available'}
 			{#if availablePlugin?.installed}
 				<span class="version-info">v{availablePlugin.installed_version}</span>
@@ -135,32 +136,38 @@
 				<span class="toggle-knob"></span>
 			</button>
 
-			<!-- Details button -->
-			<button
-				onclick={onDetails}
-				class="card-action-btn"
-				title="View details"
-			>
-				<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-				</svg>
-			</button>
-
-			<!-- Uninstall button -->
-			<button
-				onclick={onUninstall}
-				disabled={installing}
-				class="card-action-btn card-action-btn--destructive"
-				title="Uninstall"
-			>
-				{#if installing}
-					<span class="card-spinner card-spinner--small"></span>
-				{:else}
-					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-					</svg>
+			<div class="plugin-grid-card-actions-right">
+				{#if installedPlugin}
+					<span class="version-info">v{installedPlugin.version}</span>
 				{/if}
-			</button>
+
+				<!-- Details button -->
+				<button
+					onclick={onDetails}
+					class="card-action-btn"
+					title="View details"
+				>
+					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+					</svg>
+				</button>
+
+				<!-- Uninstall button -->
+				<button
+					onclick={onUninstall}
+					disabled={installing}
+					class="card-action-btn card-action-btn--destructive"
+					title="Uninstall"
+				>
+					{#if installing}
+						<span class="card-spinner card-spinner--small"></span>
+					{:else}
+						<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+						</svg>
+					{/if}
+				</button>
+			</div>
 		{/if}
 	</div>
 </div>
@@ -194,14 +201,6 @@
 		width: 12px;
 		height: 12px;
 		color: var(--primary-foreground);
-	}
-
-	/* Feature badges row */
-	.feature-badges {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 4px;
-		margin-top: 6px;
 	}
 
 	/* Feature badge colors */
@@ -270,6 +269,7 @@
 		border: none;
 		cursor: pointer;
 		transition: background var(--transition-fast, 100ms);
+		flex-shrink: 0;
 	}
 
 	.toggle-switch.enabled {

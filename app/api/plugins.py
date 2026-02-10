@@ -306,9 +306,13 @@ async def get_plugin_details(
     plugin_id: str,
     token: str = Depends(require_auth)
 ):
-    """Get detailed information about a specific plugin"""
+    """Get detailed information about a plugin (installed or available)"""
     service = get_plugin_service()
+
+    # Try installed first, then fall back to available
     plugin = service.get_plugin_details(plugin_id)
+    if not plugin:
+        plugin = service.get_available_plugin_details(plugin_id)
 
     if not plugin:
         raise HTTPException(

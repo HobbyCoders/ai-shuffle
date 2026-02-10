@@ -61,6 +61,7 @@
 
 	type Tab = 'marketplaces' | 'available' | 'installed' | 'details';
 	let activeTab = $state<Tab>('installed');
+	let previousTab = $state<Tab>('installed');
 	let searchQuery = $state('');
 	let selectedMarketplaceFilter = $state<string | ''>('');
 
@@ -121,6 +122,7 @@
 
 	// Handle plugin selection
 	async function handleSelectPlugin(pluginId: string) {
+		previousTab = activeTab;
 		await plugins.selectPlugin(pluginId);
 		activeTab = 'details';
 	}
@@ -233,7 +235,7 @@
 											<FolderOpen size={16} />
 											{marketplace}
 										</h3>
-										<div class="plugin-items">
+										<div class="plugin-grid">
 											{#each filtered as plugin (plugin.id)}
 												<PluginListItem
 													{plugin}
@@ -275,7 +277,7 @@
 								</button>
 							</div>
 						{:else}
-							<div class="plugin-items">
+							<div class="plugin-grid">
 								{#each filteredInstalled() as plugin (plugin.id)}
 									<PluginListItem
 										{plugin}
@@ -294,8 +296,12 @@
 						plugin={$selectedPlugin}
 						onClose={() => {
 							plugins.clearSelectedPlugin();
-							activeTab = 'installed';
+							activeTab = previousTab;
 						}}
+						onInstall={() => {
+							plugins.installPlugin($selectedPlugin.id);
+						}}
+						installing={$pluginInstalling[$selectedPlugin.id] || false}
 					/>
 				{/if}
 			</div>
@@ -403,6 +409,20 @@
 						class="fph-search-input"
 					/>
 				</div>
+			{/if}
+			{#if activeTab === 'available'}
+				{#if selectedForInstall.size > 0}
+					<button
+						onclick={handleBatchInstall}
+						disabled={batchInstalling}
+						class="batch-install-btn"
+					>
+						{#if batchInstalling}
+							<Loader2 size={16} class="animate-spin" />
+						{/if}
+						Install ({selectedForInstall.size})
+					</button>
+				{/if}
 			{/if}
 		{/snippet}
 		{#snippet children()}
@@ -733,11 +753,7 @@
 		margin-bottom: 12px;
 	}
 
-	.plugin-items {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
+	/* Plugin grid is defined in card-design-system.css */
 
 	.empty-state {
 		display: flex;
