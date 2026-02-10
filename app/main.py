@@ -94,6 +94,18 @@ if not root_logger.handlers:
 
 logger = logging.getLogger(__name__)
 
+# Filter out noisy WebSocket connection logs from uvicorn
+# (e.g., "('127.0.0.1', 55839) - "WebSocket /api/v1/ws/chat..." [accepted]")
+class _UvicornWebSocketFilter(logging.Filter):
+    """Suppress routine WebSocket accepted/open/closed messages."""
+    NOISE = ("connection open", "connection closed", "[accepted]")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not any(phrase in msg for phrase in self.NOISE)
+
+logging.getLogger("uvicorn.error").addFilter(_UvicornWebSocketFilter())
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
