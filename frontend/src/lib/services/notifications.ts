@@ -4,110 +4,22 @@
  * Handles requesting permission and showing browser notifications
  * for long-running task completion.
  *
- * Notification enabled state is persisted to localStorage (for instant access)
- * and synced to server (for cross-device persistence).
+ * Notifications are always active when permission is granted — no toggle needed.
+ * Permission is requested automatically when visiting the main page.
  */
 
-import { getPreference, setPreference } from '$lib/api/client';
-
-// Notification permission state
-let permissionState: NotificationPermission | 'unsupported' = 'default';
-
-// Server sync state
-const SERVER_PREFERENCE_KEY = 'notifications';
-let hasSyncedFromServer = false;
-let serverSyncTimer: ReturnType<typeof setTimeout> | null = null;
-
-interface NotificationPreferences {
-	enabled: boolean;
-}
-
-/**
- * Save notification preference to server (debounced)
- */
-function saveToServer(enabled: boolean): void {
-	if (typeof window === 'undefined') return;
-
-	if (!hasSyncedFromServer) {
-		return;
-	}
-
-	if (serverSyncTimer) {
-		clearTimeout(serverSyncTimer);
-	}
-
-	serverSyncTimer = setTimeout(async () => {
-		try {
-			await setPreference(SERVER_PREFERENCE_KEY, { enabled });
-		} catch (e) {
-			console.error('[Notifications] Failed to save to server:', e);
-		}
-		serverSyncTimer = null;
-	}, 500);
-}
-
-/**
- * Sync notification preferences from server
- */
-export async function syncNotificationsFromServer(): Promise<void> {
-	if (typeof window === 'undefined') return;
-
-	try {
-		const response = await getPreference<NotificationPreferences>(SERVER_PREFERENCE_KEY);
-		const serverPrefs = response?.value as NotificationPreferences | undefined;
-
-		if (serverPrefs) {
-			const localEnabled = localStorage.getItem('notifications_enabled') === 'true';
-			if (serverPrefs.enabled !== localEnabled) {
-				localStorage.setItem('notifications_enabled', serverPrefs.enabled ? 'true' : 'false');
-			}
-		} else {
-			// No server data - push local to server
-			const localEnabled = localStorage.getItem('notifications_enabled') === 'true';
-			hasSyncedFromServer = true;
-			if (localEnabled) {
-				saveToServer(localEnabled);
-			}
-			return;
-		}
-	} catch (e) {
-		console.error('[Notifications] Failed to sync from server:', e);
-	}
-
-	hasSyncedFromServer = true;
-}
-
-/**
- * Check if browser notifications are supported
- */
-export function isSupported(): boolean {
+function isSupported(): boolean {
+	if (typeof window === 'undefined') return false;
 	return 'Notification' in window;
 }
 
-/**
- * Get current notification permission state
- */
-export function getPermission(): NotificationPermission | 'unsupported' {
+async function requestPermission(): Promise<NotificationPermission | 'unsupported'> {
 	if (!isSupported()) {
 		return 'unsupported';
 	}
-	return Notification.permission;
-}
-
-/**
- * Request notification permission from the user
- * Returns the permission state after the request
- */
-export async function requestPermission(): Promise<NotificationPermission | 'unsupported'> {
-	if (!isSupported()) {
-		permissionState = 'unsupported';
-		return permissionState;
-	}
 
 	try {
-		const result = await Notification.requestPermission();
-		permissionState = result;
-		return result;
+		return await Notification.requestPermission();
 	} catch (error) {
 		console.error('Failed to request notification permission:', error);
 		return 'denied';
@@ -115,13 +27,26 @@ export async function requestPermission(): Promise<NotificationPermission | 'uns
 }
 
 /**
- * Show a browser notification
- *
- * @param title - Notification title
- * @param options - Notification options (body, icon, etc.)
- * @returns The Notification object if successful, null otherwise
+ * Request notification permission if not yet determined.
+ * Called automatically on main page visit.
  */
-export function showNotification(
+export async function requestPermissionIfNeeded(): Promise<void> {
+	// Clean up legacy toggle preference from localStorage
+	if (typeof localStorage !== 'undefined') {
+		localStorage.removeItem('notifications_enabled');
+	}
+
+	if (!isSupported()) return;
+	if (Notification.permission === 'default') {
+		await requestPermission();
+	}
+}
+
+/**
+ * Show a browser notification.
+ * Returns null silently if notifications are unsupported or permission is not granted.
+ */
+function showNotification(
 	title: string,
 	options?: {
 		body?: string;
@@ -131,13 +56,7 @@ export function showNotification(
 		onClick?: () => void;
 	}
 ): Notification | null {
-	if (!isSupported()) {
-		console.warn('Browser notifications not supported');
-		return null;
-	}
-
-	if (Notification.permission !== 'granted') {
-		console.warn('Notification permission not granted');
+	if (!isSupported() || Notification.permission !== 'granted') {
 		return null;
 	}
 
@@ -172,9 +91,6 @@ export interface SessionCompleteInfo {
 	model?: string;
 }
 
-/**
- * Format duration in a human-readable way
- */
 function formatDuration(seconds: number): string {
 	if (seconds < 60) {
 		return `${Math.round(seconds)}s`;
@@ -189,9 +105,6 @@ function formatDuration(seconds: number): string {
 	return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
 }
 
-/**
- * Format cost in a readable way
- */
 function formatCost(cost: number): string {
 	if (cost < 0.01) {
 		return `$${cost.toFixed(4)}`;
@@ -203,21 +116,10 @@ function formatCost(cost: number): string {
 }
 
 /**
- * Show a notification for session completion
- *
- * @param info - Session completion information including title, duration, cost, etc.
+ * Show a notification for session completion.
  */
 export function notifySessionComplete(info: SessionCompleteInfo): Notification | null {
 	const { sessionTitle, sessionId, durationSeconds, totalCostUsd } = info;
-
-	const title = 'Session Complete';
-
-	// Build body with session title, duration, and cost
-	const parts: string[] = [];
-
-	if (sessionTitle) {
-		parts.push(sessionTitle);
-	}
 
 	const details: string[] = [];
 	if (durationSeconds !== undefined && durationSeconds > 0) {
@@ -227,53 +129,30 @@ export function notifySessionComplete(info: SessionCompleteInfo): Notification |
 		details.push(formatCost(totalCostUsd));
 	}
 
+	const detailStr = details.join(' \u00b7 ');
 	let body: string;
-	if (parts.length > 0 && details.length > 0) {
-		body = `${parts.join('')} (${details.join(' · ')})`;
-	} else if (parts.length > 0) {
-		body = parts.join('');
-	} else if (details.length > 0) {
-		body = `Completed in ${details.join(' · ')}`;
+	if (sessionTitle && detailStr) {
+		body = `${sessionTitle} (${detailStr})`;
+	} else if (sessionTitle) {
+		body = sessionTitle;
+	} else if (detailStr) {
+		body = `Completed in ${detailStr}`;
 	} else {
 		body = 'Your AI session has completed';
 	}
 
-	return showNotification(title, {
+	return showNotification('Session Complete', {
 		body,
 		tag: `session-${sessionId}-${Date.now()}`,
 		onClick: () => {
-			// Navigate to the session
 			window.location.hash = '';
-			// The session should already be active if using WebSocket
 		}
 	});
 }
 
 /**
- * Show a notification for session error
- *
- * @param sessionTitle - The title of the session
- * @param errorMessage - Brief error description
- */
-export function notifySessionError(
-	sessionTitle: string | null,
-	errorMessage?: string
-): Notification | null {
-	const title = 'Session Error';
-	const body = errorMessage || `Error in session: ${sessionTitle || 'Unknown session'}`;
-
-	return showNotification(title, {
-		body,
-		requireInteraction: true
-	});
-}
-
-/**
- * Show a notification when AI is waiting for user response (permission or question)
- * Only shows if window is not focused (user is away)
- *
- * @param type - Type of waiting notification ('permission' or 'question')
- * @param details - Additional context about what's being requested
+ * Show a notification when AI is waiting for user response (permission or question).
+ * Only shows if the window is not focused (user is away).
  */
 export function notifyWaitingForResponse(
 	type: 'permission' | 'question',
@@ -283,7 +162,6 @@ export function notifyWaitingForResponse(
 		sessionTitle?: string;
 	}
 ): Notification | null {
-	// Don't notify if window is focused - user can already see the request
 	if (typeof document !== 'undefined' && document.hasFocus()) {
 		return null;
 	}
@@ -307,45 +185,9 @@ export function notifyWaitingForResponse(
 	return showNotification(title, {
 		body,
 		tag: `waiting-${type}-${Date.now()}`,
-		requireInteraction: true, // Keep notification visible until user interacts
+		requireInteraction: true,
 		onClick: () => {
-			// Focus the window when notification is clicked
 			window.focus();
 		}
 	});
-}
-
-/**
- * Check if notifications are enabled in localStorage
- */
-export function isNotificationsEnabled(): boolean {
-	if (typeof localStorage === 'undefined') return false;
-	return localStorage.getItem('notifications_enabled') === 'true';
-}
-
-/**
- * Set notifications enabled state in localStorage and sync to server
- */
-export function setNotificationsEnabled(enabled: boolean): void {
-	if (typeof localStorage === 'undefined') return;
-	localStorage.setItem('notifications_enabled', enabled ? 'true' : 'false');
-	// Sync to server
-	saveToServer(enabled);
-}
-
-/**
- * Initialize notifications (call on app start)
- * Returns true if notifications are ready to use
- */
-export async function initializeNotifications(): Promise<boolean> {
-	if (!isSupported()) {
-		return false;
-	}
-
-	// If user has enabled notifications but hasn't granted permission yet, request it
-	if (isNotificationsEnabled() && Notification.permission === 'default') {
-		await requestPermission();
-	}
-
-	return Notification.permission === 'granted' && isNotificationsEnabled();
 }

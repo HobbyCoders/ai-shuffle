@@ -5,7 +5,7 @@
 	 * Streamlined categories:
 	 * - Account: General, Security, Connections (merged)
 	 * - AI: API Keys & Model Selection (merged, compact)
-	 * - System: Users, Notifications, Cleanup (merged)
+	 * - System: Users, Webhooks, Cleanup (merged)
 	 */
 	import BaseCard from './BaseCard.svelte';
 	import type { DeckCard } from './types';
@@ -17,13 +17,6 @@
 	import type { ApiUser, ApiUserWithKey, Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/appState';
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword } from '$lib/api/auth';
-	import {
-		isSupported as isNotificationsSupported,
-		getPermission,
-		requestPermission,
-		isNotificationsEnabled,
-		setNotificationsEnabled
-	} from '$lib/services/notifications';
 	import WebhookManager from '$lib/components/WebhookManager.svelte';
 	import TwoFactorSetup from '$lib/components/TwoFactorSetup.svelte';
 	import RateLimitManager from '$lib/components/RateLimitManager.svelte';
@@ -207,12 +200,6 @@
 	let passwordChangeError = $state('');
 	let passwordChangeSuccess = $state('');
 
-	// Notifications
-	let browserNotificationsEnabled = $state(false);
-	let browserNotificationsSupported = $state(false);
-	let notificationPermission = $state<NotificationPermission | 'unsupported'>('default');
-	let requestingPermission = $state(false);
-
 	// Chat Behavior Preferences
 	let chatPrefs = $state<ChatPreferences | null>(null);
 
@@ -240,7 +227,6 @@
 		if ($isAdmin) {
 			loadAllData();
 		}
-		loadNotificationSettings();
 		loadChatPreferences();
 
 		// Subscribe to chat preferences store
@@ -251,31 +237,8 @@
 		return () => unsubscribe();
 	});
 
-	function loadNotificationSettings() {
-		browserNotificationsSupported = isNotificationsSupported();
-		notificationPermission = getPermission();
-		browserNotificationsEnabled = isNotificationsEnabled();
-	}
-
 	async function loadChatPreferences() {
 		await chatPreferences.load();
-	}
-
-	async function toggleBrowserNotifications() {
-		if (!browserNotificationsSupported) return;
-		if (!browserNotificationsEnabled) {
-			if (notificationPermission === 'default') {
-				requestingPermission = true;
-				const result = await requestPermission();
-				requestingPermission = false;
-				notificationPermission = result;
-				if (result !== 'granted') return;
-			} else if (notificationPermission === 'denied') {
-				return;
-			}
-		}
-		browserNotificationsEnabled = !browserNotificationsEnabled;
-		setNotificationsEnabled(browserNotificationsEnabled);
 	}
 
 	async function loadAllData() {
@@ -1947,44 +1910,16 @@
 							{/if}
 						</section>
 
-						<!-- Notifications Section -->
+						<!-- Webhooks Section -->
 						<section class="section">
-							<button class="section-header" onclick={() => toggleSection('notifications')}>
-								<h3>Notifications</h3>
-								<svg class="chevron" class:expanded={expandedSections.has('notifications')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<button class="section-header" onclick={() => toggleSection('webhooks')}>
+								<h3>Webhooks</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('webhooks')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 									<polyline points="6 9 12 15 18 9"/>
 								</svg>
 							</button>
-							{#if expandedSections.has('notifications')}
+							{#if expandedSections.has('webhooks')}
 								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
-									<!-- Browser Notifications -->
-									<div class="setting-row">
-										<div class="setting-info">
-											<label>Browser Notifications</label>
-											<span class="setting-desc">
-												{#if !browserNotificationsSupported}
-													Not supported in this browser
-												{:else if notificationPermission === 'denied'}
-													Blocked — enable in browser settings
-												{:else}
-													Get notified when tasks complete
-												{/if}
-											</span>
-										</div>
-										<button
-											onclick={toggleBrowserNotifications}
-											disabled={!browserNotificationsSupported || notificationPermission === 'denied' || requestingPermission}
-											class="toggle"
-											class:active={browserNotificationsEnabled}
-										>
-											<span class="toggle-knob"></span>
-										</button>
-									</div>
-
-									<hr class="divider" />
-
-									<!-- Webhooks -->
-									<h4 class="subsection-title">Webhooks</h4>
 									<WebhookManager />
 								</div>
 							{/if}

@@ -14,7 +14,7 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile } from '$lib/api/client';
 import { api } from '$lib/api/client';
-import { isNotificationsEnabled, notifySessionComplete, getPermission, type SessionCompleteInfo } from '$lib/services/notifications';
+import { notifySessionComplete, type SessionCompleteInfo } from '$lib/services/notifications';
 
 export type MessageType = 'text' | 'tool_use' | 'tool_result' | 'plugin_warning';
 
@@ -773,21 +773,19 @@ function createChatStore() {
 					};
 				});
 
-				// Trigger browser notification if enabled and permission granted
-				if (isNotificationsEnabled() && getPermission() === 'granted') {
-					const session = currentState.sessions.find(s => s.id === sessionId);
-					const sessionTitle = session?.title || (metadata?.title as string) || null;
+				// Trigger browser notification (showNotification checks permission internally)
+				const session = currentState.sessions.find(s => s.id === sessionId);
+				const sessionTitle = session?.title || (metadata?.title as string) || null;
 
-					notifySessionComplete({
-						sessionId: sessionId || '',
-						sessionTitle,
-						durationSeconds,
-						totalCostUsd: metadata?.total_cost_usd as number | undefined,
-						tokensIn: metadata?.tokens_in as number | undefined,
-						tokensOut: metadata?.tokens_out as number | undefined,
-						model: metadata?.model as string | undefined
-					});
-				}
+				notifySessionComplete({
+					sessionId: sessionId || '',
+					sessionTitle,
+					durationSeconds,
+					totalCostUsd: metadata?.total_cost_usd as number | undefined,
+					tokensIn: metadata?.tokens_in as number | undefined,
+					tokensOut: metadata?.tokens_out as number | undefined,
+					model: metadata?.model as string | undefined
+				});
 
 				// Refresh sessions list
 				loadSessionsInternal();

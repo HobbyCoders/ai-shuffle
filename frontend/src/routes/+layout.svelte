@@ -10,7 +10,6 @@
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
 	import { files } from '$lib/stores/files';
 	import { onDestroy } from 'svelte';
-	import { syncNotificationsFromServer } from '$lib/services/notifications';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 	import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
 	import OfflineBanner from '$lib/components/OfflineBanner.svelte';
@@ -36,8 +35,7 @@
 					chatPreferences.load(),
 					hotkeyPreferences.syncFromServer(),
 					theme.syncFromServer(),
-					files.syncFromServer(),
-					syncNotificationsFromServer()
+					files.syncFromServer()
 				]);
 			}
 

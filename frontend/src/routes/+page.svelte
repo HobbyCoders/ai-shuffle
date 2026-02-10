@@ -41,6 +41,7 @@
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import GlobalSttIndicator from '$lib/components/GlobalSttIndicator.svelte';
 	import { initGlobalStt } from '$lib/services/globalStt';
+	import { requestPermissionIfNeeded } from '$lib/services/notifications';
 
 	// ============================================
 	// State: Modals
@@ -254,6 +255,10 @@
 				action: () => { showAdvancedSearch = !showAdvancedSearch; }
 			})
 		];
+
+		// Request notification permission if not yet determined (works on both desktop and mobile)
+		// Fire-and-forget: non-critical, errors handled internally
+		void requestPermissionIfNeeded();
 
 		// Initialize global STT
 		cleanupGlobalStt = initGlobalStt();

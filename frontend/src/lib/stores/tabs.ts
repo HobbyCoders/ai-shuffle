@@ -10,7 +10,7 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Session, Profile, PermissionRequest as PermissionRequestType, UserQuestionRequest, PaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
 import { api, searchSessionsPaginated } from '$lib/api/client';
-import { isNotificationsEnabled, notifySessionComplete, notifyWaitingForResponse, getPermission } from '$lib/services/notifications';
+import { notifySessionComplete, notifyWaitingForResponse } from '$lib/services/notifications';
 import { deck } from './deck';
 import { getDeviceIdSync } from './device';
 import {
@@ -2314,19 +2314,17 @@ function createTabsStore() {
 					})
 				}));
 
-				// Trigger browser notification if enabled and permission granted
+				// Trigger browser notification (showNotification checks permission internally)
 				const doneTab = getTab(tabId);
-				if (isNotificationsEnabled() && getPermission() === 'granted') {
-					notifySessionComplete({
-						sessionId: sessionId || '',
-						sessionTitle: doneTab?.title ?? null,
-						durationSeconds,
-						totalCostUsd: metadata?.total_cost_usd as number | undefined,
-						tokensIn: metadata?.tokens_in as number | undefined,
-						tokensOut: metadata?.tokens_out as number | undefined,
-						model: metadata?.model as string | undefined
-					});
-				}
+				notifySessionComplete({
+					sessionId: sessionId || '',
+					sessionTitle: doneTab?.title ?? null,
+					durationSeconds,
+					totalCostUsd: metadata?.total_cost_usd as number | undefined,
+					tokensIn: metadata?.tokens_in as number | undefined,
+					tokensOut: metadata?.tokens_out as number | undefined,
+					model: metadata?.model as string | undefined
+				});
 
 				// Refresh sessions list
 				loadSessionsInternal();
@@ -2610,12 +2608,10 @@ function createTabsStore() {
 					queue_total: data.queue_total as number | undefined
 				};
 
-				// Send desktop notification if user is not focused on the window
-				if (isNotificationsEnabled()) {
-					notifyWaitingForResponse('permission', {
-						toolName: request.tool_name
-					});
-				}
+				// Send notification if user is not focused on the window
+				notifyWaitingForResponse('permission', {
+					toolName: request.tool_name
+				});
 
 				update(s => ({
 					...s,
@@ -2701,12 +2697,10 @@ function createTabsStore() {
 					questions: normalizedQuestions
 				};
 
-				// Send desktop notification if user is not focused on the window
-				if (isNotificationsEnabled()) {
-					notifyWaitingForResponse('question', {
-						questionCount: request.questions.length
-					});
-				}
+				// Send notification if user is not focused on the window
+				notifyWaitingForResponse('question', {
+					questionCount: request.questions.length
+				});
 
 				update(s => ({
 					...s,
