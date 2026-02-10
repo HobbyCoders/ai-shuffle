@@ -105,7 +105,7 @@ function createGitStore() {
 
     /**
      * Core load logic shared by loadRepository and loadForWorktree.
-     * Loads data in optimal order: status → parallel(branches, commits, worktrees, diffStats) → background fetch.
+     * Batches all API results into a single store update to prevent UI flicker.
      */
     async function _loadCore(
         key: string,
@@ -113,34 +113,21 @@ function createGitStore() {
         worktreeId: string | undefined,
         mode: GitMode
     ) {
-        // Restore cached state instantly if available
+        // Restore cached state instantly if available (spreading null is a no-op)
         const cached = _restoreFromCache(key);
-        if (cached) {
-            update(s => ({
-                ...s,
-                projectId,
-                worktreeId: worktreeId ?? null,
-                mode,
-                ...cached,
-                loading: true,
-                error: null
-            }));
-        } else {
-            update(s => ({
-                ...s,
-                projectId,
-                worktreeId: worktreeId ?? null,
-                mode,
-                loading: true,
-                error: null
-            }));
-        }
+        update(s => ({
+            ...s,
+            projectId,
+            worktreeId: worktreeId ?? null,
+            mode,
+            ...cached,
+            loading: true,
+            error: null
+        }));
 
         try {
             const status = await gitApi.getGitStatus(projectId, worktreeId);
             if (_loadInFlight !== key) return;
-
-            update(s => ({ ...s, status }));
 
             if (status.is_git_repo) {
                 // Load all data in parallel — don't wait for fetchRemote
@@ -160,6 +147,7 @@ function createGitStore() {
                     diffStats: diffStats ?? null
                 };
 
+                // Single batched update — status + all parallel data at once
                 update(s => ({
                     ...s,
                     ...newState,
@@ -172,7 +160,7 @@ function createGitStore() {
                 // Background fetch — update ahead/behind counts after network completes
                 _backgroundFetch(key, projectId, worktreeId);
             } else {
-                update(s => ({ ...s, loading: false }));
+                update(s => ({ ...s, status, loading: false }));
                 _loadedKey = key;
             }
         } catch (e) {
@@ -208,8 +196,9 @@ function createGitStore() {
                     cached.branches = branches;
                 }
 
-                // Only update live store if still the active key
-                if (_loadedKey === key) {
+                // Only update live store if still the active key and no new load
+                // has started (which would supersede this stale background data)
+                if (_loadedKey === key && !_loadInFlight) {
                     update(s => ({ ...s, status, branches }));
                 }
             } catch {
@@ -250,11 +239,15 @@ function createGitStore() {
 
         /**
          * Immediately restore cached state for a key, or show empty with loading.
-         * Does NOT trigger any network requests or change _loadedKey/_loadInFlight.
-         * Used for instant tab-switch display before the debounced network load fires.
+         * Updates _loadedKey so that stale background fetches and WebSocket updates
+         * from the previous tab are rejected during the debounce window.
+         * Does NOT trigger any network requests.
          */
         restoreCacheImmediate(projectId: string, worktreeId?: string | null, mode: GitMode = 'project') {
             const key = _makeKey(projectId, worktreeId ?? undefined);
+            // Claim ownership immediately so stale responses from the old tab
+            // (background fetches, WebSocket pushes) won't overwrite the store.
+            _loadedKey = key;
             const cached = _cache.get(key); // peek only, don't LRU-reorder
             if (cached) {
                 set({

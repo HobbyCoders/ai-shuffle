@@ -1680,8 +1680,9 @@ function createTabsStore() {
 		if (msgType === 'user_branch_changed') {
 			const projectId = data.project_id as string;
 			// Refresh git state if we're currently viewing this project
+			// Skip if already loading (a full load will supersede this)
 			const gitState = get(git);
-			if (gitState.projectId === projectId) {
+			if (gitState.projectId === projectId && !gitState.loading) {
 				git.refreshStatus();
 				git.refreshDiffStats();
 			}

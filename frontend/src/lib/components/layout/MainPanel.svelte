@@ -268,10 +268,8 @@
 		}
 
 		if (project && authenticated) {
-			// Initial refresh on project/auth change
-			untrack(() => refreshDiffStats(project));
-
 			// Fallback poll — only when tab is visible
+			// (Initial load is handled by git.loadRepository / git.loadForWorktree above)
 			_gitFallbackTimer = setInterval(() => {
 				if (!document.hidden) {
 					refreshDiffStats(project);
