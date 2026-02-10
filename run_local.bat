@@ -39,6 +39,12 @@ if not exist "venv\Scripts\python.exe" (
     goto :setup
 )
 
+REM Check if frontend is built
+if not exist "app\static\index.html" (
+    echo [INFO] Frontend not built. Running setup first...
+    goto :setup
+)
+
 goto :start
 
 :setup
@@ -69,18 +75,23 @@ if %errorlevel% neq 0 (
 )
 echo [OK] Dependencies installed
 
-REM Install frontend dependencies if npm is available
+REM Build frontend if npm is available
 where npm >nul 2>&1
 if %errorlevel% equ 0 (
-    if not exist "frontend\node_modules" (
-        echo [INFO] Installing frontend dependencies...
+    if not exist "app\static\index.html" (
+        echo [INFO] Building frontend...
         cd frontend
-        call npm install
+        npm install
+        npm run build
         cd ..
-        echo [OK] Frontend dependencies installed
+        if exist "frontend\build" (
+            if exist "app\static" rmdir /s /q "app\static"
+            robocopy "frontend\build" "app\static" /e /njh /njs /ndl /nc /ns /nfl >nul
+            echo [OK] Frontend built
+        )
     )
 ) else (
-    echo [WARN] npm not found - skipping frontend setup
+    echo [WARN] npm not found - skipping frontend build
     echo [INFO] Install Node.js from https://nodejs.org if you need the web UI
 )
 
@@ -104,23 +115,6 @@ if "%1"=="--setup" (
 )
 
 :start
-REM Always rebuild frontend before starting
-where npm >nul 2>&1
-if %errorlevel% equ 0 (
-    echo [INFO] Building frontend...
-    cd frontend
-    call npm run build || echo Build completed with warnings
-    cd ..
-    echo [INFO] Removing old static files...
-    if exist "app\static" rmdir /s /q "app\static"
-    echo [INFO] Copying build to app\static...
-    robocopy "frontend\build" "app\static" /e /njh /njs /ndl /nc /ns /nfl >nul
-    echo [OK] Frontend built
-) else (
-    echo [WARN] npm not found - skipping frontend build
-)
-echo.
-
 echo [INFO] Starting AI Hub...
 echo [INFO] Press Ctrl+C to stop
 echo.
