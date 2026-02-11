@@ -86,7 +86,7 @@ async function loadFromBackend(): Promise<GroupsState | null> {
 
 		if (response.ok) {
 			const data = await response.json();
-			if (data.value) {
+			if (data && data.value) {
 				// Merge with defaults to ensure all fields exist
 				return {
 					projects: { ...defaultState.projects, ...data.value.projects },
