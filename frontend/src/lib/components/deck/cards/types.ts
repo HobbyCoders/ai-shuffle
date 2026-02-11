@@ -8,14 +8,12 @@ export type CardType =
   | 'profile'
   | 'subagent'
   | 'project'
-  | 'user-settings'
   | 'file-browser'
   | 'plugins'
   | 'mcp'
   | 'notes'
   | 'hooks'
-  | 'stats'
-  | 'api-user-sessions';
+  | 'stats';
 
 export interface DeckCard {
   id: string;
@@ -43,14 +41,12 @@ export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: numbe
   profile: { width: 600, height: 620 },
   subagent: { width: 550, height: 580 },
   project: { width: 480, height: 520 },
-  'user-settings': { width: 650, height: 550 },
   'file-browser': { width: 600, height: 500 },
   plugins: { width: 650, height: 550 },
   mcp: { width: 600, height: 550 },
   notes: { width: 600, height: 550 },
   hooks: { width: 650, height: 550 },
   stats: { width: 700, height: 600 },
-  'api-user-sessions': { width: 700, height: 600 },
 };
 
 export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }> = {
@@ -59,14 +55,12 @@ export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }>
   profile: { width: 450, height: 400 },
   subagent: { width: 400, height: 350 },
   project: { width: 360, height: 300 },
-  'user-settings': { width: 500, height: 400 },
   'file-browser': { width: 400, height: 350 },
   plugins: { width: 500, height: 450 },
   mcp: { width: 450, height: 400 },
   notes: { width: 400, height: 350 },
   hooks: { width: 500, height: 400 },
   stats: { width: 500, height: 400 },
-  'api-user-sessions': { width: 500, height: 400 },
 };
 
 /**

@@ -24,7 +24,7 @@ import { sessionState } from './session/session-state';
 
 // Extracted modules (Phase 6)
 import type {
-	ApiUser, MessageType, SubagentChildMessage, TodoItem, ChatMessage,
+	MessageType, SubagentChildMessage, TodoItem, ChatMessage,
 	Project, ExecutionMode, ChatTab, TabsState, PersistedTab, PersistedTabsState,
 	QueuedMessage
 } from './tabs/types';
@@ -36,7 +36,7 @@ import { messageCache } from './message-cache';
 
 // Re-export types for backwards compatibility
 export type {
-	ApiUser, MessageType, SubagentChildMessage, TodoItem, ChatMessage,
+	MessageType, SubagentChildMessage, TodoItem, ChatMessage,
 	Project, ExecutionMode, ChatTab, QueuedMessage
 };
 
@@ -385,19 +385,13 @@ function createTabsStore() {
 		profiles: [],
 		projects: [],
 		sessions: [],
-		adminSessions: [],
-		apiUsers: [],
-		adminSessionsFilter: null,
 		// Initialize selection state
 		selectedSessionIds: new Set<string>(),
-		selectedAdminSessionIds: new Set<string>(),
 		selectionMode: false,
-		adminSelectionMode: false,
 		// Initialize loading state
 		sessionsLoading: false,
 		// Initialize tag filter state
 		sessionsTagFilter: null,
-		adminSessionsTagFilter: null,
 		// Pagination state
 		sessionsTotal: 0,
 		sessionsOffset: 0,
@@ -2880,13 +2874,10 @@ function createTabsStore() {
 
 	/**
 	 * Load sessions list (user's own sessions) with pagination
-	 * For admins: loads sessions where api_user_id IS NULL (their own chats)
-	 * For API users: the backend automatically filters to their sessions
 	 */
 	async function loadSessionsInternal(tagId?: string | null) {
 		update(s => ({ ...s, sessionsLoading: true }));
 		try {
-			// Load user's own sessions (admin_only=true for admins gets sessions without api_user_id)
 			let url = `/sessions/paginated?limit=${SESSIONS_PAGE_SIZE}&offset=0&admin_only=true`;
 			if (tagId) {
 				url += `&tag_id=${encodeURIComponent(tagId)}`;
@@ -3018,46 +3009,6 @@ function createTabsStore() {
 		}));
 	}
 
-	/**
-	 * Load admin sessions (all API user sessions for admin view)
-	 */
-	async function loadAdminSessionsInternal(apiUserId?: string | null, tagId?: string | null) {
-		try {
-			let url = `/sessions/paginated?limit=${SESSIONS_PAGE_SIZE}&offset=0`;
-			if (apiUserId) {
-				// Filter by specific API user
-				url += `&api_user_id=${encodeURIComponent(apiUserId)}`;
-			} else {
-				// Show all API user sessions (exclude admin's own sessions)
-				url += '&api_users_only=true';
-			}
-			if (tagId) {
-				url += `&tag_id=${encodeURIComponent(tagId)}`;
-			}
-			const result = await api.get<PaginatedSessions>(url);
-			update(s => ({
-				...s,
-				adminSessions: result.items,
-				adminSessionsFilter: apiUserId ?? null,
-				adminSessionsTagFilter: tagId ?? null
-			}));
-		} catch (e) {
-			console.error('Failed to load admin sessions:', e);
-		}
-	}
-
-	/**
-	 * Load API users list (admin only)
-	 */
-	async function loadApiUsersInternal() {
-		try {
-			const apiUsers = await api.get<ApiUser[]>('/api-users');
-			update(s => ({ ...s, apiUsers }));
-		} catch (e) {
-			// Non-admins will get 403, that's expected
-			console.debug('Failed to load API users (may not be admin):', e);
-		}
-	}
 
 	return {
 		subscribe,
@@ -4263,27 +4214,9 @@ function createTabsStore() {
 			await loadMoreSessionsInternal();
 		},
 
-		async loadAdminSessions(apiUserId?: string | null, tagId?: string | null) {
-			await loadAdminSessionsInternal(apiUserId, tagId);
-		},
-
-		async loadApiUsers() {
-			await loadApiUsersInternal();
-		},
-
-		setAdminSessionsFilter(apiUserId: string | null) {
-			update(s => ({ ...s, adminSessionsFilter: apiUserId }));
-			loadAdminSessionsInternal(apiUserId);
-		},
-
 		setSessionsTagFilter(tagId: string | null) {
 			update(s => ({ ...s, sessionsTagFilter: tagId }));
 			loadSessionsInternal(tagId);
-		},
-
-		setAdminSessionsTagFilter(tagId: string | null, apiUserId?: string | null) {
-			update(s => ({ ...s, adminSessionsTagFilter: tagId }));
-			loadAdminSessionsInternal(apiUserId, tagId);
 		},
 
 		// Search functions
@@ -4344,51 +4277,24 @@ function createTabsStore() {
 		},
 
 		// Selection mode methods
-		toggleSelectionMode(isAdmin: boolean = false) {
-			update(s => {
-				if (isAdmin) {
-					return {
-						...s,
-						adminSelectionMode: !s.adminSelectionMode,
-						selectedAdminSessionIds: new Set<string>()
-					};
-				}
-				return {
-					...s,
-					selectionMode: !s.selectionMode,
-					selectedSessionIds: new Set<string>()
-				};
-			});
+		toggleSelectionMode() {
+			update(s => ({
+				...s,
+				selectionMode: !s.selectionMode,
+				selectedSessionIds: new Set<string>()
+			}));
 		},
 
-		exitSelectionMode(isAdmin: boolean = false) {
-			update(s => {
-				if (isAdmin) {
-					return {
-						...s,
-						adminSelectionMode: false,
-						selectedAdminSessionIds: new Set<string>()
-					};
-				}
-				return {
-					...s,
-					selectionMode: false,
-					selectedSessionIds: new Set<string>()
-				};
-			});
+		exitSelectionMode() {
+			update(s => ({
+				...s,
+				selectionMode: false,
+				selectedSessionIds: new Set<string>()
+			}));
 		},
 
-		toggleSessionSelection(sessionId: string, isAdmin: boolean = false) {
+		toggleSessionSelection(sessionId: string) {
 			update(s => {
-				if (isAdmin) {
-					const newSet = new Set(s.selectedAdminSessionIds);
-					if (newSet.has(sessionId)) {
-						newSet.delete(sessionId);
-					} else {
-						newSet.add(sessionId);
-					}
-					return { ...s, selectedAdminSessionIds: newSet };
-				}
 				const newSet = new Set(s.selectedSessionIds);
 				if (newSet.has(sessionId)) {
 					newSet.delete(sessionId);
@@ -4399,31 +4305,20 @@ function createTabsStore() {
 			});
 		},
 
-		selectAllSessions(isAdmin: boolean = false) {
+		selectAllSessions() {
 			update(s => {
-				if (isAdmin) {
-					const allIds = new Set(s.adminSessions.map(session => session.id));
-					return { ...s, selectedAdminSessionIds: allIds };
-				}
 				const allIds = new Set(s.sessions.map(session => session.id));
 				return { ...s, selectedSessionIds: allIds };
 			});
 		},
 
-		deselectAllSessions(isAdmin: boolean = false) {
-			update(s => {
-				if (isAdmin) {
-					return { ...s, selectedAdminSessionIds: new Set<string>() };
-				}
-				return { ...s, selectedSessionIds: new Set<string>() };
-			});
+		deselectAllSessions() {
+			update(s => ({ ...s, selectedSessionIds: new Set<string>() }));
 		},
 
-		async deleteSelectedSessions(isAdmin: boolean = false) {
+		async deleteSelectedSessions() {
 			const state = get({ subscribe });
-			const sessionIds = isAdmin
-				? Array.from(state.selectedAdminSessionIds)
-				: Array.from(state.selectedSessionIds);
+			const sessionIds = Array.from(state.selectedSessionIds);
 
 			if (sessionIds.length === 0) return;
 
@@ -4432,9 +4327,6 @@ function createTabsStore() {
 
 			// Reload sessions
 			await this.loadSessions();
-			if (isAdmin) {
-				await loadAdminSessionsInternal(state.adminSessionsFilter);
-			}
 
 			// Clear cached messages for deleted sessions
 			for (const id of sessionIds) {
@@ -4449,11 +4341,8 @@ function createTabsStore() {
 						? { ...tab, sessionId: null, sessionProfileId: null, currentQueryProfileId: null, messages: [], title: 'New Chat' }
 						: tab
 				),
-				// Exit selection mode and clear selections
-				selectionMode: isAdmin ? s.selectionMode : false,
-				adminSelectionMode: isAdmin ? false : s.adminSelectionMode,
-				selectedSessionIds: isAdmin ? s.selectedSessionIds : new Set<string>(),
-				selectedAdminSessionIds: isAdmin ? new Set<string>() : s.selectedAdminSessionIds
+				selectionMode: false,
+				selectedSessionIds: new Set<string>()
 			}));
 		},
 
@@ -4575,16 +4464,10 @@ export const activeTab = derived(tabs, $tabs => $tabs.tabs.find(t => t.id === $t
 export const profiles = derived(tabs, $tabs => $tabs.profiles);
 export const projects = derived(tabs, $tabs => $tabs.projects);
 export const sessions = derived(tabs, $tabs => $tabs.sessions);
-export const adminSessions = derived(tabs, $tabs => $tabs.adminSessions);
-export const apiUsers = derived(tabs, $tabs => $tabs.apiUsers);
-export const adminSessionsFilter = derived(tabs, $tabs => $tabs.adminSessionsFilter);
 // Selection state derived stores
 export const selectedSessionIds = derived(tabs, $tabs => $tabs.selectedSessionIds);
-export const selectedAdminSessionIds = derived(tabs, $tabs => $tabs.selectedAdminSessionIds);
 export const selectionMode = derived(tabs, $tabs => $tabs.selectionMode);
-export const adminSelectionMode = derived(tabs, $tabs => $tabs.adminSelectionMode);
 // Loading state
 export const sessionsLoading = derived(tabs, $tabs => $tabs.sessionsLoading);
 // Tag filter state
 export const sessionsTagFilter = derived(tabs, $tabs => $tabs.sessionsTagFilter);
-export const adminSessionsTagFilter = derived(tabs, $tabs => $tabs.adminSessionsTagFilter);

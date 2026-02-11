@@ -22,7 +22,7 @@ from app.core.auth import auth_service
 from app.core import encryption
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, api_users, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, user_self_service, meshy, notes, hooks, generation, project_agents, project_plugins, mcp, mobile, internal, workspace_files
+from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, meshy, notes, hooks, generation, project_agents, project_plugins, mcp, mobile, internal, workspace_files
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -304,7 +304,6 @@ app.include_router(profiles.router)
 app.include_router(projects.router)
 app.include_router(sessions.router)
 app.include_router(query.router)
-app.include_router(api_users.router)
 app.include_router(websocket.router)
 app.include_router(commands.router)
 app.include_router(preferences.router)
@@ -326,7 +325,6 @@ app.include_router(github.router)
 app.include_router(git.router)
 app.include_router(studio.router)
 app.include_router(plugins.router)
-app.include_router(user_self_service.router)
 app.include_router(meshy.router)
 app.include_router(notes.router)
 app.include_router(hooks.router)

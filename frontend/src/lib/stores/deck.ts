@@ -31,7 +31,6 @@ export type DeckCardType =
 	| 'chat'
 	| 'file-browser'
 	| 'settings'
-	| 'user-settings'
 	| 'profile'
 	| 'subagent'
 	| 'project'
@@ -40,7 +39,6 @@ export type DeckCardType =
 	| 'notes'
 	| 'stats'
 	| 'mcp'
-	| 'api-user-sessions';
 
 export type SnapZone =
 	| 'left'
@@ -396,8 +394,6 @@ function getDefaultTitle(type: DeckCardType): string {
 			return 'Notes';
 		case 'stats':
 			return 'Stats';
-		case 'api-user-sessions':
-			return 'API User Sessions';
 		default:
 			return 'Card';
 	}

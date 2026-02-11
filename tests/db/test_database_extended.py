@@ -70,6 +70,19 @@ def setup_project(mock_db):
     return project["id"]
 
 
+@pytest.fixture
+def setup_api_user(mock_db):
+    """Insert a test API user directly into the database."""
+    now = datetime.utcnow().isoformat()
+    mock_db.execute(
+        """INSERT INTO api_users (id, name, api_key_hash, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        ("user-1", "Test", "hash", True, now, now)
+    )
+    mock_db.commit()
+    return "user-1"
+
+
 # =============================================================================
 # User Credential Policy Tests
 # =============================================================================
@@ -78,19 +91,16 @@ def setup_project(mock_db):
 class TestUserCredentialPolicies:
     """Test user credential policy operations."""
 
-    def test_set_user_credential_policy(self, mock_db):
+    def test_set_user_credential_policy(self, mock_db, setup_api_user):
         """set_user_credential_policy should create a policy."""
-        db.create_api_user("user-1", "Test", "hash")
-
         # Valid policies: 'admin_provided', 'user_provided', 'optional'
         result = db.set_user_credential_policy("user-1", "openai_key", "user_provided")
 
         assert result is not None
         assert result["policy"] == "user_provided"
 
-    def test_get_user_credential_policy(self, mock_db):
+    def test_get_user_credential_policy(self, mock_db, setup_api_user):
         """get_user_credential_policy should return policy."""
-        db.create_api_user("user-1", "Test", "hash")
         db.set_user_credential_policy("user-1", "openai_key", "user_provided")
 
         result = db.get_user_credential_policy("user-1", "openai_key")
@@ -98,15 +108,13 @@ class TestUserCredentialPolicies:
         assert result is not None
         assert result["policy"] == "user_provided"
 
-    def test_get_user_credential_policy_not_found(self, mock_db):
+    def test_get_user_credential_policy_not_found(self, mock_db, setup_api_user):
         """get_user_credential_policy should return None for non-existent policy."""
-        db.create_api_user("user-1", "Test", "hash")
         result = db.get_user_credential_policy("user-1", "openai_key")
         assert result is None
 
-    def test_delete_user_credential_policy(self, mock_db):
+    def test_delete_user_credential_policy(self, mock_db, setup_api_user):
         """delete_user_credential_policy should remove policy."""
-        db.create_api_user("user-1", "Test", "hash")
         db.set_user_credential_policy("user-1", "openai_key", "user_provided")
 
         result = db.delete_user_credential_policy("user-1", "openai_key")
@@ -114,10 +122,8 @@ class TestUserCredentialPolicies:
         assert result is True
         assert db.get_user_credential_policy("user-1", "openai_key") is None
 
-    def test_get_all_user_credential_policies(self, mock_db):
+    def test_get_all_user_credential_policies(self, mock_db, setup_api_user):
         """get_all_user_credential_policies should return all policies for user."""
-        db.create_api_user("user-1", "Test", "hash")
-        # create_api_user may auto-create some default policies
         initial_count = len(db.get_all_user_credential_policies("user-1"))
 
         db.set_user_credential_policy("user-1", "custom_key", "user_provided")
@@ -127,56 +133,6 @@ class TestUserCredentialPolicies:
 
         # Should have added 2 more policies
         assert len(result) == initial_count + 2
-
-
-# =============================================================================
-# GitHub Config Tests
-# =============================================================================
-
-
-class TestUserGitHubConfig:
-    """Test user GitHub config operations."""
-
-    def test_set_user_github_config(self, mock_db):
-        """set_user_github_config should create config."""
-        db.create_api_user("user-1", "Test", "hash")
-
-        result = db.set_user_github_config(
-            "user-1",
-            github_username="testuser",
-            github_avatar_url="https://github.com/avatar.png",
-            default_repo="test/repo",
-            default_branch="main"
-        )
-
-        assert result is not None
-        assert result["github_username"] == "testuser"
-
-    def test_get_user_github_config(self, mock_db):
-        """get_user_github_config should return config for user."""
-        db.create_api_user("user-1", "Test", "hash")
-        db.set_user_github_config("user-1", github_username="testuser")
-
-        result = db.get_user_github_config("user-1")
-
-        assert result is not None
-        assert result["github_username"] == "testuser"
-
-    def test_get_user_github_config_not_found(self, mock_db):
-        """get_user_github_config should return None for non-existent config."""
-        db.create_api_user("user-1", "Test", "hash")
-        result = db.get_user_github_config("user-1")
-        assert result is None
-
-    def test_delete_user_github_config(self, mock_db):
-        """delete_user_github_config should remove config."""
-        db.create_api_user("user-1", "Test", "hash")
-        db.set_user_github_config("user-1", github_username="testuser")
-
-        result = db.delete_user_github_config("user-1")
-
-        assert result is True
-        assert db.get_user_github_config("user-1") is None
 
 
 # =============================================================================
@@ -234,9 +190,8 @@ class TestAnalyticsOperations:
 class TestRateLimitExtended:
     """Test extended rate limit operations."""
 
-    def test_update_rate_limit(self, mock_db):
+    def test_update_rate_limit(self, mock_db, setup_api_user):
         """update_rate_limit should update existing limit."""
-        db.create_api_user("user-1", "Test", "hash")
         db.create_rate_limit("rl-1", api_key_id="user-1", requests_per_minute=10)
 
         result = db.update_rate_limit("rl-1", requests_per_minute=20)

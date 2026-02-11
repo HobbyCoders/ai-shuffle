@@ -2602,21 +2602,6 @@ def _get_api_user_profile_ids(cursor, user_id: str) -> List[str]:
     return [row[0] for row in cursor.fetchall()]
 
 
-def _set_api_user_profile_ids(cursor, user_id: str, profile_ids: Optional[List[str]]):
-    """Set profile IDs for an API user (replaces existing)"""
-    # Clear existing associations
-    cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = ?", (user_id,))
-
-    # Add new associations
-    if profile_ids:
-        now = datetime.utcnow().isoformat()
-        for profile_id in profile_ids:
-            cursor.execute(
-                "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (?, ?, ?)",
-                (user_id, profile_id, now)
-            )
-
-
 def _enrich_api_user_with_profiles(cursor, user: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Add profile_ids to API user dict from junction table"""
     if not user:
@@ -2647,111 +2632,6 @@ def get_api_user_by_key_hash(key_hash: str) -> Optional[Dict[str, Any]]:
         return _enrich_api_user_with_profiles(cursor, user)
 
 
-def get_all_api_users() -> List[Dict[str, Any]]:
-    """Get all API users"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM api_users ORDER BY created_at DESC")
-        users = rows_to_list(cursor.fetchall())
-        # Enrich each user with profile_ids
-        for user in users:
-            _enrich_api_user_with_profiles(cursor, user)
-        return users
-
-
-def create_api_user(
-    user_id: str,
-    name: str,
-    api_key_hash: str,
-    project_id: Optional[str] = None,
-    profile_ids: Optional[List[str]] = None,
-    description: Optional[str] = None,
-    username: Optional[str] = None,
-    password_hash: Optional[str] = None,
-    web_login_allowed: bool = True
-) -> Dict[str, Any]:
-    """Create a new API user"""
-    now = datetime.utcnow().isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """INSERT INTO api_users (id, name, api_key_hash, project_id, description, username, password_hash, web_login_allowed, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, name, api_key_hash, project_id, description, username, password_hash, web_login_allowed, now, now)
-        )
-        # Set profile associations in junction table
-        if profile_ids:
-            _set_api_user_profile_ids(cursor, user_id, profile_ids)
-
-    # Create default credential policies for the new user
-    # By default, users must provide their own API keys
-    create_default_user_credential_policies(user_id)
-
-    return get_api_user(user_id)
-
-
-def update_api_user(
-    user_id: str,
-    name: Optional[str] = None,
-    project_id: Optional[str] = None,
-    profile_ids: Optional[List[str]] = None,
-    description: Optional[str] = None,
-    is_active: Optional[bool] = None,
-    web_login_allowed: Optional[bool] = None
-) -> Optional[Dict[str, Any]]:
-    """Update an API user"""
-    existing = get_api_user(user_id)
-    if not existing:
-        return None
-
-    updates = []
-    values = []
-    if name is not None:
-        updates.append("name = ?")
-        values.append(name)
-    if project_id is not None:
-        updates.append("project_id = ?")
-        values.append(project_id if project_id else None)
-    if description is not None:
-        updates.append("description = ?")
-        values.append(description)
-    if is_active is not None:
-        updates.append("is_active = ?")
-        values.append(is_active)
-    if web_login_allowed is not None:
-        updates.append("web_login_allowed = ?")
-        values.append(web_login_allowed)
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        if updates:
-            updates.append("updated_at = ?")
-            values.append(datetime.utcnow().isoformat())
-            values.append(user_id)
-            cursor.execute(
-                f"UPDATE api_users SET {', '.join(updates)} WHERE id = ?",
-                values
-            )
-
-        # Update profile associations if provided (empty list means "any profile")
-        if profile_ids is not None:
-            _set_api_user_profile_ids(cursor, user_id, profile_ids if profile_ids else None)
-
-    return get_api_user(user_id)
-
-
-def update_api_user_key(user_id: str, api_key_hash: str) -> Optional[Dict[str, Any]]:
-    """Update an API user's key"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE api_users SET api_key_hash = ?, updated_at = ? WHERE id = ?",
-            (api_key_hash, datetime.utcnow().isoformat(), user_id)
-        )
-    return get_api_user(user_id)
-
-
 def update_api_user_last_used(user_id: str):
     """Update the last_used_at timestamp for an API user"""
     with get_db() as conn:
@@ -2760,75 +2640,6 @@ def update_api_user_last_used(user_id: str):
             "UPDATE api_users SET last_used_at = ? WHERE id = ?",
             (datetime.utcnow().isoformat(), user_id)
         )
-
-
-def delete_api_user(user_id: str) -> bool:
-    """Delete an API user"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM api_users WHERE id = ?", (user_id,))
-        return cursor.rowcount > 0
-
-
-def get_api_user_by_username(username: str) -> Optional[Dict[str, Any]]:
-    """Get an API user by username"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM api_users WHERE username = ? AND is_active = TRUE",
-            (username,)
-        )
-        user = row_to_dict(cursor.fetchone())
-        return _enrich_api_user_with_profiles(cursor, user)
-
-
-def is_api_key_claimed(key_hash: str) -> bool:
-    """Check if an API key has already been claimed (has username/password set)"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT username FROM api_users WHERE api_key_hash = ?",
-            (key_hash,)
-        )
-        row = cursor.fetchone()
-        if row:
-            return row["username"] is not None
-        return False
-
-
-def claim_api_key(key_hash: str, username: str, password_hash: str) -> Optional[Dict[str, Any]]:
-    """
-    Claim an API key by setting username and password.
-    Returns the updated API user or None if the key doesn't exist or is already claimed.
-    """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        # First check if the key exists and isn't claimed
-        cursor.execute(
-            "SELECT id, username FROM api_users WHERE api_key_hash = ? AND is_active = TRUE",
-            (key_hash,)
-        )
-        row = cursor.fetchone()
-        if not row:
-            return None  # API key doesn't exist or is inactive
-        if row["username"] is not None:
-            return None  # Already claimed
-
-        # Claim it
-        user_id = row["id"]
-        cursor.execute(
-            "UPDATE api_users SET username = ?, password_hash = ?, updated_at = ? WHERE id = ?",
-            (username, password_hash, datetime.utcnow().isoformat(), user_id)
-        )
-    return get_api_user(user_id)
-
-
-def is_username_taken(username: str) -> bool:
-    """Check if a username is already taken"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM api_users WHERE username = ?", (username,))
-        return cursor.fetchone() is not None
 
 
 # ============================================================================
@@ -2951,71 +2762,6 @@ def delete_user_credential_policy(api_user_id: str, credential_type: str) -> boo
         return cursor.rowcount > 0
 
 
-def delete_all_user_credential_policies(api_user_id: str) -> int:
-    """Delete all policy overrides for a user"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM user_credential_policies WHERE api_user_id = ?",
-            (api_user_id,)
-        )
-        return cursor.rowcount
-
-
-# Default credential types that every user should have policies for
-DEFAULT_CREDENTIAL_TYPES = [
-    ("openai_api_key", "OpenAI API key for AI tools (TTS, STT, GPT Image, Sora)"),
-    ("gemini_api_key", "Google Gemini API key for Nano Banana, Imagen, Veo"),
-    ("meshy_api_key", "Meshy API key for 3D model generation"),
-    ("github_pat", "GitHub Personal Access Token for repository access"),
-]
-
-
-def create_default_user_credential_policies(api_user_id: str, default_policy: str = "user_provided") -> List[Dict[str, Any]]:
-    """
-    Create default credential policies for a new user.
-
-    By default, all policies are set to 'user_provided' meaning users must
-    provide their own API keys unless the admin changes this.
-
-    Args:
-        api_user_id: The user ID to create policies for
-        default_policy: The default policy to use (default: 'user_provided')
-
-    Returns:
-        List of created policy records
-    """
-    import uuid
-    now = datetime.utcnow().isoformat()
-    created = []
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        for credential_type, description in DEFAULT_CREDENTIAL_TYPES:
-            # Check if policy already exists
-            cursor.execute(
-                "SELECT id FROM user_credential_policies WHERE api_user_id = ? AND credential_type = ?",
-                (api_user_id, credential_type)
-            )
-            if cursor.fetchone():
-                continue  # Already exists, skip
-
-            policy_id = str(uuid.uuid4())
-            cursor.execute(
-                """INSERT INTO user_credential_policies (id, api_user_id, credential_type, policy, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (policy_id, api_user_id, credential_type, default_policy, now, now)
-            )
-            created.append({
-                "id": policy_id,
-                "api_user_id": api_user_id,
-                "credential_type": credential_type,
-                "policy": default_policy
-            })
-
-    return created
-
-
 def get_effective_credential_policy(api_user_id: str, credential_type: str) -> Dict[str, Any]:
     """
     Get the effective policy for a user+credential.
@@ -3119,95 +2865,6 @@ def user_has_credential(api_user_id: str, credential_type: str) -> bool:
             (api_user_id, credential_type)
         )
         return cursor.fetchone() is not None
-
-
-# ============================================================================
-# API User GitHub Config Operations (per-user GitHub settings)
-# ============================================================================
-
-def get_user_github_config(api_user_id: str) -> Optional[Dict[str, Any]]:
-    """Get GitHub configuration for a user"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM api_user_github_config WHERE api_user_id = ?",
-            (api_user_id,)
-        )
-        return row_to_dict(cursor.fetchone())
-
-
-def set_user_github_config(
-    api_user_id: str,
-    github_username: Optional[str] = None,
-    github_avatar_url: Optional[str] = None,
-    default_repo: Optional[str] = None,
-    default_branch: Optional[str] = None
-) -> Dict[str, Any]:
-    """Set or update GitHub configuration for a user"""
-    import uuid
-    now = datetime.utcnow().isoformat()
-
-    existing = get_user_github_config(api_user_id)
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        if existing:
-            # Build update query dynamically for provided fields
-            updates = ["updated_at = ?"]
-            values = [now]
-
-            if github_username is not None:
-                updates.append("github_username = ?")
-                values.append(github_username)
-            if github_avatar_url is not None:
-                updates.append("github_avatar_url = ?")
-                values.append(github_avatar_url)
-            if default_repo is not None:
-                updates.append("default_repo = ?")
-                values.append(default_repo)
-            if default_branch is not None:
-                updates.append("default_branch = ?")
-                values.append(default_branch)
-
-            values.append(api_user_id)
-            cursor.execute(
-                f"UPDATE api_user_github_config SET {', '.join(updates)} WHERE api_user_id = ?",
-                values
-            )
-        else:
-            # Insert new
-            config_id = str(uuid.uuid4())
-            cursor.execute(
-                """INSERT INTO api_user_github_config
-                   (id, api_user_id, github_username, github_avatar_url, default_repo, default_branch, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (config_id, api_user_id, github_username, github_avatar_url, default_repo, default_branch, now, now)
-            )
-
-    return get_user_github_config(api_user_id)
-
-
-def delete_user_github_config(api_user_id: str) -> bool:
-    """Delete GitHub configuration for a user (disconnect GitHub)"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM api_user_github_config WHERE api_user_id = ?",
-            (api_user_id,)
-        )
-        return cursor.rowcount > 0
-
-
-def update_api_user_password(api_user_id: str, password_hash: str) -> bool:
-    """Update an API user's password"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE api_users SET password_hash = ?, updated_at = ? WHERE id = ?",
-            (password_hash, datetime.utcnow().isoformat(), api_user_id)
-        )
-        return cursor.rowcount > 0
 
 
 # ============================================================================
@@ -3402,19 +3059,8 @@ def is_username_locked(username: str) -> Optional[Dict[str, Any]]:
 
 
 # ============================================================================
-# API Key Web Session Operations
+# API Key Session Operations
 # ============================================================================
-
-def create_api_key_session(token: str, api_user_id: str, expires_at: datetime) -> Dict[str, Any]:
-    """Create a web session for an API key user"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO api_key_sessions (token, api_user_id, expires_at) VALUES (?, ?, ?)",
-            (token, api_user_id, expires_at.isoformat())
-        )
-        return {"token": token, "api_user_id": api_user_id, "expires_at": expires_at}
-
 
 def get_api_key_session(token: str) -> Optional[Dict[str, Any]]:
     """Get an API key session by token"""
@@ -3433,20 +3079,6 @@ def get_api_key_session(token: str) -> Optional[Dict[str, Any]]:
             profile_ids = _get_api_user_profile_ids(cursor, session["api_user_id"])
             session["profile_ids"] = profile_ids if profile_ids else None
         return session
-
-
-def delete_api_key_session(token: str):
-    """Delete an API key session"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM api_key_sessions WHERE token = ?", (token,))
-
-
-def delete_api_key_sessions_for_user(api_user_id: str):
-    """Delete all sessions for an API user"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM api_key_sessions WHERE api_user_id = ?", (api_user_id,))
 
 
 # ============================================================================

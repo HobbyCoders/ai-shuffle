@@ -936,8 +936,6 @@ function createChatStore() {
 
 	/**
 	 * Internal function to load sessions list
-	 * For admins: loads sessions where api_user_id IS NULL (their own chats)
-	 * For API users: the backend automatically filters to their sessions
 	 */
 	async function loadSessionsInternal() {
 		try {

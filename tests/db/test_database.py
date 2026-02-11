@@ -595,6 +595,19 @@ def setup_project(mock_db):
     return project["id"]
 
 
+@pytest.fixture
+def setup_api_user(mock_db):
+    """Insert a test API user directly into the database."""
+    now = datetime.utcnow().isoformat()
+    mock_db.execute(
+        """INSERT INTO api_users (id, name, api_key_hash, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        ("user-1", "Test", "hash", True, now, now)
+    )
+    mock_db.commit()
+    return "user-1"
+
+
 # =============================================================================
 # Helper Functions Tests
 # =============================================================================
@@ -1120,121 +1133,6 @@ class TestAuthSessionOperations:
 
 
 # =============================================================================
-# API User Operations Tests
-# =============================================================================
-
-class TestAPIUserOperations:
-    """Test API user operations."""
-
-    def test_create_api_user(self, mock_db, setup_profile):
-        """create_api_user should create API user."""
-        result = db.create_api_user(
-            "user-1", "Test User", "hash123",
-            profile_ids=[setup_profile],
-            description="Test API user",
-            username="testuser",
-            password_hash="pwdhash"
-        )
-
-        assert result["id"] == "user-1"
-        assert result["name"] == "Test User"
-        assert result["profile_ids"] == [setup_profile]
-
-    def test_get_api_user(self, mock_db):
-        """get_api_user should return user by ID."""
-        db.create_api_user("user-1", "Test", "hash")
-        result = db.get_api_user("user-1")
-
-        assert result is not None
-        assert result["id"] == "user-1"
-
-    def test_get_api_user_by_key_hash(self, mock_db):
-        """get_api_user_by_key_hash should return user by API key hash."""
-        db.create_api_user("user-1", "Test", "unique_hash")
-        result = db.get_api_user_by_key_hash("unique_hash")
-
-        assert result is not None
-        assert result["id"] == "user-1"
-
-    def test_get_all_api_users(self, mock_db):
-        """get_all_api_users should return all users."""
-        db.create_api_user("user-1", "User 1", "hash1")
-        db.create_api_user("user-2", "User 2", "hash2")
-
-        result = db.get_all_api_users()
-
-        assert len(result) == 2
-
-    def test_update_api_user(self, mock_db, setup_profile):
-        """update_api_user should update user fields."""
-        db.create_api_user("user-1", "Old Name", "hash")
-        result = db.update_api_user(
-            "user-1",
-            name="New Name",
-            profile_ids=[setup_profile],
-            is_active=False
-        )
-
-        assert result["name"] == "New Name"
-        assert result["profile_ids"] == [setup_profile]
-        assert result["is_active"] == 0
-
-    def test_update_api_user_key(self, mock_db):
-        """update_api_user_key should update API key hash."""
-        db.create_api_user("user-1", "Test", "old_hash")
-        result = db.update_api_user_key("user-1", "new_hash")
-
-        assert result is not None
-
-    def test_update_api_user_last_used(self, mock_db):
-        """update_api_user_last_used should update timestamp."""
-        db.create_api_user("user-1", "Test", "hash")
-        db.update_api_user_last_used("user-1")
-
-        user = db.get_api_user("user-1")
-        assert user["last_used_at"] is not None
-
-    def test_delete_api_user(self, mock_db):
-        """delete_api_user should delete user."""
-        db.create_api_user("user-1", "Test", "hash")
-        result = db.delete_api_user("user-1")
-
-        assert result is True
-        assert db.get_api_user("user-1") is None
-
-    def test_get_api_user_by_username(self, mock_db):
-        """get_api_user_by_username should return user by username."""
-        db.create_api_user("user-1", "Test", "hash", username="testuser")
-        result = db.get_api_user_by_username("testuser")
-
-        assert result is not None
-        assert result["id"] == "user-1"
-
-    def test_is_api_key_claimed(self, mock_db):
-        """is_api_key_claimed should detect claimed keys."""
-        db.create_api_user("user-1", "Test", "hash")
-        assert db.is_api_key_claimed("hash") is False
-
-        db.claim_api_key("hash", "username", "pwdhash")
-        assert db.is_api_key_claimed("hash") is True
-
-    def test_claim_api_key(self, mock_db):
-        """claim_api_key should set username and password."""
-        db.create_api_user("user-1", "Test", "hash")
-        result = db.claim_api_key("hash", "claimed_user", "pwdhash")
-
-        assert result is not None
-        assert result["username"] == "claimed_user"
-
-    def test_is_username_taken(self, mock_db):
-        """is_username_taken should check username availability."""
-        assert db.is_username_taken("newuser") is False
-
-        db.create_api_user("user-1", "Test", "hash", username="newuser")
-        assert db.is_username_taken("newuser") is True
-
-
-# =============================================================================
 # System Settings Operations Tests
 # =============================================================================
 
@@ -1524,16 +1422,19 @@ class TestWebhookOperations:
 class TestClearAllSessions:
     """Test clearing all sessions."""
 
-    def test_clear_all_sessions(self, mock_db):
+    def test_clear_all_sessions(self, mock_db, setup_api_user):
         """clear_all_sessions should delete all auth and API key sessions."""
         # Create some auth sessions
         expires = datetime.utcnow() + timedelta(hours=24)
         db.create_auth_session("auth-token-1", expires)
         db.create_auth_session("auth-token-2", expires)
 
-        # Create API user and sessions
-        db.create_api_user("user-1", "Test", "hash")
-        db.create_api_key_session("api-token-1", "user-1", expires)
+        # Create API key session directly
+        mock_db.execute(
+            "INSERT INTO api_key_sessions (token, api_user_id, expires_at) VALUES (?, ?, ?)",
+            ("api-token-1", "user-1", expires.isoformat())
+        )
+        mock_db.commit()
 
         admin_count, api_count = db.clear_all_sessions()
 
@@ -1663,65 +1564,6 @@ class TestUsageLogging:
         result = db.get_all_session_usage("nonexistent-session")
 
         assert result == []
-
-
-# =============================================================================
-# API Key Session Tests
-# =============================================================================
-
-class TestAPIKeySessions:
-    """Test API key session operations."""
-
-    def test_create_api_key_session(self, mock_db):
-        """create_api_key_session should create session."""
-        db.create_api_user("user-1", "Test", "hash")
-        expires = datetime.utcnow() + timedelta(hours=24)
-        result = db.create_api_key_session("token123", "user-1", expires)
-
-        assert result["token"] == "token123"
-        assert result["api_user_id"] == "user-1"
-
-    def test_get_api_key_session_valid(self, mock_db):
-        """get_api_key_session should return valid session."""
-        db.create_api_user("user-1", "Test", "hash")
-        expires = datetime.utcnow() + timedelta(hours=24)
-        db.create_api_key_session("token123", "user-1", expires)
-
-        result = db.get_api_key_session("token123")
-
-        assert result is not None
-        assert result["token"] == "token123"
-
-    def test_get_api_key_session_expired(self, mock_db):
-        """get_api_key_session should not return expired session."""
-        db.create_api_user("user-1", "Test", "hash")
-        expires = datetime.utcnow() - timedelta(hours=1)
-        db.create_api_key_session("token123", "user-1", expires)
-
-        result = db.get_api_key_session("token123")
-
-        assert result is None
-
-    def test_delete_api_key_session(self, mock_db):
-        """delete_api_key_session should delete session."""
-        db.create_api_user("user-1", "Test", "hash")
-        expires = datetime.utcnow() + timedelta(hours=24)
-        db.create_api_key_session("token123", "user-1", expires)
-        db.delete_api_key_session("token123")
-
-        assert db.get_api_key_session("token123") is None
-
-    def test_delete_api_key_sessions_for_user(self, mock_db):
-        """delete_api_key_sessions_for_user should delete all sessions for user."""
-        db.create_api_user("user-1", "Test", "hash")
-        expires = datetime.utcnow() + timedelta(hours=24)
-        db.create_api_key_session("token1", "user-1", expires)
-        db.create_api_key_session("token2", "user-1", expires)
-
-        db.delete_api_key_sessions_for_user("user-1")
-
-        assert db.get_api_key_session("token1") is None
-        assert db.get_api_key_session("token2") is None
 
 
 # =============================================================================
@@ -2125,17 +1967,15 @@ class TestCredentialPolicies:
 class TestUserCredentials:
     """Test user credential operations."""
 
-    def test_set_user_credential(self, mock_db):
+    def test_set_user_credential(self, mock_db, setup_api_user):
         """set_user_credential should store encrypted credential."""
-        db.create_api_user("user-1", "Test", "hash")
         result = db.set_user_credential("user-1", "openai_api_key", "enc:encrypted_value")
 
         assert result["credential_type"] == "openai_api_key"
         assert result["encrypted_value"] == "enc:encrypted_value"
 
-    def test_get_user_credential(self, mock_db):
+    def test_get_user_credential(self, mock_db, setup_api_user):
         """get_user_credential should return credential."""
-        db.create_api_user("user-1", "Test", "hash")
         db.set_user_credential("user-1", "openai_api_key", "enc:value")
 
         result = db.get_user_credential("user-1", "openai_api_key")
@@ -2143,9 +1983,8 @@ class TestUserCredentials:
         assert result is not None
         assert result["encrypted_value"] == "enc:value"
 
-    def test_get_all_user_credentials(self, mock_db):
+    def test_get_all_user_credentials(self, mock_db, setup_api_user):
         """get_all_user_credentials should return all credentials for user."""
-        db.create_api_user("user-1", "Test", "hash")
         db.set_user_credential("user-1", "openai_api_key", "enc:val1")
         db.set_user_credential("user-1", "github_pat", "enc:val2")
 
@@ -2153,9 +1992,8 @@ class TestUserCredentials:
 
         assert len(result) == 2
 
-    def test_delete_user_credential(self, mock_db):
+    def test_delete_user_credential(self, mock_db, setup_api_user):
         """delete_user_credential should delete credential."""
-        db.create_api_user("user-1", "Test", "hash")
         db.set_user_credential("user-1", "openai_api_key", "enc:value")
 
         result = db.delete_user_credential("user-1", "openai_api_key")
@@ -2163,9 +2001,8 @@ class TestUserCredentials:
         assert result is True
         assert db.get_user_credential("user-1", "openai_api_key") is None
 
-    def test_user_has_credential(self, mock_db):
+    def test_user_has_credential(self, mock_db, setup_api_user):
         """user_has_credential should check credential existence."""
-        db.create_api_user("user-1", "Test", "hash")
 
         assert db.user_has_credential("user-1", "openai_api_key") is False
 
@@ -2181,9 +2018,8 @@ class TestUserCredentials:
 class TestRateLimitOperations:
     """Test rate limit operations."""
 
-    def test_create_rate_limit(self, mock_db):
+    def test_create_rate_limit(self, mock_db, setup_api_user):
         """create_rate_limit should create rate limit config."""
-        db.create_api_user("user-1", "Test", "hash")
         result = db.create_rate_limit(
             "rl-1", api_key_id="user-1",
             requests_per_minute=10,
@@ -2193,9 +2029,8 @@ class TestRateLimitOperations:
         assert result["id"] == "rl-1"
         assert result["requests_per_minute"] == 10
 
-    def test_get_rate_limit(self, mock_db):
+    def test_get_rate_limit(self, mock_db, setup_api_user):
         """get_rate_limit should return rate limit by ID."""
-        db.create_api_user("user-1", "Test", "hash")
         db.create_rate_limit("rl-1", api_key_id="user-1")
 
         result = db.get_rate_limit("rl-1")
@@ -2203,9 +2038,8 @@ class TestRateLimitOperations:
         assert result is not None
         assert result["id"] == "rl-1"
 
-    def test_delete_rate_limit(self, mock_db):
+    def test_delete_rate_limit(self, mock_db, setup_api_user):
         """delete_rate_limit should delete rate limit."""
-        db.create_api_user("user-1", "Test", "hash")
         db.create_rate_limit("rl-1", api_key_id="user-1")
 
         result = db.delete_rate_limit("rl-1")
@@ -2221,9 +2055,8 @@ class TestRateLimitOperations:
 class TestRequestLog:
     """Test request logging operations."""
 
-    def test_log_request(self, mock_db):
+    def test_log_request(self, mock_db, setup_api_user):
         """log_request should log API request."""
-        db.create_api_user("user-1", "Test", "hash")
         # Signature: request_id, user_id, api_key_id, endpoint, status, duration_ms
         result = db.log_request(
             "req-1", None, "user-1",
@@ -2234,9 +2067,8 @@ class TestRequestLog:
         assert result["id"] == "req-1"
         assert result["endpoint"] == "/api/v1/chat"
 
-    def test_get_request_count(self, mock_db):
+    def test_get_request_count(self, mock_db, setup_api_user):
         """get_request_count should return count of requests."""
-        db.create_api_user("user-1", "Test", "hash")
         db.log_request("req-1", None, "user-1", "/api")
         db.log_request("req-2", None, "user-1", "/api")
 

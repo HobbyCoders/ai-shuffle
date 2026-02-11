@@ -7,8 +7,7 @@
 	 */
 	import { tick, onDestroy, onMount } from 'svelte';
 	import { tabs, profiles, allTabs, type ChatTab } from '$lib/stores/tabs';
-	import { claudeAuthenticated, apiUser } from '$lib/stores/auth';
-	import { canUseOpenAI, credentialsLoaded } from '$lib/stores/credentials';
+	import { claudeAuthenticated } from '$lib/stores/auth';
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
@@ -163,14 +162,8 @@
 	// with rapid MediaRecorder ondataavailable events
 	let audioChunksRef: Blob[] = [];
 
-	// Check if recording is available based on OpenAI key policy
-	// For API users, they must have OpenAI key configured (either their own or admin-provided)
-	// For admins, we assume OpenAI is available (they control the keys)
-	const canRecord = $derived(
-		!$apiUser || // Admins can always record
-		!$credentialsLoaded || // Before credentials load, allow (will fail gracefully if no key)
-		$canUseOpenAI // API users need OpenAI key
-	);
+	// Recording is always available for admins (they control the API keys)
+	const canRecord = $derived(true);
 
 	// Autocomplete state
 	let showCommandAutocomplete = $state(false);

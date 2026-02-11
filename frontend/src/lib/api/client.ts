@@ -112,13 +112,6 @@ export class ApiClient {
 export const api = new ApiClient();
 
 // Auth types
-export interface ApiUserInfo {
-	id: string;
-	name: string;
-	project_id: string | null;
-	profile_ids: string[] | null;
-}
-
 export interface AuthStatus {
 	authenticated: boolean;
 	is_admin: boolean;
@@ -127,7 +120,6 @@ export interface AuthStatus {
 	github_authenticated: boolean;
 	onboarding_complete: boolean;
 	username: string | null;
-	api_user: ApiUserInfo | null;
 }
 
 // Profile types
@@ -331,25 +323,6 @@ export interface HealthResponse {
 	authenticated: boolean;
 	setup_required: boolean;
 	claude_authenticated: boolean;
-}
-
-// API User types
-export interface ApiUser {
-	id: string;
-	name: string;
-	description: string | null;
-	project_id: string | null;
-	profile_ids: string[] | null;
-	is_active: boolean;
-	web_login_allowed: boolean;
-	username: string | null;
-	created_at: string;
-	updated_at: string;
-	last_used_at: string | null;
-}
-
-export interface ApiUserWithKey extends ApiUser {
-	api_key: string;
 }
 
 // File upload types

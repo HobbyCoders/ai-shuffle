@@ -29,32 +29,6 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(..., min_length=8)
 
 
-class ApiKeyLoginRequest(BaseModel):
-    """API key login request for web UI"""
-    api_key: str
-
-
-class ApiUserRegisterRequest(BaseModel):
-    """API user registration request - claim an API key with username/password"""
-    api_key: str
-    username: str = Field(..., min_length=3, max_length=50)
-    password: str = Field(..., min_length=8)
-
-
-class ApiUserLoginRequest(BaseModel):
-    """API user login request with username/password"""
-    username: str
-    password: str
-
-
-class ApiUserInfo(BaseModel):
-    """API user info in auth responses"""
-    id: str
-    name: str
-    project_id: Optional[str] = None
-    profile_ids: Optional[List[str]] = None  # List of allowed profile IDs (None = any profile)
-
-
 class AuthStatus(BaseModel):
     """Authentication status response"""
     authenticated: bool
@@ -62,7 +36,6 @@ class AuthStatus(BaseModel):
     setup_required: bool
     claude_authenticated: bool
     username: Optional[str] = None
-    api_user: Optional[ApiUserInfo] = None
 
 
 # ============================================================================
@@ -456,49 +429,6 @@ class StatsResponse(BaseModel):
     total_cost_usd: float
     total_tokens_in: int
     total_tokens_out: int
-
-
-# ============================================================================
-# API User Models
-# ============================================================================
-
-class ApiUserBase(BaseModel):
-    """Base API user fields"""
-    name: str = Field(..., min_length=1, max_length=100)
-    description: Optional[str] = None
-    project_id: Optional[str] = None
-    profile_ids: Optional[List[str]] = None  # List of allowed profile IDs (None/empty = any profile)
-    web_login_allowed: bool = True  # Whether user can login to web UI
-
-
-class ApiUserCreate(ApiUserBase):
-    """API user creation request"""
-    pass
-
-
-class ApiUserUpdate(BaseModel):
-    """API user update request"""
-    name: Optional[str] = None
-    description: Optional[str] = None
-    project_id: Optional[str] = None
-    profile_ids: Optional[List[str]] = None  # List of allowed profile IDs (empty list = any profile)
-    is_active: Optional[bool] = None
-    web_login_allowed: Optional[bool] = None
-
-
-class ApiUser(ApiUserBase):
-    """Full API user response (without sensitive data)"""
-    id: str
-    is_active: bool = True
-    username: Optional[str] = None  # Set when user registers
-    created_at: datetime
-    updated_at: datetime
-    last_used_at: Optional[datetime] = None
-
-
-class ApiUserWithKey(ApiUser):
-    """API user response with newly generated key (only on create)"""
-    api_key: str  # Only returned once on creation
 
 
 # ============================================================================

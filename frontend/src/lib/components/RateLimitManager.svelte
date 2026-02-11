@@ -25,14 +25,7 @@
 		updated_at: string;
 	}
 
-	interface ApiUser {
-		id: string;
-		name: string;
-		username: string | null;
-	}
-
 	let configs: RateLimitConfig[] = $state([]);
-	let apiUsers: ApiUser[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 	let success = $state('');
@@ -59,13 +52,11 @@
 		loading = true;
 		error = '';
 		try {
-			const [configsRes, usersRes, queueRes] = await Promise.all([
+			const [configsRes, queueRes] = await Promise.all([
 				api.get<RateLimitConfig[]>('/rate-limits/config'),
-				api.get<ApiUser[]>('/api-users'),
 				api.get<{ queue_size: number; max_size: number; process_time_estimate: number }>('/rate-limits/queue/admin')
 			]);
 			configs = configsRes;
-			apiUsers = usersRes;
 			queueInfo = queueRes;
 		} catch (e: any) {
 			error = e.detail || 'Failed to load rate limit configurations';
@@ -192,8 +183,7 @@
 
 	function getTargetLabel(config: RateLimitConfig): string {
 		if (config.api_key_id) {
-			const user = apiUsers.find(u => u.id === config.api_key_id);
-			return `API Key: ${user?.name || config.api_key_id}`;
+			return `API Key: ${config.api_key_id}`;
 		}
 		if (config.user_id) {
 			return `User: ${config.user_id}`;
@@ -275,12 +265,7 @@
 						{#if formData.target_type === 'api_key'}
 							<div class="form-group">
 								<label for="api_key_id">API Key</label>
-								<select id="api_key_id" bind:value={formData.api_key_id} required>
-									<option value="">Select API Key...</option>
-									{#each apiUsers as user}
-										<option value={user.id}>{user.name}</option>
-									{/each}
-								</select>
+								<input type="text" id="api_key_id" bind:value={formData.api_key_id} placeholder="API Key ID" required />
 							</div>
 						{:else if formData.target_type === 'user'}
 							<div class="form-group">

@@ -14,7 +14,7 @@
 	import { auth, username, isAdmin, claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth';
 	import { api } from '$lib/api/client';
 	import { theme, themePreference, isDark, currentPresetId, themePresets, type Theme } from '$lib/stores/theme';
-	import type { ApiUser, ApiUserWithKey, Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
+	import type { Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/appState';
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword } from '$lib/api/auth';
 	import WebhookManager from '$lib/components/WebhookManager.svelte';
@@ -27,12 +27,6 @@
 	import HotkeyCapture from '$lib/components/settings/HotkeyCapture.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import { Settings } from 'lucide-svelte';
-	import {
-		getUserCredentialPolicies,
-		setUserCredentialPolicy,
-		type UserCredentialPolicy,
-		type CredentialPolicyType
-	} from '$lib/api/credentialPolicies';
 	import {
 		ALL_IMAGE_MODELS,
 		ALL_VIDEO_MODELS,
@@ -95,23 +89,10 @@
 	}
 
 	// Data state
-	let apiUsers: ApiUser[] = $state([]);
 	let profiles: Profile[] = $state([]);
 	let projects: Project[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
-
-	// Form state for API Users
-	let formMode: 'closed' | 'create' | 'edit' = $state('closed');
-	let editingUser: ApiUser | null = $state(null);
-	let newlyCreatedKey: string | null = $state(null);
-	let regeneratedKey: string | null = $state(null);
-
-	// Per-user credential policies
-	let userPolicies: Map<string, UserCredentialPolicy[]> = $state(new Map());
-	let loadingUserPolicies = $state<string | null>(null);
-	let savingUserPolicy = $state<string | null>(null);
-	let expandedUserPolicies = $state<string | null>(null);
 
 	// Workspace state
 	let workspaceConfig: WorkspaceConfig | null = $state(null);
@@ -203,15 +184,6 @@
 	// Chat Behavior Preferences
 	let chatPrefs = $state<ChatPreferences | null>(null);
 
-	// API User form
-	let formData = $state({
-		name: '',
-		description: '',
-		project_id: '',
-		profile_ids: [] as string[],
-		web_login_allowed: true
-	});
-
 	// Security Instructions (admin only)
 	let securityInstructions = $state('');
 	let defaultSecurityInstructions = $state('');
@@ -255,52 +227,16 @@
 		loading = true;
 		error = '';
 		try {
-			const [usersRes, profilesRes, projectsRes] = await Promise.all([
-				api.get<ApiUser[]>('/api-users'),
+			const [profilesRes, projectsRes] = await Promise.all([
 				api.get<Profile[]>('/profiles'),
 				api.get<Project[]>('/projects')
 			]);
-			apiUsers = usersRes;
 			profiles = profilesRes;
 			projects = projectsRes;
 		} catch (e: any) {
 			error = e.detail || 'Failed to load data';
 		}
 		loading = false;
-	}
-
-	async function loadUserPolicies(userId: string) {
-		loadingUserPolicies = userId;
-		try {
-			const response = await getUserCredentialPolicies(userId);
-			userPolicies.set(userId, response.policies);
-			userPolicies = new Map(userPolicies);
-		} catch (e: any) {
-			console.error('Failed to load user policies:', e);
-		}
-		loadingUserPolicies = null;
-	}
-
-	async function handleUserPolicyChange(userId: string, credentialType: string, newPolicy: CredentialPolicyType) {
-		savingUserPolicy = `${userId}:${credentialType}`;
-		try {
-			await setUserCredentialPolicy(userId, credentialType, newPolicy);
-			await loadUserPolicies(userId);
-		} catch (e: any) {
-			error = e.detail || 'Failed to update policy';
-		}
-		savingUserPolicy = null;
-	}
-
-	function toggleUserPolicies(userId: string) {
-		if (expandedUserPolicies === userId) {
-			expandedUserPolicies = null;
-		} else {
-			expandedUserPolicies = userId;
-			if (!userPolicies.has(userId)) {
-				loadUserPolicies(userId);
-			}
-		}
 	}
 
 	async function loadAuthStatus() {
@@ -748,78 +684,6 @@
 			await auth.checkAuth();
 		} catch (e: any) {
 			error = e.detail || 'Failed to disconnect';
-		}
-	}
-
-	// API User functions
-	function openCreateForm() {
-		formMode = 'create';
-		formData = { name: '', description: '', project_id: '', profile_ids: [], web_login_allowed: true };
-	}
-
-	function openEditForm(user: ApiUser) {
-		formMode = 'edit';
-		editingUser = user;
-		formData = {
-			name: user.name,
-			description: user.description || '',
-			project_id: user.project_id || '',
-			profile_ids: user.profile_ids || [],
-			web_login_allowed: user.web_login_allowed ?? true
-		};
-	}
-
-	function closeForm() {
-		formMode = 'closed';
-		editingUser = null;
-		newlyCreatedKey = null;
-	}
-
-	async function saveUser() {
-		if (!formData.name.trim()) {
-			error = 'Name is required';
-			return;
-		}
-		try {
-			if (formMode === 'create') {
-				const result = await api.post<ApiUserWithKey>('/api-users', formData);
-				newlyCreatedKey = result.api_key;
-				await loadData();
-			} else if (formMode === 'edit' && editingUser) {
-				await api.put(`/api-users/${editingUser.id}`, formData);
-				await loadData();
-				closeForm();
-			}
-		} catch (e: any) {
-			error = e.detail || 'Failed to save user';
-		}
-	}
-
-	async function regenerateKey(userId: string) {
-		try {
-			const result = await api.post<{api_key: string}>(`/api-users/${userId}/regenerate-key`, {});
-			regeneratedKey = result.api_key;
-		} catch (e: any) {
-			error = e.detail || 'Failed to regenerate key';
-		}
-	}
-
-	async function toggleUserActive(user: ApiUser) {
-		try {
-			await api.patch(`/api-users/${user.id}/status`, { is_active: !user.is_active });
-			await loadData();
-		} catch (e: any) {
-			error = e.detail || 'Failed to update status';
-		}
-	}
-
-	async function deleteUser(userId: string) {
-		if (!confirm('Delete this user?')) return;
-		try {
-			await api.delete(`/api-users/${userId}`);
-			await loadData();
-		} catch (e: any) {
-			error = e.detail || 'Failed to delete user';
 		}
 	}
 
@@ -1708,124 +1572,6 @@
 				<!-- SYSTEM TAB -->
 				{#if activeTab === 'system' && $isAdmin}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
-						<!-- API Users Section -->
-						<section class="section">
-							<button class="section-header" onclick={() => toggleSection('users')}>
-								<h3>API Users</h3>
-								<svg class="chevron" class:expanded={expandedSections.has('users')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-									<polyline points="6 9 12 15 18 9"/>
-								</svg>
-							</button>
-							{#if expandedSections.has('users')}
-								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
-									{#if loading}
-										<div class="loading-text">Loading...</div>
-									{:else}
-										<button onclick={openCreateForm} class="btn primary compact mb-3">
-											+ New User
-										</button>
-
-										{#if formMode !== 'closed'}
-											<div class="user-form" transition:slide={{ duration: 200 }}>
-												<h4>{formMode === 'create' ? 'Create User' : 'Edit User'}</h4>
-												<input
-													type="text"
-													bind:value={formData.name}
-													placeholder="Username"
-													class="input"
-												/>
-												<input
-													type="text"
-													bind:value={formData.description}
-													placeholder="Description (optional)"
-													class="input"
-												/>
-												<select bind:value={formData.project_id} class="input select">
-													<option value="">No project restriction</option>
-													{#each projects as project}
-														<option value={project.id}>{project.name}</option>
-													{/each}
-												</select>
-												<label class="checkbox-label">
-													<input type="checkbox" bind:checked={formData.web_login_allowed} />
-													<span>Allow web login</span>
-												</label>
-												<div class="form-actions">
-													<button onclick={closeForm} class="btn secondary compact">Cancel</button>
-													<button onclick={saveUser} class="btn primary compact">
-														{formMode === 'create' ? 'Create' : 'Save'}
-													</button>
-												</div>
-												{#if newlyCreatedKey}
-													<div class="api-key-display">
-														<strong>API Key (save now!):</strong>
-														<code>{newlyCreatedKey}</code>
-													</div>
-												{/if}
-											</div>
-										{/if}
-
-										<div class="users-list">
-											{#each apiUsers as user}
-												<div class="user-row" class:inactive={!user.is_active}>
-													<div class="user-info">
-														<span class="user-name">{user.name}</span>
-														{#if !user.is_active}
-															<span class="badge muted">Inactive</span>
-														{/if}
-														{#if user.description}
-															<span class="user-desc">{user.description}</span>
-														{/if}
-													</div>
-													<div class="user-actions">
-														<button onclick={() => openEditForm(user)} class="icon-btn" title="Edit">
-															<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-																<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-																<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-															</svg>
-														</button>
-														<button onclick={() => regenerateKey(user.id)} class="icon-btn" title="Regenerate Key">
-															<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-																<polyline points="23 4 23 10 17 10"/>
-																<path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-															</svg>
-														</button>
-														<button onclick={() => toggleUserActive(user)} class="icon-btn" title={user.is_active ? 'Deactivate' : 'Activate'}>
-															{#if user.is_active}
-																<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-																	<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
-																	<line x1="12" y1="2" x2="12" y2="12"/>
-																</svg>
-															{:else}
-																<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-																	<path d="M5 12.55a11 11 0 0 1 14.08 0"/>
-																	<path d="M1.42 9a16 16 0 0 1 21.16 0"/>
-																	<path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
-																	<circle cx="12" cy="20" r="1"/>
-																</svg>
-															{/if}
-														</button>
-														<button onclick={() => deleteUser(user.id)} class="icon-btn danger" title="Delete">
-															<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-																<polyline points="3 6 5 6 21 6"/>
-																<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-															</svg>
-														</button>
-													</div>
-												</div>
-												{#if regeneratedKey && editingUser?.id === user.id}
-													<div class="api-key-display" transition:slide>
-														<strong>New API Key:</strong>
-														<code>{regeneratedKey}</code>
-													</div>
-												{/if}
-											{/each}
-										</div>
-									{/if}
-								</div>
-							{/if}
-						</section>
-
 						<!-- Rate Limits Section -->
 						<section class="section">
 							<button class="section-header" onclick={() => toggleSection('rate-limits')}>

@@ -10,8 +10,7 @@
 	 */
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { isAuthenticated, isAdmin, apiUser } from '$lib/stores/auth';
-	import { credentials } from '$lib/stores/credentials';
+	import { isAuthenticated, isAdmin } from '$lib/stores/auth';
 	import {
 		tabs,
 		allTabs,
@@ -148,15 +147,6 @@
 			tabs.loadProjects(),
 			loadAllTags()
 		]);
-
-		if ($isAdmin) {
-			tabs.loadApiUsers();
-			tabs.loadAdminSessions();
-		}
-
-		if ($apiUser) {
-			credentials.load();
-		}
 
 		// If no active view, open a new chat
 		if (!$activeView) {

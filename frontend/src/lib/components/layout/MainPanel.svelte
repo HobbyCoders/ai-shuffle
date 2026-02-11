@@ -26,7 +26,6 @@
 
 	// Feature page components
 	import SettingsCard from '$lib/components/deck/cards/SettingsCard.svelte';
-	import UserSettingsCard from '$lib/components/deck/cards/UserSettingsCard.svelte';
 	import ProfileCard from '$lib/components/deck/cards/ProfileCard.svelte';
 	import SubagentCard from '$lib/components/deck/cards/SubagentCard.svelte';
 	import ProjectCard from '$lib/components/deck/cards/ProjectCard.svelte';
@@ -36,7 +35,6 @@
 	import NotesCard from '$lib/components/deck/cards/NotesCard.svelte';
 	import HooksCard from '$lib/components/deck/cards/HooksCard.svelte';
 	import StatsCard from '$lib/components/deck/cards/StatsCard.svelte';
-	import ApiUserSessionsCard from '$lib/components/deck/cards/ApiUserSessionsCard.svelte';
 
 	interface Props {
 		onOpenSession?: (sessionId: string) => void;
@@ -78,7 +76,6 @@
 	// View type → page title mapping
 	const viewTitles: Record<string, string> = {
 		'settings': 'Settings',
-		'user-settings': 'My Settings',
 		'profile': 'Profiles',
 		'subagent': 'Subagents',
 		'project': 'Projects',
@@ -88,14 +85,13 @@
 		'notes': 'Notes',
 		'hooks': 'Hooks',
 		'stats': 'Stats',
-		'api-user-sessions': 'API User Sessions'
 	};
 
 	// Feature pages that use FeaturePageLayout (provide their own header)
 	// These don't need the generic PageHeader
 	const embeddedViews = new Set([
-		'profile', 'project', 'settings', 'user-settings', 'subagent',
-		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'stats', 'api-user-sessions'
+		'profile', 'project', 'settings', 'subagent',
+		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'stats'
 	]);
 
 	// Get the active chat tab (if in chat view)
@@ -651,18 +647,6 @@
 					embedded={true}
 				/>
 			</div>
-		{:else if $activeView.type === 'user-settings'}
-			<div class="feature-panel">
-				<UserSettingsCard
-					card={makeFeatureCard('user-settings', 'My Settings')}
-					onClose={noop}
-					onMaximize={noop}
-					onFocus={noop}
-					onMove={noopXY}
-					onResize={noopXY}
-					embedded={true}
-				/>
-			</div>
 		{:else if $activeView.type === 'subagent'}
 			<div class="feature-panel">
 				<SubagentCard
@@ -739,19 +723,6 @@
 			<div class="feature-panel">
 				<StatsCard
 					card={makeFeatureCard('stats', 'Stats')}
-					onClose={noop}
-					onMaximize={noop}
-					onFocus={noop}
-					onMove={noopXY}
-					onResize={noopXY}
-					onSessionClick={onOpenSession || noop}
-					embedded={true}
-				/>
-			</div>
-		{:else if $activeView.type === 'api-user-sessions'}
-			<div class="feature-panel">
-				<ApiUserSessionsCard
-					card={makeFeatureCard('api-user-sessions', 'API User Sessions')}
 					onClose={noop}
 					onMaximize={noop}
 					onFocus={noop}

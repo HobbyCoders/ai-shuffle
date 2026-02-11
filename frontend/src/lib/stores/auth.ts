@@ -4,7 +4,7 @@
 
 import { writable, derived } from 'svelte/store';
 import type { AuthStatus } from '$lib/api/client';
-import { getAuthStatus, login as apiLogin, loginWithApiKey as apiLoginWithApiKey, registerApiUser as apiRegisterApiUser, loginApiUser as apiLoginApiUser, logout as apiLogout, setup as apiSetup } from '$lib/api/auth';
+import { getAuthStatus, login as apiLogin, logout as apiLogout, setup as apiSetup } from '$lib/api/auth';
 
 interface AuthState {
 	status: AuthStatus | null;
@@ -58,42 +58,6 @@ function createAuthStore() {
 			}
 		},
 
-		async loginWithApiKey(apiKey: string) {
-			update(s => ({ ...s, loading: true, error: null }));
-			try {
-				await apiLoginWithApiKey(apiKey);
-				const status = await getAuthStatus();
-				update(s => ({ ...s, status, loading: false }));
-			} catch (e: any) {
-				update(s => ({ ...s, loading: false, error: e.detail || 'API key login failed' }));
-				throw e;
-			}
-		},
-
-		async registerApiUser(apiKey: string, username: string, password: string) {
-			update(s => ({ ...s, loading: true, error: null }));
-			try {
-				await apiRegisterApiUser(apiKey, username, password);
-				const status = await getAuthStatus();
-				update(s => ({ ...s, status, loading: false }));
-			} catch (e: any) {
-				update(s => ({ ...s, loading: false, error: e.detail || 'Registration failed' }));
-				throw e;
-			}
-		},
-
-		async loginApiUser(username: string, password: string) {
-			update(s => ({ ...s, loading: true, error: null }));
-			try {
-				await apiLoginApiUser(username, password);
-				const status = await getAuthStatus();
-				update(s => ({ ...s, status, loading: false }));
-			} catch (e: any) {
-				update(s => ({ ...s, loading: false, error: e.detail || 'Login failed' }));
-				throw e;
-			}
-		},
-
 		async logout() {
 			update(s => ({ ...s, loading: true, error: null }));
 			try {
@@ -126,6 +90,5 @@ export const claudeAuthenticated = derived(auth, $auth => $auth.status?.claude_a
 export const githubAuthenticated = derived(auth, $auth => $auth.status?.github_authenticated ?? false);
 export const onboardingComplete = derived(auth, $auth => $auth.status?.onboarding_complete ?? true);
 export const username = derived(auth, $auth => $auth.status?.username ?? null);
-export const apiUser = derived(auth, $auth => $auth.status?.api_user ?? null);
 export const authLoading = derived(auth, $auth => $auth.loading);
 export const authError = derived(auth, $auth => $auth.error);

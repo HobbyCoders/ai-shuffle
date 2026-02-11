@@ -9,20 +9,6 @@ import type { Session, Profile, PermissionRequest as PermissionRequestType, User
 
 // ─── API & Message Types ─────────────────────────────────────────────────────
 
-export interface ApiUser {
-	id: string;
-	name: string;
-	description?: string;
-	project_id?: string;
-	profile_ids?: string[];
-	is_active: boolean;
-	web_login_allowed?: boolean;
-	username?: string;
-	created_at: string;
-	updated_at: string;
-	last_used_at?: string;
-}
-
 export type MessageType = 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'system' | 'subagent' | 'command' | 'plugin_warning';
 
 // Subagent child message - represents a single tool call or text from a subagent
@@ -167,19 +153,13 @@ export interface TabsState {
 	profiles: Profile[];
 	projects: Project[];
 	sessions: Session[];
-	adminSessions: Session[];
-	apiUsers: ApiUser[];
-	adminSessionsFilter: string | null; // null = all, '' = admin only, 'user_id' = specific user
 	// Selection state for batch operations
 	selectedSessionIds: Set<string>;
-	selectedAdminSessionIds: Set<string>;
 	selectionMode: boolean;
-	adminSelectionMode: boolean;
 	// Loading state to prevent race conditions
 	sessionsLoading: boolean;
 	// Tag filter state
 	sessionsTagFilter: string | null; // null = all, 'tag_id' = filter by tag
-	adminSessionsTagFilter: string | null;
 	// Pagination state for sessions
 	sessionsTotal: number;
 	sessionsOffset: number;

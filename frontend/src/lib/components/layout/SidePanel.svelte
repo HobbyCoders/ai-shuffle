@@ -27,7 +27,6 @@
 		Star,
 		Trash2,
 		Bot,
-		KeyRound,
 		FolderKanban
 	} from 'lucide-svelte';
 	import { layout, activeView, sidebarCollapsed } from '$lib/stores/layout';
@@ -76,7 +75,6 @@
 		{ type: 'stats', label: 'Stats', icon: BarChart3 },
 		{ type: 'profile', label: 'Profiles', icon: Users },
 		{ type: 'project', label: 'Projects', icon: FolderKanban },
-		{ type: 'api-user-sessions', label: 'API User Sessions', icon: KeyRound, adminOnly: true },
 		{ type: 'settings', label: 'Settings', icon: Settings, adminOnly: true }
 	];
 

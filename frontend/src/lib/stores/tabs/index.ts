@@ -7,7 +7,6 @@
 
 // Types
 export type {
-	ApiUser,
 	MessageType,
 	SubagentChildMessage,
 	TodoItem,

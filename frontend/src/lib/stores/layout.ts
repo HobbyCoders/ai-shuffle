@@ -14,7 +14,6 @@ import { browser } from '$app/environment';
 export type ViewType =
 	| 'chat'
 	| 'settings'
-	| 'user-settings'
 	| 'profile'
 	| 'subagent'
 	| 'project'
@@ -23,8 +22,7 @@ export type ViewType =
 	| 'mcp'
 	| 'hooks'
 	| 'notes'
-	| 'stats'
-	| 'api-user-sessions';
+	| 'stats';
 
 export interface ActiveView {
 	type: ViewType;

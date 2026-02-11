@@ -16,8 +16,7 @@ import bcrypt
 from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
 
 from app.core.models import (
-    SetupRequest, LoginRequest, ApiKeyLoginRequest,
-    ApiUserRegisterRequest, ApiUserLoginRequest, ChangePasswordRequest,
+    SetupRequest, LoginRequest, ChangePasswordRequest,
     TwoFactorLoginRequest
 )
 from app.core.auth import auth_service
@@ -157,7 +156,7 @@ def hash_api_key(api_key: str) -> str:
 
 
 def require_auth(request: Request) -> str:
-    """Dependency that requires authentication (cookie, API key, or API key session)"""
+    """Dependency that requires authentication (cookie or API key)"""
     # First try cookie-based admin auth
     token = get_session_token(request)
     if token:
@@ -166,16 +165,6 @@ def require_auth(request: Request) -> str:
             request.state.is_admin = True
             request.state.api_user = None
             return token
-
-        # Check API key web session
-        api_key_session = db.get_api_key_session(token)
-        if api_key_session:
-            api_user = db.get_api_user(api_key_session["api_user_id"])
-            if api_user and api_user["is_active"]:
-                request.state.is_admin = False
-                request.state.api_user = api_user
-                db.update_api_user_last_used(api_user["id"])
-                return f"api_session:{api_user['id']}"
 
         # Diagnostic logging - session token exists but validation failed
         last4 = token[-4:] if len(token) >= 4 else token
@@ -238,7 +227,6 @@ def require_api_key(request: Request) -> dict:
     Use this for /api/v1/ endpoints that should only be accessible via API keys,
     not admin sessions. Returns the API user dict.
     """
-    # First check for Bearer token (direct API key)
     api_key = get_api_key(request)
     if api_key:
         key_hash = hash_api_key(api_key)
@@ -249,21 +237,9 @@ def require_api_key(request: Request) -> dict:
             request.state.api_user = api_user
             return api_user
 
-    # Then check for API key web session (cookie-based API key login)
-    token = get_session_token(request)
-    if token:
-        api_key_session = db.get_api_key_session(token)
-        if api_key_session:
-            api_user = db.get_api_user(api_key_session["api_user_id"])
-            if api_user and api_user.get("is_active", True):
-                db.update_api_user_last_used(api_user["id"])
-                request.state.is_admin = False
-                request.state.api_user = api_user
-                return api_user
-
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="API key required. Use Bearer token or login with API key."
+        detail="API key required. Use Bearer token."
     )
 
 
@@ -274,13 +250,9 @@ def is_admin_request(request: Request) -> bool:
 
 def get_current_api_user(request: Request) -> dict:
     """
-    Dependency that requires an API user to be authenticated.
-    Works with both API key authentication and API user web sessions.
-    Does NOT work for admin users - admin must be an API user to use /me endpoints.
-
+    Dependency that requires an API user to be authenticated via API key.
     Returns the API user dict.
     """
-    # First check for Bearer token (direct API key)
     api_key = get_api_key(request)
     if api_key:
         key_hash = hash_api_key(api_key)
@@ -291,21 +263,9 @@ def get_current_api_user(request: Request) -> dict:
             request.state.api_user = api_user
             return api_user
 
-    # Then check for API key web session (cookie-based API user login)
-    token = get_session_token(request)
-    if token:
-        api_key_session = db.get_api_key_session(token)
-        if api_key_session:
-            api_user = db.get_api_user(api_key_session["api_user_id"])
-            if api_user and api_user.get("is_active", True):
-                db.update_api_user_last_used(api_user["id"])
-                request.state.is_admin = False
-                request.state.api_user = api_user
-                return api_user
-
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="API user authentication required. This endpoint is for API users only."
+        detail="API key authentication required."
     )
 
 
@@ -314,36 +274,21 @@ async def get_auth_status(request: Request):
     """Get complete authentication status"""
     token = get_session_token(request)
     is_admin_authenticated = False
-    is_api_user_authenticated = False
-    api_user_info = None
     username = None
 
     if token:
-        # Check admin session
         if auth_service.validate_session(token):
             is_admin_authenticated = True
             username = auth_service.get_admin_username()
-        else:
-            # Check API key web session
-            api_key_session = db.get_api_key_session(token)
-            if api_key_session:
-                is_api_user_authenticated = True
-                api_user_info = {
-                    "id": api_key_session["api_user_id"],
-                    "name": api_key_session["user_name"],
-                    "project_id": api_key_session["project_id"],
-                    "profile_ids": api_key_session.get("profile_ids")
-                }
 
     return {
-        "authenticated": is_admin_authenticated or is_api_user_authenticated,
+        "authenticated": is_admin_authenticated,
         "is_admin": is_admin_authenticated,
         "setup_required": auth_service.is_setup_required(),
         "claude_authenticated": auth_service.is_claude_authenticated(),
         "github_authenticated": auth_service.is_github_authenticated(),
         "onboarding_complete": auth_service.is_onboarding_complete(),
         "username": username,
-        "api_user": api_user_info
     }
 
 
@@ -461,289 +406,12 @@ async def login(req: Request, login_data: LoginRequest, response: Response):
     return {"status": "ok", "message": "Logged in", "is_admin": True}
 
 
-@router.post("/login/api-key")
-async def login_with_api_key(req: Request, login_data: ApiKeyLoginRequest, response: Response):
-    """Login to web UI using an API key - creates a restricted session"""
-    # Check rate limiting
-    check_rate_limit(req)
-
-    # Validate API key
-    key_hash = hash_api_key(login_data.api_key)
-    api_user = db.get_api_user_by_key_hash(key_hash)
-
-    if not api_user:
-        # Record failed attempt
-        record_login_result(req, None, success=False)
-        client_ip = get_client_ip(req)
-        logger.warning(f"Failed API key login attempt from IP {client_ip}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key"
-        )
-
-    if not api_user["is_active"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="API key is disabled"
-        )
-
-    # Create API key web session
-    session_token = secrets.token_urlsafe(32)
-    expires_at = datetime.utcnow() + timedelta(hours=settings.api_key_session_expire_hours)
-    db.create_api_key_session(session_token, api_user["id"], expires_at)
-
-    # Record successful login
-    record_login_result(req, f"api_user:{api_user['id']}", success=True)
-    db.update_api_user_last_used(api_user["id"])
-    client_ip = get_client_ip(req)
-    logger.info(f"Successful API key login for user '{api_user['name']}' from IP {client_ip}")
-
-    # Set session cookie
-    response.set_cookie(
-        key="session",
-        value=session_token,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="lax",
-        max_age=settings.api_key_session_expire_hours * 60 * 60
-    )
-
-    return {
-        "status": "ok",
-        "message": "Logged in",
-        "is_admin": False,
-        "api_user": {
-            "id": api_user["id"],
-            "name": api_user["name"],
-            "project_id": api_user["project_id"],
-            "profile_ids": api_user.get("profile_ids")
-        }
-    }
-
-
-@router.post("/register/api-user")
-async def register_api_user(req: Request, register_data: ApiUserRegisterRequest, response: Response):
-    """
-    Register as an API user by claiming an API key with a username and password.
-
-    The API key must be pre-created by an admin. This endpoint allows the end user
-    to claim that API key by setting their own username and password. After registration,
-    the user can login with just username/password.
-    """
-    # Check rate limiting
-    check_rate_limit(req, register_data.username)
-
-    # Validate API key format
-    if not register_data.api_key.startswith("aih_"):
-        record_login_result(req, register_data.username, success=False)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid API key format"
-        )
-
-    # Check if username is already taken
-    if db.is_username_taken(register_data.username):
-        record_login_result(req, register_data.username, success=False)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username already taken"
-        )
-
-    # Hash the API key to look it up
-    key_hash = hash_api_key(register_data.api_key)
-
-    # Check if API key exists
-    api_user = db.get_api_user_by_key_hash(key_hash)
-    if not api_user:
-        record_login_result(req, register_data.username, success=False)
-        client_ip = get_client_ip(req)
-        logger.warning(f"Registration attempt with invalid API key from IP {client_ip}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid API key"
-        )
-
-    # Check if API key is already claimed
-    if api_user.get("username"):
-        record_login_result(req, register_data.username, success=False)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This API key has already been registered"
-        )
-
-    # Check if API user is active
-    if not api_user.get("is_active", True):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This API key is disabled"
-        )
-
-    # Check if web login is allowed for this API user
-    if not api_user.get("web_login_allowed", True):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Web login is not allowed for this API key. Use the API key directly for API access."
-        )
-
-    # Hash the password with bcrypt
-    password_hash = bcrypt.hashpw(
-        register_data.password.encode('utf-8'),
-        bcrypt.gensalt()
-    ).decode('utf-8')
-
-    # Claim the API key
-    updated_user = db.claim_api_key(key_hash, register_data.username, password_hash)
-    if not updated_user:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to register. Please try again."
-        )
-
-    # Create session for the newly registered user
-    session_token = secrets.token_urlsafe(32)
-    expires_at = datetime.utcnow() + timedelta(hours=settings.api_key_session_expire_hours)
-    db.create_api_key_session(session_token, updated_user["id"], expires_at)
-
-    # Record successful registration
-    record_login_result(req, register_data.username, success=True)
-    db.update_api_user_last_used(updated_user["id"])
-    client_ip = get_client_ip(req)
-    logger.info(f"Successful API user registration for '{register_data.username}' from IP {client_ip}")
-
-    # Set session cookie
-    response.set_cookie(
-        key="session",
-        value=session_token,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="lax",
-        max_age=settings.api_key_session_expire_hours * 60 * 60
-    )
-
-    return {
-        "status": "ok",
-        "message": "Registration successful",
-        "is_admin": False,
-        "api_user": {
-            "id": updated_user["id"],
-            "name": updated_user["name"],
-            "username": updated_user["username"],
-            "project_id": updated_user["project_id"],
-            "profile_ids": updated_user.get("profile_ids")
-        }
-    }
-
-
-@router.post("/login/api-user")
-async def login_api_user(req: Request, login_data: ApiUserLoginRequest, response: Response):
-    """
-    Login as an API user using username and password.
-
-    This is for API users who have already registered (claimed their API key
-    with a username and password).
-    """
-    # Check rate limiting
-    check_rate_limit(req, login_data.username)
-
-    # Look up user by username
-    api_user = db.get_api_user_by_username(login_data.username)
-
-    if not api_user:
-        record_login_result(req, login_data.username, success=False)
-        client_ip = get_client_ip(req)
-        logger.warning(f"Failed API user login attempt for '{login_data.username}' from IP {client_ip}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password"
-        )
-
-    # Check if user is active
-    if not api_user.get("is_active", True):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is disabled"
-        )
-
-    # Check if web login is allowed
-    if not api_user.get("web_login_allowed", True):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Web login is not allowed for this account. Use your API key directly for API access."
-        )
-
-    # Verify password
-    if not api_user.get("password_hash"):
-        # User exists but hasn't set up password (shouldn't happen, but handle it)
-        record_login_result(req, login_data.username, success=False)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password"
-        )
-
-    try:
-        password_valid = bcrypt.checkpw(
-            login_data.password.encode('utf-8'),
-            api_user["password_hash"].encode('utf-8')
-        )
-    except Exception:
-        password_valid = False
-
-    if not password_valid:
-        record_login_result(req, login_data.username, success=False)
-        client_ip = get_client_ip(req)
-        logger.warning(f"Failed API user login attempt for '{login_data.username}' from IP {client_ip}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password"
-        )
-
-    # Create session
-    session_token = secrets.token_urlsafe(32)
-    expires_at = datetime.utcnow() + timedelta(hours=settings.api_key_session_expire_hours)
-    db.create_api_key_session(session_token, api_user["id"], expires_at)
-
-    # Record successful login
-    record_login_result(req, login_data.username, success=True)
-    db.update_api_user_last_used(api_user["id"])
-    client_ip = get_client_ip(req)
-    logger.info(f"Successful API user login for '{login_data.username}' from IP {client_ip}")
-
-    # Set session cookie
-    response.set_cookie(
-        key="session",
-        value=session_token,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="lax",
-        max_age=settings.api_key_session_expire_hours * 60 * 60
-    )
-
-    return {
-        "status": "ok",
-        "message": "Logged in",
-        "is_admin": False,
-        "api_user": {
-            "id": api_user["id"],
-            "name": api_user["name"],
-            "username": api_user["username"],
-            "project_id": api_user["project_id"],
-            "profile_ids": api_user.get("profile_ids")
-        }
-    }
-
-
 @router.post("/logout")
 async def logout(request: Request, response: Response):
     """Logout and invalidate session"""
     token = get_session_token(request)
     if token:
-        # Try to logout from admin session
         auth_service.logout(token)
-        # Also try to delete API key session if exists
-        db.delete_api_key_session(token)
-
-    # Note: We don't clear the encryption key on logout to allow
-    # the app to continue functioning for API users
 
     response.delete_cookie(key="session")
     return {"status": "ok", "message": "Logged out"}
