@@ -336,11 +336,18 @@ function createBrowserStore() {
 			return this._executeAction(sid, 'click', { x: Math.round(x), y: Math.round(y) });
 		},
 
-		/** Type text. */
+		/** Type text into focused element. */
 		async typeText(text: string, selector?: string) {
 			const sid = _currentState.sessionId;
 			if (!sid) return false;
 			return this._executeAction(sid, 'type', { text, selector });
+		},
+
+		/** Press a single key (Enter, Tab, Backspace, etc.). Returns updated screenshot. */
+		async keypress(key: string) {
+			const sid = _currentState.sessionId;
+			if (!sid) return false;
+			return this._executeAction(sid, 'keypress', { key });
 		},
 	};
 }

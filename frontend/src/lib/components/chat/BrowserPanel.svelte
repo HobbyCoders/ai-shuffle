@@ -88,6 +88,8 @@
 	}
 
 	// --- Screenshot click interaction ---
+	let screenshotWrapper: HTMLDivElement | undefined = $state();
+
 	function handleScreenshotClick(e: MouseEvent) {
 		if (!screenshotContainer) return;
 		const img = screenshotContainer.querySelector('img');
@@ -111,8 +113,7 @@
 				clickIndicator = { ...clickIndicator, visible: false };
 			}, 1500);
 		} else {
-			// Normal click: send to browser
-			// Show brief indicator
+			// Normal click: send to browser + focus wrapper for keyboard input
 			clickIndicator = {
 				x: e.clientX - rect.left,
 				y: e.clientY - rect.top,
@@ -123,6 +124,103 @@
 			}, 600);
 
 			browserState.clickAt(viewportX, viewportY);
+
+			if (isMobile) {
+				// On mobile, auto-show the input bar and focus it
+				showInputBar = true;
+				requestAnimationFrame(() => inputBarEl?.focus());
+			} else {
+				// Desktop: focus the screenshot wrapper for keyboard forwarding
+				screenshotWrapper?.focus();
+			}
+		}
+	}
+
+	// --- Keyboard forwarding to Playwright browser (desktop only) ---
+	// After clicking on the screenshot, keystrokes go to the remote browser.
+	// Printable characters are batched (debounced), special keys sent immediately.
+	let _typingBuffer = '';
+	let _flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function flushTypingBuffer() {
+		if (_typingBuffer) {
+			const text = _typingBuffer;
+			_typingBuffer = '';
+			browserState.typeText(text);
+		}
+		_flushTimer = null;
+	}
+
+	const SPECIAL_KEYS: Record<string, string> = {
+		Enter: 'Enter',
+		Tab: 'Tab',
+		Backspace: 'Backspace',
+		Delete: 'Delete',
+		Escape: 'Escape',
+		ArrowUp: 'ArrowUp',
+		ArrowDown: 'ArrowDown',
+		ArrowLeft: 'ArrowLeft',
+		ArrowRight: 'ArrowRight',
+		Home: 'Home',
+		End: 'End',
+		PageUp: 'PageUp',
+		PageDown: 'PageDown',
+	};
+
+	function handleScreenshotKeydown(e: KeyboardEvent) {
+		if (isMobile) return; // Mobile uses the input bar instead
+		if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+		const specialKey = SPECIAL_KEYS[e.key];
+		if (specialKey) {
+			e.preventDefault();
+			if (_typingBuffer) flushTypingBuffer();
+			browserState.keypress(specialKey);
+			return;
+		}
+
+		if (e.key.length === 1) {
+			e.preventDefault();
+			_typingBuffer += e.key;
+			if (_flushTimer) clearTimeout(_flushTimer);
+			_flushTimer = setTimeout(flushTypingBuffer, 150);
+		}
+	}
+
+	// --- Input bar (works on both mobile and desktop) ---
+	// Visible whenever the browser has an active screenshot.
+	// Primary input method on mobile; supplementary on desktop.
+	let inputBarText = $state('');
+	let inputBarEl: HTMLInputElement | undefined = $state();
+	let showInputBar = $state(false);
+
+	function handleInputBarKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			sendInputBarText();
+		}
+	}
+
+	function sendInputBarText() {
+		const text = inputBarText;
+		if (!text) return;
+		inputBarText = '';
+		browserState.typeText(text);
+	}
+
+	function sendEnterKey() {
+		browserState.keypress('Enter');
+	}
+
+	function sendTabKey() {
+		browserState.keypress('Tab');
+	}
+
+	function toggleInputBar() {
+		showInputBar = !showInputBar;
+		if (showInputBar) {
+			// Focus the input bar after it renders
+			requestAnimationFrame(() => inputBarEl?.focus());
 		}
 	}
 </script>
@@ -228,9 +326,14 @@
 					<span>Loading...</span>
 				</div>
 			{:else if $browserState.screenshot}
-				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<div class="screenshot-wrapper" onclick={handleScreenshotClick}>
+				<div
+					class="screenshot-wrapper"
+					bind:this={screenshotWrapper}
+					tabindex="0"
+					onclick={handleScreenshotClick}
+					onkeydown={handleScreenshotKeydown}
+				>
 					<img
 						src="data:image/jpeg;base64,{$browserState.screenshot}"
 						alt="Browser screenshot"
@@ -261,8 +364,66 @@
 			{/if}
 		</div>
 
+		<!-- Input bar — type text into the focused browser element -->
+		{#if showInputBar && $browserState.screenshot}
+			<div class="input-bar">
+				<input
+					type="text"
+					class="input-bar-field"
+					placeholder="Type here..."
+					bind:value={inputBarText}
+					bind:this={inputBarEl}
+					onkeydown={handleInputBarKeydown}
+				/>
+				<button
+					class="input-bar-btn"
+					title="Send text"
+					disabled={!inputBarText || $browserState.isLoading}
+					onclick={sendInputBarText}
+				>
+					<!-- Send arrow icon -->
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<line x1="22" y1="2" x2="11" y2="13"></line>
+						<polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+					</svg>
+				</button>
+				<button class="input-bar-btn" title="Press Tab" onclick={sendTabKey}>
+					<span style="font-size: 0.6875rem; font-weight: 500;">Tab</span>
+				</button>
+				<button class="input-bar-btn submit-btn" title="Press Enter" onclick={sendEnterKey}>
+					<!-- Enter/return icon -->
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<polyline points="9 10 4 15 9 20"></polyline>
+						<path d="M20 4v7a4 4 0 01-4 4H4"></path>
+					</svg>
+				</button>
+			</div>
+		{/if}
+
 		<!-- Status bar -->
 		<div class="status-bar">
+			{#if $browserState.screenshot}
+				<button
+					class="keyboard-toggle"
+					class:active={showInputBar}
+					title={showInputBar ? 'Hide keyboard' : 'Show keyboard'}
+					onclick={toggleInputBar}
+				>
+					<!-- Keyboard icon -->
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+						<rect x="2" y="4" width="20" height="16" rx="2" ry="2"></rect>
+						<line x1="6" y1="8" x2="6" y2="8"></line>
+						<line x1="10" y1="8" x2="10" y2="8"></line>
+						<line x1="14" y1="8" x2="14" y2="8"></line>
+						<line x1="18" y1="8" x2="18" y2="8"></line>
+						<line x1="6" y1="12" x2="6" y2="12"></line>
+						<line x1="10" y1="12" x2="10" y2="12"></line>
+						<line x1="14" y1="12" x2="14" y2="12"></line>
+						<line x1="18" y1="12" x2="18" y2="12"></line>
+						<line x1="8" y1="16" x2="16" y2="16"></line>
+					</svg>
+				</button>
+			{/if}
 			<span class="status-label">
 				{#if $browserState.isLoading}
 					Loading...
@@ -457,6 +618,11 @@
 		position: relative;
 		width: 100%;
 		cursor: crosshair;
+		outline: none;
+	}
+
+	.screenshot-wrapper:focus {
+		box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--primary) 40%, transparent);
 	}
 
 	.screenshot-img {
@@ -554,14 +720,107 @@
 		}
 	}
 
+	/* Input bar — between screenshot and status bar */
+	.input-bar {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 6px 8px;
+		border-top: 1px solid var(--border);
+		background: var(--muted);
+		flex-shrink: 0;
+	}
+
+	.input-bar-field {
+		flex: 1;
+		height: 32px;
+		padding: 0 8px;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		background: var(--card);
+		color: var(--foreground);
+		font-size: 0.8125rem;
+		outline: none;
+		min-width: 0;
+	}
+
+	.input-bar-field:focus {
+		border-color: var(--primary);
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 20%, transparent);
+	}
+
+	.input-bar-field::placeholder {
+		color: var(--muted-foreground);
+	}
+
+	.input-bar-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 32px;
+		height: 32px;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		background: var(--card);
+		color: var(--muted-foreground);
+		cursor: pointer;
+		flex-shrink: 0;
+	}
+
+	.input-bar-btn:hover:not(:disabled) {
+		background: var(--hover-overlay, color-mix(in oklch, var(--foreground) 8%, transparent));
+		color: var(--foreground);
+	}
+
+	.input-bar-btn:disabled {
+		opacity: 0.3;
+		cursor: not-allowed;
+	}
+
+	.input-bar-btn.submit-btn {
+		background: var(--primary);
+		color: var(--primary-foreground);
+		border-color: var(--primary);
+	}
+
+	.input-bar-btn.submit-btn:hover {
+		opacity: 0.9;
+	}
+
 	/* Status bar */
 	.status-bar {
 		display: flex;
 		align-items: center;
+		gap: 6px;
 		padding: 4px 12px;
 		border-top: 1px solid var(--border);
 		background: var(--muted);
 		flex-shrink: 0;
+	}
+
+	.keyboard-toggle {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 24px;
+		height: 24px;
+		border: none;
+		border-radius: 4px;
+		background: transparent;
+		color: var(--muted-foreground);
+		cursor: pointer;
+		flex-shrink: 0;
+		padding: 0;
+	}
+
+	.keyboard-toggle:hover,
+	.keyboard-toggle.active {
+		color: var(--foreground);
+		background: color-mix(in oklch, var(--foreground) 8%, transparent);
+	}
+
+	.keyboard-toggle.active {
+		color: var(--primary);
 	}
 
 	.status-label {
@@ -632,6 +891,27 @@
 
 	.browser-panel.mobile .url-input {
 		font-size: 0.875rem;
+	}
+
+	/* Mobile input bar: larger touch targets */
+	.browser-panel.mobile .input-bar {
+		padding: 8px;
+		gap: 6px;
+	}
+
+	.browser-panel.mobile .input-bar-field {
+		height: 40px;
+		font-size: 1rem;
+	}
+
+	.browser-panel.mobile .input-bar-btn {
+		width: 40px;
+		height: 40px;
+	}
+
+	.browser-panel.mobile .keyboard-toggle {
+		width: 32px;
+		height: 32px;
 	}
 
 	/* Mobile: safe area insets for notched devices */

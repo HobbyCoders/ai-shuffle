@@ -221,6 +221,9 @@ class TabNewRequest(BaseModel):
 class TabSwitchRequest(BaseModel):
     index: int
 
+class KeypressRequest(BaseModel):
+    key: str  # Playwright key name: "Enter", "Tab", "Backspace", "a", etc.
+
 
 @router.post("/{session_id}/navigate")
 async def browser_navigate(
@@ -310,6 +313,33 @@ async def browser_type(
     if req.press_enter:
         args["press_enter"] = req.press_enter
     return await _execute_tool(session_id, "browser_type", args)
+
+
+@router.post("/{session_id}/keypress")
+async def browser_keypress(
+    session_id: str,
+    req: KeypressRequest,
+    _auth=Depends(require_browser_auth),
+):
+    """Press a single key (for keyboard event forwarding from browser panel)."""
+    session = await browser_session_manager.get_session(session_id)
+    if not session:
+        session = await _get_or_create_session(session_id)
+    try:
+        await session.page.keyboard.press(req.key)
+        await session.page.wait_for_timeout(50)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+    screenshot_b64 = await session.take_screenshot()
+    title = await session.get_title()
+    return {
+        "success": True,
+        "key": req.key,
+        "url": session.current_url,
+        "title": title,
+        "screenshot": screenshot_b64,
+    }
 
 
 @router.post("/{session_id}/scroll")
