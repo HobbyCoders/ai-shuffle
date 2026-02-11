@@ -7,8 +7,6 @@
 	 * - AI: API Keys & Model Selection (merged, compact)
 	 * - System: Users, Webhooks, Cleanup (merged)
 	 */
-	import BaseCard from './BaseCard.svelte';
-	import type { DeckCard } from './types';
 	import { onMount } from 'svelte';
 	import './card-design-system.css';
 	import { auth, username, isAdmin, claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth';
@@ -41,29 +39,11 @@
 	} from '$lib/types/ai-models';
 
 	interface Props {
-		card: DeckCard;
-		onClose: () => void;
-		onMaximize: () => void;
-		onFocus: () => void;
-		onMove: (x: number, y: number) => void;
-		onResize: (w: number, h: number) => void;
-		onDragEnd?: () => void;
-		onResizeEnd?: () => void;
 		mobile?: boolean;
-		embedded?: boolean;
 	}
 
 	let {
-		card,
-		onClose,
-		onMaximize,
-		onFocus,
-		onMove,
-		onResize,
-		onDragEnd,
-		onResizeEnd,
-		mobile = false,
-		embedded = false
+		mobile = false
 	}: Props = $props();
 
 	// Navigation - simplified to 3 main tabs
@@ -1675,36 +1655,21 @@
 			</div>
 {/snippet}
 
-<!-- Conditional wrapper: Embedded uses FeaturePageLayout, Mobile uses no BaseCard, Desktop uses BaseCard -->
-{#if embedded}
-	<FeaturePageLayout icon={Settings} title="Settings">
-		{#snippet headerTabs()}
-			<div class="fp-tab-bar">
-				{#each settingsTabs as tab}
-					<button class="fp-tab" class:active={activeTab === tab.id} onclick={() => activeTab = tab.id}>
-						{tab.label}
-					</button>
-				{/each}
-			</div>
-		{/snippet}
-
-		<div class="settings card-system embedded">
-			{@render settingsContent()}
+<FeaturePageLayout icon={Settings} title="Settings">
+	{#snippet headerTabs()}
+		<div class="fp-tab-bar">
+			{#each settingsTabs as tab}
+				<button class="fp-tab" class:active={activeTab === tab.id} onclick={() => activeTab = tab.id}>
+					{tab.label}
+				</button>
+			{/each}
 		</div>
-	</FeaturePageLayout>
-{:else if mobile}
-	<div class="settings card-system mobile">
+	{/snippet}
+
+	<div class="settings card-system embedded">
 		{@render settingsContent()}
 	</div>
-{:else}
-	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
-		{#snippet children()}
-			<div class="settings card-system">
-				{@render settingsContent()}
-			</div>
-		{/snippet}
-	</BaseCard>
-{/if}
+</FeaturePageLayout>
 
 <style>
 	/* ========================================

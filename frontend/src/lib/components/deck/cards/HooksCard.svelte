@@ -8,9 +8,7 @@
 	 * - Create, edit, delete, and test hooks
 	 * - Enable/disable hooks
 	 */
-	import BaseCard from './BaseCard.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
-	import type { DeckCard } from './types';
 	import {
 		hooks,
 		projectHooks,
@@ -30,29 +28,11 @@
 	import './card-design-system.css';
 
 	interface Props {
-		card: DeckCard;
-		onClose: () => void;
-		onMaximize: () => void;
-		onFocus: () => void;
-		onMove: (x: number, y: number) => void;
-		onResize: (w: number, h: number) => void;
-		onDragEnd?: () => void;
-		onResizeEnd?: () => void;
 		mobile?: boolean;
-		embedded?: boolean;
 	}
 
 	let {
-		card,
-		onClose,
-		onMaximize,
-		onFocus,
-		onMove,
-		onResize,
-		onDragEnd,
-		onResizeEnd,
-		mobile = false,
-		embedded = false
+		mobile = false
 	}: Props = $props();
 
 	type Tab = 'custom' | 'plugins';
@@ -295,173 +275,49 @@
 	{/if}
 {/snippet}
 
-{#if embedded}
-	<FeaturePageLayout
-		icon={Zap}
-		title="Hooks"
-		itemCount={$hookStats.totalCustom}
-		itemLabel="custom"
-	>
-		{#snippet headerTabs()}
-			<div class="fp-tab-bar">
-				{#each tabs as tab}
-					<button
-						class="fp-tab"
-						class:active={activeTab === tab.id}
-						onclick={() => activeTab = tab.id}
-					>
-						{tab.label}
-						<span class="fp-tab-count">{tab.count}</span>
-					</button>
-				{/each}
-			</div>
-		{/snippet}
-		{#snippet headerActions()}
-			<div class="fph-search-wrapper">
-				<Search size={14} />
-				<input
-					type="text"
-					bind:value={searchQuery}
-					placeholder="Search hooks..."
-					class="fph-search-input"
-				/>
-			</div>
-			{#if activeTab === 'custom'}
-				<button class="fp-btn fp-btn--primary" onclick={() => { editingHook = null; showForm = true; }} title="New Hook">
-					<Plus size={14} />
-					<span class="hidden sm:inline">New Hook</span>
+<FeaturePageLayout
+	icon={Zap}
+	title="Hooks"
+	itemCount={$hookStats.totalCustom}
+	itemLabel="custom"
+>
+	{#snippet headerTabs()}
+		<div class="fp-tab-bar">
+			{#each tabs as tab}
+				<button
+					class="fp-tab"
+					class:active={activeTab === tab.id}
+					onclick={() => activeTab = tab.id}
+				>
+					{tab.label}
+					<span class="fp-tab-count">{tab.count}</span>
 				</button>
-			{/if}
-		{/snippet}
-		{#snippet children()}
-			<div class="hooks-card card-system" style="position: relative;">
-				{@render hooksMainContent()}
-			</div>
-		{/snippet}
-	</FeaturePageLayout>
-{:else if mobile}
-	<!-- Mobile: Direct content without BaseCard wrapper -->
-	<!-- MobileWorkspace provides the header with title and close button -->
-	<div class="hooks-card card-system mobile">
-			<!-- Tabs -->
-			<div class="hooks-tabs">
-				{#each tabs as tab}
-					<button
-						onclick={() => activeTab = tab.id}
-						class="hooks-tab"
-						class:active={activeTab === tab.id}
-					>
-						{tab.label}
-						<span class="hooks-tab-count" class:active={activeTab === tab.id}>
-							{tab.count}
-						</span>
-					</button>
-				{/each}
-			</div>
-
-			<!-- Search bar and actions -->
-			<div class="hooks-search-bar">
-				<div class="search-input-wrapper">
-					<Search size={16} class="search-icon" />
-					<input
-						type="text"
-						bind:value={searchQuery}
-						placeholder="Search hooks..."
-						class="search-input"
-					/>
-				</div>
-
-				{#if activeTab === 'custom'}
-					<button
-						onclick={() => {
-							editingHook = null;
-							showForm = true;
-						}}
-						class="add-hook-btn"
-					>
-						<Plus size={16} />
-						Add Hook
-					</button>
-				{/if}
-			</div>
-
+			{/each}
+		</div>
+	{/snippet}
+	{#snippet headerActions()}
+		<div class="fph-search-wrapper">
+			<Search size={14} />
+			<input
+				type="text"
+				bind:value={searchQuery}
+				placeholder="Search hooks..."
+				class="fph-search-input"
+			/>
+		</div>
+		{#if activeTab === 'custom'}
+			<button class="fp-btn fp-btn--primary" onclick={() => { editingHook = null; showForm = true; }} title="New Hook">
+				<Plus size={14} />
+				<span class="hidden sm:inline">New Hook</span>
+			</button>
+		{/if}
+	{/snippet}
+	{#snippet children()}
+		<div class="hooks-card card-system" style="position: relative;">
 			{@render hooksMainContent()}
-
-			<!-- Footer -->
-			<div class="hooks-footer">
-				<div class="footer-stats">
-					{$hookStats.totalEnabled} enabled / {$hookStats.totalCustom} custom
-				</div>
-			</div>
-	</div>
-{:else}
-	<!-- Desktop: Full BaseCard with all features -->
-	<BaseCard
-		{card}
-		{onClose}
-		{onMaximize}
-		{onFocus}
-		{onMove}
-		{onResize}
-		{onDragEnd}
-		{onResizeEnd}
-	>
-		{#snippet children()}
-			<div class="hooks-card card-system" class:maximized={card.maximized}>
-				<!-- Tabs -->
-				<div class="hooks-tabs">
-					{#each tabs as tab}
-						<button
-							onclick={() => activeTab = tab.id}
-							class="hooks-tab"
-							class:active={activeTab === tab.id}
-						>
-							{tab.label}
-							<span class="hooks-tab-count" class:active={activeTab === tab.id}>
-								{tab.count}
-							</span>
-						</button>
-					{/each}
-				</div>
-
-				<!-- Search bar and actions -->
-				<div class="hooks-search-bar">
-					<div class="search-input-wrapper">
-						<Search size={16} class="search-icon" />
-						<input
-							type="text"
-							bind:value={searchQuery}
-							placeholder="Search hooks..."
-							class="search-input"
-						/>
-					</div>
-
-					{#if activeTab === 'custom'}
-						<button
-							onclick={() => {
-								editingHook = null;
-								showForm = true;
-							}}
-							class="add-hook-btn"
-						>
-							<Plus size={16} />
-							Add Hook
-						</button>
-					{/if}
-				</div>
-
-				{@render hooksMainContent()}
-
-				<!-- Footer -->
-				<div class="hooks-footer">
-					<div class="footer-stats">
-						{$hookStats.totalEnabled} enabled / {$hookStats.totalCustom} custom
-					</div>
-				</div>
-			</div>
-		{/snippet}
-	</BaseCard>
-{/if}
+		</div>
+	{/snippet}
+</FeaturePageLayout>
 
 <style>
 	.hooks-card {

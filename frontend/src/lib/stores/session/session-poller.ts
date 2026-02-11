@@ -15,8 +15,7 @@
  * - Stops automatically when streaming ends
  */
 
-import type { ChatMessage, TodoItem, SubagentChildMessage } from '../tabs';
-import type { MessageType } from '../tabs';
+import type { ChatMessage, TodoItem, SubagentChildMessage, MessageType } from '../types';
 import { sessionState, type SessionUsage } from './session-state';
 
 // ─── Configuration ───────────────────────────────────────────────────────────

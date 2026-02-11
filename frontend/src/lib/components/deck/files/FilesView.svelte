@@ -663,32 +663,33 @@
 <style>
 	/* ============================================
 	   CSS Custom Properties - File Type Colors
+	   All file/folder icons use the theme primary color
 	   ============================================ */
 	.files-view {
-		--file-folder: oklch(0.75 0.15 85);
-		--file-folder-bg: oklch(0.75 0.15 85 / 0.15);
-		--file-code: oklch(0.70 0.18 280);
-		--file-code-bg: oklch(0.70 0.18 280 / 0.15);
-		--file-doc: oklch(0.65 0.15 240);
-		--file-doc-bg: oklch(0.65 0.15 240 / 0.15);
-		--file-image: oklch(0.68 0.18 330);
-		--file-image-bg: oklch(0.68 0.18 330 / 0.15);
-		--file-video: oklch(0.65 0.20 25);
-		--file-video-bg: oklch(0.65 0.20 25 / 0.15);
-		--file-audio: oklch(0.70 0.16 160);
-		--file-audio-bg: oklch(0.70 0.16 160 / 0.15);
-		--file-archive: oklch(0.60 0.12 50);
-		--file-archive-bg: oklch(0.60 0.12 50 / 0.15);
-		--file-data: oklch(0.72 0.14 180);
-		--file-data-bg: oklch(0.72 0.14 180 / 0.15);
-		--file-spreadsheet: oklch(0.65 0.18 145);
-		--file-spreadsheet-bg: oklch(0.65 0.18 145 / 0.15);
-		--file-config: oklch(0.55 0.08 260);
-		--file-config-bg: oklch(0.55 0.08 260 / 0.15);
-		--file-package: oklch(0.68 0.16 20);
-		--file-package-bg: oklch(0.68 0.16 20 / 0.15);
-		--file-default: oklch(0.60 0.02 260);
-		--file-default-bg: oklch(0.60 0.02 260 / 0.12);
+		--file-folder: var(--primary);
+		--file-folder-bg: color-mix(in oklch, var(--primary) 15%, transparent);
+		--file-code: var(--primary);
+		--file-code-bg: color-mix(in oklch, var(--primary) 15%, transparent);
+		--file-doc: var(--primary);
+		--file-doc-bg: color-mix(in oklch, var(--primary) 15%, transparent);
+		--file-image: var(--primary);
+		--file-image-bg: color-mix(in oklch, var(--primary) 15%, transparent);
+		--file-video: var(--primary);
+		--file-video-bg: color-mix(in oklch, var(--primary) 15%, transparent);
+		--file-audio: var(--primary);
+		--file-audio-bg: color-mix(in oklch, var(--primary) 15%, transparent);
+		--file-archive: var(--primary);
+		--file-archive-bg: color-mix(in oklch, var(--primary) 15%, transparent);
+		--file-data: var(--primary);
+		--file-data-bg: color-mix(in oklch, var(--primary) 15%, transparent);
+		--file-spreadsheet: var(--primary);
+		--file-spreadsheet-bg: color-mix(in oklch, var(--primary) 15%, transparent);
+		--file-config: var(--primary);
+		--file-config-bg: color-mix(in oklch, var(--primary) 15%, transparent);
+		--file-package: var(--primary);
+		--file-package-bg: color-mix(in oklch, var(--primary) 15%, transparent);
+		--file-default: var(--primary);
+		--file-default-bg: color-mix(in oklch, var(--primary) 15%, transparent);
 	}
 
 	/* ============================================

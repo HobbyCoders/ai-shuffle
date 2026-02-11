@@ -2,15 +2,12 @@
  * Active Usage Derived Store
  *
  * Provides token usage for the currently active session.
- * Uses sessionState when available, falls back to tabs store.
+ * Uses sessionState when available, falls back to activeSession store.
  */
 
 import { derived } from 'svelte/store';
-import { tabs } from '../tabs';
+import { activeSession } from '../active-session';
 import { sessionState, type SessionUsage } from '../session/session-state';
-
-/** Read from session state (new store architecture) */
-const USE_NEW_STORES = true;
 
 const EMPTY_USAGE: SessionUsage = {
 	inputTokens: 0,
@@ -23,26 +20,23 @@ const EMPTY_USAGE: SessionUsage = {
 /**
  * Token usage for the currently active session.
  */
-export const activeUsage = derived<[typeof tabs, typeof sessionState], SessionUsage>(
-	[tabs, sessionState],
-	([$tabs, $sessionState]) => {
-		const tab = $tabs.tabs.find(t => t.id === $tabs.activeTabId);
-		if (!tab) return EMPTY_USAGE;
-
-		if (USE_NEW_STORES && tab.sessionId) {
-			const session = $sessionState.sessions.get(tab.sessionId);
+export const activeUsage = derived<[typeof activeSession, typeof sessionState], SessionUsage>(
+	[activeSession, sessionState],
+	([$activeSession, $sessionState]) => {
+		if ($activeSession.sessionId) {
+			const session = $sessionState.sessions.get($activeSession.sessionId);
 			if (session && session.usage.contextUsed > 0) {
 				return session.usage;
 			}
 		}
 
-		// Fallback to tabs store
+		// Fallback to activeSession store values
 		return {
-			inputTokens: tab.totalTokensIn,
-			outputTokens: tab.totalTokensOut,
-			cacheCreationTokens: tab.totalCacheCreationTokens,
-			cacheReadTokens: tab.totalCacheReadTokens,
-			contextUsed: tab.contextUsed ?? 0,
+			inputTokens: $activeSession.totalTokensIn,
+			outputTokens: $activeSession.totalTokensOut,
+			cacheCreationTokens: $activeSession.totalCacheCreationTokens,
+			cacheReadTokens: $activeSession.totalCacheReadTokens,
+			contextUsed: $activeSession.contextUsed ?? 0,
 		};
 	}
 );

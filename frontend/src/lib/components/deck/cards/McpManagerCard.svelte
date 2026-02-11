@@ -8,9 +8,7 @@
 	 * - View discovered MCP tools from all servers
 	 * - Server type support: stdio, sse, http
 	 */
-	import BaseCard from './BaseCard.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
-	import type { DeckCard } from './types';
 	import { onMount } from 'svelte';
 	import {
 		mcp,
@@ -26,29 +24,11 @@
 	import './card-design-system.css';
 
 	interface Props {
-		card: DeckCard;
-		onClose: () => void;
-		onMaximize: () => void;
-		onFocus: () => void;
-		onMove: (x: number, y: number) => void;
-		onResize: (w: number, h: number) => void;
-		onDragEnd?: () => void;
-		onResizeEnd?: () => void;
 		mobile?: boolean;
-		embedded?: boolean;
 	}
 
 	let {
-		card,
-		onClose,
-		onMaximize,
-		onFocus,
-		onMove,
-		onResize,
-		onDragEnd,
-		onResizeEnd,
-		mobile = false,
-		embedded = false
+		mobile = false
 	}: Props = $props();
 
 	// MCP server form state
@@ -158,65 +138,25 @@
 	/>
 {/snippet}
 
-{#if embedded}
-	<FeaturePageLayout
-		icon={Server}
-		title="MCP Servers"
-		subtitle="Manage Model Context Protocol server connections"
-		itemCount={$mcpDisplayStats.globalCount}
-		itemLabel="servers"
-	>
-		{#snippet headerActions()}
-			<button class="fp-btn fp-btn--primary" onclick={handleAddMcpServer} title="Add Server">
-				<Plus size={14} />
-				<span class="hidden sm:inline">Add Server</span>
-			</button>
-		{/snippet}
-		{#snippet children()}
-			<div class="mcp-card card-system" style="position: relative;">
-				{@render mcpMainContent()}
-			</div>
-		{/snippet}
-	</FeaturePageLayout>
-{:else}
-	<BaseCard
-		{card}
-		{onClose}
-		{onMaximize}
-		{onFocus}
-		{onMove}
-		{onResize}
-		{onDragEnd}
-		{onResizeEnd}
-	>
-		{#snippet children()}
-			<div class="mcp-card card-system" class:mobile class:maximized={card.maximized}>
-				<!-- Header -->
-				<div class="mcp-header">
-					<div class="header-title">
-						<Server size={18} />
-						<h2>MCP Servers</h2>
-					</div>
-					<p class="header-description">
-						Manage Model Context Protocol server connections
-					</p>
-				</div>
-
-				{@render mcpMainContent()}
-
-				<!-- Footer -->
-				<div class="mcp-footer">
-					<div class="footer-info">
-						{$mcpDisplayStats.toolCount} tools discovered
-					</div>
-					<div class="footer-stats">
-						{$mcpDisplayStats.globalCount} servers configured
-					</div>
-				</div>
-			</div>
-		{/snippet}
-	</BaseCard>
-{/if}
+<FeaturePageLayout
+	icon={Server}
+	title="MCP Servers"
+	subtitle="Manage Model Context Protocol server connections"
+	itemCount={$mcpDisplayStats.globalCount}
+	itemLabel="servers"
+>
+	{#snippet headerActions()}
+		<button class="fp-btn fp-btn--primary" onclick={handleAddMcpServer} title="Add Server">
+			<Plus size={14} />
+			<span class="hidden sm:inline">Add Server</span>
+		</button>
+	{/snippet}
+	{#snippet children()}
+		<div class="mcp-card card-system" style="position: relative;">
+			{@render mcpMainContent()}
+		</div>
+	{/snippet}
+</FeaturePageLayout>
 
 <style>
 	.mcp-card {

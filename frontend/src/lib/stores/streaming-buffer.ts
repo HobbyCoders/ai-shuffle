@@ -8,7 +8,7 @@
  * @see C:\Users\owner\.claude\plans\encapsulated-swimming-octopus.md
  */
 
-import type { ChatMessage, MessageType, TodoItem, SubagentChildMessage } from './tabs';
+import type { ChatMessage, MessageType, TodoItem, SubagentChildMessage } from './types';
 
 // Configuration
 const TEXT_BATCH_THRESHOLD = 100;  // Flush after accumulating 100 chars of text

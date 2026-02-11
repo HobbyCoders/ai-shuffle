@@ -5,6 +5,5 @@
  *   import { activeIsStreaming, activeUsage } from '$lib/stores/derived';
  */
 
-export { activeTab, activeTabId } from './active-tab';
-export { activeIsStreaming, workspaceIsStreaming, activeWsConnected } from './active-streaming';
+export { activeIsStreaming, workspaceIsStreaming, gitControlsStreaming, activeWsConnected } from './active-streaming';
 export { activeUsage } from './active-usage';

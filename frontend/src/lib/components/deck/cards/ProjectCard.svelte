@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * ProjectCard - Project management card for The Deck
+	 * ProjectCard - Project management card
 	 *
 	 * Features:
 	 * - Project list with name, path display
@@ -12,14 +12,8 @@
 	 * - Delete with inline confirmation
 	 * - Add project via shared modal with directory browser
 	 * - Search/filter for many projects
-	 *
-	 * Modes:
-	 * - embedded=false (default): Uses BaseCard wrapper for deck, direct render for mobile
-	 * - embedded=true: Uses FeaturePageLayout for panel integration
 	 */
-	import BaseCard from './BaseCard.svelte';
-	import type { DeckCard } from './types';
-	import { tabs, projects } from '$lib/stores/tabs';
+	import { appData as tabs, projects } from '$lib/stores/app-data';
 	import { groups } from '$lib/stores/groups';
 	import { Search, Plus, Trash2, FolderOpen, X, ChevronLeft, Package, Bot, Zap, MessageSquare } from 'lucide-svelte';
 	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
@@ -31,29 +25,11 @@
 	import './card-design-system.css';
 
 	interface Props {
-		card: DeckCard;
-		onClose: () => void;
-		onMaximize: () => void;
-		onFocus: () => void;
-		onMove: (x: number, y: number) => void;
-		onResize: (w: number, h: number) => void;
-		onDragEnd?: () => void;
-		onResizeEnd?: () => void;
 		mobile?: boolean;
-		embedded?: boolean;
 	}
 
 	let {
-		card,
-		onClose,
-		onMaximize,
-		onFocus,
-		onMove,
-		onResize,
-		onDragEnd,
-		onResizeEnd,
-		mobile = false,
-		embedded = false
+		mobile = false
 	}: Props = $props();
 
 	// View mode: list or detail
@@ -173,11 +149,7 @@
 	</div>
 {/snippet}
 
-{#if embedded}
-	<!-- ═══════════════════════════════════════════════════════════════════════════
-	     EMBEDDED MODE - Uses FeaturePageLayout
-	     ═══════════════════════════════════════════════════════════════════════════ -->
-	{#if viewMode === 'detail' && selectedProject}
+{#if viewMode === 'detail' && selectedProject}
 		<!-- Detail View -->
 		<FeaturePageLayout
 			icon={FolderOpen}
@@ -305,246 +277,6 @@
 			{/if}
 		</FeaturePageLayout>
 	{/if}
-{:else}
-	<!-- ═══════════════════════════════════════════════════════════════════════════
-	     NON-EMBEDDED MODE - Original BaseCard / mobile rendering
-	     ═══════════════════════════════════════════════════════════════════════════ -->
-	{#snippet content()}
-		<div class="card-system project-card" class:maximized={card.maximized}>
-			{#if viewMode === 'detail' && selectedProject}
-				<!-- Detail View -->
-				<div class="detail-view">
-					<!-- Detail Header -->
-					<div class="detail-header">
-						<button onclick={handleBack} class="back-btn">
-							<ChevronLeft class="w-5 h-5" />
-						</button>
-						<div class="detail-header-info">
-							<span class="detail-header-title">{selectedProject.name}</span>
-							<span class="detail-header-path">/workspace/{selectedProject.path}/</span>
-						</div>
-					</div>
-
-					<!-- Detail Tabs -->
-					<div class="detail-tabs">
-						<button
-							class="detail-tab"
-							class:active={activeTab === 'plugins'}
-							onclick={() => (activeTab = 'plugins')}
-						>
-							<Package class="w-4 h-4" />
-							Plugins
-						</button>
-						<button
-							class="detail-tab"
-							class:active={activeTab === 'agents'}
-							onclick={() => (activeTab = 'agents')}
-						>
-							<Bot class="w-4 h-4" />
-							Agents
-						</button>
-						<button
-							class="detail-tab"
-							class:active={activeTab === 'hooks'}
-							onclick={() => (activeTab = 'hooks')}
-						>
-							<Zap class="w-4 h-4" />
-							Hooks
-						</button>
-					</div>
-
-					<!-- Tab Content -->
-					<div class="detail-content">
-						{#if activeTab === 'plugins'}
-							<ProjectPluginsTab projectId={selectedProject.id} />
-						{:else if activeTab === 'agents'}
-							<ProjectAgentsTab projectId={selectedProject.id} />
-						{:else if activeTab === 'hooks'}
-							<ProjectHooksTab projectId={selectedProject.id} />
-						{/if}
-					</div>
-				</div>
-			{:else}
-				<!-- List View -->
-				<!-- Header -->
-				<div class="card-header">
-					<div class="card-header-info">
-						{#if mobile}
-							<span class="card-header-title">Projects</span>
-						{/if}
-						<span class="card-header-subtitle">
-							{$projects.length} project{$projects.length !== 1 ? 's' : ''} configured
-						</span>
-					</div>
-				</div>
-
-				<!-- Search (show if > 3 projects) -->
-				{#if $projects.length > 3}
-					<div class="card-search-wrapper">
-						<div class="card-search-container">
-							<Search class="card-search-icon" />
-							<input
-								type="text"
-								bind:value={searchQuery}
-								placeholder="Search projects..."
-								class="card-search-input"
-							/>
-						</div>
-					</div>
-				{/if}
-
-				<!-- Content -->
-				<div class="card-content">
-					<div class="centered-content">
-					{#if error}
-						<div class="card-error-banner">
-							<span class="flex-1">{error}</span>
-							<button onclick={() => (error = null)}>
-								<X class="w-4 h-4" />
-							</button>
-						</div>
-					{/if}
-
-					<!-- Project list -->
-					{#if filteredProjects().length === 0}
-						<div class="card-empty-state">
-							{#if searchQuery}
-								<Search class="card-empty-icon" />
-								<p class="card-empty-title">No projects match "{searchQuery}"</p>
-								<button onclick={() => (searchQuery = '')} class="card-empty-action">
-									Clear search
-								</button>
-							{:else}
-								<FolderOpen class="card-empty-icon" />
-								<p class="card-empty-title">No projects configured yet</p>
-								<p class="card-empty-description">
-									Projects organize your work into separate workspaces with their own settings.
-								</p>
-							{/if}
-						</div>
-					{:else}
-						{#each filteredProjects() as project (project.id)}
-							{#if deletingId === project.id}
-								<!-- Inline delete confirmation -->
-								<div class="card-list-item card-list-item--deleting">
-									<div class="card-item-icon card-item-icon--destructive">
-										<Trash2 />
-									</div>
-									<div class="card-item-content">
-										{#if project.session_count && project.session_count > 0}
-											<div class="delete-warning">
-												<div class="delete-warning-header">
-													<svg class="warning-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-														<path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
-													</svg>
-													<span>This project has {project.session_count} conversation{project.session_count === 1 ? '' : 's'}</span>
-												</div>
-												<p class="delete-warning-text">
-													Deleting <strong>{project.name}</strong> will permanently delete all associated conversations. This cannot be undone.
-												</p>
-											</div>
-										{:else}
-											<p class="delete-confirm-text">
-												Delete <strong>{project.name}</strong>? This cannot be undone.
-											</p>
-										{/if}
-										<div class="delete-confirm-actions">
-											<button
-												onclick={() => (deletingId = null)}
-												disabled={deleteLoading}
-												class="card-btn-secondary"
-											>
-												Cancel
-											</button>
-											<button
-												onclick={handleDeleteProject}
-												disabled={deleteLoading}
-												class="card-btn-destructive"
-											>
-												{#if deleteLoading}
-													<div class="card-spinner card-spinner--small"></div>
-												{/if}
-												{project.session_count && project.session_count > 0 ? 'Delete All' : 'Delete'}
-											</button>
-										</div>
-									</div>
-								</div>
-							{:else}
-								<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-								<div
-									class="card-list-item card-list-item--clickable"
-									onclick={() => handleProjectClick(project.id)}
-									role="button"
-									tabindex="0"
-									onkeydown={(e) => e.key === 'Enter' && handleProjectClick(project.id)}
-								>
-									<div class="card-item-icon">
-										<FolderOpen />
-									</div>
-									<div class="card-item-content">
-										<div class="card-item-header">
-											<span class="card-item-name">{project.name}</span>
-											{#if $groups.projects.assignments[project.id]}
-												<span class="card-badge card-badge--primary">
-													{$groups.projects.assignments[project.id]}
-												</span>
-											{/if}
-										</div>
-										<span class="card-item-id">/workspace/{project.path}/</span>
-									</div>
-									<div class="card-item-actions" onclick={(e) => e.stopPropagation()}>
-										<!-- Group dropdown (portal-based to escape overflow:hidden) -->
-										<GroupDropdown entityType="projects" entityId={project.id} />
-										<button
-											onclick={(e) => { e.stopPropagation(); deletingId = project.id; }}
-											class="card-action-btn card-action-btn--destructive"
-											title="Delete project"
-										>
-											<Trash2 />
-										</button>
-									</div>
-								</div>
-							{/if}
-						{/each}
-					{/if}
-					</div>
-				</div>
-
-				<!-- Footer -->
-				<div class="card-footer">
-					<div class="card-footer-content">
-						<button
-							onclick={() => (showAddModal = true)}
-							class="card-btn-primary"
-						>
-							<Plus />
-							New Project
-						</button>
-					</div>
-				</div>
-			{/if}
-		</div>
-	{/snippet}
-
-	{#if mobile}
-		<!-- Mobile: No BaseCard wrapper, just the content -->
-		{@render content()}
-	{:else}
-		<!-- Desktop: Wrap in BaseCard -->
-		<BaseCard
-			{card}
-			{onClose}
-			{onMaximize}
-			{onFocus}
-			{onMove}
-			{onResize}
-			{onDragEnd}
-			{onResizeEnd}
-		>
-			{@render content()}
-		</BaseCard>
-	{/if}
-{/if}
 
 <!-- Add Project Modal (shared across all modes) -->
 <AddProjectModal

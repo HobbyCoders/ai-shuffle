@@ -2,7 +2,7 @@
 	/**
 	 * SubagentMessage - Display for subagent work (matching tool message group style)
 	 */
-	import type { ChatMessage } from '$lib/stores/tabs';
+	import type { ChatMessage } from '$lib/stores/types';
 
 	interface Props {
 		message: ChatMessage;

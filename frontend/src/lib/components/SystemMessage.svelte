@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { ChatMessage } from '$lib/stores/tabs';
+	import type { ChatMessage } from '$lib/stores/types';
 	import { marked } from 'marked';
 
 	// Configure marked for system message rendering

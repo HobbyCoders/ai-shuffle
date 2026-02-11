@@ -5,7 +5,7 @@
  * cached messages render immediately, then get replaced by server data.
  */
 
-import type { ChatMessage } from './tabs/types';
+import type { ChatMessage } from './types';
 
 const DB_NAME = 'ai-shuffle-cache';
 const DB_VERSION = 1;

@@ -1,18 +1,12 @@
 <script lang="ts">
-	import { tabs, type ChatTab } from '$lib/stores/tabs';
-
-	interface Props {
-		tab: ChatTab;
-	}
-
-	let { tab }: Props = $props();
+	import { activeSession } from '$lib/stores/active-session';
 
 	function removeMessage(messageId: string) {
-		tabs.removeQueuedMessage(tab.id, messageId);
+		activeSession.removeQueuedMessage(messageId);
 	}
 
 	function clearAll() {
-		tabs.clearQueuedMessages(tab.id);
+		activeSession.clearQueuedMessages();
 	}
 
 	function truncate(text: string, maxLen: number = 60): string {
@@ -21,22 +15,22 @@
 	}
 </script>
 
-{#if tab.queuedMessages && tab.queuedMessages.length > 0}
+{#if $activeSession.queuedMessages && $activeSession.queuedMessages.length > 0}
 	<div class="queued-bar">
 		<div class="queued-bar-inner">
 			<div class="queued-header">
 				<svg class="w-3 h-3 queue-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
 				</svg>
-				<span class="queued-label">Queued ({tab.queuedMessages.length})</span>
-				{#if tab.queuedMessages.length > 1}
+				<span class="queued-label">Queued ({$activeSession.queuedMessages.length})</span>
+				{#if $activeSession.queuedMessages.length > 1}
 					<button class="clear-all-btn" onclick={clearAll} title="Clear all queued messages">
 						Clear all
 					</button>
 				{/if}
 			</div>
 			<div class="queued-chips">
-				{#each tab.queuedMessages as msg (msg.id)}
+				{#each $activeSession.queuedMessages as msg (msg.id)}
 					<div class="queued-chip">
 						<span class="chip-text">{truncate(msg.content)}</span>
 						<button class="chip-remove" onclick={() => removeMessage(msg.id)} title="Remove from queue">

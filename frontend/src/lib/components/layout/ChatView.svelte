@@ -3,13 +3,14 @@
 	 * ChatView - Full-panel chat experience
 	 *
 	 * Renders the chat UI directly in the main panel.
+	 * Reads from the activeSession store — no props needed.
 	 *
 	 * Two states:
 	 * - Empty: WorkspaceSelector + ChatInput centered
 	 * - Active: MessageArea + ChatInput at bottom + ExecutionModeBar below
 	 */
 	import { untrack } from 'svelte';
-	import { tabs, allTabs } from '$lib/stores/tabs';
+	import { activeSession } from '$lib/stores/active-session';
 	import { MessageArea, ChatInput, QueuedMessages } from '$lib/components/chat';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
@@ -17,17 +18,8 @@
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
 	import ExecutionModeBar from './ExecutionModeBar.svelte';
 
-	interface Props {
-		tabId: string;
-	}
-
-	let { tabId }: Props = $props();
-
-	// Get the tab data from the tabs store
-	const tab = $derived($allTabs.find((t) => t.id === tabId));
-
 	// Check if this is an empty state (no messages yet)
-	const isEmptyState = $derived(tab ? tab.messages.length === 0 : true);
+	const isEmptyState = $derived($activeSession.messages.length === 0);
 
 	// Animation: Track transition from empty → active state
 	let transitioningFromEmpty = $state(false);
@@ -55,9 +47,8 @@
 		remember?: 'none' | 'session' | 'profile';
 		pattern?: string;
 	}) {
-		if (!tab) return;
 		const { request_id, decision, remember, pattern } = detail;
-		tabs.sendPermissionResponse(tab.id, request_id, decision, remember, pattern);
+		activeSession.sendPermissionResponse(request_id, decision, remember, pattern);
 	}
 
 	// Handle question response
@@ -66,115 +57,87 @@
 		tool_use_id: string;
 		answers: Record<string, string | string[]>;
 	}) {
-		if (!tab) return;
 		const { request_id, tool_use_id, answers } = detail;
-		tabs.sendUserQuestionResponse(tab.id, request_id, tool_use_id, answers);
+		activeSession.sendUserQuestionResponse(request_id, tool_use_id, answers);
 	}
 
 	// Handle project selection from WorkspaceSelector
 	function handleProjectSelect(projectId: string) {
-		if (!tab) return;
-		tabs.setTabProject(tab.id, projectId);
+		activeSession.setProject(projectId);
 	}
-
-	// Loading timeout: show error after 5 seconds if tab never resolves
-	let loadingTimedOut = $state(false);
-	$effect(() => {
-		if (tab) {
-			loadingTimedOut = false;
-			return;
-		}
-		loadingTimedOut = false;
-		const timer = setTimeout(() => {
-			loadingTimedOut = true;
-		}, 5000);
-		return () => clearTimeout(timer);
-	});
 </script>
 
 <div class="chat-view" class:transitioning-from-empty={transitioningFromEmpty}>
-	{#if tab}
-		{#if isEmptyState}
-			<!-- Empty state: Workspace selector + centered input -->
-			<div class="empty-state">
-				{#if tab.error}
-					<div class="error-banner">
-						<span>{tab.error}</span>
-						<button onclick={() => tabs.clearTabError(tab.id)}>&times;</button>
-					</div>
-				{/if}
+	{#if isEmptyState}
+		<!-- Empty state: Workspace selector + centered input -->
+		<div class="empty-state">
+			{#if $activeSession.error}
+				<div class="error-banner">
+					<span>{$activeSession.error}</span>
+					<button onclick={() => activeSession.clearError()}>&times;</button>
+				</div>
+			{/if}
 
-				<div class="empty-state-content">
-					<WorkspaceSelector
-						selectedProject={tab.project}
-						onSelectProject={handleProjectSelect}
-					/>
-					<div class="empty-input-wrapper">
-						<ChatInput {tab} />
-					</div>
-					{#if $githubAuthenticated}
-						<ExecutionModeBar {tab} />
+			<div class="empty-state-content">
+				<WorkspaceSelector
+					selectedProject={$activeSession.project}
+					onSelectProject={handleProjectSelect}
+				/>
+				<div class="empty-input-wrapper">
+					<ChatInput />
+				</div>
+				{#if $githubAuthenticated}
+					<ExecutionModeBar />
+				{/if}
+			</div>
+		</div>
+	{:else}
+		<!-- Active chat: Messages + input at bottom -->
+		<div class="message-area-wrapper">
+			<!-- Key by sessionId so MessageArea is destroyed/recreated on session switch.
+			     Without this, Svelte reuses the same component instance and the
+			     onMount/onDestroy scroll-position save/restore logic never fires. -->
+			{#key $activeSession.sessionId}
+				<MessageArea />
+			{/key}
+		</div>
+
+		<!-- Queued Messages Bar (Send Later) -->
+		{#if $activeSession.queuedMessages && $activeSession.queuedMessages.length > 0}
+			<QueuedMessages />
+		{/if}
+
+		<div class="input-wrapper">
+			<ChatInput compact />
+		</div>
+
+		<!-- Modal Overlay for Permission/Question Queues -->
+		{#if ($activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0) || ($activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0)}
+			<div class="modal-overlay">
+				<div class="modal-backdrop"></div>
+				<div class="modal-content">
+					{#if $activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0}
+						<div class="modal-card-wrapper">
+							<PermissionQueue
+								requests={$activeSession.pendingPermissions}
+								onRespond={handlePermissionResponse}
+							/>
+						</div>
+					{/if}
+
+					{#if $activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0}
+						<div class="modal-card-wrapper space-y-3">
+							{#each $activeSession.pendingQuestions as question (question.request_id)}
+								<UserQuestion
+									data={question}
+									onRespond={handleQuestionResponse}
+								/>
+							{/each}
+						</div>
 					{/if}
 				</div>
 			</div>
-		{:else}
-			<!-- Active chat: Messages + input at bottom -->
-			<div class="message-area-wrapper">
-				<!-- Key by tabId so MessageArea is destroyed/recreated on tab switch.
-				     Without this, Svelte reuses the same component instance and the
-				     onMount/onDestroy scroll-position save/restore logic never fires. -->
-				{#key tabId}
-					<MessageArea {tab} />
-				{/key}
-			</div>
-
-			<!-- Queued Messages Bar (Send Later) -->
-			{#if tab.queuedMessages && tab.queuedMessages.length > 0}
-				<QueuedMessages {tab} />
-			{/if}
-
-			<div class="input-wrapper">
-				<ChatInput {tab} compact />
-			</div>
-
-			<!-- Modal Overlay for Permission/Question Queues -->
-			{#if (tab.pendingPermissions && tab.pendingPermissions.length > 0) || (tab.pendingQuestions && tab.pendingQuestions.length > 0)}
-				<div class="modal-overlay">
-					<div class="modal-backdrop"></div>
-					<div class="modal-content">
-						{#if tab.pendingPermissions && tab.pendingPermissions.length > 0}
-							<div class="modal-card-wrapper">
-								<PermissionQueue
-									requests={tab.pendingPermissions}
-									onRespond={handlePermissionResponse}
-								/>
-							</div>
-						{/if}
-
-						{#if tab.pendingQuestions && tab.pendingQuestions.length > 0}
-							<div class="modal-card-wrapper space-y-3">
-								{#each tab.pendingQuestions as question (question.request_id)}
-									<UserQuestion
-										data={question}
-										onRespond={handleQuestionResponse}
-									/>
-								{/each}
-							</div>
-						{/if}
-					</div>
-				</div>
-			{/if}
 		{/if}
-	{:else}
-		<div class="chat-loading">
-			{#if loadingTimedOut}
-				<p class="loading-error">Could not load chat</p>
-				<p class="loading-error-hint">The tab data could not be found. It may have been closed.</p>
-			{:else}
-				<div class="spinner"></div>
-				<p>Loading chat...</p>
-			{/if}
-		</div>
 	{/if}
 </div>
 

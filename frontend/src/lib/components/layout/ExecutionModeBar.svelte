@@ -9,18 +9,13 @@
 	 * Uses the git store for worktree/branch data and syncWorktrees()
 	 * to clean up stale DB records on project change.
 	 */
-	import { tabs, type ChatTab, type ExecutionMode } from '$lib/stores/tabs';
+	import { activeSession } from '$lib/stores/active-session';
+	import type { ExecutionMode } from '$lib/stores/types';
 	import { syncWorktrees, createWorktree as createWorktreeApi, type Worktree, type Branch } from '$lib/api/git';
 	import { worktrees as worktreeStore, branches as branchStore, git } from '$lib/stores/git';
 	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2 } from 'lucide-svelte';
 	import { untrack } from 'svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
-
-	interface Props {
-		tab: ChatTab;
-	}
-
-	let { tab }: Props = $props();
 
 	// --- UI state ---
 	let showBranchDropdown = $state(false);
@@ -31,6 +26,7 @@
 	// --- New branch modal state ---
 	let showCreateModal = $state(false);
 	let creatingWorktree = $state(false);
+	let localWorktreeError = $state<string | null>(null);
 
 	// --- Derived data ---
 	// Filter out worktrees that no longer exist on disk
@@ -56,13 +52,16 @@
 	});
 
 	// Current branch display name
-	const currentBranch = $derived(tab.selectedWorktreeBranch || tab.worktreeBranch || 'Select branch');
+	const currentBranch = $derived($activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch || 'Select branch');
+
+	// Combined worktree error from store or local eager-creation
+	const worktreeError = $derived($activeSession.worktreeError || localWorktreeError);
 
 	// --- Effects ---
 
 	// Sync worktrees when project changes (cleans up stale DB records)
 	$effect(() => {
-		const project = tab.project;
+		const project = $activeSession.project;
 		if (project && project !== untrack(() => lastSyncedProject)) {
 			lastSyncedProject = project;
 			syncWorktrees(project).catch(e => {
@@ -77,11 +76,11 @@
 	// --- Functions ---
 
 	function setMode(mode: ExecutionMode) {
-		tabs.setTabExecutionMode(tab.id, mode);
+		activeSession.setExecutionMode(mode);
 	}
 
 	function selectWorktree(wt: Worktree) {
-		tabs.selectExistingWorktree(tab.id, wt.id, wt.branch_name);
+		activeSession.selectWorktreeBranch(wt.branch_name, wt.id);
 		showBranchDropdown = false;
 	}
 
@@ -89,37 +88,36 @@
 		showBranchDropdown = false;
 		const branchName = branch.remote ? branch.name.replace(/^[^\/]+\//, '') : branch.name;
 
-		// Update tab state
-		tabs.clearWorktreeSelection(tab.id);
-		tabs.setTabWorktreeBranch(tab.id, branchName);
-		tabs.setTabWorktreeMode(tab.id, 'new');
-		tabs.setTabWorktreeCreateNewBranch(tab.id, false);
+		// Update session state
+		activeSession.setWorktreeBranch(branchName);
+		activeSession.setWorktreeMode('new');
+		activeSession.setWorktreeCreateNewBranch(false);
 
 		// Eagerly create the worktree directory
 		eagerCreateWorktree(branchName, false);
 	}
 
 	async function eagerCreateWorktree(branchName: string, createNew: boolean, base?: string) {
-		if (!tab.project) return;
+		if (!$activeSession.project) return;
 		creatingWorktree = true;
-		tabs.clearWorktreeError(tab.id);
+		localWorktreeError = null;
+		activeSession.clearWorktreeError();
 		try {
-			const response = await createWorktreeApi(tab.project, {
+			const response = await createWorktreeApi($activeSession.project, {
 				branch_name: branchName,
 				create_new_branch: createNew,
 				base_branch: base
 			});
 			if (response.success && response.worktree) {
-				tabs.setTabWorktreeId(tab.id, response.worktree.id);
-				tabs.setTabWorktreeMode(tab.id, 'existing');
+				activeSession.selectWorktreeBranch(branchName, response.worktree.id);
 				// Refresh so new worktree appears in list
 				await git.loadWorktrees();
 			} else {
-				tabs.setWorktreeError(tab.id, response.message || 'Failed to create worktree');
+				localWorktreeError = response.message || 'Failed to create worktree';
 			}
 		} catch (err: any) {
 			const msg = err?.detail || err?.message || 'Failed to create worktree';
-			tabs.setWorktreeError(tab.id, msg);
+			localWorktreeError = msg;
 		} finally {
 			creatingWorktree = false;
 		}
@@ -127,7 +125,7 @@
 
 	function toggleDropdown() {
 		showBranchDropdown = !showBranchDropdown;
-		if (showBranchDropdown && tab.project) {
+		if (showBranchDropdown && $activeSession.project) {
 			refreshWorktrees();
 		}
 	}
@@ -161,10 +159,9 @@
 	function handleBranchCreated(branchName: string) {
 		// Set up the new branch as a worktree
 		// Branch was already created by CreateBranchModal, so use create_new_branch=false
-		tabs.clearWorktreeSelection(tab.id);
-		tabs.setTabWorktreeBranch(tab.id, branchName);
-		tabs.setTabWorktreeMode(tab.id, 'new');
-		tabs.setTabWorktreeCreateNewBranch(tab.id, false);
+		activeSession.setWorktreeBranch(branchName);
+		activeSession.setWorktreeMode('new');
+		activeSession.setWorktreeCreateNewBranch(false);
 
 		// Create the worktree for the already-created branch
 		eagerCreateWorktree(branchName, false);
@@ -178,7 +175,7 @@
 	<div class="mode-toggle">
 		<button
 			class="mode-option"
-			class:active={tab.executionMode === 'local'}
+			class:active={$activeSession.executionMode === 'local'}
 			onclick={() => setMode('local')}
 		>
 			<Monitor size={13} strokeWidth={1.5} />
@@ -186,7 +183,7 @@
 		</button>
 		<button
 			class="mode-option"
-			class:active={tab.executionMode === 'worktree'}
+			class:active={$activeSession.executionMode === 'worktree'}
 			onclick={() => setMode('worktree')}
 		>
 			<GitFork size={13} strokeWidth={1.5} />
@@ -195,15 +192,15 @@
 	</div>
 
 	<!-- Branch selector (shown when worktree mode active) -->
-	{#if tab.executionMode === 'worktree'}
+	{#if $activeSession.executionMode === 'worktree'}
 		{#if creatingWorktree}
 			<div class="wt-status creating">
 				<Loader2 size={12} class="animate-spin" />
 				<span>Creating...</span>
 			</div>
-		{:else if tab.worktreeError}
+		{:else if worktreeError}
 			<div class="wt-status error">
-				<span>{tab.worktreeError}</span>
+				<span>{worktreeError}</span>
 			</div>
 		{/if}
 		<div class="branch-selector" bind:this={dropdownRef}>
@@ -231,7 +228,7 @@
 							{#each filteredWorktrees as wt (wt.id)}
 								<button
 									class="branch-item"
-									class:active={tab.worktreeId === wt.id}
+									class:active={$activeSession.worktreeId === wt.id}
 									onclick={() => selectWorktree(wt)}
 								>
 									<GitBranch size={13} strokeWidth={1.5} />
@@ -282,7 +279,7 @@
 
 <CreateBranchModal
 	open={showCreateModal}
-	projectId={tab.project}
+	projectId={$activeSession.project}
 	onClose={() => showCreateModal = false}
 	onCreated={handleBranchCreated}
 />

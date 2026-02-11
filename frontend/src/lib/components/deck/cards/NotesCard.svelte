@@ -5,9 +5,7 @@
 	 * Provides list view with search/filter, and editor view for editing notes.
 	 */
 
-	import BaseCard from './BaseCard.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
-	import type { DeckCard } from './types';
 	import './card-design-system.css';
 	import { StickyNote, Search as SearchIcon, Plus } from 'lucide-svelte';
 	import {
@@ -22,19 +20,10 @@
 	import { onMount } from 'svelte';
 
 	interface Props {
-		card: DeckCard;
-		onClose: () => void;
-		onMaximize: () => void;
-		onFocus: () => void;
-		onMove: (x: number, y: number) => void;
-		onResize: (w: number, h: number) => void;
-		onDragEnd?: () => void;
-		onResizeEnd?: () => void;
 		mobile?: boolean;
-		embedded?: boolean;
 	}
 
-	let { card, onClose, onMaximize, onFocus, onMove, onResize, onDragEnd, onResizeEnd, mobile = false, embedded = false }: Props = $props();
+	let { mobile = false }: Props = $props();
 
 	// State
 	let notes = $state<Note[]>([]);
@@ -489,54 +478,34 @@
 	</div>
 {/snippet}
 
-{#if embedded}
-	<FeaturePageLayout
-		icon={StickyNote}
-		title="Notes"
-		itemCount={notes.length}
-		itemLabel={notes.length === 1 ? 'note' : 'notes'}
-		breadcrumbs={editingNote || isCreatingNew ? [
-			{ label: 'Notes', onclick: closeEditor },
-			{ label: editingNote ? editorTitle || 'Untitled' : 'New Note' }
-		] : undefined}
-	>
-		{#snippet headerActions()}
-			{#if !(editingNote || isCreatingNew)}
-				<div class="fph-search-wrapper">
-					<SearchIcon size={14} />
-					<input
-						type="text"
-						placeholder="Search notes..."
-						bind:value={searchQuery}
-						class="fph-search-input"
-					/>
-				</div>
-				<button class="fp-btn fp-btn--primary" onclick={startNewNote} title="New Note">
-					<Plus size={14} />
-					<span class="hidden sm:inline">New Note</span>
-				</button>
-			{/if}
-		{/snippet}
-		{#snippet children()}
-			<div class="notes-card-content card-system">
-				{#if editingNote || isCreatingNew}
-					{@render editorView()}
-				{:else}
-					{@render listView()}
-				{/if}
+<FeaturePageLayout
+	icon={StickyNote}
+	title="Notes"
+	itemCount={notes.length}
+	itemLabel={notes.length === 1 ? 'note' : 'notes'}
+	breadcrumbs={editingNote || isCreatingNew ? [
+		{ label: 'Notes', onclick: closeEditor },
+		{ label: editingNote ? editorTitle || 'Untitled' : 'New Note' }
+	] : undefined}
+>
+	{#snippet headerActions()}
+		{#if !(editingNote || isCreatingNew)}
+			<div class="fph-search-wrapper">
+				<SearchIcon size={14} />
+				<input
+					type="text"
+					placeholder="Search notes..."
+					bind:value={searchQuery}
+					class="fph-search-input"
+				/>
 			</div>
-		{/snippet}
-	</FeaturePageLayout>
-{:else if mobile}
-	<div class="notes-card-content card-system mobile">
-		{#if editingNote || isCreatingNew}
-			{@render editorView()}
-		{:else}
-			{@render listView()}
+			<button class="fp-btn fp-btn--primary" onclick={startNewNote} title="New Note">
+				<Plus size={14} />
+				<span class="hidden sm:inline">New Note</span>
+			</button>
 		{/if}
-	</div>
-{:else}
-	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+	{/snippet}
+	{#snippet children()}
 		<div class="notes-card-content card-system">
 			{#if editingNote || isCreatingNew}
 				{@render editorView()}
@@ -544,8 +513,8 @@
 				{@render listView()}
 			{/if}
 		</div>
-	</BaseCard>
-{/if}
+	{/snippet}
+</FeaturePageLayout>
 
 <style>
 	/* ============================================

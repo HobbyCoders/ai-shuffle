@@ -9,9 +9,7 @@
 	 * - Plugin details view with readme, commands, agents, skills
 	 * - Batch install selection
 	 */
-	import BaseCard from './BaseCard.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
-	import type { DeckCard } from './types';
 	import { onMount } from 'svelte';
 	import {
 		plugins,
@@ -34,29 +32,11 @@
 	import './card-design-system.css';
 
 	interface Props {
-		card: DeckCard;
-		onClose: () => void;
-		onMaximize: () => void;
-		onFocus: () => void;
-		onMove: (x: number, y: number) => void;
-		onResize: (w: number, h: number) => void;
-		onDragEnd?: () => void;
-		onResizeEnd?: () => void;
 		mobile?: boolean;
-		embedded?: boolean;
 	}
 
 	let {
-		card,
-		onClose,
-		onMaximize,
-		onFocus,
-		onMove,
-		onResize,
-		onDragEnd,
-		onResizeEnd,
-		mobile = false,
-		embedded = false
+		mobile = false
 	}: Props = $props();
 
 	type Tab = 'marketplaces' | 'available' | 'installed' | 'details';
@@ -363,173 +343,73 @@
 	{/if}
 {/snippet}
 
-{#if embedded}
-	<FeaturePageLayout
-		icon={Package}
-		title="Plugins"
-		itemCount={$pluginStats.totalInstalled}
-		itemLabel="installed"
-	>
-		{#snippet headerTabs()}
-			<div class="fp-tab-bar">
-				{#each tabs as tab}
-					<button
-						class="fp-tab"
-						class:active={activeTab === tab.id}
-						onclick={() => {
-							activeTab = tab.id;
-							if (tab.id !== 'details') {
-								plugins.clearSelectedPlugin();
-							}
-						}}
-					>
-						{tab.label}
-						<span class="fp-tab-count">{tab.count}</span>
-					</button>
-				{/each}
-				{#if $selectedPlugin}
-					<button
-						class="fp-tab"
-						class:active={activeTab === 'details'}
-						onclick={() => activeTab = 'details'}
-					>
-						Details
-					</button>
-				{/if}
-			</div>
-		{/snippet}
-		{#snippet headerActions()}
-			{#if activeTab === 'available' || activeTab === 'installed'}
-				<div class="fph-search-wrapper">
-					<Search size={14} />
-					<input
-						type="text"
-						bind:value={searchQuery}
-						placeholder="Search plugins..."
-						class="fph-search-input"
-					/>
-				</div>
+<FeaturePageLayout
+	icon={Package}
+	title="Plugins"
+	itemCount={$pluginStats.totalInstalled}
+	itemLabel="installed"
+>
+	{#snippet headerTabs()}
+		<div class="fp-tab-bar">
+			{#each tabs as tab}
+				<button
+					class="fp-tab"
+					class:active={activeTab === tab.id}
+					onclick={() => {
+						activeTab = tab.id;
+						if (tab.id !== 'details') {
+							plugins.clearSelectedPlugin();
+						}
+					}}
+				>
+					{tab.label}
+					<span class="fp-tab-count">{tab.count}</span>
+				</button>
+			{/each}
+			{#if $selectedPlugin}
+				<button
+					class="fp-tab"
+					class:active={activeTab === 'details'}
+					onclick={() => activeTab = 'details'}
+				>
+					Details
+				</button>
 			{/if}
-			{#if activeTab === 'available'}
-				{#if selectedForInstall.size > 0}
-					<button
-						onclick={handleBatchInstall}
-						disabled={batchInstalling}
-						class="batch-install-btn"
-					>
-						{#if batchInstalling}
-							<Loader2 size={16} class="animate-spin" />
-						{/if}
-						Install ({selectedForInstall.size})
-					</button>
-				{/if}
-			{/if}
-		{/snippet}
-		{#snippet children()}
-			<div class="plugin-card card-system" style="position: relative;">
-				{@render pluginMainContent()}
+		</div>
+	{/snippet}
+	{#snippet headerActions()}
+		{#if activeTab === 'available' || activeTab === 'installed'}
+			<div class="fph-search-wrapper">
+				<Search size={14} />
+				<input
+					type="text"
+					bind:value={searchQuery}
+					placeholder="Search plugins..."
+					class="fph-search-input"
+				/>
 			</div>
-		{/snippet}
-	</FeaturePageLayout>
-{:else}
-	<BaseCard
-		{card}
-		{onClose}
-		{onMaximize}
-		{onFocus}
-		{onMove}
-		{onResize}
-		{onDragEnd}
-		{onResizeEnd}
-	>
-		{#snippet children()}
-			<div class="plugin-card card-system" class:mobile class:maximized={card.maximized}>
-				<!-- Tabs -->
-				<div class="plugin-tabs">
-					{#each tabs as tab}
-						<button
-							onclick={() => {
-								activeTab = tab.id;
-								if (tab.id !== 'details') {
-									plugins.clearSelectedPlugin();
-								}
-							}}
-							class="plugin-tab"
-							class:active={activeTab === tab.id}
-						>
-							{tab.label}
-							<span class="plugin-tab-count" class:active={activeTab === tab.id}>
-								{tab.count}
-							</span>
-						</button>
-					{/each}
-
-					{#if $selectedPlugin}
-						<button
-							onclick={() => activeTab = 'details'}
-							class="plugin-tab"
-							class:active={activeTab === 'details'}
-						>
-							Details
-						</button>
+		{/if}
+		{#if activeTab === 'available'}
+			{#if selectedForInstall.size > 0}
+				<button
+					onclick={handleBatchInstall}
+					disabled={batchInstalling}
+					class="batch-install-btn"
+				>
+					{#if batchInstalling}
+						<Loader2 size={16} class="animate-spin" />
 					{/if}
-				</div>
-
-				<!-- Search bar (for available/installed tabs) -->
-				{#if activeTab === 'available' || activeTab === 'installed'}
-					<div class="plugin-search-bar">
-						<div class="search-input-wrapper">
-							<Search size={16} class="search-icon" />
-							<input
-								type="text"
-								bind:value={searchQuery}
-								placeholder="Search plugins..."
-								class="search-input"
-							/>
-						</div>
-
-						{#if activeTab === 'available'}
-							<select
-								bind:value={selectedMarketplaceFilter}
-								class="marketplace-select"
-							>
-								<option value="">All Sources</option>
-								{#each $marketplaces as marketplace}
-									<option value={marketplace.id}>{marketplace.id}</option>
-								{/each}
-							</select>
-
-							{#if selectedForInstall.size > 0}
-								<button
-									onclick={handleBatchInstall}
-									disabled={batchInstalling}
-									class="batch-install-btn"
-								>
-									{#if batchInstalling}
-										<Loader2 size={16} class="animate-spin" />
-									{/if}
-									Install ({selectedForInstall.size})
-								</button>
-							{/if}
-						{/if}
-					</div>
-				{/if}
-
-				{@render pluginMainContent()}
-
-				<!-- Footer -->
-				<div class="plugin-footer">
-					<div class="footer-info">
-						{$pluginStats.totalFileBasedAgents} agents
-					</div>
-					<div class="footer-stats">
-						{$pluginStats.totalEnabled} plugins enabled
-					</div>
-				</div>
-			</div>
-		{/snippet}
-	</BaseCard>
-{/if}
+					Install ({selectedForInstall.size})
+				</button>
+			{/if}
+		{/if}
+	{/snippet}
+	{#snippet children()}
+		<div class="plugin-card card-system" style="position: relative;">
+			{@render pluginMainContent()}
+		</div>
+	{/snippet}
+</FeaturePageLayout>
 
 <style>
 	.plugin-card {

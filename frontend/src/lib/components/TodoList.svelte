@@ -4,7 +4,7 @@
 	 */
 	import { onMount, tick } from 'svelte';
 	import { get } from 'svelte/store';
-	import type { TodoItem } from '$lib/stores/tabs';
+	import type { TodoItem } from '$lib/stores/types';
 	import { chatPreferences, type ChatPreferences, DEFAULT_PREFERENCES } from '$lib/stores/chatPreferences';
 
 	interface Props {

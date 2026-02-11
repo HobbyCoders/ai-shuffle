@@ -6,7 +6,8 @@
 	 * Layer 2: Context Bar - inline profile/project dropdown selectors
 	 */
 	import { tick, onDestroy, onMount } from 'svelte';
-	import { tabs, profiles, allTabs, type ChatTab } from '$lib/stores/tabs';
+	import { activeSession } from '$lib/stores/active-session';
+	import { profiles } from '$lib/stores/app-data';
 	import { claudeAuthenticated } from '$lib/stores/auth';
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
@@ -27,24 +28,10 @@
 	}
 
 	interface Props {
-		tab: ChatTab;
 		compact?: boolean;
 	}
 
-	let { tab, compact = false }: Props = $props();
-
-	// Get live tab data directly from store to ensure reactivity in mobile snippet context
-	// The prop `tab` may not update properly when rendered via {@render} inside {#key} blocks
-	// Use $state + $effect instead of $derived for more explicit reactivity tracking
-	let liveTab = $state<ChatTab>(tab);
-
-	$effect(() => {
-		// Subscribe to allTabs and update liveTab when the store changes
-		const foundTab = $allTabs.find(t => t.id === tab.id);
-		if (foundTab) {
-			liveTab = foundTab;
-		}
-	});
+	let { compact = false }: Props = $props();
 
 	// Context usage calculation
 	function formatTokenCount(count: number): string {
@@ -58,7 +45,7 @@
 	}
 
 	// Get current profile to access env vars for auto-compaction reserve calculation
-	const currentProfile = $derived($profiles.find(p => p.id === liveTab.profile));
+	const currentProfile = $derived($profiles.find(p => p.id === $activeSession.profile));
 
 	// Auto-compaction reserve: 13k base + CLAUDE_CODE_MAX_OUTPUT_TOKENS from profile env vars
 	const maxOutputTokens = $derived(
@@ -70,65 +57,49 @@
 	// fall back to tab store values for idle/resumed sessions.
 	// Session state is the source of truth during streaming; tab store only updates at stream end.
 	const sessionUsage = $derived(
-		liveTab.sessionId
-			? sessionStateManager.getSession(liveTab.sessionId)?.usage
+		$activeSession.sessionId
+			? sessionStateManager.getSession($activeSession.sessionId)?.usage
 			: undefined
 	);
 	const baseContextUsed = $derived(
 		(sessionUsage && sessionUsage.contextUsed > 0)
 			? sessionUsage.contextUsed
-			: (liveTab.contextUsed ?? (liveTab.totalTokensIn + liveTab.totalCacheCreationTokens + liveTab.totalCacheReadTokens))
+			: ($activeSession.contextUsed ?? ($activeSession.totalTokensIn + $activeSession.totalCacheCreationTokens + $activeSession.totalCacheReadTokens))
 	);
 	const contextUsed = $derived(baseContextUsed + autoCompactionReserve);
 	const contextPercent = $derived(Math.min((contextUsed / CONTEXT_MAX) * 100, 100));
 
 
-	// Input state - use tab.draft for persistence across card switches
-	let inputValue = $state(tab.draft || '');
+	// Input state - use draft for persistence across session switches
+	let inputValue = $state($activeSession.draft || '');
 	let plainTextValue = $state(''); // Plain text without chip serialization, for autocomplete
 	let uploadedFiles = $state<FileUploadResponse[]>([]);
-	let previousTabId = $state(tab.id);
 	let draftSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 	// Flag to prevent onDestroy from overwriting draft after we've already cleared it
 	// Using plain variable (not $state) to avoid reactivity issues with onDestroy capture
 	let messageSent = false;
 
-	// Helper to save draft immediately (used on unmount and before tab switch)
-	function saveDraftImmediately(tabId: string, value: string) {
+	// Helper to save draft immediately (used on unmount)
+	function saveDraftImmediately(value: string) {
 		if (draftSaveTimeout) {
 			clearTimeout(draftSaveTimeout);
 			draftSaveTimeout = null;
 		}
-		tabs.setTabDraft(tabId, value);
+		activeSession.setDraft(value);
 	}
 
-	// Sync input with tab draft when tab changes
-	$effect(() => {
-		const currentTabId = tab.id;
-
-		// Detect actual tab change (not just re-render)
-		if (previousTabId !== currentTabId) {
-			// Save draft to old tab before switching
-			saveDraftImmediately(previousTabId, inputValue);
-			// Restore draft from new tab
-			inputValue = tab.draft || '';
-			previousTabId = currentTabId;
-		}
-	});
-
-	// Save draft to tab store when input changes (debounced)
+	// Save draft to store when input changes (debounced)
 	$effect(() => {
 		// Track inputValue for reactivity
 		const currentValue = inputValue;
-		const currentTabId = tab.id;
 
 		// Debounce draft saves to avoid excessive updates
 		if (draftSaveTimeout) {
 			clearTimeout(draftSaveTimeout);
 		}
 		draftSaveTimeout = setTimeout(() => {
-			if (currentValue !== tab.draft) {
-				tabs.setTabDraft(currentTabId, currentValue);
+			if (currentValue !== $activeSession.draft) {
+				activeSession.setDraft(currentValue);
 			}
 			draftSaveTimeout = null;
 		}, 100);
@@ -139,7 +110,7 @@
 	// want to overwrite it with a stale value from Tiptap's destruction events
 	onDestroy(() => {
 		if (!messageSent) {
-			saveDraftImmediately(tab.id, inputValue);
+			saveDraftImmediately(inputValue);
 		}
 	});
 	let editorRef = $state<TiptapEditor | null>(null);
@@ -205,14 +176,14 @@
 
 	// Get display labels for current overrides
 	const currentThinkingLabel = $derived(
-		thinkingModes.find(m => m.value === liveTab.thinkingModeOverride)?.label || 'Default'
+		thinkingModes.find(m => m.value === $activeSession.thinkingModeOverride)?.label || 'Default'
 	);
 	const currentPermissionLabel = $derived(
-		permissionModes.find(m => m.value === liveTab.permissionModeOverride)?.label || 'Default'
+		permissionModes.find(m => m.value === $activeSession.permissionModeOverride)?.label || 'Default'
 	);
 
 	// Get selected profile/project names for display
-	const selectedProfileName = $derived($profiles.find(p => p.id === liveTab.profile)?.name || 'Profile');
+	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Profile');
 
 	// Mobile-optimized names: show only first word to save space
 	const selectedProfileNameMobile = $derived(selectedProfileName.split(' ')[0]);
@@ -225,7 +196,7 @@
 
 	// Select a profile
 	function selectProfile(profileId: string) {
-		tabs.setTabProfile(tab.id, profileId);
+		activeSession.setProfile(profileId);
 		showProfileDropdown = false;
 	}
 
@@ -246,12 +217,12 @@
 
 	// Select override values
 	function selectThinkingMode(value: string | null) {
-		tabs.setTabThinkingModeOverride(tab.id, value);
+		activeSession.setThinkingModeOverride(value);
 		showThinkingDropdown = false;
 	}
 
 	function selectPermissionMode(value: string | null) {
-		tabs.setTabPermissionModeOverride(tab.id, value);
+		activeSession.setPermissionModeOverride(value);
 		showPermissionDropdown = false;
 	}
 
@@ -302,7 +273,7 @@
 
 		// File autocomplete (@mentions)
 		// Use plain text for detection to avoid false positives from chip @paths
-		if (!!liveTab.project && hasAtMention(plainTextValue)) {
+		if (!!$activeSession.project && hasAtMention(plainTextValue)) {
 			const atInfo = extractAtMentionQuery(plainTextValue);
 			if (atInfo) {
 				const query = atInfo.query;
@@ -332,15 +303,13 @@
 		// Get serialized message from editor (includes inline @path references)
 		const finalPrompt = editorRef?.getMessage() ?? '';
 
-		if (!finalPrompt.trim() || !liveTab || isUploading || liveTab.worktreeDeleted) return;
+		if (!finalPrompt.trim() || isUploading || $activeSession.worktreeDeleted) return;
 
 		// Require profile and project to be selected
-		if (!liveTab.profile) {
-			tabs.setTabError(liveTab.id, 'Please select a profile before starting a chat');
+		if (!$activeSession.profile) {
 			return;
 		}
-		if (!liveTab.project) {
-			tabs.setTabError(liveTab.id, 'Please select a project before starting a chat');
+		if (!$activeSession.project) {
 			return;
 		}
 
@@ -370,14 +339,14 @@
 
 		// Clear draft immediately (not debounced) - important because
 		// the component may be destroyed/recreated when isEmptyState changes
-		saveDraftImmediately(tab.id, '');
+		saveDraftImmediately('');
 
-		if (sendLater && liveTab.isStreaming) {
+		if (sendLater && $activeSession.isStreaming) {
 			// Queue for when current stream completes naturally
-			tabs.queueMessage(tab.id, finalPrompt);
+			activeSession.queueMessage(finalPrompt);
 		} else {
 			// Send immediately (interrupt_and_query if streaming, normal query if not)
-			tabs.sendMessage(tab.id, finalPrompt);
+			activeSession.sendMessage(finalPrompt);
 		}
 	}
 
@@ -404,7 +373,7 @@
 		// Ctrl/Cmd+Enter during streaming = Send Later (queue for after completion)
 		if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
 			e.preventDefault();
-			if ((e.ctrlKey || e.metaKey) && liveTab.isStreaming) {
+			if ((e.ctrlKey || e.metaKey) && $activeSession.isStreaming) {
 				handleSubmit(true); // Send Later
 			} else {
 				handleSubmit(false); // Send Now
@@ -462,7 +431,7 @@
 
 	// File upload
 	function triggerFileUpload() {
-		if (!liveTab.project) {
+		if (!$activeSession.project) {
 			alert('Please select a project first to upload files.');
 			return;
 		}
@@ -472,17 +441,17 @@
 	async function handleFileUpload(event: Event) {
 		const input = event.target as HTMLInputElement;
 		const files = input.files;
-		if (!files || files.length === 0 || !liveTab.project) return;
+		if (!files || files.length === 0 || !$activeSession.project) return;
 
 		isUploading = true;
 		try {
 			for (const file of Array.from(files)) {
 				console.debug(`[Upload] Uploading file: "${file.name}" (${file.size} bytes)`);
 				const result = await api.uploadFile(
-					`/projects/${liveTab.project}/upload`,
+					`/projects/${$activeSession.project}/upload`,
 					file,
-					liveTab.sessionId ?? undefined,
-					liveTab.executionMode === 'worktree' ? liveTab.worktreeId ?? undefined : undefined
+					$activeSession.sessionId ?? undefined,
+					$activeSession.executionMode === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
 				);
 				console.debug(`[Upload] Response for "${file.name}": filename="${result.filename}", path="${result.path}"`);
 				if (result.filename !== file.name && !result.filename.startsWith(file.name.replace(/\.[^.]+$/, ''))) {
@@ -546,7 +515,7 @@
 
 		if (!e.dataTransfer?.files?.length) return;
 
-		if (!liveTab.project) {
+		if (!$activeSession.project) {
 			alert('Please select a project first to upload files.');
 			return;
 		}
@@ -555,10 +524,10 @@
 		try {
 			for (const file of Array.from(e.dataTransfer.files)) {
 				const result = await api.uploadFile(
-					`/projects/${liveTab.project}/upload`,
+					`/projects/${$activeSession.project}/upload`,
 					file,
-					liveTab.sessionId ?? undefined,
-					liveTab.executionMode === 'worktree' ? liveTab.worktreeId ?? undefined : undefined
+					$activeSession.sessionId ?? undefined,
+					$activeSession.executionMode === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
 				);
 				editorRef?.insertFileChip({
 					path: result.path,
@@ -875,20 +844,20 @@
 		{/if}
 
 		<!-- Worktree Error Message -->
-		{#if liveTab.worktreeError}
+		{#if $activeSession.worktreeError}
 			<div class="error-banner worktree-error">
 				<svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<circle cx="6" cy="6" r="2" stroke-width="2"/>
 					<circle cx="12" cy="18" r="2" stroke-width="2"/>
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 8v4c0 2 2 4 6 4v2" />
 				</svg>
-				<span>{liveTab.worktreeError}</span>
-				<button type="button" onclick={() => tabs.clearWorktreeError(tab.id)} class="error-close">&times;</button>
+				<span>{$activeSession.worktreeError}</span>
+				<button type="button" onclick={() => activeSession.clearWorktreeError()} class="error-close">&times;</button>
 			</div>
 		{/if}
 
 		<!-- Worktree Deleted Banner (read-only mode) -->
-		{#if liveTab.worktreeDeleted}
+		{#if $activeSession.worktreeDeleted}
 			<div class="error-banner worktree-completed">
 				<svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -909,7 +878,7 @@
 							<CommandAutocomplete
 								bind:this={commandAutocompleteRef}
 								inputValue={inputValue}
-								projectId={liveTab.project}
+								projectId={$activeSession.project}
 								visible={showCommandAutocomplete}
 								onSelect={handleCommandSelect}
 								onClose={() => showCommandAutocomplete = false}
@@ -918,9 +887,9 @@
 							<FileAutocomplete
 								bind:this={fileAutocompleteRef}
 								inputValue={plainTextValue}
-								projectId={liveTab.project}
-								profileId={liveTab.profile}
-								worktreeId={liveTab.executionMode === 'worktree' ? liveTab.worktreeId ?? undefined : undefined}
+								projectId={$activeSession.project}
+								profileId={$activeSession.profile}
+								worktreeId={$activeSession.executionMode === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
 								visible={showFileAutocomplete}
 								onSelect={handleFileSelect}
 								onClose={() => showFileAutocomplete = false}
@@ -929,8 +898,8 @@
 							<TiptapEditor
 								bind:this={editorRef}
 								placeholder="Message {selectedProfileName}..."
-								initialContent={tab.draft || ''}
-								disabled={!$claudeAuthenticated || liveTab.worktreeDeleted}
+								initialContent={$activeSession.draft || ''}
+								disabled={!$claudeAuthenticated || $activeSession.worktreeDeleted}
 								onTextChange={(text) => {
 									inputValue = text;
 									// Also update plain text for autocomplete (without chip @path serialization)
@@ -948,7 +917,7 @@
 								<button
 									type="button"
 									onclick={toggleRecording}
-									disabled={!$claudeAuthenticated || isUploading || isTranscribing || isPreparing || !canRecord || liveTab.worktreeDeleted}
+									disabled={!$claudeAuthenticated || isUploading || isTranscribing || isPreparing || !canRecord || $activeSession.worktreeDeleted}
 									class="voice-btn"
 									class:preparing={isPreparing}
 									class:recording={isRecording}
@@ -991,14 +960,14 @@
 								</button>
 							</div>
 
-							{#if liveTab.isCreatingWorktree}
+							{#if $activeSession.isCreatingWorktree}
 								<!-- Creating worktree - show spinner -->
 								<button type="button" class="send-btn creating-worktree" disabled title="Creating worktree...">
 									<svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4" stroke-dashoffset="10" />
 									</svg>
 								</button>
-							{:else if liveTab.isStreaming}
+							{:else if $activeSession.isStreaming}
 								{#if inputValue.trim()}
 									<!-- Send Now: interrupts current response -->
 									<button type="submit" class="send-btn" title="Send now (interrupts) — Enter">
@@ -1018,7 +987,7 @@
 								{:else}
 									<button
 										type="button"
-										onclick={() => tabs.stopGeneration(liveTab.id)}
+										onclick={() => activeSession.stopGeneration()}
 										class="stop-btn"
 										title="Stop generating"
 									>
@@ -1031,8 +1000,8 @@
 								<button
 									type="submit"
 									class="send-btn"
-									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing || liveTab.worktreeDeleted}
-									title={liveTab.worktreeDeleted ? "This worktree session has been completed" : isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
+									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing || $activeSession.worktreeDeleted}
+									title={$activeSession.worktreeDeleted ? "This worktree session has been completed" : isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
 								>
 									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
@@ -1061,7 +1030,7 @@
 						<div class="selector-wrapper" bind:this={profileDropdownRef}>
 							<button
 								type="button"
-								class="context-selector-btn {liveTab.profile ? '' : 'unset'}"
+								class="context-selector-btn {$activeSession.profile ? '' : 'unset'}"
 								onclick={handleProfileClick}
 								title="Change profile"
 							>
@@ -1085,14 +1054,14 @@
 											<button
 												type="button"
 												class="dropdown-item"
-												class:selected={profile.id === liveTab.profile}
+												class:selected={profile.id === $activeSession.profile}
 												onclick={() => selectProfile(profile.id)}
 											>
 												<svg class="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 												</svg>
 												<span>{profile.name}</span>
-												{#if profile.id === liveTab.profile}
+												{#if profile.id === $activeSession.profile}
 													<svg class="w-3.5 h-3.5 ml-auto text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 													</svg>
@@ -1112,7 +1081,7 @@
 							<button
 								type="button"
 								class="override-btn"
-								class:active={liveTab.thinkingModeOverride !== null}
+								class:active={$activeSession.thinkingModeOverride !== null}
 								onclick={handleThinkingClick}
 								title="Thinking mode override (session only)"
 							>
@@ -1120,7 +1089,7 @@
 								<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
 								</svg>
-								{#if liveTab.thinkingModeOverride !== null}
+								{#if $activeSession.thinkingModeOverride !== null}
 									<span class="override-indicator"></span>
 								{/if}
 							</button>
@@ -1132,11 +1101,11 @@
 										<button
 											type="button"
 											class="override-dropdown-item"
-											class:selected={liveTab.thinkingModeOverride === mode.value}
+											class:selected={$activeSession.thinkingModeOverride === mode.value}
 											onclick={() => selectThinkingMode(mode.value)}
 										>
 											<span class="override-item-label">{mode.label}</span>
-											{#if liveTab.thinkingModeOverride === mode.value}
+											{#if $activeSession.thinkingModeOverride === mode.value}
 												<svg class="w-3.5 h-3.5 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 												</svg>
@@ -1152,7 +1121,7 @@
 							<button
 								type="button"
 								class="override-btn"
-								class:active={liveTab.permissionModeOverride !== null}
+								class:active={$activeSession.permissionModeOverride !== null}
 								onclick={handlePermissionClick}
 								title="Permission mode override (session only)"
 							>
@@ -1160,7 +1129,7 @@
 								<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
 								</svg>
-								{#if liveTab.permissionModeOverride !== null}
+								{#if $activeSession.permissionModeOverride !== null}
 									<span class="override-indicator"></span>
 								{/if}
 							</button>
@@ -1172,11 +1141,11 @@
 										<button
 											type="button"
 											class="override-dropdown-item"
-											class:selected={liveTab.permissionModeOverride === mode.value}
+											class:selected={$activeSession.permissionModeOverride === mode.value}
 											onclick={() => selectPermissionMode(mode.value)}
 										>
 											<span class="override-item-label">{mode.label}</span>
-											{#if liveTab.permissionModeOverride === mode.value}
+											{#if $activeSession.permissionModeOverride === mode.value}
 												<svg class="w-3.5 h-3.5 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 												</svg>
@@ -1191,9 +1160,9 @@
 						<button
 							type="button"
 							onclick={triggerFileUpload}
-							disabled={liveTab.isStreaming || !$claudeAuthenticated || isUploading || (liveTab.executionMode === 'worktree' && !liveTab.worktreeId) || liveTab.worktreeDeleted}
+							disabled={$activeSession.isStreaming || !$claudeAuthenticated || isUploading || ($activeSession.executionMode === 'worktree' && !$activeSession.worktreeId) || $activeSession.worktreeDeleted}
 							class="dock-action-btn"
-							title={isUploading ? 'Uploading...' : (liveTab.executionMode === 'worktree' && !liveTab.worktreeId) ? 'Select a branch first to attach files' : liveTab.project ? 'Attach file' : 'Select a project to attach files'}
+							title={isUploading ? 'Uploading...' : ($activeSession.executionMode === 'worktree' && !$activeSession.worktreeId) ? 'Select a branch first to attach files' : $activeSession.project ? 'Attach file' : 'Select a project to attach files'}
 						>
 							{#if isUploading}
 								<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">

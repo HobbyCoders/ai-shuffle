@@ -11,16 +11,8 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth';
-	import {
-		tabs,
-		allTabs,
-		activeTab,
-		activeTabId,
-		profiles,
-		projects,
-		sessions,
-		sessionsTagFilter
-	} from '$lib/stores/tabs';
+	import { activeSession } from '$lib/stores/active-session';
+	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data';
 
 	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout';
 	import type { ViewType } from '$lib/stores/layout';
@@ -69,18 +61,13 @@
 	 * Create a new chat session and navigate to it
 	 */
 	function handleNewSession() {
-		const existingEmptyTabId = tabs.findEmptyTab();
-		const tabId = existingEmptyTabId ?? tabs.createTab();
-
-		if (existingEmptyTabId) {
-			tabs.setActiveTab(existingEmptyTabId);
-		}
+		activeSession.newChat();
 
 		if ($sidebarOverlay && !$sidebarCollapsed) {
 			layout.setSidebarCollapsed(true);
-			requestAnimationFrame(() => layout.openChat(null, tabId));
+			requestAnimationFrame(() => layout.openChat(null));
 		} else {
-			layout.openChat(null, tabId);
+			layout.openChat(null);
 		}
 	}
 
@@ -88,15 +75,9 @@
 	 * Open an existing session by ID
 	 */
 	function handleOpenSession(sessionId: string) {
-		const existingTabId = tabs.findTabBySessionId(sessionId);
 		const openChat = () => {
-			if (existingTabId) {
-				tabs.setActiveTab(existingTabId);
-				layout.openChat(sessionId, existingTabId);
-			} else {
-				const tabId = tabs.openSession(sessionId);
-				layout.openChat(sessionId, tabId);
-			}
+			activeSession.switchSession(sessionId);
+			layout.openChat(sessionId);
 		};
 
 		if ($sidebarOverlay && !$sidebarCollapsed) {
@@ -140,26 +121,17 @@
 		}
 
 		// Initialize data
-		await tabs.init();
+		await activeSession.init();
 		await Promise.all([
-			tabs.loadProfiles(),
-			tabs.loadSessions(),
-			tabs.loadProjects(),
+			appData.loadProfiles(),
+			appData.loadSessions(),
+			appData.loadProjects(),
 			loadAllTags()
 		]);
 
 		// If no active view, open a new chat
 		if (!$activeView) {
 			handleNewSession();
-		} else if ($activeView.type === 'chat' && $activeView.tabId) {
-			// Restore the tab if it exists
-			const existingTab = $allTabs.find((t) => t.id === $activeView!.tabId);
-			if (!existingTab) {
-				// Tab no longer exists, create new
-				handleNewSession();
-			} else {
-				tabs.setActiveTab($activeView.tabId);
-			}
 		}
 
 		// Sync from server when window regains focus
@@ -262,7 +234,7 @@
 		}
 		shortcutRegistrations.forEach((reg) => reg.unregister());
 		shortcutRegistrations = [];
-		tabs.destroy();
+		activeSession.destroy();
 		if (cleanupGlobalStt) cleanupGlobalStt();
 	});
 
@@ -304,7 +276,7 @@
 	// ============================================
 	async function handleImportSuccess(event: CustomEvent<{ sessionId: string; title: string; messageCount: number }>) {
 		const { sessionId } = event.detail;
-		await tabs.loadSessions();
+		await appData.loadSessions();
 		handleOpenSession(sessionId);
 		showImportModal = false;
 	}
@@ -315,7 +287,7 @@
 	async function handleTagManagerClose() {
 		showTagManager = false;
 		await loadAllTags();
-		await tabs.loadSessions($sessionsTagFilter);
+		await appData.loadSessions($sessionsTagFilter);
 	}
 </script>
 
@@ -345,7 +317,7 @@
 	<SpotlightSearch
 		visible={showSpotlight}
 		sessions={$sessions}
-		currentProjectId={$activeTab?.project}
+		currentProjectId={$activeSession?.project}
 		onClose={() => showSpotlight = false}
 		onSelectSession={handleSpotlightSelectSession}
 		onSelectCommand={handleSpotlightSelectCommand}
@@ -382,9 +354,9 @@
 	{/if}
 
 	<!-- Knowledge Base Modal -->
-	{#if showKnowledgeModal && $activeTab?.project}
+	{#if showKnowledgeModal && $activeSession?.project}
 		<KnowledgeManager
-			projectId={$activeTab.project}
+			projectId={$activeSession.project}
 			on:close={() => showKnowledgeModal = false}
 		/>
 	{/if}

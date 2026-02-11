@@ -6,7 +6,7 @@
 	 * Includes DirectoryBrowser for location selection, auto-derived name/ID from path.
 	 */
 	import { X } from 'lucide-svelte';
-	import { tabs } from '$lib/stores/tabs';
+	import { appData } from '$lib/stores/app-data';
 	import { getWorkspaceConfig } from '$lib/api/auth';
 	import { onMount } from 'svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
@@ -80,7 +80,7 @@
 		addError = null;
 
 		try {
-			await tabs.createProject({
+			await appData.createProject({
 				id: projectId.trim(),
 				name: projectName.trim(),
 				path: projectPath.trim()

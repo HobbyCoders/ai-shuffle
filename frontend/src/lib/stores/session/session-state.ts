@@ -9,7 +9,7 @@
  */
 
 import { writable } from 'svelte/store';
-import type { ChatMessage, TodoItem } from '../tabs';
+import type { ChatMessage, TodoItem } from '../types';
 import { sessionStateManager } from './session-state.svelte';
 import type { SessionUsage, SessionData } from './session-state.svelte';
 

@@ -28,8 +28,6 @@ export interface ActiveView {
 	type: ViewType;
 	/** Session ID for chat views, null for new chat */
 	sessionId?: string | null;
-	/** Tab ID for chat views */
-	tabId?: string | null;
 }
 
 interface LayoutState {
@@ -103,10 +101,10 @@ function createLayoutStore() {
 		},
 
 		/** Navigate to a chat session */
-		openChat(sessionId: string | null, tabId: string | null) {
+		openChat(sessionId: string | null) {
 			update((s) => ({
 				...s,
-				activeView: { type: 'chat', sessionId, tabId },
+				activeView: { type: 'chat', sessionId },
 			}));
 		},
 
@@ -114,7 +112,7 @@ function createLayoutStore() {
 		openFeaturePage(type: Exclude<ViewType, 'chat'>) {
 			update((s) => ({
 				...s,
-				activeView: { type, sessionId: null, tabId: null },
+				activeView: { type, sessionId: null },
 			}));
 		},
 

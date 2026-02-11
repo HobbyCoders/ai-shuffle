@@ -9,9 +9,7 @@
 	 * - Subtle geometric patterns for depth
 	 * - Animated transitions and hover states
 	 */
-	import BaseCard from './BaseCard.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
-	import type { DeckCard } from './types';
 	import { onMount } from 'svelte';
 	import { fly, fade } from 'svelte/transition';
 	import {
@@ -29,30 +27,12 @@
 	import './card-design-system.css';
 
 	interface Props {
-		card: DeckCard;
-		onClose: () => void;
-		onMaximize: () => void;
-		onFocus: () => void;
-		onMove: (x: number, y: number) => void;
-		onResize: (w: number, h: number) => void;
-		onDragEnd?: () => void;
-		onResizeEnd?: () => void;
 		mobile?: boolean;
-		embedded?: boolean;
 		onSessionClick?: (sessionId: string) => void;
 	}
 
 	let {
-		card,
-		onClose,
-		onMaximize,
-		onFocus,
-		onMove,
-		onResize,
-		onDragEnd,
-		onResizeEnd,
 		mobile = false,
-		embedded = false,
 		onSessionClick
 	}: Props = $props();
 
@@ -372,53 +352,45 @@
 	</div>
 {/snippet}
 
-{#if embedded}
-	<FeaturePageLayout icon={BarChart3} title="Stats">
-		{#snippet headerActions()}
-			<div class="fp-date-pills">
-				{#each ['7d', '30d', '90d'] as preset}
-					<button
-						class="fp-date-pill"
-						class:active={selectedPreset === preset}
-						onclick={() => selectPreset(preset as PresetRange)}
-					>
-						{preset === '7d' ? '7D' : preset === '30d' ? '30D' : '90D'}
-					</button>
-				{/each}
-			</div>
-			<button
-				class="fp-btn fp-btn--ghost"
-				onclick={handleRefresh}
-				disabled={refreshing}
-				title="Refresh"
-			>
-				<RefreshCw class="w-4 h-4 {refreshing ? 'spin' : ''}" />
-			</button>
-			<button
-				class="fp-btn fp-btn--secondary"
-				onclick={handleExport}
-				disabled={exportLoading}
-				title="Export CSV"
-			>
-				{#if exportLoading}
-					<Loader2 class="w-4 h-4 spin" />
-				{:else}
-					<Download class="w-4 h-4" />
-				{/if}
-				<span class="hidden sm:inline">Export</span>
-			</button>
-		{/snippet}
-		{#snippet children()}
-			{@render statsContent()}
-		{/snippet}
-	</FeaturePageLayout>
-{:else if mobile}
-	{@render statsContent()}
-{:else}
-	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+<FeaturePageLayout icon={BarChart3} title="Stats">
+	{#snippet headerActions()}
+		<div class="fp-date-pills">
+			{#each ['7d', '30d', '90d'] as preset}
+				<button
+					class="fp-date-pill"
+					class:active={selectedPreset === preset}
+					onclick={() => selectPreset(preset as PresetRange)}
+				>
+					{preset === '7d' ? '7D' : preset === '30d' ? '30D' : '90D'}
+				</button>
+			{/each}
+		</div>
+		<button
+			class="fp-btn fp-btn--ghost"
+			onclick={handleRefresh}
+			disabled={refreshing}
+			title="Refresh"
+		>
+			<RefreshCw class="w-4 h-4 {refreshing ? 'spin' : ''}" />
+		</button>
+		<button
+			class="fp-btn fp-btn--secondary"
+			onclick={handleExport}
+			disabled={exportLoading}
+			title="Export CSV"
+		>
+			{#if exportLoading}
+				<Loader2 class="w-4 h-4 spin" />
+			{:else}
+				<Download class="w-4 h-4" />
+			{/if}
+			<span class="hidden sm:inline">Export</span>
+		</button>
+	{/snippet}
+	{#snippet children()}
 		{@render statsContent()}
-	</BaseCard>
-{/if}
+	{/snippet}
+</FeaturePageLayout>
 
 <style>
 	/* ============================================

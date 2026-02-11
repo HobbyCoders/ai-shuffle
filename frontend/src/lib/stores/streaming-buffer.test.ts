@@ -30,7 +30,7 @@ import {
 	invalidateStreamingIndexCache,
 	type BatchedUpdate
 } from './streaming-buffer';
-import type { ChatMessage } from './tabs';
+import type { ChatMessage } from './types';
 
 // Mock requestAnimationFrame and cancelAnimationFrame
 let rafCallbacks: Map<number, () => void>;

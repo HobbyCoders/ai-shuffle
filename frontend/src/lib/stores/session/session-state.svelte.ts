@@ -11,7 +11,7 @@
  * 3. Fine-grained reactivity via $state - only affected components re-render
  */
 
-import type { ChatMessage, TodoItem } from '../tabs';
+import type { ChatMessage, TodoItem } from '../types';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 

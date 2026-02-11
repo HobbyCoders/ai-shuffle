@@ -7,7 +7,7 @@
 	 * Includes unified "Add Project" modal with directory browser.
 	 */
 	import { FolderClosed, ChevronDown, FolderPlus, Check } from 'lucide-svelte';
-	import { projects } from '$lib/stores/tabs';
+	import { projects } from '$lib/stores/app-data';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 
 	interface Props {

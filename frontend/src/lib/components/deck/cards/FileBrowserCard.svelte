@@ -1,54 +1,29 @@
 <script lang="ts">
 	/**
-	 * FileBrowserCard - File browser card for The Deck
+	 * FileBrowserCard - File browser card
 	 *
-	 * Wraps the existing FilesView component in a BaseCard for the deck UI.
+	 * Wraps the existing FilesView component in a FeaturePageLayout.
 	 * Provides full file management: browse, upload, download, rename, delete.
 	 */
 
-	import BaseCard from './BaseCard.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import { FilesView } from '../files';
-	import type { DeckCard } from './types';
 	import { FolderTree } from 'lucide-svelte';
 
 	interface Props {
-		card: DeckCard;
-		onClose: () => void;
-		onMaximize: () => void;
-		onFocus: () => void;
-		onMove: (x: number, y: number) => void;
-		onResize: (w: number, h: number) => void;
-		onDragEnd?: () => void;
-		onResizeEnd?: () => void;
 		mobile?: boolean;
-		embedded?: boolean;
 	}
 
-	let { card, onClose, onMaximize, onFocus, onMove, onResize, onDragEnd, onResizeEnd, mobile = false, embedded = false }: Props = $props();
+	let { mobile = false }: Props = $props();
 </script>
 
-{#if embedded}
-	<FeaturePageLayout icon={FolderTree} title="Files" noPadding={true}>
-		{#snippet children()}
-			<div class="files-card-content">
-				<FilesView />
-			</div>
-		{/snippet}
-	</FeaturePageLayout>
-{:else if mobile}
-	<!-- Mobile: Full-screen without BaseCard wrapper -->
-	<div class="files-card-content mobile">
-		<FilesView />
-	</div>
-{:else}
-	<!-- Desktop: Full BaseCard with FilesView inside -->
-	<BaseCard {card} {onClose} {onMaximize} {onFocus} {onMove} {onResize} {onDragEnd} {onResizeEnd}>
+<FeaturePageLayout icon={FolderTree} title="Files" noPadding={true}>
+	{#snippet children()}
 		<div class="files-card-content">
 			<FilesView />
 		</div>
-	</BaseCard>
-{/if}
+	{/snippet}
+</FeaturePageLayout>
 
 <style>
 	.files-card-content {

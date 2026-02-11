@@ -8,8 +8,8 @@
 	import { untrack } from 'svelte';
 	import { activeView, sidebarCollapsed } from '$lib/stores/layout';
 	import type { ViewType } from '$lib/stores/layout';
-	import type { CardType, DeckCard } from '$lib/components/deck/cards/types';
-	import { allTabs, projects, tabs } from '$lib/stores/tabs';
+	import { projects } from '$lib/stores/app-data';
+	import { activeSession } from '$lib/stores/active-session';
 	import { git, gitStatus, branches as branchStore, diffStats } from '$lib/stores/git';
 	import { githubAuthenticated } from '$lib/stores/auth';
 	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming';
@@ -48,31 +48,6 @@
 		isMobile = false
 	}: Props = $props();
 
-	// Create a fake card object for feature page components that still expect it
-	// This is a compatibility shim until feature pages are fully refactored
-	function makeFeatureCard(type: CardType, title: string): DeckCard {
-		return {
-			id: `panel-${type}`,
-			type,
-			title,
-			x: 0,
-			y: 0,
-			width: 0,
-			height: 0,
-			zIndex: 1,
-			maximized: true,
-			focused: true,
-			snappedTo: undefined,
-			data: {},
-			createdAt: new Date(),
-			updatedAt: new Date()
-		};
-	}
-
-	// No-op handlers for card props that don't apply in panel mode
-	const noop = () => {};
-	const noopXY = (_x: number, _y: number) => {};
-
 	// View type → page title mapping
 	const viewTitles: Record<string, string> = {
 		'settings': 'Settings',
@@ -94,11 +69,9 @@
 		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'stats'
 	]);
 
-	// Get the active chat tab (if in chat view)
+	// Get the active session state (if in chat view)
 	const activeTab = $derived(
-		$activeView?.type === 'chat' && $activeView.tabId
-			? $allTabs.find(t => t.id === $activeView!.tabId)
-			: null
+		$activeView?.type === 'chat' ? $activeSession : null
 	);
 
 	// Header title
@@ -154,7 +127,7 @@
 
 	// PR detection for current branch
 	let branchPR = $state<{ number: number; title: string; url: string; head_branch: string } | null>(null);
-	let _finishedWorktreeTabId: string | null = null;
+	let _finishedWorktreeCleanup = false;
 
 	const isWorktreeMode = $derived(
 		activeTab?.executionMode === 'worktree' && !!activeTab?.worktreeId
@@ -490,10 +463,9 @@
 
 		const prNumber = branchPR.number;
 		const worktreeId = activeTab?.worktreeId ?? null;
-		const tabId = activeTab?.id;
 
-		// Track tab for post-cleanup close
-		_finishedWorktreeTabId = (cleanup && isWorktreeMode && worktreeId && tabId) ? tabId : null;
+		// Track for post-cleanup worktree state update
+		_finishedWorktreeCleanup = !!(cleanup && isWorktreeMode && worktreeId);
 
 		try {
 			// Step 1: Merge pull request
@@ -606,130 +578,52 @@
 				{/snippet}
 			</PageHeader>
 		{/if}
-		{#if $activeView.type === 'chat' && $activeView.tabId}
-			<ChatView tabId={$activeView.tabId} />
+		{#if $activeView.type === 'chat'}
+			<ChatView />
 		{:else if $activeView.type === 'profile'}
 			<!-- Embedded: uses FeaturePageLayout with its own header -->
 			<div class="feature-panel">
 				<ProfileCard
-					card={makeFeatureCard('profile', 'Profiles')}
-					onClose={noop}
-					onMaximize={noop}
-					onFocus={noop}
-					onMove={noopXY}
-					onResize={noopXY}
-					onOpenPlugins={onOpenPlugins || noop}
-					embedded={true}
+					onOpenPlugins={onOpenPlugins || (() => {})}
 				/>
 			</div>
 		{:else if $activeView.type === 'project'}
 			<!-- Embedded: uses FeaturePageLayout with its own header -->
 			<div class="feature-panel">
-				<ProjectCard
-					card={makeFeatureCard('project', 'Projects')}
-					onClose={noop}
-					onMaximize={noop}
-					onFocus={noop}
-					onMove={noopXY}
-					onResize={noopXY}
-					embedded={true}
-				/>
+				<ProjectCard />
 			</div>
 		{:else if $activeView.type === 'settings'}
 			<div class="feature-panel">
-				<SettingsCard
-					card={makeFeatureCard('settings', 'Settings')}
-					onClose={noop}
-					onMaximize={noop}
-					onFocus={noop}
-					onMove={noopXY}
-					onResize={noopXY}
-					embedded={true}
-				/>
+				<SettingsCard />
 			</div>
 		{:else if $activeView.type === 'subagent'}
 			<div class="feature-panel">
-				<SubagentCard
-					card={makeFeatureCard('subagent', 'Subagents')}
-					onClose={noop}
-					onMaximize={noop}
-					onFocus={noop}
-					onMove={noopXY}
-					onResize={noopXY}
-					embedded={true}
-				/>
+				<SubagentCard />
 			</div>
 		{:else if $activeView.type === 'file-browser'}
 			<div class="feature-panel">
-				<FileBrowserCard
-					card={makeFeatureCard('file-browser', 'Files')}
-					onClose={noop}
-					onMaximize={noop}
-					onFocus={noop}
-					onMove={noopXY}
-					onResize={noopXY}
-					embedded={true}
-				/>
+				<FileBrowserCard />
 			</div>
 		{:else if $activeView.type === 'plugins'}
 			<div class="feature-panel">
-				<PluginManagerCard
-					card={makeFeatureCard('plugins', 'Plugins')}
-					onClose={noop}
-					onMaximize={noop}
-					onFocus={noop}
-					onMove={noopXY}
-					onResize={noopXY}
-					embedded={true}
-				/>
+				<PluginManagerCard />
 			</div>
 		{:else if $activeView.type === 'mcp'}
 			<div class="feature-panel">
-				<McpManagerCard
-					card={makeFeatureCard('mcp', 'MCP Servers')}
-					onClose={noop}
-					onMaximize={noop}
-					onFocus={noop}
-					onMove={noopXY}
-					onResize={noopXY}
-					embedded={true}
-				/>
+				<McpManagerCard />
 			</div>
 		{:else if $activeView.type === 'notes'}
 			<div class="feature-panel">
-				<NotesCard
-					card={makeFeatureCard('notes', 'Notes')}
-					onClose={noop}
-					onMaximize={noop}
-					onFocus={noop}
-					onMove={noopXY}
-					onResize={noopXY}
-					embedded={true}
-				/>
+				<NotesCard />
 			</div>
 		{:else if $activeView.type === 'hooks'}
 			<div class="feature-panel">
-				<HooksCard
-					card={makeFeatureCard('hooks', 'Hooks')}
-					onClose={noop}
-					onMaximize={noop}
-					onFocus={noop}
-					onMove={noopXY}
-					onResize={noopXY}
-					embedded={true}
-				/>
+				<HooksCard />
 			</div>
 		{:else if $activeView.type === 'stats'}
 			<div class="feature-panel">
 				<StatsCard
-					card={makeFeatureCard('stats', 'Stats')}
-					onClose={noop}
-					onMaximize={noop}
-					onFocus={noop}
-					onMove={noopXY}
-					onResize={noopXY}
-					onSessionClick={onOpenSession || noop}
-					embedded={true}
+					onSessionClick={onOpenSession || (() => {})}
 				/>
 			</div>
 		{/if}
@@ -791,9 +685,9 @@
 		onClose={() => {
 			showProgressModal = false;
 			progressHasCleanup = false;
-			if (progressCompleted && progressMode === 'finish' && _finishedWorktreeTabId) {
-				tabs.updateTab(_finishedWorktreeTabId, { worktreeDeleted: true, worktreeId: null });
-				_finishedWorktreeTabId = null;
+			if (progressCompleted && progressMode === 'finish' && _finishedWorktreeCleanup) {
+				activeSession.markWorktreeDeleted();
+				_finishedWorktreeCleanup = false;
 			}
 		}}
 	/>

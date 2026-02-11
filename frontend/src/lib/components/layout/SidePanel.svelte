@@ -31,10 +31,11 @@
 	} from 'lucide-svelte';
 	import { layout, activeView, sidebarCollapsed } from '$lib/stores/layout';
 	import type { ViewType } from '$lib/stores/layout';
-	import { tabs, sessions, projects, allTabs, streamingSessions } from '$lib/stores/tabs';
+	import { appData, sessions, projects } from '$lib/stores/app-data';
+	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { toggleSessionFavorite } from '$lib/api/client';
 	import type { Session } from '$lib/api/client';
-	import type { Project } from '$lib/stores/tabs/types';
+	import type { Project } from '$lib/stores/types';
 
 	interface Props {
 		isAdmin?: boolean;
@@ -96,7 +97,7 @@
 		e.stopPropagation();
 		try {
 			await toggleSessionFavorite(session.id);
-			await tabs.loadSessions();
+			await appData.loadSessions();
 		} catch (err) {
 			console.error('Failed to toggle favorite:', err);
 		}
@@ -189,8 +190,8 @@
 			// Confirm delete
 			deleteLoading = true;
 			try {
-				await tabs.deleteProject(projectId);
-				await tabs.loadSessions();
+				await appData.deleteProject(projectId);
+				await appData.loadSessions();
 				deletingProjectId = null;
 			} catch (err) {
 				console.error('Failed to delete project:', err);
@@ -213,16 +214,16 @@
 		deletingProjectId = null;
 	}
 
-	// Check if a session is currently streaming (local tabs or other devices)
+	// Check if a session is currently streaming (active session or other devices)
 	function isStreaming(sessionId: string): boolean {
-		const tab = $allTabs.find(
-			(t) => t.sessionId === sessionId
-		);
-		// If a tab is watching this session, its isStreaming flag is authoritative
-		// (set by done/stopped/error/stream_end/history events)
-		if (tab) return tab.isStreaming;
-		// For sessions without a tab open, use cross-device streaming tracker
+		// If this is the active session, its isStreaming flag is authoritative
+		if ($activeSession.sessionId === sessionId) return $activeSession.isStreaming;
+		// For sessions that are not active, use cross-device streaming tracker
 		return $streamingSessions.has(sessionId);
+	}
+
+	function needsAttention(sessionId: string): boolean {
+		return $backgroundPermissions.has(sessionId);
 	}
 
 	// Format relative time
@@ -335,6 +336,8 @@
 						>
 							{#if isStreaming(session.id)}
 								<div class="streaming-dot"></div>
+							{:else if needsAttention(session.id)}
+								<div class="attention-dot"></div>
 							{/if}
 							<span class="session-title">{session.title || 'Untitled'}</span>
 							<span class="session-time">{formatRelativeTime(session.updated_at || session.created_at)}</span>
@@ -1063,6 +1066,21 @@
 	@keyframes pulse {
 		0%, 100% { opacity: 1; }
 		50% { opacity: 0.4; }
+	}
+
+	/* Needs-attention indicator (pending permissions) */
+	.attention-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--warning, #f59e0b);
+		flex-shrink: 0;
+		animation: attention-pulse 1.5s ease-in-out infinite;
+	}
+
+	@keyframes attention-pulse {
+		0%, 100% { opacity: 1; transform: scale(1); }
+		50% { opacity: 0.6; transform: scale(1.3); }
 	}
 
 	.empty-message {

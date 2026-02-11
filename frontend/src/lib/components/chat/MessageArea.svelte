@@ -14,7 +14,9 @@
 	 * - This prevents scroll jumping when switching between cards
 	 */
 	import { tick, onMount, onDestroy } from 'svelte';
-	import { tabs, profiles, type ChatTab, type ChatMessage, type TodoItem } from '$lib/stores/tabs';
+	import { activeSession } from '$lib/stores/active-session';
+	import { profiles } from '$lib/stores/app-data';
+	import type { ChatMessage, TodoItem } from '$lib/stores/types';
 	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
@@ -36,12 +38,6 @@
 	// instead of restoring a now-stale scroll position
 	const autoScrollCache = new Map<string, boolean>();
 
-	interface Props {
-		tab: ChatTab;
-	}
-
-	let { tab }: Props = $props();
-
 	/**
 	 * Reload the session after a rewind completes.
 	 * This is a backup mechanism in case the WebSocket event doesn't trigger a refresh.
@@ -50,12 +46,10 @@
 	function handleRewindComplete(warning?: string) {
 		// If there's a warning (partial success), show it as a system message
 		if (warning) {
-			tabs.addSystemMessage(tab.id, warning, 'rewind_warning');
+			activeSession.addSystemMessage(warning, 'rewind_warning');
 		}
 
-		if (tab.sessionId) {
-			tabs.loadSessionInTab(tab.id, tab.sessionId);
-		}
+		activeSession.reloadSession();
 	}
 
 	let containerRef = $state<HTMLDivElement | null>(null);
@@ -65,13 +59,13 @@
 	let scrollRafPending = false; // Throttle scroll handler to one per frame
 
 	// Current profile for message settings (uses current UI selection)
-	const currentProfile = $derived($profiles.find(p => p.id === tab.profile));
+	const currentProfile = $derived($profiles.find(p => p.id === $activeSession.profile));
 	const hasPartialMessages = $derived(currentProfile?.config?.include_partial_messages !== false);
 	const fileCheckpointingEnabled = $derived(currentProfile?.config?.enable_file_checkpointing === true);
 
 	// Session profile for fallback display (legacy messages without profileId)
 	// Falls back to current profile for new sessions before first message is sent
-	const sessionProfile = $derived($profiles.find(p => p.id === (tab.sessionProfileId || tab.profile)));
+	const sessionProfile = $derived($profiles.find(p => p.id === ($activeSession.sessionProfileId || $activeSession.profile)));
 
 	/**
 	 * Get the profile name for a specific message.
@@ -100,8 +94,8 @@
 	// Find the last streaming message index - only that message should show the streaming indicator
 	// This prevents multiple bouncing dots from appearing after each tool call
 	const lastStreamingMessageIndex = $derived(() => {
-		for (let i = tab.messages.length - 1; i >= 0; i--) {
-			if (tab.messages[i].streaming) {
+		for (let i = $activeSession.messages.length - 1; i >= 0; i--) {
+			if ($activeSession.messages[i].streaming) {
 				return i;
 			}
 		}
@@ -195,10 +189,12 @@
 			scrollRafPending = false;
 			if (!containerRef) return;
 
+			const cacheKey = $activeSession.sessionId ?? 'new';
+
 			// Save scroll position to non-reactive cache (doesn't trigger effects)
-			scrollPositionCache.set(tab.id, containerRef.scrollTop);
-			// Also save to tab store for cross-session persistence
-			tabs.setTabScrollTop(tab.id, containerRef.scrollTop);
+			scrollPositionCache.set(cacheKey, containerRef.scrollTop);
+			// Also save to session store for cross-session persistence
+			activeSession.setScrollTop(containerRef.scrollTop);
 
 			// Check current position
 			const nearBottom = isNearBottom();
@@ -221,19 +217,21 @@
 		requestAnimationFrame(() => {
 			if (!containerRef) return;
 
+			const cacheKey = $activeSession.sessionId ?? 'new';
+
 			// Check if user had explicitly scrolled up before this component
 			// was destroyed. autoScrollCache tracks shouldAutoScroll state:
 			//   true      = was at/near bottom (auto-scroll active)
 			//   false     = user had scrolled up (auto-scroll paused)
 			//   undefined = no prior state (first mount)
 			// Default to scrolling to bottom for true and undefined.
-			const wasAutoScrolling = autoScrollCache.get(tab.id);
+			const wasAutoScrolling = autoScrollCache.get(cacheKey);
 			const userScrolledUp = wasAutoScrolling === false;
 
 			if (userScrolledUp) {
 				// User intentionally scrolled up - restore their position
-				const cachedPosition = scrollPositionCache.get(tab.id);
-				const storedPosition = cachedPosition ?? tab.scrollTop;
+				const cachedPosition = scrollPositionCache.get(cacheKey);
+				const storedPosition = cachedPosition ?? $activeSession.scrollTop;
 
 				if (storedPosition > 0) {
 					isScrollingProgrammatically = true;
@@ -247,7 +245,7 @@
 					shouldAutoScroll = true;
 					scrollToBottom();
 				}
-			} else if (tab.messages.length > 0) {
+			} else if ($activeSession.messages.length > 0) {
 				// Auto-scroll was on, or first visit - always show latest content
 				shouldAutoScroll = true;
 				scrollToBottom();
@@ -259,12 +257,14 @@
 	let resizeObserver: ResizeObserver | null = null;
 
 	onDestroy(() => {
+		const cacheKey = $activeSession.sessionId ?? 'new';
+
 		if (containerRef) {
-			scrollPositionCache.set(tab.id, containerRef.scrollTop);
-			tabs.setTabScrollTop(tab.id, containerRef.scrollTop);
+			scrollPositionCache.set(cacheKey, containerRef.scrollTop);
+			activeSession.setScrollTop(containerRef.scrollTop);
 			// Persist auto-scroll state so remounting this component
 			// (e.g. returning from settings) resumes at the right position
-			autoScrollCache.set(tab.id, shouldAutoScroll);
+			autoScrollCache.set(cacheKey, shouldAutoScroll);
 		}
 		// Clean up resize observer
 		if (resizeObserver) {
@@ -311,7 +311,7 @@
 
 	// Get last message content for streaming detection (includes toolInput for TodoWrite)
 	const lastMessageContent = $derived(() => {
-		const lastMsg = tab.messages[tab.messages.length - 1];
+		const lastMsg = $activeSession.messages[$activeSession.messages.length - 1];
 		if (!lastMsg) return '';
 		// For tool_use messages, track toolInput changes (especially TodoWrite)
 		if (lastMsg.type === 'tool_use' && lastMsg.toolInput) {
@@ -324,7 +324,7 @@
 	// rendered there). This message may not be the absolute last in the array
 	// (e.g. a TodoWrite tool_use could follow it).
 	const lastMessageMetadata = $derived(() => {
-		const msg = tab.messages.findLast(m => m.role === 'assistant' && m.metadata);
+		const msg = $activeSession.messages.findLast(m => m.role === 'assistant' && m.metadata);
 		if (!msg?.metadata) return null;
 		const m = msg.metadata as Record<string, unknown>;
 		return JSON.stringify({
@@ -339,7 +339,7 @@
 		if (!isMounted) return;
 
 		// Get current values
-		const currentLength = tab.messages.length;
+		const currentLength = $activeSession.messages.length;
 		const currentContent = lastMessageContent();
 		const currentMetadata = lastMessageMetadata();
 
@@ -364,15 +364,15 @@
 	onscroll={handleScroll}
 	class="flex-1 overflow-y-auto overscroll-contain"
 >
-	{#if tab.messages.length === 0}
+	{#if $activeSession.messages.length === 0}
 		<!-- Empty State -->
 		<div class="h-full flex flex-col">
 			<!-- Error display for empty state -->
-			{#if tab.error}
+			{#if $activeSession.error}
 				<div class="max-w-5xl mx-auto w-full px-4 sm:px-8 pt-4">
 					<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg flex items-center justify-between shadow-s">
-						<span class="text-sm">{tab.error}</span>
-						<button onclick={() => tabs.clearTabError(tab.id)} class="text-destructive hover:opacity-80">&times;</button>
+						<span class="text-sm">{$activeSession.error}</span>
+						<button onclick={() => activeSession.clearError()} class="text-destructive hover:opacity-80">&times;</button>
 					</div>
 				</div>
 			{/if}
@@ -402,7 +402,7 @@
 	{:else}
 		<!-- Messages -->
 		<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
-			{#each tab.messages as message, messageIndex (message.id)}
+			{#each $activeSession.messages as message, messageIndex (message.id)}
 				<!-- content-visibility: auto lets the browser skip paint/layout for off-screen messages -->
 				<div class="msg-virtualized">
 				{#if message.type === 'command'}
@@ -414,7 +414,7 @@
 				{:else if message.role === 'user'}
 					<UserMessage
 						content={message.content}
-						sessionId={tab.sessionId}
+						sessionId={$activeSession.sessionId}
 						messageUuid={message.jsonlUuid || message.id}
 						{fileCheckpointingEnabled}
 						onRewindComplete={handleRewindComplete}
@@ -432,7 +432,7 @@
 						messageIndex={messageIndex}
 						messageId={message.id}
 						messageUuid={message.jsonlUuid || message.id}
-						sessionId={tab.sessionId}
+						sessionId={$activeSession.sessionId}
 						streaming={message.streaming && messageIndex === lastStreamingMessageIndex()}
 						{hasPartialMessages}
 						{fileCheckpointingEnabled}
@@ -453,7 +453,7 @@
 				{:else if message.type === 'tool_use' && message.toolName === 'Task'}
 					<!-- Task tool_use - Skip rendering if a linked subagent message exists -->
 					<!-- The SubagentMessage component handles displaying the agent's work -->
-					{@const hasLinkedSubagent = tab.messages.some(m => m.type === 'subagent' && m.toolId === message.toolId)}
+					{@const hasLinkedSubagent = $activeSession.messages.some(m => m.type === 'subagent' && m.toolId === message.toolId)}
 					{#if !hasLinkedSubagent}
 						<ToolUseMessage
 							name={message.toolName || 'Tool'}
@@ -493,10 +493,10 @@
 			{/each}
 
 			<!-- Error -->
-			{#if tab.error}
+			{#if $activeSession.error}
 				<div class="bg-destructive/10 border border-destructive/30 text-destructive px-4 py-3 rounded-lg flex items-center justify-between shadow-s">
-					<span class="text-sm">{tab.error}</span>
-					<button onclick={() => tabs.clearTabError(tab.id)} class="text-destructive hover:opacity-80">&times;</button>
+					<span class="text-sm">{$activeSession.error}</span>
+					<button onclick={() => activeSession.clearError()} class="text-destructive hover:opacity-80">&times;</button>
 				</div>
 			{/if}
 		</div>
