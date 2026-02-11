@@ -720,7 +720,7 @@ function createTabsStore() {
 
 	/**
 	 * Process the next queued "Send Later" message for a tab.
-	 * Called after a natural 'done' event (NOT on interrupt/stop/error).
+	 * Called after stream ends (done, stopped, or interrupted without pending interrupt).
 	 * Dequeues the first message and sends it as a normal query.
 	 */
 	function processNextQueuedMessage(tabId: string) {
@@ -2421,7 +2421,7 @@ function createTabsStore() {
 				// Save tabs state since sessionId may have changed (debounced)
 				saveTabsToServer(get({ subscribe }));
 
-				// Process queued "Send Later" messages (only on natural done, NOT on interrupt/stop/error).
+				// Process queued "Send Later" messages.
 				// Delay to let the done cleanup pipeline (final poll, session state flush) complete.
 				setTimeout(() => processNextQueuedMessage(tabId), 500);
 
@@ -2513,6 +2513,9 @@ function createTabsStore() {
 						return newMap;
 					});
 				}
+
+				// Process queued "Send Later" messages after stop/interrupt cleanup.
+				setTimeout(() => processNextQueuedMessage(tabId), 500);
 
 				// Safety: ensure cleanup if the poller pipeline fails
 				{
