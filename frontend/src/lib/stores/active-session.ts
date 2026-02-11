@@ -395,6 +395,37 @@ function createActiveSessionStore() {
 		}
 	}
 
+	// ── Streaming bridge ──────────────────────────────────────────────────
+	// Subscribes to sessionState so that polling updates flow to
+	// activeSession.messages in real-time during streaming — not just at
+	// stream end.
+
+	function setupStreamingBridge() {
+		sessionState.subscribe(($sessionState) => {
+			const currentState = get(store);
+			if (!currentState.sessionId || !currentState.isStreaming) return;
+
+			const sessionData = $sessionState.sessions.get(currentState.sessionId);
+			if (!sessionData || sessionData.messages.length === 0) return;
+
+			update(s => {
+				if (s.sessionId !== currentState.sessionId) return s;
+				return {
+					...s,
+					messages: sessionData.messages,
+					todos: sessionData.todos.length > 0 ? sessionData.todos : s.todos,
+					...(sessionData.usage.contextUsed > 0 ? {
+						totalTokensIn: sessionData.usage.inputTokens,
+						totalTokensOut: sessionData.usage.outputTokens,
+						totalCacheCreationTokens: sessionData.usage.cacheCreationTokens,
+						totalCacheReadTokens: sessionData.usage.cacheReadTokens,
+						contextUsed: sessionData.usage.contextUsed,
+					} : {}),
+				};
+			});
+		});
+	}
+
 	// ── onStreamEnd callback ───────────────────────────────────────────────
 	// Wired up after factory creation in the returned init().
 	// Flushes final messages from sessionState to the store before cleanup.
@@ -1313,6 +1344,7 @@ function createActiveSessionStore() {
 
 	async function init() {
 		setupOnStreamEnd();
+		setupStreamingBridge();
 
 		try {
 			const backendSelection = await loadSelectionFromBackend();
