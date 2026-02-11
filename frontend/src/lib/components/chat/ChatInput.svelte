@@ -9,6 +9,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles } from '$lib/stores/app-data';
 	import { claudeAuthenticated } from '$lib/stores/auth';
+	import { browserState } from '$lib/stores/browser';
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
@@ -1156,6 +1157,27 @@
 							{/if}
 						</div>
 
+						<!-- Browser Panel Toggle -->
+						{#if $browserState.isActive || $browserState.sessionId}
+							<button
+								type="button"
+								onclick={() => browserState.togglePanel()}
+								class="dock-action-btn"
+								class:active={$browserState.isOpen}
+								title={$browserState.isOpen ? 'Close browser panel' : 'Open browser panel'}
+							>
+								<!-- Globe icon -->
+								<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<circle cx="12" cy="12" r="10" stroke-width="1.75"></circle>
+									<path stroke-linecap="round" stroke-width="1.75" d="M2 12h20"></path>
+									<path stroke-linecap="round" stroke-width="1.75" d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"></path>
+								</svg>
+								{#if $browserState.isActive}
+									<span class="browser-active-dot"></span>
+								{/if}
+							</button>
+						{/if}
+
 						<!-- Attach File Button -->
 						<button
 							type="button"
@@ -1717,6 +1739,7 @@
 
 	/* ===== ACTION BUTTONS ===== */
 	.dock-action-btn {
+		position: relative;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -1753,6 +1776,22 @@
 	.dock-action-btn.transcribing {
 		background: var(--chip-primary-bg);
 		color: var(--primary);
+	}
+
+	.dock-action-btn.active {
+		color: var(--primary);
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+	}
+
+	.browser-active-dot {
+		position: absolute;
+		top: 4px;
+		right: 4px;
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: #22c55e;
+		box-shadow: 0 0 4px rgba(34, 197, 94, 0.5);
 	}
 
 	@keyframes pulse {

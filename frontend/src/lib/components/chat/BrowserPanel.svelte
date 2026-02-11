@@ -8,8 +8,26 @@
 	 * - Clickable screenshot (click sends coordinates to browser)
 	 * - Shift+click to select area and reference in chat
 	 * - Resizable panel width
+	 * - Full-screen overlay on mobile
 	 */
 	import { browserState } from '$lib/stores/browser';
+
+	import { onMount } from 'svelte';
+
+	// Detect mobile using same heuristic as AppLayout
+	let isMobile = $state(false);
+
+	function checkMobile() {
+		const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
+		const isSmall = window.innerWidth < 1024;
+		isMobile = window.innerWidth < 640 || (isTouchDevice && isSmall);
+	}
+
+	onMount(() => {
+		checkMobile();
+		window.addEventListener('resize', checkMobile);
+		return () => window.removeEventListener('resize', checkMobile);
+	});
 
 	// Local state
 	let isResizing = $state(false);
@@ -111,20 +129,29 @@
 
 <div
 	class="browser-panel"
-	style="width: {$browserState.panelWidth}px"
+	class:mobile={isMobile}
+	style={isMobile ? '' : `width: ${$browserState.panelWidth}px`}
 	class:resizing={isResizing}
 >
-	<!-- Resize handle (left edge) -->
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div
-		class="resize-handle"
-		onpointerdown={handleResizeStart}
-		onpointermove={handleResizeMove}
-		onpointerup={handleResizeEnd}
-		role="separator"
-		aria-orientation="vertical"
-		tabindex="-1"
-	></div>
+	{#if isMobile}
+		<!-- Mobile: swipe-down drag handle to dismiss -->
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="mobile-drag-handle" onclick={() => browserState.closePanel()}>
+			<div class="drag-pill"></div>
+		</div>
+	{:else}
+		<!-- Desktop: Resize handle (left edge) -->
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div
+			class="resize-handle"
+			onpointerdown={handleResizeStart}
+			onpointermove={handleResizeMove}
+			onpointerup={handleResizeEnd}
+			role="separator"
+			aria-orientation="vertical"
+			tabindex="-1"
+		></div>
+	{/if}
 
 	<div class="panel-content">
 		<!-- Navigation bar -->
@@ -542,5 +569,74 @@
 		font-size: 0.6875rem;
 		color: var(--muted-foreground);
 		letter-spacing: 0.02em;
+	}
+
+	/* ========================================
+	   MOBILE: Full-screen overlay
+	   ======================================== */
+
+	.browser-panel.mobile {
+		position: fixed;
+		inset: 0;
+		z-index: 1000;
+		width: 100% !important;
+		max-width: none;
+		min-width: 0;
+		border-left: none;
+		border-radius: 0;
+		flex-direction: column;
+		animation: slideUp 0.25s ease-out;
+	}
+
+	@keyframes slideUp {
+		from {
+			transform: translateY(100%);
+		}
+		to {
+			transform: translateY(0);
+		}
+	}
+
+	.mobile-drag-handle {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 8px 0 4px;
+		cursor: pointer;
+		flex-shrink: 0;
+		background: var(--muted);
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	.drag-pill {
+		width: 36px;
+		height: 4px;
+		border-radius: 2px;
+		background: var(--muted-foreground);
+		opacity: 0.4;
+	}
+
+	/* Mobile nav bar: larger touch targets */
+	.browser-panel.mobile .nav-btn {
+		width: 44px;
+		height: 44px;
+	}
+
+	.browser-panel.mobile .close-btn {
+		width: 44px;
+		height: 44px;
+	}
+
+	.browser-panel.mobile .url-bar {
+		height: 36px;
+	}
+
+	.browser-panel.mobile .url-input {
+		font-size: 0.875rem;
+	}
+
+	/* Mobile: safe area insets for notched devices */
+	.browser-panel.mobile .status-bar {
+		padding-bottom: max(4px, env(safe-area-inset-bottom, 4px));
 	}
 </style>
