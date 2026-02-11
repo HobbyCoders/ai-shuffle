@@ -13,7 +13,7 @@ Additional endpoints:
 import logging
 import asyncio
 import uuid
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Awaitable, Callable
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from fastapi.websockets import WebSocketState
@@ -168,21 +168,6 @@ async def chat_websocket(
         device_id = str(uuid.uuid4())
         logger.debug(f"Generated device_id: {device_id}")
 
-    # Register user device for tab sync
-    await sync_engine.register_user_device(user_id, device_id, websocket)
-
-    # Send initial snapshot of currently streaming sessions so side panel shows correct state
-    user_streaming = sync_engine.get_user_streaming_sessions(user_id)
-    if user_streaming:
-        await websocket.send_json({
-            "type": "user_streaming_sessions",
-            "sessions": user_streaming,  # List of {session_id, project_id}
-            "session_ids": [s["session_id"] for s in user_streaming],  # Backward compat
-        })
-
-    current_session_id: Optional[str] = None
-    query_task: Optional[asyncio.Task] = None
-
     # Track if connection is healthy (for detecting silent disconnects during streaming)
     connection_healthy = True
 
@@ -202,6 +187,7 @@ async def chat_websocket(
         """
         nonlocal connection_healthy
 
+        # Fast path: skip lock acquisition if already known dead
         if not connection_healthy:
             return False
 
@@ -221,6 +207,21 @@ async def chat_websocket(
                 connection_healthy = False
                 logger.warning(f"Failed to send WebSocket message (type={data.get('type')}): {e}")
                 return False
+
+    # Register user device for tab sync
+    await sync_engine.register_user_device(user_id, device_id, websocket)
+
+    # Send initial snapshot of currently streaming sessions so side panel shows correct state
+    user_streaming = sync_engine.get_user_streaming_sessions(user_id)
+    if user_streaming:
+        await send_json({
+            "type": "user_streaming_sessions",
+            "sessions": user_streaming,
+            "session_ids": [s["session_id"] for s in user_streaming],
+        })
+
+    current_session_id: Optional[str] = None
+    query_task: Optional[asyncio.Task] = None
 
     async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None, worktree_id: Optional[str] = None):
         """Execute query and stream results directly to WebSocket"""
@@ -1688,13 +1689,16 @@ async def session_sync_websocket(
                 )
 
 
-async def ping_loop(websocket: WebSocket, device_id: str, send_fn=None):
+async def ping_loop(
+    websocket: WebSocket,
+    device_id: str,
+    send_fn: Optional[Callable[[dict], Awaitable[bool]]] = None,
+):
     """Send periodic pings to keep connection alive.
 
-    Args:
-        send_fn: Optional safe-send callable (e.g. the chat endpoint's send_json).
-                 When provided, pings go through the shared lock/health check.
-                 When omitted, falls back to direct websocket.send_json.
+    When send_fn is provided (e.g. the chat endpoint's send_json), pings go
+    through the shared lock/health check. Otherwise falls back to direct
+    websocket.send_json.
     """
     try:
         while True:

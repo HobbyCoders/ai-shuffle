@@ -14,7 +14,7 @@ import { notifySessionComplete, notifyWaitingForResponse } from '$lib/services/n
 // Session infrastructure
 import { sessionPoller } from './session/session-poller';
 import { sessionNotifier } from './session/session-notifier';
-import { sessionState } from './session/session-state';
+import { sessionState, type SessionUsage } from './session/session-state';
 
 // Caches and helpers
 import { messageCache } from './message-cache';
@@ -250,6 +250,18 @@ function formatWorktreeError(rawError: string, branchName: string): string {
 	return `Failed to create worktree: ${rawError}`;
 }
 
+/** Build a partial store update from SessionUsage, skipping if no context data. */
+function usageStoreUpdate(usage: SessionUsage): Partial<ActiveSessionState> {
+	if (usage.contextUsed <= 0) return {};
+	return {
+		totalTokensIn: usage.inputTokens,
+		totalTokensOut: usage.outputTokens,
+		totalCacheCreationTokens: usage.cacheCreationTokens,
+		totalCacheReadTokens: usage.cacheReadTokens,
+		contextUsed: usage.contextUsed,
+	};
+}
+
 // ─── Default state ───────────────────────────────────────────────────────────
 
 function defaultState(): ActiveSessionState {
@@ -316,6 +328,7 @@ function createActiveSessionStore() {
 	let streamingOnDisconnect: string | null = null;
 	let interruptPending = false;
 	let reconnectAttempts = 0;
+	let intentionalDisconnect = false;
 
 	// ── Internal helpers ───────────────────────────────────────────────────
 
@@ -414,13 +427,7 @@ function createActiveSessionStore() {
 					...s,
 					messages: sessionData.messages,
 					todos: sessionData.todos.length > 0 ? sessionData.todos : s.todos,
-					...(sessionData.usage.contextUsed > 0 ? {
-						totalTokensIn: sessionData.usage.inputTokens,
-						totalTokensOut: sessionData.usage.outputTokens,
-						totalCacheCreationTokens: sessionData.usage.cacheCreationTokens,
-						totalCacheReadTokens: sessionData.usage.cacheReadTokens,
-						contextUsed: sessionData.usage.contextUsed,
-					} : {}),
+					...usageStoreUpdate(sessionData.usage),
 				};
 			});
 		});
@@ -441,7 +448,6 @@ function createActiveSessionStore() {
 			// Flush final messages AND usage from sessionState to the store
 			const finalSession = sessionState.getSession(sessionId);
 			if (finalSession && finalSession.messages.length > 0) {
-				const finalUsage = finalSession.usage;
 				update(s => {
 					if (s.sessionId !== sessionId) return s;
 					return {
@@ -449,13 +455,7 @@ function createActiveSessionStore() {
 						messages: finalSession.messages,
 						isStreaming: false,
 						todos: finalSession.todos.length > 0 ? finalSession.todos : s.todos,
-						...(finalUsage.contextUsed > 0 ? {
-							totalTokensIn: finalUsage.inputTokens,
-							totalTokensOut: finalUsage.outputTokens,
-							totalCacheCreationTokens: finalUsage.cacheCreationTokens,
-							totalCacheReadTokens: finalUsage.cacheReadTokens,
-							contextUsed: finalUsage.contextUsed,
-						} : {}),
+						...usageStoreUpdate(finalSession.usage),
 					};
 				});
 			}
@@ -1243,6 +1243,13 @@ function createActiveSessionStore() {
 		};
 
 		ws.onclose = (event) => {
+			// Guard: ignore stale close events from a previous WebSocket instance.
+			// Without this, an old WS's onclose can call stopPing() and kill the
+			// health-check timer that belongs to the new, active connection.
+			if (event.target !== ws && ws !== null) {
+				return;
+			}
+
 			const state = get(store);
 			const wasStreaming = state.isStreaming;
 			const sessionId = state.sessionId;
@@ -1260,7 +1267,13 @@ function createActiveSessionStore() {
 			if (event.code === 4001) {
 				console.warn('[ActiveSession] WebSocket auth failed (4001), redirecting to login');
 				import('$app/navigation').then(({ goto }) => goto('/login'));
-			} else if (event.code !== 1000) {
+			} else if (intentionalDisconnect) {
+				// User-initiated disconnect (newChat, destroy, session switch, etc.)
+				intentionalDisconnect = false;
+			} else {
+				// Unexpected close — always reconnect regardless of close code.
+				// The server can close with code 1000 in many legitimate scenarios
+				// (handler exit, starlette cleanup) where the frontend should reconnect.
 				if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
 					console.error('[ActiveSession] Max reconnect attempts reached');
 					update(s => ({ ...s, error: 'Connection lost. Please refresh the page.' }));
@@ -1305,6 +1318,7 @@ function createActiveSessionStore() {
 
 		if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
 
+		intentionalDisconnect = true;
 		if (ws) { ws.close(1000); ws = null; }
 		update(s => ({ ...s, wsConnected: false }));
 	}
@@ -1345,6 +1359,25 @@ function createActiveSessionStore() {
 	async function init() {
 		setupOnStreamEnd();
 		setupStreamingBridge();
+
+		// Reconnect WebSocket when the tab regains focus.
+		// Browsers can silently drop WebSocket connections when tabs are backgrounded.
+		if (typeof document !== 'undefined') {
+			document.addEventListener('visibilitychange', () => {
+				if (!document.hidden) {
+					if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+						reconnectAttempts = 0;
+						connect();
+					} else if (ws.readyState === WebSocket.OPEN) {
+						lastMessageTime = Date.now();
+						try { ws.send(JSON.stringify({ type: 'pong' })); } catch {
+							reconnectAttempts = 0;
+							connect();
+						}
+					}
+				}
+			});
+		}
 
 		try {
 			const backendSelection = await loadSelectionFromBackend();
@@ -1614,8 +1647,20 @@ function createActiveSessionStore() {
 			}
 
 			if (!ws || ws.readyState !== WebSocket.OPEN) {
-				update(s => ({ ...s, error: 'Not connected' }));
-				return;
+				// Attempt reconnection instead of just showing an error
+				reconnectAttempts = 0;
+				connect();
+				const connected = await new Promise<boolean>((resolve) => {
+					if (ws?.readyState === WebSocket.OPEN) { resolve(true); return; }
+					const timeout = setTimeout(() => { clearInterval(check); resolve(false); }, 3000);
+					const check = setInterval(() => {
+						if (ws?.readyState === WebSocket.OPEN) { clearTimeout(timeout); clearInterval(check); resolve(true); }
+					}, 100);
+				});
+				if (!connected) {
+					update(s => ({ ...s, error: 'Unable to connect. Please check your connection and try again.' }));
+					return;
+				}
 			}
 
 			const userMsgId = `user-${Date.now()}`;
@@ -1667,7 +1712,7 @@ function createActiveSessionStore() {
 
 				pendingTools.clear();
 				lastMessageTime = Date.now();
-				ws.send(JSON.stringify({
+				ws!.send(JSON.stringify({
 					type: 'interrupt_and_query',
 					prompt,
 					session_id: state.sessionId,
@@ -1684,7 +1729,7 @@ function createActiveSessionStore() {
 			if (state.thinkingModeOverride) overrides.thinking_mode = state.thinkingModeOverride;
 
 			lastMessageTime = Date.now();
-			ws.send(JSON.stringify({
+			ws!.send(JSON.stringify({
 				type: 'query',
 				prompt,
 				session_id: state.sessionId,
@@ -1924,7 +1969,18 @@ function createActiveSessionStore() {
 		if (!state.profile) { update(s => ({ ...s, error: 'Please select a profile' })); return; }
 		if (!state.project) { update(s => ({ ...s, error: 'Please select a project' })); return; }
 		if (!state.worktreeId) { update(s => ({ ...s, error: 'Please select an existing worktree' })); return; }
-		if (!ws || ws.readyState !== WebSocket.OPEN) { update(s => ({ ...s, error: 'Not connected' })); return; }
+		if (!ws || ws.readyState !== WebSocket.OPEN) {
+			reconnectAttempts = 0;
+			connect();
+			const connected = await new Promise<boolean>((resolve) => {
+				if (ws?.readyState === WebSocket.OPEN) { resolve(true); return; }
+				const timeout = setTimeout(() => { clearInterval(check); resolve(false); }, 3000);
+				const check = setInterval(() => {
+					if (ws?.readyState === WebSocket.OPEN) { clearTimeout(timeout); clearInterval(check); resolve(true); }
+				}, 100);
+			});
+			if (!connected) { update(s => ({ ...s, error: 'Unable to connect. Please check your connection and try again.' })); return; }
+		}
 
 		const branchDisplay = state.selectedWorktreeBranch || 'existing branch';
 		const userMsgId = `user-${Date.now()}`;
@@ -1959,7 +2015,7 @@ function createActiveSessionStore() {
 		if (state.thinkingModeOverride) overrides.thinking_mode = state.thinkingModeOverride;
 
 		lastMessageTime = Date.now();
-		ws.send(JSON.stringify({
+		ws!.send(JSON.stringify({
 			type: 'query',
 			prompt,
 			profile: state.profile,
