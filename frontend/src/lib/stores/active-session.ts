@@ -416,10 +416,16 @@ function createActiveSessionStore() {
 	function setupStreamingBridge() {
 		sessionState.subscribe(($sessionState) => {
 			const currentState = get(store);
-			if (!currentState.sessionId || !currentState.isStreaming) return;
+			if (!currentState.sessionId) return;
 
 			const sessionData = $sessionState.sessions.get(currentState.sessionId);
 			if (!sessionData || sessionData.messages.length === 0) return;
+
+			// Forward if the store says we're streaming OR the poller still has
+			// data (sessionState tracks server-side streaming independently).
+			// This closes the gap where `done` sets store.isStreaming=false but
+			// the poller's final poll hasn't been applied yet.
+			if (!currentState.isStreaming && !sessionData.isStreaming && !sessionPoller.isPolling(currentState.sessionId)) return;
 
 			update(s => {
 				if (s.sessionId !== currentState.sessionId) return s;
@@ -871,7 +877,16 @@ function createActiveSessionStore() {
 						ws.send(JSON.stringify({ type: 'get_pending_permissions' }));
 						ws.send(JSON.stringify({ type: 'get_pending_questions' }));
 					}
-				} else {
+				} else if (receivedSession) {
+					// Session is NOT streaming — ensure streamingSessions is clean.
+					// This handles the case where we missed a done/user_streaming_changed
+					// event during a WS disconnect, leaving stale entries that lock git.
+					streamingSessions.update(map => {
+						if (!map.has(receivedSession)) return map;
+						const newMap = new Map(map);
+						newMap.delete(receivedSession);
+						return newMap;
+					});
 					const disconnectSessionId = streamingOnDisconnect;
 					if (disconnectSessionId && disconnectSessionId === receivedSession) {
 						streamingOnDisconnect = null;
@@ -1388,11 +1403,22 @@ function createActiveSessionStore() {
 						reconnectAttempts = 0;
 						connect();
 					} else if (ws.readyState === WebSocket.OPEN) {
-						lastMessageTime = Date.now();
+						// Don't blindly reset lastMessageTime — the connection may be
+						// half-open (browser reports OPEN but TCP is dead). Instead,
+						// send a pong and verify we get a server response within 5s.
+						const preVisibilityTime = lastMessageTime;
 						try { ws.send(JSON.stringify({ type: 'pong' })); } catch {
 							reconnectAttempts = 0;
 							connect();
+							return;
 						}
+						// If no server message arrives within 5s, force reconnect
+						setTimeout(() => {
+							if (lastMessageTime === preVisibilityTime && ws?.readyState === WebSocket.OPEN) {
+								console.warn('[ActiveSession] No server response after tab return, forcing reconnect');
+								ws.close(4000, 'Half-open connection detected');
+							}
+						}, 5000);
 					}
 				}
 			});

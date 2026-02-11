@@ -211,14 +211,16 @@ async def chat_websocket(
     # Register user device for tab sync
     await sync_engine.register_user_device(user_id, device_id, websocket)
 
-    # Send initial snapshot of currently streaming sessions so side panel shows correct state
+    # Always send streaming sessions snapshot on connect so the client can
+    # reconcile stale entries from before a disconnect.  Previously this was
+    # only sent when there *were* streaming sessions, which meant stale
+    # entries from a missed `done` event would persist indefinitely.
     user_streaming = sync_engine.get_user_streaming_sessions(user_id)
-    if user_streaming:
-        await send_json({
-            "type": "user_streaming_sessions",
-            "sessions": user_streaming,
-            "session_ids": [s["session_id"] for s in user_streaming],
-        })
+    await send_json({
+        "type": "user_streaming_sessions",
+        "sessions": user_streaming or [],
+        "session_ids": [s["session_id"] for s in user_streaming] if user_streaming else [],
+    })
 
     current_session_id: Optional[str] = None
     query_task: Optional[asyncio.Task] = None
@@ -1716,9 +1718,9 @@ async def ping_loop(
     """
     try:
         while True:
-            await asyncio.sleep(30)  # Ping every 30 seconds
+            await asyncio.sleep(15)  # Ping every 15 seconds
 
-            ping_msg = {"event_type": "ping", "timestamp": None}
+            ping_msg = {"type": "ping", "timestamp": None}
 
             if send_fn:
                 if not await send_fn(ping_msg):
