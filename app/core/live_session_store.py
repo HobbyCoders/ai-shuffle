@@ -535,6 +535,20 @@ class LiveSessionStore:
                 logger.warning(f"add_system_message: session {session_id} not found (system message dropped)")
                 return
 
+            # On compact_boundary, advance initial_message_count to current length.
+            # After compaction the JSONL on disk has fewer messages than our in-memory
+            # store. By moving the boundary forward we ensure delta polls only send
+            # truly new messages, preventing a stale initial_message_count from causing
+            # the frontend's history-merge logic to produce an inconsistent array
+            # (which triggers RangeError in Svelte's {#each} reconciliation).
+            if subtype in ('compact_boundary', 'microcompact_boundary'):
+                old_count = session.initial_message_count
+                session.initial_message_count = len(session.messages)
+                logger.debug(
+                    f"Compaction boundary: advanced initial_message_count "
+                    f"{old_count} → {session.initial_message_count} for session {session_id}"
+                )
+
             msg = LiveMessage(
                 id=f"system-{datetime.utcnow().timestamp()}",
                 role="system",

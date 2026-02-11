@@ -194,10 +194,19 @@ class SessionStateManager {
 		if (existing && existing.lastUpdateId === lastUpdateId) return;
 
 		// Preserve existing message IDs where possible to prevent
-		// Svelte component recreation (keeps expanded/collapsed state stable)
-		const messagesWithStableIds = existingMessages
-			? preserveMessageIds(serverMessages, existingMessages)
-			: serverMessages;
+		// Svelte component recreation (keeps expanded/collapsed state stable).
+		// Wrapped in try-catch: during auto-compaction the message array can
+		// change shape rapidly and the comparison may hit an edge case that
+		// throws RangeError. Falling back to the raw server messages is safe —
+		// it just causes a one-time DOM recreation.
+		let messagesWithStableIds: ChatMessage[];
+		try {
+			messagesWithStableIds = existingMessages
+				? preserveMessageIds(serverMessages, existingMessages)
+				: serverMessages;
+		} catch {
+			messagesWithStableIds = serverMessages;
+		}
 
 		this.sessions.set(sessionId, {
 			sessionId,

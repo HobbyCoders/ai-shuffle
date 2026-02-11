@@ -270,11 +270,23 @@ class SessionPoller {
 
 		// If this is a delta response (initial_message_count > 0), merge with existing history.
 		// The backend only sent streaming messages; we prepend the history we already have.
+		//
+		// After auto-compaction the backend advances initial_message_count so the
+		// boundary always matches what the frontend already holds. If for any reason
+		// the count is stale (e.g., reconnect race), we clamp it and fall through
+		// to a safe full-replace to avoid producing an inconsistent array that would
+		// trigger RangeError in Svelte's {#each} reconciliation.
 		let messages: ChatMessage[];
 		if (initialMessageCount > 0 && existingMessages && existingMessages.length >= initialMessageCount) {
 			// Keep existing history messages, replace only streaming portion
 			const historyMessages = existingMessages.slice(0, initialMessageCount);
 			messages = [...historyMessages, ...streamingMessages];
+		} else if (initialMessageCount > 0 && existingMessages && existingMessages.length > 0) {
+			// Boundary is stale (existingMessages.length < initialMessageCount).
+			// This can happen when the session was reloaded from compacted JSONL
+			// while the live store still has the old boundary. Use all server
+			// messages to avoid a corrupted merge.
+			messages = streamingMessages;
 		} else {
 			// Full response or first poll — use as-is
 			messages = streamingMessages;
