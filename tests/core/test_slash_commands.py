@@ -847,6 +847,19 @@ class TestSdkBuiltinCommands:
         assert is_sdk_builtin_command("compact") is True
         assert is_sdk_builtin_command("/compact") is True
 
+    def test_is_sdk_builtin_command_new_commands(self):
+        """Should detect all new SDK built-in commands."""
+        new_commands = [
+            "cost", "model", "review", "plan", "doctor", "init",
+            "memory", "add-dir", "output-style", "todos", "export",
+            "pr-comments", "stats", "insights", "sandbox",
+            "security-review", "rename", "release-notes", "status",
+            "bug", "bashes",
+        ]
+        for cmd in new_commands:
+            assert is_sdk_builtin_command(cmd) is True, f"/{cmd} not detected"
+            assert is_sdk_builtin_command(f"/{cmd}") is True, f"/{cmd} (with slash) not detected"
+
     def test_is_sdk_builtin_command_unknown(self):
         """Should return False for unknown commands."""
         assert is_sdk_builtin_command("unknown") is False
@@ -1115,3 +1128,42 @@ class TestCommandConstants:
         assert "compact" in SDK_BUILTIN_COMMANDS
         assert "description" in SDK_BUILTIN_COMMANDS["compact"]
         assert "type" in SDK_BUILTIN_COMMANDS["compact"]
+
+    def test_sdk_builtin_commands_all_present(self):
+        """SDK_BUILTIN_COMMANDS should contain all expected commands."""
+        expected = [
+            "compact", "context", "cost", "model", "review", "plan",
+            "doctor", "init", "memory", "add-dir", "output-style",
+            "todos", "export", "pr-comments", "stats", "insights",
+            "sandbox", "security-review", "rename", "release-notes",
+            "status", "bug", "bashes",
+        ]
+        for cmd_name in expected:
+            assert cmd_name in SDK_BUILTIN_COMMANDS, f"Missing SDK built-in: {cmd_name}"
+
+    def test_sdk_builtin_commands_all_have_description(self):
+        """Every SDK built-in command must have a description."""
+        for name, info in SDK_BUILTIN_COMMANDS.items():
+            assert "description" in info, f"/{name} missing description"
+            assert len(info["description"]) > 0, f"/{name} has empty description"
+
+    def test_sdk_builtin_commands_with_argument_hints(self):
+        """Commands that take arguments should have argument_hint."""
+        commands_with_hints = ["model", "add-dir", "output-style", "rename"]
+        for name in commands_with_hints:
+            assert "argument_hint" in SDK_BUILTIN_COMMANDS[name], \
+                f"/{name} should have argument_hint"
+
+    def test_sdk_builtin_argument_hints_in_get_all_commands(self):
+        """get_all_commands should pass through argument_hint from SDK builtins."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("app.core.slash_commands.discover_plugin_commands", return_value=[]):
+                result = get_all_commands(tmpdir)
+
+                model_cmd = next((c for c in result if c["name"] == "model"), None)
+                assert model_cmd is not None
+                assert model_cmd["argument_hint"] == "<model>"
+
+                compact_cmd = next((c for c in result if c["name"] == "compact"), None)
+                assert compact_cmd is not None
+                assert compact_cmd["argument_hint"] is None

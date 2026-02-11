@@ -306,7 +306,95 @@ SDK_BUILTIN_COMMANDS = {
     "context": {
         "description": "Show current context window usage and token counts",
         "type": "sdk_builtin"
-    }
+    },
+    "cost": {
+        "description": "Display token usage and estimated cost for this session",
+        "type": "sdk_builtin"
+    },
+    "model": {
+        "description": "Switch Claude model (sonnet, opus, haiku)",
+        "type": "sdk_builtin",
+        "argument_hint": "<model>"
+    },
+    "review": {
+        "description": "Review uncommitted code changes for bugs and style issues",
+        "type": "sdk_builtin"
+    },
+    "plan": {
+        "description": "Toggle read-only planning mode",
+        "type": "sdk_builtin"
+    },
+    "doctor": {
+        "description": "Run diagnostics on installation and connectivity",
+        "type": "sdk_builtin"
+    },
+    "init": {
+        "description": "Create a CLAUDE.md file for your project",
+        "type": "sdk_builtin"
+    },
+    "memory": {
+        "description": "View and edit CLAUDE.md and memory files",
+        "type": "sdk_builtin"
+    },
+    "add-dir": {
+        "description": "Add additional directories to context",
+        "type": "sdk_builtin",
+        "argument_hint": "<path>"
+    },
+    "output-style": {
+        "description": "Set response formatting (concise, verbose, etc.)",
+        "type": "sdk_builtin",
+        "argument_hint": "<style>"
+    },
+    "todos": {
+        "description": "List tracked TODO items",
+        "type": "sdk_builtin"
+    },
+    "export": {
+        "description": "Export conversation to file or clipboard",
+        "type": "sdk_builtin"
+    },
+    "pr-comments": {
+        "description": "View pull request comments from GitHub",
+        "type": "sdk_builtin"
+    },
+    "stats": {
+        "description": "Show usage patterns and session statistics",
+        "type": "sdk_builtin"
+    },
+    "insights": {
+        "description": "Generate an HTML report analyzing recent sessions",
+        "type": "sdk_builtin"
+    },
+    "sandbox": {
+        "description": "Toggle sandboxed execution mode",
+        "type": "sdk_builtin"
+    },
+    "security-review": {
+        "description": "Audit recent changes for security vulnerabilities",
+        "type": "sdk_builtin"
+    },
+    "rename": {
+        "description": "Rename the current session",
+        "type": "sdk_builtin",
+        "argument_hint": "<name>"
+    },
+    "release-notes": {
+        "description": "Display current version and release notes",
+        "type": "sdk_builtin"
+    },
+    "status": {
+        "description": "Show version, model, account, and connectivity info",
+        "type": "sdk_builtin"
+    },
+    "bug": {
+        "description": "Report a bug to Anthropic",
+        "type": "sdk_builtin"
+    },
+    "bashes": {
+        "description": "List active background shell tasks",
+        "type": "sdk_builtin"
+    },
 }
 
 
@@ -423,13 +511,13 @@ def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
             "type": "custom"
         })
 
-    # Add SDK built-in commands (like /compact)
+    # Add SDK built-in commands (like /compact, /cost, /model, etc.)
     for name, info in SDK_BUILTIN_COMMANDS.items():
         commands.append({
             "name": name,
             "display": f"/{name}",
             "description": info["description"],
-            "argument_hint": None,
+            "argument_hint": info.get("argument_hint"),
             "type": "sdk_builtin"
         })
 
