@@ -145,6 +145,7 @@
 	let editorRef = $state<TiptapEditor | null>(null);
 	let fileInputRef = $state<HTMLInputElement | null>(null);
 	let isUploading = $state(false);
+	let isDragging = $state(false);
 
 	// Voice recording state
 	let isRecording = $state(false);
@@ -512,6 +513,71 @@
 		uploadedFiles = uploadedFiles.filter((_, i) => i !== index);
 	}
 
+	// Drag and drop file upload
+	function handleDragEnter(e: DragEvent) {
+		e.preventDefault();
+		e.stopPropagation();
+		isDragging = true;
+	}
+
+	function handleDragLeave(e: DragEvent) {
+		e.preventDefault();
+		e.stopPropagation();
+		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		if (
+			e.clientX < rect.left ||
+			e.clientX > rect.right ||
+			e.clientY < rect.top ||
+			e.clientY > rect.bottom
+		) {
+			isDragging = false;
+		}
+	}
+
+	function handleDragOver(e: DragEvent) {
+		e.preventDefault();
+		e.stopPropagation();
+	}
+
+	async function handleDrop(e: DragEvent) {
+		e.preventDefault();
+		e.stopPropagation();
+		isDragging = false;
+
+		if (!e.dataTransfer?.files?.length) return;
+
+		if (!liveTab.project) {
+			alert('Please select a project first to upload files.');
+			return;
+		}
+
+		isUploading = true;
+		try {
+			for (const file of Array.from(e.dataTransfer.files)) {
+				const result = await api.uploadFile(
+					`/projects/${liveTab.project}/upload`,
+					file,
+					liveTab.sessionId ?? undefined,
+					liveTab.executionMode === 'worktree' ? liveTab.worktreeId ?? undefined : undefined
+				);
+				editorRef?.insertFileChip({
+					path: result.path,
+					filename: result.filename,
+					fullPath: result.full_path,
+					size: result.size,
+					type: 'file'
+				});
+			}
+			inputValue = editorRef?.getText() ?? '';
+		} catch (error: unknown) {
+			console.error('Upload failed:', error);
+			const err = error as { detail?: string };
+			alert(`Upload failed: ${err.detail || 'Unknown error'}`);
+		} finally {
+			isUploading = false;
+		}
+	}
+
 	// Voice recording
 	// Minimum recording duration in milliseconds to avoid empty/too-short recordings
 	const MIN_RECORDING_DURATION = 500;
@@ -774,7 +840,21 @@
 	const contextColor = $derived('');
 </script>
 
-<div class="chat-input-wrapper">
+<div
+	class="chat-input-wrapper"
+	ondragenter={handleDragEnter}
+	ondragleave={handleDragLeave}
+	ondragover={handleDragOver}
+	ondrop={handleDrop}
+>
+	{#if isDragging}
+		<div class="drag-overlay">
+			<div class="drag-overlay-content">
+				<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+				<span>Drop files to attach</span>
+			</div>
+		</div>
+	{/if}
 	<div class="chat-input-container">
 		<!-- Hidden file input -->
 		<input
@@ -1137,6 +1217,7 @@
 <style>
 	/* Wrapper - provides safe spacing */
 	.chat-input-wrapper {
+		position: relative;
 		padding: 0.5rem 0.75rem 0.75rem;
 		flex-shrink: 0;
 	}
@@ -1145,6 +1226,39 @@
 		.chat-input-wrapper {
 			padding: 0.75rem 1rem 1rem;
 		}
+	}
+
+	/* Drag overlay */
+	.drag-overlay {
+		position: absolute;
+		inset: 0;
+		z-index: 50;
+		background: color-mix(in oklch, var(--popover) 95%, transparent);
+		backdrop-filter: blur(8px);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 0.75rem;
+		animation: fadeIn 0.2s ease;
+	}
+
+	.drag-overlay-content {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 1rem 1.5rem;
+		border: 2px dashed var(--primary);
+		border-radius: 0.75rem;
+		background: color-mix(in oklch, var(--primary) 8%, transparent);
+		color: var(--primary);
+		font-weight: 500;
+		font-size: 0.875rem;
+	}
+
+	.drag-overlay-content svg {
+		width: 1.25rem;
+		height: 1.25rem;
+		flex-shrink: 0;
 	}
 
 	/* Container with max-width */
@@ -2116,5 +2230,10 @@
 		.override-dropdown {
 			min-width: 120px;
 		}
+	}
+
+	@keyframes fadeIn {
+		from { opacity: 0; }
+		to { opacity: 1; }
 	}
 </style>
