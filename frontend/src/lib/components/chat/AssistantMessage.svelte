@@ -97,46 +97,42 @@
 	// Streaming cursor HTML to inject inline with text
 	const STREAMING_CURSOR = '<span class="streaming-cursor inline-block w-2 h-4 ml-0.5 bg-primary animate-pulse align-middle"></span>';
 
-	// Memoization state for incremental rendering
-	let _prevContent = '';
-	let _prevHtml = '';
-	let _prevWasStreaming = false;
-	// Cached HTML for the "stable prefix" (all content up to the last \n\n boundary)
-	let _stablePrefixContent = '';
-	let _stablePrefixHtml = '';
+	// Use a plain object to avoid Svelte 5 compiling these as reactive signals.
+	// Mutating reactive `let` vars inside `$derived` corrupts the effect linked list.
+	const _cache = { content: '', html: '', wasStreaming: false, stablePrefixContent: '', stablePrefixHtml: '' };
 
 	const renderedHtml = $derived(renderMarkdownMemoized(content, streaming));
 
 	function renderMarkdownMemoized(text: string, isStreaming: boolean): string {
 		// Fast path: content and streaming flag unchanged
-		if (text === _prevContent && isStreaming === _prevWasStreaming) return _prevHtml;
+		if (text === _cache.content && isStreaming === _cache.wasStreaming) return _cache.html;
 
 		// Transition from streaming→not-streaming: full re-render for final media processing
-		if (_prevWasStreaming && !isStreaming) {
-			_stablePrefixContent = '';
-			_stablePrefixHtml = '';
-			_prevContent = text;
-			_prevWasStreaming = false;
-			_prevHtml = renderMarkdownFull(text, false);
-			return _prevHtml;
+		if (_cache.wasStreaming && !isStreaming) {
+			_cache.stablePrefixContent = '';
+			_cache.stablePrefixHtml = '';
+			_cache.content = text;
+			_cache.wasStreaming = false;
+			_cache.html = renderMarkdownFull(text, false);
+			return _cache.html;
 		}
 
 		// During streaming: incremental render if content was only appended
-		if (isStreaming && _prevContent.length > 0 && text.startsWith(_prevContent)) {
+		if (isStreaming && _cache.content.length > 0 && text.startsWith(_cache.content)) {
 			const result = renderMarkdownIncremental(text);
-			_prevContent = text;
-			_prevWasStreaming = true;
-			_prevHtml = result;
+			_cache.content = text;
+			_cache.wasStreaming = true;
+			_cache.html = result;
 			return result;
 		}
 
 		// Full render (first render, content rewritten, or non-streaming)
-		_stablePrefixContent = '';
-		_stablePrefixHtml = '';
-		_prevContent = text;
-		_prevWasStreaming = isStreaming;
-		_prevHtml = renderMarkdownFull(text, isStreaming);
-		return _prevHtml;
+		_cache.stablePrefixContent = '';
+		_cache.stablePrefixHtml = '';
+		_cache.content = text;
+		_cache.wasStreaming = isStreaming;
+		_cache.html = renderMarkdownFull(text, isStreaming);
+		return _cache.html;
 	}
 
 	/**
@@ -159,13 +155,13 @@
 
 		// If the stable prefix hasn't changed, reuse its cached HTML
 		let prefixHtml: string;
-		if (stableContent === _stablePrefixContent) {
-			prefixHtml = _stablePrefixHtml;
+		if (stableContent === _cache.stablePrefixContent) {
+			prefixHtml = _cache.stablePrefixHtml;
 		} else {
 			// Stable prefix grew — re-parse it and cache
 			prefixHtml = marked(replaceMediaWithPlaceholders(stableContent), { breaks: true }) as string;
-			_stablePrefixContent = stableContent;
-			_stablePrefixHtml = prefixHtml;
+			_cache.stablePrefixContent = stableContent;
+			_cache.stablePrefixHtml = prefixHtml;
 		}
 
 		// Always re-parse the tail (last incomplete paragraph + new content)

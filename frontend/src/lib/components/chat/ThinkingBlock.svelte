@@ -94,46 +94,45 @@
 	// ── Incremental markdown rendering ──────────────────────────────────────
 	// During streaming, thinking content is only appended. Cache the rendered
 	// HTML for completed paragraphs and only re-parse the tail.
-	let _prevContent = '';
-	let _prevHtml = '';
-	let _stablePrefixContent = '';
-	let _stablePrefixHtml = '';
+	// Use a plain object to avoid Svelte 5 compiling these as reactive signals.
+	// Mutating reactive `let` vars inside `$derived` corrupts the effect linked list.
+	const _cache = { content: '', html: '', stablePrefixContent: '', stablePrefixHtml: '' };
 
 	function renderMarkdownMemoized(text: string): string {
 		if (!text) return '';
-		if (text === _prevContent) return _prevHtml;
+		if (text === _cache.content) return _cache.html;
 
 		// Incremental: if content was only appended
-		if (_prevContent.length > 0 && text.startsWith(_prevContent)) {
+		if (_cache.content.length > 0 && text.startsWith(_cache.content)) {
 			const lastBoundary = text.lastIndexOf('\n\n');
 			if (lastBoundary > 0) {
 				const stableContent = text.substring(0, lastBoundary);
 				const tailContent = text.substring(lastBoundary);
 
 				let prefixHtml: string;
-				if (stableContent === _stablePrefixContent) {
-					prefixHtml = _stablePrefixHtml;
+				if (stableContent === _cache.stablePrefixContent) {
+					prefixHtml = _cache.stablePrefixHtml;
 				} else {
 					try { prefixHtml = marked.parse(stableContent) as string; } catch { prefixHtml = stableContent; }
-					_stablePrefixContent = stableContent;
-					_stablePrefixHtml = prefixHtml;
+					_cache.stablePrefixContent = stableContent;
+					_cache.stablePrefixHtml = prefixHtml;
 				}
 
 				let tailHtml: string;
 				try { tailHtml = marked.parse(tailContent) as string; } catch { tailHtml = tailContent; }
 
-				_prevContent = text;
-				_prevHtml = prefixHtml + tailHtml;
-				return _prevHtml;
+				_cache.content = text;
+				_cache.html = prefixHtml + tailHtml;
+				return _cache.html;
 			}
 		}
 
 		// Full render
-		_stablePrefixContent = '';
-		_stablePrefixHtml = '';
-		_prevContent = text;
-		try { _prevHtml = marked.parse(text) as string; } catch { _prevHtml = text; }
-		return _prevHtml;
+		_cache.stablePrefixContent = '';
+		_cache.stablePrefixHtml = '';
+		_cache.content = text;
+		try { _cache.html = marked.parse(text) as string; } catch { _cache.html = text; }
+		return _cache.html;
 	}
 
 	const renderedHtml = $derived(renderMarkdownMemoized(content));
