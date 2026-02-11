@@ -1869,6 +1869,7 @@ async def stream_query(
     # Execute query
     response_text = []
     tool_messages = []  # Collect tool use/result messages for storage
+    tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
     metadata = {}
     sdk_session_id = resume_id  # Start with existing SDK session ID if resuming
     interrupted = False
@@ -1900,6 +1901,12 @@ async def stream_query(
                         )
 
                     elif isinstance(block, ToolUseBlock):
+                        tool_id = getattr(block, 'id', None)
+
+                        # Track tool_id → name for ToolResultBlock lookup
+                        if tool_id:
+                            tool_id_to_name[tool_id] = block.name
+
                         yield {
                             "type": "tool_use",
                             "name": block.name,
@@ -1910,7 +1917,7 @@ async def stream_query(
                         tool_messages.append({
                             "type": "tool_use",
                             "name": block.name,
-                            "tool_id": getattr(block, 'id', None),
+                            "tool_id": tool_id,
                             "input": block.input
                         })
 
@@ -1926,17 +1933,19 @@ async def stream_query(
                     elif isinstance(block, ToolResultBlock):
                         # Truncate large outputs
                         output = truncate_large_payload(block.content)
+                        tool_use_id = getattr(block, 'tool_use_id', None)
+                        tool_name = tool_id_to_name.get(tool_use_id, getattr(block, 'name', 'unknown'))
                         yield {
                             "type": "tool_result",
-                            "name": getattr(block, 'name', 'unknown'),
+                            "name": tool_name,
                             "output": output
                         }
 
                         # Collect tool result for storage
                         tool_messages.append({
                             "type": "tool_result",
-                            "name": getattr(block, 'name', 'unknown'),
-                            "tool_id": getattr(block, 'tool_use_id', None),
+                            "name": tool_name,
+                            "tool_id": tool_use_id,
                             "output": output
                         })
 
@@ -1945,7 +1954,7 @@ async def stream_query(
                             session_id=session_id,
                             message_id=assistant_msg_id,
                             chunk_type="tool_result",
-                            chunk_data={"name": getattr(block, 'name', 'unknown'), "output": output},
+                            chunk_data={"name": tool_name, "output": output},
                             source_device_id=device_id
                         )
 
@@ -1956,11 +1965,12 @@ async def stream_query(
                 for block in message.content:
                     if isinstance(block, ToolResultBlock):
                         output = truncate_large_payload(block.content) if block.content else ""
-                        logger.debug(f"UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, content length: {len(str(block.content) if block.content else '')}")
+                        tool_name = tool_id_to_name.get(block.tool_use_id, "unknown")
+                        logger.debug(f"UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, tool_name: {tool_name}, content length: {len(str(block.content) if block.content else '')}")
 
                         yield {
                             "type": "tool_result",
-                            "name": "unknown",
+                            "name": tool_name,
                             "tool_use_id": block.tool_use_id,
                             "output": output
                         }
@@ -1968,7 +1978,7 @@ async def stream_query(
                         # Collect tool result for storage
                         tool_messages.append({
                             "type": "tool_result",
-                            "name": "unknown",
+                            "name": tool_name,
                             "tool_id": block.tool_use_id,
                             "output": output
                         })
@@ -1978,7 +1988,7 @@ async def stream_query(
                             session_id=session_id,
                             message_id=assistant_msg_id,
                             chunk_type="tool_result",
-                            chunk_data={"name": "unknown", "output": output, "tool_use_id": block.tool_use_id},
+                            chunk_data={"name": tool_name, "output": output, "tool_use_id": block.tool_use_id},
                             source_device_id=device_id
                         )
 
@@ -2858,6 +2868,7 @@ async def stream_to_websocket(
     response_text = []
     tool_messages = []  # Collect tool use/result messages for storage
     task_tool_uses = {}  # Track Task (subagent) tool uses by tool_id
+    tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
     metadata = {}
     interrupted = False
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
@@ -3088,6 +3099,10 @@ async def stream_to_websocket(
                         tool_id = getattr(block, 'id', None)
                         tool_input = block.input or {}
 
+                        # Track tool_id → name for ToolResultBlock lookup
+                        if tool_id:
+                            tool_id_to_name[tool_id] = block.name
+
                         # Collect tool use for storage
                         tool_messages.append({
                             "type": "tool_use",
@@ -3135,7 +3150,7 @@ async def stream_to_websocket(
                     elif isinstance(block, ToolResultBlock):
                         output = truncate_large_payload(block.content)
                         tool_use_id = getattr(block, 'tool_use_id', None)
-                        tool_name = getattr(block, 'name', 'unknown')
+                        tool_name = tool_id_to_name.get(tool_use_id, getattr(block, 'name', 'unknown'))
 
                         # Collect tool result for storage
                         tool_messages.append({
@@ -3221,12 +3236,14 @@ async def stream_to_websocket(
                     elif isinstance(block, ToolResultBlock):
                         output = truncate_large_payload(block.content) if block.content else ""
                         tool_use_id = block.tool_use_id
-                        logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {tool_use_id}, parent_tool_id: {parent_tool_id}, content length: {len(str(block.content) if block.content else '')}, is_error: {block.is_error}")
+                        # Look up tool name from preceding ToolUseBlock
+                        tool_name = tool_id_to_name.get(tool_use_id, "unknown")
+                        logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {tool_use_id}, tool_name: {tool_name}, parent_tool_id: {parent_tool_id}, content length: {len(str(block.content) if block.content else '')}, is_error: {block.is_error}")
 
                         # Collect tool result for storage
                         tool_messages.append({
                             "type": "tool_result",
-                            "name": "unknown",  # UserMessage ToolResultBlock doesn't have name
+                            "name": tool_name,
                             "tool_id": tool_use_id,
                             "output": output
                         })
@@ -3250,7 +3267,7 @@ async def stream_to_websocket(
                             yield {
                                 "type": "subagent_tool_result",
                                 "agent_id": parent_tool_id,
-                                "name": "unknown",
+                                "name": tool_name,
                                 "tool_use_id": tool_use_id,
                                 "output": output,
                                 "is_error": block.is_error
@@ -3258,7 +3275,7 @@ async def stream_to_websocket(
                         else:
                             yield {
                                 "type": "tool_result",
-                                "name": "unknown",
+                                "name": tool_name,
                                 "tool_use_id": tool_use_id,
                                 "output": output,
                                 "is_error": block.is_error

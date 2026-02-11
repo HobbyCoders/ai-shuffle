@@ -69,10 +69,12 @@ class SessionNotifier {
 		}
 
 		// ── Forward to listeners for non-polling concerns ─────────────────
-		// (permission requests, user questions, etc.)
+		// (permission requests, user questions, browser tool results, etc.)
+		// Inject session_id so listeners can use it (e.g., browser store for screenshots)
+		const enrichedData = { ...data, session_id: sessionId };
 		for (const listener of this._listeners) {
 			try {
-				listener(data);
+				listener(enrichedData);
 			} catch (e) {
 				console.error('[Notifier] Listener error:', e);
 			}
