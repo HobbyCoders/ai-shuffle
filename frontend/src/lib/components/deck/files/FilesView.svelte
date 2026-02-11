@@ -17,7 +17,6 @@
 		MoreVertical,
 		Check,
 		X,
-		ChevronDown,
 		FileText,
 		FileCode,
 		FileImage,
@@ -34,12 +33,8 @@
 	} from 'lucide-svelte';
 	import { files, sortedFiles, breadcrumbs, hasSelection, selectionCount } from '$lib/stores/files';
 	import type { FileItem } from '$lib/stores/files';
-	import { api } from '$lib/api/client';
-	import type { Project } from '$lib/stores/appState';
 
 	// State
-	let projects: Project[] = $state([]);
-	let loadingProjects = $state(true);
 	let showNewFolderInput = $state(false);
 	let newFolderName = $state('');
 	let renameTarget: FileItem | null = $state(null);
@@ -50,11 +45,9 @@
 	let isMobile = $state(false);
 	let isDragging = $state(false);
 	let searchQuery = $state('');
-	let showProjectDropdown = $state(false);
 	let itemsLoaded = $state(false);
 
 	// Derived state using $derived
-	let selectedProjectId = $derived($files.selectedProjectId);
 	let currentPath = $derived($files.currentPath);
 	let loading = $derived($files.loading);
 	let uploading = $derived($files.uploading);
@@ -73,9 +66,6 @@
 			: $sortedFiles
 	);
 
-	// Get selected project name
-	let selectedProject = $derived(projects.find((p) => p.id === selectedProjectId));
-
 	// Trigger staggered animation when files load
 	$effect(() => {
 		if ($sortedFiles.length > 0 && !loading) {
@@ -86,7 +76,7 @@
 		}
 	});
 
-	// Load projects on mount
+	// Load workspace files on mount
 	onMount(() => {
 		// Check mobile
 		function checkMobile() {
@@ -95,31 +85,13 @@
 		checkMobile();
 		window.addEventListener('resize', checkMobile);
 
-		// Load projects asynchronously
-		(async () => {
-			try {
-				projects = await api.get<Project[]>('/projects');
-			} catch (e) {
-				console.error('[Files] Failed to load projects:', e);
-			} finally {
-				loadingProjects = false;
-			}
+		// Load workspace root files
+		files.loadFiles();
 
-			// If there's a persisted project selection, load its files
-			if ($files.selectedProjectId) {
-				files.loadFiles();
-			}
-		})();
-
-		// Close context menu and dropdowns on click outside
+		// Close context menu on click outside
 		function handleClickOutside(e: MouseEvent) {
 			if (contextMenu) {
 				contextMenu = null;
-			}
-			// Check if click is outside project dropdown
-			const target = e.target as HTMLElement;
-			if (!target.closest('.project-selector-container')) {
-				showProjectDropdown = false;
 			}
 		}
 		document.addEventListener('click', handleClickOutside);
@@ -149,11 +121,6 @@
 	});
 
 	// Handlers
-	function handleProjectSelect(projectId: string) {
-		files.selectProject(projectId);
-		showProjectDropdown = false;
-	}
-
 	function handleNavigate(item: FileItem) {
 		if (item.type === 'directory') {
 			files.navigateTo(item.path);
@@ -330,9 +297,7 @@
 	function handleDragEnter(e: DragEvent) {
 		e.preventDefault();
 		e.stopPropagation();
-		if (selectedProjectId) {
-			isDragging = true;
-		}
+		isDragging = true;
 	}
 
 	function handleDragLeave(e: DragEvent) {
@@ -360,7 +325,7 @@
 		e.stopPropagation();
 		isDragging = false;
 
-		if (!selectedProjectId || !e.dataTransfer?.files?.length) return;
+		if (!e.dataTransfer?.files?.length) return;
 
 		await files.uploadFiles(e.dataTransfer.files);
 	}
@@ -389,151 +354,94 @@
 	<!-- Header -->
 	<header class="files-header">
 		<div class="header-top">
-			<!-- Project Selector -->
-			<div class="project-selector-container">
-				{#if loadingProjects}
-					<div class="project-loading">
-						<RefreshCw class="spin-icon" />
-						<span>Loading...</span>
-					</div>
-				{:else if projects.length === 0}
-					<div class="project-empty">
-						<span>No projects</span>
-					</div>
-				{:else}
-					<button
-						class="project-trigger"
-						onclick={(e) => {
-							e.stopPropagation();
-							showProjectDropdown = !showProjectDropdown;
-						}}
-					>
-						<div class="project-icon">
-							<Folder />
-						</div>
-						<div class="project-info">
-							<span class="project-label">Project</span>
-							<span class="project-name">{selectedProject?.name || 'Select project'}</span>
-						</div>
-						<ChevronDown class="chevron {showProjectDropdown ? 'open' : ''}" />
-					</button>
-
-					{#if showProjectDropdown}
-						<div class="project-dropdown">
-							<div class="dropdown-header">
-								<span>Switch Project</span>
-							</div>
-							<div class="dropdown-list">
-								{#each projects as project}
-									<button
-										class="dropdown-item {project.id === selectedProjectId ? 'active' : ''}"
-										onclick={() => handleProjectSelect(project.id)}
-									>
-										<Folder class="item-icon" />
-										<span class="item-name">{project.name}</span>
-										{#if project.id === selectedProjectId}
-											<Check class="check-icon" />
-										{/if}
-									</button>
-								{/each}
-							</div>
-						</div>
-					{/if}
-				{/if}
-			</div>
-
 			<!-- Actions -->
-			{#if selectedProjectId}
-				<div class="header-actions">
-					<button
-						class="action-btn primary-action"
-						onclick={handleUploadClick}
-						title="Upload files"
-					>
-						<Upload />
-						<span class="action-label">Upload</span>
-					</button>
-					<button
-						class="action-btn"
-						onclick={handleNewFolder}
-						title="New folder"
-					>
-						<FolderPlus />
-					</button>
-					<div class="action-divider"></div>
-					<button
-						class="action-btn"
-						onclick={() => files.toggleShowHidden()}
-						title={showHidden ? 'Hide hidden files' : 'Show hidden files'}
-					>
-						{#if showHidden}
-							<Eye />
-						{:else}
-							<EyeOff />
-						{/if}
-					</button>
-					<button
-						class="action-btn {viewMode === 'grid' ? 'active' : ''}"
-						onclick={() => files.setViewMode('grid')}
-						title="Grid view"
-					>
-						<LayoutGrid />
-					</button>
-					<button
-						class="action-btn {viewMode === 'list' ? 'active' : ''}"
-						onclick={() => files.setViewMode('list')}
-						title="List view"
-					>
-						<LayoutList />
-					</button>
-					<button
-						class="action-btn"
-						onclick={() => files.loadFiles()}
-						title="Refresh"
-					>
-						<RefreshCw class={loading ? 'spin-icon' : ''} />
-					</button>
-				</div>
-			{/if}
+			<div class="header-actions">
+				<button
+					class="action-btn primary-action"
+					onclick={handleUploadClick}
+					title="Upload files"
+				>
+					<Upload />
+					<span class="action-label">Upload</span>
+				</button>
+				<button
+					class="action-btn"
+					onclick={handleNewFolder}
+					title="New folder"
+				>
+					<FolderPlus />
+				</button>
+				<div class="action-divider"></div>
+				<button
+					class="action-btn"
+					onclick={() => files.toggleShowHidden()}
+					title={showHidden ? 'Hide hidden files' : 'Show hidden files'}
+				>
+					{#if showHidden}
+						<Eye />
+					{:else}
+						<EyeOff />
+					{/if}
+				</button>
+				<button
+					class="action-btn {viewMode === 'grid' ? 'active' : ''}"
+					onclick={() => files.setViewMode('grid')}
+					title="Grid view"
+				>
+					<LayoutGrid />
+				</button>
+				<button
+					class="action-btn {viewMode === 'list' ? 'active' : ''}"
+					onclick={() => files.setViewMode('list')}
+					title="List view"
+				>
+					<LayoutList />
+				</button>
+				<button
+					class="action-btn"
+					onclick={() => files.loadFiles()}
+					title="Refresh"
+				>
+					<RefreshCw class={loading ? 'spin-icon' : ''} />
+				</button>
+			</div>
 		</div>
 
 		<!-- Path Navigator -->
-		{#if selectedProjectId}
-			<nav class="path-nav">
-				<div class="path-track">
-					{#each $breadcrumbs as crumb, i}
-						<button
-							class="path-segment {i === $breadcrumbs.length - 1 ? 'current' : ''}"
-							onclick={() => handleBreadcrumbClick(crumb.path)}
-						>
-							{#if i === 0}
-								<Home class="home-icon" />
-							{/if}
-							<span>{crumb.name}</span>
-						</button>
-						{#if i < $breadcrumbs.length - 1}
-							<ChevronRight class="path-sep" />
+		<nav class="path-nav">
+			<div class="path-track">
+				{#each $breadcrumbs as crumb, i}
+					<button
+						class="path-segment {i === $breadcrumbs.length - 1 ? 'current' : ''}"
+						onclick={() => handleBreadcrumbClick(crumb.path)}
+					>
+						{#if i === 0}
+							<Home class="home-icon" />
 						{/if}
-					{/each}
-				</div>
-
-				<!-- Search -->
-				<div class="path-search">
-					<Search class="search-icon" />
-					<input
-						type="text"
-						placeholder="Filter files..."
-						bind:value={searchQuery}
-						class="search-input"
-					/>
-					{#if searchQuery}
-						<button class="search-clear" onclick={() => (searchQuery = '')}>
-							<X />
-						</button>
+						<span>{crumb.name}</span>
+					</button>
+					{#if i < $breadcrumbs.length - 1}
+						<ChevronRight class="path-sep" />
 					{/if}
-				</div>
-			</nav>
-		{/if}
+				{/each}
+			</div>
+
+			<!-- Search -->
+			<div class="path-search">
+				<Search class="search-icon" />
+				<input
+					type="text"
+					placeholder="Filter files..."
+					bind:value={searchQuery}
+					class="search-input"
+				/>
+				{#if searchQuery}
+					<button class="search-clear" onclick={() => (searchQuery = '')}>
+						<X />
+					</button>
+				{/if}
+			</div>
+		</nav>
 	</header>
 
 	<!-- Selection bar -->
@@ -578,15 +486,7 @@
 
 	<!-- Main content -->
 	<main class="files-content">
-		{#if !selectedProjectId}
-			<div class="empty-state">
-				<div class="empty-icon-wrap">
-					<Folder class="empty-icon" />
-				</div>
-				<h3 class="empty-title">No Project Selected</h3>
-				<p class="empty-desc">Choose a project from the dropdown above to browse its files</p>
-			</div>
-		{:else if loading && $sortedFiles.length === 0}
+		{#if loading && $sortedFiles.length === 0}
 			<div class="loading-state">
 				<div class="loader">
 					<RefreshCw class="spin-icon large" />
@@ -877,183 +777,9 @@
 	.header-top {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
+		justify-content: flex-end;
 		padding: 0.875rem 1.25rem;
 		gap: 1rem;
-	}
-
-	/* Project Selector */
-	.project-selector-container {
-		position: relative;
-		flex: 1;
-		max-width: 320px;
-	}
-
-	.project-loading,
-	.project-empty {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		padding: 0.625rem 1rem;
-		font-size: 0.875rem;
-		color: var(--muted-foreground);
-		background: color-mix(in oklch, var(--muted) 30%, transparent);
-		border-radius: 0.75rem;
-	}
-
-	.project-trigger {
-		display: flex;
-		align-items: center;
-		gap: 0.75rem;
-		width: 100%;
-		padding: 0.5rem 0.75rem;
-		background: color-mix(in oklch, var(--muted) 40%, transparent);
-		border: 1px solid transparent;
-		border-radius: 0.75rem;
-		cursor: pointer;
-		transition: all 0.2s ease;
-	}
-
-	.project-trigger:hover {
-		background: color-mix(in oklch, var(--muted) 60%, transparent);
-		border-color: var(--border);
-	}
-
-	.project-icon {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 2.25rem;
-		height: 2.25rem;
-		background: var(--file-folder-bg);
-		border-radius: 0.5rem;
-		color: var(--file-folder);
-	}
-
-	.project-icon :global(svg) {
-		width: 1.125rem;
-		height: 1.125rem;
-	}
-
-	.project-info {
-		flex: 1;
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		align-items: flex-start;
-		gap: 0.125rem;
-	}
-
-	.project-label {
-		font-size: 0.6875rem;
-		font-weight: 500;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--muted-foreground);
-	}
-
-	.project-name {
-		font-size: 0.9375rem;
-		font-weight: 600;
-		color: var(--foreground);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		max-width: 100%;
-	}
-
-	.chevron {
-		width: 1rem;
-		height: 1rem;
-		color: var(--muted-foreground);
-		transition: transform 0.2s ease;
-	}
-
-	.chevron.open {
-		transform: rotate(180deg);
-	}
-
-	/* Project Dropdown */
-	.project-dropdown {
-		position: absolute;
-		top: calc(100% + 0.5rem);
-		left: 0;
-		right: 0;
-		background: var(--popover);
-		border: 1px solid var(--border);
-		border-radius: 0.75rem;
-		box-shadow: var(--shadow-l);
-		z-index: 100;
-		overflow: hidden;
-		animation: slideDown 0.15s ease;
-	}
-
-	@keyframes slideDown {
-		from {
-			opacity: 0;
-			transform: translateY(-8px);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
-	}
-
-	.dropdown-header {
-		padding: 0.75rem 1rem;
-		font-size: 0.75rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--muted-foreground);
-		background: var(--muted);
-		border-bottom: 1px solid var(--border);
-	}
-
-	.dropdown-list {
-		max-height: 280px;
-		overflow-y: auto;
-		padding: 0.375rem;
-	}
-
-	.dropdown-item {
-		display: flex;
-		align-items: center;
-		gap: 0.625rem;
-		width: 100%;
-		padding: 0.625rem 0.75rem;
-		background: transparent;
-		border: none;
-		border-radius: 0.5rem;
-		cursor: pointer;
-		text-align: left;
-		transition: background 0.15s ease;
-	}
-
-	.dropdown-item:hover {
-		background: var(--hover-overlay);
-	}
-
-	.dropdown-item.active {
-		background: var(--selection-bg-emphasis);
-	}
-
-	.dropdown-item :global(.item-icon) {
-		width: 1.125rem;
-		height: 1.125rem;
-		color: var(--file-folder);
-	}
-
-	.dropdown-item .item-name {
-		flex: 1;
-		font-size: 0.875rem;
-		color: var(--foreground);
-	}
-
-	.dropdown-item :global(.check-icon) {
-		width: 1rem;
-		height: 1rem;
-		color: var(--primary);
 	}
 
 	/* Header Actions */
@@ -1876,10 +1602,6 @@
 		flex-direction: column;
 		align-items: stretch;
 		gap: 0.75rem;
-	}
-
-	.mobile .project-selector-container {
-		max-width: none;
 	}
 
 	.mobile .header-actions {

@@ -2,7 +2,7 @@
  * Files Store - State management for the Files workspace
  *
  * Manages:
- * - Current project and path navigation
+ * - Path navigation within the workspace root
  * - File listing and caching
  * - File operations (CRUD)
  * - Upload progress tracking
@@ -28,7 +28,6 @@ export interface FileItem {
 }
 
 export interface FilesState {
-	selectedProjectId: string | null;
 	currentPath: string;
 	files: FileItem[];
 	loading: boolean;
@@ -150,7 +149,6 @@ function loadFromStorage(): Partial<FilesState> | null {
 		if (stored) {
 			const parsed = JSON.parse(stored);
 			return {
-				selectedProjectId: parsed.selectedProjectId || null,
 				viewMode: parsed.viewMode || 'list',
 				sortBy: parsed.sortBy || 'name',
 				sortAsc: parsed.sortAsc ?? true,
@@ -168,7 +166,6 @@ function saveToStorage(state: FilesState) {
 
 	try {
 		const toSave = {
-			selectedProjectId: state.selectedProjectId,
 			viewMode: state.viewMode,
 			sortBy: state.sortBy,
 			sortAsc: state.sortAsc,
@@ -197,7 +194,6 @@ function createFilesStore() {
 	const persisted = loadFromStorage();
 
 	const initialState: FilesState = {
-		selectedProjectId: persisted?.selectedProjectId || null,
 		currentPath: '',
 		files: [],
 		loading: false,
@@ -215,30 +211,6 @@ function createFilesStore() {
 
 	return {
 		subscribe,
-
-		// ========================================================================
-		// Project Selection
-		// ========================================================================
-
-		selectProject(projectId: string | null): void {
-			update((state) => {
-				const newState = {
-					...state,
-					selectedProjectId: projectId,
-					currentPath: '',
-					files: [],
-					selectedFiles: new Set<string>(),
-					error: null
-				};
-				saveToStorage(newState);
-				return newState;
-			});
-
-			// Auto-load files if project selected
-			if (projectId) {
-				this.loadFiles();
-			}
-		},
 
 		// ========================================================================
 		// Navigation
@@ -270,7 +242,6 @@ function createFilesStore() {
 
 		async loadFiles(): Promise<void> {
 			const state = get({ subscribe });
-			if (!state.selectedProjectId) return;
 
 			update((s) => ({ ...s, loading: true, error: null }));
 
@@ -281,7 +252,7 @@ function createFilesStore() {
 				});
 
 				const response = await fetch(
-					`/api/v1/projects/${state.selectedProjectId}/files?${params}`,
+					`/api/v1/workspace/files?${params}`,
 					{
 						credentials: 'include'
 					}
@@ -314,13 +285,12 @@ function createFilesStore() {
 
 		async createFolder(name: string): Promise<boolean> {
 			const state = get({ subscribe });
-			if (!state.selectedProjectId) return false;
 
 			try {
 				const params = new URLSearchParams({ path: state.currentPath });
 
 				const response = await fetch(
-					`/api/v1/projects/${state.selectedProjectId}/files/folder?${params}`,
+					`/api/v1/workspace/files/folder?${params}`,
 					{
 						method: 'POST',
 						headers: {
@@ -346,14 +316,11 @@ function createFilesStore() {
 		},
 
 		async rename(path: string, newName: string): Promise<boolean> {
-			const state = get({ subscribe });
-			if (!state.selectedProjectId) return false;
-
 			try {
 				const params = new URLSearchParams({ path });
 
 				const response = await fetch(
-					`/api/v1/projects/${state.selectedProjectId}/files/rename?${params}`,
+					`/api/v1/workspace/files/rename?${params}`,
 					{
 						method: 'PUT',
 						headers: {
@@ -379,14 +346,11 @@ function createFilesStore() {
 		},
 
 		async delete(path: string): Promise<boolean> {
-			const state = get({ subscribe });
-			if (!state.selectedProjectId) return false;
-
 			try {
 				const params = new URLSearchParams({ path });
 
 				const response = await fetch(
-					`/api/v1/projects/${state.selectedProjectId}/files?${params}`,
+					`/api/v1/workspace/files?${params}`,
 					{
 						method: 'DELETE',
 						credentials: 'include'
@@ -409,7 +373,7 @@ function createFilesStore() {
 
 		async deleteSelected(): Promise<boolean> {
 			const state = get({ subscribe });
-			if (!state.selectedProjectId || state.selectedFiles.size === 0) return false;
+			if (state.selectedFiles.size === 0) return false;
 
 			const paths = Array.from(state.selectedFiles);
 			let success = true;
@@ -429,7 +393,7 @@ function createFilesStore() {
 
 		async uploadFiles(files: FileList): Promise<boolean> {
 			const state = get({ subscribe });
-			if (!state.selectedProjectId || files.length === 0) return false;
+			if (files.length === 0) return false;
 
 			update((s) => ({ ...s, uploading: true, uploadProgress: 0, error: null }));
 
@@ -443,7 +407,7 @@ function createFilesStore() {
 					formData.append('path', state.currentPath);
 
 					const response = await fetch(
-						`/api/v1/projects/${state.selectedProjectId}/upload`,
+						`/api/v1/workspace/upload`,
 						{
 							method: 'POST',
 							credentials: 'include',
@@ -483,14 +447,11 @@ function createFilesStore() {
 		// ========================================================================
 
 		async downloadFile(path: string, filename: string): Promise<void> {
-			const state = get({ subscribe });
-			if (!state.selectedProjectId) return;
-
 			try {
 				const params = new URLSearchParams({ path });
 
 				const response = await fetch(
-					`/api/v1/projects/${state.selectedProjectId}/files/download?${params}`,
+					`/api/v1/workspace/files/download?${params}`,
 					{
 						credentials: 'include'
 					}
@@ -616,11 +577,7 @@ function createFilesStore() {
 
 				if (needsUpdate) {
 					// Update localStorage
-					const toSave = {
-						selectedProjectId: localState.selectedProjectId,
-						...serverPrefs
-					};
-					localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+					localStorage.setItem(STORAGE_KEY, JSON.stringify(serverPrefs));
 
 					// Update store
 					update((state) => ({
@@ -652,7 +609,6 @@ function createFilesStore() {
 
 		reset(): void {
 			set({
-				selectedProjectId: null,
 				currentPath: '',
 				files: [],
 				loading: false,
@@ -678,7 +634,7 @@ export const files = createFilesStore();
 // Derived: Current path breadcrumbs
 export const breadcrumbs = derived(files, ($files) => {
 	const parts = $files.currentPath.split('/').filter(Boolean);
-	const crumbs = [{ name: 'Root', path: '' }];
+	const crumbs = [{ name: 'Workspace', path: '' }];
 
 	let currentPath = '';
 	for (const part of parts) {
