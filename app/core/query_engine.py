@@ -51,6 +51,23 @@ MAX_DISPLAY_OUTPUT_SIZE = 2000  # What we show in the UI
 DEFAULT_SDK_BUFFER_SIZE = 50 * 1024 * 1024  # 50MB
 
 
+def extract_mcp_image(content: Any) -> Optional[str]:
+    """
+    Extract base64 image data from MCP-style content block lists.
+
+    MCP tools can return content as a list of blocks:
+    [{"type": "text", "text": "..."}, {"type": "image", "data": "base64...", "mimeType": "image/jpeg"}]
+
+    Returns the first image's base64 data, or None if no image found.
+    """
+    if not isinstance(content, list):
+        return None
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "image":
+            return block.get("data")
+    return None
+
+
 def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -> str:
     """
     Intelligently truncate large tool output payloads.
@@ -3160,6 +3177,8 @@ async def stream_to_websocket(
                             }
 
                     elif isinstance(block, ToolResultBlock):
+                        # Extract screenshot from MCP content blocks before truncation
+                        screenshot_b64 = extract_mcp_image(block.content)
                         output = truncate_large_payload(block.content)
                         tool_use_id = getattr(block, 'tool_use_id', None)
                         tool_name = tool_id_to_name.get(tool_use_id, getattr(block, 'name', 'unknown'))
@@ -3197,13 +3216,17 @@ async def stream_to_websocket(
                                 "is_error": getattr(block, 'is_error', False)
                             }
                         else:
-                            yield {
+                            event = {
                                 "type": "tool_result",
                                 "name": tool_name,
                                 "tool_use_id": tool_use_id,
                                 "output": output,
                                 "is_error": getattr(block, 'is_error', False)
                             }
+                            # Include screenshot for browser tools (MCP content has image blocks)
+                            if screenshot_b64:
+                                event["screenshot"] = screenshot_b64
+                            yield event
 
                 metadata["model"] = message.model
 
@@ -3246,11 +3269,13 @@ async def stream_to_websocket(
                         # Don't yield regular text from UserMessage - it's usually meta/system info
 
                     elif isinstance(block, ToolResultBlock):
+                        # Extract screenshot from MCP content blocks before truncation
+                        screenshot_b64 = extract_mcp_image(block.content)
                         output = truncate_large_payload(block.content) if block.content else ""
                         tool_use_id = block.tool_use_id
                         # Look up tool name from preceding ToolUseBlock
                         tool_name = tool_id_to_name.get(tool_use_id, "unknown")
-                        logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {tool_use_id}, tool_name: {tool_name}, parent_tool_id: {parent_tool_id}, content length: {len(str(block.content) if block.content else '')}, is_error: {block.is_error}")
+                        logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {tool_use_id}, tool_name: {tool_name}, parent_tool_id: {parent_tool_id}, content length: {len(str(block.content) if block.content else '')}, has_screenshot: {screenshot_b64 is not None}, is_error: {block.is_error}")
 
                         # Collect tool result for storage
                         tool_messages.append({
@@ -3285,13 +3310,17 @@ async def stream_to_websocket(
                                 "is_error": block.is_error
                             }
                         else:
-                            yield {
+                            event = {
                                 "type": "tool_result",
                                 "name": tool_name,
                                 "tool_use_id": tool_use_id,
                                 "output": output,
                                 "is_error": block.is_error
                             }
+                            # Include screenshot for browser tools (MCP content has image blocks)
+                            if screenshot_b64:
+                                event["screenshot"] = screenshot_b64
+                            yield event
 
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms

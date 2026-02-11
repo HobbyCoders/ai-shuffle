@@ -56,9 +56,10 @@ function createBrowserStore() {
 		/**
 		 * Update browser state from a tool result.
 		 * Called when a browser_* tool result comes through WebSocket.
-		 * Also triggers a screenshot fetch from the REST API.
+		 * Uses inline screenshot from MCP content blocks if available,
+		 * falls back to REST API fetch.
 		 */
-		async updateFromToolResult(toolName: string, result: string, sessionId?: string) {
+		async updateFromToolResult(toolName: string, result: string, sessionId?: string, screenshot?: string) {
 			try {
 				const data = JSON.parse(result);
 				if (!data.success) return;
@@ -72,6 +73,9 @@ function createBrowserStore() {
 
 					// Store session ID for API calls
 					if (sessionId) newState.sessionId = sessionId;
+
+					// Use inline screenshot from MCP content blocks
+					if (screenshot) newState.screenshot = screenshot;
 
 					// Mark as active
 					newState.isActive = true;
@@ -92,10 +96,8 @@ function createBrowserStore() {
 					return newState;
 				});
 
-				// Fetch screenshot from REST API after tool completes
-				// (tools that modify the page include screenshots in their MCP response
-				// to the model, but we need to fetch it separately for the panel)
-				if (toolName !== 'browser_close' && toolName !== 'browser_tab_list' && toolName !== 'browser_get_content' && toolName !== 'browser_get_elements') {
+				// If no inline screenshot, try fetching from REST API as fallback
+				if (!screenshot && toolName !== 'browser_close' && toolName !== 'browser_tab_list' && toolName !== 'browser_get_content' && toolName !== 'browser_get_elements') {
 					const sid = sessionId || _currentState.sessionId;
 					if (sid) {
 						await this.fetchScreenshot(sid);
@@ -309,12 +311,14 @@ sessionNotifier.onEvent((event) => {
 
 	let toolName: string | undefined;
 	let content: string | undefined;
+	let screenshot: string | undefined;
 	let sessionId: string | undefined = event.session_id ?? undefined;
 
 	if (ev.type === 'tool_result') {
 		// Direct WS event from originating device
 		toolName = ev.name as string | undefined;
 		content = ev.output as string | undefined;
+		screenshot = ev.screenshot as string | undefined;
 	} else if (ev.event_type === 'stream_chunk') {
 		// Sync event from another device
 		const data = ev.data as Record<string, unknown> | undefined;
@@ -332,6 +336,6 @@ sessionNotifier.onEvent((event) => {
 		const normalizedName = toolName.includes('__browser_')
 			? 'browser_' + toolName.split('__browser_').pop()
 			: toolName;
-		browserState.updateFromToolResult(normalizedName, content, sessionId);
+		browserState.updateFromToolResult(normalizedName, content, sessionId, screenshot);
 	}
 });
