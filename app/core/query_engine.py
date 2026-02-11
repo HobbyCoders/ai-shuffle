@@ -451,10 +451,53 @@ class SessionState:
 # Track active sessions - key is our session_id, value is SessionState
 _active_sessions: Dict[str, SessionState] = {}
 
+# Grace period (seconds) for the SDK subprocess to flush JSONL writes before SIGTERM.
+# The Claude Code subprocess writes to JSONL and stdout independently. After sending
+# the ResultMessage to us, it may still be flushing the final JSONL entry. If we
+# terminate immediately, that write is lost and the session history is incomplete.
+_SUBPROCESS_EXIT_GRACE_SECONDS = 5.0
+
 
 def get_session_state(session_id: str) -> Optional[SessionState]:
     """Get the active session state for a session ID"""
     return _active_sessions.get(session_id)
+
+
+async def _graceful_disconnect(client: ClaudeSDKClient, session_id: str) -> None:
+    """Disconnect the SDK client, giving the subprocess time to flush JSONL writes.
+
+    The SDK's disconnect() immediately sends SIGTERM to the subprocess. But the
+    Claude Code subprocess writes to stdout (messages to us) and to JSONL (persistent
+    history) independently. After sending the result message, the subprocess may still
+    be flushing the final assistant message to JSONL. Terminating immediately causes
+    that write to be lost, resulting in sessions with missing final messages.
+
+    This function waits for the subprocess to exit naturally (with a timeout) before
+    calling disconnect(). If the process has already exited, disconnect() is a no-op.
+    """
+    try:
+        # Access the underlying anyio Process via the SDK's internal structure.
+        # This is necessary because the SDK's disconnect() offers no grace period.
+        query = getattr(client, '_query', None)
+        transport = getattr(query, 'transport', None) if query else None
+        process = getattr(transport, '_process', None) if transport else None
+
+        if process and process.returncode is None:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=_SUBPROCESS_EXIT_GRACE_SECONDS)
+                logger.debug(f"[WS] Subprocess exited naturally for session {session_id} (rc={process.returncode})")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[WS] Subprocess for session {session_id} didn't exit in "
+                    f"{_SUBPROCESS_EXIT_GRACE_SECONDS}s, forcing disconnect"
+                )
+    except Exception as e:
+        # Don't let introspection errors prevent disconnect
+        logger.debug(f"[WS] Could not wait for subprocess for session {session_id}: {e}")
+
+    # Now disconnect (terminates the process if still running, no-op if already exited)
+    await client.disconnect()
+    logger.debug(f"[WS] Disconnected SDK client for session {session_id}")
 
 
 # Default instructions for displaying media and files in chat
@@ -3272,13 +3315,15 @@ async def stream_to_websocket(
         state.interrupt_requested = False
         state.last_activity = datetime.now()
 
-        # Disconnect the SDK client to terminate the Claude Code subprocess
+        # Gracefully disconnect the SDK client.
         # This MUST be done in the same task that created/connected the client
-        # (anyio cancel scopes are task-bound)
+        # (anyio cancel scopes are task-bound).
+        # We wait for the subprocess to exit naturally before sending SIGTERM,
+        # because the subprocess may still be flushing JSONL writes after sending
+        # the result message to us. See _graceful_disconnect() for details.
         if state.client:
             try:
-                await state.client.disconnect()
-                logger.debug(f"[WS] Disconnected SDK client for session {session_id}")
+                await _graceful_disconnect(state.client, session_id)
             except Exception as e:
                 logger.warning(f"[WS] Error disconnecting SDK client for session {session_id}: {e}")
             state.is_connected = False
