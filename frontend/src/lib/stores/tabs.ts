@@ -44,8 +44,13 @@ export type {
 
 // Track which sessions are currently streaming across all user devices (user-level)
 // Updated by user_streaming_changed and user_streaming_sessions WebSocket messages
-// Maps sessionId → projectId for workspace-level streaming awareness
-export const streamingSessions = writable<Map<string, string | null>>(new Map());
+// Maps sessionId → {projectId, worktreeId} for workspace-level streaming awareness
+// worktreeId distinguishes worktree sessions (independent working dirs) from project-mode sessions
+export interface StreamingSessionInfo {
+	projectId: string | null;
+	worktreeId: string | null;
+}
+export const streamingSessions = writable<Map<string, StreamingSessionInfo>>(new Map());
 
 // WebSocket connections per tab
 const tabConnections: Map<string, WebSocket> = new Map();
@@ -783,6 +788,7 @@ function createTabsStore() {
 			session_id: tab.sessionId,
 			profile: tab.profile,
 			project: tab.project || undefined,
+			worktree_id: tab.worktreeId || undefined,
 			...(Object.keys(overrides).length > 0 ? { overrides } : {})
 		}));
 	}
@@ -1722,10 +1728,11 @@ function createTabsStore() {
 			const sessionId = data.session_id as string;
 			const isStreaming = data.is_streaming as boolean;
 			const projectId = (data.project_id as string | null) ?? null;
+			const worktreeId = (data.worktree_id as string | null) ?? null;
 			streamingSessions.update(map => {
 				const newMap = new Map(map);
 				if (isStreaming) {
-					newMap.set(sessionId, projectId);
+					newMap.set(sessionId, { projectId, worktreeId });
 				} else {
 					newMap.delete(sessionId);
 				}
@@ -1736,18 +1743,21 @@ function createTabsStore() {
 
 		// Handle initial streaming sessions snapshot on connection
 		if (msgType === 'user_streaming_sessions') {
-			const sessions = data.sessions as Array<{ session_id: string; project_id: string | null }> | undefined;
+			const sessions = data.sessions as Array<{ session_id: string; project_id: string | null; worktree_id?: string | null }> | undefined;
 			const sessionIds = data.session_ids as string[] | undefined;
-			const newMap = new Map<string, string | null>();
+			const newMap = new Map<string, StreamingSessionInfo>();
 			if (sessions) {
-				// New format with project_id
+				// New format with project_id and worktree_id
 				for (const s of sessions) {
-					newMap.set(s.session_id, s.project_id ?? null);
+					newMap.set(s.session_id, {
+						projectId: s.project_id ?? null,
+						worktreeId: s.worktree_id ?? null
+					});
 				}
 			} else if (sessionIds) {
 				// Backward compat: old format without project_id
 				for (const sid of sessionIds) {
-					newMap.set(sid, null);
+					newMap.set(sid, { projectId: null, worktreeId: null });
 				}
 			}
 			streamingSessions.set(newMap);
@@ -3436,7 +3446,8 @@ function createTabsStore() {
 					prompt,
 					session_id: tab.sessionId,
 					profile: tab.profile,
-					project: tab.project || undefined
+					project: tab.project || undefined,
+					worktree_id: tab.worktreeId || undefined
 				}));
 				return;
 			}
@@ -3467,6 +3478,7 @@ function createTabsStore() {
 				session_id: tab.sessionId,
 				profile: tab.profile,
 				project: tab.project || undefined,
+				worktree_id: tab.worktreeId || undefined,
 				overrides: Object.keys(overrides).length > 0 ? overrides : undefined
 			}));
 		},

@@ -211,7 +211,7 @@ async def chat_websocket(
             logger.warning(f"Failed to send WebSocket message (type={data.get('type')}): {e}")
             return False
 
-    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None):
+    async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None, worktree_id: Optional[str] = None):
         """Execute query and stream results directly to WebSocket"""
         nonlocal current_session_id
 
@@ -358,7 +358,8 @@ async def chat_websocket(
                         source_device_id=None,  # Don't exclude - let all registered devices receive
                         usage=usage_data,
                         user_id=user_id,  # Enable user-level broadcast for side panel sync
-                        project_id=project_id  # Enable workspace-level streaming awareness
+                        project_id=project_id,  # Enable workspace-level streaming awareness
+                        worktree_id=worktree_id  # Worktree sessions have independent working dirs
                     )
                     stream_started = True
                 elif stream_started and event_type == 'stream_start':
@@ -1036,7 +1037,7 @@ async def chat_websocket(
                         # Note: broadcast_stream_start is called inside run_query when actual
                         # streaming begins. This prevents stuck streaming state if query fails early.
                         query_task = asyncio.create_task(
-                            run_query(prompt, session_id, profile_id, project_id, overrides)
+                            run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id)
                         )
                         _active_chat_sessions[session_id] = query_task
 
@@ -1074,6 +1075,7 @@ async def chat_websocket(
                         profile_id = data.get("profile", "claude-code")
                         project_id = data.get("project")
                         overrides = data.get("overrides")
+                        worktree_id = data.get("worktree_id")
 
                         if not prompt:
                             await send_json({"type": "error", "message": "Empty prompt"})
@@ -1120,7 +1122,7 @@ async def chat_websocket(
 
                         # Step 5: Start new query task
                         query_task = asyncio.create_task(
-                            run_query(prompt, session_id, profile_id, project_id, overrides)
+                            run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id)
                         )
                         _active_chat_sessions[session_id] = query_task
                         logger.debug(f"Started new query after interrupt for session {session_id}")

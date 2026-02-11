@@ -293,6 +293,8 @@ class SyncEngine:
         self._session_user_map: Dict[str, str] = {}
         # Map streaming session_id -> project_id for workspace-level streaming awareness
         self._session_project_map: Dict[str, Optional[str]] = {}
+        # Map streaming session_id -> worktree_id for worktree-aware streaming locks
+        self._session_worktree_map: Dict[str, Optional[str]] = {}
 
     async def register_device(
         self,
@@ -380,6 +382,7 @@ class SyncEngine:
         self._streaming_buffers.pop(session_id, None)
         self._session_user_map.pop(session_id, None)
         self._session_project_map.pop(session_id, None)
+        self._session_worktree_map.pop(session_id, None)
 
     async def acquire_session_lock(self, session_id: str, device_id: str) -> tuple[bool, Optional[str]]:
         """Acquire exclusive lock on a session for a device.
@@ -501,7 +504,8 @@ class SyncEngine:
         source_device_id: Optional[str] = None,
         usage: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
-        project_id: Optional[str] = None
+        project_id: Optional[str] = None,
+        worktree_id: Optional[str] = None
     ):
         """Notify all devices that streaming has started for a session.
 
@@ -515,6 +519,8 @@ class SyncEngine:
             usage: Token usage data from message_start event (input_tokens, cache_creation_input_tokens, cache_read_input_tokens)
             user_id: Optional user ID for user-level broadcast (notifies all user devices)
             project_id: Optional project ID for workspace-level streaming awareness
+            worktree_id: Optional worktree ID — worktree sessions have independent working
+                directories and should not lock git controls for project-mode sessions
         """
         # Only create buffer if not already streaming (idempotent)
         if session_id not in self._streaming_sessions:
@@ -530,6 +536,9 @@ class SyncEngine:
         # Store project_id mapping for workspace-level streaming awareness
         if project_id is not None:
             self._session_project_map[session_id] = project_id
+        # Store worktree_id mapping for worktree-aware git control locking
+        if worktree_id is not None:
+            self._session_worktree_map[session_id] = worktree_id
 
         data = {"message_id": message_id}
         if usage:
@@ -553,6 +562,7 @@ class SyncEngine:
                     "session_id": session_id,
                     "is_streaming": True,
                     "project_id": self._session_project_map.get(session_id),
+                    "worktree_id": self._session_worktree_map.get(session_id),
                 },
                 source_device_id=source_device_id
             )
@@ -668,6 +678,8 @@ class SyncEngine:
         stored_user_id = self._session_user_map.pop(session_id, None)
         # Pop project_id mapping (used for user-level broadcast below)
         stored_project_id = self._session_project_map.pop(session_id, None)
+        # Pop worktree_id mapping
+        stored_worktree_id = self._session_worktree_map.pop(session_id, None)
 
         event = SyncEvent(
             event_type="stream_end",
@@ -690,6 +702,7 @@ class SyncEngine:
                     "session_id": session_id,
                     "is_streaming": False,
                     "project_id": stored_project_id,
+                    "worktree_id": stored_worktree_id,
                 },
                 source_device_id=source_device_id
             )
@@ -987,13 +1000,17 @@ class SyncEngine:
         )
 
     def get_user_streaming_sessions(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get all currently streaming sessions for a user with their project IDs.
+        """Get all currently streaming sessions for a user with their project/worktree IDs.
 
         Used to send an initial snapshot when a device connects.
-        Returns list of dicts with session_id and project_id.
+        Returns list of dicts with session_id, project_id, and worktree_id.
         """
         return [
-            {"session_id": sid, "project_id": self._session_project_map.get(sid)}
+            {
+                "session_id": sid,
+                "project_id": self._session_project_map.get(sid),
+                "worktree_id": self._session_worktree_map.get(sid),
+            }
             for sid in self._streaming_sessions
             if self._session_user_map.get(sid) == user_id
         ]

@@ -56,8 +56,8 @@ export const workspaceIsStreaming = derived(
 
 		// Any session in the same project is streaming (user-level cross-device)
 		if (tab.project) {
-			for (const [, projectId] of $streamingSessions) {
-				if (projectId === tab.project) return true;
+			for (const [, info] of $streamingSessions) {
+				if (info.projectId === tab.project) return true;
 			}
 		}
 
@@ -71,8 +71,9 @@ export const workspaceIsStreaming = derived(
  * For worktree-mode tabs: only locked if the active tab's OWN session is streaming,
  * because worktrees have independent working directories and branches.
  *
- * For project-mode tabs: locked if ANY session in the same project is streaming,
- * because they share the same working directory and branch.
+ * For project-mode tabs: locked if ANY non-worktree session in the same project is streaming,
+ * because they share the same working directory and branch. Worktree sessions are excluded
+ * because they operate in independent working directories and cannot affect the main branch.
  */
 export const gitControlsStreaming = derived(
 	[tabs, sessionState, streamingSessions],
@@ -90,10 +91,11 @@ export const gitControlsStreaming = derived(
 		// For worktree-mode tabs, that's all we check — independent working directory
 		if (tab.executionMode === 'worktree') return false;
 
-		// For project-mode tabs, also check cross-session streaming in the same project
+		// For project-mode tabs, check cross-session streaming in the same project,
+		// but skip worktree sessions — they have independent working directories
 		if (tab.project) {
-			for (const [, projectId] of $streamingSessions) {
-				if (projectId === tab.project) return true;
+			for (const [, info] of $streamingSessions) {
+				if (info.projectId === tab.project && !info.worktreeId) return true;
 			}
 		}
 
