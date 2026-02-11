@@ -197,7 +197,6 @@
 					placeholder="Enter URL..."
 					bind:value={urlInput}
 					onkeydown={handleUrlKeydown}
-					disabled={!$browserState.isActive && !$browserState.sessionId}
 				/>
 			</div>
 
@@ -257,7 +256,7 @@
 						<line x1="2" y1="12" x2="22" y2="12"></line>
 						<path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
 					</svg>
-					<span>Browser will appear here when the AI navigates to a page</span>
+					<span>Enter a URL above to start browsing, or let the AI navigate for you</span>
 				</div>
 			{/if}
 		</div>
@@ -268,9 +267,9 @@
 				{#if $browserState.isLoading}
 					Loading...
 				{:else if $browserState.isActive}
-					Click to interact · Shift+click to reference
+					Click to interact · Shared with AI
 				{:else}
-					Inactive
+					Ready — enter a URL to browse
 				{/if}
 			</span>
 		</div>

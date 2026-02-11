@@ -1157,26 +1157,24 @@
 							{/if}
 						</div>
 
-						<!-- Browser Panel Toggle -->
-						{#if $browserState.isActive || $browserState.sessionId}
-							<button
-								type="button"
-								onclick={() => browserState.togglePanel()}
-								class="dock-action-btn"
-								class:active={$browserState.isOpen}
-								title={$browserState.isOpen ? 'Close browser panel' : 'Open browser panel'}
-							>
-								<!-- Globe icon -->
-								<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<circle cx="12" cy="12" r="10" stroke-width="1.75"></circle>
-									<path stroke-linecap="round" stroke-width="1.75" d="M2 12h20"></path>
-									<path stroke-linecap="round" stroke-width="1.75" d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"></path>
-								</svg>
-								{#if $browserState.isActive}
-									<span class="browser-active-dot"></span>
-								{/if}
-							</button>
-						{/if}
+						<!-- Browser Panel Toggle (always visible) -->
+						<button
+							type="button"
+							onclick={() => browserState.togglePanel()}
+							class="dock-action-btn"
+							class:active={$browserState.isOpen}
+							title={$browserState.isOpen ? 'Close browser panel' : 'Open browser panel'}
+						>
+							<!-- Globe icon -->
+							<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<circle cx="12" cy="12" r="10" stroke-width="1.75"></circle>
+								<path stroke-linecap="round" stroke-width="1.75" d="M2 12h20"></path>
+								<path stroke-linecap="round" stroke-width="1.75" d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"></path>
+							</svg>
+							{#if $browserState.isActive}
+								<span class="browser-active-dot"></span>
+							{/if}
+						</button>
 
 						<!-- Attach File Button -->
 						<button

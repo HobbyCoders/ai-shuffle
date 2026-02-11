@@ -22,8 +22,8 @@
 	// Check if this is an empty state (no messages yet)
 	const isEmptyState = $derived($activeSession.messages.length === 0);
 
-	// Browser panel visibility (only show during active chat)
-	const showBrowser = $derived($browserState.isOpen && !isEmptyState);
+	// Browser panel visibility — show whenever user opens it
+	const showBrowser = $derived($browserState.isOpen);
 
 	// Animation: Track transition from empty → active state
 	let transitioningFromEmpty = $state(false);
@@ -74,26 +74,31 @@
 <div class="chat-view" class:transitioning-from-empty={transitioningFromEmpty} class:has-browser={showBrowser}>
 	{#if isEmptyState}
 		<!-- Empty state: Workspace selector + centered input -->
-		<div class="empty-state">
-			{#if $activeSession.error}
-				<div class="error-banner">
-					<span>{$activeSession.error}</span>
-					<button onclick={() => activeSession.clearError()}>&times;</button>
-				</div>
-			{/if}
-
-			<div class="empty-state-content">
-				<WorkspaceSelector
-					selectedProject={$activeSession.project}
-					onSelectProject={handleProjectSelect}
-				/>
-				<div class="empty-input-wrapper">
-					<ChatInput />
-				</div>
-				{#if $githubAuthenticated}
-					<ExecutionModeBar />
+		<div class="chat-with-browser">
+			<div class="empty-state">
+				{#if $activeSession.error}
+					<div class="error-banner">
+						<span>{$activeSession.error}</span>
+						<button onclick={() => activeSession.clearError()}>&times;</button>
+					</div>
 				{/if}
+
+				<div class="empty-state-content">
+					<WorkspaceSelector
+						selectedProject={$activeSession.project}
+						onSelectProject={handleProjectSelect}
+					/>
+					<div class="empty-input-wrapper">
+						<ChatInput />
+					</div>
+					{#if $githubAuthenticated}
+						<ExecutionModeBar />
+					{/if}
+				</div>
 			</div>
+			{#if showBrowser}
+				<BrowserPanel />
+			{/if}
 		</div>
 	{:else}
 		<!-- Active chat: Messages + input + optional browser panel side by side -->

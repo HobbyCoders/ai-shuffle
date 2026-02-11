@@ -240,6 +240,7 @@ def resolve_note_references(prompt: str) -> str:
 
 def _build_mcp_servers_dict(
     project_dir: Optional[Path] = None,
+    browser_session_id: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Build the mcp_servers dict for ClaudeAgentOptions from registered MCP servers.
@@ -250,6 +251,7 @@ def _build_mcp_servers_dict(
 
     Args:
         project_dir: Optional project directory for project-scoped servers.
+        browser_session_id: Optional session ID to inject into browser-tools env.
 
     Returns:
         Dictionary mapping server names to SDK MCP server configs, or None if empty.
@@ -323,6 +325,14 @@ def _build_mcp_servers_dict(
                             logger.warning(f"Failed to read plugin MCP config {plugin_mcp_file}: {e}")
     except Exception as e:
         logger.warning(f"Failed to load plugin MCP servers: {e}")
+
+    # Inject session_id into browser-tools env so the MCP subprocess
+    # knows which Playwright session to proxy commands to
+    if browser_session_id and "browser-tools" in mcp_servers:
+        bt = mcp_servers["browser-tools"]
+        env = bt.get("env", {})
+        env["BROWSER_SESSION_ID"] = browser_session_id
+        bt["env"] = env
 
     if mcp_servers:
         logger.info(f"Passing {len(mcp_servers)} MCP server(s) to SDK: {list(mcp_servers.keys())}")
@@ -1461,7 +1471,8 @@ def build_options_from_profile(
         # This ensures tools from MCP servers (e.g., browser-tools) are available
         # regardless of whether the CLI discovers them from .mcp.json files
         mcp_servers=_build_mcp_servers_dict(
-            project_dir=Path(working_dir) if working_dir else None
+            project_dir=Path(working_dir) if working_dir else None,
+            browser_session_id=session_id,
         ) or {},
 
         # Environment and arguments - inject AI tool credentials if enabled

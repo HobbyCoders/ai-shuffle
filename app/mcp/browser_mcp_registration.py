@@ -34,14 +34,26 @@ def get_browser_server_command() -> list[str]:
 
 
 def _build_browser_config() -> McpServerConfig:
-    """Build the current expected MCP config for the browser server."""
+    """Build the current expected MCP config for the browser server.
+
+    Includes env vars so the MCP subprocess can proxy tool calls
+    back to the main process's REST API (shared Playwright browser).
+    BROWSER_SESSION_ID is left empty here — it's injected per-query
+    in query_engine.py's _build_mcp_servers_dict().
+    """
+    from app.core.config import settings, INTERNAL_BROWSER_TOKEN
+
     command_parts = get_browser_server_command()
     return McpServerConfig(
         name=BROWSER_MCP_SERVER_NAME,
         type=McpServerType.STDIO,
         command=command_parts[0],
         args=command_parts[1:],
-        env={},
+        env={
+            "BROWSER_API_BASE_URL": f"http://127.0.0.1:{settings.port}",
+            "BROWSER_INTERNAL_TOKEN": INTERNAL_BROWSER_TOKEN,
+            "BROWSER_SESSION_ID": "",  # Overridden per-query
+        },
         scope=McpScope.USER.value,
         enabled=True,
         description="Headless browser automation for AI agents — navigate, click, type, and interact with web pages",
@@ -70,10 +82,11 @@ def ensure_browser_mcp_registered(mcp_service) -> bool:
         for scope_servers in existing.values():
             for server in scope_servers:
                 if server.name == BROWSER_MCP_SERVER_NAME:
-                    # Verify the command and args are still correct
+                    # Verify the command, args, and env are still correct
                     if (
                         server.command == desired.command
                         and server.args == desired.args
+                        and server.env == desired.env
                     ):
                         logger.debug("Browser MCP server already registered and up to date")
                         return True

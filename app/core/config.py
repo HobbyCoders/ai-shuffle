@@ -8,6 +8,7 @@ Supports both Docker and Local deployment modes:
 Set LOCAL_MODE=true environment variable to force local mode.
 """
 
+import secrets
 from pathlib import Path
 from typing import Optional
 from pydantic_settings import BaseSettings
@@ -152,6 +153,10 @@ class Settings(BaseSettings):
 
 # Global settings instance
 settings = Settings()
+
+# Internal token for MCP subprocess → REST API browser calls.
+# Generated once at module load; the MCP browser server receives it via env var.
+INTERNAL_BROWSER_TOKEN = secrets.token_hex(32)
 
 
 # Ensure directories exist

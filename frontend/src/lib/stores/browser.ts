@@ -1,12 +1,9 @@
 /**
  * Browser State Store
  *
- * Manages the state of the AI agent's browser session,
- * including URL, title, screenshots, and panel visibility.
- *
- * Screenshots are fetched from the REST API after each browser tool
- * completes, since image content from MCP goes to the model but the
- * text result comes to the frontend via WebSocket.
+ * Manages the shared browser session between AI agent and user.
+ * Both the AI (via MCP proxy) and user (via REST API) operate on
+ * the same Playwright browser instance in the main process.
  */
 import { writable } from 'svelte/store';
 import { sessionNotifier } from './session/session-notifier';
@@ -215,6 +212,52 @@ function createBrowserStore() {
 		// =====================================================================
 
 		/**
+		 * Create a browser session via REST API (for user-initiated browsing).
+		 * Uses the current chat session ID or generates a temporary one.
+		 */
+		async createSession(sessionId: string): Promise<boolean> {
+			update((state) => ({ ...state, isLoading: true }));
+			try {
+				const token = localStorage.getItem('auth_token') || '';
+				const response = await fetch(`/api/v1/browser/${sessionId}/create`, {
+					method: 'POST',
+					headers: {
+						'Authorization': `Bearer ${token}`,
+						'Content-Type': 'application/json',
+					},
+				});
+
+				if (!response.ok) {
+					update((state) => ({ ...state, isLoading: false }));
+					return false;
+				}
+
+				update((state) => ({
+					...state,
+					sessionId,
+					isActive: true,
+					isLoading: false,
+				}));
+				return true;
+			} catch {
+				update((state) => ({ ...state, isLoading: false }));
+				return false;
+			}
+		},
+
+		/**
+		 * Ensure a browser session exists, creating one if needed.
+		 * Returns the session ID or null if creation failed.
+		 */
+		async _ensureSession(): Promise<string | null> {
+			if (_currentState.sessionId) return _currentState.sessionId;
+			// Generate a temporary session ID for user-initiated browsing
+			const tempId = 'user-browser-' + Date.now();
+			const ok = await this.createSession(tempId);
+			return ok ? tempId : null;
+		},
+
+		/**
 		 * Execute a browser action via REST API and update state from response.
 		 */
 		async _executeAction(
@@ -245,6 +288,7 @@ function createBrowserStore() {
 					url: data.url ?? state.url,
 					title: data.title ?? state.title,
 					screenshot: data.screenshot ?? state.screenshot,
+					isActive: true,
 					isLoading: false,
 				}));
 				return true;
@@ -254,10 +298,13 @@ function createBrowserStore() {
 			}
 		},
 
-		/** Navigate to a URL. */
+		/** Navigate to a URL. Auto-creates session if needed. */
 		async navigate(url: string) {
-			const sid = _currentState.sessionId;
-			if (!sid) return false;
+			let sid = _currentState.sessionId;
+			if (!sid) {
+				sid = await this._ensureSession();
+				if (!sid) return false;
+			}
 			return this._executeAction(sid, 'navigate', { url });
 		},
 
