@@ -259,7 +259,12 @@
 	};
 
 	function getToolIconType(toolName: string): IconType {
-		return TOOL_ICON_MAP[toolName] || 'cog';
+		// Direct lookup first
+		if (TOOL_ICON_MAP[toolName]) return TOOL_ICON_MAP[toolName];
+		// Handle MCP-prefixed names (e.g., mcp__browser-tools__browser_navigate → browser_navigate)
+		const mcpSuffix = toolName.includes('__') ? toolName.split('__').pop() : undefined;
+		if (mcpSuffix && TOOL_ICON_MAP[mcpSuffix]) return TOOL_ICON_MAP[mcpSuffix];
+		return 'cog';
 	}
 
 	function getToolSummary(toolInput?: Record<string, unknown>): string {

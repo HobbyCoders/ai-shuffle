@@ -300,15 +300,38 @@ export const browserState = createBrowserStore();
 
 // Register a listener on the session notifier to handle browser tool results.
 // When a tool_result WS event arrives with a browser_* tool name, update the browser state.
+//
+// Events arrive in two formats:
+// 1. Direct WS events: { type: "tool_result", name: "mcp__browser-tools__browser_navigate", output: "..." }
+// 2. Sync events: { event_type: "stream_chunk", data: { chunk_type: "tool_result", tool_name: "...", content: "..." } }
 sessionNotifier.onEvent((event) => {
-	const chunkType = (event as Record<string, unknown>).chunk_type as string | undefined;
-	if (chunkType !== 'tool_result') return;
+	const ev = event as Record<string, unknown>;
 
-	const toolName = (event as Record<string, unknown>).tool_name as string | undefined;
-	const content = (event as Record<string, unknown>).content as string | undefined;
-	const sessionId = event.session_id;
+	let toolName: string | undefined;
+	let content: string | undefined;
+	let sessionId: string | undefined = event.session_id ?? undefined;
 
-	if (toolName && toolName.startsWith('browser_') && content) {
-		browserState.updateFromToolResult(toolName, content, sessionId || undefined);
+	if (ev.type === 'tool_result') {
+		// Direct WS event from originating device
+		toolName = ev.name as string | undefined;
+		content = ev.output as string | undefined;
+	} else if (ev.event_type === 'stream_chunk') {
+		// Sync event from another device
+		const data = ev.data as Record<string, unknown> | undefined;
+		if (data?.chunk_type !== 'tool_result') return;
+		toolName = data.tool_name as string | undefined;
+		content = data.content as string | undefined;
+		if (!sessionId) sessionId = ev.session_id as string | undefined;
+	} else {
+		return;
+	}
+
+	// Match both MCP-prefixed names (mcp__browser-tools__browser_*) and plain names (browser_*)
+	if (toolName && (toolName.startsWith('browser_') || toolName.includes('browser-tools__browser_')) && content) {
+		// Normalize MCP prefix to plain tool name for updateFromToolResult
+		const normalizedName = toolName.includes('__browser_')
+			? 'browser_' + toolName.split('__browser_').pop()
+			: toolName;
+		browserState.updateFromToolResult(normalizedName, content, sessionId);
 	}
 });
