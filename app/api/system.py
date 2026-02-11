@@ -43,6 +43,10 @@ TOOL_CATEGORIES = {
         "name": "MCP tools",
         "description": "Tools from MCP servers"
     },
+    "browser": {
+        "name": "Browser tools",
+        "description": "Web browser automation tools for navigating, clicking, and extracting content"
+    },
     "other": {
         "name": "Other tools",
         "description": "Utility and miscellaneous tools"
@@ -68,6 +72,25 @@ BUILTIN_TOOLS = [
     {"name": "Bash", "category": "execution", "description": "Execute shell commands"},
     {"name": "Task", "category": "execution", "description": "Launch subagent tasks"},
     {"name": "KillShell", "category": "execution", "description": "Kill background shell"},
+
+    # Browser tools
+    {"name": "browser_navigate", "category": "browser", "description": "Navigate to a URL in the browser"},
+    {"name": "browser_screenshot", "category": "browser", "description": "Take a screenshot of the current page"},
+    {"name": "browser_click", "category": "browser", "description": "Click an element on the page"},
+    {"name": "browser_type", "category": "browser", "description": "Type text into an input field"},
+    {"name": "browser_scroll", "category": "browser", "description": "Scroll the page up or down"},
+    {"name": "browser_get_content", "category": "browser", "description": "Get readable text content from the page"},
+    {"name": "browser_get_elements", "category": "browser", "description": "List interactive elements on the page"},
+    {"name": "browser_back", "category": "browser", "description": "Navigate back in browser history"},
+    {"name": "browser_forward", "category": "browser", "description": "Navigate forward in browser history"},
+    {"name": "browser_evaluate", "category": "browser", "description": "Execute JavaScript in the browser"},
+    {"name": "browser_fill", "category": "browser", "description": "Fill a form field by label"},
+    {"name": "browser_select", "category": "browser", "description": "Select a dropdown option"},
+    {"name": "browser_wait", "category": "browser", "description": "Wait for a condition on the page"},
+    {"name": "browser_tab_new", "category": "browser", "description": "Open a new browser tab"},
+    {"name": "browser_tab_list", "category": "browser", "description": "List open browser tabs"},
+    {"name": "browser_tab_switch", "category": "browser", "description": "Switch to a browser tab"},
+    {"name": "browser_close", "category": "browser", "description": "Close the browser session"},
 
     # Other tools
     {"name": "TodoWrite", "category": "other", "description": "Manage task lists"},

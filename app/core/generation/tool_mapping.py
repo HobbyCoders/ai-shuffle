@@ -19,6 +19,14 @@ TOOL_CATEGORIES: Dict[str, List[str]] = {
     "web": ["WebFetch", "WebSearch"],
     "management": ["TodoWrite", "Task"],
     "notebook": ["NotebookEdit"],
+    "browser": [
+        "browser_navigate", "browser_screenshot", "browser_click",
+        "browser_type", "browser_scroll", "browser_get_content",
+        "browser_get_elements", "browser_back", "browser_forward",
+        "browser_evaluate", "browser_fill", "browser_select",
+        "browser_wait", "browser_tab_new", "browser_tab_list",
+        "browser_tab_switch", "browser_close",
+    ],
     "all": None,  # Special: inherit all tools
 }
 
@@ -57,6 +65,17 @@ DOMAIN_TOOLS: Dict[str, Optional[List[str]]] = {
     # Data and notebooks
     "data-science": ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "NotebookEdit"],
 
+    # Web browsing
+    "web-browsing": [
+        "Read", "Grep", "Glob", "WebFetch", "WebSearch",
+        "browser_navigate", "browser_screenshot", "browser_click",
+        "browser_type", "browser_scroll", "browser_get_content",
+        "browser_get_elements", "browser_back", "browser_forward",
+        "browser_evaluate", "browser_fill", "browser_select",
+        "browser_wait", "browser_tab_new", "browser_tab_list",
+        "browser_tab_switch", "browser_close",
+    ],
+
     # General - inherits all
     "general": None,
 }
@@ -71,6 +90,7 @@ AI_TOOLS_BY_DOMAIN: Dict[str, List[str]] = {
     "3d-modeling": ["text_to_3d", "image_to_3d", "retexture_3d"],
     "video-production": ["video_generation", "video_with_audio", "image_to_video", "video_extend"],
     "research": [],  # Might use ai_collaborate
+    "web-browsing": ["web_browsing"],
     "general": [],
 }
 
@@ -127,6 +147,11 @@ DOMAIN_KEYWORDS: Dict[str, List[str]] = {
         "data", "analysis", "notebook", "jupyter", "pandas", "visualization",
         "statistics", "machine learning", "ml"
     ],
+    "web-browsing": [
+        "browse", "browser", "website", "web page", "open url", "fill form",
+        "web browser", "click button", "scrape", "web scraping", "visit site",
+        "interact with page", "web automation"
+    ],
     "general": [
         "general", "assistant", "helper", "agent", "tool"
     ],
@@ -149,6 +174,7 @@ MODEL_BY_DOMAIN: Dict[str, str] = {
     "pr-review": "sonnet",
     "creative": "sonnet",
     "data-science": "sonnet",
+    "web-browsing": "sonnet",
     "general": "sonnet",
 }
 
@@ -169,6 +195,7 @@ THINKING_MODE_BY_DOMAIN: Dict[str, str] = {
     "pr-review": "think",
     "creative": "default",
     "data-science": "think",
+    "web-browsing": "think",
     "general": "default",
 }
 

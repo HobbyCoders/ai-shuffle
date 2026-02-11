@@ -36,6 +36,7 @@ from app.core.user_question_handler import user_question_handler
 from app.core import encryption
 from app.core.jsonl_parser import write_hook_message, write_system_message
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
+from app.core.mcp_service import get_mcp_service, McpServerType
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +207,63 @@ def resolve_note_references(prompt: str) -> str:
         return match.group(0)  # Keep original if not found
 
     return re.sub(r'@Notes/(note-[a-f0-9]+)', replace_note, prompt)
+
+
+def _build_mcp_servers_dict(
+    project_dir: Optional[Path] = None,
+) -> Optional[dict]:
+    """
+    Build the mcp_servers dict for ClaudeAgentOptions from registered MCP servers.
+
+    Reads all enabled MCP servers from the MCP service and converts them to
+    the SDK's McpServerConfig format (McpStdioServerConfig, McpSSEServerConfig, etc.).
+
+    Args:
+        project_dir: Optional project directory for project-scoped servers.
+
+    Returns:
+        Dictionary mapping server names to SDK MCP server configs, or None if empty.
+    """
+    try:
+        service = get_mcp_service(project_dir)
+        all_servers = service.get_all_servers()
+    except Exception as e:
+        logger.warning(f"Failed to load MCP servers: {e}")
+        return None
+
+    mcp_servers: dict = {}
+
+    for scope_servers in all_servers.values():
+        for server in scope_servers:
+            if not server.enabled:
+                continue
+            # Skip duplicates (same server might appear in multiple scopes)
+            if server.name in mcp_servers:
+                continue
+
+            if server.type == McpServerType.STDIO or server.type == "stdio":
+                config: dict = {"command": server.command}
+                if server.args:
+                    config["args"] = server.args
+                if server.env:
+                    config["env"] = server.env
+                mcp_servers[server.name] = config
+            elif server.type == McpServerType.SSE or server.type == "sse":
+                config = {"type": "sse", "url": server.url}
+                if server.headers:
+                    config["headers"] = server.headers
+                mcp_servers[server.name] = config
+            elif server.type == McpServerType.HTTP or server.type == "http":
+                config = {"type": "http", "url": server.url}
+                if server.headers:
+                    config["headers"] = server.headers
+                mcp_servers[server.name] = config
+
+    if mcp_servers:
+        logger.info(f"Passing {len(mcp_servers)} MCP server(s) to SDK: {list(mcp_servers.keys())}")
+        return mcp_servers
+
+    return None
 
 
 def _build_plugins_list(
@@ -1290,6 +1348,13 @@ def build_options_from_profile(
 
         # Settings loading
         setting_sources=config.get("setting_sources"),
+
+        # MCP servers - pass all registered MCP servers directly to the SDK
+        # This ensures tools from MCP servers (e.g., browser-tools) are available
+        # regardless of whether the CLI discovers them from .mcp.json files
+        mcp_servers=_build_mcp_servers_dict(
+            project_dir=Path(working_dir) if working_dir else None
+        ) or {},
 
         # Environment and arguments - inject AI tool credentials if enabled
         # Pass api_user_id for policy-based credential resolution

@@ -243,6 +243,13 @@
 		Bash: 'terminal',
 		// Web
 		WebFetch: 'globe', WebSearch: 'globe',
+		// Browser automation
+		browser_navigate: 'globe', browser_screenshot: 'globe', browser_click: 'globe',
+		browser_type: 'globe', browser_scroll: 'globe', browser_get_content: 'globe',
+		browser_get_elements: 'globe', browser_back: 'globe', browser_forward: 'globe',
+		browser_evaluate: 'globe', browser_fill: 'globe', browser_select: 'globe',
+		browser_wait: 'globe', browser_tab_new: 'globe', browser_tab_list: 'globe',
+		browser_tab_switch: 'globe', browser_close: 'globe',
 		// Agent / Skills
 		Task: 'bot', Skill: 'bot',
 		// Todo
@@ -260,6 +267,7 @@
 		// Use the description field that tools provide, fallback to path/pattern fields
 		return String(
 			toolInput.description ||
+			toolInput.url ||  // Browser tools - show URL
 			toolInput.skill ||  // Skill tool - show skill name
 			toolInput.file_path ||
 			toolInput.path ||
@@ -269,6 +277,10 @@
 			toolInput.query ||
 			toolInput.command ||
 			toolInput.prompt ||
+			toolInput.text ||  // Browser type tool
+			toolInput.selector ||
+			toolInput.label ||  // Browser fill tool
+			toolInput.script ||  // Browser evaluate tool
 			''
 		);
 	}

@@ -22,7 +22,7 @@ from app.core.auth import auth_service
 from app.core import encryption
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, meshy, notes, hooks, generation, project_agents, project_plugins, mcp, mobile, internal, workspace_files
+from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, meshy, notes, hooks, generation, project_agents, project_plugins, mcp, mobile, internal, workspace_files, browser
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -180,6 +180,17 @@ async def lifespan(app: FastAPI):
     await git_watcher.start()
     await git_hook_manager.start(port=settings.port)
 
+    # Register browser MCP server for AI agent web browsing
+    try:
+        from app.core.mcp_service import get_mcp_service
+        from app.mcp.browser_mcp_registration import ensure_browser_mcp_registered
+        if ensure_browser_mcp_registered(get_mcp_service()):
+            logger.info("Browser MCP server: Registered")
+        else:
+            logger.warning("Browser MCP server: Registration failed (browser tools unavailable)")
+    except Exception as e:
+        logger.warning(f"Browser MCP server: Could not register ({e})")
+
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
@@ -190,6 +201,14 @@ async def lifespan(app: FastAPI):
 
     # Shutdown git file watcher
     await git_watcher.shutdown()
+
+    # Cleanup browser sessions on shutdown
+    try:
+        from app.mcp.browser_session import browser_session_manager
+        await browser_session_manager.close_all()
+        logger.info("Browser sessions cleaned up")
+    except Exception:
+        pass
 
     logger.info("Shutting down AI Hub...")
 
@@ -335,6 +354,7 @@ app.include_router(mcp.router)
 app.include_router(mobile.router)
 app.include_router(internal.router)
 app.include_router(workspace_files.router)
+app.include_router(browser.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"

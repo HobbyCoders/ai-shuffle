@@ -110,10 +110,12 @@ class TestProviderKeyMap:
         assert len(PROVIDER_KEY_MAP) > 0
 
     def test_all_values_are_api_key_strings(self):
-        """All values should be API key field names."""
+        """All values should be API key field names (or None for local providers)."""
         valid_key_types = {"image_api_key", "openai_api_key", "meshy_api_key", "deepseek_api_key"}
 
         for provider, key_field in PROVIDER_KEY_MAP.items():
+            if key_field is None:
+                continue  # Local providers (e.g., playwright) don't need API keys
             assert isinstance(key_field, str), f"Key field for {provider} should be string"
             assert key_field in valid_key_types, f"Unknown key type {key_field} for {provider}"
 

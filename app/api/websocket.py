@@ -239,6 +239,7 @@ async def chat_websocket(
         query_start_time = time.time()  # Track duration for webhooks
         final_metadata: Dict[str, Any] = {}  # Store metadata from done event
         current_tool_id: Optional[str] = None  # Track current tool for input streaming
+        current_tool_name: Optional[str] = None  # Track current tool name for result broadcasts
 
         # Unregister this device from SyncEngine while streaming
         # This prevents duplicate events (we get direct events via send_json)
@@ -473,6 +474,7 @@ async def chat_websocket(
                     # Tool use event - update live store
                     tool_id = event.get('id')
                     current_tool_id = tool_id  # Track for input streaming
+                    current_tool_name = event.get('name')  # Track for result broadcasts
                     await live_session_store.add_tool_use(
                         session_id=session_id,
                         tool_id=tool_id,
@@ -496,7 +498,9 @@ async def chat_websocket(
                 elif event_type == 'tool_result':
                     # Tool result event - update live store
                     tool_id = event.get('tool_use_id')
+                    tool_name = current_tool_name  # Capture before clearing
                     current_tool_id = None  # Clear tool tracking
+                    current_tool_name = None
                     await live_session_store.add_tool_result(
                         session_id=session_id,
                         tool_id=tool_id,
@@ -507,6 +511,7 @@ async def chat_websocket(
                     chunk_data = {
                         'content': event.get('output', ''),
                         'tool_id': tool_id,
+                        'tool_name': tool_name,
                         'is_error': event.get('is_error', False)
                     }
                     await sync_engine.broadcast_stream_chunk(
@@ -1522,6 +1527,15 @@ async def chat_websocket(
 
                     # Clear streaming state in sync engine (no need to broadcast - no devices left)
                     sync_engine.clear_streaming_state(current_session_id)
+
+                    # Cleanup browser session if one exists
+                    try:
+                        from app.mcp.browser_session import browser_session_manager
+                        if browser_session_manager.has_session(current_session_id):
+                            await browser_session_manager.close_session(current_session_id)
+                            logger.info(f"Cleaned up browser session for {current_session_id}")
+                    except Exception:
+                        pass
                 elif remaining_devices > 0:
                     logger.debug(f"Session {current_session_id} still has {remaining_devices} device(s) connected")
                 elif not is_task_done:
