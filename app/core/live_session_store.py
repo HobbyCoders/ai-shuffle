@@ -162,6 +162,11 @@ class LiveSession:
     # These messages never change during streaming, so delta polls can skip them.
     initial_message_count: int = 0
 
+    # Set after auto-compaction to force the next delta poll to return all
+    # messages (initial_message_count=0), ensuring the frontend gets a clean
+    # full snapshot instead of a stale delta merge.
+    needs_full_refresh: bool = False
+
     # Token usage (updated during streaming)
     input_tokens: int = 0
     output_tokens: int = 0
@@ -535,18 +540,15 @@ class LiveSessionStore:
                 logger.warning(f"add_system_message: session {session_id} not found (system message dropped)")
                 return
 
-            # On compact_boundary, advance initial_message_count to current length.
-            # After compaction the JSONL on disk has fewer messages than our in-memory
-            # store. By moving the boundary forward we ensure delta polls only send
-            # truly new messages, preventing a stale initial_message_count from causing
-            # the frontend's history-merge logic to produce an inconsistent array
-            # (which triggers RangeError in Svelte's {#each} reconciliation).
+            # On compact_boundary, flag the session so the next delta poll
+            # returns ALL messages (initial_message_count=0). This forces
+            # the frontend to do a full replace instead of a delta merge,
+            # preventing stale history from being shown after compaction.
             if subtype in ('compact_boundary', 'microcompact_boundary'):
-                old_count = session.initial_message_count
-                session.initial_message_count = len(session.messages)
+                session.needs_full_refresh = True
                 logger.debug(
-                    f"Compaction boundary: advanced initial_message_count "
-                    f"{old_count} → {session.initial_message_count} for session {session_id}"
+                    f"Compaction boundary: flagged needs_full_refresh "
+                    f"for session {session_id}"
                 )
 
             msg = LiveMessage(
@@ -927,6 +929,16 @@ class LiveSessionStore:
 
         if session.last_update_id <= since_update_id:
             return None  # No updates since last check
+
+        # After compaction, force a full response so the frontend gets a
+        # clean snapshot of all messages instead of a potentially stale delta.
+        # Setting initial_message_count=0 tells the frontend to treat this as
+        # a full replace (no history merge), avoiding message duplication or loss.
+        if session.needs_full_refresh:
+            session.needs_full_refresh = False
+            result = session.to_dict(delta_only=False)
+            result['initial_message_count'] = 0
+            return result
 
         # Delta polls: skip initial history messages (frontend already has them)
         delta_only = since_update_id > 0
