@@ -207,6 +207,92 @@ function createBrowserStore() {
 		reset() {
 			set({ ...DEFAULT_STATE });
 		},
+
+		// =====================================================================
+		// User-driven browser actions
+		// =====================================================================
+
+		/**
+		 * Execute a browser action via REST API and update state from response.
+		 */
+		async _executeAction(
+			sessionId: string,
+			endpoint: string,
+			body?: Record<string, unknown>
+		): Promise<boolean> {
+			update((state) => ({ ...state, isLoading: true }));
+			try {
+				const token = localStorage.getItem('auth_token') || '';
+				const response = await fetch(`/api/v1/browser/${sessionId}/${endpoint}`, {
+					method: 'POST',
+					headers: {
+						'Authorization': `Bearer ${token}`,
+						'Content-Type': 'application/json',
+					},
+					body: body ? JSON.stringify(body) : '{}',
+				});
+
+				if (!response.ok) {
+					update((state) => ({ ...state, isLoading: false }));
+					return false;
+				}
+
+				const data = await response.json();
+				update((state) => ({
+					...state,
+					url: data.url ?? state.url,
+					title: data.title ?? state.title,
+					screenshot: data.screenshot ?? state.screenshot,
+					isLoading: false,
+				}));
+				return true;
+			} catch {
+				update((state) => ({ ...state, isLoading: false }));
+				return false;
+			}
+		},
+
+		/** Navigate to a URL. */
+		async navigate(url: string) {
+			const sid = _currentState.sessionId;
+			if (!sid) return false;
+			return this._executeAction(sid, 'navigate', { url });
+		},
+
+		/** Go back in history. */
+		async goBack() {
+			const sid = _currentState.sessionId;
+			if (!sid) return false;
+			return this._executeAction(sid, 'back');
+		},
+
+		/** Go forward in history. */
+		async goForward() {
+			const sid = _currentState.sessionId;
+			if (!sid) return false;
+			return this._executeAction(sid, 'forward');
+		},
+
+		/** Refresh the current page. */
+		async refresh() {
+			const sid = _currentState.sessionId;
+			if (!sid) return false;
+			return this._executeAction(sid, 'refresh');
+		},
+
+		/** Click at coordinates (viewport-space). */
+		async clickAt(x: number, y: number) {
+			const sid = _currentState.sessionId;
+			if (!sid) return false;
+			return this._executeAction(sid, 'click', { x: Math.round(x), y: Math.round(y) });
+		},
+
+		/** Type text. */
+		async typeText(text: string, selector?: string) {
+			const sid = _currentState.sessionId;
+			if (!sid) return false;
+			return this._executeAction(sid, 'type', { text, selector });
+		},
 	};
 }
 

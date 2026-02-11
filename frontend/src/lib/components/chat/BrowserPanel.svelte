@@ -1,62 +1,113 @@
 <script lang="ts">
 	/**
-	 * BrowserPanel - Side panel showing live browser preview
+	 * BrowserPanel - Interactive side panel for AI + user browser collaboration
 	 *
-	 * Displays the AI agent's browser session with:
-	 * - Read-only URL bar
-	 * - Live screenshot (updated after each browser tool action)
-	 * - Navigation controls (back, forward, refresh)
-	 * - Close button
-	 * - Resizable width via drag handle
+	 * Features:
+	 * - Editable URL bar with navigation
+	 * - Back/Forward/Refresh controls
+	 * - Clickable screenshot (click sends coordinates to browser)
+	 * - Shift+click to select area and reference in chat
+	 * - Resizable panel width
 	 */
 	import { browserState } from '$lib/stores/browser';
-	import type { ChatTab } from '$lib/stores/tabs';
 
-	interface Props {
-		tab: ChatTab;
-	}
-
-	let { tab }: Props = $props();
-
-	// Local state for resize drag
+	// Local state
 	let isResizing = $state(false);
 	let startX = $state(0);
 	let startWidth = $state(0);
+	let urlInput = $state($browserState.url || '');
+	let screenshotContainer: HTMLDivElement | undefined = $state();
+	let clickIndicator = $state<{ x: number; y: number; visible: boolean }>({
+		x: 0,
+		y: 0,
+		visible: false,
+	});
 
-	function handleResizeStart(e: MouseEvent) {
+	// Keep URL input synced with store (when AI navigates)
+	$effect(() => {
+		urlInput = $browserState.url || '';
+	});
+
+	// --- Resize ---
+	function handleResizeStart(e: PointerEvent) {
 		isResizing = true;
 		startX = e.clientX;
 		startWidth = $browserState.panelWidth;
 		e.preventDefault();
+		(e.target as HTMLElement).setPointerCapture(e.pointerId);
 	}
 
-	function handleResizeMove(e: MouseEvent) {
+	function handleResizeMove(e: PointerEvent) {
 		if (!isResizing) return;
-		// Dragging left edge → increasing width means decreasing x
 		const delta = startX - e.clientX;
 		browserState.setPanelWidth(startWidth + delta);
 	}
 
-	function handleResizeEnd() {
+	function handleResizeEnd(e: PointerEvent) {
 		isResizing = false;
+		(e.target as HTMLElement).releasePointerCapture(e.pointerId);
 	}
 
-	// Extract filename from URL for display
-	function formatUrl(url: string): string {
-		if (!url) return 'No page loaded';
-		try {
-			const u = new URL(url);
-			return u.hostname + u.pathname + (u.search || '');
-		} catch {
-			return url;
+	// --- Navigation ---
+	function handleUrlKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			const url = urlInput.trim();
+			if (url) browserState.navigate(url);
+		}
+	}
+
+	function handleBack() {
+		browserState.goBack();
+	}
+
+	function handleForward() {
+		browserState.goForward();
+	}
+
+	function handleRefresh() {
+		browserState.refresh();
+	}
+
+	// --- Screenshot click interaction ---
+	function handleScreenshotClick(e: MouseEvent) {
+		if (!screenshotContainer) return;
+		const img = screenshotContainer.querySelector('img');
+		if (!img) return;
+
+		// Map display coordinates to viewport coordinates (1280x720)
+		const rect = img.getBoundingClientRect();
+		const scaleX = 1280 / rect.width;
+		const scaleY = 720 / rect.height;
+		const viewportX = (e.clientX - rect.left) * scaleX;
+		const viewportY = (e.clientY - rect.top) * scaleY;
+
+		if (e.shiftKey) {
+			// Shift+click: show click indicator for chat reference
+			clickIndicator = {
+				x: e.clientX - rect.left,
+				y: e.clientY - rect.top,
+				visible: true,
+			};
+			setTimeout(() => {
+				clickIndicator = { ...clickIndicator, visible: false };
+			}, 1500);
+		} else {
+			// Normal click: send to browser
+			// Show brief indicator
+			clickIndicator = {
+				x: e.clientX - rect.left,
+				y: e.clientY - rect.top,
+				visible: true,
+			};
+			setTimeout(() => {
+				clickIndicator = { ...clickIndicator, visible: false };
+			}, 600);
+
+			browserState.clickAt(viewportX, viewportY);
 		}
 	}
 </script>
-
-<svelte:window
-	onmousemove={handleResizeMove}
-	onmouseup={handleResizeEnd}
-/>
 
 <div
 	class="browser-panel"
@@ -64,25 +115,63 @@
 	class:resizing={isResizing}
 >
 	<!-- Resize handle (left edge) -->
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<div
 		class="resize-handle"
-		onmousedown={handleResizeStart}
+		onpointerdown={handleResizeStart}
+		onpointermove={handleResizeMove}
+		onpointerup={handleResizeEnd}
 		role="separator"
 		aria-orientation="vertical"
 		tabindex="-1"
 	></div>
 
 	<div class="panel-content">
-		<!-- Header with URL bar -->
-		<div class="panel-header">
-			<div class="url-bar">
-				<!-- Status dot -->
-				<div class="status-dot" class:active={$browserState.isActive}></div>
+		<!-- Navigation bar -->
+		<div class="nav-bar">
+			<button
+				class="nav-btn"
+				title="Back"
+				disabled={!$browserState.isActive || $browserState.isLoading}
+				onclick={handleBack}
+			>
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<polyline points="15 18 9 12 15 6"></polyline>
+				</svg>
+			</button>
+			<button
+				class="nav-btn"
+				title="Forward"
+				disabled={!$browserState.isActive || $browserState.isLoading}
+				onclick={handleForward}
+			>
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<polyline points="9 18 15 12 9 6"></polyline>
+				</svg>
+			</button>
+			<button
+				class="nav-btn"
+				title="Refresh"
+				disabled={!$browserState.isActive || $browserState.isLoading}
+				onclick={handleRefresh}
+			>
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<polyline points="23 4 23 10 17 10"></polyline>
+					<path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+				</svg>
+			</button>
 
-				<!-- URL text -->
-				<span class="url-text" title={$browserState.url}>
-					{formatUrl($browserState.url)}
-				</span>
+			<!-- URL bar -->
+			<div class="url-bar">
+				<div class="status-dot" class:active={$browserState.isActive}></div>
+				<input
+					type="text"
+					class="url-input"
+					placeholder="Enter URL..."
+					bind:value={urlInput}
+					onkeydown={handleUrlKeydown}
+					disabled={!$browserState.isActive && !$browserState.sessionId}
+				/>
 			</div>
 
 			<!-- Close button -->
@@ -105,19 +194,35 @@
 			</div>
 		{/if}
 
-		<!-- Screenshot area -->
-		<div class="screenshot-area">
-			{#if $browserState.isLoading}
+		<!-- Screenshot area (interactive) -->
+		<div class="screenshot-area" bind:this={screenshotContainer}>
+			{#if $browserState.isLoading && !$browserState.screenshot}
 				<div class="loading-state">
 					<div class="spinner"></div>
 					<span>Loading...</span>
 				</div>
 			{:else if $browserState.screenshot}
-				<img
-					src="data:image/jpeg;base64,{$browserState.screenshot}"
-					alt="Browser screenshot"
-					class="screenshot-img"
-				/>
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div class="screenshot-wrapper" onclick={handleScreenshotClick}>
+					<img
+						src="data:image/jpeg;base64,{$browserState.screenshot}"
+						alt="Browser screenshot"
+						class="screenshot-img"
+						draggable="false"
+					/>
+					{#if clickIndicator.visible}
+						<div
+							class="click-indicator"
+							style="left: {clickIndicator.x}px; top: {clickIndicator.y}px"
+						></div>
+					{/if}
+					{#if $browserState.isLoading}
+						<div class="screenshot-loading-overlay">
+							<div class="spinner-small"></div>
+						</div>
+					{/if}
+				</div>
 			{:else}
 				<div class="empty-state">
 					<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
@@ -130,29 +235,16 @@
 			{/if}
 		</div>
 
-		<!-- Control bar -->
-		<div class="control-bar">
-			<button class="nav-btn" title="Back" disabled={!$browserState.isActive}>
-				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<polyline points="15 18 9 12 15 6"></polyline>
-				</svg>
-			</button>
-			<button class="nav-btn" title="Forward" disabled={!$browserState.isActive}>
-				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<polyline points="9 18 15 12 9 6"></polyline>
-				</svg>
-			</button>
-			<button class="nav-btn" title="Refresh" disabled={!$browserState.isActive}>
-				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<polyline points="23 4 23 10 17 10"></polyline>
-					<path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-				</svg>
-			</button>
-
-			<div class="control-spacer"></div>
-
-			<span class="session-label">
-				{$browserState.isActive ? 'Active' : 'Inactive'}
+		<!-- Status bar -->
+		<div class="status-bar">
+			<span class="status-label">
+				{#if $browserState.isLoading}
+					Loading...
+				{:else if $browserState.isActive}
+					Click to interact · Shift+click to reference
+				{:else}
+					Inactive
+				{/if}
 			</span>
 		</div>
 	</div>
@@ -183,6 +275,7 @@
 		width: 6px;
 		cursor: col-resize;
 		z-index: 10;
+		touch-action: none;
 	}
 
 	.resize-handle:hover,
@@ -198,32 +291,63 @@
 		overflow: hidden;
 	}
 
-	/* Header with URL bar */
-	.panel-header {
+	/* Navigation bar (browser chrome) */
+	.nav-bar {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		padding: 8px 12px;
+		gap: 4px;
+		padding: 6px 8px;
 		border-bottom: 1px solid var(--border);
 		background: var(--muted);
 		flex-shrink: 0;
 	}
 
+	.nav-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		border: none;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--muted-foreground);
+		cursor: pointer;
+		flex-shrink: 0;
+	}
+
+	.nav-btn:hover:not(:disabled) {
+		background: var(--hover-overlay, color-mix(in oklch, var(--foreground) 8%, transparent));
+		color: var(--foreground);
+	}
+
+	.nav-btn:disabled {
+		opacity: 0.3;
+		cursor: not-allowed;
+	}
+
+	/* URL bar */
 	.url-bar {
 		flex: 1;
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		padding: 4px 10px;
+		gap: 6px;
+		padding: 2px 8px;
 		background: var(--card);
 		border: 1px solid var(--border);
 		border-radius: 6px;
 		min-width: 0;
+		height: 28px;
+	}
+
+	.url-bar:focus-within {
+		border-color: var(--primary);
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 20%, transparent);
 	}
 
 	.status-dot {
-		width: 8px;
-		height: 8px;
+		width: 7px;
+		height: 7px;
 		border-radius: 50%;
 		background: var(--muted-foreground);
 		flex-shrink: 0;
@@ -236,13 +360,24 @@
 		box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
 	}
 
-	.url-text {
+	.url-input {
+		flex: 1;
+		border: none;
+		background: transparent;
 		font-size: 0.75rem;
 		font-family: var(--card-font-mono, monospace);
+		color: var(--foreground);
+		outline: none;
+		min-width: 0;
+		padding: 0;
+	}
+
+	.url-input::placeholder {
 		color: var(--muted-foreground);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
+	}
+
+	.url-input:disabled {
+		opacity: 0.5;
 	}
 
 	.close-btn {
@@ -260,21 +395,21 @@
 	}
 
 	.close-btn:hover {
-		background: color-mix(in oklch, var(--destructive) 15%, transparent) !important;
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
 		color: var(--destructive);
 	}
 
 	/* Title bar */
 	.title-bar {
-		padding: 4px 12px;
+		padding: 3px 12px;
 		border-bottom: 1px solid var(--border);
 		flex-shrink: 0;
 	}
 
 	.page-title {
-		font-size: 0.75rem;
+		font-size: 0.6875rem;
 		font-weight: 500;
-		color: var(--foreground);
+		color: var(--muted-foreground);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -292,11 +427,62 @@
 		background: color-mix(in oklch, var(--muted) 50%, var(--card));
 	}
 
+	.screenshot-wrapper {
+		position: relative;
+		width: 100%;
+		cursor: crosshair;
+	}
+
 	.screenshot-img {
 		width: 100%;
 		height: auto;
 		display: block;
 		object-fit: contain;
+		pointer-events: none;
+	}
+
+	/* Click indicator */
+	.click-indicator {
+		position: absolute;
+		width: 20px;
+		height: 20px;
+		border-radius: 50%;
+		border: 2px solid var(--primary);
+		background: color-mix(in oklch, var(--primary) 25%, transparent);
+		transform: translate(-50%, -50%);
+		pointer-events: none;
+		animation: clickPulse 0.6s ease-out forwards;
+	}
+
+	@keyframes clickPulse {
+		0% {
+			transform: translate(-50%, -50%) scale(0.5);
+			opacity: 1;
+		}
+		100% {
+			transform: translate(-50%, -50%) scale(2);
+			opacity: 0;
+		}
+	}
+
+	/* Loading overlay on screenshot */
+	.screenshot-loading-overlay {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: color-mix(in oklch, var(--background) 40%, transparent);
+		pointer-events: none;
+	}
+
+	.spinner-small {
+		width: 20px;
+		height: 20px;
+		border: 2px solid var(--border);
+		border-top-color: var(--primary);
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
 	}
 
 	.empty-state {
@@ -342,49 +528,19 @@
 		}
 	}
 
-	/* Control bar */
-	.control-bar {
+	/* Status bar */
+	.status-bar {
 		display: flex;
 		align-items: center;
-		gap: 4px;
-		padding: 6px 12px;
+		padding: 4px 12px;
 		border-top: 1px solid var(--border);
 		background: var(--muted);
 		flex-shrink: 0;
 	}
 
-	.nav-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 28px;
-		height: 28px;
-		border: none;
-		border-radius: 6px;
-		background: transparent;
-		color: var(--muted-foreground);
-		cursor: pointer;
-	}
-
-	.nav-btn:hover:not(:disabled) {
-		background: var(--hover-overlay) !important;
-		color: var(--foreground);
-	}
-
-	.nav-btn:disabled {
-		opacity: 0.3;
-		cursor: not-allowed;
-	}
-
-	.control-spacer {
-		flex: 1;
-	}
-
-	.session-label {
+	.status-label {
 		font-size: 0.6875rem;
 		color: var(--muted-foreground);
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		font-weight: 500;
+		letter-spacing: 0.02em;
 	}
 </style>

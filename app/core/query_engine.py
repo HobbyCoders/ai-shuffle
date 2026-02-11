@@ -215,8 +215,9 @@ def _build_mcp_servers_dict(
     """
     Build the mcp_servers dict for ClaudeAgentOptions from registered MCP servers.
 
-    Reads all enabled MCP servers from the MCP service and converts them to
-    the SDK's McpServerConfig format (McpStdioServerConfig, McpSSEServerConfig, etc.).
+    Reads MCP servers from two sources:
+    1. Scope-based .mcp.json files (user, local, project) via McpService
+    2. Installed+enabled plugin directories (each plugin can have its own .mcp.json)
 
     Args:
         project_dir: Optional project directory for project-scoped servers.
@@ -224,20 +225,22 @@ def _build_mcp_servers_dict(
     Returns:
         Dictionary mapping server names to SDK MCP server configs, or None if empty.
     """
+    import json as _json
+
+    mcp_servers: dict = {}
+
+    # --- Source 1: Scope-based .mcp.json files ---
     try:
         service = get_mcp_service(project_dir)
         all_servers = service.get_all_servers()
     except Exception as e:
-        logger.warning(f"Failed to load MCP servers: {e}")
-        return None
-
-    mcp_servers: dict = {}
+        logger.warning(f"Failed to load MCP servers from scopes: {e}")
+        all_servers = {}
 
     for scope_servers in all_servers.values():
         for server in scope_servers:
             if not server.enabled:
                 continue
-            # Skip duplicates (same server might appear in multiple scopes)
             if server.name in mcp_servers:
                 continue
 
@@ -258,6 +261,39 @@ def _build_mcp_servers_dict(
                 if server.headers:
                     config["headers"] = server.headers
                 mcp_servers[server.name] = config
+
+    # --- Source 2: Installed plugin MCP servers ---
+    # Plugins like Context7 define their own .mcp.json inside their install directory.
+    # These are not in the scope-based .mcp.json files, so we scan them here.
+    try:
+        from app.core.plugin_service import get_plugin_service
+        plugin_service = get_plugin_service()
+        installed_file = plugin_service.INSTALLED_FILE
+
+        if installed_file.exists():
+            with open(installed_file, 'r') as f:
+                installed_data = _json.load(f)
+            enabled_plugins = plugin_service.get_enabled_plugins()
+
+            for plugin_id, installations in installed_data.get("plugins", {}).items():
+                if not enabled_plugins.get(plugin_id, False):
+                    continue
+                for install_info in installations:
+                    install_path = Path(install_info.get("installPath", ""))
+                    plugin_mcp_file = install_path / ".mcp.json"
+                    if plugin_mcp_file.exists():
+                        try:
+                            with open(plugin_mcp_file, 'r') as f:
+                                plugin_mcp_data = _json.load(f)
+                            # Plugin .mcp.json has flat format: {"server-name": {config}}
+                            for server_name, server_config in plugin_mcp_data.items():
+                                if server_name not in mcp_servers:
+                                    mcp_servers[server_name] = server_config
+                                    logger.debug(f"Added MCP server '{server_name}' from plugin {plugin_id}")
+                        except Exception as e:
+                            logger.warning(f"Failed to read plugin MCP config {plugin_mcp_file}: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to load plugin MCP servers: {e}")
 
     if mcp_servers:
         logger.info(f"Passing {len(mcp_servers)} MCP server(s) to SDK: {list(mcp_servers.keys())}")

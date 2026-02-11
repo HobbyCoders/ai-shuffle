@@ -11,15 +11,19 @@
 	 */
 	import { untrack } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { MessageArea, ChatInput, QueuedMessages } from '$lib/components/chat';
+	import { MessageArea, ChatInput, QueuedMessages, BrowserPanel } from '$lib/components/chat';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth';
+	import { browserState } from '$lib/stores/browser';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
 	import ExecutionModeBar from './ExecutionModeBar.svelte';
 
 	// Check if this is an empty state (no messages yet)
 	const isEmptyState = $derived($activeSession.messages.length === 0);
+
+	// Browser panel visibility (only show during active chat)
+	const showBrowser = $derived($browserState.isOpen && !isEmptyState);
 
 	// Animation: Track transition from empty → active state
 	let transitioningFromEmpty = $state(false);
@@ -67,7 +71,7 @@
 	}
 </script>
 
-<div class="chat-view" class:transitioning-from-empty={transitioningFromEmpty}>
+<div class="chat-view" class:transitioning-from-empty={transitioningFromEmpty} class:has-browser={showBrowser}>
 	{#if isEmptyState}
 		<!-- Empty state: Workspace selector + centered input -->
 		<div class="empty-state">
@@ -92,52 +96,60 @@
 			</div>
 		</div>
 	{:else}
-		<!-- Active chat: Messages + input at bottom -->
-		<div class="message-area-wrapper">
-			<!-- Key by sessionId so MessageArea is destroyed/recreated on session switch.
-			     Without this, Svelte reuses the same component instance and the
-			     onMount/onDestroy scroll-position save/restore logic never fires. -->
-			{#key $activeSession.sessionId}
-				<MessageArea />
-			{/key}
-		</div>
-
-		<!-- Queued Messages Bar (Send Later) -->
-		{#if $activeSession.queuedMessages && $activeSession.queuedMessages.length > 0}
-			<QueuedMessages />
-		{/if}
-
-		<div class="input-wrapper">
-			<ChatInput compact />
-		</div>
-
-		<!-- Modal Overlay for Permission/Question Queues -->
-		{#if ($activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0) || ($activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0)}
-			<div class="modal-overlay">
-				<div class="modal-backdrop"></div>
-				<div class="modal-content">
-					{#if $activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0}
-						<div class="modal-card-wrapper">
-							<PermissionQueue
-								requests={$activeSession.pendingPermissions}
-								onRespond={handlePermissionResponse}
-							/>
-						</div>
-					{/if}
-
-					{#if $activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0}
-						<div class="modal-card-wrapper space-y-3">
-							{#each $activeSession.pendingQuestions as question (question.request_id)}
-								<UserQuestion
-									data={question}
-									onRespond={handleQuestionResponse}
-								/>
-							{/each}
-						</div>
-					{/if}
+		<!-- Active chat: Messages + input + optional browser panel side by side -->
+		<div class="chat-with-browser">
+			<div class="chat-column">
+				<div class="message-area-wrapper">
+					<!-- Key by sessionId so MessageArea is destroyed/recreated on session switch.
+					     Without this, Svelte reuses the same component instance and the
+					     onMount/onDestroy scroll-position save/restore logic never fires. -->
+					{#key $activeSession.sessionId}
+						<MessageArea />
+					{/key}
 				</div>
+
+				<!-- Queued Messages Bar (Send Later) -->
+				{#if $activeSession.queuedMessages && $activeSession.queuedMessages.length > 0}
+					<QueuedMessages />
+				{/if}
+
+				<div class="input-wrapper">
+					<ChatInput compact />
+				</div>
+
+				<!-- Modal Overlay for Permission/Question Queues -->
+				{#if ($activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0) || ($activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0)}
+					<div class="modal-overlay">
+						<div class="modal-backdrop"></div>
+						<div class="modal-content">
+							{#if $activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0}
+								<div class="modal-card-wrapper">
+									<PermissionQueue
+										requests={$activeSession.pendingPermissions}
+										onRespond={handlePermissionResponse}
+									/>
+								</div>
+							{/if}
+
+							{#if $activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0}
+								<div class="modal-card-wrapper space-y-3">
+									{#each $activeSession.pendingQuestions as question (question.request_id)}
+										<UserQuestion
+											data={question}
+											onRespond={handleQuestionResponse}
+										/>
+									{/each}
+								</div>
+							{/if}
+						</div>
+					</div>
+				{/if}
 			</div>
-		{/if}
+
+			{#if showBrowser}
+				<BrowserPanel />
+			{/if}
+		</div>
 	{/if}
 </div>
 
@@ -154,6 +166,28 @@
 		-webkit-font-smoothing: antialiased;
 		-moz-osx-font-smoothing: grayscale;
 		text-rendering: optimizeLegibility;
+	}
+
+	/* ========================================
+	   CHAT + BROWSER PANEL LAYOUT
+	   ======================================== */
+
+	.chat-with-browser {
+		display: flex;
+		flex-direction: row;
+		flex: 1;
+		min-height: 0;
+		overflow: hidden;
+	}
+
+	.chat-column {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		flex: 1;
+		min-width: 0;
+		min-height: 0;
+		overflow: hidden;
 	}
 
 	/* ========================================

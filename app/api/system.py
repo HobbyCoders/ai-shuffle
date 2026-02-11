@@ -171,21 +171,33 @@ async def discover_tools_from_cli(force_refresh: bool = False) -> Dict[str, Any]
     logger.info("Discovering tools from Claude CLI...")
 
     try:
-        # Run a minimal query to get the init event
-        # Use --tools "default" to get all tools, and a simple prompt that exits quickly
+        # Build CLI command with MCP servers so plugin tools are discovered
+        cmd = [
+            'claude',
+            '--tools', 'default',
+            '--output-format', 'json',
+            '-p',  # Print mode (non-interactive)
+            'exit'  # Minimal prompt
+        ]
+
+        # Pass all registered MCP servers (including plugin MCP servers like Context7)
+        # so the CLI discovers their tools during the init event
+        try:
+            from app.core.query_engine import _build_mcp_servers_dict
+            mcp_dict = _build_mcp_servers_dict() or {}
+            if mcp_dict:
+                cmd.extend(['--mcp-servers', json.dumps(mcp_dict)])
+                logger.info(f"Passing {len(mcp_dict)} MCP server(s) to tool discovery CLI")
+        except Exception as e:
+            logger.warning(f"Failed to build MCP servers for discovery: {e}")
+
         result = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: subprocess.run(
-                [
-                    'claude',
-                    '--tools', 'default',
-                    '--output-format', 'json',
-                    '-p',  # Print mode (non-interactive)
-                    'exit'  # Minimal prompt
-                ],
+                cmd,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=60,  # Increased timeout for MCP server startup
                 cwd=str(settings.effective_workspace_dir)
             )
         )

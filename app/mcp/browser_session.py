@@ -85,6 +85,45 @@ class BrowserSession:
             logger.error(f"Screenshot failed for session {self.session_id}: {e}")
             return ""
 
+    async def navigate(self, url: str) -> None:
+        """Navigate to a URL."""
+        self.touch()
+        if url and not url.startswith(("http://", "https://", "about:", "data:")):
+            url = "https://" + url
+        await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+    async def go_back(self) -> None:
+        """Navigate back in history."""
+        self.touch()
+        await self.page.go_back(wait_until="domcontentloaded", timeout=15000)
+
+    async def go_forward(self) -> None:
+        """Navigate forward in history."""
+        self.touch()
+        await self.page.go_forward(wait_until="domcontentloaded", timeout=15000)
+
+    async def reload(self) -> None:
+        """Reload the current page."""
+        self.touch()
+        await self.page.reload(wait_until="domcontentloaded", timeout=15000)
+
+    async def click_at(self, x: int, y: int) -> None:
+        """Click at the given coordinates."""
+        self.touch()
+        await self.page.mouse.click(x, y)
+        try:
+            await self.page.wait_for_load_state("domcontentloaded", timeout=3000)
+        except Exception:
+            pass
+
+    async def type_text(self, text: str, selector: Optional[str] = None) -> None:
+        """Type text into the focused element or a specific selector."""
+        self.touch()
+        if selector:
+            await self.page.fill(selector, text)
+        else:
+            await self.page.keyboard.type(text)
+
     async def close(self):
         """Close this browser session."""
         try:
