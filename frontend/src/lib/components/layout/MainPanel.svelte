@@ -140,6 +140,7 @@
 	const activeWorktreeId = $derived(
 		activeTab?.executionMode === 'worktree' ? (activeTab.worktreeId ?? null) : null
 	);
+	const activeSessionId = $derived(activeTab?.sessionId ?? null);
 
 	// Debounce rapid project changes (e.g., clicking through chats quickly)
 	// to prevent cascading git loads that break commit/branch buttons.
@@ -148,6 +149,10 @@
 		const project = activeProject;
 		const worktreeId = activeWorktreeId;
 		const authenticated = $githubAuthenticated;
+		// Track session ID so the effect re-fires on every tab switch,
+		// even when two sessions share the same project/worktree.
+		// This ensures git state is always fresh after a session change.
+		const _sessionId = activeSessionId;
 
 		if (_projectDebounceTimer) {
 			clearTimeout(_projectDebounceTimer);
@@ -227,6 +232,7 @@
 		const project = activeProject;
 		const worktreeId = activeWorktreeId; // Track worktree changes for tab switches
 		const authenticated = $githubAuthenticated;
+		const _sessionId = activeSessionId; // Track session changes for tab switches
 
 		// Clear stale PR state immediately when any dependency changes.
 		branchPR = null;

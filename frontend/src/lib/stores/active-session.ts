@@ -902,8 +902,13 @@ function createActiveSessionStore() {
 
 			case 'session_created': {
 				const sessionId = data.session_id as string;
-				update(s => ({ ...s, sessionId, sessionProfileId: s.profile }));
-				persistSession();
+				const currentState = get(store);
+				// Only adopt session ID for the active session or new chat (no session yet).
+				// Prevents stale session_created from overwriting a session switch.
+				if (!currentState.sessionId || currentState.sessionId === sessionId) {
+					update(s => ({ ...s, sessionId, sessionProfileId: s.profile }));
+					persistSession();
+				}
 				appData.loadSessions();
 				break;
 			}
@@ -911,8 +916,13 @@ function createActiveSessionStore() {
 			case 'start': {
 				const sessionId = data.session_id as string;
 				interruptPending = false;
-				update(s => ({ ...s, sessionId, isStreaming: true, streamStartTime: Date.now() }));
-				persistSession();
+				const currentStartState = get(store);
+				// Only update if this is for the active session or we just started a new chat (no session yet).
+				// Without this guard, a stale start from a previous session could hijack the current tab.
+				if (sessionId === currentStartState.sessionId || !currentStartState.sessionId) {
+					update(s => ({ ...s, sessionId, isStreaming: true, streamStartTime: Date.now() }));
+					persistSession();
+				}
 				break;
 			}
 
@@ -960,72 +970,81 @@ function createActiveSessionStore() {
 
 				interruptPending = false;
 
-				const doneSessionId = sessionId || get(store).sessionId;
+				const currentDoneState = get(store);
+				// Determine if this done event is for the currently active session.
+				// If sessionId is falsy, assume it's for the active session (legacy compat).
+				const isActiveSession = !sessionId || sessionId === currentDoneState.sessionId;
+				const doneSessionId = sessionId || currentDoneState.sessionId;
+
 				if (doneSessionId) sessionPoller.pollNow(doneSessionId);
 
-				if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
-				pendingTools.clear();
+				if (isActiveSession) {
+					if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
+					pendingTools.clear();
+				}
 
-				const currentDoneState = get(store);
-				const durationSeconds = currentDoneState.streamStartTime
-					? (Date.now() - currentDoneState.streamStartTime) / 1000
-					: undefined;
+				// Only update session-level store state for the active session.
+				// Without this guard, a done event from a previous session would
+				// overwrite sessionId and corrupt the current tab's state.
+				if (isActiveSession) {
+					const durationSeconds = currentDoneState.streamStartTime
+						? (Date.now() - currentDoneState.streamStartTime) / 1000
+						: undefined;
 
-				update(s => {
-					let title = s.title;
-					if (title === 'New Chat' && s.messages.length > 0) {
-						const firstUserMsg = s.messages.find(m => m.role === 'user');
-						if (firstUserMsg) {
-							title = firstUserMsg.content.substring(0, 100) + (firstUserMsg.content.length > 100 ? '...' : '');
+					update(s => {
+						let title = s.title;
+						if (title === 'New Chat' && s.messages.length > 0) {
+							const firstUserMsg = s.messages.find(m => m.role === 'user');
+							if (firstUserMsg) {
+								title = firstUserMsg.content.substring(0, 100) + (firstUserMsg.content.length > 100 ? '...' : '');
+							}
 						}
-					}
-					return { ...s, isStreaming: false, streamStartTime: null, sessionId: sessionId || s.sessionId, title };
-				});
+						return { ...s, isStreaming: false, streamStartTime: null, title };
+					});
 
-				const doneCleanupId = sessionId || get(store).sessionId;
-				if (doneCleanupId) {
+					const doneState = get(store);
+					notifySessionComplete({
+						sessionId: sessionId || '',
+						sessionTitle: doneState.title ?? null,
+						durationSeconds,
+						totalCostUsd: metadata?.total_cost_usd as number | undefined,
+						tokensIn: metadata?.tokens_in as number | undefined,
+						tokensOut: metadata?.tokens_out as number | undefined,
+						model: metadata?.model as string | undefined
+					});
+
+					persistSession();
+					setTimeout(() => processNextQueuedMessage(), 500);
+				}
+
+				// Always clean up streamingSessions (cross-session/cross-device)
+				if (doneSessionId) {
 					streamingSessions.update(map => {
-						if (!map.has(doneCleanupId)) return map;
+						if (!map.has(doneSessionId)) return map;
 						const newMap = new Map(map);
-						newMap.delete(doneCleanupId);
+						newMap.delete(doneSessionId);
 						return newMap;
 					});
 				}
 
-				const doneState = get(store);
-				notifySessionComplete({
-					sessionId: sessionId || '',
-					sessionTitle: doneState.title ?? null,
-					durationSeconds,
-					totalCostUsd: metadata?.total_cost_usd as number | undefined,
-					tokensIn: metadata?.tokens_in as number | undefined,
-					tokensOut: metadata?.tokens_out as number | undefined,
-					model: metadata?.model as string | undefined
-				});
-
 				appData.loadSessions();
-				persistSession();
 
-				setTimeout(() => processNextQueuedMessage(), 500);
-
-				// Safety: ensure cleanup if poller pipeline fails
-				{
-					const cleanupId = sessionId || currentDoneState.sessionId;
-					if (cleanupId) {
-						setTimeout(() => {
-							if (streamEndCleanedUp) { streamEndCleanedUp = false; return; }
-							console.warn(`[ActiveSession] Safety: onStreamEnd didn't fire for ${cleanupId}, running fallback`);
-							if (sessionPoller.isPolling(cleanupId)) sessionPoller.stop(cleanupId);
-							const sd = sessionState.getSession(cleanupId);
-							if (sd) sessionState.removeSession(cleanupId);
-							const refreshState = get(store);
-							if (!refreshState.isStreaming && refreshState.sessionId === cleanupId && ws?.readyState === WebSocket.OPEN) {
-								expectedSessionId = cleanupId;
-								waitingForHistory = [];
-								ws.send(JSON.stringify({ type: 'load_session', session_id: cleanupId }));
-							}
-						}, 5000);
-					}
+				// Safety: ensure cleanup if poller pipeline fails (only for active session)
+				if (isActiveSession && doneSessionId) {
+					const cleanupId = doneSessionId;
+					setTimeout(() => {
+						if (streamEndCleanedUp) { streamEndCleanedUp = false; return; }
+						console.warn(`[ActiveSession] Safety: onStreamEnd didn't fire for ${cleanupId}, running fallback`);
+						if (sessionPoller.isPolling(cleanupId)) sessionPoller.stop(cleanupId);
+						const sd = sessionState.getSession(cleanupId);
+						if (sd) sessionState.removeSession(cleanupId);
+						const refreshState = get(store);
+						if (!refreshState.isStreaming && refreshState.sessionId === cleanupId && ws?.readyState === WebSocket.OPEN) {
+							expectedSessionId = cleanupId;
+							waitingForHistory = [];
+							ws.send(JSON.stringify({ type: 'load_session', session_id: cleanupId }));
+						}
+					}, 5000);
 				}
 				break;
 			}
@@ -1518,6 +1537,8 @@ function createActiveSessionStore() {
 				pendingPermissions: [],
 				pendingQuestions: [],
 				isStreaming: false,
+				isCreatingWorktree: false,
+				worktreeError: null,
 				sessionLocked: false,
 				sessionLockedBy: undefined,
 			}));
