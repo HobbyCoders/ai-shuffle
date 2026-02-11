@@ -11,7 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     NODE_VERSION=20.x
 
-# Install system dependencies including Node.js and GitHub CLI
+# Install system dependencies including Node.js, GitHub CLI, and Playwright/Chromium libs
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
@@ -19,6 +19,26 @@ RUN apt-get update && \
     gnupg \
     git \
     gosu \
+    # Playwright Chromium runtime dependencies
+    libglib2.0-0 \
+    libnss3 \
+    libnspr4 \
+    libdbus-1-3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libatspi2.0-0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2 \
+    fonts-liberation \
     && mkdir -p /etc/apt/keyrings \
     # Add Node.js repo
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
@@ -44,6 +64,11 @@ COPY requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright Chromium browser (used by browser MCP tools)
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN playwright install chromium && \
+    chmod -R 755 $PLAYWRIGHT_BROWSERS_PATH
 
 # Copy application code first
 COPY app/ ./app/
