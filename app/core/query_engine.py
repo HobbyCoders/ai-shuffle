@@ -59,6 +59,7 @@ def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -
     - Base64 encoded images/files (detected by pattern)
     - Very long text outputs
     - List/dict content that serializes to large strings
+    - MCP content block lists (extract text, skip images)
 
     Args:
         content: The raw content from a ToolResultBlock
@@ -70,8 +71,19 @@ def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -
     if content is None:
         return ""
 
+    # Handle MCP-style content block lists: [{"type": "text", "text": "..."}, {"type": "image", ...}]
+    # Extract text content so downstream consumers get usable strings instead of Python repr
+    if isinstance(content, list):
+        text_parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text_parts.append(block.get("text", ""))
+        if text_parts:
+            content = "\n".join(text_parts)
+        # else: fall through to str() for non-standard lists
+
     # Convert to string for size checking
-    content_str = str(content)
+    content_str = str(content) if not isinstance(content, str) else content
     content_len = len(content_str)
 
     # If it's small enough, return as-is (truncated for display)
