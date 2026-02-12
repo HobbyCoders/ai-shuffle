@@ -256,6 +256,40 @@
 	// Save scroll position when component is destroyed (critical for card switching)
 	let resizeObserver: ResizeObserver | null = null;
 
+	// Handle visibility change (mobile: minimize Chrome and return)
+	// When the page becomes visible again, if auto-scroll was enabled, re-scroll to bottom.
+	// Mobile browsers often restore a stale scroll position from their history state,
+	// causing the chat to appear scrolled to the middle instead of the bottom.
+	function handleVisibilityChange() {
+		if (document.visibilityState === 'visible' && shouldAutoScroll && containerRef) {
+			// Use double RAF to ensure browser has finished any scroll restoration
+			requestAnimationFrame(() => {
+				requestAnimationFrame(() => {
+					scrollToBottom();
+				});
+			});
+		}
+	}
+
+	// Track visibility listener for cleanup
+	let visibilityListenerAdded = false;
+
+	$effect(() => {
+		if (!isMounted) return;
+
+		if (!visibilityListenerAdded) {
+			document.addEventListener('visibilitychange', handleVisibilityChange);
+			visibilityListenerAdded = true;
+		}
+
+		return () => {
+			if (visibilityListenerAdded) {
+				document.removeEventListener('visibilitychange', handleVisibilityChange);
+				visibilityListenerAdded = false;
+			}
+		};
+	});
+
 	onDestroy(() => {
 		const cacheKey = $activeSession.sessionId ?? 'new';
 
