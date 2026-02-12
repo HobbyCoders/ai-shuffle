@@ -995,7 +995,7 @@
 									</svg>
 								</button>
 							{:else if $activeSession.isStreaming}
-								{#if inputValue.trim()}
+								{#if plainTextValue.trim()}
 									<!-- Send Now: interrupts current response -->
 									<button type="submit" class="send-btn" title="Send now (interrupts) — Enter">
 										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -380,4 +380,11 @@
 		opacity: 1 !important;
 		background: var(--muted);
 	}
+
+	/* Mobile: reduce max-height so the chat island stays within viewport bounds */
+	@media (max-width: 639px) {
+		.tiptap-editor {
+			max-height: 150px;
+		}
+	}
 </style>
