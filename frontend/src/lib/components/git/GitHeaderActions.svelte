@@ -5,7 +5,7 @@
 	 * Branch selector dropdown (checkout branches), commit button, and diff stats.
 	 * Branch selector is locked during streaming.
 	 */
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine } from 'lucide-svelte';
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode } from '$lib/stores/git';
 
 	interface Props {
@@ -20,10 +20,11 @@
 		onClickCreatePR: () => void;
 		onClickFinish: () => void;
 		onClickNewBranch: () => void;
+		onClickPush: () => void;
 		onClickPull: () => void;
 	}
 
-	let { projectId, isStreaming = false, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPull }: Props = $props();
+	let { projectId, isStreaming = false, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull }: Props = $props();
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
@@ -48,7 +49,9 @@
 	// Behind upstream tracking branch (for pull button)
 	const currentBranchInfo = $derived($branchStore.find(b => b.current));
 	const commitsBehindUpstream = $derived(currentBranchInfo?.behind ?? 0);
+	const commitsAheadUpstream = $derived(currentBranchInfo?.ahead ?? 0);
 	const hasUpstream = $derived(!!currentBranchInfo?.upstream);
+	const canPush = $derived(!hasChanges && commitsAheadUpstream > 0 && hasUpstream);
 
 	// Local branches for the dropdown (exclude remotes)
 	const localBranches = $derived(
@@ -179,6 +182,22 @@
 		</button>
 	{/if}
 
+	<!-- Push button (when commits ahead of upstream) -->
+	{#if canPush}
+		<button
+			class="git-btn push-btn"
+			onclick={onClickPush}
+			disabled={isStreaming}
+			title={isStreaming
+				? 'Cannot push during streaming'
+				: `${commitsAheadUpstream} commit${commitsAheadUpstream === 1 ? '' : 's'} to push`}
+		>
+			<ArrowUpFromLine size={14} strokeWidth={1.5} />
+			<span class="btn-label">Push</span>
+			<span class="ahead-badge">{commitsAheadUpstream}</span>
+		</button>
+	{/if}
+
 	<!-- Commit / Create PR / Finish button -->
 	{#if hasChanges}
 		<button
@@ -294,6 +313,23 @@
 
 	/* Pull behind badge */
 	.behind-badge {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 16px;
+		height: 16px;
+		padding: 0 4px;
+		border-radius: 8px;
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		color: var(--primary);
+		font-size: 0.625rem;
+		font-weight: 700;
+		font-variant-numeric: tabular-nums;
+		line-height: 1;
+	}
+
+	/* Push ahead badge */
+	.ahead-badge {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;

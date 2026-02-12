@@ -112,7 +112,7 @@
 	let showCommitModalMode = $state<'commit' | 'pr-only'>('commit');
 	let showProgressModal = $state(false);
 	let progressAction = $state<'commit' | 'push' | 'pr' | 'finish' | 'pull'>('commit');
-	let progressMode = $state<'commit' | 'pr-only' | 'finish' | 'pull'>('commit');
+	let progressMode = $state<'commit' | 'pr-only' | 'finish' | 'pull' | 'push'>('commit');
 	let progressStep = $state(1);
 	let progressCompleted = $state(false);
 	let progressError = $state<string | null>(null);
@@ -127,6 +127,7 @@
 
 	// PR detection for current branch
 	let branchPR = $state<{ number: number; title: string; url: string; head_branch: string } | null>(null);
+	let _pendingPRModal = $state(false);
 	let _finishedWorktreeCleanup = false;
 
 	const isWorktreeMode = $derived(
@@ -350,24 +351,13 @@
 				await git.pushCommits(branch, true);
 
 				if (action === 'pr') {
-					// Create PR step
-					progressStep = commitStep + 2;
-					const currentBranch = $gitStatus?.current_branch;
-					if (currentBranch) {
-						await createPullRequest(projectId, {
-							title: finalMessage,
-							body: '',
-							head: currentBranch,
-							base: 'main'
-						});
-						// Detect the new PR so UI transitions to Finish state
-						await checkPullRequests(projectId, currentBranch);
-					}
+					_pendingPRModal = true;
 				}
 			}
 
 			progressCompleted = true;
 		} catch (e: any) {
+			_pendingPRModal = false;
 			progressError = e?.detail || e?.message || 'An error occurred';
 		}
 	}
@@ -518,6 +508,25 @@
 		($diffStats?.files_changed ?? 0) > 0
 	);
 
+	async function handlePush() {
+		progressAction = 'push';
+		progressMode = 'push';
+		progressStep = 1;
+		progressCompleted = false;
+		progressError = null;
+		progressIsGenerating = false;
+		progressHasCleanup = false;
+		showProgressModal = true;
+
+		try {
+			const branch = $gitStatus?.current_branch ?? undefined;
+			await git.pushCommits(branch, true);
+			progressCompleted = true;
+		} catch (e: any) {
+			progressError = e?.detail || e?.message || 'Failed to push';
+		}
+	}
+
 	async function handlePull(strategy: 'merge' | 'rebase') {
 		progressAction = 'pull';
 		progressMode = 'pull';
@@ -578,7 +587,8 @@
 							onClickCreatePR={() => { showCommitModalMode = 'pr-only'; showCommitModal = true; }}
 							onClickFinish={() => showFinishModal = true}
 							onClickNewBranch={() => showCreateBranchModal = true}
-							onClickPull={() => showPullModal = true}
+							onClickPush={handlePush}
+						onClickPull={() => showPullModal = true}
 						/>
 					{/if}
 				{/snippet}
@@ -694,6 +704,11 @@
 			if (progressCompleted && progressMode === 'finish' && _finishedWorktreeCleanup) {
 				activeSession.markWorktreeDeleted();
 				_finishedWorktreeCleanup = false;
+			}
+			if (progressCompleted && _pendingPRModal) {
+				_pendingPRModal = false;
+				showCommitModalMode = 'pr-only';
+				showCommitModal = true;
 			}
 		}}
 	/>

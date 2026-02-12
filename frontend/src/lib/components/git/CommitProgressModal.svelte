@@ -8,7 +8,7 @@
 	import { Check, Loader2, X, AlertCircle } from 'lucide-svelte';
 
 	type CommitAction = 'commit' | 'push' | 'pr' | 'finish' | 'pull';
-	type ModalMode = 'commit' | 'pr-only' | 'finish' | 'pull';
+	type ModalMode = 'commit' | 'pr-only' | 'finish' | 'pull' | 'push';
 
 	interface ProgressStep {
 		label: string;
@@ -32,6 +32,10 @@
 	let { open, action, mode = 'commit', currentStep, completed, error, branchName = '', isGenerating = false, hasCleanup = false, onClose }: Props = $props();
 
 	const steps = $derived.by((): ProgressStep[] => {
+		if (mode === 'push') {
+			return [{ label: branchName ? `Pushing to ${branchName}` : 'Pushing to remote' }];
+		}
+
 		if (mode === 'pull') {
 			return [{ label: 'Pulling latest changes' }];
 		}
@@ -69,16 +73,16 @@
 			});
 		}
 
-		if (action === 'pr') {
-			result.push({ label: 'Creating a pull request' });
-		}
-
 		return result;
 	});
 
 	const title = $derived.by(() => {
 		if (error) return 'Error';
 		if (completed) return 'Done';
+
+		if (mode === 'push') {
+			return 'Pushing changes';
+		}
 
 		if (mode === 'pull') {
 			return 'Pulling changes';
@@ -103,7 +107,6 @@
 		const commitStep = isGenerating ? 2 : 1;
 		if (currentStep <= commitStep) return 'Committing changes';
 		if (currentStep === commitStep + 1 && (action === 'push' || action === 'pr')) return 'Pushing changes';
-		if (currentStep === commitStep + 2 && action === 'pr') return 'Creating a PR';
 		return 'Processing';
 	});
 

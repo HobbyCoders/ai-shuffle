@@ -217,7 +217,7 @@
 							<input type="radio" name="nextStep" value="pr" bind:group={nextStep} />
 							<span class="radio-dot"></span>
 							<Github size={16} strokeWidth={1.5} />
-							<span class="radio-text">Commit and create PR</span>
+							<span class="radio-text">Commit, push, and create PR</span>
 							{#if nextStep === 'pr'}
 								<span class="check-mark">&#10003;</span>
 							{/if}
