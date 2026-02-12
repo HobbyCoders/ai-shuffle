@@ -168,15 +168,25 @@ class BrowserSessionManager:
         """Create a new browser session."""
         pw = await self._ensure_playwright()
 
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-            ],
-        )
+        try:
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
+            )
+        except Exception as e:
+            if "Executable doesn't exist" in str(e):
+                msg = (
+                    "Playwright Chromium browser is not installed. "
+                    "Run: playwright install chromium"
+                )
+                logger.error(msg)
+                raise RuntimeError(msg) from e
+            raise
 
         context = await browser.new_context(
             viewport=DEFAULT_VIEWPORT,
