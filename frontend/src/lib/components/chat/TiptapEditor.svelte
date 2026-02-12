@@ -366,7 +366,7 @@
 		border-radius: 50%;
 		color: var(--muted-foreground);
 		cursor: pointer;
-		opacity: 0;
+		opacity: 0.5;
 		transition: opacity 0.15s ease, background-color 0.15s ease;
 		font-size: 14px;
 		line-height: 1;
