@@ -36,7 +36,7 @@
 	let prTitle = $state('');
 	let prBody = $state('');
 	let includeUnstaged = $state(true);
-	let nextStep = $state<CommitAction>('commit');
+	let nextStep = $state<CommitAction>('push');
 
 	const currentBranch = $derived($gitStatus?.current_branch ?? 'unknown');
 	const fileCount = $derived($diffStats?.files_changed ?? 0);
@@ -58,7 +58,7 @@
 			prTitle = '';
 			prBody = '';
 			includeUnstaged = true;
-			nextStep = 'commit';
+			nextStep = 'push';
 		}
 	});
 
