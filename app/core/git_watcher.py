@@ -58,7 +58,7 @@ _HOOK_CATEGORY_MAP = {
     "post-commit": {"status", "diff_stats", "branches"},
     "post-checkout": {"status", "branches", "diff_stats"},
     "post-merge": {"status", "diff_stats", "branches"},
-    "post-rewrite": {"status", "diff_stats"},
+    "post-rewrite": {"status", "diff_stats", "branches"},
 }
 
 
