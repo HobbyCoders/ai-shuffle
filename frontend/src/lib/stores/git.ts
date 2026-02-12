@@ -77,6 +77,8 @@ function createGitStore() {
      * the current in-flight load.
      */
     let _loadInFlight: string | null = null;
+    /** Prevents concurrent background fetches (git-fetch is network-bound). */
+    let _bgFetchRunning = false;
 
     /** Per-key state cache for instant tab switches. */
     const _cache = new Map<string, CachedState>();
@@ -182,8 +184,18 @@ function createGitStore() {
      * Runs after the UI is already populated, so the user sees data instantly.
      */
     function _backgroundFetch(key: string, projectId: string, worktreeId?: string) {
-        gitApi.fetchRemote(projectId, worktreeId).then(async () => {
+        // Only one background fetch at a time — prevents concurrent git-fetch
+        // subprocess calls that pile up during rapid tab switching.
+        if (_bgFetchRunning) return;
+        _bgFetchRunning = true;
+
+        (async () => {
             try {
+                await gitApi.fetchRemote(projectId, worktreeId);
+
+                // After slow fetchRemote, bail if user switched tabs
+                if (_loadedKey !== key) return;
+
                 const [status, branches] = await Promise.all([
                     gitApi.getGitStatus(projectId, worktreeId),
                     gitApi.getBranches(projectId, true, worktreeId)
@@ -203,10 +215,10 @@ function createGitStore() {
                 }
             } catch {
                 // Silent — background refresh is non-critical
+            } finally {
+                _bgFetchRunning = false;
             }
-        }).catch(() => {
-            // fetchRemote failed — not critical, user already has local data
-        });
+        })();
     }
 
     return {
@@ -284,11 +296,14 @@ function createGitStore() {
         async refreshStatus() {
             const state = getCurrentState();
             if (!state.projectId) return;
+            const key = _makeKey(state.projectId, state.worktreeId ?? undefined);
 
             try {
                 const status = await gitApi.getGitStatus(state.projectId, state.worktreeId ?? undefined);
+                if (_loadedKey !== key) return; // Stale — user switched tabs
                 update(s => ({ ...s, status }));
             } catch (e) {
+                if (_loadedKey !== key) return;
                 const error = e as { detail?: string };
                 update(s => ({ ...s, error: error.detail || 'Failed to refresh status' }));
             }
@@ -300,11 +315,14 @@ function createGitStore() {
         async loadBranches() {
             const state = getCurrentState();
             if (!state.projectId) return;
+            const key = _makeKey(state.projectId, state.worktreeId ?? undefined);
 
             try {
                 const branches = await gitApi.getBranches(state.projectId, true, state.worktreeId ?? undefined);
+                if (_loadedKey !== key) return;
                 update(s => ({ ...s, branches }));
             } catch (e) {
+                if (_loadedKey !== key) return;
                 const error = e as { detail?: string };
                 update(s => ({ ...s, error: error.detail || 'Failed to load branches' }));
             }
@@ -316,11 +334,14 @@ function createGitStore() {
         async loadGraph(limit?: number) {
             const state = getCurrentState();
             if (!state.projectId) return;
+            const key = _makeKey(state.projectId, state.worktreeId ?? undefined);
 
             try {
                 const graphResponse = await gitApi.getCommitGraph(state.projectId, limit);
+                if (_loadedKey !== key) return;
                 update(s => ({ ...s, commits: graphResponse.commits }));
             } catch (e) {
+                if (_loadedKey !== key) return;
                 const error = e as { detail?: string };
                 update(s => ({ ...s, error: error.detail || 'Failed to load commit graph' }));
             }
@@ -332,11 +353,14 @@ function createGitStore() {
         async loadWorktrees() {
             const state = getCurrentState();
             if (!state.projectId) return;
+            const key = _makeKey(state.projectId, state.worktreeId ?? undefined);
 
             try {
                 const worktrees = await gitApi.getWorktrees(state.projectId);
+                if (_loadedKey !== key) return;
                 update(s => ({ ...s, worktrees }));
             } catch (e) {
+                if (_loadedKey !== key) return;
                 const error = e as { detail?: string };
                 update(s => ({ ...s, error: error.detail || 'Failed to load worktrees' }));
             }
@@ -544,11 +568,14 @@ function createGitStore() {
         async refreshDiffStats() {
             const state = getCurrentState();
             if (!state.projectId) return;
+            const key = _makeKey(state.projectId, state.worktreeId ?? undefined);
 
             try {
                 const diffStats = await gitApi.getDiffStats(state.projectId, true, state.worktreeId ?? undefined);
+                if (_loadedKey !== key) return;
                 update(s => ({ ...s, diffStats }));
             } catch (e) {
+                if (_loadedKey !== key) return;
                 // Silently fail - diff stats are non-critical
                 console.debug('Failed to refresh diff stats:', e);
             }
