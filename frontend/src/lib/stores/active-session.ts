@@ -627,7 +627,7 @@ function createActiveSessionStore() {
 							role: 'system' as const,
 							content: m.content as string,
 							type: 'system' as const,
-							systemSubtype: m.subtype as string | undefined,
+							systemSubtype: (m.systemSubtype || m.subtype) as string | undefined,
 							systemData: (m.systemData as Record<string, unknown>) || { content: m.content },
 							metadata: m.metadata as Record<string, unknown>,
 							streaming: false

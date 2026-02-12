@@ -848,6 +848,8 @@ def _parse_session_history_uncached(
                         "content": local_output,
                         "type": "system",
                         "subtype": "local_command",
+                        "systemSubtype": "local_command",  # Frontend compatibility
+                        "systemData": {"content": local_output},  # Frontend uses data.content for rendering
                         "metadata": {"timestamp": timestamp},
                         "streaming": False
                     })
