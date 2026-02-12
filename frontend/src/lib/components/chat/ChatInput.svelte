@@ -906,6 +906,7 @@
 								bind:this={commandAutocompleteRef}
 								inputValue={inputValue}
 								projectId={$activeSession.project}
+								worktreeId={$activeSession.executionMode === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined}
 								visible={showCommandAutocomplete}
 								onSelect={handleCommandSelect}
 								onClose={() => showCommandAutocomplete = false}

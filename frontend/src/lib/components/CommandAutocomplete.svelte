@@ -13,12 +13,13 @@
   interface Props {
     inputValue: string;
     projectId?: string;
+    worktreeId?: string;
     onSelect: (command: Command) => void;
     onClose: () => void;
     visible: boolean;
   }
 
-  let { inputValue, projectId, onSelect, onClose, visible }: Props = $props();
+  let { inputValue, projectId, worktreeId, onSelect, onClose, visible }: Props = $props();
 
   let commands = $state<Command[]>([]);
   let filteredCommands = $state<Command[]>([]);
@@ -107,6 +108,9 @@
       const params = new URLSearchParams();
       if (projectId) {
         params.set('project_id', projectId);
+      }
+      if (worktreeId) {
+        params.set('worktree_id', worktreeId);
       }
 
       const response = await fetch(`/api/v1/commands/?${params}`, {

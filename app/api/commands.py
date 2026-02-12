@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from app.db import database
 from app.core.config import settings
-from app.core.project_utils import get_project_working_dir
+from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.core.slash_commands import (
     get_command_by_name, get_all_commands,
     is_interactive_command, is_rest_api_command, get_rest_api_command_info,
@@ -85,8 +85,12 @@ class ExecuteCommandResponse(BaseModel):
     is_interactive: bool = False
 
 
-def get_working_dir_for_project(project_id: Optional[str]) -> str:
-    """Get the working directory for a project"""
+def get_working_dir_for_project(project_id: Optional[str], worktree_id: Optional[str] = None) -> str:
+    """Get the working directory for a project, or its worktree if specified."""
+    if worktree_id:
+        worktree = database.get_worktree(worktree_id)
+        if worktree:
+            return get_worktree_working_dir(worktree)
     if project_id:
         project = database.get_project(project_id)
         if project:
@@ -96,7 +100,8 @@ def get_working_dir_for_project(project_id: Optional[str]) -> str:
 
 @router.get("/", response_model=CommandListResponse)
 async def list_commands(
-    project_id: Optional[str] = Query(None, description="Project ID to get commands for")
+    project_id: Optional[str] = Query(None, description="Project ID to get commands for"),
+    worktree_id: Optional[str] = Query(None, description="Worktree ID (overrides project path when in worktree mode)")
 ):
     """
     List all available slash commands.
@@ -104,7 +109,7 @@ async def list_commands(
     Returns both custom commands from the project's .claude/commands/
     directory and built-in interactive commands like /rewind.
     """
-    working_dir = get_working_dir_for_project(project_id)
+    working_dir = get_working_dir_for_project(project_id, worktree_id)
     commands = get_all_commands(working_dir)
 
     return CommandListResponse(
@@ -116,7 +121,8 @@ async def list_commands(
 @router.get("/{command_name}", response_model=CommandDetailResponse)
 async def get_command(
     command_name: str,
-    project_id: Optional[str] = Query(None, description="Project ID")
+    project_id: Optional[str] = Query(None, description="Project ID"),
+    worktree_id: Optional[str] = Query(None, description="Worktree ID (overrides project path when in worktree mode)")
 ):
     """
     Get detailed information about a specific command.
@@ -137,7 +143,7 @@ async def get_command(
             )
 
     # Look for custom command
-    working_dir = get_working_dir_for_project(project_id)
+    working_dir = get_working_dir_for_project(project_id, worktree_id)
     cmd = get_command_by_name(working_dir, command_name)
 
     if not cmd:
