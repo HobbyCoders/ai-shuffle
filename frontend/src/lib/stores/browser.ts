@@ -4,6 +4,10 @@
  * Manages the shared browser session between AI agent and user.
  * Both the AI (via MCP proxy) and user (via REST API) operate on
  * the same Playwright browser instance in the main process.
+ *
+ * Browser state is per-session: switching sessions saves/restores
+ * each session's browser content (URL, screenshot, etc.) while
+ * keeping the panel open/closed state and width as global prefs.
  */
 import { writable } from 'svelte/store';
 import { sessionNotifier } from './session/session-notifier';
@@ -27,6 +31,16 @@ export interface BrowserState {
 	sessionId: string | null;
 }
 
+/** Per-session browser content (saved/restored on session switch) */
+interface BrowserSessionContent {
+	isOpen: boolean;
+	url: string;
+	title: string;
+	screenshot: string | null;
+	isActive: boolean;
+	sessionId: string | null;
+}
+
 const DEFAULT_STATE: BrowserState = {
 	isOpen: false,
 	url: '',
@@ -38,14 +52,70 @@ const DEFAULT_STATE: BrowserState = {
 	sessionId: null,
 };
 
-function createBrowserStore() {
-	const { subscribe, set, update } = writable<BrowserState>({ ...DEFAULT_STATE });
+/** Empty content for sessions with no browser activity */
+const EMPTY_CONTENT: BrowserSessionContent = {
+	isOpen: false,
+	url: '',
+	title: '',
+	screenshot: null,
+	isActive: false,
+	sessionId: null,
+};
 
-	let _currentState = { ...DEFAULT_STATE };
+const PANEL_WIDTH_KEY = 'browser-panel-width';
+
+function _loadPanelWidth(): number {
+	try {
+		const stored = localStorage.getItem(PANEL_WIDTH_KEY);
+		if (stored) {
+			const w = parseInt(stored, 10);
+			if (w >= 300 && w <= 1400) return w;
+		}
+	} catch { /* SSR or storage error */ }
+	return 480;
+}
+
+function createBrowserStore() {
+	const initialState = { ...DEFAULT_STATE, panelWidth: _loadPanelWidth() };
+	const { subscribe, set, update } = writable<BrowserState>(initialState);
+
+	let _currentState = initialState;
 	// Keep a copy of current state for non-reactive access
 	subscribe((state) => {
 		_currentState = state;
 	});
+
+	/** LRU cache of per-session browser content (max 50 entries) */
+	const _sessionCache = new Map<string, BrowserSessionContent>();
+	const MAX_CACHE = 50;
+
+	function _saveToCache(chatSessionId: string) {
+		_sessionCache.delete(chatSessionId); // re-insert at end
+		_sessionCache.set(chatSessionId, {
+			isOpen: _currentState.isOpen,
+			url: _currentState.url,
+			title: _currentState.title,
+			screenshot: _currentState.screenshot,
+			isActive: _currentState.isActive,
+			sessionId: _currentState.sessionId,
+		});
+		// Evict oldest
+		while (_sessionCache.size > MAX_CACHE) {
+			const oldest = _sessionCache.keys().next().value;
+			if (oldest !== undefined) _sessionCache.delete(oldest);
+		}
+	}
+
+	function _restoreFromCache(chatSessionId: string): BrowserSessionContent {
+		const cached = _sessionCache.get(chatSessionId);
+		if (cached) {
+			// Move to most recently used
+			_sessionCache.delete(chatSessionId);
+			_sessionCache.set(chatSessionId, cached);
+			return cached;
+		}
+		return { ...EMPTY_CONTENT };
+	}
 
 	return {
 		subscribe,
@@ -171,23 +241,38 @@ function createBrowserStore() {
 		},
 
 		/**
-		 * Close the browser panel.
+		 * Close the browser panel UI and destroy the backend Playwright session.
 		 */
-		closePanel() {
-			update((state) => ({
-				...state,
-				isOpen: false,
-			}));
+		async closePanel() {
+			const sid = _currentState.sessionId;
+			// Close backend browser session
+			if (sid) {
+				try {
+					const token = localStorage.getItem('auth_token') || '';
+					await fetch(`/api/v1/browser/${sid}`, {
+						method: 'DELETE',
+						headers: { 'Authorization': `Bearer ${token}` },
+					});
+				} catch {
+					// Best-effort cleanup
+				}
+				// Remove from session cache so it doesn't restore stale state
+				_sessionCache.delete(sid);
+			}
+			// Reset all state
+			set({ ...DEFAULT_STATE, panelWidth: _currentState.panelWidth });
 		},
 
 		/**
 		 * Set panel width (for resizing).
 		 */
 		setPanelWidth(width: number) {
+			const clamped = Math.max(300, Math.min(1400, width));
 			update((state) => ({
 				...state,
-				panelWidth: Math.max(300, Math.min(800, width)),
+				panelWidth: clamped,
 			}));
+			try { localStorage.setItem(PANEL_WIDTH_KEY, String(clamped)); } catch { /* ignore */ }
 		},
 
 		/**
@@ -205,6 +290,36 @@ function createBrowserStore() {
 		 */
 		reset() {
 			set({ ...DEFAULT_STATE });
+		},
+
+		/**
+		 * Switch browser context between chat sessions.
+		 * Saves the leaving session's browser state and restores the arriving session's.
+		 * Keeps isOpen and panelWidth as global preferences.
+		 */
+		switchSession(leavingSessionId: string | null, arrivingSessionId: string | null) {
+			// Save current browser content for the session we're leaving
+			if (leavingSessionId) {
+				_saveToCache(leavingSessionId);
+			}
+
+			// Restore browser content for the arriving session
+			const content = arrivingSessionId
+				? _restoreFromCache(arrivingSessionId)
+				: { ...EMPTY_CONTENT };
+
+			update((state) => ({
+				...state,
+				// panelWidth stays as global pref
+				// Replace per-session content (including panel open state)
+				isOpen: content.isOpen,
+				url: content.url,
+				title: content.title,
+				screenshot: content.screenshot,
+				isActive: content.isActive,
+				sessionId: content.sessionId,
+				isLoading: false,
+			}));
 		},
 
 		// =====================================================================

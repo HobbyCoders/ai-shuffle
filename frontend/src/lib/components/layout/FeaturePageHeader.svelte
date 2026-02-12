@@ -105,7 +105,7 @@
 					onclick={triggerToggle}
 					aria-label={$globalSttState.isRecording ? 'Stop recording' : 'Start voice input'}
 				>
-					<Mic size={18} />
+					<Mic size={16} strokeWidth={1.5} />
 				</button>
 			{/if}
 			{#if actions}
@@ -225,8 +225,10 @@
 	.fph-breadcrumbs {
 		display: flex;
 		align-items: center;
+		justify-content: center;
 		gap: 6px;
 		min-width: 0;
+		flex: 1;
 	}
 
 	/* Breadcrumb items (both button and span) */
@@ -326,11 +328,10 @@
 	}
 
 	/* -----------------------------------------------------------------------
-	   DESKTOP CENTERING — raised to 1024px so foldable/tablet touch devices
-	   (640–1023px) use simpler space-between flexbox instead of absolute
-	   positioning, which causes overlap on those screens.
+	   CENTERING — absolute-position fph-left so title/breadcrumbs are
+	   centered within the full header width, independent of fph-right.
 	   ----------------------------------------------------------------------- */
-	@media (min-width: 1024px) {
+	@media (min-width: 640px) {
 		.fph-main {
 			position: relative;
 		}
@@ -358,6 +359,16 @@
 			z-index: 1;
 			margin-left: auto;
 		}
+
+		/* When search is present, expand fph-right and center the search
+		   while keeping the button pinned to the right edge */
+		.fph-right:has(:global(.fph-search-wrapper)) {
+			flex: 0 0 40%;
+		}
+
+		.fph-right > :global(.fph-search-wrapper) {
+			margin: 0 auto;
+		}
 	}
 
 	/* -----------------------------------------------------------------------
@@ -367,6 +378,7 @@
 	/* Ensure touch targets on mobile */
 	@media (max-width: 639px) {
 		.fph-main {
+			position: relative;
 			padding: 0 var(--space-3);
 			gap: var(--space-2);
 			height: auto;
@@ -377,20 +389,26 @@
 		}
 
 		.fph-left {
-			flex: 1 1 0;
+			flex: 1 1 100%;
 			min-width: 0;
 			overflow: hidden;
+			justify-content: center;
+			/* Reserve space for absolute-positioned toggle + mic */
+			padding-left: 36px;
+			padding-right: 36px;
 		}
 
 		.fph-right {
 			flex: 1 0 100%;
 			flex-wrap: wrap;
+			justify-content: center;
 			gap: var(--space-2);
 		}
 
-		/* When only the STT button is present (no actions), keep it inline */
+		/* When only the STT button is present (no actions), collapse */
 		.fph-right:not(:has(> :nth-child(2))) {
-			flex: 0 0 auto;
+			flex: 0 0 0;
+			overflow: hidden;
 		}
 
 		.fph-tabs-row {
@@ -400,8 +418,11 @@
 		}
 
 		.fph-sidebar-toggle {
-			width: 44px;
-			height: 44px;
+			position: absolute;
+			left: var(--space-3);
+			top: var(--space-2);
+			width: 32px;
+			height: 32px;
 		}
 
 		/* On mobile, always show the sidebar toggle */
@@ -484,8 +505,12 @@
 	@media (max-width: 639px) {
 		.fph-stt-btn {
 			display: flex;
-			width: 44px;
-			height: 44px;
+			position: absolute;
+			top: var(--space-2);
+			right: var(--space-3);
+			width: 32px;
+			height: 32px;
+			z-index: 1;
 		}
 	}
 

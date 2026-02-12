@@ -3,6 +3,29 @@ import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
 import { FileChipNode } from './FileChipNode';
 
+/**
+ * Parse initial content string: supports Tiptap JSON (preserves file chips)
+ * or plain text (wrapped in a doc/paragraph structure).
+ */
+function parseInitialContent(content: string): string | Record<string, unknown> {
+	if (!content) return '';
+	if (content.startsWith('{')) {
+		try {
+			const parsed = JSON.parse(content);
+			if (parsed && parsed.type === 'doc') return parsed;
+		} catch { /* not JSON, fall through to plain text */ }
+	}
+	return {
+		type: 'doc',
+		content: [
+			{
+				type: 'paragraph',
+				content: [{ type: 'text', text: content }]
+			}
+		]
+	};
+}
+
 export interface EditorOptions {
 	element: HTMLElement;
 	placeholder?: string;
@@ -48,17 +71,7 @@ export function createChatEditor(options: EditorOptions): Editor {
 			}),
 			FileChipNode
 		],
-		content: initialContent
-			? {
-					type: 'doc',
-					content: [
-						{
-							type: 'paragraph',
-							content: [{ type: 'text', text: initialContent }]
-						}
-					]
-				}
-			: '',
+		content: parseInitialContent(initialContent),
 		editorProps: {
 			attributes: {
 				class: 'chat-editor-content',

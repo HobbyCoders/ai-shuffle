@@ -34,6 +34,13 @@ def init_encryption_from_env(db_module) -> bool:
         True if encryption was initialized, False if env var not set
     """
     admin_password = os.environ.get("ADMIN_PASSWORD")
+    # Also check settings (which loads from .env file)
+    if not admin_password:
+        try:
+            from app.core.config import settings
+            admin_password = settings.admin_password
+        except Exception:
+            pass
     if not admin_password:
         return False
 

@@ -41,8 +41,17 @@
 	let showOther = $state<Record<number, boolean>>({});
 	let otherText = $state<Record<number, string>>({});
 
-	// Initialize answers when data changes
+	// Initialize answers when a NEW question arrives (tracked by request_id).
+	// IMPORTANT: Do NOT depend on `data` directly — only on `data.request_id`.
+	// If the store replaces the data object reference (e.g., heartbeat triggers
+	// get_pending_questions → pending_questions replaces array), the $effect
+	// would refire and wipe the user's in-progress answers/typed "Other" text.
+	let initializedRequestId = $state<string | null>(null);
 	$effect(() => {
+		const requestId = data.request_id;
+		if (requestId === initializedRequestId) return;
+		initializedRequestId = requestId;
+
 		const questions = data.questions ?? [];
 		const initial: Record<number, string | string[]> = {};
 		questions.forEach((q, idx) => {

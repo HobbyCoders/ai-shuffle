@@ -2912,6 +2912,8 @@ async def stream_to_websocket(
     metadata = {}
     interrupted = False
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
+    has_visible_content = False  # Track if any content was yielded to the frontend
+    is_slash_command = prompt.strip().startswith("/")
 
     # Helper to drain stderr queue and yield plugin messages
     async def drain_stderr_queue():
@@ -2983,18 +2985,14 @@ async def stream_to_websocket(
                                 }
                             )
                 else:
-                    # Only forward system messages with known user-visible subtypes
-                    # Filter out internal SDK messages that would show as "unknown" in the UI
-                    KNOWN_SUBTYPES = {
-                        'status', 'compact_boundary', 'microcompact_boundary',
-                        'context', 'local_command', 'local_command_output',
-                        'informational', 'turn_duration', 'stop_hook_summary',
-                        'agent_launched', 'agent_error',
-                        'api_error', 'plugin_warning', 'rewind_warning',
-                        'worktree_context', 'worktree_created', 'worktree_selected',
-                        'error', 'exception', 'validation_error', 'permission_error', 'timeout_error'
+                    # Forward all system messages to frontend except noisy internal ones.
+                    # Previous whitelist approach silently dropped SDK errors/warnings
+                    # with new subtypes (e.g., skill errors, command output).
+                    SUPPRESSED_SUBTYPES = {
+                        'init',  # Already handled above
                     }
-                    if message.subtype in KNOWN_SUBTYPES:
+                    if message.subtype not in SUPPRESSED_SUBTYPES:
+                        has_visible_content = True
                         logger.debug(f"[WS] Forwarding SystemMessage to frontend: subtype={message.subtype}")
                         yield {
                             "type": "system",
@@ -3002,7 +3000,7 @@ async def stream_to_websocket(
                             "data": message.data
                         }
                     else:
-                        logger.debug(f"[WS] Filtering unknown SystemMessage subtype: {message.subtype}, data_keys={list(message.data.keys()) if message.data else []}")
+                        logger.debug(f"[WS] Suppressed SystemMessage subtype: {message.subtype}")
 
             elif isinstance(message, StreamEvent):
                 # StreamEvent is sent when include_partial_messages=True
@@ -3035,6 +3033,7 @@ async def stream_to_websocket(
                     if delta_type == "text_delta" and delta.get("text"):
                         # Real-time text streaming chunk
                         text = delta["text"]
+                        has_visible_content = True
                         logger.debug(f"[WS] StreamEvent text_delta: {len(text)} chars")
                         yield {
                             "type": "stream_delta",
@@ -3131,6 +3130,7 @@ async def stream_to_websocket(
                             # When include_partial_messages=True, text was already streamed via stream_delta
                             # Only send chunk when partial messages is disabled
                             response_text.append(block.text)
+                            has_visible_content = True
                             if not include_partial:
                                 logger.debug(f"[WS] Text chunk len={len(block.text)} for session={session_id}")
                                 yield {"type": "chunk", "content": block.text}
@@ -3257,11 +3257,20 @@ async def stream_to_websocket(
                     if "<local-command-stdout>" in content:
                         match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
                         if match:
+                            has_visible_content = True
                             yield {
                                 "type": "system",
                                 "subtype": "local_command",
                                 "data": {"content": match.group(1).strip()}
                             }
+                    elif is_slash_command and content.strip() and content.strip() != "No response requested.":
+                        has_visible_content = True
+                        logger.debug(f"[WS] Forwarding slash command UserMessage string: {content[:200]}")
+                        yield {
+                            "type": "system",
+                            "subtype": "local_command",
+                            "data": {"content": content.strip()}
+                        }
                     continue
 
                 for block in message.content:
@@ -3272,12 +3281,23 @@ async def stream_to_websocket(
                         if "<local-command-stdout>" in text:
                             match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', text, re.DOTALL)
                             if match:
+                                has_visible_content = True
                                 yield {
                                     "type": "system",
                                     "subtype": "local_command",
                                     "data": {"content": match.group(1).strip()}
                                 }
-                        # Don't yield regular text from UserMessage - it's usually meta/system info
+                        elif is_slash_command and text.strip() and text.strip() != "No response requested.":
+                            # For slash commands, forward non-trivial UserMessage text
+                            # SDK built-in commands may return output without <local-command-stdout> tags
+                            has_visible_content = True
+                            logger.debug(f"[WS] Forwarding slash command UserMessage text: {text[:200]}")
+                            yield {
+                                "type": "system",
+                                "subtype": "local_command",
+                                "data": {"content": text.strip()}
+                            }
+                        # Don't yield regular text from UserMessage for non-slash queries
 
                     elif isinstance(block, ToolResultBlock):
                         # Extract screenshot from MCP content blocks before truncation
@@ -3476,6 +3496,18 @@ async def stream_to_websocket(
             cost_usd=metadata.get("total_cost_usd", 0),
             duration_ms=metadata.get("duration_ms", 0)
         )
+
+    # For slash commands that produced no visible content, yield a notification
+    # SDK built-in commands like /memory, /cost, /model execute inside the subprocess
+    # and may not produce any streaming events visible to the frontend
+    if is_slash_command and not has_visible_content and not interrupted:
+        cmd_name = prompt.strip().split()[0]  # e.g., "/memory"
+        logger.info(f"[WS] Slash command {cmd_name} produced no visible output for session {session_id}")
+        yield {
+            "type": "system",
+            "subtype": "local_command",
+            "data": {"content": f"Command {cmd_name} completed (no output)."}
+        }
 
     # Yield done or interrupted event
     if interrupted:

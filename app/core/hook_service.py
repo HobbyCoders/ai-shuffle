@@ -83,10 +83,14 @@ def load_plugin_hooks(plugin_paths: List[str]) -> Dict[str, List[Dict[str, Any]]
                             # Replace ${CLAUDE_PLUGIN_ROOT} with actual path
                             command = command.replace("${CLAUDE_PLUGIN_ROOT}", plugin_path)
 
+                            # Stop hooks process the full transcript, which grows with
+                            # session length. Give them a longer default timeout (120s)
+                            # to avoid timeouts on long chats (e.g., ralph-loop).
+                            default_timeout = 120 if event_name == "Stop" else 30
                             all_hooks[event_name].append({
                                 "command": command,
                                 "matcher": matcher_pattern,
-                                "timeout": hook_def.get("timeout", 30),
+                                "timeout": hook_def.get("timeout", default_timeout),
                                 "plugin_path": plugin_path
                             })
                             logger.debug(f"[HookService] Loaded {event_name} hook: {command[:80]}")
@@ -252,7 +256,8 @@ async def execute_plugin_hook(
         return None
 
     except asyncio.TimeoutError:
-        logger.warning(f"Plugin hook timed out after {timeout}s: {command}")
+        logger.warning(f"Plugin hook timed out after {timeout}s: {command} (cwd={working_dir})")
+        logger.warning(f"If this is a Stop hook (e.g., ralph-loop), the transcript may be too large for the timeout.")
         try:
             process.kill()
             await process.wait()

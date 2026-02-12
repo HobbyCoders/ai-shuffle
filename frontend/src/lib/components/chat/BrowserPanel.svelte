@@ -41,7 +41,7 @@
 		visible: false,
 	});
 
-	// Keep URL input synced with store (when AI navigates)
+	// Keep URL input synced with store (when AI navigates or session switches)
 	$effect(() => {
 		urlInput = $browserState.url || '';
 	});
@@ -443,8 +443,8 @@
 		display: flex;
 		flex-direction: row;
 		height: 100%;
-		min-width: 300px;
-		max-width: 800px;
+		min-width: 320px;
+		max-width: 70vw;
 		border-left: 1px solid var(--border);
 		background: var(--card);
 		flex-shrink: 0;
@@ -609,7 +609,7 @@
 		min-height: 0;
 		overflow: auto;
 		display: flex;
-		align-items: flex-start;
+		align-items: stretch;
 		justify-content: center;
 		background: color-mix(in oklch, var(--muted) 50%, var(--card));
 	}
@@ -617,6 +617,8 @@
 	.screenshot-wrapper {
 		position: relative;
 		width: 100%;
+		display: flex;
+		align-items: flex-start;
 		cursor: crosshair;
 		outline: none;
 	}

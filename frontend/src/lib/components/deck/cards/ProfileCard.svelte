@@ -1974,29 +1974,29 @@
 		font-size: 0.75rem;
 	}
 
-	/* --- Model-color item icons --- */
+	/* --- Model-color item icons — uses theme semantic colors --- */
 	.fp-item-icon--haiku {
-		background: color-mix(in oklch, oklch(0.68 0.18 155) 15%, transparent);
-		color: oklch(0.68 0.18 155);
-		border: 1px solid color-mix(in oklch, oklch(0.68 0.18 155) 30%, transparent);
+		background: color-mix(in oklch, var(--success) 15%, transparent);
+		color: var(--success);
+		border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
 	}
 
 	.fp-item-icon--sonnet {
-		background: color-mix(in oklch, oklch(0.62 0.17 240) 15%, transparent);
-		color: oklch(0.62 0.17 240);
-		border: 1px solid color-mix(in oklch, oklch(0.62 0.17 240) 30%, transparent);
+		background: color-mix(in oklch, var(--info) 15%, transparent);
+		color: var(--info);
+		border: 1px solid color-mix(in oklch, var(--info) 30%, transparent);
 	}
 
 	.fp-item-icon--sonnet-1m {
-		background: color-mix(in oklch, oklch(0.65 0.20 290) 15%, transparent);
-		color: oklch(0.65 0.20 290);
-		border: 1px solid color-mix(in oklch, oklch(0.65 0.20 290) 30%, transparent);
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		color: var(--primary);
+		border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
 	}
 
 	.fp-item-icon--opus {
-		background: color-mix(in oklch, oklch(0.70 0.18 55) 15%, transparent);
-		color: oklch(0.70 0.18 55);
-		border: 1px solid color-mix(in oklch, oklch(0.70 0.18 55) 30%, transparent);
+		background: color-mix(in oklch, var(--warning) 15%, transparent);
+		color: var(--warning);
+		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
 	}
 
 	.fp-model-initial {

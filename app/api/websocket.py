@@ -1374,7 +1374,7 @@ async def chat_websocket(
                                     is_new=False  # Resuming existing session
                                 )
                             else:
-                                await send_json({"type": "error", "message": "Session not found"})
+                                await send_json({"type": "session_not_found", "session_id": session_id})
 
                     elif msg_type == "close_session":
                         # Close/unload the current session

@@ -82,6 +82,18 @@
 		}
 	}
 
+	// ==================== Helpers ====================
+
+	/** Try to parse a string as Tiptap JSON doc. Returns the parsed object or null. */
+	function tryParseTiptapJSON(str: string): Record<string, unknown> | null {
+		if (!str.startsWith('{')) return null;
+		try {
+			const parsed = JSON.parse(str);
+			if (parsed && parsed.type === 'doc') return parsed;
+		} catch { /* not JSON */ }
+		return null;
+	}
+
 	// ==================== Public API ====================
 
 	/**
@@ -89,6 +101,13 @@
 	 */
 	export function getEditor(): Editor | null {
 		return editor;
+	}
+
+	/**
+	 * Get the editor content as Tiptap JSON (preserves file chips).
+	 */
+	export function getJSON(): Record<string, unknown> | null {
+		return editor?.getJSON() as Record<string, unknown> | null ?? null;
 	}
 
 	/**
@@ -106,23 +125,31 @@
 	}
 
 	/**
-	 * Set the editor content (plain text)
+	 * Set the editor content.
+	 * Accepts either plain text or a JSON string (Tiptap doc structure).
+	 * JSON strings preserve file chips across session switches.
 	 */
 	export function setContent(content: string) {
 		if (!editor) return;
-		editor.commands.setContent(
-			content
-				? {
-						type: 'doc',
-						content: [
-							{
-								type: 'paragraph',
-								content: [{ type: 'text', text: content }]
-							}
-						]
+		if (!content) {
+			editor.commands.setContent('');
+			return;
+		}
+		// Try parsing as Tiptap JSON (preserves file chip nodes)
+		const json = tryParseTiptapJSON(content);
+		if (json) {
+			editor.commands.setContent(json);
+		} else {
+			editor.commands.setContent({
+				type: 'doc',
+				content: [
+					{
+						type: 'paragraph',
+						content: [{ type: 'text', text: content }]
 					}
-				: ''
-		);
+				]
+			});
+		}
 	}
 
 	/**

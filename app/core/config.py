@@ -76,9 +76,14 @@ class Settings(BaseSettings):
     # Security - Request limits
     max_request_body_mb: int = 50  # Maximum request body size in MB
 
+    # Admin password - used for encryption key derivation on startup
+    # Set via ADMIN_PASSWORD env var or .env file to survive server restarts
+    admin_password: Optional[str] = None
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"  # Allow env vars not defined as fields
 
     def model_post_init(self, __context) -> None:
         """Initialize paths based on deployment mode after model creation"""

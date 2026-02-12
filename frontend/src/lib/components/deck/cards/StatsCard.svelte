@@ -353,40 +353,6 @@
 {/snippet}
 
 <FeaturePageLayout icon={BarChart3} title="Stats">
-	{#snippet headerActions()}
-		<div class="fp-date-pills">
-			{#each ['7d', '30d', '90d'] as preset}
-				<button
-					class="fp-date-pill"
-					class:active={selectedPreset === preset}
-					onclick={() => selectPreset(preset as PresetRange)}
-				>
-					{preset === '7d' ? '7D' : preset === '30d' ? '30D' : '90D'}
-				</button>
-			{/each}
-		</div>
-		<button
-			class="fp-btn fp-btn--ghost"
-			onclick={handleRefresh}
-			disabled={refreshing}
-			title="Refresh"
-		>
-			<RefreshCw class="w-4 h-4 {refreshing ? 'spin' : ''}" />
-		</button>
-		<button
-			class="fp-btn fp-btn--secondary"
-			onclick={handleExport}
-			disabled={exportLoading}
-			title="Export CSV"
-		>
-			{#if exportLoading}
-				<Loader2 class="w-4 h-4 spin" />
-			{:else}
-				<Download class="w-4 h-4" />
-			{/if}
-			<span class="hidden sm:inline">Export</span>
-		</button>
-	{/snippet}
 	{#snippet children()}
 		{@render statsContent()}
 	{/snippet}

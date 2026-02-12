@@ -83,12 +83,6 @@
   --text-tertiary: color-mix(in oklch, var(--muted-foreground) 70%, transparent);
   --text-accent: var(--primary);
 
-  /* Model colors */
-  --model-haiku: oklch(0.68 0.18 155);
-  --model-sonnet: oklch(0.62 0.17 240);
-  --model-sonnet-1m: oklch(0.65 0.20 290);
-  --model-opus: oklch(0.70 0.18 55);
-  --model-inherit: var(--muted-foreground);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -507,29 +501,29 @@
   transition: all var(--transition-fast);
 }
 
-/* Model badges */
+/* Model badges — mapped to theme semantic colors */
 .card-badge--haiku {
-  background: color-mix(in oklch, var(--model-haiku) 15%, transparent);
-  color: var(--model-haiku);
-  border: 1px solid color-mix(in oklch, var(--model-haiku) 30%, transparent);
+  background: color-mix(in oklch, var(--success) 15%, transparent);
+  color: var(--success);
+  border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
 }
 
 .card-badge--sonnet {
-  background: color-mix(in oklch, var(--model-sonnet) 15%, transparent);
-  color: var(--model-sonnet);
-  border: 1px solid color-mix(in oklch, var(--model-sonnet) 30%, transparent);
+  background: color-mix(in oklch, var(--info) 15%, transparent);
+  color: var(--info);
+  border: 1px solid color-mix(in oklch, var(--info) 30%, transparent);
 }
 
 .card-badge--sonnet-1m {
-  background: color-mix(in oklch, var(--model-sonnet-1m) 15%, transparent);
-  color: var(--model-sonnet-1m);
-  border: 1px solid color-mix(in oklch, var(--model-sonnet-1m) 30%, transparent);
+  background: color-mix(in oklch, var(--primary) 15%, transparent);
+  color: var(--primary);
+  border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
 }
 
 .card-badge--opus {
-  background: color-mix(in oklch, var(--model-opus) 15%, transparent);
-  color: var(--model-opus);
-  border: 1px solid color-mix(in oklch, var(--model-opus) 30%, transparent);
+  background: color-mix(in oklch, var(--warning) 15%, transparent);
+  color: var(--warning);
+  border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
 }
 
 .card-badge--inherit {
@@ -1728,10 +1722,10 @@
   outline-offset: 2px;
 }
 
-/* Mobile: larger touch targets for fp buttons */
+/* Mobile: compact touch targets for fp buttons in header */
 @media (max-width: 639px) {
   .fp-btn {
-    height: 44px;
+    height: 36px;
     padding: 0 var(--space-3);
   }
 }
@@ -2032,7 +2026,7 @@
 
   .fph-search-input {
     width: 100%;
-    height: 44px;
+    height: 36px;
     transition: border-color 100ms;
   }
 

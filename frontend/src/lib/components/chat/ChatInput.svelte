@@ -6,6 +6,7 @@
 	 * Layer 2: Context Bar - inline profile/project dropdown selectors
 	 */
 	import { tick, onDestroy, onMount } from 'svelte';
+	import { get } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles } from '$lib/stores/app-data';
 	import { claudeAuthenticated } from '$lib/stores/auth';
@@ -76,45 +77,70 @@
 	let plainTextValue = $state(''); // Plain text without chip serialization, for autocomplete
 	let uploadedFiles = $state<FileUploadResponse[]>([]);
 	let draftSaveTimeout: ReturnType<typeof setTimeout> | null = null;
-	// Flag to prevent onDestroy from overwriting draft after we've already cleared it
-	// Using plain variable (not $state) to avoid reactivity issues with onDestroy capture
+	// Flag to prevent onDestroy from overwriting draft after we've already cleared it.
+	// Using plain variable (not $state) to avoid reactivity issues with onDestroy capture.
 	let messageSent = false;
+	const initialSessionId = $activeSession.sessionId;
+
+	// Get the draft value as JSON string (preserves file chips)
+	function getDraftJSON(): string {
+		const json = editorRef?.getJSON();
+		if (!json) return inputValue;
+		return JSON.stringify(json);
+	}
 
 	// Helper to save draft immediately (used on unmount)
-	function saveDraftImmediately(value: string) {
+	function saveDraftImmediately(value?: string) {
 		if (draftSaveTimeout) {
 			clearTimeout(draftSaveTimeout);
 			draftSaveTimeout = null;
 		}
-		activeSession.setDraft(value);
+		activeSession.setDraft(value ?? getDraftJSON());
 	}
 
 	// Save draft to store when input changes (debounced)
 	$effect(() => {
-		// Track inputValue for reactivity
-		const currentValue = inputValue;
+		// Track inputValue for reactivity (triggers on any text change)
+		const _trigger = inputValue;
 
 		// Debounce draft saves to avoid excessive updates
 		if (draftSaveTimeout) {
 			clearTimeout(draftSaveTimeout);
 		}
 		draftSaveTimeout = setTimeout(() => {
-			if (currentValue !== $activeSession.draft) {
-				activeSession.setDraft(currentValue);
+			const draftValue = getDraftJSON();
+			if (draftValue !== $activeSession.draft) {
+				activeSession.setDraft(draftValue);
 			}
 			draftSaveTimeout = null;
 		}, 100);
 	});
 
 	// Save draft immediately when component unmounts (critical for mode switches)
-	// BUT skip if we just sent a message - the draft was already cleared and we don't
-	// want to overwrite it with a stale value from Tiptap's destruction events
+	// BUT skip if we just sent a message or a session switch happened - the draft
+	// was already cleared and we don't want to overwrite it with stale text.
+	// Check the store imperatively (get()) since $effects don't run during teardown.
 	onDestroy(() => {
-		if (!messageSent) {
-			saveDraftImmediately(inputValue);
-		}
+		if (messageSent) return;
+		const currentSessionId = get(activeSession).sessionId;
+		if (currentSessionId !== initialSessionId) return; // session switched
+		saveDraftImmediately();
 	});
 	let editorRef = $state<TiptapEditor | null>(null);
+	let prevSessionId = $state($activeSession.sessionId);
+
+	// Sync editor content when session changes (ChatInput is NOT keyed by sessionId)
+	$effect(() => {
+		const newSessionId = $activeSession.sessionId;
+		if (newSessionId !== prevSessionId) {
+			prevSessionId = newSessionId;
+			const newDraft = $activeSession.draft || '';
+			inputValue = newDraft;
+			plainTextValue = '';
+			editorRef?.setContent(newDraft);
+		}
+	});
+
 	let fileInputRef = $state<HTMLInputElement | null>(null);
 	let isUploading = $state(false);
 	let isDragging = $state(false);

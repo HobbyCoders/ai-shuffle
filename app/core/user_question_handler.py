@@ -87,6 +87,14 @@ class UserQuestionHandler:
             async with self._lock:
                 if session_id in self._pending_questions:
                     self._pending_questions[session_id].pop(request_id, None)
+            # Notify frontend to dismiss the modal
+            try:
+                await broadcast_func({
+                    "type": "user_question_timeout",
+                    "request_id": request_id
+                })
+            except Exception:
+                pass  # Best-effort notification
             logger.warning(f"User question request timed out: {request_id}")
             return {"error": "Question timed out - no response from user"}
 

@@ -196,6 +196,14 @@ class PermissionHandler:
             async with self._lock:
                 if session_id in self._pending_requests:
                     self._pending_requests[session_id].pop(request_id, None)
+            # Notify frontend to dismiss the modal
+            try:
+                await broadcast_func({
+                    "type": "permission_timeout",
+                    "request_id": request_id
+                })
+            except Exception:
+                pass  # Best-effort notification
             return PermissionResultDeny(message="Permission request timed out")
 
         # Return the response - convert from stored dict to proper type

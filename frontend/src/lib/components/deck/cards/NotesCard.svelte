@@ -387,18 +387,26 @@
 
 {#snippet editorView()}
 	<div class="note-editor">
-		<!-- Editor Header -->
-		<div class="editor-header">
-			<button class="back-btn" onclick={closeEditor}>
-				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<polyline points="15 18 9 12 15 6"/>
-				</svg>
-				Back
-			</button>
+		<!-- Title Row: title + actions -->
+		<div class="editor-title-row">
+			<input
+				type="text"
+				class="title-input"
+				placeholder="Note title..."
+				bind:value={editorTitle}
+				oninput={markDirty}
+			/>
 			<div class="editor-actions">
 				{#if saving}
 					<span class="autosave-status">Saving...</span>
 				{/if}
+				<label class="pin-toggle" title="Pin to top">
+					<input type="checkbox" bind:checked={editorPinned} onchange={markDirty} />
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<line x1="12" y1="17" x2="12" y2="22"/>
+						<path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>
+					</svg>
+				</label>
 				{#if editingNote}
 					<button class="delete-btn" onclick={handleDelete} title="Delete note">
 						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -409,15 +417,6 @@
 				{/if}
 			</div>
 		</div>
-
-		<!-- Title Input -->
-		<input
-			type="text"
-			class="title-input"
-			placeholder="Note title..."
-			bind:value={editorTitle}
-			oninput={markDirty}
-		/>
 
 		<!-- Tags -->
 		<div class="tags-section">
@@ -442,10 +441,6 @@
 					onblur={addTag}
 				/>
 			</div>
-			<label class="pin-toggle">
-				<input type="checkbox" bind:checked={editorPinned} onchange={markDirty} />
-				Pin to top
-			</label>
 		</div>
 
 		<!-- Editor/Preview Toggle -->
@@ -875,39 +870,24 @@
 	.note-editor {
 		display: flex;
 		flex-direction: column;
-		height: 100%;
+		flex: 1;
+		min-height: 0;
 		overflow: hidden;
 	}
 
-	.editor-header {
+	.editor-title-row {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		padding: var(--space-3);
+		gap: var(--space-2);
+		padding: var(--space-2) var(--space-3);
 		border-bottom: 1px solid var(--border-default);
-	}
-
-	.back-btn {
-		display: flex;
-		align-items: center;
-		gap: var(--space-1);
-		padding: calc(var(--space-1) * 1.5) var(--space-3);
-		background: var(--surface-1);
-		border: none;
-		border-radius: var(--radius-sm);
-		color: var(--text-primary);
-		font-size: var(--text-md);
-		cursor: pointer;
-		transition: all var(--transition-smooth);
-	}
-
-	.back-btn:hover {
-		background: var(--surface-hover);
 	}
 
 	.editor-actions {
 		display: flex;
-		gap: var(--space-2);
+		align-items: center;
+		gap: var(--space-1);
+		flex-shrink: 0;
 	}
 
 	.delete-btn {
@@ -933,10 +913,11 @@
 	}
 
 	.title-input {
-		padding: var(--space-3);
+		flex: 1;
+		min-width: 0;
+		padding: var(--space-1) 0;
 		background: none;
 		border: none;
-		border-bottom: 1px solid var(--border-default);
 		color: var(--text-primary);
 		font-size: var(--text-xl);
 		font-weight: 600;
@@ -947,27 +928,24 @@
 		color: var(--text-secondary);
 	}
 
-	.title-input:focus {
-		border-bottom-color: var(--border-emphasis);
-	}
-
 	/* ============================================
 	   TAGS SECTION
 	   ============================================ */
 	.tags-section {
 		display: flex;
 		align-items: center;
+		justify-content: center;
 		gap: var(--space-3);
 		padding: var(--space-2) var(--space-3);
 		border-bottom: 1px solid var(--border-default);
 	}
 
 	.tags-list {
-		flex: 1;
 		display: flex;
 		flex-wrap: wrap;
 		gap: calc(var(--space-1) * 1.5);
 		align-items: center;
+		justify-content: center;
 	}
 
 	.editor-tag {
@@ -1017,15 +995,24 @@
 	.pin-toggle {
 		display: flex;
 		align-items: center;
-		gap: calc(var(--space-1) * 1.5);
-		font-size: var(--text-sm);
+		justify-content: center;
+		padding: calc(var(--space-1) * 1.5) calc(var(--space-2) + 2px);
 		color: var(--text-secondary);
 		cursor: pointer;
-		white-space: nowrap;
+		border-radius: var(--radius-sm);
+		transition: all var(--transition-smooth);
+	}
+
+	.pin-toggle:hover {
+		background: var(--surface-hover);
+	}
+
+	.pin-toggle:has(input:checked) {
+		color: var(--text-accent);
 	}
 
 	.pin-toggle input {
-		accent-color: var(--primary);
+		display: none;
 	}
 
 	/* ============================================

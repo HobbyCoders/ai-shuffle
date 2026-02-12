@@ -167,7 +167,6 @@
         scrollToSelected();
         return true;
 
-      case 'Enter':
       case 'Tab':
         if (filteredCommands[selectedIndex]) {
           event.preventDefault();
@@ -175,6 +174,13 @@
           onSelect(filteredCommands[selectedIndex]);
           return true;
         }
+        return false;
+
+      case 'Enter':
+        // Don't capture Enter — let it fall through to ChatInput's submit handler.
+        // Tab is the intended key for selecting autocomplete items (see hint text).
+        // Enter should send the command as a message.
+        onClose();
         return false;
 
       case 'Escape':

@@ -21,6 +21,7 @@ import { messageCache } from './message-cache';
 import { sessionEphemeralCache } from './session-cache';
 import { appData } from './app-data';
 import { git } from './git';
+import { browserState } from './browser';
 
 // Shared types
 import type {
@@ -1115,6 +1116,20 @@ function createActiveSessionStore() {
 				break;
 			}
 
+			case 'session_not_found': {
+				const missingId = data.session_id as string;
+				console.warn(`[ActiveSession] Session not found: ${missingId}`);
+				// Refresh sidebar to remove stale entry
+				appData.loadSessions();
+				// Navigate to new chat if this was the active session
+				const currentId = get(store).sessionId;
+				if (currentId === missingId) {
+					update(s => ({ ...s, error: 'This session no longer exists.' }));
+					storeApi.newChat();
+				}
+				break;
+			}
+
 			case 'message_queued':
 			case 'queued_message_processing':
 				break;
@@ -1192,7 +1207,8 @@ function createActiveSessionStore() {
 				break;
 			}
 
-			case 'permission_response_ack': {
+			case 'permission_response_ack':
+			case 'permission_timeout': {
 				const requestId = data.request_id as string;
 				update(s => ({
 					...s,
@@ -1230,7 +1246,8 @@ function createActiveSessionStore() {
 				break;
 			}
 
-			case 'user_question_response_ack': {
+			case 'user_question_response_ack':
+			case 'user_question_timeout': {
 				const requestId = data.request_id as string;
 				update(s => ({
 					...s,
@@ -1241,7 +1258,17 @@ function createActiveSessionStore() {
 
 			case 'pending_questions': {
 				const questions = data.questions as UserQuestionRequest[];
-				update(s => ({ ...s, pendingQuestions: questions }));
+				// Only replace if the set of request IDs actually changed.
+				// Blindly replacing creates new object references which can
+				// trigger reactive effects in the UserQuestion component,
+				// wiping the user's in-progress answers and "Other" text.
+				update(s => {
+					const existingIds = new Set(s.pendingQuestions.map(q => q.request_id));
+					const newIds = new Set(questions.map(q => q.request_id));
+					const same = existingIds.size === newIds.size && [...existingIds].every(id => newIds.has(id));
+					if (same) return s; // No change — keep existing references
+					return { ...s, pendingQuestions: questions };
+				});
 				break;
 			}
 
@@ -1533,24 +1560,23 @@ function createActiveSessionStore() {
 		async switchSession(sessionId: string) {
 			const state = get(store);
 
-			// Save ephemeral for session we're leaving
-			if (state.sessionId) {
-				sessionEphemeralCache.save(state.sessionId, {
-					draft: state.draft,
-					scrollTop: state.scrollTop,
-					modelOverride: state.modelOverride,
-					permissionModeOverride: state.permissionModeOverride,
-					thinkingModeOverride: state.thinkingModeOverride,
-					executionMode: state.executionMode,
-					worktreeId: state.worktreeId,
-					worktreeBranch: state.worktreeBranch,
-					worktreeBaseBranch: state.worktreeBaseBranch,
-					selectedWorktreeBranch: state.selectedWorktreeBranch,
-					worktreeMode: state.worktreeMode,
-					worktreeDeleted: state.worktreeDeleted,
-					queuedMessages: state.queuedMessages,
-				});
-			}
+			// Save ephemeral for session we're leaving (use sentinel for new chat)
+			const leavingKey = state.sessionId || '__new_chat__';
+			sessionEphemeralCache.save(leavingKey, {
+				draft: state.draft,
+				scrollTop: state.scrollTop,
+				modelOverride: state.modelOverride,
+				permissionModeOverride: state.permissionModeOverride,
+				thinkingModeOverride: state.thinkingModeOverride,
+				executionMode: state.executionMode,
+				worktreeId: state.worktreeId,
+				worktreeBranch: state.worktreeBranch,
+				worktreeBaseBranch: state.worktreeBaseBranch,
+				selectedWorktreeBranch: state.selectedWorktreeBranch,
+				worktreeMode: state.worktreeMode,
+				worktreeDeleted: state.worktreeDeleted,
+				queuedMessages: state.queuedMessages,
+			});
 
 			// Hydrate from IndexedDB cache for instant render
 			const cachedMessages = await messageCache.get(sessionId);
@@ -1560,6 +1586,7 @@ function createActiveSessionStore() {
 				messages: cachedMessages && cachedMessages.length > 0 ? cachedMessages : [],
 				error: null,
 				// Reset session-specific state
+				draft: '',
 				pendingPermissions: [],
 				pendingQuestions: [],
 				isStreaming: false,
@@ -1568,6 +1595,10 @@ function createActiveSessionStore() {
 				sessionLocked: false,
 				sessionLockedBy: undefined,
 			}));
+
+			// Switch browser panel to new session's context (saves/restores per-session).
+			// Panel stays open; only the content (URL, screenshot, etc.) swaps.
+			browserState.switchSession(state.sessionId, sessionId);
 
 			// Restore ephemeral from cache
 			const ephemeral = sessionEphemeralCache.restore(sessionId);
@@ -1604,23 +1635,22 @@ function createActiveSessionStore() {
 			const state = get(store);
 
 			// Save ephemeral for the session we're leaving
-			if (state.sessionId) {
-				sessionEphemeralCache.save(state.sessionId, {
-					draft: state.draft,
-					scrollTop: state.scrollTop,
-					modelOverride: state.modelOverride,
-					permissionModeOverride: state.permissionModeOverride,
-					thinkingModeOverride: state.thinkingModeOverride,
-					executionMode: state.executionMode,
-					worktreeId: state.worktreeId,
-					worktreeBranch: state.worktreeBranch,
-					worktreeBaseBranch: state.worktreeBaseBranch,
-					selectedWorktreeBranch: state.selectedWorktreeBranch,
-					worktreeMode: state.worktreeMode,
-					worktreeDeleted: state.worktreeDeleted,
-					queuedMessages: state.queuedMessages,
-				});
-			}
+			const leavingKey = state.sessionId || '__new_chat__';
+			sessionEphemeralCache.save(leavingKey, {
+				draft: state.draft,
+				scrollTop: state.scrollTop,
+				modelOverride: state.modelOverride,
+				permissionModeOverride: state.permissionModeOverride,
+				thinkingModeOverride: state.thinkingModeOverride,
+				executionMode: state.executionMode,
+				worktreeId: state.worktreeId,
+				worktreeBranch: state.worktreeBranch,
+				worktreeBaseBranch: state.worktreeBaseBranch,
+				selectedWorktreeBranch: state.selectedWorktreeBranch,
+				worktreeMode: state.worktreeMode,
+				worktreeDeleted: state.worktreeDeleted,
+				queuedMessages: state.queuedMessages,
+			});
 
 			// Tell backend to release session lock
 			if (ws?.readyState === WebSocket.OPEN && state.sessionId) {
@@ -1671,6 +1701,15 @@ function createActiveSessionStore() {
 			expectedSessionId = null;
 			waitingForHistory = null;
 
+			// Save current browser state and show empty for the new chat
+			browserState.switchSession(state.sessionId, null);
+
+			// Restore new chat draft if one was saved earlier
+			const newChatEphemeral = sessionEphemeralCache.restore('__new_chat__');
+			if (newChatEphemeral?.draft) {
+				update(s => ({ ...s, draft: newChatEphemeral.draft }));
+			}
+
 			persistSession();
 		},
 
@@ -1717,45 +1756,37 @@ function createActiveSessionStore() {
 				: state.title;
 			const queryProfileId = state.profile;
 
-			update(s => ({
-				...s,
-				messages: [...s.messages, {
-					id: userMsgId,
-					role: 'user' as const,
-					content: prompt,
-					profileId: queryProfileId,
-				}],
-				isStreaming: true,
-				error: null,
-				title: newTitle,
-				currentQueryProfileId: queryProfileId,
-			}));
-
 			// Interrupt and re-query if currently streaming
 			if (state.isStreaming && state.sessionId) {
-				const currentSession = sessionState.getSession(state.sessionId);
-				const streamingMessages = currentSession?.messages || [];
-
+				// Cleanup first: stop poller and remove session to prevent
+				// the sessionState subscriber from overwriting our update
 				sessionPoller.stop(state.sessionId);
 				sessionState.removeSession(state.sessionId);
 				interruptPending = true;
 
-				const updatedMessages = streamingMessages.map(m => {
-					if (m.type === 'tool_use' && m.toolStatus === 'running') {
-						return { ...m, streaming: false, toolStatus: 'error' as const };
-					}
-					return m.streaming ? { ...m, streaming: false } : m;
+				// Single atomic update: mark running tools as errored + append user message.
+				// Uses s.messages (current store state) instead of stale sessionState data.
+				update(s => {
+					const updatedMessages = s.messages.map(m => {
+						if (m.type === 'tool_use' && m.toolStatus === 'running') {
+							return { ...m, streaming: false, toolStatus: 'error' as const };
+						}
+						return m.streaming ? { ...m, streaming: false } : m;
+					});
+					return {
+						...s,
+						messages: [...updatedMessages, {
+							id: userMsgId,
+							role: 'user' as const,
+							content: prompt,
+							profileId: queryProfileId,
+						}],
+						isStreaming: true,
+						error: null,
+						title: newTitle,
+						currentQueryProfileId: queryProfileId,
+					};
 				});
-
-				update(s => ({
-					...s,
-					messages: [...updatedMessages, {
-						id: userMsgId,
-						role: 'user' as const,
-						content: prompt,
-						profileId: queryProfileId,
-					}]
-				}));
 
 				pendingTools.clear();
 				lastMessageTime = Date.now();
@@ -1769,6 +1800,21 @@ function createActiveSessionStore() {
 				}));
 				return;
 			}
+
+			// Normal path (not currently streaming)
+			update(s => ({
+				...s,
+				messages: [...s.messages, {
+					id: userMsgId,
+					role: 'user' as const,
+					content: prompt,
+					profileId: queryProfileId,
+				}],
+				isStreaming: true,
+				error: null,
+				title: newTitle,
+				currentQueryProfileId: queryProfileId,
+			}));
 
 			const overrides: Record<string, string> = {};
 			if (state.modelOverride) overrides.model = state.modelOverride;

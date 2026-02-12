@@ -284,6 +284,7 @@
 	/* Mobile touch targets & wrapping layout */
 	@media (max-width: 639px) {
 		.page-header {
+			position: relative;
 			height: auto;
 			min-height: 48px;
 			flex-wrap: wrap;
@@ -292,14 +293,31 @@
 		}
 
 		.header-left {
-			flex: 1 1 0;
+			flex: 1 1 100%;
 			min-width: 0;
 			overflow: hidden;
+			justify-content: center;
+			padding-left: 36px;
+			padding-right: 36px;
+		}
+
+		.sidebar-toggle {
+			position: absolute;
+			left: var(--space-3, 12px);
+			top: var(--space-2, 8px);
+			width: 32px;
+			height: 32px;
+		}
+
+		.header-btn {
+			width: 32px;
+			height: 32px;
 		}
 
 		.header-right {
 			flex: 1 0 100%;
 			flex-wrap: wrap;
+			justify-content: center;
 			gap: var(--space-2, 8px);
 		}
 
@@ -308,15 +326,10 @@
 			flex: 0 0 auto;
 		}
 
-		.sidebar-toggle,
-		.header-btn {
-			width: 44px;
-			height: 44px;
-		}
-
 		.header-title {
 			flex: 1;
 			min-width: 0;
+			text-align: center;
 		}
 
 		.context-badge {

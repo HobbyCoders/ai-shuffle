@@ -43,6 +43,7 @@
 	let contextMenuEl: HTMLDivElement | undefined = $state();
 	let uploadInput: HTMLInputElement;
 	let isMobile = $state(false);
+	let pathTrackEl = $state<HTMLDivElement | null>(null);
 	let isDragging = $state(false);
 	let searchQuery = $state('');
 	let itemsLoaded = $state(false);
@@ -73,6 +74,16 @@
 			setTimeout(() => {
 				itemsLoaded = true;
 			}, 50);
+		}
+	});
+
+	// Auto-scroll breadcrumbs to show the current (rightmost) segment
+	$effect(() => {
+		$breadcrumbs; // track changes
+		if (pathTrackEl) {
+			requestAnimationFrame(() => {
+				pathTrackEl!.scrollLeft = pathTrackEl!.scrollWidth;
+			});
 		}
 	});
 
@@ -409,7 +420,7 @@
 
 		<!-- Path Navigator -->
 		<nav class="path-nav">
-			<div class="path-track">
+			<div class="path-track" bind:this={pathTrackEl}>
 				{#each $breadcrumbs as crumb, i}
 					<button
 						class="path-segment {i === $breadcrumbs.length - 1 ? 'current' : ''}"
@@ -778,7 +789,7 @@
 	.header-top {
 		display: flex;
 		align-items: center;
-		justify-content: flex-end;
+		justify-content: center;
 		padding: 0.875rem 1.25rem;
 		gap: 1rem;
 	}
@@ -846,7 +857,7 @@
 	.path-nav {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
+		justify-content: center;
 		gap: 1rem;
 		padding: 0.625rem 1.25rem;
 		background: color-mix(in oklch, var(--muted) 25%, transparent);
@@ -1410,6 +1421,23 @@
 		right: 0.5rem;
 	}
 
+	/* Mobile/small screens: always show file menu since hover isn't available */
+	.mobile .file-menu {
+		opacity: 1;
+	}
+
+	@media (max-width: 639px) {
+		.file-menu {
+			opacity: 1;
+		}
+	}
+
+	@media (pointer: coarse) {
+		.file-menu {
+			opacity: 1;
+		}
+	}
+
 	/* Selected Indicator */
 	.selected-indicator {
 		position: absolute;
@@ -1606,7 +1634,11 @@
 	}
 
 	.mobile .header-actions {
-		justify-content: flex-end;
+		justify-content: center;
+	}
+
+	.mobile .path-track {
+		justify-content: center;
 	}
 
 	.mobile .action-label {
