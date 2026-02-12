@@ -43,6 +43,7 @@
 	const additions = $derived($diffStats?.additions ?? 0);
 	const deletions = $derived($diffStats?.deletions ?? 0);
 	const commitsAhead = $derived($gitStatus?.ahead ?? 0);
+	const isOnDefaultBranch = $derived(currentBranch === defaultBranch);
 
 	// Truncate branch name for display
 	const branchDisplay = $derived(
@@ -213,12 +214,14 @@
 							{/if}
 						</label>
 
-						<label class="radio-option" class:selected={nextStep === 'pr'}>
-							<input type="radio" name="nextStep" value="pr" bind:group={nextStep} />
+						<label class="radio-option" class:selected={nextStep === 'pr'} class:disabled={isOnDefaultBranch}>
+							<input type="radio" name="nextStep" value="pr" bind:group={nextStep} disabled={isOnDefaultBranch} />
 							<span class="radio-dot"></span>
 							<Github size={16} strokeWidth={1.5} />
 							<span class="radio-text">Commit, push, and create PR</span>
-							{#if nextStep === 'pr'}
+							{#if isOnDefaultBranch}
+								<span class="radio-hint">Not available on {defaultBranch}</span>
+							{:else if nextStep === 'pr'}
 								<span class="check-mark">&#10003;</span>
 							{/if}
 						</label>
@@ -494,6 +497,21 @@
 	.check-mark {
 		font-size: 0.875rem;
 		color: var(--foreground);
+		margin-left: auto;
+	}
+
+	.radio-option.disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	.radio-option.disabled:hover {
+		background: transparent;
+	}
+
+	.radio-hint {
+		font-size: 0.6875rem;
+		color: var(--muted-foreground);
 		margin-left: auto;
 	}
 

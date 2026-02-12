@@ -7,6 +7,7 @@
 	 */
 	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine } from 'lucide-svelte';
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode } from '$lib/stores/git';
+	import { githubRepoInfo } from '$lib/stores/github';
 
 	interface Props {
 		projectId: string;
@@ -44,7 +45,9 @@
 	const additions = $derived($diffStats?.additions ?? 0);
 	const deletions = $derived($diffStats?.deletions ?? 0);
 	const commitsAhead = $derived($gitStatus?.ahead ?? 0);
-	const canCreatePR = $derived(!hasChanges && commitsAhead > 0);
+	const defaultBranch = $derived($githubRepoInfo?.default_branch ?? 'main');
+	const isOnDefaultBranch = $derived(currentBranch === defaultBranch);
+	const canCreatePR = $derived(!hasChanges && commitsAhead > 0 && !isOnDefaultBranch);
 
 	// Behind upstream tracking branch (for pull button)
 	const currentBranchInfo = $derived($branchStore.find(b => b.current));

@@ -12,6 +12,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { git, gitStatus, branches as branchStore, diffStats } from '$lib/stores/git';
 	import { githubAuthenticated } from '$lib/stores/auth';
+	import { githubRepoInfo } from '$lib/stores/github';
 	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming';
 	import { createPullRequest, getPullRequests, mergePullRequest } from '$lib/api/github';
 	import { generateCommitMessage, generatePRDescription, deleteWorktree } from '$lib/api/git';
@@ -665,6 +666,7 @@
 		open={showCommitModal}
 		projectId={activeTab.project}
 		mode={showCommitModalMode}
+		defaultBranch={$githubRepoInfo?.default_branch ?? 'main'}
 		onClose={() => showCommitModal = false}
 		onStartCommit={handleStartCommit}
 		onCreatePR={handleCreatePR}
