@@ -847,6 +847,14 @@ function createActiveSessionStore() {
 						stateUpdate.selectedWorktreeBranch = worktreeBranch;
 						stateUpdate.worktreeMode = 'existing';
 						stateUpdate.worktreeDeleted = true;
+					} else {
+						// Non-worktree session: reset to local mode so stale worktree
+						// state from a previously viewed tab doesn't leak through.
+						stateUpdate.executionMode = 'local';
+						stateUpdate.worktreeId = null;
+						stateUpdate.worktreeBranch = '';
+						stateUpdate.selectedWorktreeBranch = null;
+						stateUpdate.worktreeDeleted = false;
 					}
 
 					// Restore pending permissions/questions on reconnect

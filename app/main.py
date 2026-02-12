@@ -5,9 +5,8 @@ Main FastAPI application entry point
 
 import logging
 import time
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -77,20 +76,6 @@ if not root_logger.handlers:
     console_handler.setLevel(log_level)
     console_handler.setFormatter(log_format)
     root_logger.addHandler(console_handler)
-
-    # File handler (for in-container access) - only if /data exists (Docker environment)
-    log_dir = Path("/data")
-    if log_dir.exists():
-        log_file = log_dir / "backend.log"
-        file_handler = RotatingFileHandler(
-            log_file,
-            maxBytes=5 * 1024 * 1024,  # 5MB
-            backupCount=3,
-            encoding="utf-8"
-        )
-        file_handler.setLevel(log_level)
-        file_handler.setFormatter(log_format)
-        root_logger.addHandler(file_handler)
 
 logger = logging.getLogger(__name__)
 
