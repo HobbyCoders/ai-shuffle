@@ -297,38 +297,10 @@ def _build_mcp_servers_dict(
                     config["headers"] = server.headers
                 mcp_servers[server.name] = config
 
-    # --- Source 2: Installed plugin MCP servers ---
-    # Plugins like Context7 define their own .mcp.json inside their install directory.
-    # These are not in the scope-based .mcp.json files, so we scan them here.
-    try:
-        from app.core.plugin_service import get_plugin_service
-        plugin_service = get_plugin_service()
-        installed_file = plugin_service.INSTALLED_FILE
-
-        if installed_file.exists():
-            with open(installed_file, 'r') as f:
-                installed_data = _json.load(f)
-            enabled_plugins = plugin_service.get_enabled_plugins()
-
-            for plugin_id, installations in installed_data.get("plugins", {}).items():
-                if not enabled_plugins.get(plugin_id, False):
-                    continue
-                for install_info in installations:
-                    install_path = Path(install_info.get("installPath", ""))
-                    plugin_mcp_file = install_path / ".mcp.json"
-                    if plugin_mcp_file.exists():
-                        try:
-                            with open(plugin_mcp_file, 'r') as f:
-                                plugin_mcp_data = _json.load(f)
-                            # Plugin .mcp.json has flat format: {"server-name": {config}}
-                            for server_name, server_config in plugin_mcp_data.items():
-                                if server_name not in mcp_servers:
-                                    mcp_servers[server_name] = server_config
-                                    logger.debug(f"Added MCP server '{server_name}' from plugin {plugin_id}")
-                        except Exception as e:
-                            logger.warning(f"Failed to read plugin MCP config {plugin_mcp_file}: {e}")
-    except Exception as e:
-        logger.warning(f"Failed to load plugin MCP servers: {e}")
+    # NOTE: Plugin MCP servers (e.g. Context7) are NOT added here.
+    # The SDK loads installed plugins automatically from ~/.claude/plugins/,
+    # just like the CLI does. Manually adding them would create duplicates
+    # (e.g. mcp__context7__* AND mcp__plugin_context7_context7__*).
 
     # Add browser-tools as an in-process SDK MCP server (replaces the old
     # stdio subprocess).  The server proxies tool calls to the FastAPI

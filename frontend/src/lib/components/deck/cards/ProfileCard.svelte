@@ -284,28 +284,10 @@
 		const allowedTools = config.allowed_tools || [];
 		const disallowedTools = config.disallowed_tools || [];
 
-		// Build enabled AI tools array
-		const enabledAITools: string[] = [];
-		if (aiTools.image_generation) enabledAITools.push('image_generation');
-		if (aiTools.image_editing) enabledAITools.push('image_editing');
-		if (aiTools.image_reference) enabledAITools.push('image_reference');
-		if (aiTools.video_generation) enabledAITools.push('video_generation');
-		if (aiTools.video_with_audio) enabledAITools.push('video_with_audio');
-		if (aiTools.image_to_video) enabledAITools.push('image_to_video');
-		if (aiTools.video_extend) enabledAITools.push('video_extend');
-		if (aiTools.video_bridge) enabledAITools.push('video_bridge');
-		if (aiTools.video_understanding) enabledAITools.push('video_understanding');
-		// 3D Model Generation Tools
-		if (aiTools.text_to_3d) enabledAITools.push('text_to_3d');
-		if (aiTools.image_to_3d) enabledAITools.push('image_to_3d');
-		if (aiTools.retexture_3d) enabledAITools.push('retexture_3d');
-		if (aiTools.rig_3d) enabledAITools.push('rig_3d');
-		if (aiTools.animate_3d) enabledAITools.push('animate_3d');
-		// AI Collaboration Tools
-		if (aiTools.ai_collaborate) enabledAITools.push('ai_collaborate');
-		if (aiTools.ai_memory) enabledAITools.push('ai_memory');
-		if (aiTools.ai_review) enabledAITools.push('ai_review');
-		if (aiTools.ai_reason) enabledAITools.push('ai_reason');
+		// Build enabled AI tools array dynamically from config keys
+		const enabledAITools: string[] = Object.entries(aiTools)
+			.filter(([_, enabled]) => enabled)
+			.map(([key]) => key);
 
 		// Determine tool selection mode
 		if (allowedTools.length > 0) {
@@ -585,28 +567,10 @@
 		const effectiveAITools =
 			aiToolSelectionMode === 'all' ? getAllAIToolIds() : profileForm.enabled_ai_tools;
 		if (effectiveAITools.length > 0) {
-			config.ai_tools = {
-				image_generation: effectiveAITools.includes('image_generation'),
-				image_editing: effectiveAITools.includes('image_editing'),
-				image_reference: effectiveAITools.includes('image_reference'),
-				video_generation: effectiveAITools.includes('video_generation'),
-				video_with_audio: effectiveAITools.includes('video_with_audio'),
-				image_to_video: effectiveAITools.includes('image_to_video'),
-				video_extend: effectiveAITools.includes('video_extend'),
-				video_bridge: effectiveAITools.includes('video_bridge'),
-				video_understanding: effectiveAITools.includes('video_understanding'),
-				// 3D Model Generation Tools
-				text_to_3d: effectiveAITools.includes('text_to_3d'),
-				image_to_3d: effectiveAITools.includes('image_to_3d'),
-				retexture_3d: effectiveAITools.includes('retexture_3d'),
-				rig_3d: effectiveAITools.includes('rig_3d'),
-				animate_3d: effectiveAITools.includes('animate_3d'),
-				// AI Collaboration Tools
-				ai_collaborate: effectiveAITools.includes('ai_collaborate'),
-				ai_memory: effectiveAITools.includes('ai_memory'),
-				ai_review: effectiveAITools.includes('ai_review'),
-				ai_reason: effectiveAITools.includes('ai_reason')
-			};
+			// Build ai_tools config dynamically from the enabled tool IDs
+			config.ai_tools = Object.fromEntries(
+				effectiveAITools.map((id) => [id, true])
+			);
 		}
 
 		// System prompt
@@ -708,27 +672,11 @@
 			toolSelectionMode = 'all';
 		}
 
-		// Build enabled AI tools array from ai_tools object
+		// Build enabled AI tools array dynamically from config keys
 		const aiTools = agent.ai_tools || {};
-		const enabledAITools: string[] = [];
-		if (aiTools.image_generation) enabledAITools.push('image_generation');
-		if (aiTools.image_editing) enabledAITools.push('image_editing');
-		if (aiTools.image_reference) enabledAITools.push('image_reference');
-		if (aiTools.video_generation) enabledAITools.push('video_generation');
-		if (aiTools.video_with_audio) enabledAITools.push('video_with_audio');
-		if (aiTools.image_to_video) enabledAITools.push('image_to_video');
-		if (aiTools.video_extend) enabledAITools.push('video_extend');
-		if (aiTools.video_bridge) enabledAITools.push('video_bridge');
-		if (aiTools.video_understanding) enabledAITools.push('video_understanding');
-		if (aiTools.text_to_3d) enabledAITools.push('text_to_3d');
-		if (aiTools.image_to_3d) enabledAITools.push('image_to_3d');
-		if (aiTools.retexture_3d) enabledAITools.push('retexture_3d');
-		if (aiTools.rig_3d) enabledAITools.push('rig_3d');
-		if (aiTools.animate_3d) enabledAITools.push('animate_3d');
-		if (aiTools.ai_collaborate) enabledAITools.push('ai_collaborate');
-		if (aiTools.ai_memory) enabledAITools.push('ai_memory');
-		if (aiTools.ai_review) enabledAITools.push('ai_review');
-		if (aiTools.ai_reason) enabledAITools.push('ai_reason');
+		const enabledAITools: string[] = Object.entries(aiTools)
+			.filter(([_, enabled]) => enabled)
+			.map(([key]) => key);
 
 		// Determine AI tool selection mode
 		if (enabledAITools.length > 0) {
