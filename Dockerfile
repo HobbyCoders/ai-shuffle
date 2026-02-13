@@ -107,7 +107,7 @@ RUN groupadd -g 1000 appuser && \
 EXPOSE 8000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=120s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Use entrypoint script to handle runtime UID/GID changes

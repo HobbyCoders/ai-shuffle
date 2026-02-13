@@ -1718,7 +1718,7 @@ async def ping_loop(
     """
     try:
         while True:
-            await asyncio.sleep(15)  # Ping every 15 seconds
+            await asyncio.sleep(30)  # Ping every 30 seconds
 
             ping_msg = {"type": "ping", "timestamp": None}
 

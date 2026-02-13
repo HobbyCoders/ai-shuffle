@@ -112,7 +112,7 @@ const STREAMING_HEALTH_TIMEOUT_MS = 45_000;
 const TOOL_EXECUTION_TIMEOUT_MS = 120_000;
 const MAX_RECONNECT_ATTEMPTS = 50;
 const MAX_RECONNECT_DELAY_MS = 30_000;
-const PING_INTERVAL_MS = 10_000;
+const PING_INTERVAL_MS = 30_000;
 const SELECTION_SYNC_DEBOUNCE_MS = 1000;
 
 // ─── Module-Level Helpers ────────────────────────────────────────────────────
@@ -1431,9 +1431,30 @@ function createActiveSessionStore() {
 
 		// Reconnect WebSocket when the tab regains focus.
 		// Browsers can silently drop WebSocket connections when tabs are backgrounded.
+		// Also pause pings + polling when hidden to reduce idle CPU usage.
 		if (typeof document !== 'undefined') {
 			document.addEventListener('visibilitychange', () => {
-				if (!document.hidden) {
+				if (document.hidden) {
+					// Tab is hidden — pause pings to reduce idle CPU.
+					// The backend ping will keep the connection alive.
+					stopPing();
+					// Pause session polling — no one is looking at the UI
+					const state = get(store);
+					if (state.sessionId && sessionPoller.isPolling(state.sessionId)) {
+						sessionPoller.stop(state.sessionId);
+					}
+				} else {
+					// Tab is visible again — resume pings and check connection health
+					if (ws?.readyState === WebSocket.OPEN) {
+						startPing();
+					}
+
+					// Resume streaming poll if session was streaming
+					const state = get(store);
+					if (state.isStreaming && state.sessionId) {
+						sessionPoller.startStreaming(state.sessionId);
+					}
+
 					if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
 						reconnectAttempts = 0;
 						connect();

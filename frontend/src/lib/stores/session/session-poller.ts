@@ -21,7 +21,7 @@ import { sessionState, type SessionUsage } from './session-state';
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const STREAMING_POLL_INTERVAL_MS = 500;
-const IDLE_POLL_INTERVAL_MS = 5000;
+const IDLE_POLL_INTERVAL_MS = 30_000;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
