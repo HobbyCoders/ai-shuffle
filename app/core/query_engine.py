@@ -2961,7 +2961,21 @@ async def stream_to_websocket(
                     SUPPRESSED_SUBTYPES = {
                         'init',  # Already handled above
                     }
-                    if message.subtype not in SUPPRESSED_SUBTYPES:
+
+                    # Suppress system messages from subagent execution.
+                    # SystemMessage doesn't have parent_tool_use_id as a direct attribute,
+                    # but the raw data dict may contain it. Also suppress if any subagents
+                    # are actively running (SDK runs subagents synchronously, so system
+                    # messages during active subagent execution are from the subagent context).
+                    parent_tool_id = message.data.get("parent_tool_use_id") if message.data else None
+                    is_from_subagent = (
+                        (parent_tool_id and parent_tool_id in task_tool_uses) or
+                        (not parent_tool_id and len(task_tool_uses) > 0)
+                    )
+
+                    if is_from_subagent:
+                        logger.debug(f"[WS] Suppressed subagent SystemMessage: subtype={message.subtype}")
+                    elif message.subtype not in SUPPRESSED_SUBTYPES:
                         has_visible_content = True
                         logger.debug(f"[WS] Forwarding SystemMessage to frontend: subtype={message.subtype}")
                         yield {
@@ -3219,6 +3233,9 @@ async def stream_to_websocket(
                 parent_tool_id = message.parent_tool_use_id
                 logger.debug(f"[WS] UserMessage received: content_type={type(message.content).__name__}, parent_tool_id={parent_tool_id}")
 
+                # Suppress local command output from subagent UserMessages
+                is_subagent_user_msg = parent_tool_id and parent_tool_id in task_tool_uses
+
                 # Handle string content (rare but possible)
                 if isinstance(message.content, str):
                     content = message.content
@@ -3226,14 +3243,14 @@ async def stream_to_websocket(
                     # Check for local command output
                     if "<local-command-stdout>" in content:
                         match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', content, re.DOTALL)
-                        if match:
+                        if match and not is_subagent_user_msg:
                             has_visible_content = True
                             yield {
                                 "type": "system",
                                 "subtype": "local_command",
                                 "data": {"content": match.group(1).strip()}
                             }
-                    elif is_slash_command and content.strip() and content.strip() != "No response requested.":
+                    elif is_slash_command and content.strip() and content.strip() != "No response requested." and not is_subagent_user_msg:
                         has_visible_content = True
                         logger.debug(f"[WS] Forwarding slash command UserMessage string: {content[:200]}")
                         yield {
@@ -3250,14 +3267,14 @@ async def stream_to_websocket(
                         # Check for local command output (e.g., /context, /compact)
                         if "<local-command-stdout>" in text:
                             match = re.search(r'<local-command-stdout>(.*?)</local-command-stdout>', text, re.DOTALL)
-                            if match:
+                            if match and not is_subagent_user_msg:
                                 has_visible_content = True
                                 yield {
                                     "type": "system",
                                     "subtype": "local_command",
                                     "data": {"content": match.group(1).strip()}
                                 }
-                        elif is_slash_command and text.strip() and text.strip() != "No response requested.":
+                        elif is_slash_command and text.strip() and text.strip() != "No response requested." and not is_subagent_user_msg:
                             # For slash commands, forward non-trivial UserMessage text
                             # SDK built-in commands may return output without <local-command-stdout> tags
                             has_visible_content = True
