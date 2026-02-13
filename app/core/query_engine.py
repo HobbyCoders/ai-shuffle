@@ -274,6 +274,10 @@ def _build_mcp_servers_dict(
                 continue
             if server.name in mcp_servers:
                 continue
+            # Skip browser-tools from .mcp.json — it's now added as an
+            # in-process SDK MCP server below (no subprocess needed)
+            if server.name == "browser-tools":
+                continue
 
             if server.type == McpServerType.STDIO or server.type == "stdio":
                 config: dict = {"command": server.command}
@@ -326,16 +330,69 @@ def _build_mcp_servers_dict(
     except Exception as e:
         logger.warning(f"Failed to load plugin MCP servers: {e}")
 
-    # Inject session_id into browser-tools env so the MCP subprocess
-    # knows which Playwright session to proxy commands to
-    if browser_session_id and "browser-tools" in mcp_servers:
-        bt = mcp_servers["browser-tools"]
-        env = bt.get("env", {})
-        env["BROWSER_SESSION_ID"] = browser_session_id
-        bt["env"] = env
+    # Add browser-tools as an in-process SDK MCP server (replaces the old
+    # stdio subprocess).  The server proxies tool calls to the FastAPI
+    # browser REST API so agent and user share the same Playwright browser.
+    if browser_session_id:
+        try:
+            from app.mcp.browser_sdk_tools import create_browser_tools_server
+            from app.core.config import INTERNAL_BROWSER_TOKEN
+
+            browser_server = create_browser_tools_server(
+                base_url=f"http://127.0.0.1:{settings.port}",
+                session_id=browser_session_id,
+                auth_token=INTERNAL_BROWSER_TOKEN,
+            )
+            mcp_servers["browser-tools"] = browser_server
+            logger.debug("Added in-process SDK MCP server for browser-tools")
+        except Exception as e:
+            logger.warning(f"Failed to create browser-tools SDK MCP server: {e}")
 
     if mcp_servers:
         logger.info(f"Passing {len(mcp_servers)} MCP server(s) to SDK: {list(mcp_servers.keys())}")
+        return mcp_servers
+
+    return None
+
+
+def _build_mcp_servers_dict_with_ai_tools(
+    project_dir: Optional[Path] = None,
+    browser_session_id: Optional[str] = None,
+    ai_tools_config: Optional[Dict[str, Any]] = None,
+) -> Optional[dict]:
+    """
+    Build MCP servers dict including AI content generation tools.
+
+    Wraps _build_mcp_servers_dict() and adds the AI tools SDK MCP server
+    when any AI tools are enabled in the profile.
+
+    Args:
+        project_dir: Optional project directory for project-scoped servers.
+        browser_session_id: Optional session ID to inject into browser-tools env.
+        ai_tools_config: Optional dict with individual AI tool toggles.
+
+    Returns:
+        Dictionary mapping server names to SDK MCP server configs, or None if empty.
+    """
+    mcp_servers = _build_mcp_servers_dict(
+        project_dir=project_dir,
+        browser_session_id=browser_session_id,
+    ) or {}
+
+    # Add AI tools SDK MCP server if any AI tools are enabled
+    if ai_tools_config and any(ai_tools_config.values()):
+        try:
+            from app.mcp.ai_tools_sdk import create_ai_tools_server
+            tools_dir = settings.effective_tools_dir
+            if tools_dir:
+                ai_server = create_ai_tools_server(ai_tools_config, str(tools_dir))
+                if ai_server:
+                    mcp_servers["ai-tools"] = ai_server
+                    logger.debug("Added in-process SDK MCP server for ai-tools")
+        except Exception as e:
+            logger.warning(f"Failed to create AI tools SDK MCP server: {e}")
+
+    if mcp_servers:
         return mcp_servers
 
     return None
@@ -705,10 +762,11 @@ def _build_ai_tools_section(
     api_keys: Optional[Dict[str, str]] = None
 ) -> str:
     """
-    Build the <ai-tools> section for system prompts with multi-provider support.
+    Build the <ai-tools> section for system prompts.
 
-    This compact version provides tool paths and key parameters without verbose examples.
-    Claude knows how to write the code - we just need to tell it what's available.
+    This provides a minimal tool selection guide. The actual tools are registered
+    as native SDK MCP tools via app.mcp.ai_tools_sdk - Claude calls them directly
+    instead of writing .mjs scripts.
 
     Args:
         ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
@@ -721,14 +779,6 @@ def _build_ai_tools_section(
     if not ai_tools_config:
         return ""
 
-    providers = _get_available_providers()
-    tools_dir = settings.effective_tools_dir
-
-    # Convert Windows paths to file:// URLs for ESM imports
-    tools_dir_str = str(tools_dir)
-    if platform.system() == "Windows" and len(tools_dir_str) >= 2 and tools_dir_str[1] == ':':
-        tools_dir_str = "file:///" + tools_dir_str.replace("\\", "/")
-
     # Check if any AI tools are enabled
     any_image_tools = ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False) or ai_tools_config.get("image_reference", False)
     any_video_tools = ai_tools_config.get("video_generation", False) or ai_tools_config.get("image_to_video", False) or ai_tools_config.get("video_extend", False) or ai_tools_config.get("video_bridge", False) or ai_tools_config.get("video_with_audio", False) or ai_tools_config.get("video_understanding", False)
@@ -737,126 +787,55 @@ def _build_ai_tools_section(
     if not any_image_tools and not any_video_tools and not any_3d_tools:
         return ""
 
-    if not providers["image_providers"] and not providers["video_providers"] and not providers["model3d_providers"]:
-        return ""
-
     tools_section = f"{prefix}<ai-tools>\n"
     tools_section += """## AI Content Generation Tools
 
-**Usage:** Write `.mjs` scripts, run with `node script.mjs`, delete after. All tools return JSON with `file_path` and URL fields.
+AI content generation tools are available as native tools. Use them directly by calling the tool - do not write .mjs scripts to call them.
 
 ### Tool Selection (MANDATORY)
 | Intent | Tool | NOT |
 |--------|------|-----|
-| Analyze/describe video | `analyzeVideo` | ❌ WebFetch/Read |
-| Generate image | `generateImage` | ❌ WebSearch |
-| Edit existing image | `editImage` | ❌ generateImage |
-| Generate video from text | `generateVideo` | ❌ WebSearch |
-| Animate image to video | `imageToVideo` | ❌ generateVideo |
-| Extend Veo video | `extendVideo` | ❌ generateVideo |
-| Create 3D from text | `textTo3D` | ❌ image gen |
-| Convert image to 3D | `imageTo3D` | ❌ textTo3D |
-
 """
 
-    # =========================================================================
-    # IMAGE TOOLS
-    # =========================================================================
-    if any_image_tools and providers["image_providers"]:
-        tools_section += "### 🖼️ Image Tools\n"
-        tools_section += "**Providers:** "
-        provider_list = []
-        for pid, pinfo in providers["image_providers"].items():
-            edit_mark = " (edit)" if "image-edit" in pinfo["capabilities"] else ""
-            provider_list.append(f"`{pid}`{edit_mark}")
-        tools_section += ", ".join(provider_list) + "\n\n"
-
+    # Only include rows for enabled tool categories
+    if any_image_tools:
         if ai_tools_config.get("image_generation", False):
-            tools_section += f"- **generateImage**: `import {{ generateImage }} from '{tools_dir_str}/dist/image-generation/generateImage.js'`\n"
-            tools_section += "  - Params: `prompt`, `provider` → Returns: `image_url`, `file_path`\n"
-
+            tools_section += "| Generate image | `generateImage` | Do not use WebSearch |\n"
         if ai_tools_config.get("image_editing", False):
-            tools_section += f"- **editImage**: `import {{ editImage }} from '{tools_dir_str}/dist/image-generation/editImage.js'`\n"
-            tools_section += "  - Params: `prompt`, `image_path`, `provider` (gemini/openai only) → Returns: `image_url`\n"
+            tools_section += "| Edit existing image | `editImage` | Do not use generateImage |\n"
+        if ai_tools_config.get("image_reference", False):
+            tools_section += "| Generate with reference images | `generateWithReference` | Do not use generateImage |\n"
 
-        if ai_tools_config.get("image_reference", False) and providers["has_gemini"]:
-            tools_section += f"- **generateWithReference**: `import {{ generateWithReference }} from '{tools_dir_str}/dist/image-generation/generateWithReference.js'`\n"
-            tools_section += "  - Params: `prompt`, `reference_images[]` (up to 14) → Returns: `image_url`\n"
-
-        tools_section += "\n"
-
-    # =========================================================================
-    # VIDEO TOOLS
-    # =========================================================================
-    if any_video_tools and providers["video_providers"]:
-        tools_section += "### 🎬 Video Tools\n"
-        tools_section += "**Providers:** "
-        provider_list = []
-        for pid, pinfo in providers["video_providers"].items():
-            caps = []
-            if "video-extend" in pinfo["capabilities"]:
-                caps.append("extend")
-            if "video-with-audio" in pinfo["capabilities"]:
-                caps.append("audio")
-            cap_str = f" ({','.join(caps)})" if caps else ""
-            provider_list.append(f"`{pid}`{cap_str}")
-        tools_section += ", ".join(provider_list) + "\n\n"
-
+    if any_video_tools:
         if ai_tools_config.get("video_generation", False) or ai_tools_config.get("video_with_audio", False):
-            tools_section += f"- **generateVideo**: `import {{ generateVideo }} from '{tools_dir_str}/dist/video-generation/generateVideo.js'`\n"
-            tools_section += "  - Params: `prompt`, `duration` (4/6/8), `aspect_ratio`, `provider` → Returns: `video_url`, `source_video_uri`\n"
-            tools_section += "  - For audio: use `veo-3-generate-preview` model. Takes 1-6 min.\n"
-
+            tools_section += "| Generate video from text | `generateVideo` | Do not use WebSearch |\n"
         if ai_tools_config.get("image_to_video", False):
-            tools_section += f"- **imageToVideo**: `import {{ imageToVideo }} from '{tools_dir_str}/dist/video-generation/imageToVideo.js'`\n"
-            tools_section += "  - Params: `image_path`, `prompt`, `provider` → Returns: `video_url`\n"
+            tools_section += "| Animate image to video | `imageToVideo` | Do not use generateVideo |\n"
+        if ai_tools_config.get("video_extend", False):
+            tools_section += "| Extend Veo video | `extendVideo` | Do not use generateVideo |\n"
+        if ai_tools_config.get("video_bridge", False):
+            tools_section += "| Bridge between frames | `bridgeFrames` | Do not use generateVideo |\n"
+        if ai_tools_config.get("video_understanding", False):
+            tools_section += "| Analyze/describe video | `analyzeVideo` | Do not use WebFetch/Read |\n"
 
-        if ai_tools_config.get("video_extend", False) and providers["has_gemini"]:
-            tools_section += f"- **extendVideo** (Veo only): `import {{ extendVideo }} from '{tools_dir_str}/dist/video-generation/extendVideo.js'`\n"
-            tools_section += "  - Params: `video_uri` (from previous result.source_video_uri), `prompt` → Returns: `video_url`\n"
-
-        if ai_tools_config.get("video_bridge", False) and providers["has_gemini"]:
-            tools_section += f"- **bridgeFrames** (Veo only): `import {{ bridgeFrames }} from '{tools_dir_str}/dist/video-generation/bridgeFrames.js'`\n"
-            tools_section += "  - Params: `start_image`, `end_image`, `prompt` → Returns: `video_url`\n"
-
-        if ai_tools_config.get("video_understanding", False) and providers["has_gemini"]:
-            tools_section += f"- **analyzeVideo**: `import {{ analyzeVideo }} from '{tools_dir_str}/dist/video-analysis/analyzeVideo.js'`\n"
-            tools_section += "  - Params: `video_path`, `prompt` → Returns: `response`, `scenes`, `transcript`\n"
-            tools_section += "  - **ONLY tool for video understanding** - not WebFetch/Read\n"
-
-        tools_section += "\n"
-
-    # =========================================================================
-    # 3D MODEL TOOLS
-    # =========================================================================
-    if any_3d_tools and providers["model3d_providers"]:
-        tools_section += "### 🧊 3D Model Tools (Meshy)\n"
-        tools_section += "**Note:** Async (2-5 min). Use `wait_for_completion: true` or poll with `getTask3D`.\n\n"
-
+    if any_3d_tools:
         if ai_tools_config.get("text_to_3d", False):
-            tools_section += f"- **textTo3D**: `import {{ textTo3D }} from '{tools_dir_str}/dist/model3d-generation/textTo3D.js'`\n"
-            tools_section += "  - Params: `prompt`, `art_style` (realistic/sculpture), `model` (latest/meshy-5), `topology`, `target_polycount`, `wait_for_completion`\n"
-
+            tools_section += "| Create 3D from text | `textTo3D` | Do not use image gen |\n"
         if ai_tools_config.get("image_to_3d", False):
-            tools_section += f"- **imageTo3D**: `import {{ imageTo3D }} from '{tools_dir_str}/dist/model3d-generation/imageTo3D.js'`\n"
-            tools_section += "  - Params: `image_path`, `prompt` (optional), `model`, `topology`, `enable_pbr`, `wait_for_completion`\n"
-
+            tools_section += "| Convert image to 3D | `imageTo3D` | Do not use textTo3D |\n"
         if ai_tools_config.get("retexture_3d", False):
-            tools_section += f"- **retexture3D**: `import {{ retexture3D }} from '{tools_dir_str}/dist/model3d-generation/retexture3D.js'`\n"
-            tools_section += "  - Params: `model_path_or_task_id`, `style_prompt`, `style_image` (optional), `enable_pbr`\n"
-
+            tools_section += "| Retexture 3D model | `retexture3D` | |\n"
         if ai_tools_config.get("rig_3d", False):
-            tools_section += f"- **rig3D**: `import {{ rig3D }} from '{tools_dir_str}/dist/model3d-generation/rig3D.js'`\n"
-            tools_section += "  - Params: `model_path_or_task_id`, `height_meters` → Use result.task_id with animate3D\n"
-
+            tools_section += "| Rig 3D model | `rig3D` | |\n"
         if ai_tools_config.get("animate_3d", False):
-            tools_section += f"- **animate3D**: `import {{ animate3D }} from '{tools_dir_str}/dist/model3d-generation/animate3D.js'`\n"
-            tools_section += "  - Params: `rig_task_id` (from rig3D), `action_id` (walk_forward, run, jump, idle, wave, dance_hip_hop, etc), `fps`\n"
+            tools_section += "| Animate 3D model | `animate3D` | |\n"
 
-        tools_section += f"- **getTask3D**: `import {{ getTask3D }} from '{tools_dir_str}/dist/model3d-generation/getTask3D.js'`\n"
-        tools_section += "  - Params: `task_id` → Returns: `status`, `model_urls` (glb/fbx/obj/usdz), `thumbnail_url`\n"
+    # Add helpful notes for specific tool categories
+    if any_video_tools and (ai_tools_config.get("video_generation", False) or ai_tools_config.get("video_with_audio", False)):
+        tools_section += "\n**Video notes:** For audio, pass `model: \"veo-3-generate-preview\"` to generateVideo.\n"
 
-        tools_section += "\n"
+    if any_3d_tools:
+        tools_section += "\n**3D notes:** 3D tools are async (2-5 min). Pass `wait_for_completion: true` or poll with `getTask3D`.\n"
 
     tools_section += "</ai-tools>"
 
@@ -1437,6 +1416,24 @@ def build_options_from_profile(
         # Use preset (TypedDict format for SDK)
         sdk_tools = {"type": "preset", "preset": "claude_code"}
 
+    # Collect MCP tool names that always need to be in allowed_tools
+    # (MCP tools must be explicitly allowed regardless of the tools preset)
+    mcp_allowed_tools: list = []
+    if ai_tools_config and any(ai_tools_config.values()):
+        from app.mcp.ai_tools_sdk import get_enabled_tool_names
+        mcp_allowed_tools = get_enabled_tool_names(ai_tools_config)
+        if mcp_allowed_tools:
+            logger.debug(f"AI MCP tools to allow: {mcp_allowed_tools}")
+
+    # Build final allowed_tools list:
+    # - When sdk_tools is set (preset), built-in tools are handled by the preset.
+    #   Only MCP tool names need to go in allowed_tools.
+    # - When sdk_tools is not set (legacy mode), pass all configured tools + MCP names.
+    if sdk_tools:
+        final_allowed_tools = mcp_allowed_tools
+    else:
+        final_allowed_tools = list(allowed_tools) + mcp_allowed_tools
+
     # Build options with all ClaudeAgentOptions fields
     # Note: We don't set cli_path - let the SDK use its bundled CLI or find system CLI automatically
     # The SDK handles finding Claude properly on all platforms
@@ -1448,10 +1445,10 @@ def build_options_from_profile(
 
         # Tool configuration (SDK 0.1.12+)
         # 'tools' is the new way - explicit list or preset
-        # 'allowed_tools' is legacy - used if tools not set
+        # 'allowed_tools' is legacy - used if tools not set, but MCP tools always go here
         # 'disallowed_tools' always applies as a blocklist
         tools=sdk_tools,
-        allowed_tools=allowed_tools if not sdk_tools else [],  # Only use if tools not set
+        allowed_tools=final_allowed_tools,
         disallowed_tools=disallowed_tools,
 
         # System prompt
@@ -1470,9 +1467,10 @@ def build_options_from_profile(
         # MCP servers - pass all registered MCP servers directly to the SDK
         # This ensures tools from MCP servers (e.g., browser-tools) are available
         # regardless of whether the CLI discovers them from .mcp.json files
-        mcp_servers=_build_mcp_servers_dict(
+        mcp_servers=_build_mcp_servers_dict_with_ai_tools(
             project_dir=Path(working_dir) if working_dir else None,
             browser_session_id=session_id,
+            ai_tools_config=ai_tools_config,
         ) or {},
 
         # Environment and arguments - inject AI tool credentials if enabled

@@ -165,16 +165,9 @@ async def lifespan(app: FastAPI):
     await git_watcher.start()
     await git_hook_manager.start(port=settings.port)
 
-    # Register browser MCP server for AI agent web browsing
-    try:
-        from app.core.mcp_service import get_mcp_service
-        from app.mcp.browser_mcp_registration import ensure_browser_mcp_registered
-        if ensure_browser_mcp_registered(get_mcp_service()):
-            logger.info("Browser MCP server: Registered")
-        else:
-            logger.warning("Browser MCP server: Registration failed (browser tools unavailable)")
-    except Exception as e:
-        logger.warning(f"Browser MCP server: Could not register ({e})")
+    # Browser tools are now served in-process via SDK MCP server
+    # (browser_sdk_tools.py), no startup registration needed.
+    logger.info("Browser MCP server: In-process SDK mode (no subprocess)")
 
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)

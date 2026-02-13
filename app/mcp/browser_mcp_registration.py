@@ -1,8 +1,13 @@
 """
 Auto-registration for the Browser MCP Server.
 
-Ensures the browser-tools MCP server is registered in the user-scope
-.mcp.json so the Claude CLI can discover and use browser tools.
+DEPRECATED: Browser tools are now served in-process via the SDK MCP server
+(see browser_sdk_tools.py). This module is no longer called at startup.
+It is kept temporarily because INTERNAL_BROWSER_TOKEN (in config.py) and
+the BROWSER_MCP_SERVER_NAME constant may still be referenced elsewhere.
+
+Previously, this module registered browser-tools as a stdio subprocess in
+the user-scope .mcp.json so the Claude CLI could discover it.
 """
 
 import logging
