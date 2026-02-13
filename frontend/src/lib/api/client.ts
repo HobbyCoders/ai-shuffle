@@ -1693,11 +1693,13 @@ export interface AutocompleteSubagent {
 export async function getSubagentsForAutocomplete(
 	profileId: string,
 	projectId?: string,
+	worktreeId?: string,
 	search?: string,
 	limit: number = 30
 ): Promise<AutocompleteSubagent[]> {
 	const params = new URLSearchParams();
 	if (projectId) params.set('project_id', projectId);
+	if (worktreeId) params.set('worktree_id', worktreeId);
 	if (search) params.set('search', search);
 	params.set('limit', limit.toString());
 

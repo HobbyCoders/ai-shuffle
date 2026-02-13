@@ -5,7 +5,7 @@ Project management API routes
 import logging
 import shutil
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Request, Query, Form
@@ -610,27 +610,35 @@ async def list_chat_history(
     project_id: str,
     search: str = Query("", description="Search query for filtering sessions"),
     limit: int = Query(50, ge=1, le=100, description="Maximum sessions to return"),
+    worktree_id: Optional[str] = Query(None, description="Worktree ID (overrides project path when in worktree mode)"),
     token: str = Depends(require_auth)
 ):
     """
     List chat history sessions available for referencing in the @ mention UI.
 
-    Returns sessions from the Claude SDK's JSONL history files for this project.
-    These can be referenced as context in new chat sessions.
+    Returns sessions from the Claude SDK's JSONL history files for this project
+    or worktree. When worktree_id is provided, shows history from the worktree directory.
     """
     from app.core.jsonl_parser import list_chat_history_sessions
 
     check_project_access(request, project_id)
 
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
-
-    # Get the project's working directory
-    working_dir = get_project_working_dir(project)
+    # Resolve working directory: worktree takes priority over project
+    working_dir: str
+    if worktree_id:
+        worktree = database.get_worktree(worktree_id)
+        if worktree:
+            working_dir = get_worktree_working_dir(worktree)
+        else:
+            project = database.get_project(project_id)
+            if not project:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project not found: {project_id}")
+            working_dir = get_project_working_dir(project)
+    else:
+        project = database.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project not found: {project_id}")
+        working_dir = get_project_working_dir(project)
 
     # List chat history sessions
     sessions = list_chat_history_sessions(

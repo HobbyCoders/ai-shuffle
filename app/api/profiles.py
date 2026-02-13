@@ -18,7 +18,7 @@ from app.core.models import (
 from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.core.plugin_service import get_plugin_service
-from app.core.project_utils import get_project_working_dir_as_path
+from app.core.project_utils import get_project_working_dir_as_path, get_worktree_working_dir_as_path
 from app.core.project_agent_service import get_project_agent_service
 from app.core.config import settings
 
@@ -164,6 +164,7 @@ async def get_all_available_subagents(
     request: Request,
     profile_id: str,
     project_id: Optional[str] = Query(None, description="Project ID to include project agents"),
+    worktree_id: Optional[str] = Query(None, description="Worktree ID (overrides project path when in worktree mode)"),
     search: str = Query("", description="Search filter for name/description"),
     limit: int = Query(30, ge=1, le=50, description="Maximum number of results"),
     token: str = Depends(require_auth)
@@ -224,11 +225,15 @@ async def get_all_available_subagents(
                 source_name=profile.get("name", profile_id)
             ))
 
-    # 2. Project agents (if project_id provided)
+    # 2. Project agents (if project_id provided; worktree overrides project path)
     if project_id:
         project = database.get_project(project_id)
         if project:
-            project_path = get_project_working_dir_as_path(project)
+            if worktree_id:
+                worktree = database.get_worktree(worktree_id)
+                project_path = get_worktree_working_dir_as_path(worktree) if worktree else get_project_working_dir_as_path(project)
+            else:
+                project_path = get_project_working_dir_as_path(project)
             try:
                 project_agent_service = get_project_agent_service(project_path)
                 for agent in project_agent_service.get_agents():

@@ -334,6 +334,9 @@
         params.set('search', search);
       }
       params.set('limit', '30');
+      if (worktreeId) {
+        params.set('worktree_id', worktreeId);
+      }
 
       const response = await fetch(`/api/v1/projects/${projectId}/chat-history?${params}`, {
         credentials: 'include'
@@ -396,7 +399,7 @@
     }
 
     try {
-      const subagents = await getSubagentsForAutocomplete(profileId, projectId, search || undefined, 30);
+      const subagents = await getSubagentsForAutocomplete(profileId, projectId, worktreeId, search || undefined, 30);
 
       if (fetchId !== fetchCounter) return;
 
