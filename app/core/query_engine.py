@@ -360,7 +360,11 @@ def _build_mcp_servers_dict_with_ai_tools(
             from app.mcp.ai_tools_sdk import create_ai_tools_server
             tools_dir = settings.effective_tools_dir
             if tools_dir:
-                ai_server = create_ai_tools_server(ai_tools_config, str(tools_dir), tool_env=tool_env)
+                ai_server = create_ai_tools_server(
+                    ai_tools_config, str(tools_dir),
+                    tool_env=tool_env,
+                    tool_cwd=str(settings.effective_workspace_dir),
+                )
                 if ai_server:
                     mcp_servers["ai-tools"] = ai_server
                     logger.debug("Added in-process SDK MCP server for ai-tools")

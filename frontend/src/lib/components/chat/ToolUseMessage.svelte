@@ -341,6 +341,23 @@
 			return false;
 		}
 	}
+
+	// Extract media URL from tool result JSON for rendering
+	function getMediaFromResult(content: string): { type: 'image' | 'video'; src: string; filename?: string } | null {
+		try {
+			const data = JSON.parse(content);
+			if (!data.success) return null;
+			if (data.video_url) return { type: 'video', src: data.video_url, filename: data.filename };
+			if (data.image_url) return { type: 'image', src: data.image_url, filename: data.filename };
+			if (data.image_base64) {
+				const mime = data.mime_type || 'image/png';
+				return { type: 'image', src: `data:${mime};base64,${data.image_base64}`, filename: data.filename };
+			}
+			return null;
+		} catch {
+			return null;
+		}
+	}
 </script>
 
 <div class="w-full tool-use-message">
