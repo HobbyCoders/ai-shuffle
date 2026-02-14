@@ -362,6 +362,14 @@ function convertServerMessage(m: Record<string, unknown>, index: number): ChatMe
 	if (m.toolResult !== undefined) msg.toolResult = m.toolResult as string;
 	if (m.toolStatus) msg.toolStatus = m.toolStatus as 'running' | 'complete' | 'error';
 
+	// For streaming tool_use messages, the content field contains accumulated
+	// partial JSON from input_json_delta events (via live_session_store's
+	// update_tool_input_streaming). Map it to partialToolInput so
+	// ToolUseMessage can render input fields incrementally as they stream in.
+	if (serverType === 'tool_use' && msg.streaming && msg.content) {
+		msg.partialToolInput = msg.content;
+	}
+
 	// Subagent fields
 	if (m.agentId) msg.agentId = m.agentId as string;
 	if (m.agentType) msg.agentType = m.agentType as string;
