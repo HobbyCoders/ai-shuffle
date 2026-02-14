@@ -363,7 +363,7 @@ def _build_mcp_servers_dict_with_ai_tools(
                 ai_server = create_ai_tools_server(
                     ai_tools_config, str(tools_dir),
                     tool_env=tool_env,
-                    tool_cwd=str(settings.effective_workspace_dir),
+                    tool_cwd=str(project_dir) if project_dir else str(settings.effective_workspace_dir),
                 )
                 if ai_server:
                     mcp_servers["ai-tools"] = ai_server
