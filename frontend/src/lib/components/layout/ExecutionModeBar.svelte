@@ -286,13 +286,15 @@
 
 <style>
 	.execution-mode-bar {
+		position: relative;
+		z-index: 10;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		gap: 12px;
 		padding: 8px 0 4px;
 		max-width: 100%;
-		overflow: hidden;
+		overflow: visible;
 	}
 
 	/* Segmented pill */
