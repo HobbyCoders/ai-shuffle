@@ -80,6 +80,17 @@ class Settings(BaseSettings):
     # Set via ADMIN_PASSWORD env var or .env file to survive server restarts
     admin_password: Optional[str] = None
 
+    # Timeouts (milliseconds)
+    db_busy_timeout_ms: int = 30_000
+    hook_timeout_ms: int = 30_000
+    browser_action_timeout_ms: int = 5_000
+    browser_fill_timeout_ms: int = 3_000
+
+    # Size limits
+    max_tool_output_chars: int = 500_000  # ~500KB, well under 1MB WS buffer
+    max_display_output_chars: int = 2_000  # What we show in the UI
+    sdk_buffer_size: int = 50 * 1024 * 1024  # 50MB for base64 images/PDFs
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

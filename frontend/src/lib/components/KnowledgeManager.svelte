@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { createEventDispatcher } from 'svelte';
 	import type { KnowledgeDocumentSummary, KnowledgeStats, KnowledgeSearchResult } from '$lib/api/client';
 	import {
 		getKnowledgeDocuments,
@@ -10,11 +9,7 @@
 		getKnowledgeDocumentPreview
 	} from '$lib/api/client';
 
-	export let projectId: string;
-
-	const dispatch = createEventDispatcher<{
-		close: void;
-	}>();
+	let { projectId, onclose }: { projectId: string; onclose?: () => void } = $props();
 
 	// Supported file extensions
 	const SUPPORTED_EXTENSIONS = ['.txt', '.md', '.markdown', '.json', '.yaml', '.yml', '.py', '.js', '.ts', '.html', '.css', '.xml', '.csv', '.log'];
@@ -196,7 +191,7 @@
 				</p>
 			</div>
 			<button
-				on:click={() => dispatch('close')}
+				onclick={() => onclose?.()}
 				class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors" aria-label="Close"
 			>
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -210,7 +205,7 @@
 			{#if error}
 				<div class="p-3 rounded-lg bg-destructive/10 text-destructive text-sm">
 					{error}
-					<button on:click={() => error = ''} class="ml-2 underline">Dismiss</button>
+					<button onclick={() => error = ''} class="ml-2 underline">Dismiss</button>
 				</div>
 			{/if}
 
@@ -218,9 +213,9 @@
 			<div
 				class="relative border-2 border-dashed rounded-xl p-6 text-center transition-colors
 					{isDragging ? 'border-primary bg-primary/5' : 'border-border hover:border-muted-foreground'}"
-				on:dragover={handleDragOver}
-				on:dragleave={handleDragLeave}
-				on:drop={handleDrop}
+				ondragover={handleDragOver}
+				ondragleave={handleDragLeave}
+				ondrop={handleDrop}
 			>
 				{#if uploading}
 					<div class="flex items-center justify-center gap-2">
@@ -242,7 +237,7 @@
 						type="file"
 						multiple
 						accept={SUPPORTED_EXTENSIONS.join(',')}
-						on:change={handleFileInputChange}
+						onchange={handleFileInputChange}
 						class="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
 					/>
 				{/if}
@@ -260,11 +255,11 @@
 							bind:value={searchQuery}
 							placeholder="Search knowledge base..."
 							class="w-full pl-10 pr-4 py-2 rounded-lg bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-							on:keypress={(e) => e.key === 'Enter' && handleSearch()}
+							onkeypress={(e) => e.key === 'Enter' && handleSearch()}
 						/>
 					</div>
 					<button
-						on:click={handleSearch}
+						onclick={handleSearch}
 						disabled={!searchQuery.trim() || searching}
 						class="px-4 py-2 rounded-lg bg-primary text-primary-foreground font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-primary/90 transition-colors"
 					>
@@ -279,7 +274,7 @@
 								{searchResults.length} result{searchResults.length !== 1 ? 's' : ''} for "{searchQuery}"
 							</span>
 							<button
-								on:click={() => { showSearchResults = false; searchResults = []; searchQuery = ''; }}
+								onclick={() => { showSearchResults = false; searchResults = []; searchQuery = ''; }}
 								class="text-sm text-muted-foreground hover:text-foreground"
 							>
 								Clear
@@ -341,7 +336,7 @@
 								</div>
 								<div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity hover-actions">
 									<button
-										on:click={() => showPreview(doc)}
+										onclick={() => showPreview(doc)}
 										class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 										title="Preview"
 										aria-label="Preview"
@@ -354,7 +349,7 @@
 									{#if confirmDelete === doc.id}
 										<span class="text-xs text-destructive">Delete?</span>
 										<button
-											on:click={() => handleDelete(doc.id)}
+											onclick={() => handleDelete(doc.id)}
 											class="p-1.5 rounded-lg text-destructive hover:bg-destructive/10 transition-colors"
 											title="Confirm delete"
 											aria-label="Confirm delete"
@@ -364,7 +359,7 @@
 											</svg>
 										</button>
 										<button
-											on:click={() => confirmDelete = null}
+											onclick={() => confirmDelete = null}
 											class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 											title="Cancel"
 											aria-label="Cancel"
@@ -375,7 +370,7 @@
 										</button>
 									{:else}
 										<button
-											on:click={() => confirmDelete = doc.id}
+											onclick={() => confirmDelete = doc.id}
 											class="p-1.5 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
 											title="Delete"
 											aria-label="Delete"
@@ -406,7 +401,7 @@
 		<!-- Footer -->
 		<div class="flex justify-end px-5 py-4 border-t border-border">
 			<button
-				on:click={() => dispatch('close')}
+				onclick={() => onclose?.()}
 				class="px-4 py-2 rounded-lg bg-muted/50 text-foreground font-medium text-sm hover:bg-hover-overlay transition-colors"
 			>
 				Close
@@ -422,7 +417,7 @@
 			<div class="flex items-center justify-between px-4 py-3 border-b border-border">
 				<h3 class="font-medium text-foreground">{previewDocument.filename}</h3>
 				<button
-					on:click={() => previewDocument = null}
+					onclick={() => previewDocument = null}
 					class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors" aria-label="Close"
 				>
 					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -376,10 +376,6 @@ if static_dir.exists():
     async def serve_spa_workspace():
         return FileResponse(static_dir / "index.html")
 
-    @app.get("/deck")
-    async def serve_spa_deck():
-        return FileResponse(static_dir / "index.html")
-
     @app.get("/favicon.svg")
     async def serve_favicon():
         return FileResponse(static_dir / "favicon.svg")

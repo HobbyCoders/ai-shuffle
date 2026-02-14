@@ -1,10 +1,6 @@
 <script lang="ts">
-	import { createEventDispatcher } from 'svelte';
-
-	const dispatch = createEventDispatcher();
-
 	// Props
-	export let show = false;
+	let { show = $bindable(false), onclose, onimported }: { show: boolean; onclose?: () => void; onimported?: (data: { sessionId: string; title: string; messageCount: number }) => void } = $props();
 
 	// State
 	let fileInput: HTMLInputElement;
@@ -25,7 +21,7 @@
 	function close() {
 		show = false;
 		resetState();
-		dispatch('close');
+		onclose?.();
 	}
 
 	function resetState() {
@@ -131,7 +127,7 @@
 
 			const result = await response.json();
 
-			dispatch('imported', {
+			onimported?.({
 				sessionId: result.session_id,
 				title: result.title,
 				messageCount: result.message_count
@@ -155,8 +151,8 @@
 	<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
 	<div
 		class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] bg-black/50 z-50 flex items-center justify-center p-4"
-		on:click={close}
-		on:keydown={(e) => e.key === 'Escape' && close()}
+		onclick={close}
+		onkeydown={(e) => e.key === 'Escape' && close()}
 		role="dialog"
 		aria-modal="true"
 		tabindex="-1"
@@ -164,14 +160,14 @@
 		<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
 		<div
 			class="bg-card rounded-xl w-full max-w-md overflow-hidden shadow-xl border border-border"
-			on:click|stopPropagation
+			onclick={(e) => e.stopPropagation()}
 		>
 			<!-- Header -->
 			<div class="px-4 py-3 border-b border-border flex items-center justify-between">
 				<h2 class="text-lg font-semibold text-foreground">Import Session</h2>
 				<button
 					class="import-modal-btn p-1.5 text-muted-foreground hover:text-foreground rounded-lg transition-colors"
-					on:click={close}
+					onclick={close}
 					aria-label="Close"
 				>
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -186,7 +182,7 @@
 					type="file"
 					accept=".json"
 					bind:this={fileInput}
-					on:change={handleFileSelect}
+					onchange={handleFileSelect}
 					class="hidden"
 				/>
 
@@ -195,11 +191,11 @@
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<div
 						class="border-2 border-dashed rounded-xl p-8 text-center transition-colors cursor-pointer {isDragOver ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50'}"
-						on:click={triggerFileSelect}
-						on:drop={handleDrop}
-						on:dragover={handleDragOver}
-						on:dragleave={handleDragLeave}
-						on:keydown={(e) => e.key === 'Enter' && triggerFileSelect()}
+						onclick={triggerFileSelect}
+						ondrop={handleDrop}
+						ondragover={handleDragOver}
+						ondragleave={handleDragLeave}
+						onkeydown={(e) => e.key === 'Enter' && triggerFileSelect()}
 						role="button"
 						tabindex="0"
 					>
@@ -234,7 +230,7 @@
 								<p class="text-xs text-muted-foreground">{(selectedFile.size / 1024).toFixed(1)} KB</p>
 							</div>
 							<button
-								on:click={() => { selectedFile = null; previewData = null; }}
+								onclick={() => { selectedFile = null; previewData = null; }}
 								class="p-1 text-muted-foreground hover:text-foreground transition-colors"
 								title="Remove file"
 							>
@@ -296,13 +292,13 @@
 			<!-- Footer -->
 			<div class="px-4 py-3 border-t border-border flex justify-end gap-2 bg-muted/30">
 				<button
-					on:click={close}
+					onclick={close}
 					class="import-modal-cancel px-4 py-2 text-sm bg-muted text-foreground rounded-lg transition-colors"
 				>
 					Cancel
 				</button>
 				<button
-					on:click={handleImport}
+					onclick={handleImport}
 					disabled={!previewData || isImporting}
 					class="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
 				>

@@ -26,38 +26,6 @@ export * from './pwa';
 // Theme
 export * from './theme';
 
-// Canvas store removed
-
-// =============================================================================
-// Deck Stores (legacy, used by feature page components)
-// =============================================================================
-
-// Note: Uses explicit exports to avoid conflicts with workspace store
-export {
-	deck,
-	allCards,
-	focusedCard,
-	workspaceBounds,
-	isMobile,
-	mobileActiveCardIndex,
-	snapEnabled,
-	gridSnapEnabled,
-	// Types
-	type DeckMode,
-	type DeckCardType,
-	type DeckCard,
-	type DeckCardPosition,
-	type DeckCardSize,
-	type DeckState,
-	type SnapZone
-} from './deck';
-
-// Background Agents
-// TODO: Create agents store - currently not implemented
-// export * from './agents';
-
-// Studio store removed - components now use API directly
-
 // Hooks store
 export * from './hooks';
 

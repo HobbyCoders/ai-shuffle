@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { createEventDispatcher } from 'svelte';
 	import {
 		get2FAStatus,
 		setup2FA,
@@ -10,7 +9,7 @@
 		type TwoFactorSetupResponse
 	} from '$lib/api/auth';
 
-	const dispatch = createEventDispatcher();
+	let { onenabled, ondisabled }: { onenabled?: () => void; ondisabled?: () => void } = $props();
 
 	// State
 	let status: TwoFactorStatusResponse | null = null;
@@ -69,7 +68,7 @@
 			verifyCode = '';
 			// Refresh status
 			status = await get2FAStatus();
-			dispatch('enabled');
+			onenabled?.();
 		} catch (e: any) {
 			error = e.detail || 'Invalid code. Please try again.';
 		} finally {
@@ -96,7 +95,7 @@
 			step = 'status';
 			disableCode = '';
 			disablePassword = '';
-			dispatch('disabled');
+			ondisabled?.();
 		} catch (e: any) {
 			error = e.detail || 'Failed to disable 2FA';
 		} finally {
@@ -173,10 +172,10 @@
 				</div>
 
 				<div class="actions">
-					<button class="btn btn-secondary" on:click={handleRegenerateCodes} disabled={loading}>
+					<button class="btn btn-secondary" onclick={handleRegenerateCodes} disabled={loading}>
 						Generate New Recovery Codes
 					</button>
-					<button class="btn btn-danger" on:click={() => (step = 'disable')} disabled={loading}>
+					<button class="btn btn-danger" onclick={() => (step = 'disable')} disabled={loading}>
 						Disable 2FA
 					</button>
 				</div>
@@ -187,7 +186,7 @@
 				</p>
 
 				<div class="actions">
-					<button class="btn btn-primary" on:click={startSetup} disabled={loading}>
+					<button class="btn btn-primary" onclick={startSetup} disabled={loading}>
 						{loading ? 'Setting up...' : 'Enable Two-Factor Authentication'}
 					</button>
 				</div>
@@ -211,7 +210,7 @@
 					<code>{setupData.secret}</code>
 					<button
 						class="btn-copy"
-						on:click={() => navigator.clipboard.writeText(setupData?.secret || '')}
+						onclick={() => navigator.clipboard.writeText(setupData?.secret || '')}
 					>
 						Copy
 					</button>
@@ -238,12 +237,12 @@
 				{/if}
 
 				<div class="actions">
-					<button class="btn btn-secondary" on:click={() => (step = 'status')} disabled={loading}>
+					<button class="btn btn-secondary" onclick={() => (step = 'status')} disabled={loading}>
 						Cancel
 					</button>
 					<button
 						class="btn btn-primary"
-						on:click={verifyAndEnable}
+						onclick={verifyAndEnable}
 						disabled={loading || verifyCode.length !== 6}
 					>
 						{loading ? 'Verifying...' : 'Verify and Enable'}
@@ -270,10 +269,10 @@
 			</div>
 
 			<div class="actions">
-				<button class="btn btn-secondary" on:click={copyRecoveryCodes}>
+				<button class="btn btn-secondary" onclick={copyRecoveryCodes}>
 					Copy All Codes
 				</button>
-				<button class="btn btn-primary" on:click={() => (step = 'status')}>
+				<button class="btn btn-primary" onclick={() => (step = 'status')}>
 					I've Saved My Codes
 				</button>
 			</div>
@@ -319,12 +318,12 @@
 			{/if}
 
 			<div class="actions">
-				<button class="btn btn-secondary" on:click={() => (step = 'status')} disabled={loading}>
+				<button class="btn btn-secondary" onclick={() => (step = 'status')} disabled={loading}>
 					Cancel
 				</button>
 				<button
 					class="btn btn-danger"
-					on:click={handleDisable}
+					onclick={handleDisable}
 					disabled={loading || disableCode.length !== 6 || !disablePassword}
 				>
 					{loading ? 'Disabling...' : 'Disable 2FA'}

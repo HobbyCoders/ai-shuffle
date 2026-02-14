@@ -18,6 +18,9 @@ from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
 from app.core.project_utils import get_project_working_dir
 
+import logging
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 
 
@@ -57,6 +60,73 @@ def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
     return sessions
 
 
+def _apply_session_filters(
+    request: Request,
+    project_id: Optional[str],
+    profile_id: Optional[str],
+    api_user_id: Optional[str],
+    admin_only: bool,
+    api_users_only: bool,
+    sync_claude_sessions: bool,
+) -> tuple:
+    """Apply API user restrictions and sync Claude sessions.
+
+    Shared logic for list_sessions and list_sessions_paginated:
+    1. Force project/profile/api_user_id from API user restrictions
+    2. Auto-sync Claude Code sessions for the project
+    3. Build filter_api_user_id and filter_api_users_only from the flags
+
+    Returns (project_id, profile_id, filter_api_user_id, filter_api_users_only).
+    """
+    api_user = get_api_user_from_request(request)
+
+    # Force API user restrictions
+    if api_user:
+        if api_user.get("project_id"):
+            project_id = api_user["project_id"]
+        if api_user.get("profile_id"):
+            profile_id = api_user["profile_id"]
+        # API users can only see their own sessions
+        api_user_id = api_user["id"]
+        admin_only = False
+        api_users_only = False
+
+    # Auto-sync Claude Code sessions (only for specific project, not global).
+    # Global sync is too expensive to run synchronously on every request.
+    # Use POST /api/v1/projects/{id}/sync-sessions for explicit sync.
+    if sync_claude_sessions and project_id:
+        try:
+            from app.core.session_sync import session_sync_service
+            sync_result = session_sync_service.sync_project_sessions(
+                project_id=project_id,
+                profile_id=profile_id or "default"
+            )
+            if sync_result["imported_count"] > 0:
+                logger.debug(
+                    f"Auto-imported {sync_result['imported_count']} Claude Code sessions "
+                    f"for project {project_id}"
+                )
+        except Exception as e:
+            # Don't fail the request if sync fails - just log and continue
+            logger.warning(f"Failed to auto-sync Claude Code sessions: {e}")
+
+    # Determine api_user_id filter value:
+    # - admin_only=True  -> filter for sessions with api_user_id IS NULL
+    # - api_users_only=True -> filter for sessions with api_user_id IS NOT NULL
+    # - api_user_id set  -> filter for that specific user
+    # - otherwise        -> show all sessions
+    filter_api_user_id = None
+    filter_api_users_only = False
+    if admin_only:
+        filter_api_user_id = ""  # Empty string signals "IS NULL" in database.get_sessions
+    elif api_users_only:
+        filter_api_users_only = True
+    elif api_user_id:
+        filter_api_user_id = api_user_id
+
+    return project_id, profile_id, filter_api_user_id, filter_api_users_only
+
+
 @router.get("", response_model=List[Session])
 async def list_sessions(
     request: Request,
@@ -81,55 +151,9 @@ async def list_sessions(
     yet in the database. This ensures users see all their sessions regardless of whether they
     were created in Claude Code or AI Shuffle.
     """
-    import logging
-    logger = logging.getLogger(__name__)
-
-    api_user = get_api_user_from_request(request)
-
-    # Force API user restrictions
-    if api_user:
-        if api_user.get("project_id"):
-            project_id = api_user["project_id"]
-        if api_user.get("profile_id"):
-            profile_id = api_user["profile_id"]
-        # API users can only see their own sessions
-        api_user_id = api_user["id"]
-        admin_only = False
-        api_users_only = False
-
-    # Auto-sync Claude Code sessions (only for specific project, not global)
-    # Global sync is too expensive to run synchronously on every request.
-    # Use POST /api/v1/projects/{id}/sync-sessions for explicit sync.
-    if sync_claude_sessions and project_id:
-        try:
-            from app.core.session_sync import session_sync_service
-            # Sync specific project only
-            sync_result = session_sync_service.sync_project_sessions(
-                project_id=project_id,
-                profile_id=profile_id or "default"
-            )
-            if sync_result["imported_count"] > 0:
-                logger.debug(
-                    f"Auto-imported {sync_result['imported_count']} Claude Code sessions "
-                    f"for project {project_id}"
-                )
-        except Exception as e:
-            # Don't fail the request if sync fails - just log and continue
-            logger.warning(f"Failed to auto-sync Claude Code sessions: {e}")
-
-    # Determine api_user_id filter value
-    # - If admin_only=True, filter for sessions with api_user_id IS NULL
-    # - If api_users_only=True, filter for sessions with api_user_id IS NOT NULL
-    # - If api_user_id is specified, filter for that specific user
-    # - Otherwise, show all sessions
-    filter_api_user_id = None
-    filter_api_users_only = False
-    if admin_only:
-        filter_api_user_id = ""  # Empty string signals "IS NULL" in database.get_sessions
-    elif api_users_only:
-        filter_api_users_only = True
-    elif api_user_id:
-        filter_api_user_id = api_user_id
+    project_id, profile_id, filter_api_user_id, filter_api_users_only = _apply_session_filters(
+        request, project_id, profile_id, api_user_id, admin_only, api_users_only, sync_claude_sessions
+    )
 
     sessions = database.get_sessions(
         project_id=project_id,
@@ -165,46 +189,9 @@ async def list_sessions_paginated(
     List sessions with pagination metadata (total count, has_more).
     Use this endpoint for infinite scroll UIs that need to know the total count.
     """
-    import logging
-    logger = logging.getLogger(__name__)
-
-    api_user = get_api_user_from_request(request)
-
-    # Force API user restrictions
-    if api_user:
-        if api_user.get("project_id"):
-            project_id = api_user["project_id"]
-        if api_user.get("profile_id"):
-            profile_id = api_user["profile_id"]
-        api_user_id = api_user["id"]
-        admin_only = False
-        api_users_only = False
-
-    # Auto-sync Claude Code sessions
-    if sync_claude_sessions and project_id:
-        try:
-            from app.core.session_sync import session_sync_service
-            sync_result = session_sync_service.sync_project_sessions(
-                project_id=project_id,
-                profile_id=profile_id or "default"
-            )
-            if sync_result["imported_count"] > 0:
-                logger.debug(
-                    f"Auto-imported {sync_result['imported_count']} Claude Code sessions "
-                    f"for project {project_id}"
-                )
-        except Exception as e:
-            logger.warning(f"Failed to auto-sync Claude Code sessions: {e}")
-
-    # Determine api_user_id filter value
-    filter_api_user_id = None
-    filter_api_users_only = False
-    if admin_only:
-        filter_api_user_id = ""
-    elif api_users_only:
-        filter_api_users_only = True
-    elif api_user_id:
-        filter_api_user_id = api_user_id
+    project_id, profile_id, filter_api_user_id, filter_api_users_only = _apply_session_filters(
+        request, project_id, profile_id, api_user_id, admin_only, api_users_only, sync_claude_sessions
+    )
 
     sessions, total = database.get_sessions_paginated(
         project_id=project_id,
@@ -334,9 +321,7 @@ async def search_sessions_paginated(
 @router.get("/{session_id}", response_model=SessionWithMessages)
 async def get_session(request: Request, session_id: str, token: str = Depends(require_auth)):
     """Get a session with its message history. API users can only access their assigned sessions."""
-    import logging
     import traceback
-    logger = logging.getLogger(__name__)
 
     logger.debug(f"Loading session: {session_id}")
 
@@ -513,11 +498,8 @@ async def get_live_session(
     - last_update_id: For efficient polling (only fetch if updated)
     - usage: Token usage counts
     """
-    import logging
     from starlette.responses import Response
     from app.core.live_session_store import live_session_store
-
-    logger = logging.getLogger(__name__)
 
     # Check session exists and user has access
     session = database.get_session(session_id)
@@ -867,12 +849,9 @@ async def export_session(
         - For markdown: Plain text Markdown representation
         - For JSON: Full session data including metadata and messages
     """
-    import logging
     from datetime import datetime
     from fastapi.responses import Response
     import json
-
-    logger = logging.getLogger(__name__)
 
     # Validate format
     if format not in ("markdown", "json"):
@@ -1124,13 +1103,10 @@ async def import_session(
     Returns:
         Information about the imported session
     """
-    import logging
     import json
     import uuid
     from datetime import datetime
     from app.core.config import settings
-
-    logger = logging.getLogger(__name__)
 
     # Validate file type
     if not file.filename or not file.filename.endswith('.json'):
@@ -1446,15 +1422,12 @@ async def import_jsonl_session(
     Returns:
         Information about the imported session
     """
-    import logging
     import uuid
     from pathlib import Path
     from app.core.jsonl_parser import (
         get_session_cost_from_jsonl,
         _get_session_title_and_preview
     )
-
-    logger = logging.getLogger(__name__)
 
     jsonl_path = Path(body.jsonl_path)
 
@@ -1599,13 +1572,10 @@ async def fork_session(
     Returns:
         Information about the forked session
     """
-    import logging
     import uuid
     import json
     from app.core.config import settings
     from app.core.jsonl_parser import get_session_jsonl_path, parse_jsonl_file
-
-    logger = logging.getLogger(__name__)
 
     # Get the original session
     original_session = database.get_session(session_id)
@@ -1802,10 +1772,7 @@ async def create_session_with_worktree(
     Returns:
         Session and worktree information
     """
-    import logging
     from app.core.worktree_manager import worktree_manager
-
-    logger = logging.getLogger(__name__)
 
     # Verify project exists and user has access
     project = database.get_project(body.project_id)

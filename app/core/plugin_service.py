@@ -300,11 +300,21 @@ class PluginService:
         Returns:
             MarketplaceInfo for the new marketplace
         """
+        # Validate URL before passing to subprocess
+        import re
+        if not re.match(r'^https?://[\w\-.]+(:\d+)?(/[\w\-./%+@]*)*$', url) and \
+           not re.match(r'^git@[\w\-.]+:[\w\-./]+$', url):
+            raise ValueError(f"Invalid git URL: {url[:100]}")
+
         # Derive name from URL if not provided
         if not name:
             name = url.rstrip("/").split("/")[-1]
             if name.endswith(".git"):
                 name = name[:-4]
+
+        # Validate derived name (prevent path traversal)
+        if not re.match(r'^[\w\-]+$', name):
+            raise ValueError(f"Invalid marketplace name: {name[:50]}")
 
         install_location = str(self.MARKETPLACES_DIR / name)
 
@@ -312,7 +322,7 @@ class PluginService:
         if not Path(install_location).exists():
             try:
                 subprocess.run(
-                    ["git", "clone", url, install_location],
+                    ["git", "clone", "--depth", "1", url, install_location],
                     check=True,
                     capture_output=True,
                     timeout=120

@@ -1,12 +1,8 @@
 <script lang="ts">
-	import { createEventDispatcher } from 'svelte';
 	import type { Tag } from '$lib/api/client';
 	import { getTags, createTag, updateTag, deleteTag } from '$lib/api/client';
 
-	const dispatch = createEventDispatcher<{
-		close: void;
-		tagsUpdated: Tag[];
-	}>();
+	let { onclose, ontagsupdated }: { onclose?: () => void; ontagsupdated?: (tags: Tag[]) => void } = $props();
 
 	// Predefined colors for tags
 	const TAG_COLORS = [
@@ -54,7 +50,7 @@
 			tags = [...tags, tag].sort((a, b) => a.name.localeCompare(b.name));
 			newTagName = '';
 			newTagColor = TAG_COLORS[4].value;
-			dispatch('tagsUpdated', tags);
+			ontagsupdated?.(tags);
 		} catch (err: any) {
 			error = err.detail || 'Failed to create tag';
 		}
@@ -79,7 +75,7 @@
 			});
 			tags = tags.map(t => t.id === updated.id ? updated : t).sort((a, b) => a.name.localeCompare(b.name));
 			editingTag = null;
-			dispatch('tagsUpdated', tags);
+			ontagsupdated?.(tags);
 		} catch (err: any) {
 			error = err.detail || 'Failed to update tag';
 		}
@@ -98,7 +94,7 @@
 			await deleteTag(tagId);
 			tags = tags.filter(t => t.id !== tagId);
 			confirmDelete = null;
-			dispatch('tagsUpdated', tags);
+			ontagsupdated?.(tags);
 		} catch (err: any) {
 			error = err.detail || 'Failed to delete tag';
 		}
@@ -114,7 +110,7 @@
 		<div class="flex items-center justify-between px-5 py-4 border-b border-border">
 			<h2 class="text-lg font-semibold text-foreground">Manage Tags</h2>
 			<button
-				on:click={() => dispatch('close')}
+				onclick={() => onclose?.()}
 				aria-label="Close"
 				class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 			>
@@ -142,12 +138,12 @@
 						bind:value={newTagName}
 						placeholder="Tag name..."
 						class="flex-1 px-3 py-2 rounded-lg bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-						on:keypress={(e) => e.key === 'Enter' && handleCreateTag()}
+						onkeypress={(e) => e.key === 'Enter' && handleCreateTag()}
 					/>
 					<div class="flex items-center gap-1">
 						{#each TAG_COLORS as color}
 							<button
-								on:click={() => newTagColor = color.value}
+								onclick={() => newTagColor = color.value}
 								class="w-6 h-6 rounded-full transition-transform {newTagColor === color.value ? 'ring-2 ring-offset-2 ring-offset-background ring-primary scale-110' : 'hover:scale-110'}"
 								style="background-color: {color.value}"
 								title={color.name}
@@ -155,7 +151,7 @@
 						{/each}
 					</div>
 					<button
-						on:click={handleCreateTag}
+						onclick={handleCreateTag}
 						disabled={!newTagName.trim()}
 						class="px-3 py-2 rounded-lg bg-primary text-primary-foreground font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-primary/90 transition-colors"
 					>
@@ -185,12 +181,12 @@
 										type="text"
 										bind:value={editName}
 										class="flex-1 px-2 py-1 rounded bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-										on:keypress={(e) => e.key === 'Enter' && saveEdit()}
+										onkeypress={(e) => e.key === 'Enter' && saveEdit()}
 									/>
 									<div class="flex items-center gap-1">
 										{#each TAG_COLORS as color}
 											<button
-												on:click={() => editColor = color.value}
+												onclick={() => editColor = color.value}
 												class="w-5 h-5 rounded-full transition-transform {editColor === color.value ? 'ring-2 ring-offset-1 ring-offset-background ring-primary scale-110' : 'hover:scale-110'}"
 												style="background-color: {color.value}"
 												title={color.name}
@@ -198,7 +194,7 @@
 										{/each}
 									</div>
 									<button
-										on:click={saveEdit}
+										onclick={saveEdit}
 										class="p-1.5 rounded-lg text-success hover:bg-success/10 transition-colors"
 										title="Save"
 									>
@@ -207,7 +203,7 @@
 										</svg>
 									</button>
 									<button
-										on:click={cancelEdit}
+										onclick={cancelEdit}
 										class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 										title="Cancel"
 									>
@@ -223,7 +219,7 @@
 									></span>
 									<span class="flex-1 text-sm text-foreground">{tag.name}</span>
 									<button
-										on:click={() => startEdit(tag)}
+										onclick={() => startEdit(tag)}
 										class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 										title="Edit"
 									>
@@ -234,7 +230,7 @@
 									{#if confirmDelete === tag.id}
 										<span class="text-xs text-destructive">Delete?</span>
 										<button
-											on:click={() => handleDelete(tag.id)}
+											onclick={() => handleDelete(tag.id)}
 											class="p-1.5 rounded-lg text-destructive hover:bg-destructive/10 transition-colors"
 											title="Confirm delete"
 										>
@@ -243,7 +239,7 @@
 											</svg>
 										</button>
 										<button
-											on:click={() => confirmDelete = null}
+											onclick={() => confirmDelete = null}
 											class="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-hover-overlay transition-colors"
 											title="Cancel"
 										>
@@ -253,7 +249,7 @@
 										</button>
 									{:else}
 										<button
-											on:click={() => confirmDelete = tag.id}
+											onclick={() => confirmDelete = tag.id}
 											class="p-1.5 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
 											title="Delete"
 										>
@@ -273,7 +269,7 @@
 		<!-- Footer -->
 		<div class="flex justify-end px-5 py-4 border-t border-border">
 			<button
-				on:click={() => dispatch('close')}
+				onclick={() => onclose?.()}
 				class="px-4 py-2 rounded-lg bg-muted/50 text-foreground font-medium text-sm hover:bg-hover-overlay transition-colors"
 			>
 				Close

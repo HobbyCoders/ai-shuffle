@@ -81,6 +81,9 @@ frontend/build-frontend.bat
 /generated-audio
 frontend/build.bat
 
+# Generated reports
+docs/insights-report.html
+
 # Coverage
 .coverage
 htmlcov/

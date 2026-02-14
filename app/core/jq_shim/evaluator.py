@@ -4,8 +4,11 @@ jq expression evaluator.
 Evaluates AST nodes against JSON data with variable support.
 """
 
+import logging
 from typing import Any, Dict, List, Optional
 from .parser import ASTNode, NodeType
+
+logger = logging.getLogger(__name__)
 
 
 class EvaluationError(Exception):
@@ -653,7 +656,7 @@ class JQEvaluator:
         if func_name == "debug":
             import sys
             import json
-            print(f"DEBUG: {json.dumps(data)}", file=sys.stderr)
+            logger.debug("jq debug: %s", json.dumps(data))
             return data
 
         if func_name == "getpath":

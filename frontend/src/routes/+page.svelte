@@ -274,8 +274,8 @@
 	// ============================================
 	// Import Session Handlers
 	// ============================================
-	async function handleImportSuccess(event: CustomEvent<{ sessionId: string; title: string; messageCount: number }>) {
-		const { sessionId } = event.detail;
+	async function handleImportSuccess(data: { sessionId: string; title: string; messageCount: number }) {
+		const { sessionId } = data;
 		await appData.loadSessions();
 		handleOpenSession(sessionId);
 		showImportModal = false;
@@ -340,16 +340,16 @@
 
 	<!-- Import Session Modal -->
 	<ImportSessionModal
-		show={showImportModal}
-		on:close={() => showImportModal = false}
-		on:imported={handleImportSuccess}
+		bind:show={showImportModal}
+		onclose={() => showImportModal = false}
+		onimported={handleImportSuccess}
 	/>
 
 	<!-- Tag Manager Modal -->
 	{#if showTagManager}
 		<TagManager
-			on:close={handleTagManagerClose}
-			on:tagsUpdated={() => loadAllTags()}
+			onclose={handleTagManagerClose}
+			ontagsupdated={() => loadAllTags()}
 		/>
 	{/if}
 
@@ -357,7 +357,7 @@
 	{#if showKnowledgeModal && $activeSession?.project}
 		<KnowledgeManager
 			projectId={$activeSession.project}
-			on:close={() => showKnowledgeModal = false}
+			onclose={() => showKnowledgeModal = false}
 		/>
 	{/if}
 

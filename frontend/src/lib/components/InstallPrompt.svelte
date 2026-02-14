@@ -1,17 +1,20 @@
 <script lang="ts">
 	import { pwa, isInstallable } from '$lib/stores/pwa';
 
-	let showPrompt = false;
-	let isDismissed = false;
+	let showPrompt = $state(false);
+	let isDismissed = $state(false);
 
 	// Show the prompt with a delay to not be intrusive
-	$: if ($isInstallable && !isDismissed) {
-		setTimeout(() => {
-			showPrompt = true;
-		}, 3000);
-	} else {
-		showPrompt = false;
-	}
+	$effect(() => {
+		if ($isInstallable && !isDismissed) {
+			const timer = setTimeout(() => {
+				showPrompt = true;
+			}, 3000);
+			return () => clearTimeout(timer);
+		} else {
+			showPrompt = false;
+		}
+	});
 
 	async function handleInstall() {
 		const installed = await pwa.promptInstall();

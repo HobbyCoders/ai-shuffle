@@ -40,15 +40,10 @@ from app.core.mcp_service import get_mcp_service, McpServerType
 
 logger = logging.getLogger(__name__)
 
-# Maximum size for tool output before truncation (in characters)
-# Keep well under 1MB to avoid WebSocket JSON buffer overflow
-MAX_TOOL_OUTPUT_SIZE = 500_000  # ~500KB to leave room for JSON overhead
-MAX_DISPLAY_OUTPUT_SIZE = 2000  # What we show in the UI
-
-# Default SDK buffer size for reading CLI output (50MB)
-# The SDK's default is 1MB which is too small for images/PDFs (base64 encoded)
-# This must match the max_buffer_size in ClaudeAgentOptions
-DEFAULT_SDK_BUFFER_SIZE = 50 * 1024 * 1024  # 50MB
+# Use centralized constants from config (can be overridden via env vars)
+MAX_TOOL_OUTPUT_SIZE = settings.max_tool_output_chars
+MAX_DISPLAY_OUTPUT_SIZE = settings.max_display_output_chars
+DEFAULT_SDK_BUFFER_SIZE = settings.sdk_buffer_size
 
 
 def extract_mcp_image(content: Any) -> Optional[str]:
