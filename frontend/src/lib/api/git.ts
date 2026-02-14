@@ -488,6 +488,36 @@ export async function pullFromRemote(
 }
 
 // ============================================================================
+// Init Repo API
+// ============================================================================
+
+export interface InitRepoRequest {
+    create_initial_commit?: boolean;
+    create_github_repo?: boolean;
+    github_repo_name?: string;
+    github_private?: boolean;
+    default_branch?: string;
+}
+
+export interface InitRepoResponse {
+    success: boolean;
+    message: string;
+    repository_id: string | null;
+    github_repo_url: string | null;
+    github_repo_name: string | null;
+}
+
+/**
+ * Initialize a git repository for a project
+ */
+export async function initRepository(
+    projectId: string,
+    request: InitRepoRequest = {}
+): Promise<InitRepoResponse> {
+    return api.post<InitRepoResponse>(`${BASE}/${projectId}/git/init`, request);
+}
+
+// ============================================================================
 // AI Generation API
 // ============================================================================
 

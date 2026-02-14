@@ -5,13 +5,14 @@
 	 * Branch selector dropdown (checkout branches), commit button, and diff stats.
 	 * Branch selector is locked during streaming.
 	 */
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2 } from 'lucide-svelte';
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode } from '$lib/stores/git';
 	import { githubRepoInfo } from '$lib/stores/github';
 
 	interface Props {
 		projectId: string;
 		isStreaming?: boolean;
+		isGitRepo?: boolean;
 		/** When set, forces worktree read-only mode and uses this as the branch display.
 		 *  This ensures the correct branch shows immediately without waiting for the store to load. */
 		worktreeBranch?: string | null;
@@ -23,9 +24,10 @@
 		onClickNewBranch: () => void;
 		onClickPush: () => void;
 		onClickPull: () => void;
+		onClickInitRepo?: () => void;
 	}
 
-	let { projectId, isStreaming = false, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull }: Props = $props();
+	let { projectId, isStreaming = false, isGitRepo = true, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo }: Props = $props();
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
@@ -115,6 +117,7 @@
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
 
 <div class="git-actions">
+	{#if isGitRepo}
 	<!-- Branch selector -->
 	<div class="branch-selector" bind:this={dropdownRef}>
 		<button
@@ -256,6 +259,18 @@
 			{/if}
 		</div>
 	{/if}
+
+	{:else}
+		<!-- No git repo: show Init button -->
+		<button
+			class="git-btn init-btn"
+			onclick={onClickInitRepo}
+			title="Initialize a git repository for this project"
+		>
+			<FolderGit2 size={14} strokeWidth={1.5} />
+			<span class="btn-label">Init Repo</span>
+		</button>
+	{/if}
 </div>
 
 <style>
@@ -302,6 +317,15 @@
 
 	.git-btn :global(svg) {
 		flex-shrink: 0;
+	}
+
+	.init-btn {
+		border-color: var(--primary);
+		color: var(--primary);
+	}
+
+	.init-btn:hover:not(:disabled) {
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
 	}
 
 	.btn-label {

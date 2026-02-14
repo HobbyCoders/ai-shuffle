@@ -24,6 +24,7 @@
 	import CommitProgressModal from '$lib/components/git/CommitProgressModal.svelte';
 	import FinishModal from '$lib/components/git/FinishModal.svelte';
 	import PullModal from '$lib/components/git/PullModal.svelte';
+	import InitRepoModal from '$lib/components/git/InitRepoModal.svelte';
 
 	// Feature page components
 	import SettingsCard from '$lib/components/deck/cards/SettingsCard.svelte';
@@ -125,6 +126,9 @@
 
 	// Pull modal state
 	let showPullModal = $state(false);
+
+	// Init repo modal state
+	let showInitRepoModal = $state(false);
 
 	// PR detection for current branch
 	let branchPR = $state<{ number: number; title: string; url: string; head_branch: string } | null>(null);
@@ -582,6 +586,7 @@
 						<GitHeaderActions
 							projectId={activeTab.project}
 							isStreaming={$gitControlsStreaming}
+							isGitRepo={$gitStatus?.is_git_repo !== false}
 							worktreeBranch={activeWorktreeBranch}
 							openPR={branchPR}
 							onClickCommit={() => { showCommitModalMode = 'commit'; showCommitModal = true; }}
@@ -589,7 +594,8 @@
 							onClickFinish={() => showFinishModal = true}
 							onClickNewBranch={() => showCreateBranchModal = true}
 							onClickPush={handlePush}
-						onClickPull={() => showPullModal = true}
+							onClickPull={() => showPullModal = true}
+							onClickInitRepo={() => showInitRepoModal = true}
 						/>
 					{/if}
 				{/snippet}
@@ -711,6 +717,18 @@
 				_pendingPRModal = false;
 				showCommitModalMode = 'pr-only';
 				showCommitModal = true;
+			}
+		}}
+	/>
+
+	<InitRepoModal
+		open={showInitRepoModal}
+		projectId={activeTab.project}
+		projectName={headerProjectName ?? ''}
+		onClose={() => showInitRepoModal = false}
+		onInitialized={() => {
+			if (activeTab?.project) {
+				git.loadRepository(activeTab.project, true);
 			}
 		}}
 	/>

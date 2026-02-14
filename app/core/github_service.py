@@ -228,6 +228,49 @@ class GitHubService:
             logger.debug(f"Failed to get repo info: {e}")
             return None
 
+    def create_repo(
+        self,
+        name: str,
+        private: bool = True,
+        description: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """Create a new GitHub repository using gh CLI.
+
+        Args:
+            name: Repository name
+            private: If True, create a private repository
+            description: Optional repository description
+
+        Returns:
+            Dict with name, full_name, url, clone_url keys, or None on failure
+        """
+        try:
+            args = ['repo', 'create', name]
+            args.append('--private' if private else '--public')
+            if description:
+                args.extend(['--description', description])
+            args.extend(['--json', 'name,nameWithOwner,url,sshUrl'])
+
+            result = self._run_gh(args, timeout=30)
+
+            if result.returncode != 0:
+                logger.error(f"Failed to create GitHub repo: {result.stderr}")
+                return None
+
+            data = json.loads(result.stdout)
+            return {
+                'name': data.get('name'),
+                'full_name': data.get('nameWithOwner'),
+                'url': data.get('url'),
+                'clone_url': data.get('sshUrl') or data.get('url'),
+            }
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse repo creation response: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to create GitHub repo: {e}")
+            return None
+
     # =========================================================================
     # Pull Requests
     # =========================================================================

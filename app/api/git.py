@@ -166,6 +166,24 @@ class PullResponse(BaseModel):
     has_conflicts: bool = False
 
 
+class InitRepoRequest(BaseModel):
+    """Request to initialize a git repository"""
+    create_initial_commit: bool = Field(default=True, description="Create an initial commit after init")
+    create_github_repo: bool = Field(default=False, description="Create a GitHub repository and add as remote")
+    github_repo_name: Optional[str] = Field(default=None, max_length=100, description="GitHub repo name (if creating)")
+    github_private: bool = Field(default=True, description="Make the GitHub repo private")
+    default_branch: str = Field(default="main", pattern=r'^[a-zA-Z0-9._/-]+$')
+
+
+class InitRepoResponse(BaseModel):
+    """Response for init repo endpoint"""
+    success: bool
+    message: str
+    repository_id: Optional[str] = None
+    github_repo_url: Optional[str] = None
+    github_repo_name: Optional[str] = None
+
+
 class GenerateCommitMessageRequest(BaseModel):
     """Request to generate a commit message using AI"""
     include_unstaged: bool = Field(default=True)
@@ -463,6 +481,110 @@ async def get_git_status(
     await git_state_cache.set_category(cache_key, "status", response.model_dump())
 
     return response
+
+
+@router.post("/init", response_model=InitRepoResponse)
+async def init_repository(
+    request: Request,
+    project_id: str,
+    body: InitRepoRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Initialize a new git repository for a project.
+
+    Optionally creates an initial commit and/or a GitHub repository with remote.
+    """
+    check_project_access(request, project_id)
+    working_dir = get_project_path(project_id)
+
+    # Guard: don't re-init an existing repo
+    if git_service.is_git_repo(working_dir):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project is already a git repository"
+        )
+
+    # Step 1: git init
+    success = git_service.init_repo(working_dir, default_branch=body.default_branch)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to initialize git repository"
+        )
+
+    github_repo_url = None
+    github_full_name = None
+
+    # Step 2: Optional initial commit
+    if body.create_initial_commit:
+        staged = git_service.stage_files(working_dir, ["."])
+        if staged:
+            git_service.commit(working_dir, "Initial commit")
+
+    # Step 3: Optional GitHub repo creation
+    if body.create_github_repo and body.github_repo_name:
+        from app.core.github_service import github_service
+
+        if github_service.is_authenticated():
+            repo_info = github_service.create_repo(
+                name=body.github_repo_name,
+                private=body.github_private,
+            )
+            if repo_info:
+                github_repo_url = repo_info['url']
+                github_full_name = repo_info['full_name']
+                clone_url = repo_info['clone_url']
+
+                # Add remote origin
+                git_service._run_git(
+                    working_dir,
+                    ["remote", "add", "origin", clone_url],
+                    timeout=10
+                )
+
+                # Push initial commit if we made one
+                if body.create_initial_commit:
+                    git_service.push(
+                        working_dir,
+                        remote="origin",
+                        branch=body.default_branch,
+                        set_upstream=True
+                    )
+            else:
+                logger.warning(f"Failed to create GitHub repo '{body.github_repo_name}'")
+
+    # Step 4: Create database record
+    repo = ensure_git_repository_record(project_id, working_dir)
+
+    # Update record with GitHub info if we created a repo
+    if github_full_name and repo:
+        database.update_git_repository(
+            repo["id"],
+            remote_url=git_service.get_remote_url(working_dir),
+            github_repo_name=github_full_name,
+        )
+
+    # Step 5: Invalidate cache and broadcast
+    await git_state_cache.invalidate_project(project_id)
+    await _broadcast_git_update(
+        request, project_id, working_dir,
+        {"status", "branches", "diff_stats"}
+    )
+
+    message = "Git repository initialized"
+    if body.create_initial_commit:
+        message += " with initial commit"
+    if github_repo_url:
+        message += f" and linked to {github_full_name}"
+
+    return InitRepoResponse(
+        success=True,
+        message=message,
+        repository_id=repo["id"] if repo else None,
+        github_repo_url=github_repo_url,
+        github_repo_name=github_full_name,
+    )
 
 
 @router.get("/branches", response_model=BranchListResponse)

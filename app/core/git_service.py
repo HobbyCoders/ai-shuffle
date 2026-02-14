@@ -77,6 +77,31 @@ class GitService:
             logger.warning(f"is_git_repo check failed for '{working_dir}': {e}")
             return False
 
+    def init_repo(self, working_dir: str, default_branch: str = "main") -> bool:
+        """Initialize a new git repository.
+
+        Args:
+            working_dir: Directory to initialize as a git repo
+            default_branch: Name for the initial branch (default: main)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            result = self._run_git(
+                working_dir,
+                ["init", "--initial-branch", default_branch],
+                timeout=10
+            )
+            if result.returncode == 0:
+                logger.debug(f"Initialized git repository at {working_dir}")
+                return True
+            logger.warning(f"Failed to init repo: {result.stderr}")
+            return False
+        except Exception as e:
+            logger.error(f"Error initializing git repository: {e}")
+            return False
+
     def get_remote_url(self, working_dir: str) -> Optional[str]:
         """Get the remote URL for origin."""
         try:
