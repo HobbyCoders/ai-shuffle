@@ -134,14 +134,6 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
         "category": "collaboration",
         "providers": ["deepseek", "openai"]
     },
-
-    # Web browsing tools
-    "web_browsing": {
-        "name": "Web Browsing",
-        "description": "Interactive web browser — navigate, click, fill forms, extract content, take screenshots",
-        "category": "browser",
-        "providers": ["playwright"]
-    },
 }
 
 # ============================================================================
@@ -162,8 +154,6 @@ PROVIDER_KEY_MAP: Dict[str, str] = {
     "openai": "openai_api_key",
     "google": "image_api_key",
     "deepseek": "deepseek_api_key",
-    # Browser providers (no API key needed - local Playwright)
-    "playwright": None,
 }
 
 # ============================================================================

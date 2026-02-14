@@ -501,29 +501,14 @@
   transition: all var(--transition-fast);
 }
 
-/* Model badges — mapped to theme semantic colors */
-.card-badge--haiku {
-  background: color-mix(in oklch, var(--success) 15%, transparent);
-  color: var(--success);
-  border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
-}
-
-.card-badge--sonnet {
-  background: color-mix(in oklch, var(--info) 15%, transparent);
-  color: var(--info);
-  border: 1px solid color-mix(in oklch, var(--info) 30%, transparent);
-}
-
-.card-badge--sonnet-1m {
+/* Model badges — unified theme primary */
+.card-badge--haiku,
+.card-badge--sonnet,
+.card-badge--sonnet-1m,
+.card-badge--opus {
   background: color-mix(in oklch, var(--primary) 15%, transparent);
   color: var(--primary);
   border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
-}
-
-.card-badge--opus {
-  background: color-mix(in oklch, var(--warning) 15%, transparent);
-  color: var(--warning);
-  border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
 }
 
 .card-badge--inherit {

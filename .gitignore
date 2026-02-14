@@ -88,3 +88,4 @@ docs/insights-report.html
 .coverage
 htmlcov/
 build-frontend.bat
+tools/mockups/profile-design-1-sidebar.html

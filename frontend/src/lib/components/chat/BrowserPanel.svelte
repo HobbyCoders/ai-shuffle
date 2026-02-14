@@ -607,7 +607,7 @@
 	.screenshot-area {
 		flex: 1;
 		min-height: 0;
-		overflow: auto;
+		overflow: hidden;
 		display: flex;
 		align-items: stretch;
 		justify-content: center;
@@ -617,8 +617,10 @@
 	.screenshot-wrapper {
 		position: relative;
 		width: 100%;
+		height: 100%;
 		display: flex;
-		align-items: flex-start;
+		align-items: center;
+		justify-content: center;
 		cursor: crosshair;
 		outline: none;
 	}
@@ -629,7 +631,7 @@
 
 	.screenshot-img {
 		width: 100%;
-		height: auto;
+		height: 100%;
 		display: block;
 		object-fit: contain;
 		pointer-events: none;

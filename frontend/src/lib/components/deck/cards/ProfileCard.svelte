@@ -1727,6 +1727,7 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-md, 10px);
 		overflow: hidden;
+		margin-top: var(--space-2, 8px);
 	}
 
 	.source-section-header {
@@ -2136,29 +2137,14 @@
 		font-size: 0.75rem;
 	}
 
-	/* --- Model-color item icons — uses theme semantic colors --- */
-	.fp-item-icon--haiku {
-		background: color-mix(in oklch, var(--success) 15%, transparent);
-		color: var(--success);
-		border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
-	}
-
-	.fp-item-icon--sonnet {
-		background: color-mix(in oklch, var(--info) 15%, transparent);
-		color: var(--info);
-		border: 1px solid color-mix(in oklch, var(--info) 30%, transparent);
-	}
-
-	.fp-item-icon--sonnet-1m {
+	/* --- Model item icons — unified theme primary --- */
+	.fp-item-icon--haiku,
+	.fp-item-icon--sonnet,
+	.fp-item-icon--sonnet-1m,
+	.fp-item-icon--opus {
 		background: color-mix(in oklch, var(--primary) 15%, transparent);
 		color: var(--primary);
 		border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
-	}
-
-	.fp-item-icon--opus {
-		background: color-mix(in oklch, var(--warning) 15%, transparent);
-		color: var(--warning);
-		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
 	}
 
 	.fp-model-initial {
