@@ -323,7 +323,8 @@ def _create_3d_tools(tools_dir: str, tool_env: Optional[Dict[str, str]] = None, 
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the 3D model to generate"},
             "art_style": {"type": "string", "description": "Art style (e.g., realistic, sculpture)"},
-            "model": {"type": "string", "description": "Model to use (latest, meshy-5)"},
+            "model": {"type": "string", "description": "Model to use (latest, meshy-5, or fal-ai model IDs like fal-ai/hunyuan-3d/v2/turbo)"},
+            "provider": {"type": "string", "description": "Provider to use: 'meshy' (default) or 'fal-ai'"},
             "topology": {"type": "string", "description": "Mesh topology type"},
             "target_polycount": {"type": "integer", "description": "Target polygon count"},
             "wait_for_completion": {"type": "boolean", "description": "Wait for completion (true) or return task ID immediately"}
@@ -347,7 +348,8 @@ def _create_3d_tools(tools_dir: str, tool_env: Optional[Dict[str, str]] = None, 
         "properties": {
             "image_path": {"type": "string", "description": "Path to the reference image"},
             "prompt": {"type": "string", "description": "Optional text description to guide generation"},
-            "model": {"type": "string", "description": "Model to use (latest, meshy-5)"},
+            "model": {"type": "string", "description": "Model to use (latest, meshy-5, or fal-ai model IDs like fal-ai/hunyuan-3d/v2/turbo)"},
+            "provider": {"type": "string", "description": "Provider to use: 'meshy' (default) or 'fal-ai'"},
             "topology": {"type": "string", "description": "Mesh topology type"},
             "enable_pbr": {"type": "boolean", "description": "Enable PBR materials"},
             "wait_for_completion": {"type": "boolean", "description": "Wait for completion (true) or return task ID immediately"}

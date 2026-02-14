@@ -1050,12 +1050,14 @@ def _build_env_with_ai_tools(
         gemini_api_key = _resolve_api_credential("gemini_api_key", api_user_id)
         openai_api_key = _resolve_api_credential("openai_api_key", api_user_id)
         meshy_api_key = _resolve_api_credential("meshy_api_key", api_user_id)
+        fal_api_key = _resolve_api_credential("fal_api_key", api_user_id)
         logger.debug(f"Resolved credentials for API user {api_user_id}")
     else:
         # Admin/local session - use admin keys directly
         gemini_api_key = _get_decrypted_api_key("image_api_key")
         openai_api_key = _get_decrypted_api_key("openai_api_key")
         meshy_api_key = _get_decrypted_api_key("meshy_api_key")
+        fal_api_key = _get_decrypted_api_key("fal_api_key")
 
     # Inject ALL available API keys so Claude can dynamically choose providers
     # This is the key change - instead of only injecting the default provider's key,
@@ -1075,6 +1077,10 @@ def _build_env_with_ai_tools(
         env["MESHY_API_KEY"] = meshy_api_key
         env["MODEL3D_API_KEY"] = meshy_api_key  # Alternative name
         logger.debug("Injected MESHY_API_KEY for 3D model tools (Meshy)")
+
+    if fal_api_key:
+        env["FAL_KEY"] = fal_api_key
+        logger.debug("Injected FAL_KEY for fal.ai tools (Flux, Kling, Hunyuan-3D)")
 
     # Set default provider/model from settings (Claude can override these per-request)
     if any_image_tools:

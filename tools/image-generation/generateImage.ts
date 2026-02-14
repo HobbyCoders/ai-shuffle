@@ -182,6 +182,10 @@ function getApiKey(providerId: string): string {
     return process.env.OPENAI_API_KEY || '';
   }
 
+  if (providerId === 'fal-ai') {
+    return process.env.FAL_KEY || '';
+  }
+
   return '';
 }
 

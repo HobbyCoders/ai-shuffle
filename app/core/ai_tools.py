@@ -25,7 +25,7 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
         "name": "Image Generation",
         "description": "Generate AI images from text prompts (supports 1K-4K, multiple images)",
         "category": "image",
-        "providers": ["google-gemini", "google-imagen", "openai-gpt-image"]
+        "providers": ["google-gemini", "google-imagen", "openai-gpt-image", "fal-ai"]
     },
     "image_editing": {
         "name": "Image Editing",
@@ -45,7 +45,7 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
         "name": "Video Generation",
         "description": "Generate AI videos from text prompts (4-12 sec)",
         "category": "video",
-        "providers": ["google-veo", "openai-sora"]
+        "providers": ["google-veo", "openai-sora", "fal-ai"]
     },
     "video_with_audio": {
         "name": "Video with Audio",
@@ -57,7 +57,7 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
         "name": "Image to Video",
         "description": "Animate a still image into a video",
         "category": "video",
-        "providers": ["google-veo", "openai-sora"]
+        "providers": ["google-veo", "openai-sora", "fal-ai"]
     },
     "video_extend": {
         "name": "Video Extension",
@@ -78,18 +78,18 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
         "providers": ["google-gemini-video"]
     },
 
-    # 3D Model tools (Meshy)
+    # 3D Model tools
     "text_to_3d": {
         "name": "Text to 3D",
         "description": "Generate 3D models from text descriptions",
         "category": "3d",
-        "providers": ["meshy"]
+        "providers": ["meshy", "fal-ai"]
     },
     "image_to_3d": {
         "name": "Image to 3D",
         "description": "Generate 3D models from reference images",
         "category": "3d",
-        "providers": ["meshy"]
+        "providers": ["meshy", "fal-ai"]
     },
     "retexture_3d": {
         "name": "3D Retexturing",
@@ -156,6 +156,8 @@ PROVIDER_KEY_MAP: Dict[str, str] = {
     "openai-sora": "openai_api_key",
     "google-gemini-video": "image_api_key",
     "meshy": "meshy_api_key",
+    # fal.ai (single key covers image, video, 3D)
+    "fal-ai": "fal_api_key",
     # Collaboration providers
     "openai": "openai_api_key",
     "google": "image_api_key",

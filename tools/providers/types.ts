@@ -32,6 +32,7 @@ export const API_KEY_PATTERNS: Record<string, { prefix?: string; minLength: numb
   google: { minLength: 30, description: 'Google API keys are typically 39 characters' },
   gemini: { minLength: 30, description: 'Gemini API keys are typically 39 characters' },
   meshy: { minLength: 20, description: 'Meshy API keys are alphanumeric strings' },
+  fal: { minLength: 10, description: 'fal.ai API keys are alphanumeric strings' },
 };
 
 /**
@@ -443,6 +444,8 @@ export interface ToolEnvironment {
   MODEL3D_API_KEY?: string;
   MODEL3D_MODEL?: string;
   MESHY_API_KEY?: string;
+  // fal.ai (single key covers image, video, 3D)
+  FAL_KEY?: string;
   // Legacy support (backwards compatible)
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;

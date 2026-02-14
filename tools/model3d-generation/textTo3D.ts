@@ -41,6 +41,7 @@ import {
   pollForCompletion,
   saveModelFromResponse
 } from './shared.js';
+import { registry } from '../providers/registry.js';
 
 export interface TextTo3DInput {
   /**
@@ -68,7 +69,14 @@ export interface TextTo3DInput {
    * - "meshy-4": Fast generation (5 credits)
    * @default "latest"
    */
-  model?: 'meshy-4' | 'meshy-5' | 'latest';
+  model?: string;
+
+  /**
+   * Override the default 3D provider.
+   * Available: "meshy" (default), "fal-ai"
+   * If not specified, uses Meshy directly.
+   */
+  provider?: string;
 
   /**
    * Mesh topology type.
@@ -160,6 +168,38 @@ export type TextTo3DResponse = Model3DResponse;
  * ```
  */
 export async function textTo3D(input: TextTo3DInput): Promise<TextTo3DResponse> {
+  // Route to fal.ai provider if specified
+  if (input.provider === 'fal-ai') {
+    const provider = registry.getModel3DProvider('fal-ai');
+    if (!provider) {
+      return { success: false, error: "fal-ai 3D provider not found." };
+    }
+    const falKey = process.env.FAL_KEY || '';
+    if (!falKey) {
+      return { success: false, error: 'FAL_KEY environment variable not set.' };
+    }
+    const falModel = input.model || provider.models[0]?.id || 'fal-ai/hunyuan-3d/v2/turbo';
+    const result = await provider.textTo3D(
+      { prompt: input.prompt, art_style: input.art_style, topology: input.topology, target_polycount: input.target_polycount },
+      { apiKey: falKey },
+      falModel
+    );
+    // Map Model3DResult → Model3DResponse
+    return {
+      success: result.success,
+      task_id: result.task_id,
+      model_url: result.model_urls?.glb,
+      model_urls: result.model_urls,
+      file_path: result.file_path,
+      filename: result.filename,
+      status: result.status,
+      progress: result.progress,
+      thumbnail_url: result.thumbnail_url,
+      error: result.error,
+    };
+  }
+
+  // Default: Meshy direct path
   // Get API key from environment
   const apiKey = getMeshyApiKey();
   if (!apiKey) {

@@ -286,6 +286,11 @@ import { openaiAudioProvider } from './audio/openai-audio.js';
 // 3D model providers
 import { meshyProvider } from './model3d/meshy.js';
 
+// fal.ai providers (unified single-key access to multiple models)
+import { falImageProvider } from './image/fal-ai.js';
+import { falVideoProvider } from './video/fal-ai.js';
+import { fal3DProvider } from './model3d/fal-ai.js';
+
 // Register image providers
 registry.registerImageProvider(googleGeminiProvider);
 registry.registerImageProvider(googleImagenProvider);
@@ -303,6 +308,11 @@ registry.registerAudioProvider(openaiAudioProvider);
 
 // Register 3D model providers
 registry.registerModel3DProvider(meshyProvider);
+
+// Register fal.ai providers (single API key covers all modalities)
+registry.registerImageProvider(falImageProvider);
+registry.registerVideoProvider(falVideoProvider);
+registry.registerModel3DProvider(fal3DProvider);
 
 // Future providers:
 // import { stabilityAiProvider } from './image/stability-ai.js';
