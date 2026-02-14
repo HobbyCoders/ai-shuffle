@@ -34,9 +34,21 @@
 		tools: AITool[];
 	}
 
+	interface ToolInfo {
+		name: string;
+		description: string;
+		mcp_server?: string;
+	}
+
+	interface ToolCategory {
+		id: string;
+		name: string;
+		tools: ToolInfo[];
+	}
+
 	interface ToolsResponse {
-		all_tools: { name: string; description: string }[];
-		categories: { name: string; tools: { name: string; description: string }[] }[];
+		all_tools: ToolInfo[];
+		categories: ToolCategory[];
 	}
 
 	interface Subagent {
@@ -159,6 +171,41 @@
 	// Tool selection mode
 	let toolSelectionMode = $state<'all' | 'allow' | 'disallow'>('all');
 	let aiToolSelectionMode = $state<'all' | 'custom'>('custom');
+
+	// Collapsible tool source sections
+	let expandedSections = $state<Record<string, boolean>>({
+		sdk: true,
+		ai: true,
+		mcp: false,
+		plugins: false
+	});
+
+	function toggleSection(id: string) {
+		expandedSections = { ...expandedSections, [id]: !expandedSections[id] };
+	}
+
+	// SDK-only categories (exclude MCP-sourced tools)
+	const sdkToolCategories = $derived(
+		availableTools.categories.filter((c: ToolCategory) => c.id !== 'mcp' && c.id !== 'browser')
+	);
+
+	// MCP tools grouped by server name
+	const mcpToolsByServer = $derived.by(() => {
+		const groups: Record<string, { name: string; description: string }[]> = {};
+		for (const tool of availableTools.all_tools) {
+			if (tool.name.startsWith('mcp__')) {
+				const parts = tool.name.split('__');
+				const server = parts[1];
+				const toolName = parts.slice(2).join('__');
+				if (!groups[server]) groups[server] = [];
+				groups[server].push({ name: toolName, description: tool.description });
+			}
+		}
+		return groups;
+	});
+
+	const mcpServerNames = $derived(Object.keys(mcpToolsByServer));
+	const mcpToolCount = $derived(Object.values(mcpToolsByServer).reduce((sum, tools) => sum + tools.length, 0));
 
 	// AI Tools
 	let aiToolCategories = $state<AIToolCategory[]>([]);
@@ -853,11 +900,13 @@
 						</div>
 					</div>
 				{:else if activeTab === 'tools'}
-					<!-- Tools Tab -->
+					<!-- Unified Tools Tab -->
+
+					<!-- SDK Tool Access Mode -->
 					<div class="card-form-section">
 						<div class="section-header">
-							<h3 class="card-form-title">Claude Tools</h3>
-							<span class="card-badge card-badge--primary">{availableTools.all_tools.length} available</span>
+							<h3 class="card-form-title">Tool Access Mode</h3>
+							<span class="card-badge card-badge--primary">{availableTools.all_tools.length} total</span>
 						</div>
 						<div class="card-mode-selector">
 							<button type="button" class="card-mode-btn" class:card-mode-btn--active={toolSelectionMode === 'all'} onclick={() => { toolSelectionMode = 'all'; profileForm.allowed_tools = []; profileForm.disallowed_tools = []; }}>All Tools</button>
@@ -865,101 +914,214 @@
 							<button type="button" class="card-mode-btn" class:card-mode-btn--active={toolSelectionMode === 'disallow'} onclick={() => { toolSelectionMode = 'disallow'; profileForm.allowed_tools = []; }}>Disallow</button>
 						</div>
 						<p class="card-form-hint">
-							{#if toolSelectionMode === 'all'}Agent can use all available tools.
-							{:else if toolSelectionMode === 'allow'}Agent can ONLY use selected tools.
-							{:else}Agent can use all tools EXCEPT selected ones.{/if}
+							{#if toolSelectionMode === 'all'}Agent can use all available SDK and MCP tools.
+							{:else if toolSelectionMode === 'allow'}Agent can ONLY use selected SDK and MCP tools.
+							{:else}Agent can use all SDK and MCP tools EXCEPT selected ones.{/if}
 						</p>
-						{#if toolSelectionMode !== 'all'}
-							<div class="tools-list">
-								{#each availableTools.categories as category}
-									{#if category.tools.length > 0}
-										{@const state = getCategorySelectionState(category)}
-										<div class="tool-category">
-											<button type="button" class="category-header" onclick={() => toggleCategory(category)}>
-												<div class="category-checkbox" class:checked={state !== 'none'} class:partial={state === 'some'}>
-													{#if state === 'all'}
-														<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
-													{:else if state === 'some'}
-														<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" /></svg>
-													{/if}
+					</div>
+
+					<!-- Section 1: Built-in SDK Tools -->
+					<div class="tool-source-section">
+						<button type="button" class="source-section-header" onclick={() => toggleSection('sdk')}>
+							<span class="source-section-title">Built-in Tools</span>
+							<span class="card-badge card-badge--muted">{sdkToolCategories.reduce((sum, c) => sum + c.tools.length, 0)}</span>
+							<svg class="chevron" class:expanded={expandedSections.sdk} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+						</button>
+						{#if expandedSections.sdk}
+							<div class="source-section-body">
+								{#if toolSelectionMode !== 'all'}
+									<div class="tools-list">
+										{#each sdkToolCategories as category}
+											{#if category.tools.length > 0}
+												{@const state = getCategorySelectionState(category)}
+												<div class="tool-category">
+													<button type="button" class="category-header" onclick={() => toggleCategory(category)}>
+														<div class="category-checkbox" class:checked={state !== 'none'} class:partial={state === 'some'}>
+															{#if state === 'all'}
+																<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
+															{:else if state === 'some'}
+																<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" /></svg>
+															{/if}
+														</div>
+														<span class="category-name">{category.name}</span>
+														<span class="category-count">{category.tools.length}</span>
+													</button>
+													<div class="category-tools">
+														{#each category.tools as tool}
+															{@const isSelected = toolSelectionMode === 'allow' ? profileForm.allowed_tools.includes(tool.name) : profileForm.disallowed_tools.includes(tool.name)}
+															<label class="tool-item">
+																<input type="checkbox" checked={isSelected} onchange={() => toggleTool(tool.name)} class="tool-checkbox" />
+																<span class="tool-name" title={tool.description}>{tool.name}</span>
+															</label>
+														{/each}
+													</div>
 												</div>
-												<span class="category-name">{category.name}</span>
-												<span class="category-count">{category.tools.length}</span>
-											</button>
-											<div class="category-tools">
-												{#each category.tools as tool}
-													{@const isSelected = toolSelectionMode === 'allow' ? profileForm.allowed_tools.includes(tool.name) : profileForm.disallowed_tools.includes(tool.name)}
-													<label class="tool-item">
-														<input type="checkbox" checked={isSelected} onchange={() => toggleTool(tool.name)} class="tool-checkbox" />
-														<span class="tool-name" title={tool.description}>{tool.name}</span>
-													</label>
-												{/each}
-											</div>
-										</div>
-									{/if}
-								{/each}
-							</div>
-							<div class="selection-count">
-								{#if toolSelectionMode === 'allow'}{profileForm.allowed_tools.length} tool{profileForm.allowed_tools.length !== 1 ? 's' : ''} allowed
-								{:else}{profileForm.disallowed_tools.length} tool{profileForm.disallowed_tools.length !== 1 ? 's' : ''} blocked{/if}
+											{/if}
+										{/each}
+									</div>
+									<div class="selection-count">
+										{#if toolSelectionMode === 'allow'}{profileForm.allowed_tools.length} tool{profileForm.allowed_tools.length !== 1 ? 's' : ''} allowed
+										{:else}{profileForm.disallowed_tools.length} tool{profileForm.disallowed_tools.length !== 1 ? 's' : ''} blocked{/if}
+									</div>
+								{:else}
+									<p class="card-form-hint" style="padding: 0 var(--space-4, 16px) var(--space-3, 12px);">All built-in tools are available.</p>
+								{/if}
 							</div>
 						{/if}
 					</div>
-					<!-- AI Tools Section -->
-					<div class="card-form-section">
-						<div class="section-header">
-							<h3 class="card-form-title">AI Tools</h3>
+
+					<!-- Section 2: AI Tools -->
+					<div class="tool-source-section">
+						<button type="button" class="source-section-header" onclick={() => toggleSection('ai')}>
+							<span class="source-section-title">AI Tools</span>
 							{#if !aiToolsLoading}
 								<span class="card-badge card-badge--primary">{aiToolCount} enabled</span>
 							{/if}
-						</div>
-						<div class="card-mode-selector">
-							<button type="button" class="card-mode-btn" class:card-mode-btn--active={aiToolSelectionMode === 'all'} onclick={() => (aiToolSelectionMode = 'all')}>All Tools</button>
-							<button type="button" class="card-mode-btn" class:card-mode-btn--active={aiToolSelectionMode === 'custom'} onclick={() => (aiToolSelectionMode = 'custom')}>Custom</button>
-						</div>
-						{#if aiToolSelectionMode === 'custom'}
-							{#if aiToolsLoading}
-								<div class="loading-state">Loading AI tools...</div>
-							{:else if aiToolCategories.length === 0}
-								<div class="card-empty-state"><p class="card-empty-description">No AI tools available. Configure API keys in Settings.</p></div>
-							{:else}
-								<div class="tools-list">
-									{#each aiToolCategories as category}
-										{#if category.tools.length > 0}
-											{@const state = getAICategorySelectionState(category)}
-											<div class="tool-category">
-												<button type="button" class="category-header" onclick={() => toggleAIToolCategory(category)}>
-													<div class="category-checkbox" class:checked={state !== 'none'} class:partial={state === 'some'}>
-														{#if state === 'all'}
-															<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
-														{:else if state === 'some'}
-															<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" /></svg>
-														{/if}
-													</div>
-													<span class="category-name">{category.name}</span>
-													<span class="category-count">{category.tools.length}</span>
-												</button>
-												<div class="ai-category-tools">
-													{#each category.tools as tool}
-														{@const isSelected = profileForm.enabled_ai_tools.includes(tool.id)}
-														<label class="ai-tool-row" class:disabled={!tool.available}>
-															<input type="checkbox" checked={isSelected} disabled={!tool.available} onchange={() => toggleAITool(tool.id)} class="tool-checkbox" />
-															<div class="ai-tool-content">
-																<span class="tool-name">{tool.name}</span>
-																{#if !tool.available}<span class="card-badge card-badge--warning">No API key</span>{/if}
-																<p class="ai-tool-description">{tool.description}</p>
+							<svg class="chevron" class:expanded={expandedSections.ai} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+						</button>
+						{#if expandedSections.ai}
+							<div class="source-section-body">
+								<div class="source-section-controls">
+									<div class="card-mode-selector">
+										<button type="button" class="card-mode-btn" class:card-mode-btn--active={aiToolSelectionMode === 'all'} onclick={() => (aiToolSelectionMode = 'all')}>All Tools</button>
+										<button type="button" class="card-mode-btn" class:card-mode-btn--active={aiToolSelectionMode === 'custom'} onclick={() => (aiToolSelectionMode = 'custom')}>Custom</button>
+									</div>
+								</div>
+								{#if aiToolSelectionMode === 'custom'}
+									{#if aiToolsLoading}
+										<div class="loading-state">Loading AI tools...</div>
+									{:else if aiToolCategories.length === 0}
+										<div class="card-empty-state"><p class="card-empty-description">No AI tools available. Configure API keys in Settings.</p></div>
+									{:else}
+										<div class="tools-list">
+											{#each aiToolCategories as category}
+												{#if category.tools.length > 0}
+													{@const state = getAICategorySelectionState(category)}
+													<div class="tool-category">
+														<button type="button" class="category-header" onclick={() => toggleAIToolCategory(category)}>
+															<div class="category-checkbox" class:checked={state !== 'none'} class:partial={state === 'some'}>
+																{#if state === 'all'}
+																	<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
+																{:else if state === 'some'}
+																	<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" /></svg>
+																{/if}
 															</div>
-														</label>
+															<span class="category-name">{category.name}</span>
+															<span class="category-count">{category.tools.length}</span>
+														</button>
+														<div class="ai-category-tools">
+															{#each category.tools as tool}
+																{@const isSelected = profileForm.enabled_ai_tools.includes(tool.id)}
+																<label class="ai-tool-row" class:disabled={!tool.available}>
+																	<input type="checkbox" checked={isSelected} disabled={!tool.available} onchange={() => toggleAITool(tool.id)} class="tool-checkbox" />
+																	<div class="ai-tool-content">
+																		<span class="tool-name">{tool.name}</span>
+																		{#if !tool.available}<span class="card-badge card-badge--warning">No API key</span>{/if}
+																		<p class="ai-tool-description">{tool.description}</p>
+																	</div>
+																</label>
+															{/each}
+														</div>
+													</div>
+												{/if}
+											{/each}
+										</div>
+									{/if}
+								{:else}
+									<p class="card-form-hint" style="padding: 0 var(--space-4, 16px) var(--space-3, 12px);">All configured AI tools are enabled.</p>
+								{/if}
+							</div>
+						{/if}
+					</div>
+
+					<!-- Section 3: MCP Server Tools (read-only) -->
+					<div class="tool-source-section">
+						<button type="button" class="source-section-header" onclick={() => toggleSection('mcp')}>
+							<span class="source-section-title">MCP Tools</span>
+							<span class="card-badge card-badge--muted">{mcpToolCount}</span>
+							<span class="card-badge card-badge--info">read-only</span>
+							<svg class="chevron" class:expanded={expandedSections.mcp} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+						</button>
+						{#if expandedSections.mcp}
+							<div class="source-section-body">
+								{#if mcpServerNames.length === 0}
+									<div class="card-empty-state" style="padding: var(--space-3, 12px) var(--space-4, 16px);">
+										<p class="card-empty-description">No MCP tools discovered.</p>
+										<p class="card-empty-description small">Configure MCP servers in Settings.</p>
+									</div>
+								{:else}
+									<p class="card-form-hint" style="padding: 0 var(--space-4, 16px) var(--space-2, 8px);">MCP tools are globally configured. Subject to the tool access mode above.</p>
+									<div class="tools-list">
+										{#each mcpServerNames as server}
+											{@const tools = mcpToolsByServer[server]}
+											<div class="tool-category">
+												<div class="category-header readonly">
+													<span class="category-name">{server}</span>
+													<span class="category-count">{tools.length}</span>
+												</div>
+												<div class="category-tools">
+													{#each tools as tool}
+														<div class="tool-item readonly">
+															<span class="tool-name" title={tool.description}>{tool.name}</span>
+														</div>
 													{/each}
 												</div>
 											</div>
-										{/if}
-									{/each}
-								</div>
-							{/if}
-						{:else}
-							<p class="card-form-hint">All configured AI tools are enabled. Configure API keys in Settings.</p>
+										{/each}
+									</div>
+								{/if}
+							</div>
 						{/if}
+					</div>
+
+					<!-- Section 4: Plugin Tools (read-only) -->
+					<div class="tool-source-section">
+						<button type="button" class="source-section-header" onclick={() => toggleSection('plugins')}>
+							<span class="source-section-title">Plugin Tools</span>
+							<span class="card-badge card-badge--muted">{pluginAgents.reduce((sum, a) => sum + (a.tools?.length || 0), 0)}</span>
+							<span class="card-badge card-badge--info">read-only</span>
+							<svg class="chevron" class:expanded={expandedSections.plugins} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+						</button>
+						{#if expandedSections.plugins}
+							<div class="source-section-body">
+								<div class="source-section-actions">
+									<button type="button" class="text-btn primary" onclick={() => onOpenPlugins?.()}>Manage Plugins</button>
+								</div>
+								{#if pluginAgents.length === 0}
+									<div class="card-empty-state" style="padding: var(--space-3, 12px) var(--space-4, 16px);">
+										<p class="card-empty-description">No plugin tools available.</p>
+										<p class="card-empty-description small">Install and enable plugins to get tools.</p>
+									</div>
+								{:else}
+									<p class="card-form-hint" style="padding: 0 var(--space-4, 16px) var(--space-2, 8px);">Tools from enabled plugins (managed via plugin settings)</p>
+									<div class="plugin-agents-list" style="padding: 0 var(--space-4, 16px) var(--space-3, 12px);">
+										{#each pluginAgents as agent (agent.id)}
+											<div class="plugin-agent-item">
+												<div class="plugin-agent-info">
+													<div class="plugin-agent-header">
+														<span class="plugin-agent-name">{agent.name}</span>
+														<span class="card-badge card-badge--muted">{agent.plugin_name}</span>
+													</div>
+												</div>
+												{#if agent.tools && agent.tools.length > 0}
+													<div class="plugin-agent-tools">
+														{#each agent.tools as tool}<span class="tool-badge">{tool}</span>{/each}
+													</div>
+												{/if}
+											</div>
+										{/each}
+									</div>
+								{/if}
+							</div>
+						{/if}
+					</div>
+
+					<!-- Tools Summary -->
+					<div class="tools-summary">
+						{sdkToolCategories.reduce((sum, c) => sum + c.tools.length, 0)} built-in &middot;
+						{aiToolCount} AI &middot;
+						{mcpToolCount} MCP &middot;
+						{pluginAgents.reduce((sum, a) => sum + (a.tools?.length || 0), 0)} plugin
 					</div>
 				{:else if activeTab === 'agents'}
 					<!-- Agents Tab -->
@@ -995,41 +1157,7 @@
 							<div class="selection-count">{profileForm.enabled_agents.length} of {allSubagents.length} enabled</div>
 						{/if}
 					</div>
-					<div class="card-form-section">
-						<div class="section-header">
-							<h3 class="card-form-title">Plugin Agents</h3>
-							<button type="button" class="text-btn primary" onclick={() => onOpenPlugins?.()}>Manage Plugins</button>
-						</div>
-						{#if pluginAgents.length === 0}
-							<div class="card-empty-state">
-								<p class="card-empty-description">No plugin agents available</p>
-								<p class="card-empty-description small">Install and enable plugins to get agents</p>
-							</div>
-						{:else}
-							<p class="card-form-hint">Agents from enabled plugins (managed via plugin settings)</p>
-							<div class="plugin-agents-list">
-								{#each pluginAgents as agent (agent.id)}
-									<div class="plugin-agent-item">
-										<div class="plugin-agent-info">
-											<div class="plugin-agent-header">
-												<span class="plugin-agent-name">{agent.name}</span>
-												<span class="card-badge card-badge--muted">{agent.plugin_name}</span>
-												{#if agent.model}<span class="card-badge {getModelBadgeClass(agent.model)}">{getModelDisplay(agent.model)}</span>{/if}
-											</div>
-											<p class="plugin-agent-desc">{agent.description}</p>
-										</div>
-										{#if agent.tools && agent.tools.length > 0}
-											<div class="plugin-agent-tools">
-												{#each agent.tools.slice(0, 3) as tool}<span class="tool-badge">{tool}</span>{/each}
-												{#if agent.tools.length > 3}<span class="tool-badge more">+{agent.tools.length - 3}</span>{/if}
-											</div>
-										{/if}
-									</div>
-								{/each}
-							</div>
-							<div class="selection-count">{pluginAgents.length} plugin agent{pluginAgents.length !== 1 ? 's' : ''} available</div>
-						{/if}
-					</div>
+					<!-- Plugin agents now shown in the unified Tools tab -->
 				{:else if activeTab === 'prompt'}
 					<!-- System Prompt Tab -->
 					<div class="card-form-section">
@@ -1592,6 +1720,92 @@
 		margin-top: var(--space-3, 12px);
 		padding-top: var(--space-3, 12px);
 		border-top: 1px solid var(--border-subtle);
+	}
+
+	/* Tool Source Sections (collapsible accordion) */
+	.tool-source-section {
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		overflow: hidden;
+	}
+
+	.source-section-header {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2, 8px);
+		width: 100%;
+		padding: var(--space-3, 12px) var(--space-4, 16px);
+		background: var(--surface-1);
+		border: none;
+		color: var(--text-primary);
+		font-size: var(--text-md, 0.875rem);
+		cursor: pointer;
+		transition: background var(--transition-smooth, 200ms);
+	}
+
+	.source-section-header:hover {
+		background: var(--surface-hover);
+	}
+
+	.source-section-title {
+		flex: 1;
+		text-align: left;
+		font-weight: 600;
+	}
+
+	.source-section-body {
+		border-top: 1px solid var(--border-subtle);
+	}
+
+	.source-section-controls {
+		padding: var(--space-2, 8px) var(--space-4, 16px);
+	}
+
+	.source-section-actions {
+		display: flex;
+		justify-content: flex-end;
+		padding: var(--space-2, 8px) var(--space-4, 16px) 0;
+	}
+
+	.chevron {
+		color: var(--text-secondary);
+		transform: rotate(0deg);
+		transition: transform var(--transition-fast, 100ms);
+		flex-shrink: 0;
+	}
+
+	.chevron.expanded {
+		transform: rotate(180deg);
+	}
+
+	.category-header.readonly {
+		cursor: default;
+	}
+
+	.category-header.readonly:hover {
+		background: var(--surface-1);
+	}
+
+	.tool-item.readonly {
+		cursor: default;
+		padding-left: var(--space-4, 16px);
+	}
+
+	.tool-item.readonly:hover {
+		background: transparent;
+	}
+
+	.tools-summary {
+		font-size: var(--text-sm, 0.75rem);
+		color: var(--text-secondary);
+		padding: var(--space-3, 12px) 0;
+		text-align: center;
+	}
+
+	.card-badge--info {
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		color: var(--primary);
+		font-size: var(--text-xs, 0.6875rem);
 	}
 
 	/* AI Tools - Category Tools with descriptions */
