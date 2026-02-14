@@ -331,6 +331,7 @@ def _build_mcp_servers_dict_with_ai_tools(
     project_dir: Optional[Path] = None,
     browser_session_id: Optional[str] = None,
     ai_tools_config: Optional[Dict[str, Any]] = None,
+    tool_env: Optional[Dict[str, str]] = None,
 ) -> Optional[dict]:
     """
     Build MCP servers dict including AI content generation tools.
@@ -342,6 +343,8 @@ def _build_mcp_servers_dict_with_ai_tools(
         project_dir: Optional project directory for project-scoped servers.
         browser_session_id: Optional session ID to inject into browser-tools env.
         ai_tools_config: Optional dict with individual AI tool toggles.
+        tool_env: Environment variables (API keys, provider settings) to inject
+            into AI tool Node.js subprocesses.
 
     Returns:
         Dictionary mapping server names to SDK MCP server configs, or None if empty.
@@ -357,7 +360,7 @@ def _build_mcp_servers_dict_with_ai_tools(
             from app.mcp.ai_tools_sdk import create_ai_tools_server
             tools_dir = settings.effective_tools_dir
             if tools_dir:
-                ai_server = create_ai_tools_server(ai_tools_config, str(tools_dir))
+                ai_server = create_ai_tools_server(ai_tools_config, str(tools_dir), tool_env=tool_env)
                 if ai_server:
                     mcp_servers["ai-tools"] = ai_server
                     logger.debug("Added in-process SDK MCP server for ai-tools")
@@ -1406,6 +1409,12 @@ def build_options_from_profile(
     else:
         final_allowed_tools = list(allowed_tools) + mcp_allowed_tools
 
+    # Build AI tool environment (API keys + provider settings) ONCE, then pass to both:
+    # 1. MCP server creation (so Node.js tool subprocesses get the keys)
+    # 2. ClaudeAgentOptions env (so the Claude CLI subprocess also gets them)
+    full_env = _build_env_with_ai_tools(config.get("env"), ai_tools_config, api_user_id)
+    ai_tool_env = full_env if full_env else None
+
     # Build options with all ClaudeAgentOptions fields
     # Note: We don't set cli_path - let the SDK use its bundled CLI or find system CLI automatically
     # The SDK handles finding Claude properly on all platforms
@@ -1439,15 +1448,17 @@ def build_options_from_profile(
         # MCP servers - pass all registered MCP servers directly to the SDK
         # This ensures tools from MCP servers (e.g., browser-tools) are available
         # regardless of whether the CLI discovers them from .mcp.json files
+        # Note: ai_tool_env is passed so Node.js tool subprocesses get API keys
         mcp_servers=_build_mcp_servers_dict_with_ai_tools(
             project_dir=Path(working_dir) if working_dir else None,
             browser_session_id=session_id,
             ai_tools_config=ai_tools_config,
+            tool_env=ai_tool_env,
         ) or {},
 
         # Environment and arguments - inject AI tool credentials if enabled
         # Pass api_user_id for policy-based credential resolution
-        env=_build_env_with_ai_tools(config.get("env"), ai_tools_config, api_user_id),
+        env=full_env,
         extra_args=_build_extra_args(config.get("extra_args") or {}, hooks),
 
         # Buffer settings - Default to 50MB to handle large file reads (images, PDFs)

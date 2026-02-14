@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Node.js Tool Runner
 # ============================================================================
 
-async def run_node_tool(module_path: str, function_name: str, args: dict) -> dict:
+async def run_node_tool(module_path: str, function_name: str, args: dict, extra_env: Optional[Dict[str, str]] = None) -> dict:
     """
     Run a Node.js AI tool function and return the JSON result.
 
@@ -37,6 +37,7 @@ async def run_node_tool(module_path: str, function_name: str, args: dict) -> dic
         module_path: Absolute path to the .js module file
         function_name: Name of the exported function to call
         args: Arguments dict to pass to the function
+        extra_env: Additional environment variables (e.g., API keys) to inject
 
     Returns:
         Parsed JSON result dict from the tool
@@ -64,12 +65,16 @@ try {{
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(script_content)
 
-        # Run with node, passing through all env vars (API keys come from env)
+        # Run with node, merging extra env vars (API keys) into process env
+        node_env = os.environ.copy()
+        if extra_env:
+            node_env.update(extra_env)
+
         process = await asyncio.create_subprocess_exec(
             'node', script_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=os.environ.copy()
+            env=node_env
         )
 
         # 5 min timeout for async tools like 3D generation
@@ -120,7 +125,7 @@ def _tool_result(result: dict) -> dict:
 # Each tool is defined with the @tool decorator. The tools_dir is resolved
 # at server creation time via closure in create_ai_tools_server().
 
-def _create_image_tools(tools_dir: str) -> list:
+def _create_image_tools(tools_dir: str, tool_env: Optional[Dict[str, str]] = None) -> list:
     """Create image generation/editing tool functions."""
     tools = []
 
@@ -136,7 +141,8 @@ def _create_image_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/image-generation/generateImage.js",
             function_name="generateImage",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -155,7 +161,8 @@ def _create_image_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/image-generation/editImage.js",
             function_name="editImage",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -177,7 +184,8 @@ def _create_image_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/image-generation/generateWithReference.js",
             function_name="generateWithReference",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -186,7 +194,7 @@ def _create_image_tools(tools_dir: str) -> list:
     return tools
 
 
-def _create_video_tools(tools_dir: str) -> list:
+def _create_video_tools(tools_dir: str, tool_env: Optional[Dict[str, str]] = None) -> list:
     """Create video generation/analysis tool functions."""
     tools = []
 
@@ -205,7 +213,8 @@ def _create_video_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/video-generation/generateVideo.js",
             function_name="generateVideo",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -224,7 +233,8 @@ def _create_video_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/video-generation/imageToVideo.js",
             function_name="imageToVideo",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -242,7 +252,8 @@ def _create_video_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/video-generation/extendVideo.js",
             function_name="extendVideo",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -261,7 +272,8 @@ def _create_video_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/video-generation/bridgeFrames.js",
             function_name="bridgeFrames",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -279,7 +291,8 @@ def _create_video_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/video-analysis/analyzeVideo.js",
             function_name="analyzeVideo",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -288,7 +301,7 @@ def _create_video_tools(tools_dir: str) -> list:
     return tools
 
 
-def _create_3d_tools(tools_dir: str) -> list:
+def _create_3d_tools(tools_dir: str, tool_env: Optional[Dict[str, str]] = None) -> list:
     """Create 3D model generation tool functions."""
     tools = []
 
@@ -308,7 +321,8 @@ def _create_3d_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/model3d-generation/textTo3D.js",
             function_name="textTo3D",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -330,7 +344,8 @@ def _create_3d_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/model3d-generation/imageTo3D.js",
             function_name="imageTo3D",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -350,7 +365,8 @@ def _create_3d_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/model3d-generation/retexture3D.js",
             function_name="retexture3D",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -368,7 +384,8 @@ def _create_3d_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/model3d-generation/rig3D.js",
             function_name="rig3D",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -387,7 +404,8 @@ def _create_3d_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/model3d-generation/animate3D.js",
             function_name="animate3D",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -404,7 +422,8 @@ def _create_3d_tools(tools_dir: str) -> list:
         result = await run_node_tool(
             module_path=f"{tools_dir}/dist/model3d-generation/getTask3D.js",
             function_name="getTask3D",
-            args=args
+            args=args,
+            extra_env=tool_env
         )
         return _tool_result(result)
 
@@ -485,6 +504,7 @@ def get_enabled_tool_names(ai_tools_config: dict) -> List[str]:
 def create_ai_tools_server(
     ai_tools_config: dict,
     tools_dir: str,
+    tool_env: Optional[Dict[str, str]] = None,
 ) -> Optional[Any]:
     """
     Create an SDK MCP server with AI content generation tools.
@@ -496,6 +516,8 @@ def create_ai_tools_server(
         ai_tools_config: Dict with boolean toggles for each tool category
             (e.g., {"image_generation": True, "video_generation": False})
         tools_dir: Absolute path to the AI tools directory containing dist/
+        tool_env: Environment variables (API keys, provider settings) to inject
+            into Node.js subprocesses when executing tools
 
     Returns:
         McpSdkServerConfig from create_sdk_mcp_server(), or None
@@ -525,10 +547,10 @@ def create_ai_tools_server(
     # Normalize tools_dir path (remove trailing separators)
     tools_dir = tools_dir.rstrip("/\\")
 
-    # Create all tool functions with the tools_dir baked in
-    all_image_tools = _create_image_tools(tools_dir)
-    all_video_tools = _create_video_tools(tools_dir)
-    all_3d_tools = _create_3d_tools(tools_dir)
+    # Create all tool functions with the tools_dir and env baked in
+    all_image_tools = _create_image_tools(tools_dir, tool_env)
+    all_video_tools = _create_video_tools(tools_dir, tool_env)
+    all_3d_tools = _create_3d_tools(tools_dir, tool_env)
 
     # Filter to only enabled tools
     enabled_tools = []
