@@ -291,6 +291,8 @@
 		justify-content: center;
 		gap: 12px;
 		padding: 8px 0 4px;
+		max-width: 100%;
+		overflow: hidden;
 	}
 
 	/* Segmented pill */
@@ -302,6 +304,7 @@
 		border-radius: 20px;
 		padding: 2px;
 		gap: 2px;
+		flex-shrink: 0;
 	}
 
 	.mode-option {
@@ -337,6 +340,7 @@
 	/* Branch selector */
 	.branch-selector {
 		position: relative;
+		min-width: 0;
 	}
 
 	.branch-trigger {
@@ -351,6 +355,8 @@
 		font-size: 0.75rem;
 		cursor: pointer;
 		transition: all 150ms ease;
+		max-width: 100%;
+		min-width: 0;
 	}
 
 	.branch-trigger:hover {
@@ -359,7 +365,7 @@
 	}
 
 	.branch-name {
-		max-width: 180px;
+		max-width: min(180px, 40vw);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -534,6 +540,13 @@
 	@keyframes spin {
 		from { transform: rotate(0deg); }
 		to { transform: rotate(360deg); }
+	}
+
+	/* Mobile: tighter branch name limit */
+	@media (max-width: 639px) {
+		.branch-name {
+			max-width: min(120px, 30vw);
+		}
 	}
 
 	/* Reduced motion */
