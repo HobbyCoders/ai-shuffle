@@ -133,7 +133,8 @@ export interface ProfileConfig {
 	max_turns?: number;
 	include_partial_messages?: boolean;
 	enable_file_checkpointing?: boolean;  // SDK 0.1.15+ - enable file snapshots for rewind
-	thinking_mode?: 'default' | 'think' | 'think_harder' | 'ultra_think';  // Extended thinking configuration
+	thinking_mode?: 'default' | 'think' | 'think_harder' | 'ultra_think';  // Extended thinking (for Sonnet/Haiku)
+	effort?: 'low' | 'medium' | 'high' | 'max';  // Opus 4.6+ effort-based reasoning
 	enabled_agents?: string[];  // Subagents enabled for this profile
 	system_prompt?: {
 		type: string;

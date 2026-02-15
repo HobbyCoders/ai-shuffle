@@ -73,7 +73,10 @@ class ProfileConfig(BaseModel):
     # Core settings
     model: Optional[str] = "sonnet"
     permission_mode: Optional[str] = "default"  # default, acceptEdits, plan, bypassPermissions
-    thinking_mode: Optional[str] = "default"  # default, think, think_harder, ultra_think
+    thinking_mode: Optional[str] = "default"  # default, think, think_harder, ultra_think (for Sonnet/Haiku)
+    # Opus 4.6+ uses effort-based reasoning instead of token budgets
+    # effort: low, medium, high, max (only used when model is opus)
+    effort: Optional[str] = None  # low, medium, high, max - for Opus 4.6+ models
     max_turns: Optional[int] = None
 
     # Tool configuration - SDK 0.1.12+ supports new 'tools' option

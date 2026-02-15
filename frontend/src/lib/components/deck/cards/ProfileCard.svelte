@@ -140,6 +140,8 @@
 		enabled_agents: [] as string[],
 		include_partial_messages: true,
 		thinking_mode: 'default' as 'default' | 'think' | 'think_harder' | 'ultra_think',
+		// Opus 4.6+ uses effort-based reasoning instead of token budgets
+		effort: null as 'low' | 'medium' | 'high' | 'max' | null,
 		system_prompt_type: 'preset',
 		system_prompt_preset: 'claude_code',
 		system_prompt_append: '',
@@ -291,6 +293,7 @@
 			enabled_agents: [],
 			include_partial_messages: true,
 			thinking_mode: 'default' as 'default' | 'think' | 'think_harder' | 'ultra_think',
+			effort: null,
 			system_prompt_type: 'preset',
 			system_prompt_preset: 'claude_code',
 			system_prompt_append: '',
@@ -357,6 +360,7 @@
 			enabled_agents: (config as any).enabled_agents || [],
 			include_partial_messages: config.include_partial_messages !== false,
 			thinking_mode: (config as any).thinking_mode || 'default',
+			effort: (config as any).effort || null,
 			system_prompt_type: sp.type || 'preset',
 			system_prompt_preset: sp.preset || 'claude_code',
 			system_prompt_append: sp.append || '',
@@ -573,10 +577,18 @@
 			model: profileForm.model,
 			permission_mode: profileForm.permission_mode,
 			include_partial_messages: profileForm.include_partial_messages,
-			thinking_mode: profileForm.thinking_mode,
 			// SDK 0.1.15+ file checkpointing for rewind
 			enable_file_checkpointing: profileForm.enable_file_checkpointing
 		};
+
+		// Opus uses effort-based reasoning, other models use thinking_mode with token budgets
+		if (profileForm.model === 'opus') {
+			if (profileForm.effort) {
+				config.effort = profileForm.effort;
+			}
+		} else {
+			config.thinking_mode = profileForm.thinking_mode;
+		}
 
 		if (profileForm.max_turns) config.max_turns = profileForm.max_turns;
 		if (toolSelectionMode === 'allow' && profileForm.allowed_tools.length > 0) {
@@ -761,6 +773,7 @@
 			enabled_agents: agent.enabled_agents || [],
 			include_partial_messages: agent.include_partial_messages !== false,
 			thinking_mode: (agent as any).thinking_mode || 'default',
+			effort: (agent as any).effort || null,
 			system_prompt_type: spType,
 			system_prompt_preset: spPreset,
 			system_prompt_append: spAppend,
@@ -872,15 +885,30 @@
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'bypassPermissions'} onclick={() => profileForm.permission_mode = 'bypassPermissions'}>Bypass</button>
 							</div>
 						</div>
-						<div class="form-field">
-							<label class="card-form-label">Extended Thinking — {#if profileForm.thinking_mode === 'default'}no extended thinking, standard response mode{:else if profileForm.thinking_mode === 'think'}light reasoning (8K tokens), good for simple tasks{:else if profileForm.thinking_mode === 'think_harder'}substantial reasoning (24K tokens), good for complex tasks{:else if profileForm.thinking_mode === 'ultra_think'}deep reasoning (64K tokens), for multi-step problem solving{/if}</label>
-							<div class="card-mode-selector">
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'default'} onclick={() => updateThinkingMode('default')}>Default</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'think'} onclick={() => updateThinkingMode('think')}>Think</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'think_harder'} onclick={() => updateThinkingMode('think_harder')}>Think Harder</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'ultra_think'} onclick={() => updateThinkingMode('ultra_think')}>Ultra Think</button>
+						{#if profileForm.model === 'opus'}
+							<!-- Opus 4.6+ uses effort-based reasoning -->
+							<div class="form-field">
+								<label class="card-form-label">Reasoning Effort — {#if !profileForm.effort}no extended reasoning, standard response mode{:else if profileForm.effort === 'low'}light reasoning, good for simple tasks{:else if profileForm.effort === 'medium'}balanced reasoning, good for most tasks{:else if profileForm.effort === 'high'}deep reasoning, good for complex problems{:else if profileForm.effort === 'max'}maximum reasoning depth, for challenging problems{/if}</label>
+								<div class="card-mode-selector">
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={!profileForm.effort} onclick={() => profileForm.effort = null}>Default</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'low'} onclick={() => profileForm.effort = 'low'}>Low</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'medium'} onclick={() => profileForm.effort = 'medium'}>Medium</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'high'} onclick={() => profileForm.effort = 'high'}>High</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'max'} onclick={() => profileForm.effort = 'max'}>Max</button>
+								</div>
 							</div>
-						</div>
+						{:else}
+							<!-- Sonnet/Haiku use token-budget based thinking -->
+							<div class="form-field">
+								<label class="card-form-label">Extended Thinking — {#if profileForm.thinking_mode === 'default'}no extended thinking, standard response mode{:else if profileForm.thinking_mode === 'think'}light reasoning (8K tokens), good for simple tasks{:else if profileForm.thinking_mode === 'think_harder'}substantial reasoning (24K tokens), good for complex tasks{:else if profileForm.thinking_mode === 'ultra_think'}deep reasoning (64K tokens), for multi-step problem solving{/if}</label>
+								<div class="card-mode-selector">
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'default'} onclick={() => updateThinkingMode('default')}>Default</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'think'} onclick={() => updateThinkingMode('think')}>Think</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'think_harder'} onclick={() => updateThinkingMode('think_harder')}>Think Harder</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'ultra_think'} onclick={() => updateThinkingMode('ultra_think')}>Ultra Think</button>
+								</div>
+							</div>
+						{/if}
 						<div class="form-field">
 							<label class="card-form-label">Max Turns — maximum agentic turns per query (leave empty for unlimited)</label>
 							<input type="number" bind:value={profileForm.max_turns} class="card-form-input" placeholder="Unlimited" />
