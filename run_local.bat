@@ -81,8 +81,8 @@ if %errorlevel% equ 0 (
     if not exist "app\static\index.html" (
         echo [INFO] Building frontend...
         cd frontend
-        npm install
-        npm run build
+        call npm install
+        call npm run build
         cd ..
         if exist "frontend\build" (
             if exist "app\static" rmdir /s /q "app\static"
