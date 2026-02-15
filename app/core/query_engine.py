@@ -124,6 +124,55 @@ def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -
     return f"{truncated}\n\n[... truncated - total size: {size_kb}KB]"
 
 
+# Token budgets for thinking modes (for Sonnet/Haiku - token-based thinking)
+THINKING_TOKEN_BUDGETS = {
+    'think': 8000,
+    'think_harder': 24000,
+    'ultra_think': 64000
+}
+
+
+def _build_thinking_config(config: Dict[str, Any], model: Optional[str]) -> Dict[str, Any]:
+    """
+    Build thinking/effort configuration for ClaudeAgentOptions based on model type.
+
+    SDK 0.1.36+ introduces two thinking systems:
+    1. Opus 4.6+: Uses effort-based adaptive thinking (effort: low/medium/high/max)
+    2. Sonnet/Haiku: Uses token budget-based thinking (thinking: {type: "enabled", budget_tokens: N})
+
+    Args:
+        config: Profile configuration dict
+        model: Model name (e.g., 'opus', 'sonnet', 'haiku')
+
+    Returns:
+        Dict with thinking/effort configuration to spread into ClaudeAgentOptions
+    """
+    result: Dict[str, Any] = {}
+
+    # Determine if this is an Opus model (uses effort-based thinking)
+    is_opus = model and ('opus' in model.lower())
+
+    if is_opus:
+        # Opus 4.6+ uses effort-based adaptive thinking
+        effort = config.get('effort')
+        if effort and effort in ('low', 'medium', 'high', 'max'):
+            # Use adaptive thinking with effort level
+            result['thinking'] = {'type': 'adaptive'}
+            result['effort'] = effort
+            logger.debug(f"Opus model: using adaptive thinking with effort={effort}")
+        # If no effort specified, use defaults (no extended thinking)
+    else:
+        # Sonnet/Haiku use token budget-based thinking
+        thinking_mode = config.get('thinking_mode', 'default')
+        if thinking_mode and thinking_mode != 'default' and thinking_mode in THINKING_TOKEN_BUDGETS:
+            budget_tokens = THINKING_TOKEN_BUDGETS[thinking_mode]
+            result['thinking'] = {'type': 'enabled', 'budget_tokens': budget_tokens}
+            logger.debug(f"Non-opus model: using token-based thinking with budget={budget_tokens}")
+        # If default or not specified, no extended thinking
+
+    return result
+
+
 def write_agents_to_filesystem(agents_dict: Dict[str, AgentDefinition], cwd: str) -> Optional[Path]:
     """
     Write subagent definitions to .claude/agents/ directory in the working directory.
@@ -1500,6 +1549,11 @@ def build_options_from_profile(
 
         # File checkpointing for rewind (SDK 0.1.15+)
         enable_file_checkpointing=config.get("enable_file_checkpointing", False),
+
+        # Extended thinking configuration (SDK 0.1.36+)
+        # For Opus 4.6+: use effort-based adaptive thinking
+        # For Sonnet/Haiku: use token budget-based thinking
+        **_build_thinking_config(config, model_to_use),
     )
 
     deployment_mode = detect_deployment_mode()
