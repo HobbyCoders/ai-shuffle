@@ -526,33 +526,51 @@ async def init_repository(
     if body.create_github_repo and body.github_repo_name:
         from app.core.github_service import github_service
 
-        if github_service.is_authenticated():
-            repo_info = github_service.create_repo(
-                name=body.github_repo_name,
-                private=body.github_private,
+        if not github_service.is_authenticated():
+            raise HTTPException(
+                status_code=400,
+                detail="GitHub CLI is not authenticated. Run 'gh auth login' in your terminal first."
             )
-            if repo_info:
-                github_repo_url = repo_info['url']
-                github_full_name = repo_info['full_name']
-                clone_url = repo_info['clone_url']
 
-                # Add remote origin
-                git_service._run_git(
-                    working_dir,
-                    ["remote", "add", "origin", clone_url],
-                    timeout=10
+        repo_info = github_service.create_repo(
+            name=body.github_repo_name,
+            private=body.github_private,
+        )
+        if not repo_info:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to create GitHub repository '{body.github_repo_name}'. Check logs for details."
+            )
+
+        github_repo_url = repo_info['url']
+        github_full_name = repo_info['full_name']
+        clone_url = repo_info['clone_url']
+
+        # Add remote origin
+        result = git_service._run_git(
+            working_dir,
+            ["remote", "add", "origin", clone_url],
+            timeout=10
+        )
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to add git remote: {result.stderr}"
+            )
+
+        # Push initial commit if we made one
+        if body.create_initial_commit:
+            push_success, push_error = git_service.push(
+                working_dir,
+                remote="origin",
+                branch=body.default_branch,
+                set_upstream=True
+            )
+            if not push_success:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to push to GitHub: {push_error or 'Unknown error'}"
                 )
-
-                # Push initial commit if we made one
-                if body.create_initial_commit:
-                    git_service.push(
-                        working_dir,
-                        remote="origin",
-                        branch=body.default_branch,
-                        set_upstream=True
-                    )
-            else:
-                logger.warning(f"Failed to create GitHub repo '{body.github_repo_name}'")
 
     # Step 4: Create database record
     repo = ensure_git_repository_record(project_id, working_dir)
