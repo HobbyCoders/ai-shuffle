@@ -6,7 +6,9 @@ scoped to the workspace root directory (not project-specific).
 """
 
 import logging
+import os
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -32,13 +34,36 @@ class RenameRequest(BaseModel):
     new_name: str
 
 
+# Windows reserved device names — Python's pathlib resolves these to device
+# paths instead of actual files, breaking exists/is_file/unlink operations.
+_WINDOWS_RESERVED_NAMES = frozenset({
+    'CON', 'PRN', 'AUX', 'NUL',
+    'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+    'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+})
+
+
+def _is_windows_reserved_name(name: str) -> bool:
+    """Check if a filename is a Windows reserved device name."""
+    # Windows treats 'nul', 'nul.txt', 'NUL.anything' all as the NUL device
+    stem = name.split('.')[0].upper()
+    return sys.platform == 'win32' and stem in _WINDOWS_RESERVED_NAMES
+
+
 def validate_workspace_path(path: str) -> Path:
     """
     Validate and resolve a path within the workspace directory.
     Prevents path traversal outside the workspace boundary.
     """
     workspace = settings.workspace_dir.resolve()
-    full_path = (workspace / path).resolve()
+    raw_path = workspace / path
+
+    # On Windows, resolve() converts reserved names (NUL, CON, etc.) to device
+    # paths, breaking the workspace boundary check. Resolve the parent instead.
+    if _is_windows_reserved_name(raw_path.name):
+        full_path = raw_path.parent.resolve() / raw_path.name
+    else:
+        full_path = raw_path.resolve()
 
     try:
         full_path.relative_to(workspace)
@@ -280,20 +305,34 @@ async def delete_file_or_folder(
     workspace = settings.workspace_dir.resolve()
 
     target_path = validate_workspace_path(path)
-    if not target_path.exists():
+    is_reserved = _is_windows_reserved_name(target_path.name)
+
+    # For Windows reserved names (NUL, CON, etc.), pathlib resolves them to
+    # device paths instead of actual files. Use the \\?\ extended path prefix
+    # to bypass device name resolution for all operations.
+    if is_reserved:
+        extended = "\\\\?\\" + str(target_path.parent.resolve()) + "\\" + target_path.name
+        if not os.path.exists(extended):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File or folder not found"
+            )
+    elif not target_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="File or folder not found"
         )
 
-    if target_path.resolve() == workspace:
+    if not is_reserved and target_path.resolve() == workspace:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete workspace root directory"
         )
 
     try:
-        if target_path.is_dir():
+        if is_reserved:
+            os.remove(extended)
+        elif target_path.is_dir():
             shutil.rmtree(target_path)
         else:
             target_path.unlink()
