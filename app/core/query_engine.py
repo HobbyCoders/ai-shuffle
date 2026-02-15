@@ -2896,11 +2896,14 @@ async def stream_to_websocket(
         written_agent_ids = list(agents_dict.keys())
 
     # Clean up any existing state for this session
+    # IMPORTANT: Use _graceful_disconnect instead of disconnect() to give the
+    # subprocess time to flush JSONL writes. Without this, the new subprocess
+    # would read incomplete JSONL and lose conversation context.
     state = _active_sessions.get(session_id)
     if state:
         logger.debug(f"[WS] Cleaning up existing state for session {session_id}")
         try:
-            await state.client.disconnect()
+            await _graceful_disconnect(state.client, session_id)
         except Exception:
             pass
         # Clean up agent files from previous session
@@ -3467,11 +3470,19 @@ async def stream_to_websocket(
         # We wait for the subprocess to exit naturally before sending SIGTERM,
         # because the subprocess may still be flushing JSONL writes after sending
         # the result message to us. See _graceful_disconnect() for details.
+        #
+        # CRITICAL: Shield from cancellation! During interrupt_and_query, the task
+        # may be cancelled a second time (wait_for timeout). Without shielding,
+        # the CancelledError would interrupt _graceful_disconnect, killing the
+        # subprocess before it flushes JSONL and causing context loss on resume.
         if state.client:
             try:
-                await _graceful_disconnect(state.client, session_id)
-            except Exception as e:
-                logger.warning(f"[WS] Error disconnecting SDK client for session {session_id}: {e}")
+                await asyncio.shield(_graceful_disconnect(state.client, session_id))
+            except (asyncio.CancelledError, Exception) as e:
+                if isinstance(e, asyncio.CancelledError):
+                    logger.debug(f"[WS] Graceful disconnect shielded from cancellation for session {session_id}")
+                else:
+                    logger.warning(f"[WS] Error disconnecting SDK client for session {session_id}: {e}")
             state.is_connected = False
 
         # Remove from active sessions and cleanup agent files

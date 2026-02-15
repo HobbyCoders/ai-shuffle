@@ -250,21 +250,31 @@ async def chat_websocket(
         logger.debug(f"Unregistered device {device_id} during streaming to prevent duplicates")
 
         # Initialize LiveSessionStore for server-authoritative state
-        # Load existing messages from JSONL first
-        session_data = database.get_session(session_id)
-        initial_messages = []
-        if session_data:
-            sdk_session_id = session_data.get("sdk_session_id")
-            if sdk_session_id:
-                working_dir = str(settings.workspace_dir)
-                if project_id:
-                    project = database.get_project(project_id)
-                    if project:
-                        working_dir = get_project_working_dir(project)
-                try:
-                    initial_messages, _usage = parse_session_history(sdk_session_id, working_dir)
-                except Exception as e:
-                    logger.warning(f"Failed to load history for live store: {e}")
+        # IMPORTANT: Check live store first for complete messages from an interrupted session.
+        # During interrupt_and_query, end_streaming() preserves messages in memory, but
+        # the JSONL file may be incomplete (subprocess killed before flushing).
+        # Using live store messages prevents context loss on interrupt transitions.
+        existing_live = live_session_store.get_session(session_id)
+        if existing_live and not existing_live.is_streaming and existing_live.messages:
+            # Use complete messages from the interrupted session's live store
+            initial_messages = [m.to_dict() for m in existing_live.messages]
+            logger.debug(f"Using {len(initial_messages)} messages from live store (interrupted session) for {session_id}")
+        else:
+            # Fall back to JSONL parsing (normal path: no interrupted session in memory)
+            initial_messages = []
+            session_data = database.get_session(session_id)
+            if session_data:
+                sdk_session_id = session_data.get("sdk_session_id")
+                if sdk_session_id:
+                    working_dir = str(settings.workspace_dir)
+                    if project_id:
+                        project = database.get_project(project_id)
+                        if project:
+                            working_dir = get_project_working_dir(project)
+                    try:
+                        initial_messages, _usage = parse_session_history(sdk_session_id, working_dir)
+                    except Exception as e:
+                        logger.warning(f"Failed to load history for live store: {e}")
 
         # Start live session with existing messages
         await live_session_store.start_streaming(session_id, initial_messages)
@@ -1111,12 +1121,16 @@ async def chat_websocket(
                         logger.debug(f"Interrupt session {session_id} before new query: {interrupted}")
 
                         # Step 2: Cancel the asyncio task
+                        # Timeout must exceed _SUBPROCESS_EXIT_GRACE_SECONDS (5s) to allow
+                        # the subprocess to flush JSONL writes before the new query reads it.
+                        # Without sufficient time, the new subprocess reads incomplete JSONL
+                        # and loses conversation context.
                         if session_id in _active_chat_sessions:
                             task = _active_chat_sessions[session_id]
                             if not task.done():
                                 task.cancel()
                                 try:
-                                    await asyncio.wait_for(task, timeout=2.0)
+                                    await asyncio.wait_for(task, timeout=8.0)
                                 except (asyncio.CancelledError, asyncio.TimeoutError):
                                     pass
 
