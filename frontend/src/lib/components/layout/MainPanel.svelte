@@ -507,6 +507,7 @@
 		const current = $branchStore.find(b => b.current);
 		return current?.behind ?? 0;
 	});
+	const needsPull = $derived(commitsBehindForPull > 0);
 	const pullHasChanges = $derived(
 		($diffStats?.additions ?? 0) > 0 ||
 		($diffStats?.deletions ?? 0) > 0 ||
@@ -673,6 +674,7 @@
 		projectId={activeTab.project}
 		mode={showCommitModalMode}
 		defaultBranch={$githubRepoInfo?.default_branch ?? 'main'}
+		{needsPull}
 		onClose={() => showCommitModal = false}
 		onStartCommit={handleStartCommit}
 		onCreatePR={handleCreatePR}

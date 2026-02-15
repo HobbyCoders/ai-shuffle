@@ -49,14 +49,15 @@
 	const commitsAhead = $derived($gitStatus?.ahead ?? 0);
 	const defaultBranch = $derived($githubRepoInfo?.default_branch ?? 'main');
 	const isOnDefaultBranch = $derived(currentBranch === defaultBranch);
-	const canCreatePR = $derived(!hasChanges && commitsAhead > 0 && !isOnDefaultBranch);
 
 	// Behind upstream tracking branch (for pull button)
 	const currentBranchInfo = $derived($branchStore.find(b => b.current));
 	const commitsBehindUpstream = $derived(currentBranchInfo?.behind ?? 0);
 	const commitsAheadUpstream = $derived(currentBranchInfo?.ahead ?? 0);
 	const hasUpstream = $derived(!!currentBranchInfo?.upstream);
-	const canPush = $derived(!hasChanges && commitsAheadUpstream > 0 && hasUpstream);
+	const needsPull = $derived(commitsBehindUpstream > 0 && hasUpstream);
+	const canPush = $derived(!hasChanges && commitsAheadUpstream > 0 && hasUpstream && !needsPull);
+	const canCreatePR = $derived(!hasChanges && commitsAhead > 0 && !isOnDefaultBranch && !needsPull);
 
 	// Local branches for the dropdown (exclude remotes)
 	const localBranches = $derived(

@@ -25,12 +25,13 @@
 		projectId: string;
 		mode?: ModalMode;
 		defaultBranch?: string;
+		needsPull?: boolean;
 		onClose: () => void;
 		onStartCommit: (action: CommitAction, message: string, includeUnstaged: boolean) => void;
 		onCreatePR?: (title: string, body: string) => void;
 	}
 
-	let { open, projectId, mode = 'commit', defaultBranch = 'main', onClose, onStartCommit, onCreatePR }: Props = $props();
+	let { open, projectId, mode = 'commit', defaultBranch = 'main', needsPull = false, onClose, onStartCommit, onCreatePR }: Props = $props();
 
 	let commitMessage = $state('');
 	let prTitle = $state('');
@@ -59,7 +60,7 @@
 			prTitle = '';
 			prBody = '';
 			includeUnstaged = true;
-			nextStep = 'push';
+			nextStep = needsPull ? 'commit' : 'push';
 		}
 	});
 
@@ -204,22 +205,26 @@
 							{/if}
 						</label>
 
-						<label class="radio-option" class:selected={nextStep === 'push'}>
-							<input type="radio" name="nextStep" value="push" bind:group={nextStep} />
+						<label class="radio-option" class:selected={nextStep === 'push'} class:disabled={needsPull}>
+							<input type="radio" name="nextStep" value="push" bind:group={nextStep} disabled={needsPull} />
 							<span class="radio-dot"></span>
 							<ArrowUp size={16} strokeWidth={1.5} />
 							<span class="radio-text">Commit and push</span>
-							{#if nextStep === 'push'}
+							{#if needsPull}
+								<span class="radio-hint">Pull required first</span>
+							{:else if nextStep === 'push'}
 								<span class="check-mark">&#10003;</span>
 							{/if}
 						</label>
 
-						<label class="radio-option" class:selected={nextStep === 'pr'} class:disabled={isOnDefaultBranch}>
-							<input type="radio" name="nextStep" value="pr" bind:group={nextStep} disabled={isOnDefaultBranch} />
+						<label class="radio-option" class:selected={nextStep === 'pr'} class:disabled={isOnDefaultBranch || needsPull}>
+							<input type="radio" name="nextStep" value="pr" bind:group={nextStep} disabled={isOnDefaultBranch || needsPull} />
 							<span class="radio-dot"></span>
 							<Github size={16} strokeWidth={1.5} />
 							<span class="radio-text">Commit, push, and create PR</span>
-							{#if isOnDefaultBranch}
+							{#if needsPull}
+								<span class="radio-hint">Pull required first</span>
+							{:else if isOnDefaultBranch}
 								<span class="radio-hint">Not available on {defaultBranch}</span>
 							{:else if nextStep === 'pr'}
 								<span class="check-mark">&#10003;</span>
