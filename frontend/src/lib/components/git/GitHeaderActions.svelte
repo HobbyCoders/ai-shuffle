@@ -23,11 +23,12 @@
 		onClickFinish: () => void;
 		onClickNewBranch: () => void;
 		onClickPush: () => void;
+		onClickForcePush: () => void;
 		onClickPull: () => void;
 		onClickInitRepo?: () => void;
 	}
 
-	let { projectId, isStreaming = false, isGitRepo = true, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo }: Props = $props();
+	let { projectId, isStreaming = false, isGitRepo = true, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickForcePush, onClickPull, onClickInitRepo }: Props = $props();
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
@@ -50,14 +51,17 @@
 	const defaultBranch = $derived($githubRepoInfo?.default_branch ?? 'main');
 	const isOnDefaultBranch = $derived(currentBranch === defaultBranch);
 
-	// Behind upstream tracking branch (for pull button)
+	// Upstream tracking branch state (for push/pull buttons)
 	const currentBranchInfo = $derived($branchStore.find(b => b.current));
 	const commitsBehindUpstream = $derived(currentBranchInfo?.behind ?? 0);
 	const commitsAheadUpstream = $derived(currentBranchInfo?.ahead ?? 0);
 	const hasUpstream = $derived(!!currentBranchInfo?.upstream);
-	const needsPull = $derived(commitsBehindUpstream > 0 && hasUpstream);
-	const canPush = $derived(!hasChanges && commitsAheadUpstream > 0 && hasUpstream && !needsPull);
-	const canCreatePR = $derived(!hasChanges && commitsAhead > 0 && !isOnDefaultBranch && !needsPull);
+	// Diverged = both ahead AND behind (e.g. after rebase/amend). Needs force push, not pull.
+	const isDiverged = $derived(commitsAheadUpstream > 0 && commitsBehindUpstream > 0 && hasUpstream);
+	const needsPull = $derived(commitsBehindUpstream > 0 && hasUpstream && !isDiverged);
+	const canPush = $derived(!hasChanges && commitsAheadUpstream > 0 && hasUpstream && !needsPull && !isDiverged);
+	const canForcePush = $derived(!hasChanges && isDiverged);
+	const canCreatePR = $derived(!hasChanges && commitsAhead > 0 && !isOnDefaultBranch && !needsPull && !isDiverged);
 
 	// Local branches for the dropdown (exclude remotes)
 	const localBranches = $derived(
@@ -173,8 +177,8 @@
 		{/if}
 	</div>
 
-	<!-- Pull button (when behind upstream) -->
-	{#if commitsBehindUpstream > 0 && hasUpstream}
+	<!-- Pull button (when behind upstream, but not diverged) -->
+	{#if needsPull}
 		<button
 			class="git-btn pull-btn"
 			onclick={onClickPull}
@@ -185,7 +189,7 @@
 		>
 			<ArrowDownToLine size={14} strokeWidth={1.5} />
 			<span class="btn-label">Pull</span>
-			<span class="behind-badge">{commitsBehindUpstream}</span>
+			<span class="count-badge">{commitsBehindUpstream}</span>
 		</button>
 	{/if}
 
@@ -201,7 +205,22 @@
 		>
 			<ArrowUpFromLine size={14} strokeWidth={1.5} />
 			<span class="btn-label">Push</span>
-			<span class="ahead-badge">{commitsAheadUpstream}</span>
+			<span class="count-badge">{commitsAheadUpstream}</span>
+		</button>
+	{/if}
+
+	<!-- Force Push button (when branch diverged after rebase/amend) -->
+	{#if canForcePush}
+		<button
+			class="git-btn force-push-btn"
+			onclick={onClickForcePush}
+			disabled={isStreaming}
+			title={isStreaming
+				? 'Cannot push during streaming'
+				: `Branch diverged from upstream — force push needed (${commitsAheadUpstream} ahead, ${commitsBehindUpstream} behind)`}
+		>
+			<ArrowUpFromLine size={14} strokeWidth={1.5} />
+			<span class="btn-label">Force Push</span>
 		</button>
 	{/if}
 
@@ -339,8 +358,8 @@
 		text-overflow: ellipsis;
 	}
 
-	/* Pull behind badge */
-	.behind-badge {
+	/* Commit count badge (used in pull/push buttons) */
+	.count-badge {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
@@ -356,21 +375,14 @@
 		line-height: 1;
 	}
 
-	/* Push ahead badge */
-	.ahead-badge {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		min-width: 16px;
-		height: 16px;
-		padding: 0 4px;
-		border-radius: 8px;
-		background: color-mix(in oklch, var(--primary) 15%, transparent);
-		color: var(--primary);
-		font-size: 0.625rem;
-		font-weight: 700;
-		font-variant-numeric: tabular-nums;
-		line-height: 1;
+	/* Force push button (diverged branch) */
+	.force-push-btn {
+		border-color: var(--warning, #e8a735);
+		color: var(--warning, #e8a735);
+	}
+
+	.force-push-btn:hover:not(:disabled) {
+		background: color-mix(in oklch, var(--warning, #e8a735) 10%, transparent);
 	}
 
 	/* Branch dropdown */

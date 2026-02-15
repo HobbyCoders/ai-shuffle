@@ -619,7 +619,8 @@ function createGitStore() {
          */
         async pushCommits(
             branch?: string,
-            setUpstream: boolean = false
+            setUpstream: boolean = false,
+            force: boolean = false,
         ): Promise<{ success: boolean; message: string }> {
             const state = getCurrentState();
             if (!state.projectId) throw new Error('No project selected');
@@ -627,7 +628,8 @@ function createGitStore() {
             try {
                 const response = await gitApi.pushCommits(state.projectId, {
                     branch,
-                    set_upstream: setUpstream
+                    set_upstream: setUpstream,
+                    force,
                 }, state.worktreeId ?? undefined);
 
                 // Refresh status after push

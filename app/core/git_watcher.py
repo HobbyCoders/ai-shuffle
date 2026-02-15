@@ -51,6 +51,7 @@ _FILE_CATEGORY_MAP = {
     "MERGE_HEAD": {"status"},
     "REBASE_HEAD": {"status"},
     "COMMIT_EDITMSG": {"status", "diff_stats"},
+    "packed-refs": {"branches", "status"},
 }
 
 # Hook names mapped to cache categories (higher precision than filesystem events)

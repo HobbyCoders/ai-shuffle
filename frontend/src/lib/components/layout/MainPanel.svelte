@@ -507,14 +507,19 @@
 		const current = $branchStore.find(b => b.current);
 		return current?.behind ?? 0;
 	});
-	const needsPull = $derived(commitsBehindForPull > 0);
+	const commitsAheadForPull = $derived.by(() => {
+		const current = $branchStore.find(b => b.current);
+		return current?.ahead ?? 0;
+	});
+	// Diverged (both ahead and behind) means rebase/amend — don't treat as needing pull
+	const needsPull = $derived(commitsBehindForPull > 0 && commitsAheadForPull === 0);
 	const pullHasChanges = $derived(
 		($diffStats?.additions ?? 0) > 0 ||
 		($diffStats?.deletions ?? 0) > 0 ||
 		($diffStats?.files_changed ?? 0) > 0
 	);
 
-	async function handlePush() {
+	async function handlePush(force: boolean = false) {
 		progressAction = 'push';
 		progressMode = 'push';
 		progressStep = 1;
@@ -526,7 +531,7 @@
 
 		try {
 			const branch = $gitStatus?.current_branch ?? undefined;
-			await git.pushCommits(branch, true);
+			await git.pushCommits(branch, true, force);
 			progressCompleted = true;
 		} catch (e: any) {
 			progressError = e?.detail || e?.message || 'Failed to push';
@@ -594,7 +599,8 @@
 							onClickCreatePR={() => { showCommitModalMode = 'pr-only'; showCommitModal = true; }}
 							onClickFinish={() => showFinishModal = true}
 							onClickNewBranch={() => showCreateBranchModal = true}
-							onClickPush={handlePush}
+							onClickPush={() => handlePush(false)}
+							onClickForcePush={() => handlePush(true)}
 							onClickPull={() => showPullModal = true}
 							onClickInitRepo={() => showInitRepoModal = true}
 						/>

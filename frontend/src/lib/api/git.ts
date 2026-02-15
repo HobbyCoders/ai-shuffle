@@ -449,6 +449,7 @@ export interface PushRequest {
     remote?: string;
     branch?: string;
     set_upstream?: boolean;
+    force?: boolean;
 }
 
 /**

@@ -760,7 +760,8 @@ class GitService:
         working_dir: str,
         remote: str = "origin",
         branch: Optional[str] = None,
-        set_upstream: bool = False
+        set_upstream: bool = False,
+        force: bool = False,
     ) -> Tuple[bool, Optional[str]]:
         """
         Push commits to remote.
@@ -770,6 +771,7 @@ class GitService:
             remote: Remote name (default: origin)
             branch: Branch name (default: current branch)
             set_upstream: Set upstream tracking
+            force: Use --force-with-lease (safe force push for rebased branches)
 
         Returns:
             Tuple of (success: bool, error_message: Optional[str])
@@ -781,6 +783,9 @@ class GitService:
                 args = ["push", remote, branch]
             else:
                 args = ["push", remote]
+
+            if force:
+                args.insert(1, "--force-with-lease")
 
             result = self._run_git(working_dir, args, timeout=120)
 

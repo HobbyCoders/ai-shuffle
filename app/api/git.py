@@ -150,6 +150,7 @@ class PushRequest(BaseModel):
     remote: str = Field(default="origin", pattern=r'^[a-zA-Z0-9._-]+$')
     branch: Optional[str] = None
     set_upstream: bool = Field(default=False)
+    force: bool = Field(default=False)
 
 
 class PullRequest(BaseModel):
@@ -1113,7 +1114,8 @@ async def push_commits(
         working_dir,
         remote=body.remote,
         branch=branch,
-        set_upstream=body.set_upstream
+        set_upstream=body.set_upstream,
+        force=body.force,
     )
 
     if not success:
