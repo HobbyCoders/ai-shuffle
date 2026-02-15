@@ -614,9 +614,28 @@ async def _graceful_disconnect(client: ClaudeSDKClient, session_id: str) -> None
         # Don't let introspection errors prevent disconnect
         logger.debug(f"[WS] Could not wait for subprocess for session {session_id}: {e}")
 
-    # Now disconnect (terminates the process if still running, no-op if already exited)
-    await client.disconnect()
-    logger.debug(f"[WS] Disconnected SDK client for session {session_id}")
+    # Now disconnect (terminates the process if still running, no-op if already exited).
+    # NOTE: When called from asyncio.shield() during task cancellation, the shield
+    # creates a new internal task. client.disconnect() will fail because anyio's
+    # cancel scope was entered in the original task. In that case, fall back to
+    # directly terminating the subprocess.
+    try:
+        await client.disconnect()
+        logger.debug(f"[WS] Disconnected SDK client for session {session_id}")
+    except RuntimeError as e:
+        if "cancel scope" in str(e):
+            logger.debug(f"[WS] Cannot disconnect from shielded task for session {session_id}, terminating subprocess directly")
+            # Fall back to direct process termination
+            try:
+                query_obj = getattr(client, '_query', None)
+                transport = getattr(query_obj, 'transport', None) if query_obj else None
+                proc = getattr(transport, '_process', None) if transport else None
+                if proc and proc.returncode is None:
+                    proc.terminate()
+            except Exception:
+                pass
+        else:
+            raise
 
 
 # Default instructions for displaying media and files in chat
