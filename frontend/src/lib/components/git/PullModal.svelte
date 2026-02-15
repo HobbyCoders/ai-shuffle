@@ -22,7 +22,7 @@
 
 	let { open, branchName, commitsBehind, hasChanges, onClose, onPull }: Props = $props();
 
-	let strategy = $state<PullStrategy>('merge');
+	let strategy = $state<PullStrategy>('rebase');
 
 	const branchDisplay = $derived(
 		branchName.length > 30 ? branchName.slice(0, 27) + '...' : branchName
@@ -33,7 +33,7 @@
 	// Reset state when modal opens
 	$effect(() => {
 		if (open) {
-			strategy = 'merge';
+			strategy = 'rebase';
 		}
 	});
 
@@ -102,22 +102,22 @@
 			<div class="field">
 				<span class="field-label">Strategy</span>
 				<div class="radio-group">
-					<label class="radio-option" class:selected={strategy === 'merge'}>
-						<input type="radio" name="pullStrategy" value="merge" bind:group={strategy} />
-						<span class="radio-dot"></span>
-						<GitMerge size={16} strokeWidth={1.5} />
-						<span class="radio-text">Merge</span>
-						{#if strategy === 'merge'}
-							<span class="check-mark">&#10003;</span>
-						{/if}
-					</label>
-
 					<label class="radio-option" class:selected={strategy === 'rebase'}>
 						<input type="radio" name="pullStrategy" value="rebase" bind:group={strategy} />
 						<span class="radio-dot"></span>
 						<GitBranch size={16} strokeWidth={1.5} />
 						<span class="radio-text">Rebase</span>
 						{#if strategy === 'rebase'}
+							<span class="check-mark">&#10003;</span>
+						{/if}
+					</label>
+
+					<label class="radio-option" class:selected={strategy === 'merge'}>
+						<input type="radio" name="pullStrategy" value="merge" bind:group={strategy} />
+						<span class="radio-dot"></span>
+						<GitMerge size={16} strokeWidth={1.5} />
+						<span class="radio-text">Merge</span>
+						{#if strategy === 'merge'}
 							<span class="check-mark">&#10003;</span>
 						{/if}
 					</label>
