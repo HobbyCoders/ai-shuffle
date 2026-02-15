@@ -542,6 +542,20 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
     messages_removed = 0
     errors = []
 
+    # IMPORTANT: File rewind must happen BEFORE chat rewind.
+    # Chat rewind truncates the JSONL file, which can remove the target message UUID.
+    # The SDK needs that UUID present in the JSONL to find the file checkpoint.
+    if request.restore_files:
+        file_success, file_error = await rewind_files_via_sdk(
+            sdk_session_id=sdk_session_id,
+            target_uuid=request.target_uuid,
+            working_dir=working_dir
+        )
+        if file_success:
+            files_rewound = True
+        else:
+            errors.append(file_error or "File rewind failed")
+
     # Execute chat rewind using JSONL rewind service
     if request.restore_chat:
         result = jsonl_rewind_service.truncate_to_checkpoint(
@@ -556,18 +570,6 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
             messages_removed = result.messages_removed or 0
         else:
             errors.append(f"Chat rewind failed: {result.error}")
-
-    # Execute file rewind via SDK (if requested)
-    if request.restore_files:
-        file_success, file_error = await rewind_files_via_sdk(
-            sdk_session_id=sdk_session_id,
-            target_uuid=request.target_uuid,
-            working_dir=working_dir
-        )
-        if file_success:
-            files_rewound = True
-        else:
-            errors.append(file_error or "File rewind failed")
 
     # Determine overall success
     # Chat rewind is the primary operation - if it succeeds, the operation is successful
