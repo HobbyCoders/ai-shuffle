@@ -104,15 +104,24 @@
 	}
 
 	// Sessions: recent (top 5) and all — favorites sorted first
+	// Filter out sessions with no chat history (turn_count === 0) - these are
+	// either empty or were fully rewound and have no useful content to show.
+	// Always keep the active session visible (new sessions start at 0 turns
+	// until the first query completes).
+	const activeId = $derived($activeSession.sessionId);
+	const sessionsWithHistory = $derived(
+		$sessions.filter(s => s.turn_count > 0 || s.id === activeId)
+	);
+
 	const recentSessions = $derived(
-		sortWithFavorites($sessions).slice(0, 5)
+		sortWithFavorites(sessionsWithHistory).slice(0, 5)
 	);
 
 	const filteredSessions = $derived.by(() => {
-		if (!searchQuery.trim()) return sortWithFavorites($sessions);
+		if (!searchQuery.trim()) return sortWithFavorites(sessionsWithHistory);
 		const q = searchQuery.toLowerCase();
 		return sortWithFavorites(
-			$sessions.filter(
+			sessionsWithHistory.filter(
 				(s) =>
 					s.title?.toLowerCase().includes(q) ||
 					s.id.toLowerCase().includes(q)

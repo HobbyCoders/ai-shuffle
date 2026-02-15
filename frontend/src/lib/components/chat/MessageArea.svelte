@@ -18,6 +18,7 @@
 	import { profiles } from '$lib/stores/app-data';
 	import type { ChatMessage, TodoItem } from '$lib/stores/types';
 	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
+	import { messageCache } from '$lib/stores/message-cache';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import ToolUseMessage from './ToolUseMessage.svelte';
@@ -40,7 +41,8 @@
 
 	/**
 	 * Reload the session after a rewind completes.
-	 * This is a backup mechanism in case the WebSocket event doesn't trigger a refresh.
+	 * Clears stale messages and cache first so the reload shows the correct
+	 * post-rewind state (which may be empty if all messages were rewound).
 	 * @param warning - Optional warning message for partial success (e.g., file restore failed)
 	 */
 	function handleRewindComplete(warning?: string) {
@@ -49,7 +51,16 @@
 			activeSession.addSystemMessage(warning, 'rewind_warning');
 		}
 
-		activeSession.reloadSession();
+		// Clear stale messages from the store and IndexedDB cache.
+		// Without this, the defensive check in the history handler would
+		// preserve old (broken) messages when the reload returns fewer/zero.
+		const sessionId = $activeSession.sessionId;
+		activeSession.clearMessages();
+		if (sessionId) {
+			messageCache.delete(sessionId);
+		}
+
+		activeSession.reloadSession(true);
 	}
 
 	let containerRef = $state<HTMLDivElement | null>(null);
@@ -449,7 +460,7 @@
 					<UserMessage
 						content={message.content}
 						sessionId={$activeSession.sessionId}
-						messageUuid={message.jsonlUuid || message.id}
+						messageUuid={message.jsonlUuid}
 						{fileCheckpointingEnabled}
 						onRewindComplete={handleRewindComplete}
 					/>
@@ -465,7 +476,7 @@
 						content={message.content}
 						messageIndex={messageIndex}
 						messageId={message.id}
-						messageUuid={message.jsonlUuid || message.id}
+						messageUuid={message.jsonlUuid}
 						sessionId={$activeSession.sessionId}
 						streaming={message.streaming && messageIndex === lastStreamingMessageIndex()}
 						{hasPartialMessages}

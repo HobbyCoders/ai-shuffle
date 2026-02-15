@@ -1206,12 +1206,16 @@ async def chat_websocket(
                                 # After streaming ends, the session stays in memory for 30s
                                 # with clean, finalized messages. This avoids reading from JSONL
                                 # which may have incomplete/partial snapshots (stop_reason: null).
+                                # The force_jsonl flag bypasses this cache (used after rewind to
+                                # ensure we read the truncated JSONL, not stale in-memory data).
                                 sdk_session_id = session.get("sdk_session_id")
                                 messages = []
-                                live_data = live_session_store.get_session_dict(session_id)
-                                if live_data and live_data.get("messages"):
-                                    messages = live_data["messages"]
-                                    logger.debug(f"Using live_session_store for session {session_id} with {len(messages)} messages")
+                                force_jsonl = data.get("force_jsonl", False)
+                                if not force_jsonl:
+                                    live_data = live_session_store.get_session_dict(session_id)
+                                    if live_data and live_data.get("messages"):
+                                        messages = live_data["messages"]
+                                        logger.debug(f"Using live_session_store for session {session_id} with {len(messages)} messages")
 
                                 # Get working dir from project if available
                                 working_dir = str(settings.workspace_dir)

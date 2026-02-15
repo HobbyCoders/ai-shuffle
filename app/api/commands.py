@@ -27,6 +27,7 @@ from app.core.slash_commands import (
 # New V2 rewind services - direct JSONL manipulation
 from app.core.jsonl_rewind import jsonl_rewind_service
 from app.core.sync_engine import sync_engine
+from app.core.live_session_store import live_session_store
 from app.core.models import (
     RewindRequest, RewindCheckpoint, RewindCheckpointsResponse,
     RewindExecuteResponse
@@ -380,7 +381,8 @@ async def rewind_files_via_sdk(
     """
     Rewind files to a checkpoint using the Claude SDK.
 
-    This creates a temporary SDK client, resumes the session, and calls rewind_files().
+    This creates a temporary SDK client, resumes the session with an empty prompt,
+    and calls rewind_files() within the response loop per the SDK's documented pattern.
 
     IMPORTANT: This requires that the session was originally created with
     enable_file_checkpointing=True in ClaudeAgentOptions. If file checkpointing
@@ -403,18 +405,19 @@ async def rewind_files_via_sdk(
             enable_file_checkpointing=True,  # Required for rewind_files() operation
         )
 
-        client = ClaudeSDKClient(options=options)
+        logger.debug(f"Rewinding files for session {sdk_session_id} to UUID {target_uuid}")
 
-        try:
-            await client.connect()
-            await client.rewind_files(target_uuid)
-            logger.debug(f"Successfully rewound files for session {sdk_session_id} to {target_uuid}")
-            return True, None
-        finally:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass  # Ignore disconnect errors
+        # Per SDK docs: resume the session with an empty prompt, then call
+        # rewind_files() inside the receive_response() loop. The CLI subprocess
+        # needs an active query/response cycle for control requests to work.
+        async with ClaudeSDKClient(options) as client:
+            await client.query("")  # Empty prompt opens the connection
+            async for message in client.receive_response():
+                await client.rewind_files(target_uuid)
+                break
+
+        logger.debug(f"Successfully rewound files for session {sdk_session_id} to {target_uuid}")
+        return True, None
 
     except Exception as e:
         error_msg = f"File rewind failed: {str(e)}"
@@ -536,6 +539,13 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
     # Get working directory for project
     working_dir = get_working_dir_for_project(session.get("project_id"))
 
+    logger.info(
+        f"Rewind requested: session={session_id}, sdk_session={sdk_session_id}, "
+        f"target_uuid={request.target_uuid}, target_role={request.target_role}, "
+        f"restore_chat={request.restore_chat}, restore_files={request.restore_files}, "
+        f"include_response={request.include_response}"
+    )
+
     # Track what was rewound
     chat_rewound = False
     files_rewound = False
@@ -568,6 +578,16 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
         if result.success:
             chat_rewound = True
             messages_removed = result.messages_removed or 0
+            # Clear stale messages from live_session_store so the next
+            # load_session reads from the truncated JSONL instead of
+            # serving pre-rewind data from memory.
+            await live_session_store.cleanup_ended_session(session_id)
+            # Update turn_count in DB so sidebar correctly hides empty sessions.
+            if result.remaining_user_turns is not None:
+                current_turns = session.get("turn_count", 0)
+                turn_diff = result.remaining_user_turns - current_turns
+                if turn_diff != 0:
+                    database.update_session(session_id, turn_increment=turn_diff)
         else:
             errors.append(f"Chat rewind failed: {result.error}")
 

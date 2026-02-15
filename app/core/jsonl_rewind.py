@@ -53,6 +53,7 @@ class RewindResult:
     message: str
     checkpoint_uuid: Optional[str] = None
     messages_removed: int = 0
+    remaining_user_turns: Optional[int] = None  # User message count after truncation
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -390,12 +391,22 @@ class JSONLRewindService:
 
         messages_removed = len(entries) - len(keep_entries)
 
+        # Count remaining user turns (for updating turn_count in DB)
+        remaining_user_turns = sum(
+            1 for e in keep_entries
+            if e.get('type') == 'user'
+            and e.get('message', {}).get('role') == 'user'
+            and not e.get('isMeta')
+            and not isinstance(e.get('message', {}).get('content'), list)  # Skip tool_result
+        )
+
         if messages_removed == 0:
             return RewindResult(
                 success=True,
                 message="Already at the target checkpoint",
                 checkpoint_uuid=target_uuid,
-                messages_removed=0
+                messages_removed=0,
+                remaining_user_turns=remaining_user_turns
             )
 
         # Perform atomic write: write to temp file, then rename
@@ -428,7 +439,8 @@ class JSONLRewindService:
                     success=True,
                     message=f"Successfully rewound to checkpoint, removed {messages_removed} messages",
                     checkpoint_uuid=target_uuid,
-                    messages_removed=messages_removed
+                    messages_removed=messages_removed,
+                    remaining_user_turns=remaining_user_turns
                 )
 
             except Exception:

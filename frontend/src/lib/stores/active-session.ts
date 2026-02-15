@@ -1940,12 +1940,21 @@ function createActiveSessionStore() {
 		setScrollTop(pos: number) { update(s => ({ ...s, scrollTop: pos })); },
 		clearError() { update(s => ({ ...s, error: null })); },
 		clearWorktreeError() { update(s => ({ ...s, worktreeError: null })); },
+		/** Clear all messages (e.g. before reloading after rewind). */
+		clearMessages() { update(s => ({ ...s, messages: [], todos: [] })); },
 
-		/** Reload the current session from backend (e.g. after rewind). */
-		reloadSession() {
+		/** Reload the current session from backend (e.g. after rewind).
+		 *  @param forceJsonl - Skip live_session_store and read directly from JSONL.
+		 *                      Use after rewind to avoid stale in-memory data.
+		 */
+		reloadSession(forceJsonl = false) {
 			const state = get(store);
 			if (state.sessionId && ws?.readyState === WebSocket.OPEN) {
-				ws.send(JSON.stringify({ type: 'load_session', session_id: state.sessionId }));
+				ws.send(JSON.stringify({
+					type: 'load_session',
+					session_id: state.sessionId,
+					...(forceJsonl && { force_jsonl: true }),
+				}));
 			}
 		},
 
