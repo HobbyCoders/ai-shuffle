@@ -1954,6 +1954,16 @@ async def stream_query(
     logger.debug(f"Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
     logger.debug(f"Options cwd: {options.cwd}")
     logger.debug(f"Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
+
+    # Wrap stderr callback to collect lines for error reporting
+    cli_stderr_lines: list[str] = []
+    original_stderr = options.stderr
+    def capturing_stderr(line: str):
+        cli_stderr_lines.append(line)
+        if original_stderr:
+            original_stderr(line)
+    options.stderr = capturing_stderr
+
     client = ClaudeSDKClient(options=options)
     logger.debug("ClaudeSDKClient created, attempting connect...")
 
@@ -1966,7 +1976,13 @@ async def stream_query(
         logger.error(f"Failed to connect to Claude SDK for session {session_id}: {e}")
         logger.error(f"Exception type: {type(e).__name__}")
         logger.error(f"Full traceback:\n{traceback.format_exc()}")
-        yield {"type": "error", "message": f"Connection failed: {e}"}
+        # Surface actual CLI stderr in the error message for actionable feedback
+        if cli_stderr_lines:
+            stderr_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
+            logger.error(f"CLI stderr: {stderr_msg}")
+            yield {"type": "error", "message": stderr_msg}
+        else:
+            yield {"type": "error", "message": f"Connection failed: {e}"}
         return
 
     state = SessionState(
@@ -2326,6 +2342,16 @@ async def _run_background_query(
     # Always create new client
     logger.debug(f"[Background] Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
     logger.debug(f"[Background] Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
+
+    # Wrap stderr callback to collect lines for error reporting
+    cli_stderr_lines: list[str] = []
+    original_stderr = options.stderr
+    def capturing_stderr(line: str):
+        cli_stderr_lines.append(line)
+        if original_stderr:
+            original_stderr(line)
+    options.stderr = capturing_stderr
+
     client = ClaudeSDKClient(options=options)
 
     # Connect
@@ -2333,12 +2359,16 @@ async def _run_background_query(
         await client.connect()
         logger.debug(f"[Background] Connected to Claude SDK for session {session_id}")
     except Exception as e:
-        logger.error(f"[Background] Failed to connect to Claude SDK for session {session_id}: {e}")
+        error_msg = str(e)
+        if cli_stderr_lines:
+            error_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
+            logger.error(f"[Background] CLI stderr: {error_msg}")
+        logger.error(f"[Background] Failed to connect to Claude SDK for session {session_id}: {error_msg}")
         # Broadcast error
         await sync_engine.broadcast_stream_end(
             session_id=session_id,
             message_id=f"error-{session_id}",
-            metadata={"error": str(e)},
+            metadata={"error": error_msg},
             interrupted=True,
             source_device_id=device_id
         )
@@ -2971,6 +3001,16 @@ async def stream_to_websocket(
     logger.debug(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None}, include_partial={options.include_partial_messages})")
     logger.debug(f"[WS] Options cwd: {options.cwd}")
     logger.debug(f"[WS] Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
+
+    # Wrap stderr callback to collect lines for error reporting
+    cli_stderr_lines: list[str] = []
+    original_stderr = options.stderr
+    def capturing_stderr(line: str):
+        cli_stderr_lines.append(line)
+        if original_stderr:
+            original_stderr(line)
+    options.stderr = capturing_stderr
+
     client = ClaudeSDKClient(options=options)
     logger.debug("[WS] ClaudeSDKClient created, attempting connect...")
 
@@ -2983,7 +3023,13 @@ async def stream_to_websocket(
         logger.error(f"[WS] Failed to connect for session {session_id}: {e}")
         logger.error(f"[WS] Exception type: {type(e).__name__}")
         logger.error(f"[WS] Full traceback:\n{traceback.format_exc()}")
-        yield {"type": "error", "message": f"Connection failed: {e}"}
+        # Surface actual CLI stderr in the error message for actionable feedback
+        if cli_stderr_lines:
+            stderr_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
+            logger.error(f"[WS] CLI stderr: {stderr_msg}")
+            yield {"type": "error", "message": stderr_msg}
+        else:
+            yield {"type": "error", "message": f"Connection failed: {e}"}
         return
 
     state = SessionState(
