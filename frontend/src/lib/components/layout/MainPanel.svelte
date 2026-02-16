@@ -38,6 +38,7 @@
 	import HooksCard from '$lib/components/deck/cards/HooksCard.svelte';
 	import AutomationsCard from '$lib/components/deck/cards/AutomationsCard.svelte';
 	import StatsCard from '$lib/components/deck/cards/StatsCard.svelte';
+	import DocsCard from '$lib/components/docs/DocsCard.svelte';
 
 	interface Props {
 		onOpenSession?: (sessionId: string) => void;
@@ -63,13 +64,14 @@
 		'notes': 'Notes',
 		'hooks': 'Hooks',
 		'stats': 'Stats',
+		'docs': 'Documentation',
 	};
 
 	// Feature pages that use FeaturePageLayout (provide their own header)
 	// These don't need the generic PageHeader
 	const embeddedViews = new Set([
 		'profile', 'project', 'settings', 'subagent',
-		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'stats'
+		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'stats', 'docs'
 	]);
 
 	// Get the active session state (if in chat view)
@@ -660,6 +662,10 @@
 				<StatsCard
 					onSessionClick={onOpenSession || (() => {})}
 				/>
+			</div>
+		{:else if $activeView.type === 'docs'}
+			<div class="feature-panel">
+				<DocsCard mobile={isMobile} />
 			</div>
 		{/if}
 	{:else}

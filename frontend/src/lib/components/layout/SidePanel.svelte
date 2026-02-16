@@ -29,7 +29,8 @@
 		Bot,
 		KeyRound,
 		FolderKanban,
-		CalendarClock
+		CalendarClock,
+		BookOpen
 	} from 'lucide-svelte';
 	import { layout, activeView, sidebarCollapsed } from '$lib/stores/layout';
 	import type { ViewType } from '$lib/stores/layout';
@@ -109,6 +110,7 @@
 
 	// Navigation items
 	const navItems: { type: ViewType; label: string; icon: typeof Settings; adminOnly?: boolean }[] = [
+		{ type: 'docs', label: 'Docs', icon: BookOpen },
 		{ type: 'file-browser', label: 'Files', icon: FolderOpen },
 		{ type: 'plugins', label: 'Plugins', icon: Puzzle },
 		{ type: 'mcp', label: 'MCP Servers', icon: Server },

@@ -23,7 +23,8 @@ export type ViewType =
 	| 'hooks'
 	| 'automations'
 	| 'notes'
-	| 'stats';
+	| 'stats'
+	| 'docs';
 
 export interface ActiveView {
 	type: ViewType;
