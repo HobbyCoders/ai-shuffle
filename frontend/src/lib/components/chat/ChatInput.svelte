@@ -183,14 +183,31 @@
 	let thinkingDropdownRef = $state<HTMLDivElement | null>(null);
 	let permissionDropdownRef = $state<HTMLDivElement | null>(null);
 
-	// Thinking mode options
-	const thinkingModes = [
+	// Thinking mode options vary by model type
+	// Opus uses effort-based adaptive thinking; Sonnet/Haiku use token-budget thinking
+	const effortModes = [
+		{ value: null, label: 'Default', description: 'Use profile setting' },
+		{ value: 'low', label: 'Low', description: 'Light reasoning' },
+		{ value: 'medium', label: 'Medium', description: 'Balanced reasoning' },
+		{ value: 'high', label: 'High', description: 'Deep reasoning' },
+		{ value: 'max', label: 'Max', description: 'Maximum depth' }
+	];
+	const tokenBudgetModes = [
 		{ value: null, label: 'Default', description: 'Use profile setting' },
 		{ value: 'default', label: 'Off', description: 'No extended thinking' },
 		{ value: 'think', label: 'Think', description: '~8k tokens' },
 		{ value: 'think_harder', label: 'Think Harder', description: '~24k tokens' },
 		{ value: 'ultra_think', label: 'Ultra Think', description: '~64k tokens' }
 	];
+
+	// Determine effective model: override > profile config > fallback
+	const effectiveModel = $derived(
+		$activeSession.modelOverride ||
+		$profiles.find(p => p.id === $activeSession.profile)?.config?.model ||
+		'sonnet'
+	);
+	const isOpusModel = $derived(effectiveModel.toLowerCase().includes('opus'));
+	const thinkingModes = $derived(isOpusModel ? effortModes : tokenBudgetModes);
 
 	// Permission mode options
 	const permissionModes = [
@@ -241,6 +258,18 @@
 		showProfileDropdown = false;
 		showPermissionDropdown = !showPermissionDropdown;
 	}
+
+	// Clear thinking override when model type changes and override is incompatible
+	const effortValues = new Set(effortModes.map(m => m.value));
+	const tokenBudgetValues = new Set(tokenBudgetModes.map(m => m.value));
+	$effect(() => {
+		const override = $activeSession.thinkingModeOverride;
+		if (override === null) return; // null (Default) is always valid
+		const validValues = isOpusModel ? effortValues : tokenBudgetValues;
+		if (!validValues.has(override)) {
+			activeSession.setThinkingModeOverride(null);
+		}
+	});
 
 	// Select override values
 	function selectThinkingMode(value: string | null) {
@@ -1124,7 +1153,7 @@
 
 							{#if showThinkingDropdown}
 								<div class="override-dropdown">
-									<div class="override-dropdown-header">Thinking Mode</div>
+									<div class="override-dropdown-header">{isOpusModel ? 'Reasoning Effort' : 'Thinking Mode'}</div>
 									{#each thinkingModes as mode}
 										<button
 											type="button"

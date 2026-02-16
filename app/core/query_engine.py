@@ -132,7 +132,7 @@ THINKING_TOKEN_BUDGETS = {
 }
 
 
-def _build_thinking_config(config: Dict[str, Any], model: Optional[str]) -> Dict[str, Any]:
+def _build_thinking_config(config: Dict[str, Any], model: Optional[str], overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Build thinking/effort configuration for ClaudeAgentOptions based on model type.
 
@@ -140,30 +140,37 @@ def _build_thinking_config(config: Dict[str, Any], model: Optional[str]) -> Dict
     1. Opus 4.6+: Uses effort-based adaptive thinking (effort: low/medium/high/max)
     2. Sonnet/Haiku: Uses token budget-based thinking (thinking: {type: "enabled", budget_tokens: N})
 
+    Chat-level overrides (from the thinking mode dropdown) take priority over profile config.
+    Opus overrides send effort values (low/medium/high/max).
+    Sonnet/Haiku overrides send thinking_mode values (think/think_harder/ultra_think).
+
     Args:
         config: Profile configuration dict
         model: Model name (e.g., 'opus', 'sonnet', 'haiku')
+        overrides: Optional query-level overrides dict (may contain 'thinking_mode')
 
     Returns:
         Dict with thinking/effort configuration to spread into ClaudeAgentOptions
     """
     result: Dict[str, Any] = {}
+    overrides = overrides or {}
 
     # Determine if this is an Opus model (uses effort-based thinking)
     is_opus = model and ('opus' in model.lower())
 
     if is_opus:
         # Opus 4.6+ uses effort-based adaptive thinking
-        effort = config.get('effort')
+        # Override takes priority over profile config
+        effort = overrides.get('thinking_mode') or config.get('effort')
         if effort and effort in ('low', 'medium', 'high', 'max'):
-            # Use adaptive thinking with effort level
             result['thinking'] = {'type': 'adaptive'}
             result['effort'] = effort
             logger.debug(f"Opus model: using adaptive thinking with effort={effort}")
         # If no effort specified, use defaults (no extended thinking)
     else:
         # Sonnet/Haiku use token budget-based thinking
-        thinking_mode = config.get('thinking_mode', 'default')
+        # Override takes priority over profile config
+        thinking_mode = overrides.get('thinking_mode') or config.get('thinking_mode', 'default')
         if thinking_mode and thinking_mode != 'default' and thinking_mode in THINKING_TOKEN_BUDGETS:
             budget_tokens = THINKING_TOKEN_BUDGETS[thinking_mode]
             result['thinking'] = {'type': 'enabled', 'budget_tokens': budget_tokens}
@@ -1572,7 +1579,7 @@ def build_options_from_profile(
         # Extended thinking configuration (SDK 0.1.36+)
         # For Opus 4.6+: use effort-based adaptive thinking
         # For Sonnet/Haiku: use token budget-based thinking
-        **_build_thinking_config(config, model_to_use),
+        **_build_thinking_config(config, model_to_use, overrides),
     )
 
     deployment_mode = detect_deployment_mode()
