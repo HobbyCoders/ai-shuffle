@@ -126,6 +126,7 @@
 			appData.loadProfiles(),
 			appData.loadSessions(),
 			appData.loadProjects(),
+			appData.loadApiUserSessions(),
 			loadAllTags()
 		]);
 

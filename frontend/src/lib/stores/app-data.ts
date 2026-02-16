@@ -37,6 +37,9 @@ interface AppDataState {
 	searchHasMore: boolean;
 	searchLoading: boolean;
 	searchLoadingMore: boolean;
+	// API user sessions (separate from admin sessions)
+	apiUserSessions: Session[];
+	apiUserSessionsLoading: boolean;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -66,6 +69,8 @@ function createAppDataStore() {
 		searchHasMore: false,
 		searchLoading: false,
 		searchLoadingMore: false,
+		apiUserSessions: [],
+		apiUserSessionsLoading: false,
 	});
 
 	const { subscribe, update } = store;
@@ -180,6 +185,23 @@ function createAppDataStore() {
 		}
 	}
 
+	async function loadApiUserSessionsInternal() {
+		update(s => ({ ...s, apiUserSessionsLoading: true }));
+		try {
+			const result = await api.get<PaginatedSessions>(
+				`/sessions/paginated?limit=100&offset=0&api_users_only=true&admin_only=false`
+			);
+			update(s => ({
+				...s,
+				apiUserSessions: result.items,
+				apiUserSessionsLoading: false,
+			}));
+		} catch (e) {
+			console.error('Failed to load API user sessions:', e);
+			update(s => ({ ...s, apiUserSessionsLoading: false }));
+		}
+	}
+
 	// ─── Public API ───────────────────────────────────────────────────────────
 
 	return {
@@ -240,6 +262,10 @@ function createAppDataStore() {
 
 		async loadMoreSessions() {
 			await loadMoreSessionsInternal();
+		},
+
+		async loadApiUserSessions() {
+			await loadApiUserSessionsInternal();
 		},
 
 		setSessionsTagFilter(tagId: string | null) {
@@ -349,3 +375,4 @@ export const selectedSessionIds = derived(appData, $d => $d.selectedSessionIds);
 export const selectionMode = derived(appData, $d => $d.selectionMode);
 export const sessionsLoading = derived(appData, $d => $d.sessionsLoading);
 export const sessionsTagFilter = derived(appData, $d => $d.sessionsTagFilter);
+export const apiUserSessions = derived(appData, $d => $d.apiUserSessions);

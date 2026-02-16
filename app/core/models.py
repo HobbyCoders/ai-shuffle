@@ -269,6 +269,8 @@ class Session(SessionBase):
     sdk_session_id: Optional[str] = None
     status: str = "active"
     is_favorite: bool = False
+    api_user_id: Optional[str] = None
+    api_user_name: Optional[str] = None
     total_cost_usd: float = 0.0
     total_tokens_in: int = 0
     total_tokens_out: int = 0

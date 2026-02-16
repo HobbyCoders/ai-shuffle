@@ -180,6 +180,8 @@ export interface Session {
 	title: string | null;
 	status: string;
 	is_favorite: boolean;
+	api_user_id?: string | null;
+	api_user_name?: string | null;
 	total_cost_usd: number;
 	total_tokens_in: number;
 	total_tokens_out: number;

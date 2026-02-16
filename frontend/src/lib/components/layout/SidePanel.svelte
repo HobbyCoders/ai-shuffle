@@ -31,7 +31,7 @@
 	} from 'lucide-svelte';
 	import { layout, activeView, sidebarCollapsed } from '$lib/stores/layout';
 	import type { ViewType } from '$lib/stores/layout';
-	import { appData, sessions, projects } from '$lib/stores/app-data';
+	import { appData, sessions, projects, apiUserSessions } from '$lib/stores/app-data';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { toggleSessionFavorite } from '$lib/api/client';
 	import type { Session } from '$lib/api/client';
@@ -64,6 +64,50 @@
 	// Track project being deleted (for confirmation)
 	let deletingProjectId = $state<string | null>(null);
 	let deleteLoading = $state(false);
+
+	// API Users section
+	let apiUsersExpanded = $state(true);
+	let collapsedApiUsers = $state<Set<string>>(new Set());
+
+	// Group API user sessions by user name
+	interface ApiUserGroup {
+		userName: string;
+		sessions: Session[];
+	}
+
+	const apiUserSessionsWithHistory = $derived(
+		$apiUserSessions.filter(s => s.turn_count > 0 || s.id === activeId || $streamingSessions.has(s.id))
+	);
+
+	const groupedApiUserSessions = $derived.by((): ApiUserGroup[] => {
+		const groups = new Map<string, Session[]>();
+
+		for (const session of apiUserSessionsWithHistory) {
+			const userName = session.api_user_name || 'Unknown User';
+			if (!groups.has(userName)) {
+				groups.set(userName, []);
+			}
+			groups.get(userName)!.push(session);
+		}
+
+		return [...groups.entries()]
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([userName, sessions]) => ({ userName, sessions }));
+	});
+
+	function isApiUserExpanded(userName: string): boolean {
+		return !collapsedApiUsers.has(userName);
+	}
+
+	function toggleApiUserGroup(userName: string) {
+		const next = new Set(collapsedApiUsers);
+		if (next.has(userName)) {
+			next.delete(userName);
+		} else {
+			next.add(userName);
+		}
+		collapsedApiUsers = next;
+	}
 
 	// Navigation items
 	const navItems: { type: ViewType; label: string; icon: typeof Settings; adminOnly?: boolean }[] = [
@@ -498,6 +542,72 @@
 					</div>
 				{/if}
 			</div>
+
+			<!-- API Users Section -->
+			{#if groupedApiUserSessions.length > 0}
+				<div class="divider"></div>
+
+				<div class="sessions-section">
+					<button
+						class="section-header"
+						onclick={() => apiUsersExpanded = !apiUsersExpanded}
+						aria-expanded={apiUsersExpanded}
+					>
+						<span class="section-title">API Users</span>
+						<div class="section-actions">
+							{#if apiUsersExpanded}
+								<ChevronDown size={14} strokeWidth={1.5} />
+							{:else}
+								<ChevronRight size={14} strokeWidth={1.5} />
+							{/if}
+						</div>
+					</button>
+
+					{#if apiUsersExpanded}
+						<div class="session-list">
+							{#each groupedApiUserSessions as group (group.userName)}
+								<div class="project-group">
+									<button
+										class="project-group-header"
+										onclick={() => toggleApiUserGroup(group.userName)}
+									>
+										<div class="project-group-chevron">
+											{#if isApiUserExpanded(group.userName)}
+												<ChevronDown size={12} strokeWidth={1.5} />
+											{:else}
+												<ChevronRight size={12} strokeWidth={1.5} />
+											{/if}
+										</div>
+										<Users size={13} strokeWidth={1.5} class="project-group-icon" />
+										<span class="project-group-name">
+											{group.userName}
+										</span>
+										<span class="project-group-count">{group.sessions.length}</span>
+									</button>
+
+									{#if isApiUserExpanded(group.userName)}
+										<div class="project-group-sessions">
+											{#each group.sessions as session (session.id)}
+												<button
+													class="session-item"
+													class:active={isActiveChat(session.id)}
+													onclick={() => onOpenSession(session.id)}
+												>
+													{#if isStreaming(session.id)}
+														<div class="streaming-dot"></div>
+													{/if}
+													<span class="session-title">{session.title || 'Untitled'}</span>
+													<span class="session-time">{formatRelativeTime(session.updated_at || session.created_at)}</span>
+												</button>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			{/if}
 		</div>
 	{/if}
 </aside>

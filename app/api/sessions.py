@@ -53,10 +53,20 @@ def check_session_access(request: Request, session: dict) -> None:
 
 
 def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
-    """Add tags array and has_forks field to each session"""
+    """Add tags array, has_forks field, and api_user_name to each session"""
+    # Batch-lookup API user names for efficiency
+    api_user_ids = {s["api_user_id"] for s in sessions if s.get("api_user_id")}
+    api_user_names: dict[str, str] = {}
+    for uid in api_user_ids:
+        user = database.get_api_user(uid)
+        if user:
+            api_user_names[uid] = user.get("name") or user.get("username") or uid
+
     for session in sessions:
         session["tags"] = database.get_session_tags(session["id"])
         session["has_forks"] = database.session_has_forks(session["id"])
+        if session.get("api_user_id"):
+            session["api_user_name"] = api_user_names.get(session["api_user_id"])
     return sessions
 
 
