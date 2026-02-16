@@ -34,7 +34,7 @@ from app.core.permission_handler import permission_handler
 from app.core.platform import detect_deployment_mode, DeploymentMode
 from app.core.user_question_handler import user_question_handler
 from app.core import encryption
-from app.core.jsonl_parser import write_hook_message, write_system_message
+
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.core.mcp_service import get_mcp_service, McpServerType
 
@@ -3007,15 +3007,6 @@ async def stream_to_websocket(
             # Drain stderr queue and yield any plugin messages
             for stderr_msg in await drain_stderr_queue():
                 logger.debug(f"[WS] Yielding plugin message to websocket: {stderr_msg.get('type')}")
-                # Write hook message to JSONL file for persistence across app restarts
-                if state.sdk_session_id and options.cwd:
-                    write_hook_message(
-                        sdk_session_id=state.sdk_session_id,
-                        working_dir=options.cwd,
-                        plugin=stderr_msg.get("plugin", "unknown"),
-                        message=stderr_msg.get("message", ""),
-                        severity=stderr_msg.get("severity", "warning")
-                    )
                 yield stderr_msg
 
             if isinstance(message, SystemMessage):
@@ -3025,27 +3016,6 @@ async def stream_to_websocket(
                     state.sdk_session_id = sdk_session_id
                     logger.debug(f"[WS] Captured SDK session ID: {sdk_session_id}")
 
-                    # Write worktree context message if this is a worktree session
-                    # This creates a persistent record in JSONL that appears first in chat history
-                    if session_id and options.cwd:
-                        worktree = database.get_worktree_by_session(session_id)
-                        if worktree and worktree.get("status") == "active":
-                            branch_name = worktree.get("branch_name", "unknown")
-                            base_branch = worktree.get("base_branch", "main")
-                            worktree_path = worktree.get("worktree_path", "")
-                            logger.debug(f"[WS] Writing worktree context for session {session_id}: branch={branch_name}")
-                            write_system_message(
-                                sdk_session_id=sdk_session_id,
-                                working_dir=options.cwd,
-                                subtype="worktree_context",
-                                content=f"Working in git worktree on branch '{branch_name}' (based on '{base_branch}')",
-                                data={
-                                    "branch_name": branch_name,
-                                    "base_branch": base_branch,
-                                    "worktree_path": worktree_path,
-                                    "worktree_id": worktree.get("id")
-                                }
-                            )
                 else:
                     # Forward all system messages to frontend except noisy internal ones.
                     # Previous whitelist approach silently dropped SDK errors/warnings
@@ -3455,15 +3425,6 @@ async def stream_to_websocket(
 
         # Final drain of stderr queue after streaming loop completes
         for stderr_msg in await drain_stderr_queue():
-            # Write hook message to JSONL file for persistence across app restarts
-            if state.sdk_session_id and options.cwd:
-                write_hook_message(
-                    sdk_session_id=state.sdk_session_id,
-                    working_dir=options.cwd,
-                    plugin=stderr_msg.get("plugin", "unknown"),
-                    message=stderr_msg.get("message", ""),
-                    severity=stderr_msg.get("severity", "warning")
-                )
             yield stderr_msg
 
     except asyncio.CancelledError:
