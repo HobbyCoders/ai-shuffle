@@ -30,7 +30,7 @@ import { ProviderCredentials, createValidatedCredentials } from '../providers/ty
 // ============================================================================
 
 const DEFAULT_PROVIDER = 'openai';
-const DEFAULT_MODEL = 'gpt-4o';
+const DEFAULT_MODEL = 'gpt-5';
 
 // ============================================================================
 // Review Prompts
@@ -104,8 +104,6 @@ function getCredentials(providerId: string): ProviderCredentials | null {
     case 'google':
       const googleKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
       return createValidatedCredentials(googleKey, 'google');
-    case 'deepseek':
-      return createValidatedCredentials(process.env.DEEPSEEK_API_KEY, 'deepseek');
     default:
       return null;
   }
@@ -193,8 +191,8 @@ export async function aiReview(input: ReviewInput): Promise<ReviewResult> {
 
   try {
     const model = providerId === 'openai' ? DEFAULT_MODEL :
-                  providerId === 'google' ? 'gemini-2.5-flash-preview-05-20' :
-                  'deepseek-chat';
+                  providerId === 'google' ? 'gemini-3-flash-preview' :
+                  chatRegistry.getDefaultModel(providerId) || DEFAULT_MODEL;
 
     const result = await provider.chat({
       messages,

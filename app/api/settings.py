@@ -168,9 +168,6 @@ class IntegrationSettingsResponse(BaseModel):
     meshy_api_key_masked: str = ""
     model3d_provider: Optional[str] = None  # "meshy"
     model3d_model: Optional[str] = None  # "latest", "meshy-5", "meshy-4"
-    # DeepSeek settings
-    deepseek_api_key_set: bool = False
-    deepseek_api_key_masked: str = ""
 
 
 class OpenAIKeyRequest(BaseModel):
@@ -317,7 +314,6 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     openai_key = get_decrypted_api_key("openai_api_key")
     image_api_key = get_decrypted_api_key("image_api_key")
     meshy_api_key = get_decrypted_api_key("meshy_api_key")
-    deepseek_api_key = get_decrypted_api_key("deepseek_api_key")
 
     # Non-sensitive settings
     image_provider = database.get_system_setting("image_provider")
@@ -353,8 +349,6 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         meshy_api_key_masked=mask_api_key(meshy_api_key) if meshy_api_key else "",
         model3d_provider=model3d_provider,
         model3d_model=model3d_model,
-        deepseek_api_key_set=bool(deepseek_api_key),
-        deepseek_api_key_masked=mask_api_key(deepseek_api_key) if deepseek_api_key else ""
     )
 
 
@@ -411,84 +405,6 @@ async def remove_openai_api_key(token: str = Depends(require_admin)):
     Remove the OpenAI API key (admin only).
     """
     database.delete_system_setting("openai_api_key")
-    return {"success": True}
-
-
-# ============================================================================
-# DeepSeek API Key
-# ============================================================================
-
-class DeepSeekKeyRequest(BaseModel):
-    api_key: str
-
-
-class DeepSeekKeyResponse(BaseModel):
-    success: bool
-    masked_key: str
-
-
-@router.post("/integrations/deepseek", response_model=DeepSeekKeyResponse)
-async def set_deepseek_api_key(
-    request: DeepSeekKeyRequest,
-    token: str = Depends(require_admin)
-):
-    """
-    Set the DeepSeek API key (admin only).
-
-    Get your API key from: https://platform.deepseek.com/api_keys
-    """
-    api_key = request.api_key.strip()
-
-    if not api_key:
-        raise HTTPException(status_code=400, detail="API key cannot be empty")
-
-    # DeepSeek API keys start with "sk-"
-    if not api_key.startswith("sk-"):
-        raise HTTPException(status_code=400, detail="Invalid API key format. DeepSeek keys start with 'sk-'")
-
-    # Validate the key by making a test request to DeepSeek
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                "https://api.deepseek.com/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "deepseek-chat",
-                    "messages": [{"role": "user", "content": "Hi"}],
-                    "max_tokens": 1
-                }
-            )
-            if response.status_code == 401:
-                raise HTTPException(status_code=400, detail="Invalid API key. Authentication failed.")
-            elif response.status_code not in (200, 429):  # 429 = rate limit, key is still valid
-                logger.warning(f"DeepSeek API check returned status {response.status_code}")
-    except httpx.TimeoutException:
-        # Don't fail on timeout - key might still be valid
-        logger.warning("DeepSeek API validation timed out, saving key anyway")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.warning(f"Error validating DeepSeek key: {e}")
-        # Don't fail on network errors - save the key
-
-    # Save to database (encrypted if encryption is ready)
-    set_encrypted_api_key("deepseek_api_key", api_key)
-
-    return DeepSeekKeyResponse(
-        success=True,
-        masked_key=mask_api_key(api_key)
-    )
-
-
-@router.delete("/integrations/deepseek")
-async def remove_deepseek_api_key(token: str = Depends(require_admin)):
-    """
-    Remove the DeepSeek API key (admin only).
-    """
-    database.delete_system_setting("deepseek_api_key")
     return {"success": True}
 
 
@@ -2757,10 +2673,6 @@ async def get_available_ai_tools(token: str = Depends(require_auth)):
         available_providers.add("openai")  # For collaboration tools
     if meshy_api_key:
         available_providers.add("meshy")
-    # DeepSeek for collaboration tools
-    deepseek_api_key = get_decrypted_api_key("deepseek_api_key")
-    if deepseek_api_key:
-        available_providers.add("deepseek")
 
     # Get current configured providers
     current_image_provider = database.get_system_setting("image_provider")

@@ -142,8 +142,6 @@ function getCredentials(providerId: string): ProviderCredentials | null {
     case 'google':
       const googleKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
       return createValidatedCredentials(googleKey, 'google');
-    case 'deepseek':
-      return createValidatedCredentials(process.env.DEEPSEEK_API_KEY, 'deepseek');
     default:
       return null;
   }

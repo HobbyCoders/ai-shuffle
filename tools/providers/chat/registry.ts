@@ -165,13 +165,13 @@ class ChatProviderRegistry {
 
   /**
    * Get the best provider for a specific task
-   * Priority: DeepSeek for reasoning, Gemini for long context, OpenAI as default
+   * Priority: OpenAI for reasoning, Gemini for long context/memory, OpenAI as default
    */
   getBestProviderForTask(task: 'reasoning' | 'memory' | 'review' | 'general'): ChatProvider | undefined {
     switch (task) {
       case 'reasoning':
-        // Prefer DeepSeek for reasoning tasks
-        return this.get('deepseek') || this.get('openai') || this.list()[0];
+        // Prefer OpenAI for reasoning tasks (o3-mini, gpt-5.2-pro)
+        return this.get('openai') || this.get('google') || this.list()[0];
 
       case 'memory':
         // Prefer Gemini for long context memory tasks

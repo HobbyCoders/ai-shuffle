@@ -1,7 +1,7 @@
 /**
  * Chat Provider Types
  *
- * Common interfaces for LLM chat providers (OpenAI, Google, Anthropic, DeepSeek, etc.)
+ * Common interfaces for LLM chat providers (OpenAI, Google, etc.)
  * These types enable Claude to collaborate with other LLMs for specialized tasks
  * like planning, memory, review, and reasoning.
  */
@@ -189,7 +189,7 @@ export interface ChatModelInfo extends Omit<ModelInfo, 'capabilities'> {
  * Chat provider interface
  */
 export interface ChatProvider {
-  /** Unique provider identifier (e.g., "openai", "google", "deepseek") */
+  /** Unique provider identifier (e.g., "openai", "google") */
   readonly id: string;
   /** Human-readable provider name */
   readonly name: string;

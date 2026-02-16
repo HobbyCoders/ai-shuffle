@@ -2,7 +2,7 @@
  * OpenAI Chat Provider
  *
  * Adapter for OpenAI's Chat Completions API.
- * Supports GPT-4o, GPT-4o-mini, o1, o1-mini, and other models.
+ * Supports GPT-5 family, GPT-4o, o-series reasoning models, and more.
  *
  * API Reference: https://platform.openai.com/docs/api-reference/chat
  */
@@ -178,10 +178,69 @@ export const openaiChatProvider: ChatProvider = {
   id: 'openai',
   name: 'OpenAI',
   models: [
+    // GPT-5 family
+    {
+      id: 'gpt-5',
+      name: 'GPT-5',
+      description: 'Most capable GPT-5 model with vision - $2.50/1M input, $10/1M output',
+      capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming'],
+      context_window: 128000,
+      pricing: { unit: '1M tokens', price: 2.50 }
+    },
+    {
+      id: 'gpt-5-mini',
+      name: 'GPT-5 Mini',
+      description: 'Fast and affordable GPT-5 class model - $0.15/1M input, $0.60/1M output',
+      capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming'],
+      context_window: 128000,
+      pricing: { unit: '1M tokens', price: 0.15 }
+    },
+    {
+      id: 'gpt-5-nano',
+      name: 'GPT-5 Nano',
+      description: 'Fastest and cheapest GPT-5 for summarization and classification',
+      capabilities: ['chat', 'tools', 'json_mode', 'streaming'],
+      context_window: 128000,
+      pricing: { unit: '1M tokens', price: 0.10 }
+    },
+    {
+      id: 'gpt-5.1',
+      name: 'GPT-5.1',
+      description: 'Enhanced GPT-5 with improved performance - $1.25/1M input, $10/1M output',
+      capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming'],
+      context_window: 128000,
+      pricing: { unit: '1M tokens', price: 1.25 }
+    },
+    {
+      id: 'gpt-5.2',
+      name: 'GPT-5.2',
+      description: 'Latest GPT-5 with 400K context - $1.75/1M input, $14/1M output',
+      capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming', 'long_context'],
+      context_window: 400000,
+      pricing: { unit: '1M tokens', price: 1.75 }
+    },
+    {
+      id: 'gpt-5.2-pro',
+      name: 'GPT-5.2 Pro',
+      description: 'Reasoning model with chain-of-thought - $21/1M input, $168/1M output',
+      capabilities: ['chat', 'reasoning', 'tools', 'vision'],
+      context_window: 400000,
+      pricing: { unit: '1M tokens', price: 21.00 }
+    },
+    // o-series reasoning models
+    {
+      id: 'o3-mini',
+      name: 'o3 Mini',
+      description: 'Compact reasoning model - $1.10/1M input, $4.40/1M output',
+      capabilities: ['chat', 'reasoning', 'tools'],
+      context_window: 200000,
+      pricing: { unit: '1M tokens', price: 1.10 }
+    },
+    // Previous generation
     {
       id: 'gpt-4o',
       name: 'GPT-4o',
-      description: 'Most capable GPT-4 model with vision - $2.50/1M input, $10/1M output',
+      description: 'Previous generation GPT-4 with vision - $2.50/1M input, $10/1M output',
       capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming'],
       context_window: 128000,
       pricing: { unit: '1M tokens', price: 2.50 }
@@ -189,48 +248,16 @@ export const openaiChatProvider: ChatProvider = {
     {
       id: 'gpt-4o-mini',
       name: 'GPT-4o Mini',
-      description: 'Fast and affordable GPT-4 class model - $0.15/1M input, $0.60/1M output',
+      description: 'Previous generation fast model - $0.15/1M input, $0.60/1M output',
       capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming'],
       context_window: 128000,
       pricing: { unit: '1M tokens', price: 0.15 }
     },
-    {
-      id: 'o1',
-      name: 'o1',
-      description: 'Reasoning model for complex tasks - $15/1M input, $60/1M output',
-      capabilities: ['chat', 'reasoning'],
-      context_window: 200000,
-      pricing: { unit: '1M tokens', price: 15.00 }
-    },
-    {
-      id: 'o1-mini',
-      name: 'o1 Mini',
-      description: 'Faster reasoning model - $3/1M input, $12/1M output',
-      capabilities: ['chat', 'reasoning'],
-      context_window: 128000,
-      pricing: { unit: '1M tokens', price: 3.00 }
-    },
-    {
-      id: 'o3-mini',
-      name: 'o3 Mini',
-      description: 'Latest compact reasoning model with improved performance',
-      capabilities: ['chat', 'reasoning', 'tools'],
-      context_window: 200000,
-      pricing: { unit: '1M tokens', price: 1.10 }
-    },
-    {
-      id: 'gpt-4-turbo',
-      name: 'GPT-4 Turbo',
-      description: 'Previous generation GPT-4 with vision - $10/1M input, $30/1M output',
-      capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming'],
-      context_window: 128000,
-      pricing: { unit: '1M tokens', price: 10.00 }
-    }
   ],
 
   async chat(input: ChatInput, credentials: ProviderCredentials): Promise<ChatResult> {
     const apiKey = credentials.apiKey;
-    const model = input.model || 'gpt-4o';
+    const model = input.model || 'gpt-5';
 
     // Validate we have messages
     if (!input.messages || input.messages.length === 0) {
@@ -345,7 +372,7 @@ export const openaiChatProvider: ChatProvider = {
 
   async *streamChat(input: ChatInput, credentials: ProviderCredentials): AsyncIterable<ChatStreamChunk> {
     const apiKey = credentials.apiKey;
-    const model = input.model || 'gpt-4o';
+    const model = input.model || 'gpt-5';
 
     // Build request body with streaming enabled
     const requestBody: Record<string, any> = {

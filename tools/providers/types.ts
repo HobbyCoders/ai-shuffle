@@ -28,7 +28,6 @@ export interface ProviderCredentials {
  */
 export const API_KEY_PATTERNS: Record<string, { prefix?: string; minLength: number; description: string }> = {
   openai: { prefix: 'sk-', minLength: 20, description: 'OpenAI keys start with sk-' },
-  deepseek: { prefix: 'sk-', minLength: 20, description: 'DeepSeek keys start with sk-' },
   google: { minLength: 30, description: 'Google API keys are typically 39 characters' },
   gemini: { minLength: 30, description: 'Gemini API keys are typically 39 characters' },
   meshy: { minLength: 20, description: 'Meshy API keys are alphanumeric strings' },

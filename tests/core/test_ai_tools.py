@@ -111,7 +111,7 @@ class TestProviderKeyMap:
 
     def test_all_values_are_api_key_strings(self):
         """All values should be API key field names (or None for local providers)."""
-        valid_key_types = {"image_api_key", "openai_api_key", "meshy_api_key", "deepseek_api_key"}
+        valid_key_types = {"image_api_key", "openai_api_key", "meshy_api_key", "fal_api_key"}
 
         for provider, key_field in PROVIDER_KEY_MAP.items():
             if key_field is None:

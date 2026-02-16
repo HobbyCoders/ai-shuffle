@@ -1,7 +1,7 @@
 /**
  * AI Reason Tool
  *
- * Leverages reasoning-optimized models (DeepSeek-R1, o1) for complex
+ * Leverages reasoning-optimized models (OpenAI o3-mini, Gemini 3 Pro) for complex
  * logical analysis, verification, and problem-solving.
  *
  * Usage:
@@ -26,11 +26,11 @@ import { ProviderCredentials, createValidatedCredentials } from '../providers/ty
 // Configuration
 // ============================================================================
 
-// Prefer DeepSeek for reasoning (better price/performance for reasoning)
-// Fall back to OpenAI o1 if DeepSeek unavailable
+// Prefer OpenAI o3-mini for reasoning (good price/performance)
+// Fall back to Google Gemini 3 Pro if OpenAI unavailable
 const REASONING_PROVIDERS = [
-  { id: 'deepseek', model: 'deepseek-reasoner' },
-  { id: 'openai', model: 'o1-mini' }
+  { id: 'openai', model: 'o3-mini' },
+  { id: 'google', model: 'gemini-3-pro-preview' }
 ];
 
 // ============================================================================
@@ -39,10 +39,11 @@ const REASONING_PROVIDERS = [
 
 function getCredentials(providerId: string): ProviderCredentials | null {
   switch (providerId) {
-    case 'deepseek':
-      return createValidatedCredentials(process.env.DEEPSEEK_API_KEY, 'deepseek');
     case 'openai':
       return createValidatedCredentials(process.env.OPENAI_API_KEY, 'openai');
+    case 'google':
+      const googleKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+      return createValidatedCredentials(googleKey, 'google');
     default:
       return null;
   }
@@ -90,7 +91,7 @@ export async function aiReason(input: ReasonInput): Promise<ReasonResult> {
       reasoning: '',
       conclusion: '',
       confidence: 0,
-      error: 'No reasoning provider available. Set DEEPSEEK_API_KEY or OPENAI_API_KEY.'
+      error: 'No reasoning provider available. Set OPENAI_API_KEY or GEMINI_API_KEY.'
     };
   }
 
@@ -152,7 +153,7 @@ IMPORTANT:
   ];
 
   try {
-    // Note: Reasoning models (o1, deepseek-reasoner) don't support JSON mode
+    // Note: Reasoning models (o1, o3-mini) don't support JSON mode
     // So we'll parse the response ourselves
     const result = await provider.chat({
       messages,

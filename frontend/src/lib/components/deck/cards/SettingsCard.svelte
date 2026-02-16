@@ -106,12 +106,6 @@
 	let meshyKeySuccess = $state('');
 	let meshyKeyError = $state('');
 
-	let deepseekApiKey = $state('');
-	let deepseekApiKeyMasked = $state('');
-	let savingDeepseekKey = $state(false);
-	let deepseekKeySuccess = $state('');
-	let deepseekKeyError = $state('');
-
 	let geminiApiKey = $state('');
 	let geminiApiKeyMasked = $state('');
 	let savingGeminiKey = $state(false);
@@ -253,8 +247,6 @@
 				meshy_api_key_set: boolean;
 				meshy_api_key_masked: string;
 				model_3d_model: string | null;
-				deepseek_api_key_set: boolean;
-				deepseek_api_key_masked: string;
 				image_api_key_set: boolean;
 				image_api_key_masked: string;
 			}>('/settings/integrations');
@@ -276,7 +268,6 @@
 			meshyApiKeyMasked = settings.meshy_api_key_masked || '';
 			selected3DModel = settings.model_3d_model || 'meshy-6';
 			current3DModel = selected3DModel;
-			deepseekApiKeyMasked = settings.deepseek_api_key_masked || '';
 			geminiApiKeyMasked = settings.image_api_key_masked || '';
 		} catch (e) {
 			console.error('Failed to load integration settings:', e);
@@ -391,23 +382,6 @@
 			meshyKeyError = e.detail || 'Failed to save';
 		}
 		savingMeshyKey = false;
-	}
-
-	async function saveDeepseekKey() {
-		if (!deepseekApiKey.trim()) return;
-		savingDeepseekKey = true;
-		deepseekKeyError = '';
-		deepseekKeySuccess = '';
-		try {
-			await api.post('/settings/integrations/deepseek', { api_key: deepseekApiKey });
-			deepseekKeySuccess = 'Saved';
-			deepseekApiKey = '';
-			await loadIntegrationSettings();
-			setTimeout(() => deepseekKeySuccess = '', 3000);
-		} catch (e: any) {
-			deepseekKeyError = e.detail || 'Failed to save';
-		}
-		savingDeepseekKey = false;
 	}
 
 	async function saveGeminiApiKey() {
@@ -1270,33 +1244,6 @@
 										</div>
 										{#if meshyKeySuccess}<span class="inline-success">{meshyKeySuccess}</span>{/if}
 										{#if meshyKeyError}<span class="inline-error">{meshyKeyError}</span>{/if}
-									</div>
-
-									<!-- DeepSeek -->
-									<div class="api-key-row">
-										<div class="api-key-info">
-											<span class="api-key-name">DeepSeek</span>
-											{#if deepseekApiKeyMasked}
-												<code class="masked-key">{deepseekApiKeyMasked}</code>
-											{/if}
-										</div>
-										<div class="api-key-input">
-											<input
-												type="password"
-												bind:value={deepseekApiKey}
-												placeholder={deepseekApiKeyMasked ? 'Enter new key...' : 'sk-...'}
-												class="input compact"
-											/>
-											<button
-												onclick={saveDeepseekKey}
-												disabled={savingDeepseekKey || !deepseekApiKey.trim()}
-												class="btn primary compact"
-											>
-												{savingDeepseekKey ? '...' : 'Save'}
-											</button>
-										</div>
-										{#if deepseekKeySuccess}<span class="inline-success">{deepseekKeySuccess}</span>{/if}
-										{#if deepseekKeyError}<span class="inline-error">{deepseekKeyError}</span>{/if}
 									</div>
 
 									<!-- Google Gemini -->

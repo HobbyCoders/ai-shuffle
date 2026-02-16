@@ -114,7 +114,7 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
         "name": "AI Collaboration",
         "description": "Collaborate with other AI models for specialized tasks (review, plan, summarize)",
         "category": "collaboration",
-        "providers": ["openai", "google", "deepseek"]
+        "providers": ["openai", "google"]
     },
     "ai_memory": {
         "name": "AI Memory",
@@ -126,13 +126,13 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
         "name": "AI Review",
         "description": "Get second opinions on code, plans, or content from another AI model",
         "category": "collaboration",
-        "providers": ["openai", "google", "deepseek"]
+        "providers": ["openai", "google"]
     },
     "ai_reason": {
         "name": "AI Reasoning",
-        "description": "Complex logical reasoning using DeepSeek-R1 or OpenAI o1 models",
+        "description": "Complex logical reasoning using OpenAI o3-mini or Gemini 3 Pro models",
         "category": "collaboration",
-        "providers": ["deepseek", "openai"]
+        "providers": ["openai", "google"]
     },
 }
 
@@ -153,7 +153,6 @@ PROVIDER_KEY_MAP: Dict[str, str] = {
     # Collaboration providers
     "openai": "openai_api_key",
     "google": "image_api_key",
-    "deepseek": "deepseek_api_key",
 }
 
 # ============================================================================

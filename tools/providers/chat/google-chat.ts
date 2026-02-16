@@ -2,7 +2,7 @@
  * Google Gemini Chat Provider
  *
  * Adapter for Google's Gemini API for chat completions.
- * Supports Gemini 2.5 Pro, Flash, and other models.
+ * Supports Gemini 3 Pro/Flash, Gemini 2.5 Pro/Flash, and other models.
  * Key advantage: 1M+ token context window for memory tasks.
  *
  * API Reference: https://ai.google.dev/gemini-api/docs
@@ -190,10 +190,28 @@ export const googleChatProvider: ChatProvider = {
   id: 'google',
   name: 'Google Gemini',
   models: [
+    // Gemini 3
+    {
+      id: 'gemini-3-pro-preview',
+      name: 'Gemini 3 Pro',
+      description: 'Most capable Gemini 3 with reasoning - $2/1M input, $12/1M output',
+      capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming', 'long_context', 'reasoning'],
+      context_window: 1048576,
+      pricing: { unit: '1M tokens', price: 2.00 }
+    },
+    {
+      id: 'gemini-3-flash-preview',
+      name: 'Gemini 3 Flash',
+      description: 'Fast Gemini 3 with 1M context - $0.50/1M input, $3/1M output',
+      capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming', 'long_context'],
+      context_window: 1048576,
+      pricing: { unit: '1M tokens', price: 0.50 }
+    },
+    // Previous generation
     {
       id: 'gemini-2.5-pro-preview-06-05',
       name: 'Gemini 2.5 Pro',
-      description: 'Most capable Gemini with 1M context - $1.25/1M input, $10/1M output',
+      description: 'Previous generation pro with 1M context - $1.25/1M input, $10/1M output',
       capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming', 'long_context', 'reasoning'],
       context_window: 1048576,
       pricing: { unit: '1M tokens', price: 1.25 }
@@ -201,7 +219,7 @@ export const googleChatProvider: ChatProvider = {
     {
       id: 'gemini-2.5-flash-preview-05-20',
       name: 'Gemini 2.5 Flash',
-      description: 'Fast and efficient with 1M context - $0.15/1M input, $0.60/1M output',
+      description: 'Previous generation flash with 1M context - $0.15/1M input, $0.60/1M output',
       capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming', 'long_context'],
       context_window: 1048576,
       pricing: { unit: '1M tokens', price: 0.15 }
@@ -209,32 +227,16 @@ export const googleChatProvider: ChatProvider = {
     {
       id: 'gemini-2.0-flash',
       name: 'Gemini 2.0 Flash',
-      description: 'Latest flash model - $0.10/1M input, $0.40/1M output',
+      description: 'Previous generation flash - $0.10/1M input, $0.40/1M output',
       capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming'],
       context_window: 1048576,
       pricing: { unit: '1M tokens', price: 0.10 }
     },
-    {
-      id: 'gemini-1.5-pro',
-      name: 'Gemini 1.5 Pro',
-      description: 'Previous generation pro model with 2M context',
-      capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming', 'long_context'],
-      context_window: 2097152,
-      pricing: { unit: '1M tokens', price: 1.25 }
-    },
-    {
-      id: 'gemini-1.5-flash',
-      name: 'Gemini 1.5 Flash',
-      description: 'Previous generation flash model with 1M context',
-      capabilities: ['chat', 'tools', 'vision', 'json_mode', 'streaming', 'long_context'],
-      context_window: 1048576,
-      pricing: { unit: '1M tokens', price: 0.075 }
-    }
   ],
 
   async chat(input: ChatInput, credentials: ProviderCredentials): Promise<ChatResult> {
     const apiKey = credentials.apiKey;
-    const model = input.model || 'gemini-2.5-flash-preview-05-20';
+    const model = input.model || 'gemini-3-flash-preview';
 
     // Validate we have messages
     if (!input.messages || input.messages.length === 0) {
@@ -367,7 +369,7 @@ export const googleChatProvider: ChatProvider = {
 
   async *streamChat(input: ChatInput, credentials: ProviderCredentials): AsyncIterable<ChatStreamChunk> {
     const apiKey = credentials.apiKey;
-    const model = input.model || 'gemini-2.5-flash-preview-05-20';
+    const model = input.model || 'gemini-3-flash-preview';
 
     // Convert messages to Gemini format
     const { contents, systemInstruction } = toGeminiContents(input.messages);

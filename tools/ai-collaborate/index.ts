@@ -7,7 +7,7 @@
  * - collaborateAI: Unified interface for any collaboration task
  * - aiMemory: Long-term memory using Gemini's 1M context
  * - aiReview: Get second opinions on code/plans
- * - aiReason: Complex reasoning using DeepSeek-R1/o1
+ * - aiReason: Complex reasoning using OpenAI o3-mini/Gemini 3 Pro
  */
 
 // Main collaboration tool
@@ -32,7 +32,7 @@ export {
   multiReview
 } from './aiReview.js';
 
-// Reasoning tool (DeepSeek-R1/o1)
+// Reasoning tool (OpenAI o3-mini/Gemini 3 Pro)
 export {
   aiReason,
   verifySolution,

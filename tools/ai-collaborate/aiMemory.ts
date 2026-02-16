@@ -31,7 +31,7 @@ import { ProviderCredentials, createValidatedCredentials } from '../providers/ty
 // ============================================================================
 
 const MEMORY_PROVIDER = 'google'; // Gemini has the largest context window
-const MEMORY_MODEL = 'gemini-2.5-flash-preview-05-20'; // 1M context, fast and cheap
+const MEMORY_MODEL = 'gemini-3-flash-preview'; // 1M context, fast and capable
 
 // Memory limits to prevent unbounded growth
 const MAX_ENTRIES = 10000;
