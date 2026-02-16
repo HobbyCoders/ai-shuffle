@@ -441,3 +441,96 @@ class TestEarlyToolUseDedup:
         assert msg.type == "subagent"
         assert msg.agent_id == "agent-1"
         assert msg.tool_name is None  # Cleared on conversion
+
+
+# =============================================================================
+# Bug: Compaction + stream end double-update crash (KNOWN_ISSUES Root Cause 10)
+#
+# When compact_boundary sets needs_full_refresh and then end_streaming()
+# follows shortly after, the next poll returns BOTH a full refresh
+# (initial_message_count=0) AND is_streaming=False. On the frontend,
+# this causes two synchronous store updates in the same call stack:
+# one from the streaming bridge (full message replacement) and one from
+# the onStreamEnd callback (same messages + isStreaming:false).
+# The double-update can corrupt Svelte's internal effect linked list,
+# freezing the entire UI.
+#
+# Backend invariant: needs_full_refresh must survive end_streaming() so
+# the combined response is correctly formed for the frontend fix to handle.
+# =============================================================================
+
+class TestCompactionStreamEndRace:
+    """Regression tests for the compaction + stream end race condition."""
+
+    async def test_needs_full_refresh_survives_end_streaming(self, store_with_history):
+        """needs_full_refresh must NOT be cleared by end_streaming().
+
+        This is critical: if end_streaming clears the flag, the frontend
+        would get a normal delta response after compaction, missing the
+        full refresh needed to reconcile post-compaction messages.
+        """
+        # Compaction boundary sets the flag
+        await store_with_history.add_system_message(
+            "s1", content="Compacted", subtype="compact_boundary",
+        )
+        session = store_with_history.get_session("s1")
+        assert session.needs_full_refresh is True
+
+        # Streaming ends shortly after (common for end-of-query compaction)
+        await store_with_history.end_streaming("s1")
+
+        # Flag must still be set
+        session = store_with_history.get_session("s1")
+        assert session.needs_full_refresh is True
+
+    async def test_combined_full_refresh_and_stream_end_response(self, store_with_history):
+        """When compaction + stream end coincide, the poll must return
+        a full refresh (initial_message_count=0) WITH is_streaming=False.
+
+        The frontend must handle this combined response without double-updating.
+        """
+        session = store_with_history.get_session("s1")
+        update_id_before = session.last_update_id
+
+        # Compaction boundary
+        await store_with_history.add_system_message(
+            "s1", content="Compacted", subtype="compact_boundary",
+        )
+
+        # Streaming ends
+        await store_with_history.end_streaming("s1")
+
+        # Frontend polls
+        result = store_with_history.get_session_since("s1", update_id_before)
+
+        assert result is not None
+        # Must be a full refresh
+        assert result["initial_message_count"] == 0
+        # Must indicate streaming has ended
+        assert result["is_streaming"] is False
+        # Must include all messages
+        assert len(result["messages"]) >= 5
+
+    async def test_full_refresh_consumed_after_stream_end(self, store_with_history):
+        """After the combined response is consumed, subsequent polls
+        should return normal responses (not full refresh again).
+        """
+        session = store_with_history.get_session("s1")
+        update_id_before = session.last_update_id
+
+        await store_with_history.add_system_message(
+            "s1", content="Compacted", subtype="compact_boundary",
+        )
+        await store_with_history.end_streaming("s1")
+
+        # First poll consumes the flag
+        result1 = store_with_history.get_session_since("s1", update_id_before)
+        assert result1["initial_message_count"] == 0
+
+        # Second poll should return None (no new changes)
+        result2 = store_with_history.get_session_since("s1", result1["last_update_id"])
+        assert result2 is None
+
+        # Flag should be cleared
+        session = store_with_history.get_session("s1")
+        assert session.needs_full_refresh is False

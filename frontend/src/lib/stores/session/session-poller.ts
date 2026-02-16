@@ -322,7 +322,21 @@ class SessionPoller {
 				this.stop(sessionId);
 			}
 			if (this._onStreamEnd) {
-				this._onStreamEnd(sessionId, usage);
+				// Defer onStreamEnd to the next microtask. This prevents a
+				// double-update to activeSession in the same synchronous call:
+				// 1. applyServerState() → _sync() → streaming bridge → store update
+				// 2. onStreamEnd → store update (same messages + isStreaming:false)
+				//
+				// During compaction, the full refresh (needs_full_refresh) can
+				// coincide with stream end in the same poll response. The bridge's
+				// update causes DOM reconciliation; an immediate second update from
+				// onStreamEnd while Svelte is still processing the first corrupts
+				// the effect linked list (TypeError: Cannot read 'prev' of undefined).
+				//
+				// Deferring ensures Svelte completes the bridge's reactive cycle
+				// before onStreamEnd triggers the next one.
+				const cb = this._onStreamEnd;
+				queueMicrotask(() => cb(sessionId, usage));
 			}
 		} else if (!isStreaming && this._timers.has(sessionId)) {
 			// Non-transition case: poll returns !isStreaming but session wasn't previously
@@ -331,7 +345,9 @@ class SessionPoller {
 			if (entry.interval === STREAMING_POLL_INTERVAL_MS) {
 				this.stop(sessionId);
 				if (this._onStreamEnd) {
-					this._onStreamEnd(sessionId, usage);
+					// Defer for same reason as streamingJustEnded (avoid double-update)
+					const cb = this._onStreamEnd;
+					queueMicrotask(() => cb(sessionId, usage));
 				}
 			}
 		}

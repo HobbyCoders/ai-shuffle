@@ -428,6 +428,12 @@ function createActiveSessionStore() {
 			// the poller's final poll hasn't been applied yet.
 			if (!currentState.isStreaming && !sessionData.isStreaming && !sessionPoller.isPolling(currentState.sessionId)) return;
 
+			// Skip if messages reference hasn't changed. During compaction's full
+			// refresh, preserveMessageIds may return the same array when content
+			// matches. Skipping here avoids a redundant reactive update that the
+			// deferred onStreamEnd would also trigger, reducing DOM churn.
+			if (currentState.messages === sessionData.messages) return;
+
 			update(s => {
 				if (s.sessionId !== currentState.sessionId) return s;
 				return {
@@ -452,14 +458,22 @@ function createActiveSessionStore() {
 			// Refresh sessions list
 			appData.loadSessions();
 
-			// Flush final messages AND usage from sessionState to the store
+			// Flush final messages AND usage from sessionState to the store.
+			// NOTE: This callback is deferred via queueMicrotask() from the poller
+			// to avoid a double-update with the streaming bridge in the same
+			// synchronous call stack (which can corrupt Svelte's effect list
+			// during compaction full refresh + stream end).
 			const finalSession = sessionState.getSession(sessionId);
 			if (finalSession && finalSession.messages.length > 0) {
 				update(s => {
 					if (s.sessionId !== sessionId) return s;
+					// If the bridge already flushed these exact messages, only
+					// update isStreaming and usage — skip the messages reference
+					// change to minimize reactive DOM churn.
+					const messagesChanged = s.messages !== finalSession.messages;
 					return {
 						...s,
-						messages: finalSession.messages,
+						messages: messagesChanged ? finalSession.messages : s.messages,
 						isStreaming: false,
 						todos: finalSession.todos.length > 0 ? finalSession.todos : s.todos,
 						...usageStoreUpdate(finalSession.usage),
