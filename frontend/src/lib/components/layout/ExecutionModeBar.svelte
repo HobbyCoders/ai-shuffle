@@ -193,12 +193,7 @@
 
 	<!-- Branch selector (shown when worktree mode active) -->
 	{#if $activeSession.executionMode === 'worktree'}
-		{#if creatingWorktree}
-			<div class="wt-status creating">
-				<Loader2 size={12} class="animate-spin" />
-				<span>Creating...</span>
-			</div>
-		{:else if worktreeError}
+		{#if worktreeError}
 			<div class="wt-status error">
 				<span>{worktreeError}</span>
 			</div>
@@ -209,7 +204,11 @@
 				onclick={toggleDropdown}
 				disabled={creatingWorktree}
 			>
-				<GitBranch size={12} strokeWidth={1.5} />
+				{#if creatingWorktree}
+					<Loader2 size={12} strokeWidth={1.5} class="animate-spin" />
+				{:else}
+					<GitBranch size={12} strokeWidth={1.5} />
+				{/if}
 				<span class="branch-name">{currentBranch}</span>
 				<ChevronDown size={12} strokeWidth={1.5} />
 			</button>
@@ -489,14 +488,6 @@
 		font-size: 0.6875rem;
 		padding: 2px 8px;
 		border-radius: 12px;
-	}
-
-	.wt-status.creating {
-		color: var(--muted-foreground);
-	}
-
-	.wt-status.creating :global(svg) {
-		color: var(--primary);
 	}
 
 	.wt-status.error {
