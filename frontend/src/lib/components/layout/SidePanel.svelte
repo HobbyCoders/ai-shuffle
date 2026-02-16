@@ -75,14 +75,10 @@
 		sessions: Session[];
 	}
 
-	const apiUserSessionsWithHistory = $derived(
-		$apiUserSessions.filter(s => s.turn_count > 0 || s.id === activeId || $streamingSessions.has(s.id))
-	);
-
 	const groupedApiUserSessions = $derived.by((): ApiUserGroup[] => {
 		const groups = new Map<string, Session[]>();
 
-		for (const session of apiUserSessionsWithHistory) {
+		for (const session of $apiUserSessions) {
 			const userName = session.api_user_name || 'Unknown User';
 			if (!groups.has(userName)) {
 				groups.set(userName, []);
@@ -147,26 +143,17 @@
 		}
 	}
 
-	// Sessions: recent (top 5) and all — favorites sorted first
-	// Filter out sessions with no chat history (turn_count === 0) - these are
-	// either empty or were fully rewound and have no useful content to show.
-	// Always keep the active session visible (new sessions start at 0 turns
-	// until the first query completes), and keep streaming sessions visible
-	// even if the user switches to another tab before the first turn finishes.
 	const activeId = $derived($activeSession.sessionId);
-	const sessionsWithHistory = $derived(
-		$sessions.filter(s => s.turn_count > 0 || s.id === activeId || $streamingSessions.has(s.id))
-	);
 
 	const recentSessions = $derived(
-		sortWithFavorites(sessionsWithHistory).slice(0, 5)
+		sortWithFavorites($sessions).slice(0, 5)
 	);
 
 	const filteredSessions = $derived.by(() => {
-		if (!searchQuery.trim()) return sortWithFavorites(sessionsWithHistory);
+		if (!searchQuery.trim()) return sortWithFavorites($sessions);
 		const q = searchQuery.toLowerCase();
 		return sortWithFavorites(
-			sessionsWithHistory.filter(
+			$sessions.filter(
 				(s) =>
 					s.title?.toLowerCase().includes(q) ||
 					s.id.toLowerCase().includes(q)
