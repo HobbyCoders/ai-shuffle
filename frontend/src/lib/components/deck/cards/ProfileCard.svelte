@@ -329,7 +329,7 @@
 			content?: string;
 			inject_env_details?: boolean;
 		};
-		const aiTools = (config as any).ai_tools || {};
+		const aiTools = config.ai_tools || {};
 
 		const allowedTools = config.allowed_tools || [];
 		const disallowedTools = config.disallowed_tools || [];
@@ -622,15 +622,20 @@
 			}, {} as Record<string, string>);
 		}
 
-		// AI tools
-		const effectiveAITools =
-			aiToolSelectionMode === 'all' ? getAllAIToolIds() : profileForm.enabled_ai_tools;
-		if (effectiveAITools.length > 0) {
-			// Build ai_tools config dynamically from the enabled tool IDs
-			config.ai_tools = Object.fromEntries(
-				effectiveAITools.map((id) => [id, true])
-			);
+		// AI tools - always include ai_tools to explicitly save the selection
+		let effectiveAITools: string[];
+		if (aiToolSelectionMode === 'all') {
+			const allIds = getAllAIToolIds();
+			// Fallback: if categories haven't loaded yet, use the form's current selection
+			effectiveAITools = allIds.length > 0 ? allIds : [...profileForm.enabled_ai_tools];
+		} else {
+			// Spread to ensure plain array (not Svelte proxy)
+			effectiveAITools = [...profileForm.enabled_ai_tools];
 		}
+		// Always include ai_tools in config - even empty means "no AI tools enabled"
+		config.ai_tools = effectiveAITools.length > 0
+			? Object.fromEntries(effectiveAITools.map((id) => [id, true]))
+			: {};
 
 		// System prompt
 		if (profileForm.system_prompt_type === 'preset') {
