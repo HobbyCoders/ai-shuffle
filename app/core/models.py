@@ -3,6 +3,7 @@ Pydantic models for API requests and responses
 """
 
 from datetime import datetime
+from enum import Enum
 from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field
 
@@ -1115,3 +1116,311 @@ class TrustedAction(BaseModel):
     action_pattern: str
     auto_approve: bool = True
     require_preview: bool = False
+
+
+# ============================================================================
+# API User Models
+# ============================================================================
+
+class ApiUserCreate(BaseModel):
+    """API user creation request"""
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    project_id: Optional[str] = None
+    profile_ids: Optional[List[str]] = None
+    web_login_allowed: bool = True
+
+
+class ApiUserUpdate(BaseModel):
+    """API user update request — all fields optional"""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    project_id: Optional[str] = None
+    profile_ids: Optional[List[str]] = None
+    is_active: Optional[bool] = None
+    web_login_allowed: Optional[bool] = None
+
+
+class ApiUserResponse(BaseModel):
+    """Full API user response (never includes key or hash)"""
+    id: str
+    name: str
+    username: Optional[str] = None
+    description: Optional[str] = None
+    project_id: Optional[str] = None
+    profile_ids: Optional[List[str]] = None
+    is_active: bool = True
+    web_login_allowed: bool = True
+    created_at: datetime
+    updated_at: datetime
+    last_used_at: Optional[datetime] = None
+
+
+class ApiUserCreateResponse(ApiUserResponse):
+    """Response from create — includes plaintext API key shown ONCE"""
+    api_key: str
+
+
+class ApiUserRotateKeyResponse(BaseModel):
+    """Response from key rotation — includes new plaintext API key shown ONCE"""
+    id: str
+    api_key: str
+
+
+# ============================================================================
+# Connector Models
+# ============================================================================
+
+class ConnectorType(str, Enum):
+    TELEGRAM = "telegram"
+    DISCORD = "discord"
+    WHATSAPP = "whatsapp"
+    WEBHOOK = "webhook"
+    SLACK = "slack"
+    LINE = "line"
+    SIGNAL = "signal"
+    IMESSAGE = "imessage"
+    MSTEAMS = "msteams"
+    BLUEBUBBLES = "bluebubbles"
+    SPOTIFY = "spotify"
+    HUE = "hue"
+    HOMEASSISTANT = "homeassistant"
+    GMAIL = "gmail"
+
+
+VALID_CONNECTOR_EVENTS = [
+    "session.complete",
+    "session.error",
+    "session.started",
+    "permission.requested",
+    "input.needed",
+]
+
+
+class ConnectorConfigTelegram(BaseModel):
+    """Telegram-specific connector config"""
+    bot_token: str = Field(..., min_length=1)
+    allowed_chat_ids: Optional[List[str]] = None
+    welcome_message: Optional[str] = None
+
+
+class ConnectorConfigDiscord(BaseModel):
+    """Discord-specific connector config"""
+    bot_token: str = Field(..., min_length=1)
+    guild_ids: Optional[List[str]] = None
+    allowed_channel_ids: Optional[List[str]] = None
+    command_prefix: str = "!"
+
+
+class ConnectorConfigWhatsApp(BaseModel):
+    """WhatsApp Cloud API connector config"""
+    phone_number_id: str = Field(..., min_length=1)
+    access_token: str = Field(..., min_length=1)
+    verify_token: str = Field(..., min_length=1)
+    allowed_phone_numbers: Optional[List[str]] = None
+
+
+class ConnectorConfigWebhook(BaseModel):
+    """Generic webhook connector config (replaces old webhook system)"""
+    url: str = Field(..., min_length=1)
+    secret: Optional[str] = None
+    headers: Optional[Dict[str, str]] = None
+
+
+class ConnectorBase(BaseModel):
+    """Base connector fields for creation/update"""
+    name: str = Field(..., min_length=1, max_length=100)
+    type: ConnectorType
+    config: Dict[str, Any] = Field(default_factory=dict)
+    events: List[str] = Field(default_factory=list)
+
+
+class ConnectorCreate(ConnectorBase):
+    """Connector creation request"""
+    api_user_id: Optional[str] = None
+    profile_ids: Optional[List[str]] = None
+    project_id: Optional[str] = None
+
+
+class ConnectorUpdate(BaseModel):
+    """Connector update request — all fields optional"""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    config: Optional[Dict[str, Any]] = None
+    events: Optional[List[str]] = None
+    is_active: Optional[bool] = None
+
+
+class Connector(ConnectorBase):
+    """Full connector response"""
+    id: str
+    api_user_id: Optional[str] = None
+    is_active: bool = False
+    status: str = "disconnected"
+    status_message: Optional[str] = None
+    last_connected_at: Optional[datetime] = None
+    last_event_at: Optional[datetime] = None
+    failure_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConnectorTestResponse(BaseModel):
+    """Response from testing a connector"""
+    success: bool
+    message: str
+    response_time_ms: Optional[int] = None
+    error: Optional[str] = None
+
+
+class ConnectorEventLog(BaseModel):
+    """A single connector event log entry"""
+    id: str
+    connector_id: str
+    event_type: str
+    direction: str
+    payload: Optional[Dict[str, Any]] = None
+    status: str
+    error: Optional[str] = None
+    created_at: datetime
+
+
+# ============================================================================
+# Automation Models
+# ============================================================================
+
+class AutomationTriggerType(str, Enum):
+    CRON = "cron"
+    INTERVAL = "interval"
+    CONNECTOR_EVENT = "connector_event"
+    WEBHOOK = "webhook"
+
+
+class AutomationOutputType(str, Enum):
+    CONNECTOR = "connector"
+    WEBHOOK = "webhook"
+    SESSION = "session"
+    NONE = "none"
+
+
+VALID_AUTOMATION_TRIGGER_TYPES = [t.value for t in AutomationTriggerType]
+
+
+class AutomationCreate(BaseModel):
+    """Automation creation request"""
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    trigger_type: AutomationTriggerType
+    trigger_config: Dict[str, Any] = Field(default_factory=dict)
+    prompt: str = Field(..., min_length=1)
+    profile_id: str
+    project_id: Optional[str] = None
+    output_config: Dict[str, Any] = Field(default_factory=lambda: {"type": "session"})
+    max_turns: int = Field(default=1, ge=1, le=25)
+    timeout_seconds: int = Field(default=300, ge=30, le=1800)
+    max_cost_per_run: Optional[float] = Field(default=None, ge=0)
+    max_cost_per_day: Optional[float] = Field(default=None, ge=0)
+    max_cost_total: Optional[float] = Field(default=None, ge=0)
+    max_runs_per_day: Optional[int] = Field(default=None, ge=1)
+    requires_approval: bool = False
+
+
+class AutomationUpdate(BaseModel):
+    """Automation update request — all fields optional"""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    trigger_type: Optional[AutomationTriggerType] = None
+    trigger_config: Optional[Dict[str, Any]] = None
+    prompt: Optional[str] = None
+    profile_id: Optional[str] = None
+    project_id: Optional[str] = None
+    output_config: Optional[Dict[str, Any]] = None
+    max_turns: Optional[int] = Field(None, ge=1, le=25)
+    timeout_seconds: Optional[int] = Field(None, ge=30, le=1800)
+    max_cost_per_run: Optional[float] = None
+    max_cost_per_day: Optional[float] = None
+    max_cost_total: Optional[float] = None
+    max_runs_per_day: Optional[int] = None
+    requires_approval: Optional[bool] = None
+    is_enabled: Optional[bool] = None
+
+
+class Automation(BaseModel):
+    """Full automation response"""
+    id: str
+    name: str
+    description: Optional[str] = None
+    trigger_type: str
+    trigger_config: Dict[str, Any] = Field(default_factory=dict)
+    prompt: str
+    profile_id: str
+    project_id: Optional[str] = None
+    output_config: Dict[str, Any] = Field(default_factory=lambda: {"type": "session"})
+    max_turns: int = 1
+    timeout_seconds: int = 300
+    max_cost_per_run: Optional[float] = None
+    max_cost_per_day: Optional[float] = None
+    max_cost_total: Optional[float] = None
+    max_runs_per_day: Optional[int] = None
+    total_cost_used: float = 0.0
+    is_enabled: bool = False
+    status: str = "idle"
+    last_run_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+    run_count: int = 0
+    failure_count: int = 0
+    requires_approval: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class AutomationRun(BaseModel):
+    """Automation run response"""
+    id: str
+    automation_id: str
+    status: str
+    trigger_data: Optional[Dict[str, Any]] = None
+    session_id: Optional[str] = None
+    prompt_rendered: Optional[str] = None
+    response: Optional[str] = None
+    error: Optional[str] = None
+    cost_usd: float = 0.0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    duration_ms: int = 0
+    output_status: str = "pending"
+    output_error: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class AutomationApproval(BaseModel):
+    """Automation approval response"""
+    id: str
+    run_id: str
+    automation_id: str
+    automation_name: Optional[str] = None
+    status: str
+    prompt_preview: Optional[str] = None
+    decided_by: Optional[str] = None
+    decided_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class AutomationStats(BaseModel):
+    """Automation statistics"""
+    automation_id: str
+    total_runs: int = 0
+    successful_runs: int = 0
+    failed_runs: int = 0
+    total_cost_usd: float = 0.0
+    avg_duration_ms: float = 0.0
+    today_runs: int = 0
+    today_cost_usd: float = 0.0
+
+
+class AutomationTestResult(BaseModel):
+    """Result of a dry-run test"""
+    prompt_rendered: str
+    budget_ok: bool
+    message: str

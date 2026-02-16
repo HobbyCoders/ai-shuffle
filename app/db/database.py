@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 # v31: Make notes global (remove project_id FK), remove linked_sessions
 # v32: Add mobile device tables (mobile_devices, pending_actions, trusted_actions)
 # v33: Add file_path to notes for physical markdown files
-SCHEMA_VERSION = 33
+# v34: Add connectors tables (connectors, connector_event_log, connector_sessions)
+SCHEMA_VERSION = 34
 
 
 # =============================================================================
@@ -1073,6 +1074,150 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_trusted_actions_device ON trusted_actions(device_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mobile_schedules_device ON mobile_schedules(device_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mobile_schedules_enabled ON mobile_schedules(enabled)")
+
+    # ========================================================================
+    # Connectors — external messaging platform integrations
+    # ========================================================================
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS connectors (
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            api_user_id TEXT,
+            config JSON NOT NULL DEFAULT '{}',
+            events JSON NOT NULL DEFAULT '[]',
+            is_active BOOLEAN DEFAULT FALSE,
+            status TEXT DEFAULT 'disconnected',
+            status_message TEXT,
+            last_connected_at TIMESTAMP,
+            last_error TEXT,
+            last_event_at TIMESTAMP,
+            failure_count INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS connector_event_log (
+            id TEXT PRIMARY KEY,
+            connector_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            direction TEXT NOT NULL DEFAULT 'outbound',
+            payload JSON,
+            status TEXT DEFAULT 'pending',
+            error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS connector_sessions (
+            id TEXT PRIMARY KEY,
+            connector_id TEXT NOT NULL,
+            platform_chat_id TEXT NOT NULL,
+            platform_user_id TEXT,
+            platform_user_name TEXT,
+            session_id TEXT,
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL,
+            UNIQUE(connector_id, platform_chat_id)
+        )
+    """)
+
+    # Connector indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_connector_event_log_connector ON connector_event_log(connector_id, created_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_connector_sessions_connector ON connector_sessions(connector_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_connector_sessions_session ON connector_sessions(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_connectors_active ON connectors(is_active)")
+
+    # ========================================================================
+    # Automations — scheduled and event-driven AI task execution
+    # ========================================================================
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS automations (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            trigger_type TEXT NOT NULL,
+            trigger_config JSON NOT NULL DEFAULT '{}',
+            prompt TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            project_id TEXT,
+            output_config JSON NOT NULL DEFAULT '{"type": "session"}',
+            max_turns INTEGER DEFAULT 1,
+            timeout_seconds INTEGER DEFAULT 300,
+            max_cost_per_run REAL,
+            max_cost_per_day REAL,
+            max_cost_total REAL,
+            max_runs_per_day INTEGER,
+            total_cost_used REAL DEFAULT 0.0,
+            is_enabled BOOLEAN DEFAULT FALSE,
+            status TEXT DEFAULT 'idle',
+            last_run_at TIMESTAMP,
+            last_error TEXT,
+            run_count INTEGER DEFAULT 0,
+            failure_count INTEGER DEFAULT 0,
+            requires_approval BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE RESTRICT,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS automation_runs (
+            id TEXT PRIMARY KEY,
+            automation_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            trigger_data JSON,
+            session_id TEXT,
+            prompt_rendered TEXT,
+            response TEXT,
+            error TEXT,
+            cost_usd REAL DEFAULT 0.0,
+            tokens_in INTEGER DEFAULT 0,
+            tokens_out INTEGER DEFAULT 0,
+            duration_ms INTEGER DEFAULT 0,
+            output_status TEXT DEFAULT 'pending',
+            output_error TEXT,
+            started_at TIMESTAMP,
+            completed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS automation_approvals (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL UNIQUE,
+            automation_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            prompt_preview TEXT,
+            decided_by TEXT,
+            decided_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (run_id) REFERENCES automation_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Automation indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automation_runs_automation ON automation_runs(automation_id, created_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automation_runs_status ON automation_runs(status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automation_approvals_status ON automation_approvals(status, created_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automations_enabled ON automations(is_enabled)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automations_trigger ON automations(trigger_type)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -2611,6 +2756,45 @@ def _enrich_api_user_with_profiles(cursor, user: Optional[Dict[str, Any]]) -> Op
     return user
 
 
+def create_api_user(
+    user_id: str,
+    name: str,
+    api_key_hash: str,
+    project_id: Optional[str] = None,
+    profile_ids: Optional[List[str]] = None,
+    web_login_allowed: bool = True,
+    description: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a new API user and optionally link profile IDs."""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO api_users
+               (id, name, api_key_hash, project_id, is_active, web_login_allowed, description, created_at, updated_at)
+               VALUES (?, ?, ?, ?, TRUE, ?, ?, ?, ?)""",
+            (user_id, name, api_key_hash, project_id, web_login_allowed, description, now, now),
+        )
+        if profile_ids:
+            for pid in profile_ids:
+                cursor.execute(
+                    "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (?, ?, ?)",
+                    (user_id, pid, now),
+                )
+        cursor.execute("SELECT * FROM api_users WHERE id = ?", (user_id,))
+        user = row_to_dict(cursor.fetchone())
+        return _enrich_api_user_with_profiles(cursor, user)
+
+
+def delete_api_user(user_id: str) -> bool:
+    """Delete an API user by ID. Cascade handles junction tables."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = ?", (user_id,))
+        cursor.execute("DELETE FROM api_users WHERE id = ?", (user_id,))
+        return cursor.rowcount > 0
+
+
 def get_api_user(user_id: str) -> Optional[Dict[str, Any]]:
     """Get an API user by ID"""
     with get_db() as conn:
@@ -2640,6 +2824,70 @@ def update_api_user_last_used(user_id: str):
             "UPDATE api_users SET last_used_at = ? WHERE id = ?",
             (datetime.utcnow().isoformat(), user_id)
         )
+
+
+def get_all_api_users(active_only: bool = False) -> List[Dict[str, Any]]:
+    """Get all API users, optionally filtered to active-only."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if active_only:
+            cursor.execute("SELECT * FROM api_users WHERE is_active = TRUE ORDER BY created_at DESC")
+        else:
+            cursor.execute("SELECT * FROM api_users ORDER BY created_at DESC")
+        users = rows_to_list(cursor.fetchall())
+        for user in users:
+            profile_ids = _get_api_user_profile_ids(cursor, user["id"])
+            user["profile_ids"] = profile_ids if profile_ids else None
+        return users
+
+
+def update_api_user(user_id: str, **kwargs) -> Optional[Dict[str, Any]]:
+    """Update an API user. Only provided fields are changed.
+
+    Supported kwargs: name, description, project_id, is_active,
+    web_login_allowed, api_key_hash, username, password_hash, profile_ids.
+
+    profile_ids replaces the full set in the junction table when provided.
+    """
+    existing = get_api_user(user_id)
+    if not existing:
+        return None
+
+    profile_ids = kwargs.pop("profile_ids", None)
+
+    now = datetime.utcnow().isoformat()
+    updates = ["updated_at = ?"]
+    values: list = [now]
+
+    allowed = {
+        "name", "description", "project_id", "is_active",
+        "web_login_allowed", "api_key_hash", "username", "password_hash",
+    }
+    for key, val in kwargs.items():
+        if key in allowed:
+            updates.append(f"{key} = ?")
+            values.append(val)
+
+    values.append(user_id)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE api_users SET {', '.join(updates)} WHERE id = ?",
+            tuple(values),
+        )
+
+        if profile_ids is not None:
+            cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = ?", (user_id,))
+            for pid in profile_ids:
+                cursor.execute(
+                    "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (?, ?, ?)",
+                    (user_id, pid, now),
+                )
+
+        cursor.execute("SELECT * FROM api_users WHERE id = ?", (user_id,))
+        user = row_to_dict(cursor.fetchone())
+        return _enrich_api_user_with_profiles(cursor, user)
 
 
 # ============================================================================
@@ -4246,6 +4494,279 @@ def get_webhooks_for_event(event_type: str) -> List[Dict[str, Any]]:
 
 
 # ============================================================================
+# Connector Operations
+# ============================================================================
+
+def _parse_connector_row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Parse JSON fields in a connector row."""
+    if not row:
+        return None
+    if row.get("events") and isinstance(row["events"], str):
+        row["events"] = json.loads(row["events"])
+    if row.get("config") and isinstance(row["config"], str):
+        row["config"] = json.loads(row["config"])
+    return row
+
+
+def create_connector(
+    connector_id: str,
+    connector_type: str,
+    name: str,
+    config: Dict[str, Any],
+    events: List[str],
+    api_user_id: Optional[str] = None,
+    is_active: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Create a new connector."""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO connectors (id, type, name, api_user_id, config, events, is_active, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (connector_id, connector_type, name, api_user_id,
+             json.dumps(config), json.dumps(events), is_active, now, now)
+        )
+    return get_connector(connector_id)
+
+
+def get_connector(connector_id: str) -> Optional[Dict[str, Any]]:
+    """Get a connector by ID."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM connectors WHERE id = ?", (connector_id,))
+        return _parse_connector_row(row_to_dict(cursor.fetchone()))
+
+
+def get_all_connectors() -> List[Dict[str, Any]]:
+    """Get all connectors."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM connectors ORDER BY created_at DESC")
+        rows = rows_to_list(cursor.fetchall())
+        return [_parse_connector_row(r) for r in rows]
+
+
+def get_active_connectors() -> List[Dict[str, Any]]:
+    """Get all active connectors."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM connectors WHERE is_active = TRUE ORDER BY created_at DESC")
+        rows = rows_to_list(cursor.fetchall())
+        return [_parse_connector_row(r) for r in rows]
+
+
+def get_connectors_for_event(event_type: str) -> List[Dict[str, Any]]:
+    """Get all active connectors subscribed to a specific event type."""
+    connectors = get_active_connectors()
+    return [c for c in connectors if event_type in c.get("events", [])]
+
+
+def update_connector(connector_id: str, **kwargs) -> Optional[Dict[str, Any]]:
+    """Update a connector. Pass keyword arguments for fields to update."""
+    existing = get_connector(connector_id)
+    if not existing:
+        return None
+
+    updates = []
+    values = []
+
+    for key in ("name", "is_active", "status", "status_message", "last_connected_at",
+                "last_error", "last_event_at", "api_user_id"):
+        if key in kwargs:
+            updates.append(f"{key} = ?")
+            values.append(kwargs[key])
+
+    if "config" in kwargs:
+        updates.append("config = ?")
+        values.append(json.dumps(kwargs["config"]))
+    if "events" in kwargs:
+        updates.append("events = ?")
+        values.append(json.dumps(kwargs["events"]))
+
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(connector_id)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE connectors SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_connector(connector_id)
+
+
+def update_connector_status(
+    connector_id: str,
+    status: str,
+    status_message: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Update the runtime status of a connector."""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if status == "connected":
+            cursor.execute(
+                """UPDATE connectors
+                   SET status = ?, status_message = ?, last_error = NULL,
+                       last_connected_at = ?, failure_count = 0, updated_at = ?
+                   WHERE id = ?""",
+                (status, status_message, now, now, connector_id)
+            )
+        elif status == "error":
+            cursor.execute(
+                """UPDATE connectors
+                   SET status = ?, status_message = ?, last_error = ?,
+                       failure_count = failure_count + 1, updated_at = ?
+                   WHERE id = ?""",
+                (status, status_message, error, now, connector_id)
+            )
+        else:
+            cursor.execute(
+                """UPDATE connectors
+                   SET status = ?, status_message = ?, updated_at = ?
+                   WHERE id = ?""",
+                (status, status_message, now, connector_id)
+            )
+
+
+def delete_connector(connector_id: str) -> bool:
+    """Delete a connector and all related data (cascades)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM connectors WHERE id = ?", (connector_id,))
+        return cursor.rowcount > 0
+
+
+def update_connector_event_dispatched(connector_id: str, success: bool) -> None:
+    """Update last_event_at and failure_count after event dispatch."""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if success:
+            cursor.execute(
+                "UPDATE connectors SET last_event_at = ?, failure_count = 0, updated_at = ? WHERE id = ?",
+                (now, now, connector_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE connectors SET last_event_at = ?, failure_count = failure_count + 1, updated_at = ? WHERE id = ?",
+                (now, now, connector_id)
+            )
+
+
+# ---- Connector Event Log ----
+
+def create_connector_event_log(
+    log_id: str,
+    connector_id: str,
+    event_type: str,
+    direction: str = "outbound",
+    payload: Optional[Dict[str, Any]] = None,
+    status: str = "pending",
+    error: Optional[str] = None,
+) -> None:
+    """Create a connector event log entry."""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO connector_event_log (id, connector_id, event_type, direction, payload, status, error, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (log_id, connector_id, event_type, direction,
+             json.dumps(payload) if payload else None, status, error, now)
+        )
+
+
+def get_connector_event_log(connector_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """Get recent event log entries for a connector."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM connector_event_log WHERE connector_id = ? ORDER BY created_at DESC LIMIT ?",
+            (connector_id, limit)
+        )
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            if row.get("payload") and isinstance(row["payload"], str):
+                try:
+                    row["payload"] = json.loads(row["payload"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        return rows
+
+
+# ---- Connector Sessions ----
+
+def create_connector_session(
+    session_id: str,
+    connector_id: str,
+    platform_chat_id: str,
+    platform_user_id: Optional[str] = None,
+    platform_user_name: Optional[str] = None,
+    ai_session_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Create a new connector session mapping."""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT OR REPLACE INTO connector_sessions
+               (id, connector_id, platform_chat_id, platform_user_id, platform_user_name, session_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, connector_id, platform_chat_id, platform_user_id,
+             platform_user_name, ai_session_id, now, now)
+        )
+    return get_connector_session_by_id(session_id)
+
+
+def get_connector_session(connector_id: str, platform_chat_id: str) -> Optional[Dict[str, Any]]:
+    """Get a connector session by connector ID and platform chat ID."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM connector_sessions WHERE connector_id = ? AND platform_chat_id = ?",
+            (connector_id, platform_chat_id)
+        )
+        return row_to_dict(cursor.fetchone())
+
+
+def get_connector_session_by_id(session_id: str) -> Optional[Dict[str, Any]]:
+    """Get a connector session by its ID."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM connector_sessions WHERE id = ?", (session_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_connector_sessions_for_ai_session(ai_session_id: str) -> List[Dict[str, Any]]:
+    """Get all connector sessions linked to a given AI session."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM connector_sessions WHERE session_id = ? AND is_active = TRUE",
+            (ai_session_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def update_connector_session_ai_session(
+    session_id: str, ai_session_id: Optional[str]
+) -> None:
+    """Update the AI session linked to a connector session."""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE connector_sessions SET session_id = ?, updated_at = ? WHERE id = ?",
+            (ai_session_id, now, session_id)
+        )
+
+
+# ============================================================================
 # Rate Limit Operations
 # ============================================================================
 
@@ -5592,4 +6113,301 @@ def save_mobile_device(
             """, (record_id, device_id, name, platform, api_key_hash, fcm_token, capabilities, now, last_seen_at or now))
 
     return get_mobile_device(device_id)
+
+
+# ============================================================================
+# Automation Operations
+# ============================================================================
+
+def _parse_automation_row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Parse JSON fields in an automation row."""
+    if not row:
+        return None
+    for field in ("trigger_config", "output_config"):
+        if row.get(field) and isinstance(row[field], str):
+            row[field] = json.loads(row[field])
+    return row
+
+
+def _parse_automation_run_row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Parse JSON fields in an automation run row."""
+    if not row:
+        return None
+    if row.get("trigger_data") and isinstance(row["trigger_data"], str):
+        row["trigger_data"] = json.loads(row["trigger_data"])
+    return row
+
+
+def create_automation(
+    automation_id: str,
+    name: str,
+    trigger_type: str,
+    trigger_config: Dict[str, Any],
+    prompt: str,
+    profile_id: str,
+    project_id: Optional[str] = None,
+    description: Optional[str] = None,
+    output_config: Optional[Dict[str, Any]] = None,
+    max_turns: int = 1,
+    timeout_seconds: int = 300,
+    max_cost_per_run: Optional[float] = None,
+    max_cost_per_day: Optional[float] = None,
+    max_cost_total: Optional[float] = None,
+    max_runs_per_day: Optional[int] = None,
+    requires_approval: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Create a new automation."""
+    now = datetime.utcnow().isoformat()
+    if output_config is None:
+        output_config = {"type": "session"}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO automations
+               (id, name, description, trigger_type, trigger_config, prompt,
+                profile_id, project_id, output_config, max_turns, timeout_seconds,
+                max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
+                requires_approval, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (automation_id, name, description, trigger_type,
+             json.dumps(trigger_config), prompt, profile_id, project_id,
+             json.dumps(output_config), max_turns, timeout_seconds,
+             max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
+             requires_approval, now, now)
+        )
+    return get_automation(automation_id)
+
+
+def get_automation(automation_id: str) -> Optional[Dict[str, Any]]:
+    """Get an automation by ID."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM automations WHERE id = ?", (automation_id,))
+        return _parse_automation_row(row_to_dict(cursor.fetchone()))
+
+
+def get_all_automations() -> List[Dict[str, Any]]:
+    """Get all automations."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM automations ORDER BY created_at DESC")
+        rows = rows_to_list(cursor.fetchall())
+        return [_parse_automation_row(r) for r in rows]
+
+
+def get_enabled_automations() -> List[Dict[str, Any]]:
+    """Get all enabled automations."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM automations WHERE is_enabled = TRUE ORDER BY created_at DESC")
+        rows = rows_to_list(cursor.fetchall())
+        return [_parse_automation_row(r) for r in rows]
+
+
+def get_automations_for_event(trigger_type: str, event_type: str, connector_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Get enabled automations matching a connector event trigger."""
+    automations = get_enabled_automations()
+    results = []
+    for a in automations:
+        if a.get("trigger_type") != trigger_type:
+            continue
+        tc = a.get("trigger_config", {})
+        if trigger_type == "connector_event":
+            if tc.get("event_type") != event_type:
+                continue
+            if connector_id and tc.get("connector_id") and tc["connector_id"] != connector_id:
+                continue
+        results.append(a)
+    return results
+
+
+def update_automation(automation_id: str, **kwargs) -> Optional[Dict[str, Any]]:
+    """Update an automation. Pass keyword arguments for fields to update."""
+    existing = get_automation(automation_id)
+    if not existing:
+        return None
+
+    updates = []
+    values = []
+
+    for key in ("name", "description", "prompt", "profile_id", "project_id",
+                "max_turns", "timeout_seconds", "max_cost_per_run", "max_cost_per_day",
+                "max_cost_total", "max_runs_per_day", "is_enabled", "status",
+                "last_run_at", "last_error", "run_count", "failure_count",
+                "total_cost_used", "requires_approval"):
+        if key in kwargs:
+            updates.append(f"{key} = ?")
+            values.append(kwargs[key])
+
+    for key in ("trigger_config", "output_config"):
+        if key in kwargs:
+            updates.append(f"{key} = ?")
+            values.append(json.dumps(kwargs[key]))
+
+    if "trigger_type" in kwargs:
+        updates.append("trigger_type = ?")
+        values.append(kwargs["trigger_type"])
+
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(automation_id)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE automations SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_automation(automation_id)
+
+
+def delete_automation(automation_id: str) -> bool:
+    """Delete an automation (cascades to runs and approvals)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM automations WHERE id = ?", (automation_id,))
+        return cursor.rowcount > 0
+
+
+# ---- Automation Runs ----
+
+def create_automation_run(
+    run_id: str,
+    automation_id: str,
+    status: str = "pending",
+    trigger_data: Optional[Dict[str, Any]] = None,
+    prompt_rendered: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Create a new automation run."""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO automation_runs
+               (id, automation_id, status, trigger_data, prompt_rendered, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (run_id, automation_id, status,
+             json.dumps(trigger_data) if trigger_data else None,
+             prompt_rendered, now)
+        )
+    return get_automation_run(run_id)
+
+
+def get_automation_run(run_id: str) -> Optional[Dict[str, Any]]:
+    """Get an automation run by ID."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM automation_runs WHERE id = ?", (run_id,))
+        return _parse_automation_run_row(row_to_dict(cursor.fetchone()))
+
+
+def get_automation_runs(automation_id: str, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    """Get runs for an automation, most recent first."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM automation_runs WHERE automation_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (automation_id, limit, offset)
+        )
+        rows = rows_to_list(cursor.fetchall())
+        return [_parse_automation_run_row(r) for r in rows]
+
+
+def update_automation_run(run_id: str, **kwargs) -> Optional[Dict[str, Any]]:
+    """Update an automation run."""
+    updates = []
+    values = []
+
+    for key in ("status", "session_id", "prompt_rendered", "response", "error",
+                "cost_usd", "tokens_in", "tokens_out", "duration_ms",
+                "output_status", "output_error", "started_at", "completed_at"):
+        if key in kwargs:
+            updates.append(f"{key} = ?")
+            values.append(kwargs[key])
+
+    if "trigger_data" in kwargs:
+        updates.append("trigger_data = ?")
+        values.append(json.dumps(kwargs["trigger_data"]) if kwargs["trigger_data"] else None)
+
+    if updates:
+        values.append(run_id)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE automation_runs SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_automation_run(run_id)
+
+
+def get_automation_daily_stats(automation_id: str) -> Dict[str, Any]:
+    """Get today's run count and cost for an automation."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT COUNT(*) as run_count, COALESCE(SUM(cost_usd), 0) as total_cost
+               FROM automation_runs
+               WHERE automation_id = ? AND created_at >= ?""",
+            (automation_id, today)
+        )
+        row = cursor.fetchone()
+        return {"run_count": row["run_count"], "total_cost": row["total_cost"]}
+
+
+# ---- Automation Approvals ----
+
+def create_automation_approval(
+    approval_id: str,
+    run_id: str,
+    automation_id: str,
+    prompt_preview: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Create a new automation approval."""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO automation_approvals
+               (id, run_id, automation_id, prompt_preview, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (approval_id, run_id, automation_id, prompt_preview, now)
+        )
+    return get_automation_approval(approval_id)
+
+
+def get_automation_approval(approval_id: str) -> Optional[Dict[str, Any]]:
+    """Get an automation approval by ID."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM automation_approvals WHERE id = ?", (approval_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_pending_automation_approvals() -> List[Dict[str, Any]]:
+    """Get all pending automation approvals."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT a.*, au.name as automation_name
+               FROM automation_approvals a
+               JOIN automations au ON a.automation_id = au.id
+               WHERE a.status = 'pending'
+               ORDER BY a.created_at DESC"""
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def update_automation_approval(approval_id: str, status: str, decided_by: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Update an automation approval status."""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE automation_approvals SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?",
+            (status, decided_by, now, approval_id)
+        )
+    return get_automation_approval(approval_id)
 

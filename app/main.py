@@ -21,7 +21,7 @@ from app.core.auth import auth_service
 from app.core import encryption
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, meshy, notes, hooks, generation, project_agents, project_plugins, mcp, mobile, internal, workspace_files, browser
+from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, meshy, notes, hooks, generation, project_agents, project_plugins, mcp, mobile, internal, workspace_files, connectors, automations, browser, api_users
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -159,6 +159,14 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(f"Admin user: {auth_service.get_admin_username()}")
 
+    # Start connectors (after encryption is potentially available)
+    from app.core.connectors.manager import connector_manager
+    await connector_manager.start_all()
+
+    # Start automations scheduler (after connectors are available)
+    from app.core.automation_manager import automation_manager
+    await automation_manager.start()
+
     # Start git file watcher service and hook manager
     from app.core.git_watcher import git_watcher
     from app.core.git_hook_manager import git_hook_manager
@@ -173,6 +181,12 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
 
     yield
+
+    # Shutdown automations (before connectors, since automations may use them)
+    await automation_manager.shutdown()
+
+    # Shutdown connectors
+    await connector_manager.shutdown_all()
 
     # Shutdown git hook manager (uninstalls hooks before watcher stops)
     await git_hook_manager.shutdown()
@@ -316,6 +330,9 @@ app.include_router(analytics.router)
 app.include_router(search.router)
 app.include_router(templates.router)
 app.include_router(webhooks.router)
+app.include_router(connectors.router)
+app.include_router(api_users.router)
+app.include_router(automations.router)
 app.include_router(security.router)
 app.include_router(rate_limits.router)
 app.include_router(github.router)

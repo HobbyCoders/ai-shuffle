@@ -16,3 +16,10 @@ apscheduler>=3.10.4  # Proactive scheduling
 watchdog>=4.0.0  # Git filesystem watcher for real-time state updates
 # Web browser automation
 playwright>=1.49.0  # Headless browser for AI agent web browsing
+# Connector dependencies (messaging platform integrations)
+aiogram>=3.4.0  # Telegram bot framework (async)
+discord.py>=2.3.0  # Discord bot library
+# Gmail connector dependencies
+google-api-python-client>=2.100.0  # Gmail API client
+google-auth-oauthlib>=1.1.0  # Google OAuth2 authentication
+google-auth-httplib2>=0.2.0  # Google auth HTTP transport

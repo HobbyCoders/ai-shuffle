@@ -40,6 +40,9 @@ from app.core.mcp_service import get_mcp_service, McpServerType
 
 logger = logging.getLogger(__name__)
 
+# Sentinel for "use default" (distinguishes None from "not provided")
+_UNSET = object()
+
 # Use centralized constants from config (can be overridden via env vars)
 MAX_TOOL_OUTPUT_SIZE = settings.max_tool_output_chars
 MAX_DISPLAY_OUTPUT_SIZE = settings.max_display_output_chars
@@ -1102,6 +1105,13 @@ def _build_env_with_ai_tools(
     """
     env = dict(base_env) if base_env else {}
 
+    # Strip CLAUDECODE env var to prevent "nested session" detection when
+    # the server is started from within a Claude Code session.  The SDK
+    # merges os.environ with this dict, so setting it to empty overrides
+    # the inherited value.
+    env.pop("CLAUDECODE", None)
+    env["CLAUDECODE"] = ""
+
     if not ai_tools_config:
         return env
 
@@ -1242,7 +1252,8 @@ def build_options_from_profile(
     can_use_tool: Optional[callable] = None,
     hooks: Optional[Dict[str, list]] = None,
     api_user_id: Optional[str] = None,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    browser_session_id: Optional[str] = _UNSET,
 ) -> tuple[ClaudeAgentOptions, Optional[Dict[str, AgentDefinition]]]:
     """
     Convert a profile to ClaudeAgentOptions with all available options.
@@ -1529,9 +1540,11 @@ def build_options_from_profile(
         # This ensures tools from MCP servers (e.g., browser-tools) are available
         # regardless of whether the CLI discovers them from .mcp.json files
         # Note: ai_tool_env is passed so Node.js tool subprocesses get API keys
+        # browser_session_id defaults to session_id (WebSocket queries) but can
+        # be set to None for connector/API queries that have no browser.
         mcp_servers=_build_mcp_servers_dict_with_ai_tools(
             project_dir=Path(working_dir) if working_dir else None,
-            browser_session_id=session_id,
+            browser_session_id=session_id if browser_session_id is _UNSET else browser_session_id,
             ai_tools_config=ai_tools_config,
             tool_env=ai_tool_env,
         ) or {},
@@ -1610,9 +1623,16 @@ async def execute_query(
     project_id: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
     session_id: Optional[str] = None,
-    api_user_id: Optional[str] = None
+    api_user_id: Optional[str] = None,
+    browser_session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Execute a non-streaming query"""
+    """Execute a non-streaming query.
+
+    Args:
+        browser_session_id: Optional browser session ID for browser-tools MCP.
+            If None, browser-tools is not included (appropriate for connector
+            and API queries that have no interactive browser).
+    """
 
     # Get profile
     profile = get_profile(profile_id)
@@ -1647,6 +1667,14 @@ async def execute_query(
         )
         resume_id = None
 
+        # Notify all connected frontends so the sidebar updates
+        from app.core.sync_engine import sync_engine
+        await sync_engine.broadcast_user_session_created(
+            user_id="admin",
+            session_id=session_id,
+            source_device_id=None
+        )
+
     # Store user message with profile_id for per-query tracking
     database.add_session_message(
         session_id=session_id,
@@ -1656,13 +1684,15 @@ async def execute_query(
     )
 
     # Build options with user-scoped credential resolution
+    # browser_session_id=None for connector/API queries (no interactive browser)
     options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
         overrides=overrides,
         resume_session_id=resume_id,
         api_user_id=api_user_id,
-        session_id=session_id
+        session_id=session_id,
+        browser_session_id=browser_session_id,
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)

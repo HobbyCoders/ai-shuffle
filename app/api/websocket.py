@@ -23,6 +23,7 @@ from app.core.live_session_store import live_session_store
 from app.core.config import settings
 from app.db import database
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
+from app.core.connectors.manager import connector_manager
 from app.core.cli_bridge import CLIBridge, RewindParser
 from app.core.project_utils import get_project_working_dir
 from app.core.permission_handler import permission_handler
@@ -796,11 +797,12 @@ async def chat_websocket(
 
             logger.debug(f"Query completed for session {session_id}")
 
-            # Dispatch webhook for session completion (non-blocking)
+            # Dispatch notifications for session completion (non-blocking)
             import time as time_module
             duration = time_module.time() - query_start_time
             session_data = database.get_session(session_id)
             try:
+                # Legacy webhook dispatch
                 asyncio.create_task(dispatch_session_complete(
                     session_id=session_id,
                     title=session_data.get("title") if session_data else None,
@@ -810,8 +812,21 @@ async def chat_websocket(
                     output_tokens=final_metadata.get("tokens_out", 0),
                     duration_seconds=duration
                 ))
+                # Connector dispatch
+                asyncio.create_task(connector_manager.dispatch_event(
+                    "session.complete",
+                    {
+                        "session_id": session_id,
+                        "title": session_data.get("title") if session_data else None,
+                        "profile_id": profile_id,
+                        "total_cost_usd": final_metadata.get("total_cost_usd", 0.0),
+                        "input_tokens": final_metadata.get("tokens_in", 0),
+                        "output_tokens": final_metadata.get("tokens_out", 0),
+                        "duration_seconds": duration,
+                    }
+                ))
             except Exception as webhook_error:
-                logger.warning(f"Failed to dispatch session.complete webhook: {webhook_error}")
+                logger.warning(f"Failed to dispatch session.complete notifications: {webhook_error}")
 
         except asyncio.CancelledError:
             await send_json({"type": "stopped", "session_id": session_id})
@@ -864,17 +879,28 @@ async def chat_websocket(
                     source_device_id=None
                 )
 
-            # Dispatch webhook for session error (non-blocking)
+            # Dispatch notifications for session error (non-blocking)
             session_data = database.get_session(session_id)
             try:
+                # Legacy webhook dispatch
                 asyncio.create_task(dispatch_session_error(
                     session_id=session_id,
                     title=session_data.get("title") if session_data else None,
                     profile_id=profile_id,
                     error_message=str(e)
                 ))
+                # Connector dispatch
+                asyncio.create_task(connector_manager.dispatch_event(
+                    "session.error",
+                    {
+                        "session_id": session_id,
+                        "title": session_data.get("title") if session_data else None,
+                        "profile_id": profile_id,
+                        "error_message": str(e),
+                    }
+                ))
             except Exception as webhook_error:
-                logger.warning(f"Failed to dispatch session.error webhook: {webhook_error}")
+                logger.warning(f"Failed to dispatch session.error notifications: {webhook_error}")
 
         finally:
             # Stop heartbeat task

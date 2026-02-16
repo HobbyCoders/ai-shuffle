@@ -13,6 +13,7 @@ export type CardType =
   | 'mcp'
   | 'notes'
   | 'hooks'
+  | 'automations'
   | 'stats';
 
 export interface DeckCard {
@@ -46,6 +47,7 @@ export const DEFAULT_CARD_SIZES: Record<CardType, { width: number; height: numbe
   mcp: { width: 600, height: 550 },
   notes: { width: 600, height: 550 },
   hooks: { width: 650, height: 550 },
+  automations: { width: 750, height: 650 },
   stats: { width: 700, height: 600 },
 };
 
@@ -60,6 +62,7 @@ export const MIN_CARD_SIZES: Record<CardType, { width: number; height: number }>
   mcp: { width: 450, height: 400 },
   notes: { width: 400, height: 350 },
   hooks: { width: 500, height: 400 },
+  automations: { width: 550, height: 450 },
   stats: { width: 500, height: 400 },
 };
 

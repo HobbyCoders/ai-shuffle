@@ -27,7 +27,9 @@
 		Star,
 		Trash2,
 		Bot,
-		FolderKanban
+		KeyRound,
+		FolderKanban,
+		CalendarClock
 	} from 'lucide-svelte';
 	import { layout, activeView, sidebarCollapsed } from '$lib/stores/layout';
 	import type { ViewType } from '$lib/stores/layout';
@@ -113,6 +115,7 @@
 		{ type: 'subagent', label: 'Subagents', icon: Bot },
 		{ type: 'notes', label: 'Notes', icon: StickyNote },
 		{ type: 'hooks', label: 'Hooks', icon: Webhook },
+		{ type: 'automations', label: 'Automations', icon: CalendarClock, adminOnly: true },
 		{ type: 'stats', label: 'Stats', icon: BarChart3 },
 		{ type: 'profile', label: 'Profiles', icon: Users },
 		{ type: 'project', label: 'Projects', icon: FolderKanban },

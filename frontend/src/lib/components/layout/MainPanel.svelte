@@ -36,6 +36,7 @@
 	import McpManagerCard from '$lib/components/deck/cards/McpManagerCard.svelte';
 	import NotesCard from '$lib/components/deck/cards/NotesCard.svelte';
 	import HooksCard from '$lib/components/deck/cards/HooksCard.svelte';
+	import AutomationsCard from '$lib/components/deck/cards/AutomationsCard.svelte';
 	import StatsCard from '$lib/components/deck/cards/StatsCard.svelte';
 
 	interface Props {
@@ -649,6 +650,10 @@
 		{:else if $activeView.type === 'hooks'}
 			<div class="feature-panel">
 				<HooksCard />
+			</div>
+		{:else if $activeView.type === 'automations'}
+			<div class="feature-panel">
+				<AutomationsCard />
 			</div>
 		{:else if $activeView.type === 'stats'}
 			<div class="feature-panel">

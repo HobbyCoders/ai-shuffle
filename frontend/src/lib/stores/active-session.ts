@@ -525,6 +525,7 @@ function createActiveSessionStore() {
 
 		if (msgType === 'user_session_created') {
 			appData.loadSessions();
+			appData.loadApiUserSessions();
 			return;
 		}
 
@@ -780,7 +781,7 @@ function createActiveSessionStore() {
 					}
 				}
 
-				// Extract token counts from session data
+				// Extract token counts and session context from session data
 				const session = data.session as Record<string, unknown> | undefined;
 				const tokenUpdates: Record<string, unknown> = {};
 				if (session) {
@@ -790,6 +791,10 @@ function createActiveSessionStore() {
 					if (typeof session.cache_read_tokens === 'number') tokenUpdates.totalCacheReadTokens = session.cache_read_tokens;
 					if (typeof session.context_tokens === 'number') tokenUpdates.contextUsed = session.context_tokens;
 					if (typeof session.profile_id === 'string') tokenUpdates.sessionProfileId = session.profile_id;
+					// Restore profile and project from the loaded session so the header
+					// and profile selector reflect the session's actual context.
+					if (typeof session.profile_id === 'string') tokenUpdates.profile = session.profile_id;
+					if (typeof session.project_id === 'string') tokenUpdates.project = session.project_id;
 				}
 
 				// Late-joining context usage from streamingUsage
@@ -1700,12 +1705,14 @@ function createActiveSessionStore() {
 				ws.send(JSON.stringify({ type: 'close_session' }));
 			}
 
-			// Reset session-specific state, preserve profile/project
+			// Reset session-specific state, restore profile/project to user defaults
 			update(s => ({
 				...s,
 				sessionId: null,
 				sessionProfileId: null,
 				currentQueryProfileId: null,
+				profile: getPersistedProfile() || s.profile,
+				project: getPersistedProject() || s.project,
 				messages: [],
 				isStreaming: false,
 				error: null,

@@ -1,0 +1,544 @@
+"""
+Connector service — business logic for CRUD, credential encryption, and API user linking.
+"""
+
+import hashlib
+import logging
+import secrets
+import time
+from typing import Any, Dict, List, Optional
+
+from app.core import encryption
+from app.core.models import VALID_CONNECTOR_EVENTS
+from app.db import database
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Sensitive-field mapping (shared with ConnectorManager)
+# ---------------------------------------------------------------------------
+
+def get_sensitive_fields(connector_type: str) -> List[str]:
+    """Return the config keys that contain secrets for a given connector type."""
+    mapping = {
+        "telegram": ["bot_token"],
+        "discord": ["bot_token"],
+        "whatsapp": ["access_token"],
+        "webhook": ["secret", "inbound_token"],
+        "slack": ["bot_token", "app_token"],
+        "line": ["channel_access_token", "channel_secret"],
+        "signal": [],
+        "imessage": [],
+        "msteams": ["app_password"],
+        "bluebubbles": ["password"],
+        "spotify": ["client_secret", "refresh_token"],
+        "hue": ["api_key"],
+        "homeassistant": ["access_token"],
+        "gmail": ["client_secret", "refresh_token"],
+    }
+    return mapping.get(connector_type, [])
+
+
+# ---------------------------------------------------------------------------
+# Config encryption / decryption / masking
+# ---------------------------------------------------------------------------
+
+def _get_list_fields(connector_type: str) -> List[str]:
+    """Return config keys that should be stored as lists for a given connector type."""
+    type_meta = get_connector_type_info()
+    for t in type_meta:
+        if t["type"] == connector_type:
+            return [f["key"] for f in t.get("config_fields", []) if f.get("type") == "list"]
+    return []
+
+
+def normalize_config(config: Dict, connector_type: str) -> Dict:
+    """Ensure list-type config fields are stored as actual lists.
+
+    The frontend may submit a bare string (e.g. ``"12345"``) for fields
+    declared as ``type: "list"``.  This normalizes them so downstream code
+    can always iterate safely.
+    """
+    list_fields = _get_list_fields(connector_type)
+    if not list_fields:
+        return config
+
+    normalized = dict(config)
+    for key in list_fields:
+        value = normalized.get(key)
+        if value is None or value == "":
+            continue
+        if isinstance(value, str):
+            # Split on commas or whitespace to support "id1, id2" input
+            normalized[key] = [v.strip() for v in value.replace(",", " ").split() if v.strip()]
+    return normalized
+
+
+def encrypt_config(config: Dict, connector_type: str) -> Dict:
+    """Encrypt sensitive fields in a connector config dict.
+
+    Falls back to storing plaintext when encryption is not ready (same pattern
+    as the settings API).
+    """
+    sensitive = get_sensitive_fields(connector_type)
+    if not sensitive:
+        return config
+
+    encrypted = dict(config)
+    for key in sensitive:
+        value = encrypted.get(key)
+        if value and isinstance(value, str) and not encryption.is_encrypted(value):
+            if encryption.is_encryption_ready():
+                try:
+                    encrypted[key] = encryption.encrypt_value(value)
+                except Exception as e:
+                    logger.error(f"Failed to encrypt connector field '{key}': {e}")
+            else:
+                logger.warning(
+                    f"Storing connector config field '{key}' as plaintext — "
+                    "encryption key not loaded"
+                )
+    return encrypted
+
+
+def decrypt_config(config: Dict, connector_type: str) -> Dict:
+    """Decrypt sensitive fields in a connector config dict."""
+    sensitive = get_sensitive_fields(connector_type)
+    if not sensitive:
+        return config
+
+    decrypted = dict(config)
+    for key in sensitive:
+        value = decrypted.get(key)
+        if value and isinstance(value, str):
+            if encryption.is_encrypted(value):
+                if not encryption.is_encryption_ready():
+                    logger.warning(
+                        f"Cannot decrypt connector config field '{key}' — "
+                        "encryption key not loaded"
+                    )
+                    continue
+                try:
+                    decrypted[key] = encryption.decrypt_value(value)
+                except Exception as e:
+                    logger.error(f"Failed to decrypt connector field '{key}': {e}")
+    return decrypted
+
+
+def mask_config(config: Dict, connector_type: str) -> Dict:
+    """Return a copy of *config* with sensitive fields masked.
+
+    Non-sensitive fields are passed through unchanged.  Sensitive values show
+    only the last four characters, prefixed with ``****``.
+    """
+    sensitive = get_sensitive_fields(connector_type)
+    if not sensitive:
+        return config
+
+    masked = dict(config)
+    for key in sensitive:
+        value = masked.get(key)
+        if value and isinstance(value, str):
+            # If the value is encrypted, we can't show any real chars
+            if encryption.is_encrypted(value):
+                masked[key] = "****"
+            elif len(value) > 4:
+                masked[key] = "****" + value[-4:]
+            else:
+                masked[key] = "****"
+    return masked
+
+
+# ---------------------------------------------------------------------------
+# CRUD operations
+# ---------------------------------------------------------------------------
+
+async def create_connector(
+    name: str,
+    connector_type: str,
+    config: Dict[str, Any],
+    events: List[str],
+    api_user_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    profile_ids: Optional[List[str]] = None,
+) -> Dict:
+    """Create a new connector.
+
+    If *api_user_id* is provided, the connector is linked to an existing API
+    user.  Otherwise a dedicated API user is auto-created (legacy behaviour).
+
+    Returns the connector dict with masked config.
+    """
+    # 1. Validate events
+    invalid = [e for e in events if e not in VALID_CONNECTOR_EVENTS]
+    if invalid:
+        raise ValueError(f"Invalid event types: {', '.join(invalid)}")
+
+    # 2. Generate connector ID
+    connector_id = f"conn-{secrets.token_hex(4)}"
+
+    # 3. Resolve API user
+    auto_created = False
+    if api_user_id:
+        # Use the provided (existing) API user
+        existing_user = database.get_api_user(api_user_id)
+        if not existing_user:
+            raise ValueError(f"API user not found: {api_user_id}")
+    else:
+        # Auto-create a dedicated API user for this connector
+        auto_created = True
+        api_user_id = secrets.token_hex(4)
+        api_key = f"aih_{secrets.token_urlsafe(32)}"
+        api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+
+        database.create_api_user(
+            user_id=api_user_id,
+            name=f"connector:{connector_type}:{name}",
+            api_key_hash=api_key_hash,
+            project_id=project_id,
+            profile_ids=profile_ids,
+            web_login_allowed=False,
+            description=f"Auto-created API user for connector {connector_id}",
+        )
+
+    # 4. Normalize list-type fields, then encrypt sensitive config fields
+    config = normalize_config(config, connector_type)
+    encrypted_config = encrypt_config(config, connector_type)
+
+    # 5. Persist the connector
+    connector = database.create_connector(
+        connector_id=connector_id,
+        connector_type=connector_type,
+        name=name,
+        config=encrypted_config,
+        events=events,
+        api_user_id=api_user_id,
+    )
+
+    if not connector:
+        if auto_created:
+            database.delete_api_user(api_user_id)
+        raise RuntimeError("Failed to create connector in database")
+
+    # 6. Return with masked config
+    connector["config"] = mask_config(connector.get("config", {}), connector_type)
+    return connector
+
+
+async def update_connector(connector_id: str, **kwargs) -> Optional[Dict]:
+    """Update an existing connector.
+
+    Accepts keyword arguments matching ``ConnectorUpdate`` fields:
+    ``name``, ``config``, ``events``, ``is_active``.
+
+    If config changes and the connector is active, it will be restarted.
+    Returns the updated connector with masked config, or ``None`` if not found.
+    """
+    existing = database.get_connector(connector_id)
+    if not existing:
+        return None
+
+    connector_type = existing["type"]
+
+    # Encrypt sensitive config fields if config is being updated.
+    # Preserve existing encrypted values when the frontend sends masked
+    # placeholders (e.g. "****abcd") back — these must not overwrite the
+    # real token stored in the database.
+    config_changed = False
+    if "config" in kwargs and kwargs["config"] is not None:
+        new_config = normalize_config(kwargs["config"], connector_type)
+        kwargs["config"] = new_config
+        existing_config = existing.get("config", {}) or {}
+        sensitive = get_sensitive_fields(connector_type)
+
+        for key in sensitive:
+            new_val = new_config.get(key, "")
+            if isinstance(new_val, str) and new_val.startswith("****"):
+                # Masked value — keep the original encrypted value from DB
+                new_config[key] = existing_config.get(key, new_val)
+
+        # Check if config actually changed vs what's in the DB
+        if new_config != existing_config:
+            kwargs["config"] = encrypt_config(new_config, connector_type)
+            config_changed = True
+        else:
+            # No real change — drop config from the update
+            del kwargs["config"]
+
+    # Validate events if provided
+    if "events" in kwargs and kwargs["events"] is not None:
+        invalid = [e for e in kwargs["events"] if e not in VALID_CONNECTOR_EVENTS]
+        if invalid:
+            raise ValueError(f"Invalid event types: {', '.join(invalid)}")
+
+    updated = database.update_connector(connector_id, **kwargs)
+    if not updated:
+        return None
+
+    # Restart if the connector is active and config was changed
+    if config_changed and updated.get("is_active"):
+        try:
+            # Lazy import to avoid circular dependency
+            from app.core.connectors.manager import connector_manager
+            await connector_manager.restart_connector(connector_id)
+        except Exception as e:
+            logger.error(f"Failed to restart connector {connector_id} after update: {e}")
+            updated["_restart_error"] = str(e)
+
+    # Mask config before returning
+    updated["config"] = mask_config(updated.get("config", {}), connector_type)
+    return updated
+
+
+async def delete_connector(connector_id: str) -> bool:
+    """Delete a connector, its API user, and stop it if running."""
+    connector = database.get_connector(connector_id)
+    if not connector:
+        return False
+
+    # Stop the connector if it is running
+    try:
+        from app.core.connectors.manager import connector_manager
+        await connector_manager.stop_connector(connector_id)
+    except Exception as e:
+        logger.error(f"Error stopping connector {connector_id} during delete: {e}")
+
+    # Only delete the API user if it was auto-created for this connector
+    api_user_id = connector.get("api_user_id")
+    if api_user_id:
+        try:
+            api_user = database.get_api_user(api_user_id)
+            if api_user and api_user.get("name", "").startswith("connector:"):
+                database.delete_api_user(api_user_id)
+        except Exception as e:
+            logger.error(f"Failed to delete API user {api_user_id} for connector {connector_id}: {e}")
+
+    # Delete the connector itself (cascades to event_log / sessions via FK)
+    return database.delete_connector(connector_id)
+
+
+async def test_connector(connector_id: str) -> Dict:
+    """Instantiate a temporary connector and test its credentials.
+
+    Returns ``{"success": bool, "message": str, "elapsed_ms": int}``.
+    """
+    from app.core.connectors.registry import get_connector_class
+
+    connector = database.get_connector(connector_id)
+    if not connector:
+        return {"success": False, "message": "Connector not found", "elapsed_ms": 0}
+
+    connector_type = connector["type"]
+    config = connector.get("config", {}) or {}
+
+    # Decrypt config for testing
+    config = decrypt_config(config, connector_type)
+
+    try:
+        cls = get_connector_class(connector_type)
+    except ValueError as e:
+        return {"success": False, "message": str(e), "elapsed_ms": 0}
+
+    # Create a disposable instance (callbacks are no-ops for testing)
+    async def _noop_msg(_msg):
+        pass
+
+    async def _noop_perm(_rid, _sid, _approved):
+        pass
+
+    instance = cls(
+        connector_id=connector_id,
+        connector_type=connector_type,
+        config=config,
+        on_incoming_message=_noop_msg,
+        on_permission_response=_noop_perm,
+    )
+
+    start = time.time()
+    result = await instance.test_connection()
+    elapsed_ms = int((time.time() - start) * 1000)
+
+    return {
+        "success": result.get("success", False),
+        "message": result.get("message", ""),
+        "response_time_ms": elapsed_ms,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Connector type metadata
+# ---------------------------------------------------------------------------
+
+def get_connector_type_info() -> List[Dict]:
+    """Return metadata about each supported connector type."""
+    types = [
+        {
+            "type": "telegram",
+            "name": "Telegram",
+            "description": "Telegram bot via Bot API",
+            "config_fields": [
+                {"key": "bot_token", "label": "Bot Token", "type": "password", "required": True},
+                {"key": "allowed_chat_ids", "label": "Allowed Chat IDs", "type": "list", "required": False},
+                {"key": "welcome_message", "label": "Welcome Message", "type": "text", "required": False},
+            ],
+        },
+        {
+            "type": "discord",
+            "name": "Discord",
+            "description": "Discord bot via discord.py",
+            "config_fields": [
+                {"key": "bot_token", "label": "Bot Token", "type": "password", "required": True},
+                {"key": "guild_ids", "label": "Guild IDs", "type": "list", "required": False},
+                {"key": "allowed_channel_ids", "label": "Allowed Channel IDs", "type": "list", "required": False},
+                {"key": "command_prefix", "label": "Command Prefix", "type": "text", "required": False},
+            ],
+        },
+        {
+            "type": "whatsapp",
+            "name": "WhatsApp",
+            "description": "WhatsApp via Cloud API",
+            "config_fields": [
+                {"key": "phone_number_id", "label": "Phone Number ID", "type": "text", "required": True},
+                {"key": "access_token", "label": "Access Token", "type": "password", "required": True},
+                {"key": "verify_token", "label": "Verify Token", "type": "text", "required": True},
+                {"key": "allowed_phone_numbers", "label": "Allowed Phone Numbers", "type": "list", "required": False},
+            ],
+        },
+        {
+            "type": "webhook",
+            "name": "Webhook",
+            "description": "HTTP webhook — outbound notifications and/or inbound triggers",
+            "config_fields": [
+                {"key": "mode", "label": "Mode", "type": "text", "required": False, "placeholder": "outbound", "description": "outbound, inbound, or bidirectional"},
+                {"key": "url", "label": "Outbound URL", "type": "text", "required": False, "description": "Required for outbound/bidirectional mode"},
+                {"key": "secret", "label": "Signing Secret", "type": "password", "required": False, "description": "HMAC-SHA256 secret for signing and verification"},
+                {"key": "headers", "label": "Custom Headers", "type": "json", "required": False},
+                {"key": "inbound_path", "label": "Inbound Path", "type": "text", "required": False, "placeholder": "my-webhook", "description": "URL slug for inbound: /api/v1/connectors/hooks/{path}"},
+                {"key": "inbound_token", "label": "Inbound Auth Token", "type": "password", "required": False, "description": "Bearer token for incoming requests"},
+                {"key": "prompt_template", "label": "Prompt Template", "type": "textarea", "required": False, "placeholder": "Process the above webhook payload.", "description": "Custom instructions appended after the payload"},
+            ],
+        },
+        {
+            "type": "slack",
+            "name": "Slack",
+            "description": "Slack bot via Socket Mode",
+            "config_fields": [
+                {"key": "bot_token", "label": "Bot Token (xoxb-...)", "type": "password", "required": True},
+                {"key": "app_token", "label": "App Token (xapp-...)", "type": "password", "required": True},
+                {"key": "allowed_channel_ids", "label": "Allowed Channel IDs", "type": "list", "required": False},
+                {"key": "command_prefix", "label": "Command Prefix", "type": "text", "required": False},
+            ],
+        },
+        {
+            "type": "line",
+            "name": "LINE",
+            "description": "LINE Messaging API via webhook",
+            "config_fields": [
+                {"key": "channel_access_token", "label": "Channel Access Token", "type": "password", "required": True},
+                {"key": "channel_secret", "label": "Channel Secret", "type": "password", "required": True},
+                {"key": "allowed_user_ids", "label": "Allowed User IDs", "type": "list", "required": False},
+                {"key": "allowed_group_ids", "label": "Allowed Group IDs", "type": "list", "required": False},
+            ],
+        },
+        {
+            "type": "signal",
+            "name": "Signal",
+            "description": "Signal via signal-cli REST API",
+            "config_fields": [
+                {"key": "account", "label": "Phone Number (E.164)", "type": "text", "required": True, "placeholder": "+1234567890"},
+                {"key": "api_url", "label": "API URL", "type": "text", "required": False, "placeholder": "http://127.0.0.1:8080"},
+                {"key": "allowed_numbers", "label": "Allowed Phone Numbers", "type": "list", "required": False},
+            ],
+        },
+        {
+            "type": "imessage",
+            "name": "iMessage",
+            "description": "iMessage via imsg CLI (macOS only)",
+            "config_fields": [
+                {"key": "cli_path", "label": "CLI Path", "type": "text", "required": False, "placeholder": "imsg"},
+                {"key": "service", "label": "Service", "type": "text", "required": False, "placeholder": "auto"},
+                {"key": "allowed_handles", "label": "Allowed Handles", "type": "list", "required": False},
+            ],
+        },
+        {
+            "type": "msteams",
+            "name": "Microsoft Teams",
+            "description": "Microsoft Teams via Bot Framework",
+            "config_fields": [
+                {"key": "app_id", "label": "Application (Client) ID", "type": "text", "required": True},
+                {"key": "app_password", "label": "Client Secret", "type": "password", "required": True},
+                {"key": "tenant_id", "label": "Tenant ID", "type": "text", "required": False, "placeholder": "botframework.com"},
+                {"key": "allowed_user_ids", "label": "Allowed User IDs", "type": "list", "required": False},
+            ],
+        },
+        {
+            "type": "bluebubbles",
+            "name": "BlueBubbles",
+            "description": "iMessage via BlueBubbles server (macOS)",
+            "config_fields": [
+                {"key": "server_url", "label": "Server URL", "type": "text", "required": True, "placeholder": "http://192.168.1.10:1234"},
+                {"key": "password", "label": "API Password", "type": "password", "required": True},
+                {"key": "allowed_handles", "label": "Allowed Handles", "type": "list", "required": False},
+            ],
+        },
+        {
+            "type": "spotify",
+            "name": "Spotify",
+            "description": "Spotify playback control via Web API",
+            "config_fields": [
+                {"key": "client_id", "label": "Client ID", "type": "text", "required": True, "description": "From Spotify Developer Dashboard"},
+                {"key": "client_secret", "label": "Client Secret", "type": "password", "required": True},
+                {"key": "refresh_token", "label": "Refresh Token", "type": "password", "required": True, "description": "OAuth2 refresh token from authorization flow"},
+                {"key": "poll_interval_seconds", "label": "Poll Interval (seconds)", "type": "text", "required": False, "placeholder": "30"},
+            ],
+        },
+        {
+            "type": "hue",
+            "name": "Philips Hue",
+            "description": "Smart lighting via local Hue Bridge API",
+            "config_fields": [
+                {"key": "bridge_ip", "label": "Bridge IP Address", "type": "text", "required": True, "placeholder": "192.168.1.x"},
+                {"key": "api_key", "label": "API Key (Username)", "type": "password", "required": True, "description": "Press bridge button, then generate via POST /api"},
+                {"key": "poll_interval_seconds", "label": "Poll Interval (seconds)", "type": "text", "required": False, "placeholder": "60"},
+            ],
+        },
+        {
+            "type": "homeassistant",
+            "name": "Home Assistant",
+            "description": "Smart home control via Home Assistant REST API",
+            "config_fields": [
+                {"key": "url", "label": "Home Assistant URL", "type": "text", "required": True, "placeholder": "http://homeassistant.local:8123"},
+                {"key": "access_token", "label": "Long-Lived Access Token", "type": "password", "required": True, "description": "Generate in HA: Profile > Long-Lived Access Tokens"},
+                {"key": "entity_filter", "label": "Entity Filter", "type": "text", "required": False, "placeholder": "light.,switch.,climate.", "description": "Comma-separated entity prefixes to monitor"},
+                {"key": "poll_interval_seconds", "label": "Poll Interval (seconds)", "type": "text", "required": False, "placeholder": "60"},
+            ],
+        },
+        {
+            "type": "gmail",
+            "name": "Gmail",
+            "description": "Email integration via Gmail API",
+            "config_fields": [
+                {"key": "client_id", "label": "OAuth Client ID", "type": "text", "required": True, "description": "From Google Cloud Console"},
+                {"key": "client_secret", "label": "OAuth Client Secret", "type": "password", "required": True},
+                {"key": "refresh_token", "label": "OAuth Refresh Token", "type": "password", "required": True, "description": "From OAuth2 authorization flow"},
+                {"key": "labels", "label": "Gmail Labels", "type": "text", "required": False, "placeholder": "INBOX", "description": "Comma-separated labels to watch"},
+                {"key": "max_results", "label": "Max Results per Poll", "type": "text", "required": False, "placeholder": "10"},
+                {"key": "poll_interval_seconds", "label": "Poll Interval (seconds)", "type": "text", "required": False, "placeholder": "60"},
+            ],
+        },
+    ]
+
+    # Enrich each type with capabilities from the registered connector class
+    from dataclasses import asdict
+    from app.core.connectors.registry import get_connector_class
+
+    for type_info in types:
+        try:
+            cls = get_connector_class(type_info["type"])
+            type_info["capabilities"] = asdict(cls.CAPABILITIES)
+            type_info["max_message_length"] = cls.MAX_MESSAGE_LENGTH
+        except (ValueError, AttributeError) as e:
+            logger.warning("Failed to enrich capabilities for connector type '%s': %s", type_info["type"], e)
+
+    return types

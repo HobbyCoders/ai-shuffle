@@ -16,11 +16,14 @@
 	import type { Project } from '$lib/stores/appState';
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword } from '$lib/api/auth';
 	import WebhookManager from '$lib/components/WebhookManager.svelte';
+	import ConnectorManager from '$lib/components/ConnectorManager.svelte';
 	import TwoFactorSetup from '$lib/components/TwoFactorSetup.svelte';
 	import RateLimitManager from '$lib/components/RateLimitManager.svelte';
+	import ApiUserManager from '$lib/components/ApiUserManager.svelte';
 	import { slide, fade } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
 	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
+	import { timezonePreference } from '$lib/stores/timezonePreference';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
 	import HotkeyCapture from '$lib/components/settings/HotkeyCapture.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
@@ -47,12 +50,13 @@
 	}: Props = $props();
 
 	// Navigation - simplified to 3 main tabs
-	type Tab = 'account' | 'ai' | 'system';
+	type Tab = 'account' | 'ai' | 'connectors' | 'system';
 	let activeTab: Tab = $state('account');
 
 	const settingsTabs = $derived([
 		{ id: 'account' as Tab, label: 'Account' },
 		{ id: 'ai' as Tab, label: 'AI Models' },
+		...($isAdmin ? [{ id: 'connectors' as Tab, label: 'Connectors' }] : []),
 		...($isAdmin ? [{ id: 'system' as Tab, label: 'System' }] : [])
 	]);
 
@@ -157,6 +161,7 @@
 
 	// Chat Behavior Preferences
 	let chatPrefs = $state<ChatPreferences | null>(null);
+	let currentTimezone = $state('local');
 
 	// Security Instructions (admin only)
 	let securityInstructions = $state('');
@@ -174,13 +179,17 @@
 			loadAllData();
 		}
 		loadChatPreferences();
+		timezonePreference.load();
 
 		// Subscribe to chat preferences store
 		const unsubscribe = chatPreferences.subscribe(prefs => {
 			chatPrefs = prefs;
 		});
+		const unsubTz = timezonePreference.subscribe(tz => {
+			currentTimezone = tz;
+		});
 
-		return () => unsubscribe();
+		return () => { unsubscribe(); unsubTz(); };
 	});
 
 	async function loadChatPreferences() {
@@ -825,6 +834,46 @@
 										{#if workspaceError}
 											<div class="error-msg">{workspaceError}</div>
 										{/if}
+									</div>
+
+									<!-- Timezone -->
+									<div class="setting-row">
+										<div class="setting-info">
+											<label>Timezone</label>
+											<span class="setting-desc">Used for timestamps across the UI</span>
+										</div>
+										<select
+											class="select"
+											value={currentTimezone}
+											onchange={(e) => timezonePreference.setTimezone(e.currentTarget.value)}
+										>
+											<option value="local">Browser Default</option>
+											<option value="UTC">UTC</option>
+											<optgroup label="Americas">
+												<option value="America/New_York">Eastern (New York)</option>
+												<option value="America/Chicago">Central (Chicago)</option>
+												<option value="America/Denver">Mountain (Denver)</option>
+												<option value="America/Los_Angeles">Pacific (Los Angeles)</option>
+												<option value="America/Anchorage">Alaska</option>
+												<option value="Pacific/Honolulu">Hawaii</option>
+												<option value="America/Sao_Paulo">S&atilde;o Paulo</option>
+											</optgroup>
+											<optgroup label="Europe &amp; Africa">
+												<option value="Europe/London">London</option>
+												<option value="Europe/Paris">Paris / Berlin</option>
+												<option value="Europe/Moscow">Moscow</option>
+												<option value="Africa/Cairo">Cairo</option>
+											</optgroup>
+											<optgroup label="Asia &amp; Pacific">
+												<option value="Asia/Dubai">Dubai</option>
+												<option value="Asia/Kolkata">India (Kolkata)</option>
+												<option value="Asia/Shanghai">China (Shanghai)</option>
+												<option value="Asia/Tokyo">Tokyo</option>
+												<option value="Asia/Seoul">Seoul</option>
+												<option value="Australia/Sydney">Sydney</option>
+												<option value="Pacific/Auckland">Auckland</option>
+											</optgroup>
+										</select>
 									</div>
 								</div>
 							{/if}
@@ -1496,6 +1545,13 @@
 					</div>
 				{/if}
 
+				<!-- CONNECTORS TAB -->
+				{#if activeTab === 'connectors' && $isAdmin}
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<ConnectorManager />
+					</div>
+				{/if}
+
 				<!-- SYSTEM TAB -->
 				{#if activeTab === 'system' && $isAdmin}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
@@ -1510,6 +1566,21 @@
 							{#if expandedSections.has('rate-limits')}
 								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
 									<RateLimitManager />
+								</div>
+							{/if}
+						</section>
+
+						<!-- API Users Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('api-users')}>
+								<h3>API Users</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('api-users')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('api-users')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									<ApiUserManager />
 								</div>
 							{/if}
 						</section>
@@ -1583,20 +1654,7 @@
 							{/if}
 						</section>
 
-						<!-- Webhooks Section -->
-						<section class="section">
-							<button class="section-header" onclick={() => toggleSection('webhooks')}>
-								<h3>Webhooks</h3>
-								<svg class="chevron" class:expanded={expandedSections.has('webhooks')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-									<polyline points="6 9 12 15 18 9"/>
-								</svg>
-							</button>
-							{#if expandedSections.has('webhooks')}
-								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
-									<WebhookManager />
-								</div>
-							{/if}
-						</section>
+						<!-- Webhooks moved to Connectors tab -->
 					</div>
 				{/if}
 			</div>

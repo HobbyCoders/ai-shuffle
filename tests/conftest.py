@@ -572,6 +572,132 @@ def create_test_schema(cursor: sqlite3.Cursor):
         )
     """)
 
+    # Connectors
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS connectors (
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            api_user_id TEXT,
+            config JSON DEFAULT '{}',
+            events JSON DEFAULT '[]',
+            is_active BOOLEAN DEFAULT FALSE,
+            status TEXT DEFAULT 'disconnected',
+            status_message TEXT,
+            last_connected_at TIMESTAMP,
+            last_event_at TIMESTAMP,
+            failure_count INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL
+        )
+    """)
+
+    # Connector event logs
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS connector_event_log (
+            id TEXT PRIMARY KEY,
+            connector_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            direction TEXT NOT NULL DEFAULT 'outbound',
+            payload JSON,
+            status TEXT DEFAULT 'pending',
+            error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Connector sessions
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS connector_sessions (
+            id TEXT PRIMARY KEY,
+            connector_id TEXT NOT NULL,
+            platform_chat_id TEXT NOT NULL,
+            platform_user_id TEXT,
+            platform_user_name TEXT,
+            session_id TEXT,
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE,
+            UNIQUE(connector_id, platform_chat_id)
+        )
+    """)
+
+    # Automations
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS automations (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            trigger_type TEXT NOT NULL,
+            trigger_config JSON NOT NULL DEFAULT '{}',
+            prompt TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            project_id TEXT,
+            output_config JSON NOT NULL DEFAULT '{"type": "session"}',
+            max_turns INTEGER DEFAULT 1,
+            timeout_seconds INTEGER DEFAULT 300,
+            max_cost_per_run REAL,
+            max_cost_per_day REAL,
+            max_cost_total REAL,
+            max_runs_per_day INTEGER,
+            total_cost_used REAL DEFAULT 0.0,
+            is_enabled BOOLEAN DEFAULT FALSE,
+            status TEXT DEFAULT 'idle',
+            last_run_at TIMESTAMP,
+            last_error TEXT,
+            run_count INTEGER DEFAULT 0,
+            failure_count INTEGER DEFAULT 0,
+            requires_approval BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE RESTRICT,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
+        )
+    """)
+
+    # Automation runs
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS automation_runs (
+            id TEXT PRIMARY KEY,
+            automation_id TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            trigger_data JSON,
+            prompt_rendered TEXT,
+            session_id TEXT,
+            response TEXT,
+            cost_usd REAL DEFAULT 0,
+            tokens_in INTEGER DEFAULT 0,
+            tokens_out INTEGER DEFAULT 0,
+            duration_ms INTEGER,
+            error TEXT,
+            output_status TEXT,
+            output_error TEXT,
+            started_at TIMESTAMP,
+            completed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Automation approvals
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS automation_approvals (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            automation_id TEXT NOT NULL,
+            prompt_preview TEXT,
+            status TEXT DEFAULT 'pending',
+            approved_by TEXT,
+            approved_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (run_id) REFERENCES automation_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE
+        )
+    """)
+
     # Insert schema version
     cursor.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (26)")
 
@@ -620,6 +746,17 @@ def mock_db(test_db: sqlite3.Connection):
 
     with patch("app.db.database.get_connection", mock_get_connection):
         with patch("app.db.database.get_db", mock_get_db):
+            # Seed a "default" profile so tests can reference it
+            from app.db import database
+            try:
+                database.create_profile(
+                    profile_id="default",
+                    name="Default Profile",
+                    description=None,
+                    config={"model": "claude-sonnet-4-20250514"},
+                )
+            except Exception:
+                pass  # May already exist
             yield test_db
 
 
@@ -639,6 +776,12 @@ def client(mock_db):
     """
     from fastapi.testclient import TestClient
     from app.main import app
+    from app.core.automation_manager import automation_manager
+    from app.core.connectors.manager import connector_manager
+
+    # Prevent scheduler shutdown errors during test teardown
+    automation_manager._scheduler = None
+    automation_manager._initialized = False
 
     with TestClient(app) as test_client:
         yield test_client
@@ -670,6 +813,12 @@ def authenticated_client(mock_db):
     from fastapi.testclient import TestClient
     from app.main import app
     from app.api.auth import require_auth, require_admin
+    from app.core.automation_manager import automation_manager
+    from app.core.connectors.manager import connector_manager
+
+    # Prevent scheduler shutdown errors during test teardown
+    automation_manager._scheduler = None
+    automation_manager._initialized = False
 
     # Override the dependencies at the FastAPI app level
     app.dependency_overrides[require_auth] = _mock_require_auth

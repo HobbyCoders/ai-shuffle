@@ -21,6 +21,7 @@ export type ViewType =
 	| 'plugins'
 	| 'mcp'
 	| 'hooks'
+	| 'automations'
 	| 'notes'
 	| 'stats';
 
