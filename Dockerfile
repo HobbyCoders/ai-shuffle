@@ -92,7 +92,7 @@ COPY .env.example .
 
 # Copy AI tools to /opt/ai-tools (accessible by Claude agent)
 COPY tools/ /opt/ai-tools/
-RUN cd /opt/ai-tools && npm install --omit=dev && rm -rf /root/.npm
+RUN cd /opt/ai-tools && npm install --omit=dev --ignore-scripts && rm -rf /root/.npm
 
 # Copy entrypoint script
 COPY entrypoint.sh /entrypoint.sh
