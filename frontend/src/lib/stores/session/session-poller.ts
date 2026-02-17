@@ -5,8 +5,8 @@
  * not a fallback. WebSocket events just trigger an immediate poll via pollNow().
  *
  * Polling rates:
- * - 500ms during streaming (real-time feel)
- * - 5000ms when idle (detects remote session starts)
+ * - 300ms during streaming (real-time feel)
+ * - 30s when idle (detects remote session starts)
  *
  * Key behaviors:
  * - Sends ?since_update_id=N → gets 304 if nothing changed (cheap)
@@ -20,7 +20,7 @@ import { sessionState, type SessionUsage } from './session-state';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
-const STREAMING_POLL_INTERVAL_MS = 500;
+const STREAMING_POLL_INTERVAL_MS = 300;
 const IDLE_POLL_INTERVAL_MS = 30_000;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
