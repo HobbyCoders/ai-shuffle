@@ -659,6 +659,7 @@ class WorktreeSyncResponse(BaseModel):
     is_git_repo: bool
     active_worktrees: int
     cleaned_up: List[dict]
+    imported: int = 0
 
 
 @router.post("/{project_id}/sync-worktrees", response_model=WorktreeSyncResponse)
@@ -697,7 +698,8 @@ async def sync_project_worktrees(
     return WorktreeSyncResponse(
         is_git_repo=result.get("is_git_repo", False),
         active_worktrees=result.get("active", 0),
-        cleaned_up=result.get("cleaned_up", [])
+        cleaned_up=result.get("cleaned_up", []),
+        imported=result.get("imported", 0)
     )
 
 

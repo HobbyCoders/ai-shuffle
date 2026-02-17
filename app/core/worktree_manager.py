@@ -229,9 +229,40 @@ class WorktreeManager:
         if cleaned_up:
             logger.debug(f"Cleaned up {len(cleaned_up)} stale worktree records for project {project_id}")
 
+        # Import external worktrees (created outside the app, e.g. via git CLI)
+        imported = 0
+        try:
+            git_worktrees = self.git_service.list_worktrees(main_dir)
+            db_paths = {get_worktree_working_dir(wt) for wt in active_worktrees if wt["id"] not in {c["id"] for c in cleaned_up}}
+            for git_wt in git_worktrees:
+                if git_wt.get("is_main"):
+                    continue
+                git_path = git_wt.get("path", "")
+                if git_path and git_path not in db_paths:
+                    try:
+                        worktree_folder = Path(git_path).name
+                        branch_name = git_wt.get("branch", "unknown")
+                        worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
+                        database.create_worktree(
+                            worktree_id=worktree_id,
+                            repository_id=repo["id"],
+                            branch_name=branch_name,
+                            worktree_path=worktree_folder,
+                            session_id=None,
+                            base_branch=None,
+                            status=WorktreeStatus.ACTIVE
+                        )
+                        logger.debug(f"Imported external worktree: {worktree_folder} (branch: {branch_name})")
+                        imported += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to import external worktree {git_path}: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to scan for external worktrees: {e}")
+
         return {
             "cleaned_up": cleaned_up,
-            "active": still_active,
+            "active": still_active + imported,
+            "imported": imported,
             "is_git_repo": True
         }
 
