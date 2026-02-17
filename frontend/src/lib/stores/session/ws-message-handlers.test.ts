@@ -540,6 +540,45 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('stream_message_delta handler', () => {
+		it('should NOT process queued messages on stop_reason (including tool_use)', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.isStreaming = true;
+			state.queuedMessages = [{ id: 'q1', content: 'queued msg', queuedAt: Date.now() }];
+
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			// Simulate assistant finishing a message block with stop_reason: "tool_use"
+			// This should NOT trigger queued message processing
+			handlers.handleMessage({
+				type: 'stream_message_delta',
+				delta: { stop_reason: 'tool_use' },
+			});
+
+			expect(deps.onProcessNextQueuedMessage).not.toHaveBeenCalled();
+		});
+
+		it('should NOT process queued messages on stop_reason: end_turn', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.isStreaming = true;
+			state.queuedMessages = [{ id: 'q1', content: 'queued msg', queuedAt: Date.now() }];
+
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			// Even end_turn should NOT trigger — only the done event should
+			handlers.handleMessage({
+				type: 'stream_message_delta',
+				delta: { stop_reason: 'end_turn' },
+			});
+
+			expect(deps.onProcessNextQueuedMessage).not.toHaveBeenCalled();
+		});
+	});
+
 	describe('sync event forwarding', () => {
 		it('should forward sync events to session notifier', () => {
 			const state = mockState();

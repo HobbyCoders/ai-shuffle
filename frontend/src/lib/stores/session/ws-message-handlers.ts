@@ -729,20 +729,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			case 'plugin_message':
 				break;
 
-			case 'stream_message_delta': {
-				// Assistant message completed — send queued messages immediately.
-				// This fires when the assistant finishes its current response (any stop_reason),
-				// allowing queued "Send Later" messages to be sent in the same turn rather
-				// than waiting for the full query to end (done event).
-				const delta = data.delta as Record<string, unknown> | undefined;
-				if (delta?.stop_reason) {
-					const qState = getState();
-					if (qState.queuedMessages.length > 0) {
-						onProcessNextQueuedMessage();
-					}
-				}
+			case 'stream_message_delta':
+				// No-op for queued messages — stream_message_delta fires for EVERY
+				// assistant message block (including stop_reason: "tool_use" mid-turn).
+				// Queued "Send Later" messages must only be sent after the agent is
+				// fully done (handled by the `done` and `stopped` handlers).
 				break;
-			}
 
 			case 'tool_use': {
 				const toolId = data.id as string;
