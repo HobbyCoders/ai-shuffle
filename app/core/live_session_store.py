@@ -14,6 +14,7 @@ Key principles:
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -324,7 +325,7 @@ class LiveSessionStore:
 
             # No streaming text message found - create one
             msg = LiveMessage(
-                id=f"text-{datetime.utcnow().timestamp()}",
+                id=f"text-{uuid.uuid4().hex[:12]}",
                 role="assistant",
                 type="text",
                 content=content,
@@ -362,7 +363,7 @@ class LiveSessionStore:
                     break
 
             msg = LiveMessage(
-                id=f"thinking-{datetime.utcnow().timestamp()}",
+                id=f"thinking-{uuid.uuid4().hex[:12]}",
                 role="assistant",
                 type="thinking",
                 content=content,
@@ -552,7 +553,7 @@ class LiveSessionStore:
                 )
 
             msg = LiveMessage(
-                id=f"system-{datetime.utcnow().timestamp()}",
+                id=f"system-{uuid.uuid4().hex[:12]}",
                 role="system",
                 type="system",
                 content=content,

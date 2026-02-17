@@ -928,3 +928,66 @@ class TestIntegrationScenarios:
         assert len(state_after_refresh["messages"]) == 2  # user + streaming text
         assert state_after_refresh["messages"][1]["content"] == "Response in progress..."
         assert state_after_refresh["messages"][1]["streaming"] is True
+
+
+# =============================================================================
+# Message ID Uniqueness Tests
+# =============================================================================
+
+class TestMessageIdUniqueness:
+    """Verify that auto-generated message IDs never collide, even under rapid creation."""
+
+    @pytest.mark.asyncio
+    async def test_rapid_text_messages_have_unique_ids(self, streaming_session):
+        """Two text messages created back-to-back must have different IDs."""
+        # Create first text message
+        await streaming_session.append_text("session-1", "chunk1")
+        # Finalize it so append_text creates a new message
+        session = streaming_session.get_session("session-1")
+        for msg in session.messages:
+            if msg.streaming and msg.type == "text":
+                msg.streaming = False
+        # Create second text message
+        await streaming_session.append_text("session-1", "chunk2")
+
+        text_msgs = [m for m in session.messages if m.type == "text"]
+        assert len(text_msgs) == 2
+        assert text_msgs[0].id != text_msgs[1].id, f"ID collision: {text_msgs[0].id}"
+
+    @pytest.mark.asyncio
+    async def test_rapid_thinking_messages_have_unique_ids(self, streaming_session):
+        """Two thinking messages created back-to-back must have different IDs."""
+        await streaming_session.append_thinking("session-1", "thought1")
+        session = streaming_session.get_session("session-1")
+        for msg in session.messages:
+            if msg.streaming and msg.type == "thinking":
+                msg.streaming = False
+        await streaming_session.append_thinking("session-1", "thought2")
+
+        thinking_msgs = [m for m in session.messages if m.type == "thinking"]
+        assert len(thinking_msgs) == 2
+        assert thinking_msgs[0].id != thinking_msgs[1].id, f"ID collision: {thinking_msgs[0].id}"
+
+    @pytest.mark.asyncio
+    async def test_rapid_system_messages_have_unique_ids(self, streaming_session):
+        """Two system messages created back-to-back must have different IDs."""
+        await streaming_session.add_system_message("session-1", "msg1", subtype="info")
+        await streaming_session.add_system_message("session-1", "msg2", subtype="info")
+
+        session = streaming_session.get_session("session-1")
+        system_msgs = [m for m in session.messages if m.type == "system"]
+        assert len(system_msgs) == 2
+        assert system_msgs[0].id != system_msgs[1].id, f"ID collision: {system_msgs[0].id}"
+
+    @pytest.mark.asyncio
+    async def test_ids_are_uuid_format(self, streaming_session):
+        """Auto-generated IDs should use UUID hex format, not timestamps."""
+        await streaming_session.append_text("session-1", "test")
+        session = streaming_session.get_session("session-1")
+        text_msg = [m for m in session.messages if m.type == "text"][0]
+        # Should be text-<12 hex chars>, not text-<float timestamp>
+        assert text_msg.id.startswith("text-")
+        hex_part = text_msg.id.split("-", 1)[1]
+        assert len(hex_part) == 12
+        # Verify it's hex (would raise ValueError if not)
+        int(hex_part, 16)
