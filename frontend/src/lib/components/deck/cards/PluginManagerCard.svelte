@@ -405,7 +405,7 @@
 		{/if}
 	{/snippet}
 	{#snippet children()}
-		<div class="plugin-card card-system" style="position: relative;">
+		<div class="plugin-card card-system">
 			{@render pluginMainContent()}
 		</div>
 	{/snippet}
@@ -689,7 +689,7 @@
 
 	/* Add Marketplace Modal */
 	.add-marketplace-overlay {
-		position: absolute;
+		position: fixed;
 		inset: 0;
 		z-index: 100;
 		display: flex;
