@@ -10,8 +10,6 @@ Tests cover:
 - get_session_state function
 - _is_git_repo function
 - _get_os_version function
-- _get_available_providers function
-- _build_ai_tools_section function
 - _get_decrypted_api_key function
 - _resolve_api_credential function
 - _get_hook_tool_names function
@@ -44,8 +42,6 @@ from app.core.query_engine import (
     get_session_state,
     _is_git_repo,
     _get_os_version,
-    _get_available_providers,
-    _build_ai_tools_section,
     _get_decrypted_api_key,
     _resolve_api_credential,
     _get_hook_tool_names,
@@ -487,123 +483,6 @@ class TestGetOsVersion:
         """Should return Linux format on Linux."""
         result = _get_os_version()
         assert "Linux" in result or "linux" in result
-
-
-# =============================================================================
-# _get_available_providers Tests
-# =============================================================================
-
-class TestGetAvailableProviders:
-    """Test _get_available_providers function."""
-
-    @patch("app.core.query_engine._get_decrypted_api_key")
-    def test_no_keys_returns_empty_providers(self, mock_get_key):
-        """Should return empty providers when no API keys configured."""
-        mock_get_key.return_value = None
-
-        result = _get_available_providers()
-
-        assert result["image_providers"] == {}
-        assert result["video_providers"] == {}
-        assert result["model3d_providers"] == {}
-        assert result["has_gemini"] is False
-        assert result["has_openai"] is False
-        assert result["has_meshy"] is False
-
-    @patch("app.core.query_engine._get_decrypted_api_key")
-    def test_gemini_key_enables_google_providers(self, mock_get_key):
-        """Should enable Google providers when Gemini key is available."""
-        def side_effect(key_name):
-            if key_name == "image_api_key":
-                return "test-gemini-key"
-            return None
-        mock_get_key.side_effect = side_effect
-
-        result = _get_available_providers()
-
-        assert "google-gemini" in result["image_providers"]
-        assert "google-imagen" in result["image_providers"]
-        assert "google-veo" in result["video_providers"]
-        assert result["has_gemini"] is True
-
-    @patch("app.core.query_engine._get_decrypted_api_key")
-    def test_openai_key_enables_openai_providers(self, mock_get_key):
-        """Should enable OpenAI providers when OpenAI key is available."""
-        def side_effect(key_name):
-            if key_name == "openai_api_key":
-                return "test-openai-key"
-            return None
-        mock_get_key.side_effect = side_effect
-
-        result = _get_available_providers()
-
-        assert "openai-gpt-image" in result["image_providers"]
-        assert "openai-sora" in result["video_providers"]
-        assert result["has_openai"] is True
-
-    @patch("app.core.query_engine._get_decrypted_api_key")
-    def test_meshy_key_enables_3d_providers(self, mock_get_key):
-        """Should enable Meshy provider when Meshy key is available."""
-        def side_effect(key_name):
-            if key_name == "meshy_api_key":
-                return "test-meshy-key"
-            return None
-        mock_get_key.side_effect = side_effect
-
-        result = _get_available_providers()
-
-        assert "meshy" in result["model3d_providers"]
-        assert result["has_meshy"] is True
-
-
-# =============================================================================
-# _build_ai_tools_section Tests
-# =============================================================================
-
-class TestBuildAiToolsSection:
-    """Test _build_ai_tools_section function."""
-
-    def test_none_config_returns_empty(self):
-        """Should return empty string for None config."""
-        result = _build_ai_tools_section(None)
-        assert result == ""
-
-    def test_empty_config_returns_empty(self):
-        """Should return empty string for empty config."""
-        result = _build_ai_tools_section({})
-        assert result == ""
-
-    def test_no_tools_enabled_returns_empty(self):
-        """Should return empty string when no tools enabled."""
-        result = _build_ai_tools_section({
-            "image_generation": False,
-            "video_generation": False
-        })
-        assert result == ""
-
-    @patch("app.core.query_engine._get_available_providers")
-    def test_image_tools_section_when_enabled(self, mock_providers):
-        """Should include image tools section when image generation enabled."""
-        mock_providers.return_value = {
-            "image_providers": {
-                "google-gemini": {
-                    "name": "Nano Banana",
-                    "capabilities": ["image-edit"],
-                    "best_for": "Fast iteration"
-                }
-            },
-            "video_providers": {},
-            "model3d_providers": {},
-            "has_gemini": True,
-            "has_openai": False,
-            "has_meshy": False
-        }
-
-        result = _build_ai_tools_section({"image_generation": True})
-
-        assert "<ai-tools>" in result
-        assert "</ai-tools>" in result
-        assert "Image Tools" in result
 
 
 # =============================================================================

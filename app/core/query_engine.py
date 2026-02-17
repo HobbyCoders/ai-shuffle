@@ -736,162 +736,6 @@ def _get_os_version() -> str:
         return sys.platform
 
 
-def _get_available_providers() -> Dict[str, Any]:
-    """
-    Get all available AI providers based on configured API keys.
-    Returns a dict with image_providers, video_providers, and model3d_providers that have valid keys.
-    """
-    gemini_key = _get_decrypted_api_key("image_api_key")
-    openai_key = _get_decrypted_api_key("openai_api_key")
-    meshy_key = _get_decrypted_api_key("meshy_api_key")
-
-    # Image providers with their capabilities
-    image_providers = {}
-    if gemini_key:
-        image_providers["google-gemini"] = {
-            "name": "Nano Banana",
-            "models": ["gemini-2.5-flash-image", "gemini-3-pro-image-preview"],
-            "capabilities": ["text-to-image", "image-edit", "image-reference"],
-            "best_for": "Fast iteration, editing, reference images"
-        }
-        image_providers["google-imagen"] = {
-            "name": "Imagen 4",
-            "models": ["imagen-4.0-fast-generate-001", "imagen-4.0-generate-001", "imagen-4.0-ultra-generate-001"],
-            "capabilities": ["text-to-image"],
-            "best_for": "Highest quality, photo-realism"
-        }
-    if openai_key:
-        image_providers["openai-gpt-image"] = {
-            "name": "GPT Image",
-            "models": ["gpt-image-1"],
-            "capabilities": ["text-to-image", "image-edit"],
-            "best_for": "Accurate text in images, inpainting"
-        }
-
-    # Video providers with their capabilities
-    video_providers = {}
-    if gemini_key:
-        video_providers["google-veo"] = {
-            "name": "Veo",
-            "models": ["veo-3.1-fast-generate-preview", "veo-3.1-generate-preview", "veo-3-fast-generate-preview", "veo-3-generate-preview"],
-            "capabilities": ["text-to-video", "image-to-video", "video-extend", "frame-bridge", "video-with-audio"],
-            "best_for": "Video extension, frame bridging, native audio (Veo 3)",
-            "durations": "4, 6, or 8 seconds"
-        }
-    if openai_key:
-        video_providers["openai-sora"] = {
-            "name": "Sora",
-            "models": ["sora-2", "sora-2-pro"],
-            "capabilities": ["text-to-video", "image-to-video"],
-            "best_for": "Fast generation, good quality",
-            "durations": "4, 8, or 12 seconds"
-        }
-
-    # 3D Model providers with their capabilities
-    model3d_providers = {}
-    if meshy_key:
-        model3d_providers["meshy"] = {
-            "name": "Meshy AI",
-            "models": ["latest", "meshy-5", "meshy-4"],  # latest = Meshy 6 Preview
-            "capabilities": ["text-to-3d", "image-to-3d", "retexture", "rigging", "animation"],
-            "best_for": "3D model generation, texturing, rigging, animation",
-            "credits": "5-20 per generation"
-        }
-
-    return {
-        "image_providers": image_providers,
-        "video_providers": video_providers,
-        "model3d_providers": model3d_providers,
-        "has_gemini": bool(gemini_key),
-        "has_openai": bool(openai_key),
-        "has_meshy": bool(meshy_key)
-    }
-
-
-def _build_ai_tools_section(
-    ai_tools_config: Optional[Dict[str, Any]] = None,
-    prefix: str = "\n\n",
-    api_keys: Optional[Dict[str, str]] = None
-) -> str:
-    """
-    Build the <ai-tools> section for system prompts.
-
-    This provides a minimal tool selection guide. The actual tools are registered
-    as native SDK MCP tools via app.mcp.ai_tools_sdk - Claude calls them directly
-    instead of writing .mjs scripts.
-
-    Args:
-        ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
-        prefix: String to prepend before the section (default: "\n\n")
-        api_keys: Optional dict with API keys to include in technical notes
-
-    Returns:
-        The formatted <ai-tools> section, or empty string if no tools enabled
-    """
-    if not ai_tools_config:
-        return ""
-
-    # Check if any AI tools are enabled
-    any_image_tools = ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False) or ai_tools_config.get("image_reference", False)
-    any_video_tools = ai_tools_config.get("video_generation", False) or ai_tools_config.get("image_to_video", False) or ai_tools_config.get("video_extend", False) or ai_tools_config.get("video_bridge", False) or ai_tools_config.get("video_with_audio", False) or ai_tools_config.get("video_understanding", False)
-    any_3d_tools = ai_tools_config.get("text_to_3d", False) or ai_tools_config.get("image_to_3d", False) or ai_tools_config.get("retexture_3d", False) or ai_tools_config.get("rig_3d", False) or ai_tools_config.get("animate_3d", False)
-
-    if not any_image_tools and not any_video_tools and not any_3d_tools:
-        return ""
-
-    tools_section = f"{prefix}<ai-tools>\n"
-    tools_section += """## AI Content Generation Tools
-
-AI content generation tools are available as native tools. Use them directly by calling the tool - do not write .mjs scripts to call them.
-
-### Tool Selection (MANDATORY)
-| Intent | Tool | NOT |
-|--------|------|-----|
-"""
-
-    # Only include rows for enabled tool categories
-    if any_image_tools:
-        if ai_tools_config.get("image_generation", False):
-            tools_section += "| Generate image | `generateImage` | Do not use WebSearch |\n"
-        if ai_tools_config.get("image_editing", False):
-            tools_section += "| Edit existing image | `editImage` | Do not use generateImage |\n"
-        if ai_tools_config.get("image_reference", False):
-            tools_section += "| Generate with reference images | `generateWithReference` | Do not use generateImage |\n"
-
-    if any_video_tools:
-        if ai_tools_config.get("video_generation", False) or ai_tools_config.get("video_with_audio", False):
-            tools_section += "| Generate video from text | `generateVideo` | Do not use WebSearch |\n"
-        if ai_tools_config.get("image_to_video", False):
-            tools_section += "| Animate image to video | `imageToVideo` | Do not use generateVideo |\n"
-        if ai_tools_config.get("video_extend", False):
-            tools_section += "| Extend Veo video | `extendVideo` | Do not use generateVideo |\n"
-        if ai_tools_config.get("video_bridge", False):
-            tools_section += "| Bridge between frames | `bridgeFrames` | Do not use generateVideo |\n"
-        if ai_tools_config.get("video_understanding", False):
-            tools_section += "| Analyze/describe video | `analyzeVideo` | Do not use WebFetch/Read |\n"
-
-    if any_3d_tools:
-        if ai_tools_config.get("text_to_3d", False):
-            tools_section += "| Create 3D from text | `textTo3D` | Do not use image gen |\n"
-        if ai_tools_config.get("image_to_3d", False):
-            tools_section += "| Convert image to 3D | `imageTo3D` | Do not use textTo3D |\n"
-        if ai_tools_config.get("retexture_3d", False):
-            tools_section += "| Retexture 3D model | `retexture3D` | |\n"
-        if ai_tools_config.get("rig_3d", False):
-            tools_section += "| Rig 3D model | `rig3D` | |\n"
-        if ai_tools_config.get("animate_3d", False):
-            tools_section += "| Animate 3D model | `animate3D` | |\n"
-
-    # Add helpful notes for specific tool categories
-    if any_video_tools and (ai_tools_config.get("video_generation", False) or ai_tools_config.get("video_with_audio", False)):
-        tools_section += "\n**Video notes:** For audio, pass `model: \"veo-3-generate-preview\"` to generateVideo.\n"
-
-    if any_3d_tools:
-        tools_section += "\n**3D notes:** 3D tools are async (2-5 min). Pass `wait_for_completion: true` or poll with `getTask3D`.\n"
-
-    tools_section += "</ai-tools>"
-
-    return tools_section
 
 
 def _get_decrypted_api_key(setting_name: str) -> Optional[str]:
@@ -1216,16 +1060,14 @@ def generate_environment_details(
 
     Args:
         working_dir: The working directory path
-        ai_tools_config: Dict with individual tool toggles (e.g., {"image_generation": True})
+        ai_tools_config: Deprecated, ignored. AI tools are registered as native MCP tools
+            with their own descriptions — no system prompt injection needed.
         execution_mode: Either "local" or "worktree"
         worktree_info: Dict with branch and base_branch info when in worktree mode
     """
     is_git = _is_git_repo(working_dir)
     os_version = _get_os_version()
     today = datetime.now().strftime("%Y-%m-%d")
-
-    # Get AI tools section using helper function
-    tools_section = _build_ai_tools_section(ai_tools_config)
 
     # Build execution mode lines
     execution_lines = f"\nExecution mode: {execution_mode}"
@@ -1241,7 +1083,7 @@ Is directory a git repo: {"Yes" if is_git else "No"}
 Platform: {sys.platform}
 OS Version: {os_version}
 Today's date: {today}{execution_lines}
-</env>{tools_section}"""
+</env>"""
 
 
 def build_options_from_profile(
@@ -1318,12 +1160,12 @@ def build_options_from_profile(
     else:
         working_dir = str(settings.workspace_dir)
 
+    # Get AI tools config (used for MCP tool registration + env vars, not system prompt)
+    ai_tools_config = config.get("ai_tools")
+
     # Build system prompt
     system_prompt = config.get("system_prompt")
     override_append = overrides.get("system_prompt_append", "")
-
-    # Get AI tools config from profile config (not system_prompt)
-    ai_tools_config = config.get("ai_tools")
 
     # Get the active security instructions (custom or default)
     security_instructions = get_security_instructions()
@@ -1331,9 +1173,6 @@ def build_options_from_profile(
     if system_prompt is None:
         # No preset - just security instructions as plain text
         final_system_prompt = security_instructions
-
-        # Add AI tools section if any are enabled
-        final_system_prompt += _build_ai_tools_section(ai_tools_config)
 
         if override_append:
             final_system_prompt += "\n\n" + override_append
@@ -1353,15 +1192,9 @@ def build_options_from_profile(
             if inject_env:
                 prompt_parts.append(generate_environment_details(
                     working_dir,
-                    ai_tools_config,
                     execution_mode=execution_mode,
                     worktree_info=worktree_info
                 ))
-            else:
-                # If env details not enabled, still add AI tools section if any are enabled
-                tools_section = _build_ai_tools_section(ai_tools_config, prefix="")
-                if tools_section:
-                    prompt_parts.append(tools_section)
 
             # Add custom content if provided
             if custom_content:
@@ -1381,9 +1214,6 @@ def build_options_from_profile(
             if override_append:
                 full_append += "\n\n" + override_append
 
-            # Add AI tools section if any are enabled
-            full_append += _build_ai_tools_section(ai_tools_config)
-
             final_system_prompt = {
                 "type": "preset",
                 "preset": system_prompt.get("preset", "claude_code"),
@@ -1392,9 +1222,6 @@ def build_options_from_profile(
     else:
         # String system prompt - use it directly with security instructions
         final_system_prompt = security_instructions + "\n\n" + str(system_prompt)
-
-        # Add AI tools section if any are enabled
-        final_system_prompt += _build_ai_tools_section(ai_tools_config)
 
         if override_append:
             final_system_prompt += "\n\n" + override_append
