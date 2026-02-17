@@ -22,7 +22,7 @@ from unittest.mock import patch, MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.projects import router, validate_project_path, check_project_access
+from app.api.projects import router, validate_project_path, normalize_docker_path, check_project_access
 from app.api.auth import require_auth, require_admin
 
 
@@ -166,6 +166,131 @@ class TestValidateProjectPath:
                 validate_project_path("../../../etc/passwd")
             assert exc_info.value.status_code == 400
             assert "Path escapes workspace boundary" in exc_info.value.detail
+
+
+class TestNormalizeDockerPath:
+    """Test Docker mode path normalization."""
+
+    def test_absolute_workspace_path_normalized_in_docker_mode(self, temp_dir):
+        """Absolute workspace path should be converted to relative in Docker mode."""
+        mock_settings_obj = MagicMock()
+        mock_settings_obj.workspace_dir = temp_dir
+
+        with patch("app.api.projects.settings", mock_settings_obj), \
+             patch("app.api.projects.is_local_mode", return_value=False):
+            result = normalize_docker_path(str(temp_dir / "my-project"))
+            assert result == "my-project"
+
+    def test_absolute_workspace_root_normalized_in_docker_mode(self, temp_dir):
+        """Absolute workspace root path should be normalized to empty string in Docker mode."""
+        mock_settings_obj = MagicMock()
+        mock_settings_obj.workspace_dir = temp_dir
+
+        with patch("app.api.projects.settings", mock_settings_obj), \
+             patch("app.api.projects.is_local_mode", return_value=False):
+            result = normalize_docker_path(str(temp_dir))
+            assert result == ""
+
+    def test_nested_workspace_path_normalized_in_docker_mode(self, temp_dir):
+        """Nested absolute workspace path should be converted to relative in Docker mode."""
+        mock_settings_obj = MagicMock()
+        mock_settings_obj.workspace_dir = temp_dir
+
+        with patch("app.api.projects.settings", mock_settings_obj), \
+             patch("app.api.projects.is_local_mode", return_value=False):
+            result = normalize_docker_path(str(temp_dir / "deep" / "nested" / "project"))
+            assert result == "deep/nested/project"
+
+    def test_absolute_path_outside_workspace_unchanged_in_docker_mode(self, temp_dir):
+        """Absolute path outside workspace should remain unchanged in Docker mode."""
+        mock_settings_obj = MagicMock()
+        mock_settings_obj.workspace_dir = temp_dir
+
+        with patch("app.api.projects.settings", mock_settings_obj), \
+             patch("app.api.projects.is_local_mode", return_value=False):
+            result = normalize_docker_path("/etc/something")
+            assert result == "/etc/something"
+
+    def test_absolute_path_unchanged_in_local_mode(self, temp_dir):
+        """Absolute paths should be unchanged in local mode."""
+        mock_settings_obj = MagicMock()
+        mock_settings_obj.workspace_dir = temp_dir
+
+        with patch("app.api.projects.settings", mock_settings_obj), \
+             patch("app.api.projects.is_local_mode", return_value=True):
+            abs_path = str(temp_dir / "my-project")
+            result = normalize_docker_path(abs_path)
+            assert result == abs_path
+
+    def test_relative_path_unchanged(self, temp_dir):
+        """Relative paths should be returned unchanged."""
+        mock_settings_obj = MagicMock()
+        mock_settings_obj.workspace_dir = temp_dir
+
+        with patch("app.api.projects.settings", mock_settings_obj), \
+             patch("app.api.projects.is_local_mode", return_value=False):
+            result = normalize_docker_path("my-project")
+            assert result == "my-project"
+
+    def test_validate_accepts_absolute_workspace_path_in_docker_mode(self, temp_dir):
+        """validate_project_path should accept absolute workspace paths in Docker mode."""
+        mock_settings_obj = MagicMock()
+        mock_settings_obj.workspace_dir = temp_dir
+
+        # Create the target directory
+        project_dir = temp_dir / "ai-dungeon"
+        project_dir.mkdir()
+
+        with patch("app.api.projects.settings", mock_settings_obj), \
+             patch("app.api.projects.is_local_mode", return_value=False):
+            result = validate_project_path(str(temp_dir / "ai-dungeon"))
+            assert result == project_dir.resolve()
+
+    def test_validate_rejects_outside_workspace_in_docker_mode(self, temp_dir):
+        """validate_project_path should reject absolute paths outside workspace in Docker mode."""
+        from fastapi import HTTPException
+        mock_settings_obj = MagicMock()
+        mock_settings_obj.workspace_dir = temp_dir
+
+        with patch("app.api.projects.settings", mock_settings_obj), \
+             patch("app.api.projects.is_local_mode", return_value=False):
+            with pytest.raises(HTTPException) as exc_info:
+                validate_project_path("/etc/passwd")
+            assert exc_info.value.status_code == 400
+
+    def test_create_project_with_absolute_workspace_path_in_docker_mode(
+        self, client, mock_database, temp_dir, mock_settings
+    ):
+        """Creating a project with absolute workspace path should work in Docker mode."""
+        mock_database.get_project.return_value = None
+        mock_database.create_project.return_value = {
+            "id": "ai-dungeon",
+            "name": "AI Dungeon",
+            "description": None,
+            "path": "ai-dungeon",
+            "settings": {},
+            "created_at": "2024-01-15T10:30:00",
+            "updated_at": "2024-01-15T10:30:00"
+        }
+
+        with patch("app.api.projects.is_local_mode", return_value=False):
+            response = client.post(
+                "/api/v1/projects",
+                json={
+                    "id": "ai-dungeon",
+                    "name": "AI Dungeon",
+                    "path": str(temp_dir / "ai-dungeon")
+                }
+            )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["id"] == "ai-dungeon"
+        # Verify the directory was created
+        assert (temp_dir / "ai-dungeon").exists()
+        # Verify the db_path is stored as relative, not absolute
+        call_kwargs = mock_database.create_project.call_args
+        assert call_kwargs.kwargs.get("path") == "ai-dungeon" or call_kwargs[1].get("path") == "ai-dungeon"
 
 
 class TestCheckProjectAccess:

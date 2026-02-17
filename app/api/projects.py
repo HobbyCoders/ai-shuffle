@@ -33,16 +33,45 @@ class RenameRequest(BaseModel):
 router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
 
 
+def normalize_docker_path(path: str) -> str:
+    """
+    In Docker mode, convert absolute workspace paths to relative paths.
+
+    The DirectoryBrowser returns absolute paths (e.g., /workspace/my-project)
+    even in Docker mode. This helper strips the workspace prefix so downstream
+    validation treats them as workspace-relative paths.
+
+    Returns the original path unchanged in local mode or if the path is not
+    within the workspace directory.
+    """
+    if not is_absolute_project_path(path) or is_local_mode():
+        return path
+
+    workspace = settings.workspace_dir.resolve()
+    try:
+        resolved = Path(path).resolve()
+        rel = resolved.relative_to(workspace)
+        return str(rel) if str(rel) != "." else ""
+    except ValueError:
+        # Path is outside workspace — return as-is and let validation reject it
+        return path
+
+
 def validate_project_path(path: str, allow_create: bool = False) -> Path:
     """
     Validate a project path.
 
-    In Docker mode: path must be relative and within workspace boundary.
+    In Docker mode: path must be within the workspace boundary. Absolute paths
+                    that resolve inside the workspace are accepted and converted
+                    to relative paths automatically.
     In local mode: absolute paths are allowed (pointing anywhere on disk),
                    relative paths are resolved within workspace.
 
     If allow_create=True, non-existent directories are permitted (caller will create them).
     """
+    # In Docker mode, normalize absolute workspace paths to relative
+    path = normalize_docker_path(path)
+
     if is_absolute_project_path(path):
         # Absolute paths only allowed in local mode
         if not is_local_mode():
@@ -138,16 +167,20 @@ async def create_project(request: ProjectCreate, token: str = Depends(require_ad
         )
 
     # Determine project path and create directory if needed
-    if request.path and is_absolute_project_path(request.path):
-        # Absolute path (local mode) - create directory if it doesn't exist
-        project_path = validate_project_path(request.path, allow_create=True)
+    # Normalize Docker paths first (e.g., /workspace/foo → foo)
+    effective_path = normalize_docker_path(request.path) if request.path else None
+
+    if effective_path and is_absolute_project_path(effective_path):
+        # Absolute path (local mode only) - create directory if it doesn't exist
+        project_path = validate_project_path(effective_path, allow_create=True)
         project_path.mkdir(parents=True, exist_ok=True)
-        db_path = request.path
+        db_path = effective_path
     else:
-        # Relative path - create directory inside workspace
-        project_path = validate_project_path(request.id)
+        # Relative path (or normalized Docker path) - create directory inside workspace
+        rel_path = effective_path if effective_path else request.id
+        project_path = validate_project_path(rel_path)
         project_path.mkdir(parents=True, exist_ok=True)
-        db_path = request.id
+        db_path = rel_path
 
     # Create project in database
     settings_dict = None

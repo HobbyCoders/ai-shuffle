@@ -127,7 +127,7 @@
 				<input
 					type="text"
 					class="create-modal-input create-modal-input--mono"
-					placeholder={isLocalMode ? '/path/to/project' : '/workspace/my-project'}
+					placeholder={isLocalMode ? '/path/to/project' : 'my-project'}
 					value={projectPath}
 					oninput={handlePathInput}
 					onkeydown={(e) => { if (e.key === 'Enter' && projectId.trim() && projectName.trim() && projectPath.trim()) handleAddProject(); }}
