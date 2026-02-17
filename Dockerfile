@@ -7,11 +7,10 @@ WORKDIR /app
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     NODE_VERSION=20.x
 
-# Install system dependencies including Node.js, GitHub CLI, and Playwright/Chromium libs
+# ── Layer 1: System deps + Playwright runtime libs (rarely changes) ──
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
@@ -39,53 +38,57 @@ RUN apt-get update && \
     libcairo2 \
     libasound2 \
     fonts-liberation \
-    && mkdir -p /etc/apt/keyrings \
-    # Add Node.js repo
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list \
-    # Add GitHub CLI repo
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update \
-    && apt-get install -y nodejs gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Verify GitHub CLI installation
-RUN gh --version
+# ── Layer 2: Node.js (changes only when NODE_VERSION changes) ──
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+       | tee /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
-# Verify Node.js and npm installation
-RUN node --version && npm --version
+# ── Layer 3: GitHub CLI (changes rarely) ──
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       | tee /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Verify installations
+RUN node --version && npm --version && gh --version
 
 # Note: Claude Code CLI is bundled with claude-agent-sdk Python package
 # No need to install separately via npm
 
-# Copy requirements first for better caching
+# ── Layer 4: Python dependencies (changes when requirements.txt changes) ──
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright Chromium browser (used by browser MCP tools)
+# ── Layer 5: Playwright browser (changes when playwright version changes) ──
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 RUN playwright install chromium && \
     chmod -R 755 $PLAYWRIGHT_BROWSERS_PATH
 
-# Copy application code first
-COPY app/ ./app/
-COPY .env.example .
-
-# Build frontend
+# ── Layer 6: Frontend deps (changes when package-lock.json changes) ──
 COPY frontend/package.json frontend/package-lock.json ./frontend/
 WORKDIR /app/frontend
 RUN npm ci
 
+# ── Layer 7: Frontend build (changes when frontend source changes) ──
 COPY frontend/ ./
 RUN npm run build
 
-# Copy built frontend to app/static (after app/ is copied)
-RUN mkdir -p /app/app/static && cp -r build/* /app/app/static/
-
 WORKDIR /app
+
+# ── Layer 8: Backend code + static assets (changes most frequently) ──
+COPY app/ ./app/
+RUN mkdir -p /app/app/static && cp -r /app/frontend/build/* /app/app/static/
+
+COPY .env.example .
 
 # Copy AI tools to /opt/ai-tools (accessible by Claude agent)
 COPY tools/ /opt/ai-tools/
