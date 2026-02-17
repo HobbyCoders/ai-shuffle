@@ -467,6 +467,7 @@ export async function pushCommits(projectId: string, request: PushRequest = {}, 
 export interface PullRequest {
     remote?: string;
     strategy?: 'merge' | 'rebase';
+    auto_stash?: boolean;
 }
 
 export interface PullResponse {

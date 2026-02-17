@@ -470,7 +470,8 @@ function createGitStore() {
          * Pull from remote (fetch + merge/rebase)
          */
         async pull(
-            strategy: 'merge' | 'rebase' = 'merge'
+            strategy: 'merge' | 'rebase' = 'merge',
+            autoStash: boolean = false,
         ): Promise<gitApi.PullResponse> {
             const state = getCurrentState();
             if (!state.projectId) throw new Error('No project selected');
@@ -478,7 +479,7 @@ function createGitStore() {
             try {
                 const response = await gitApi.pullFromRemote(
                     state.projectId,
-                    { strategy },
+                    { strategy, auto_stash: autoStash },
                     state.worktreeId ?? undefined
                 );
 

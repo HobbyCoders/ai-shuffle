@@ -23,12 +23,11 @@
 		onClickFinish: () => void;
 		onClickNewBranch: () => void;
 		onClickPush: () => void;
-		onClickForcePush: () => void;
 		onClickPull: () => void;
 		onClickInitRepo?: () => void;
 	}
 
-	let { projectId, isStreaming = false, isGitRepo = true, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickForcePush, onClickPull, onClickInitRepo }: Props = $props();
+	let { projectId, isStreaming = false, isGitRepo = true, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo }: Props = $props();
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
@@ -56,12 +55,13 @@
 	const commitsBehindUpstream = $derived(currentBranchInfo?.behind ?? 0);
 	const commitsAheadUpstream = $derived(currentBranchInfo?.ahead ?? 0);
 	const hasUpstream = $derived(!!currentBranchInfo?.upstream);
-	// Diverged = both ahead AND behind (e.g. after rebase/amend). Needs force push, not pull.
+	// Diverged = both ahead AND behind (e.g. after rebase/amend or normal development divergence).
+	// Always show Pull as the primary action — pull integrates remote changes safely.
+	// Force push is available as a secondary option in the Pull modal for rebase recovery.
 	const isDiverged = $derived(commitsAheadUpstream > 0 && commitsBehindUpstream > 0 && hasUpstream);
-	const needsPull = $derived(commitsBehindUpstream > 0 && hasUpstream && !isDiverged);
-	const canPush = $derived(!hasChanges && commitsAheadUpstream > 0 && hasUpstream && !needsPull && !isDiverged);
-	const canForcePush = $derived(!hasChanges && isDiverged);
-	const canCreatePR = $derived(!hasChanges && commitsAhead > 0 && !isOnDefaultBranch && !needsPull && !isDiverged);
+	const needsPull = $derived(commitsBehindUpstream > 0 && hasUpstream);
+	const canPush = $derived(!hasChanges && commitsAheadUpstream > 0 && hasUpstream && !needsPull);
+	const canCreatePR = $derived(!hasChanges && commitsAhead > 0 && !isOnDefaultBranch && !needsPull);
 
 	// Local branches for the dropdown (exclude remotes)
 	const localBranches = $derived(
@@ -177,23 +177,26 @@
 		{/if}
 	</div>
 
-	<!-- Pull button (when behind upstream, but not diverged) -->
+	<!-- Pull button (when behind upstream, including diverged state) -->
 	{#if needsPull}
 		<button
 			class="git-btn pull-btn"
+			class:diverged={isDiverged}
 			onclick={onClickPull}
 			disabled={isStreaming}
 			title={isStreaming
 				? 'Cannot pull during streaming'
-				: `${commitsBehindUpstream} commit${commitsBehindUpstream === 1 ? '' : 's'} behind upstream — pull latest`}
+				: isDiverged
+					? `Branch diverged — ${commitsAheadUpstream} ahead, ${commitsBehindUpstream} behind upstream. Pull to sync.`
+					: `${commitsBehindUpstream} commit${commitsBehindUpstream === 1 ? '' : 's'} behind upstream — pull latest`}
 		>
 			<ArrowDownToLine size={14} strokeWidth={1.5} />
-			<span class="btn-label">Pull</span>
+			<span class="btn-label">{isDiverged ? 'Sync' : 'Pull'}</span>
 			<span class="count-badge">{commitsBehindUpstream}</span>
 		</button>
 	{/if}
 
-	<!-- Push button (when commits ahead of upstream) -->
+	<!-- Push button (when commits ahead of upstream, not behind) -->
 	{#if canPush}
 		<button
 			class="git-btn push-btn"
@@ -206,21 +209,6 @@
 			<ArrowUpFromLine size={14} strokeWidth={1.5} />
 			<span class="btn-label">Push</span>
 			<span class="count-badge">{commitsAheadUpstream}</span>
-		</button>
-	{/if}
-
-	<!-- Force Push button (when branch diverged after rebase/amend) -->
-	{#if canForcePush}
-		<button
-			class="git-btn force-push-btn"
-			onclick={onClickForcePush}
-			disabled={isStreaming}
-			title={isStreaming
-				? 'Cannot push during streaming'
-				: `Branch diverged from upstream — force push needed (${commitsAheadUpstream} ahead, ${commitsBehindUpstream} behind)`}
-		>
-			<ArrowUpFromLine size={14} strokeWidth={1.5} />
-			<span class="btn-label">Force Push</span>
 		</button>
 	{/if}
 
@@ -375,14 +363,19 @@
 		line-height: 1;
 	}
 
-	/* Force push button (diverged branch) */
-	.force-push-btn {
+	/* Pull button in diverged state (branch both ahead and behind) */
+	.pull-btn.diverged {
 		border-color: var(--warning, #e8a735);
 		color: var(--warning, #e8a735);
 	}
 
-	.force-push-btn:hover:not(:disabled) {
+	.pull-btn.diverged:hover:not(:disabled) {
 		background: color-mix(in oklch, var(--warning, #e8a735) 10%, transparent);
+	}
+
+	.pull-btn.diverged .count-badge {
+		background: color-mix(in oklch, var(--warning, #e8a735) 15%, transparent);
+		color: var(--warning, #e8a735);
 	}
 
 	/* Branch dropdown */

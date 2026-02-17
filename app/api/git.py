@@ -157,6 +157,7 @@ class PullRequest(BaseModel):
     """Request to pull from remote"""
     remote: str = Field(default="origin", pattern=r'^[a-zA-Z0-9._-]+$')
     strategy: str = Field(default="merge", pattern=r'^(merge|rebase)$')
+    auto_stash: bool = Field(default=False, description="Auto-stash uncommitted changes before pull and restore after")
 
 
 class PullResponse(BaseModel):
@@ -1169,9 +1170,9 @@ async def pull_from_remote(
             detail="Project is not a git repository"
         )
 
-    # Check for uncommitted changes
+    # Check for uncommitted changes (allow if auto_stash is enabled)
     status_data = git_service.get_status(working_dir)
-    if not status_data["is_clean"]:
+    if not status_data["is_clean"] and not body.auto_stash:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot pull: you have uncommitted changes. Commit or stash them first."
@@ -1180,7 +1181,8 @@ async def pull_from_remote(
     success, error_msg, conflicts = git_service.pull(
         working_dir,
         remote=body.remote,
-        strategy=body.strategy
+        strategy=body.strategy,
+        auto_stash=body.auto_stash,
     )
 
     # Invalidate cache and broadcast — pull affects status, branches, and diff stats

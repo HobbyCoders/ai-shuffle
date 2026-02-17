@@ -800,11 +800,58 @@ class GitService:
             logger.error(f"Error pushing: {e}")
             return False, str(e)
 
+    def stash_push(self, working_dir: str, message: str = "auto-stash") -> bool:
+        """
+        Stash uncommitted changes.
+
+        Args:
+            working_dir: Repository directory
+            message: Stash message for identification
+
+        Returns:
+            True if changes were stashed, False if nothing to stash or error
+        """
+        try:
+            result = self._run_git(
+                working_dir, ["stash", "push", "-m", message], timeout=30
+            )
+            if result.returncode == 0:
+                # "No local changes to save" means nothing was stashed
+                output = result.stdout.strip() if result.stdout else ""
+                if "No local changes" in output:
+                    return False
+                logger.debug(f"Stashed changes: {message}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Error stashing changes: {e}")
+            return False
+
+    def stash_pop(self, working_dir: str) -> Tuple[bool, Optional[str]]:
+        """
+        Pop the most recent stash entry.
+
+        Returns:
+            Tuple of (success, error_message)
+        """
+        try:
+            result = self._run_git(working_dir, ["stash", "pop"], timeout=30)
+            if result.returncode == 0:
+                logger.debug("Popped stash successfully")
+                return True, None
+            error_msg = result.stderr.strip() if result.stderr else "Failed to pop stash"
+            logger.warning(f"Stash pop failed: {error_msg}")
+            return False, error_msg
+        except Exception as e:
+            logger.error(f"Error popping stash: {e}")
+            return False, str(e)
+
     def pull(
         self,
         working_dir: str,
         remote: str = "origin",
         strategy: str = "merge",
+        auto_stash: bool = False,
     ) -> Tuple[bool, Optional[str], List[str]]:
         """
         Pull from remote (fetch + merge/rebase).
@@ -813,18 +860,26 @@ class GitService:
             working_dir: Repository directory
             remote: Remote name (default: origin)
             strategy: "merge" or "rebase"
+            auto_stash: If True, stash uncommitted changes before pull and pop after
 
         Returns:
             Tuple of (success, error_message, conflicted_files)
         """
+        stashed = False
         try:
             # Get current branch
             branch = self.get_current_branch(working_dir)
             if not branch:
                 return False, "Cannot pull: HEAD is detached", []
 
+            # Auto-stash uncommitted changes if requested
+            if auto_stash:
+                stashed = self.stash_push(working_dir, "auto-stash before pull")
+
             # Fetch first
             if not self.fetch(working_dir, remote):
+                if stashed:
+                    self.stash_pop(working_dir)
                 return False, f"Failed to fetch from '{remote}'", []
 
             # Merge or rebase
@@ -837,6 +892,11 @@ class GitService:
 
             if result.returncode == 0:
                 logger.debug(f"Pulled from {remote}/{branch} using {strategy}")
+                # Pop stash after successful pull
+                if stashed:
+                    pop_ok, pop_err = self.stash_pop(working_dir)
+                    if not pop_ok:
+                        return True, f"Pull succeeded but failed to restore stashed changes: {pop_err}", []
                 return True, None, []
 
             # Check for merge conflicts
@@ -847,13 +907,24 @@ class GitService:
                     self._run_git(working_dir, ["rebase", "--abort"], timeout=10)
                 else:
                     self._run_git(working_dir, ["merge", "--abort"], timeout=10)
+                # Restore stashed changes after abort
+                if stashed:
+                    self.stash_pop(working_dir)
                 return False, "Merge conflicts detected", conflicts
 
-            # Non-conflict error
+            # Non-conflict error — restore stash
+            if stashed:
+                self.stash_pop(working_dir)
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
             logger.warning(f"Pull failed: {error_msg}")
             return False, error_msg, []
         except Exception as e:
+            # Restore stash on any exception
+            if stashed:
+                try:
+                    self.stash_pop(working_dir)
+                except Exception:
+                    pass
             logger.error(f"Error pulling: {e}")
             return False, str(e), []
 

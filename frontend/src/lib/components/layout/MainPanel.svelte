@@ -536,8 +536,9 @@
 		const current = $branchStore.find(b => b.current);
 		return current?.ahead ?? 0;
 	});
-	// Diverged (both ahead and behind) means rebase/amend — don't treat as needing pull
-	const needsPull = $derived(commitsBehindForPull > 0 && commitsAheadForPull === 0);
+	const isDivergedForPull = $derived(commitsBehindForPull > 0 && commitsAheadForPull > 0);
+	// Show pull when behind upstream, including diverged state (pull is the safe default)
+	const needsPull = $derived(commitsBehindForPull > 0);
 	const pullHasChanges = $derived(
 		($diffStats?.additions ?? 0) > 0 ||
 		($diffStats?.deletions ?? 0) > 0 ||
@@ -563,7 +564,7 @@
 		}
 	}
 
-	async function handlePull(strategy: 'merge' | 'rebase') {
+	async function handlePull(strategy: 'merge' | 'rebase', autoStash: boolean = false) {
 		progressAction = 'pull';
 		progressMode = 'pull';
 		progressStep = 1;
@@ -580,7 +581,7 @@
 		}
 
 		try {
-			const result = await git.pull(strategy);
+			const result = await git.pull(strategy, autoStash);
 
 			if (result.has_conflicts) {
 				const fileList = result.conflicts.join(', ');
@@ -625,7 +626,6 @@
 							onClickFinish={() => showFinishModal = true}
 							onClickNewBranch={() => showCreateBranchModal = true}
 							onClickPush={() => handlePush(false)}
-							onClickForcePush={() => handlePush(true)}
 							onClickPull={() => showPullModal = true}
 							onClickInitRepo={() => showInitRepoModal = true}
 						/>
@@ -732,9 +732,12 @@
 		open={showPullModal}
 		branchName={$gitStatus?.current_branch ?? ''}
 		commitsBehind={commitsBehindForPull}
+		commitsAhead={commitsAheadForPull}
 		hasChanges={pullHasChanges}
+		isDiverged={isDivergedForPull}
 		onClose={() => showPullModal = false}
-		onPull={(strategy) => { showPullModal = false; handlePull(strategy); }}
+		onPull={(strategy, autoStash) => { showPullModal = false; handlePull(strategy, autoStash); }}
+		onForcePush={() => { showPullModal = false; handlePush(true); }}
 	/>
 
 	<CommitProgressModal
