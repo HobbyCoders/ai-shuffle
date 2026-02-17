@@ -460,3 +460,50 @@ async def browser_tab_switch(
 ):
     """Switch to a different browser tab."""
     return await _execute_tool(session_id, "browser_tab_switch", {"index": req.index})
+
+
+# =========================================================================
+# New endpoints for refactored browser architecture
+# =========================================================================
+
+@router.get("/{session_id}/observe")
+async def browser_observe(
+    session_id: str,
+    _auth=Depends(require_browser_auth),
+):
+    """Observe current page state: URL, title, and accessibility tree."""
+    return await _execute_tool(session_id, "browser_observe", {})
+
+
+class ViewportRequest(BaseModel):
+    width: int
+    height: int
+
+
+@router.post("/{session_id}/viewport")
+async def set_viewport(
+    session_id: str,
+    req: ViewportRequest,
+    _auth=Depends(require_browser_auth),
+):
+    """Set the browser viewport size (used when panel is resized)."""
+    session = await browser_session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="No active browser session")
+
+    await session.set_viewport(req.width, req.height)
+    return {"success": True, "width": req.width, "height": req.height}
+
+
+@router.get("/{session_id}/accessibility")
+async def get_accessibility_tree(
+    session_id: str,
+    _auth=Depends(require_browser_auth),
+):
+    """Get the accessibility tree for the current page."""
+    session = await browser_session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="No active browser session")
+
+    tree = await session.get_accessibility_tree()
+    return {"success": True, "tree": tree}

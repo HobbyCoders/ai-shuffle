@@ -2,15 +2,19 @@
  * Browser State Store
  *
  * Manages the shared browser session between AI agent and user.
- * Both the AI (via MCP proxy) and user (via REST API) operate on
+ * Both the AI (via MCP proxy) and user (via browser WebSocket) operate on
  * the same Playwright browser instance in the main process.
  *
+ * The user sees a live CDP screencast streamed via a dedicated browser
+ * WebSocket (/ws/browser/{sessionId}). The AI receives accessibility tree
+ * snapshots (not screenshots) for token-efficient page understanding.
+ *
  * Browser state is per-session: switching sessions saves/restores
- * each session's browser content (URL, screenshot, etc.) while
- * keeping the panel open/closed state and width as global prefs.
+ * each session's browser content while keeping panel width as a global pref.
  */
 import { writable } from 'svelte/store';
 import { sessionNotifier } from './session/session-notifier';
+import { createBrowserWs, type BrowserWsConnection } from './browser-ws';
 
 export interface BrowserState {
 	/** Whether the browser panel is open */
@@ -19,16 +23,20 @@ export interface BrowserState {
 	url: string;
 	/** Current page title */
 	title: string;
-	/** Latest screenshot as base64 JPEG */
-	screenshot: string | null;
 	/** Whether a browser session is active */
 	isActive: boolean;
 	/** Browser panel width in pixels */
 	panelWidth: number;
-	/** Whether we're loading a screenshot */
+	/** Whether we're in a loading state (e.g., navigating) */
 	isLoading: boolean;
 	/** The session ID for API calls */
 	sessionId: string | null;
+	/** Whether live screencast is streaming */
+	isStreaming: boolean;
+	/** Current browser viewport width (matches panel) */
+	viewportWidth: number;
+	/** Current browser viewport height (matches panel) */
+	viewportHeight: number;
 }
 
 /** Per-session browser content (saved/restored on session switch) */
@@ -36,7 +44,6 @@ interface BrowserSessionContent {
 	isOpen: boolean;
 	url: string;
 	title: string;
-	screenshot: string | null;
 	isActive: boolean;
 	sessionId: string | null;
 }
@@ -45,11 +52,13 @@ const DEFAULT_STATE: BrowserState = {
 	isOpen: false,
 	url: '',
 	title: '',
-	screenshot: null,
 	isActive: false,
 	panelWidth: 480,
 	isLoading: false,
 	sessionId: null,
+	isStreaming: false,
+	viewportWidth: 1280,
+	viewportHeight: 720,
 };
 
 /** Empty content for sessions with no browser activity */
@@ -57,7 +66,6 @@ const EMPTY_CONTENT: BrowserSessionContent = {
 	isOpen: false,
 	url: '',
 	title: '',
-	screenshot: null,
 	isActive: false,
 	sessionId: null,
 };
@@ -71,7 +79,9 @@ function _loadPanelWidth(): number {
 			const w = parseInt(stored, 10);
 			if (w >= 300 && w <= 1400) return w;
 		}
-	} catch { /* SSR or storage error */ }
+	} catch {
+		/* SSR or storage error */
+	}
 	return 480;
 }
 
@@ -95,7 +105,6 @@ function createBrowserStore() {
 			isOpen: _currentState.isOpen,
 			url: _currentState.url,
 			title: _currentState.title,
-			screenshot: _currentState.screenshot,
 			isActive: _currentState.isActive,
 			sessionId: _currentState.sessionId,
 		});
@@ -117,16 +126,84 @@ function createBrowserStore() {
 		return { ...EMPTY_CONTENT };
 	}
 
+	// Browser WebSocket connection — handles screencast frames + input
+	let _browserWs: BrowserWsConnection | null = null;
+
+	// Callback: render frame to the canvas (set by BrowserPanel component)
+	let _frameCallback: ((data: ArrayBuffer) => void) | null = null;
+
+	function _ensureBrowserWs(): BrowserWsConnection {
+		if (!_browserWs) {
+			_browserWs = createBrowserWs({
+				onFrame: (data) => {
+					if (_frameCallback) _frameCallback(data);
+				},
+				onStateUpdate: (url, title) => {
+					update((state) => ({ ...state, url, title }));
+				},
+				onError: (message) => {
+					console.warn('[browser-ws] Error:', message);
+				},
+				onConnected: () => {
+					update((state) => ({ ...state, isStreaming: true }));
+				},
+				onDisconnected: () => {
+					update((state) => ({ ...state, isStreaming: false }));
+				},
+			});
+		}
+		return _browserWs;
+	}
+
 	return {
 		subscribe,
 
 		/**
-		 * Update browser state from a tool result.
-		 * Called when a browser_* tool result comes through WebSocket.
-		 * Uses inline screenshot from MCP content blocks if available,
-		 * falls back to REST API fetch.
+		 * Register a frame callback — called by BrowserPanel when canvas is ready.
+		 * The callback receives raw JPEG ArrayBuffer data for each screencast frame.
 		 */
-		async updateFromToolResult(toolName: string, result: string, sessionId?: string, screenshot?: string) {
+		setFrameCallback(callback: ((data: ArrayBuffer) => void) | null) {
+			_frameCallback = callback;
+		},
+
+		/**
+		 * Get the browser WebSocket connection (for sending input events).
+		 */
+		getBrowserWs(): BrowserWsConnection {
+			return _ensureBrowserWs();
+		},
+
+		/**
+		 * Connect the screencast WebSocket to a session.
+		 * Called when the browser panel opens or session changes.
+		 */
+		connectScreencast(sessionId: string, width: number, height: number) {
+			const ws = _ensureBrowserWs();
+			ws.connect(sessionId, width, height);
+			update((state) => ({
+				...state,
+				viewportWidth: Math.round(width),
+				viewportHeight: Math.round(height),
+			}));
+		},
+
+		/**
+		 * Disconnect the screencast WebSocket.
+		 * Called when the browser panel closes or session switches away.
+		 */
+		disconnectScreencast() {
+			if (_browserWs) {
+				_browserWs.disconnect();
+			}
+			update((state) => ({ ...state, isStreaming: false }));
+		},
+
+		/**
+		 * Update browser state from a tool result.
+		 * Called when a browser_* tool result comes through the chat WebSocket.
+		 * Only updates URL/title — screencast handles visual rendering.
+		 */
+		updateFromToolResult(toolName: string, result: string, sessionId?: string) {
 			try {
 				const data = JSON.parse(result);
 				if (!data.success) return;
@@ -141,9 +218,6 @@ function createBrowserStore() {
 					// Store session ID for API calls
 					if (sessionId) newState.sessionId = sessionId;
 
-					// Use inline screenshot from MCP content blocks
-					if (screenshot) newState.screenshot = screenshot;
-
 					// Mark as active
 					newState.isActive = true;
 
@@ -157,67 +231,13 @@ function createBrowserStore() {
 						newState.isActive = false;
 						newState.url = '';
 						newState.title = '';
-						newState.screenshot = null;
 					}
 
 					return newState;
 				});
-
-				// If no inline screenshot, try fetching from REST API as fallback
-				if (!screenshot && toolName !== 'browser_close' && toolName !== 'browser_tab_list' && toolName !== 'browser_get_content' && toolName !== 'browser_get_elements') {
-					const sid = sessionId || _currentState.sessionId;
-					if (sid) {
-						await this.fetchScreenshot(sid);
-					}
-				}
 			} catch {
 				// Non-JSON result, ignore
 			}
-		},
-
-		/**
-		 * Fetch screenshot from the REST API.
-		 */
-		async fetchScreenshot(sessionId: string) {
-			update((state) => ({ ...state, isLoading: true }));
-
-			try {
-				const token = localStorage.getItem('auth_token') || '';
-				const response = await fetch(`/api/v1/browser/${sessionId}/screenshot`, {
-					headers: {
-						'Authorization': `Bearer ${token}`,
-					},
-				});
-
-				if (response.ok) {
-					const blob = await response.blob();
-					const reader = new FileReader();
-					reader.onload = () => {
-						const base64 = (reader.result as string).split(',')[1];
-						update((state) => ({
-							...state,
-							screenshot: base64,
-							isLoading: false,
-						}));
-					};
-					reader.readAsDataURL(blob);
-				} else {
-					update((state) => ({ ...state, isLoading: false }));
-				}
-			} catch {
-				update((state) => ({ ...state, isLoading: false }));
-			}
-		},
-
-		/**
-		 * Update screenshot directly from base64 data.
-		 */
-		updateScreenshot(screenshotBase64: string) {
-			update((state) => ({
-				...state,
-				screenshot: screenshotBase64,
-				isLoading: false,
-			}));
 		},
 
 		/**
@@ -244,6 +264,11 @@ function createBrowserStore() {
 		 * Close the browser panel UI and destroy the backend Playwright session.
 		 */
 		async closePanel() {
+			// Disconnect screencast first
+			if (_browserWs) {
+				_browserWs.disconnect();
+			}
+
 			const sid = _currentState.sessionId;
 			// Close backend browser session
 			if (sid) {
@@ -251,7 +276,7 @@ function createBrowserStore() {
 					const token = localStorage.getItem('auth_token') || '';
 					await fetch(`/api/v1/browser/${sid}`, {
 						method: 'DELETE',
-						headers: { 'Authorization': `Bearer ${token}` },
+						headers: { Authorization: `Bearer ${token}` },
 					});
 				} catch {
 					// Best-effort cleanup
@@ -272,7 +297,11 @@ function createBrowserStore() {
 				...state,
 				panelWidth: clamped,
 			}));
-			try { localStorage.setItem(PANEL_WIDTH_KEY, String(clamped)); } catch { /* ignore */ }
+			try {
+				localStorage.setItem(PANEL_WIDTH_KEY, String(clamped));
+			} catch {
+				/* ignore */
+			}
 		},
 
 		/**
@@ -289,15 +318,22 @@ function createBrowserStore() {
 		 * Reset the store to default state.
 		 */
 		reset() {
+			if (_browserWs) {
+				_browserWs.disconnect();
+			}
 			set({ ...DEFAULT_STATE });
 		},
 
 		/**
 		 * Switch browser context between chat sessions.
 		 * Saves the leaving session's browser state and restores the arriving session's.
-		 * Keeps isOpen and panelWidth as global preferences.
 		 */
 		switchSession(leavingSessionId: string | null, arrivingSessionId: string | null) {
+			// Disconnect screencast for the session we're leaving
+			if (_browserWs) {
+				_browserWs.disconnect();
+			}
+
 			// Save current browser content for the session we're leaving
 			if (leavingSessionId) {
 				_saveToCache(leavingSessionId);
@@ -311,24 +347,24 @@ function createBrowserStore() {
 			update((state) => ({
 				...state,
 				// panelWidth stays as global pref
-				// Replace per-session content (including panel open state)
 				isOpen: content.isOpen,
 				url: content.url,
 				title: content.title,
-				screenshot: content.screenshot,
 				isActive: content.isActive,
 				sessionId: content.sessionId,
 				isLoading: false,
+				isStreaming: false,
 			}));
+
+			// Note: BrowserPanel's $effect will reconnect screencast if panel is open
 		},
 
 		// =====================================================================
-		// User-driven browser actions
+		// User-driven browser actions (via REST API for intentional navigation)
 		// =====================================================================
 
 		/**
 		 * Create a browser session via REST API (for user-initiated browsing).
-		 * Uses the current chat session ID or generates a temporary one.
 		 */
 		async createSession(sessionId: string): Promise<boolean> {
 			update((state) => ({ ...state, isLoading: true }));
@@ -337,7 +373,7 @@ function createBrowserStore() {
 				const response = await fetch(`/api/v1/browser/${sessionId}/create`, {
 					method: 'POST',
 					headers: {
-						'Authorization': `Bearer ${token}`,
+						Authorization: `Bearer ${token}`,
 						'Content-Type': 'application/json',
 					},
 				});
@@ -362,11 +398,9 @@ function createBrowserStore() {
 
 		/**
 		 * Ensure a browser session exists, creating one if needed.
-		 * Returns the session ID or null if creation failed.
 		 */
 		async _ensureSession(): Promise<string | null> {
 			if (_currentState.sessionId) return _currentState.sessionId;
-			// Generate a temporary session ID for user-initiated browsing
 			const tempId = 'user-browser-' + Date.now();
 			const ok = await this.createSession(tempId);
 			return ok ? tempId : null;
@@ -386,7 +420,7 @@ function createBrowserStore() {
 				const response = await fetch(`/api/v1/browser/${sessionId}/${endpoint}`, {
 					method: 'POST',
 					headers: {
-						'Authorization': `Bearer ${token}`,
+						Authorization: `Bearer ${token}`,
 						'Content-Type': 'application/json',
 					},
 					body: body ? JSON.stringify(body) : '{}',
@@ -402,7 +436,6 @@ function createBrowserStore() {
 					...state,
 					url: data.url ?? state.url,
 					title: data.title ?? state.title,
-					screenshot: data.screenshot ?? state.screenshot,
 					isActive: true,
 					isLoading: false,
 				}));
@@ -443,27 +476,6 @@ function createBrowserStore() {
 			if (!sid) return false;
 			return this._executeAction(sid, 'refresh');
 		},
-
-		/** Click at coordinates (viewport-space). */
-		async clickAt(x: number, y: number) {
-			const sid = _currentState.sessionId;
-			if (!sid) return false;
-			return this._executeAction(sid, 'click', { x: Math.round(x), y: Math.round(y) });
-		},
-
-		/** Type text into focused element. */
-		async typeText(text: string, selector?: string) {
-			const sid = _currentState.sessionId;
-			if (!sid) return false;
-			return this._executeAction(sid, 'type', { text, selector });
-		},
-
-		/** Press a single key (Enter, Tab, Backspace, etc.). Returns updated screenshot. */
-		async keypress(key: string) {
-			const sid = _currentState.sessionId;
-			if (!sid) return false;
-			return this._executeAction(sid, 'keypress', { key });
-		},
 	};
 }
 
@@ -480,14 +492,12 @@ sessionNotifier.onEvent((event) => {
 
 	let toolName: string | undefined;
 	let content: string | undefined;
-	let screenshot: string | undefined;
 	let sessionId: string | undefined = event.session_id ?? undefined;
 
 	if (ev.type === 'tool_result') {
 		// Direct WS event from originating device
 		toolName = ev.name as string | undefined;
 		content = ev.output as string | undefined;
-		screenshot = ev.screenshot as string | undefined;
 	} else if (ev.event_type === 'stream_chunk') {
 		// Sync event from another device
 		const data = ev.data as Record<string, unknown> | undefined;
@@ -500,11 +510,15 @@ sessionNotifier.onEvent((event) => {
 	}
 
 	// Match both MCP-prefixed names (mcp__browser-tools__browser_*) and plain names (browser_*)
-	if (toolName && (toolName.startsWith('browser_') || toolName.includes('browser-tools__browser_')) && content) {
+	if (
+		toolName &&
+		(toolName.startsWith('browser_') || toolName.includes('browser-tools__browser_')) &&
+		content
+	) {
 		// Normalize MCP prefix to plain tool name for updateFromToolResult
 		const normalizedName = toolName.includes('__browser_')
 			? 'browser_' + toolName.split('__browser_').pop()
 			: toolName;
-		browserState.updateFromToolResult(normalizedName, content, sessionId, screenshot);
+		browserState.updateFromToolResult(normalizedName, content, sessionId);
 	}
 });

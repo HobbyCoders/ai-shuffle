@@ -4,14 +4,16 @@ MCP Tools for web browser capabilities.
 Provides tools that Claude can call to control a headless browser, including:
 - Navigation (URLs, back, forward)
 - Page interaction (click, type, fill, select)
-- Content extraction (readable text, interactive elements)
-- Screenshots
+- Content extraction (readable text, accessibility tree, interactive elements)
+- Screenshots (explicit opt-in for visual verification)
 - Tab management
 - JavaScript evaluation
 
+Tools return accessibility tree snapshots by default (token-efficient, semantic)
+instead of screenshots. The AI can explicitly call browser_screenshot when
+visual context is needed.
+
 Each tool uses Playwright for headless Chromium browser automation.
-Content extraction is context-conscious — returns readable text,
-not raw HTML, and interactive element lists for easy AI reference.
 """
 
 import json
@@ -111,6 +113,55 @@ def _clean_text(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+# ============================================================================
+# Accessibility Tree Formatting
+# ============================================================================
+
+def _format_a11y_node(node: dict, depth: int = 0, max_depth: int = 6) -> str:
+    """Format an accessibility tree node as indented text for AI consumption."""
+    if depth > max_depth:
+        return ""
+
+    indent = "  " * depth
+    role = node.get("role", "")
+    name = node.get("name", "")
+    value = node.get("value", "")
+
+    parts = [f"{indent}{role}"]
+    if name:
+        parts.append(f'"{name}"')
+    if value:
+        parts.append(f'value="{value}"')
+
+    # Add relevant boolean properties
+    for prop in ("checked", "disabled", "expanded", "selected", "required", "pressed"):
+        val = node.get(prop)
+        if val is not None and val is not False:
+            parts.append(f"{prop}={val}")
+
+    result = " ".join(parts)
+
+    children = node.get("children", [])
+    child_lines = []
+    for child in children:
+        child_str = _format_a11y_node(child, depth + 1, max_depth)
+        if child_str:
+            child_lines.append(child_str)
+
+    if child_lines:
+        result += "\n" + "\n".join(child_lines)
+
+    return result
+
+
+def _a11y_to_text(snapshot: Optional[dict], max_chars: int = 3000) -> str:
+    """Convert accessibility snapshot to concise text representation."""
+    if not snapshot:
+        return "[Accessibility tree unavailable]"
+    text = _format_a11y_node(snapshot)
+    return _truncate_text(text, max_chars)
+
+
 async def _get_session() -> BrowserSession:
     """Get or create browser session for current chat."""
     session_id = get_session_id()
@@ -122,7 +173,7 @@ async def _get_session() -> BrowserSession:
 # ============================================================================
 
 async def browser_navigate(url: str) -> Dict[str, Any]:
-    """Navigate to a URL and return page info with screenshot."""
+    """Navigate to a URL and return page info with accessibility tree."""
     try:
         session = await _get_session()
 
@@ -145,21 +196,24 @@ async def browser_navigate(url: str) -> Dict[str, Any]:
         except Exception:
             summary = ""
 
-        screenshot = await session.take_screenshot()
+        # Get accessibility tree for semantic understanding
+        a11y = await session.get_accessibility_tree()
+        a11y_text = _a11y_to_text(a11y)
 
-        return _text_and_image_result({
+        return _text_result({
             "success": True,
             "url": session.current_url,
             "title": title,
             "status": status,
             "summary": summary,
-        }, screenshot)
+            "accessibility_tree": a11y_text,
+        })
     except Exception as e:
         return _error_result(f"Navigation failed: {str(e)}")
 
 
 async def browser_screenshot(full_page: bool = False) -> Dict[str, Any]:
-    """Take a screenshot of the current page."""
+    """Take a screenshot of the current page (explicit visual verification)."""
     try:
         session = await _get_session()
         title = await session.get_title()
@@ -209,15 +263,16 @@ async def browser_click(
         # Wait for potential navigation or content change
         await session.page.wait_for_timeout(500)
 
-        screenshot = await session.take_screenshot()
         title = await session.get_title()
+        a11y = await session.get_accessibility_tree()
 
-        return _text_and_image_result({
+        return _text_result({
             "success": True,
             "clicked": clicked,
             "url": session.current_url,
             "title": title,
-        }, screenshot)
+            "accessibility_tree": _a11y_to_text(a11y),
+        })
     except Exception as e:
         return _error_result(f"Click failed: {str(e)}")
 
@@ -242,14 +297,15 @@ async def browser_type(
             await session.page.keyboard.press("Enter")
 
         await session.page.wait_for_timeout(300)
-        screenshot = await session.take_screenshot()
+        a11y = await session.get_accessibility_tree()
 
-        return _text_and_image_result({
+        return _text_result({
             "success": True,
             "typed": text,
             "target": target,
             "pressed_enter": press_enter,
-        }, screenshot)
+            "accessibility_tree": _a11y_to_text(a11y),
+        })
     except Exception as e:
         return _error_result(f"Type failed: {str(e)}")
 
@@ -269,8 +325,6 @@ async def browser_scroll(
         await session.page.evaluate(f"window.scrollBy(0, {pixels})")
         await session.page.wait_for_timeout(300)
 
-        screenshot = await session.take_screenshot()
-
         # Get scroll position info
         scroll_info = await session.page.evaluate("""
             () => ({
@@ -280,13 +334,16 @@ async def browser_scroll(
             })
         """)
 
-        return _text_and_image_result({
+        a11y = await session.get_accessibility_tree()
+
+        return _text_result({
             "success": True,
             "direction": direction,
             "scroll_y": scroll_info["scrollY"],
             "page_height": scroll_info["scrollHeight"],
             "viewport_height": scroll_info["clientHeight"],
-        }, screenshot)
+            "accessibility_tree": _a11y_to_text(a11y),
+        })
     except Exception as e:
         return _error_result(f"Scroll failed: {str(e)}")
 
@@ -434,14 +491,15 @@ async def browser_back() -> Dict[str, Any]:
         await session.page.go_back(wait_until="domcontentloaded", timeout=10000)
         await session.page.wait_for_timeout(500)
 
-        screenshot = await session.take_screenshot()
         title = await session.get_title()
+        a11y = await session.get_accessibility_tree()
 
-        return _text_and_image_result({
+        return _text_result({
             "success": True,
             "url": session.current_url,
             "title": title,
-        }, screenshot)
+            "accessibility_tree": _a11y_to_text(a11y),
+        })
     except Exception as e:
         return _error_result(f"Back navigation failed: {str(e)}")
 
@@ -453,14 +511,15 @@ async def browser_forward() -> Dict[str, Any]:
         await session.page.go_forward(wait_until="domcontentloaded", timeout=10000)
         await session.page.wait_for_timeout(500)
 
-        screenshot = await session.take_screenshot()
         title = await session.get_title()
+        a11y = await session.get_accessibility_tree()
 
-        return _text_and_image_result({
+        return _text_result({
             "success": True,
             "url": session.current_url,
             "title": title,
-        }, screenshot)
+            "accessibility_tree": _a11y_to_text(a11y),
+        })
     except Exception as e:
         return _error_result(f"Forward navigation failed: {str(e)}")
 
@@ -471,19 +530,17 @@ async def browser_evaluate(script: str) -> Dict[str, Any]:
         session = await _get_session()
         result = await session.page.evaluate(script)
 
-        screenshot = await session.take_screenshot()
-
         # Serialize result
         try:
             result_str = json.dumps(result, indent=2, default=str)
         except (TypeError, ValueError):
             result_str = str(result)
 
-        return _text_and_image_result({
+        return _text_result({
             "success": True,
             "result": result_str,
             "url": session.current_url,
-        }, screenshot)
+        })
     except Exception as e:
         return _error_result(f"JavaScript evaluation failed: {str(e)}")
 
@@ -531,13 +588,14 @@ async def browser_fill(label: str, value: str) -> Dict[str, Any]:
             return _error_result(f'Could not find form field with label "{label}". Try browser_get_elements to see available fields.')
 
         await session.page.wait_for_timeout(300)
-        screenshot = await session.take_screenshot()
+        a11y = await session.get_accessibility_tree()
 
-        return _text_and_image_result({
+        return _text_result({
             "success": True,
             "label": label,
             "value": value,
-        }, screenshot)
+            "accessibility_tree": _a11y_to_text(a11y),
+        })
     except Exception as e:
         return _error_result(f"Fill failed: {str(e)}")
 
@@ -554,13 +612,14 @@ async def browser_select(selector: str, value: str) -> Dict[str, Any]:
             await session.page.select_option(selector, label=value, timeout=5000)
 
         await session.page.wait_for_timeout(300)
-        screenshot = await session.take_screenshot()
+        a11y = await session.get_accessibility_tree()
 
-        return _text_and_image_result({
+        return _text_result({
             "success": True,
             "selector": selector,
             "value": value,
-        }, screenshot)
+            "accessibility_tree": _a11y_to_text(a11y),
+        })
     except Exception as e:
         return _error_result(f"Select failed: {str(e)}")
 
@@ -585,13 +644,14 @@ async def browser_wait(
             await session.page.wait_for_load_state("networkidle", timeout=timeout)
             waited_for = "network idle"
 
-        screenshot = await session.take_screenshot()
+        a11y = await session.get_accessibility_tree()
 
-        return _text_and_image_result({
+        return _text_result({
             "success": True,
             "waited_for": waited_for,
             "url": session.current_url,
-        }, screenshot)
+            "accessibility_tree": _a11y_to_text(a11y),
+        })
     except Exception as e:
         return _error_result(f"Wait failed: {str(e)}")
 
@@ -610,16 +670,17 @@ async def browser_tab_new(url: Optional[str] = None) -> Dict[str, Any]:
             await new_page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await new_page.wait_for_timeout(1000)
 
-        screenshot = await session.take_screenshot()
         title = await session.get_title()
+        a11y = await session.get_accessibility_tree()
 
-        return _text_and_image_result({
+        return _text_result({
             "success": True,
             "tab_count": len(session._pages),
             "active_tab": len(session._pages),
             "url": session.current_url,
             "title": title,
-        }, screenshot)
+            "accessibility_tree": _a11y_to_text(a11y),
+        })
     except Exception as e:
         return _error_result(f"Tab creation failed: {str(e)}")
 
@@ -673,15 +734,16 @@ async def browser_tab_switch(index: int) -> Dict[str, Any]:
         session.page = session._pages[index - 1]
         await session.page.bring_to_front()
 
-        screenshot = await session.take_screenshot()
         title = await session.get_title()
+        a11y = await session.get_accessibility_tree()
 
-        return _text_and_image_result({
+        return _text_result({
             "success": True,
             "active_tab": index,
             "url": session.current_url,
             "title": title,
-        }, screenshot)
+            "accessibility_tree": _a11y_to_text(a11y),
+        })
     except Exception as e:
         return _error_result(f"Tab switch failed: {str(e)}")
 
@@ -700,6 +762,23 @@ async def browser_close() -> Dict[str, Any]:
         return _error_result(f"Close failed: {str(e)}")
 
 
+async def browser_observe() -> Dict[str, Any]:
+    """Observe the current page state without any side effects."""
+    try:
+        session = await _get_session()
+        title = await session.get_title()
+        a11y = await session.get_accessibility_tree()
+
+        return _text_result({
+            "success": True,
+            "url": session.current_url,
+            "title": title,
+            "accessibility_tree": _a11y_to_text(a11y),
+        })
+    except Exception as e:
+        return _error_result(f"Observe failed: {str(e)}")
+
+
 # ============================================================================
 # Tool Registry (follows phone_tools.py pattern)
 # ============================================================================
@@ -707,7 +786,7 @@ async def browser_close() -> Dict[str, Any]:
 BROWSER_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "browser_navigate",
-        "description": "Navigate to a URL in the browser. Returns page title, status, content summary, and screenshot.",
+        "description": "Navigate to a URL in the browser. Returns page title, status, content summary, and accessibility tree.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -723,7 +802,7 @@ BROWSER_TOOLS: List[Dict[str, Any]] = [
     },
     {
         "name": "browser_screenshot",
-        "description": "Take a screenshot of the current browser page.",
+        "description": "Take a screenshot for visual verification. Most tools return an accessibility tree instead. Use this only when you need to see the visual layout.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -735,6 +814,16 @@ BROWSER_TOOLS: List[Dict[str, Any]] = [
             },
         },
         "handler": browser_screenshot,
+        "security_level": "safe",
+    },
+    {
+        "name": "browser_observe",
+        "description": "Observe the current page state: URL, title, and accessibility tree. Lightweight, no side effects.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+        "handler": browser_observe,
         "security_level": "safe",
     },
     {
@@ -807,7 +896,7 @@ BROWSER_TOOLS: List[Dict[str, Any]] = [
                 },
                 "amount": {
                     "type": "integer",
-                    "description": "Number of scroll units (1 unit ≈ 300px, default: 3)",
+                    "description": "Number of scroll units (1 unit \u2248 300px, default: 3)",
                     "default": 3,
                 },
             },
@@ -923,7 +1012,7 @@ BROWSER_TOOLS: List[Dict[str, Any]] = [
     },
     {
         "name": "browser_wait",
-        "description": "Wait for a condition — an element to appear/disappear, or network to become idle.",
+        "description": "Wait for a condition \u2014 an element to appear/disappear, or network to become idle.",
         "input_schema": {
             "type": "object",
             "properties": {

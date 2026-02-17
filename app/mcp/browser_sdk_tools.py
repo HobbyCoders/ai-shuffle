@@ -46,6 +46,7 @@ TOOL_ROUTES: dict[str, tuple[str, str]] = {
     "browser_tab_list":     ("GET",    "/tab/list"),
     "browser_tab_switch":   ("POST",   "/tab/switch"),
     "browser_close":        ("DELETE", ""),
+    "browser_observe":      ("GET",    "/observe"),
 }
 
 
@@ -387,12 +388,20 @@ def create_browser_tools_server(
     async def browser_close(args: dict[str, Any]) -> dict[str, Any]:
         return await _proxy_request(api_url, headers, "DELETE", "", args)
 
+    @tool("browser_observe", "Observe the current page state: URL, title, and accessibility tree. Lightweight, no side effects.", {
+        "type": "object",
+        "properties": {},
+    })
+    async def browser_observe(args: dict[str, Any]) -> dict[str, Any]:
+        return await _proxy_request(api_url, headers, "GET", "/observe", args)
+
     # ------------------------------------------------------------------
     # Assemble and return the SDK MCP server
     # ------------------------------------------------------------------
     all_tools = [
         browser_navigate,
         browser_screenshot,
+        browser_observe,
         browser_click,
         browser_type,
         browser_scroll,

@@ -21,7 +21,7 @@ from app.core.auth import auth_service
 from app.core import encryption
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, meshy, notes, hooks, generation, project_agents, project_plugins, mcp, mobile, internal, workspace_files, connectors, automations, browser, api_users, documentation
+from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, meshy, notes, hooks, generation, project_agents, project_plugins, mcp, mobile, internal, workspace_files, connectors, automations, browser, browser_ws, api_users, documentation
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -350,6 +350,7 @@ app.include_router(mobile.router)
 app.include_router(internal.router)
 app.include_router(workspace_files.router)
 app.include_router(browser.router)
+app.include_router(browser_ws.router)
 app.include_router(documentation.router)
 
 # Serve static files (Svelte build) if they exist

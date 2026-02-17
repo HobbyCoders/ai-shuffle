@@ -3,6 +3,14 @@ Browser Session Manager for AI agent web browsing.
 
 Manages Playwright browser instances per chat session, providing
 isolated browser contexts with automatic cleanup.
+
+Supports two rendering modes:
+- CDP Screencast: Live frame streaming via Chrome DevTools Protocol
+- Legacy Screenshots: One-shot JPEG captures (kept for browser_screenshot tool)
+
+The CDP screencast mode enables dynamic viewport sizing (matching the
+frontend panel dimensions), real-time frame delivery over WebSocket,
+and low-latency input dispatch — replacing the old screenshot-poll loop.
 """
 
 import asyncio
@@ -10,20 +18,21 @@ import base64
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from playwright.async_api import (
     async_playwright,
     Browser,
     BrowserContext,
+    CDPSession,
     Page,
     Playwright,
 )
 
 logger = logging.getLogger(__name__)
 
-# Default browser configuration
-DEFAULT_VIEWPORT = {"width": 1280, "height": 720}
+# Initial viewport — overridden when a screencast client connects with panel dimensions
+INITIAL_VIEWPORT = {"width": 1280, "height": 720}
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -33,7 +42,11 @@ SESSION_IDLE_TIMEOUT = 300  # 5 minutes
 
 @dataclass
 class BrowserSession:
-    """A browser session tied to a chat session."""
+    """A browser session tied to a chat session.
+
+    Wraps a Playwright browser with CDP-level access for screencast
+    streaming, accessibility tree extraction, and direct input dispatch.
+    """
 
     session_id: str
     browser: Browser
@@ -42,6 +55,15 @@ class BrowserSession:
     created_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     _pages: list = field(default_factory=list)
+
+    # CDP screencast state
+    _cdp_session: Optional[CDPSession] = field(default=None, repr=False)
+    _screencast_active: bool = field(default=False)
+    _screencast_callback: Optional[Callable[[bytes], Awaitable[None]]] = field(
+        default=None, repr=False
+    )
+    _viewport_width: int = field(default=INITIAL_VIEWPORT["width"])
+    _viewport_height: int = field(default=INITIAL_VIEWPORT["height"])
 
     def touch(self):
         """Update last activity timestamp."""
@@ -61,7 +83,6 @@ class BrowserSession:
     @property
     def current_title(self) -> str:
         try:
-            # Use a sync-safe approach
             return ""  # Title fetched async in tools
         except Exception:
             return ""
@@ -71,6 +92,10 @@ class BrowserSession:
             return await self.page.title()
         except Exception:
             return ""
+
+    # ------------------------------------------------------------------
+    # Legacy screenshot (kept for browser_screenshot tool / fallback)
+    # ------------------------------------------------------------------
 
     async def take_screenshot(self, full_page: bool = False) -> str:
         """Take a screenshot and return as base64 JPEG string."""
@@ -84,6 +109,238 @@ class BrowserSession:
         except Exception as e:
             logger.error(f"Screenshot failed for session {self.session_id}: {e}")
             return ""
+
+    # ------------------------------------------------------------------
+    # CDP session management
+    # ------------------------------------------------------------------
+
+    async def _ensure_cdp_session(self) -> CDPSession:
+        """Get or create a CDP session for the current page."""
+        if self._cdp_session is None:
+            self._cdp_session = await self.page.context.new_cdp_session(self.page)
+        return self._cdp_session
+
+    # ------------------------------------------------------------------
+    # Screencast — live frame streaming via CDP
+    # ------------------------------------------------------------------
+
+    async def start_screencast(
+        self,
+        width: int,
+        height: int,
+        quality: int = 60,
+        every_nth_frame: int = 1,
+        callback: Optional[Callable[[bytes], Awaitable[None]]] = None,
+    ) -> None:
+        """Start CDP screencast, streaming JPEG frames to the callback.
+
+        Args:
+            width: Target frame width (should match panel dimensions)
+            height: Target frame height (should match panel dimensions)
+            quality: JPEG quality (0-100). Lower = smaller frames, faster delivery.
+            every_nth_frame: Send every Nth frame (1 = all frames, ~60fps base).
+            callback: Async function receiving raw JPEG bytes for each frame.
+        """
+        self.touch()
+
+        # Stop any existing screencast first
+        if self._screencast_active:
+            await self.stop_screencast()
+
+        # Resize viewport to match panel dimensions
+        await self.set_viewport(width, height)
+
+        cdp = await self._ensure_cdp_session()
+        self._screencast_callback = callback
+
+        # Frame handler: decode base64 → invoke callback → ack frame
+        def on_frame(params: dict) -> None:
+            frame_b64 = params.get("data", "")
+            session_id = params.get("metadata", {}).get("sessionId", 0)
+
+            if frame_b64 and self._screencast_callback:
+                frame_bytes = base64.b64decode(frame_b64)
+
+                async def deliver_and_ack():
+                    try:
+                        await self._screencast_callback(frame_bytes)
+                    except Exception as e:
+                        logger.debug(f"Frame delivery failed: {e}")
+                    try:
+                        await cdp.send(
+                            "Page.screencastFrameAck",
+                            {"sessionId": session_id},
+                        )
+                    except Exception:
+                        pass
+
+                asyncio.create_task(deliver_and_ack())
+
+        cdp.on("Page.screencastFrame", on_frame)
+
+        await cdp.send(
+            "Page.startScreencast",
+            {
+                "format": "jpeg",
+                "quality": quality,
+                "maxWidth": width,
+                "maxHeight": height,
+                "everyNthFrame": every_nth_frame,
+            },
+        )
+        self._screencast_active = True
+        logger.debug(
+            f"Started screencast for {self.session_id}: "
+            f"{width}x{height} q={quality} every={every_nth_frame}"
+        )
+
+    async def stop_screencast(self) -> None:
+        """Stop the CDP screencast if active."""
+        if self._cdp_session and self._screencast_active:
+            try:
+                await self._cdp_session.send("Page.stopScreencast", {})
+            except Exception:
+                pass
+            self._screencast_active = False
+            self._screencast_callback = None
+            logger.debug(f"Stopped screencast for {self.session_id}")
+
+    # ------------------------------------------------------------------
+    # Dynamic viewport
+    # ------------------------------------------------------------------
+
+    async def set_viewport(self, width: int, height: int) -> None:
+        """Resize the browser viewport to match the panel dimensions."""
+        self.touch()
+        # Clamp to reasonable bounds
+        width = max(320, min(3840, width))
+        height = max(240, min(2160, height))
+        self._viewport_width = width
+        self._viewport_height = height
+        await self.page.set_viewport_size({"width": width, "height": height})
+
+    # ------------------------------------------------------------------
+    # Accessibility tree — semantic page understanding for AI
+    # ------------------------------------------------------------------
+
+    async def get_accessibility_tree(
+        self, interesting_only: bool = True
+    ) -> Optional[dict]:
+        """Get the accessibility tree snapshot for AI consumption.
+
+        Returns a structured dict with roles, names, values, and children
+        representing the semantic page structure. This is orders of magnitude
+        smaller than a screenshot and more useful for AI understanding.
+
+        Args:
+            interesting_only: If True, only return "interesting" nodes
+                (those with a name, role, or value). Filters noise.
+        """
+        self.touch()
+        try:
+            snapshot = await self.page.accessibility.snapshot(
+                interesting_only=interesting_only
+            )
+            return snapshot
+        except Exception as e:
+            logger.error(
+                f"Accessibility tree failed for session {self.session_id}: {e}"
+            )
+            return None
+
+    # ------------------------------------------------------------------
+    # CDP input dispatch — low-latency mouse/keyboard/scroll
+    # ------------------------------------------------------------------
+
+    async def cdp_mouse_event(
+        self,
+        event_type: str,
+        x: float,
+        y: float,
+        button: str = "left",
+        click_count: int = 1,
+    ) -> None:
+        """Dispatch a mouse event via CDP for minimal-latency interaction.
+
+        Args:
+            event_type: "mousePressed", "mouseReleased", "mouseMoved"
+            x: X coordinate in viewport space
+            y: Y coordinate in viewport space
+            button: "left", "right", or "middle"
+            click_count: Number of clicks (1 for single, 2 for double)
+        """
+        self.touch()
+        cdp = await self._ensure_cdp_session()
+        params: Dict[str, Any] = {
+            "type": event_type,
+            "x": x,
+            "y": y,
+            "button": button,
+            "clickCount": click_count,
+        }
+        # mousePressed/mouseReleased require buttons bitmask
+        if event_type in ("mousePressed", "mouseReleased"):
+            buttons_map = {"left": 1, "right": 2, "middle": 4}
+            params["buttons"] = buttons_map.get(button, 1)
+        await cdp.send("Input.dispatchMouseEvent", params)
+
+    async def cdp_key_event(
+        self,
+        event_type: str,
+        key: str = "",
+        code: str = "",
+        text: str = "",
+        modifiers: int = 0,
+    ) -> None:
+        """Dispatch a keyboard event via CDP for minimal-latency input.
+
+        Args:
+            event_type: "keyDown", "keyUp", or "char"
+            key: Key value (e.g., "a", "Enter", "Backspace")
+            code: Physical key code (e.g., "KeyA", "Enter")
+            text: Text generated by the key (for "char" events)
+            modifiers: Bitmask — 1=Alt, 2=Ctrl, 4=Meta, 8=Shift
+        """
+        self.touch()
+        cdp = await self._ensure_cdp_session()
+        params: Dict[str, Any] = {"type": event_type}
+        if key:
+            params["key"] = key
+        if code:
+            params["code"] = code
+        if text:
+            params["text"] = text
+        if modifiers:
+            params["modifiers"] = modifiers
+        await cdp.send("Input.dispatchKeyEvent", params)
+
+    async def cdp_scroll(
+        self, x: float, y: float, delta_x: float, delta_y: float
+    ) -> None:
+        """Dispatch a scroll (wheel) event via CDP.
+
+        Args:
+            x: X coordinate of the scroll location
+            y: Y coordinate of the scroll location
+            delta_x: Horizontal scroll delta
+            delta_y: Vertical scroll delta
+        """
+        self.touch()
+        cdp = await self._ensure_cdp_session()
+        await cdp.send(
+            "Input.dispatchMouseEvent",
+            {
+                "type": "mouseWheel",
+                "x": x,
+                "y": y,
+                "deltaX": delta_x,
+                "deltaY": delta_y,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Navigation helpers (unchanged from original)
+    # ------------------------------------------------------------------
 
     async def navigate(self, url: str) -> None:
         """Navigate to a URL."""
@@ -108,7 +365,7 @@ class BrowserSession:
         await self.page.reload(wait_until="domcontentloaded", timeout=15000)
 
     async def click_at(self, x: int, y: int) -> None:
-        """Click at the given coordinates."""
+        """Click at the given coordinates (Playwright-level, used by tools)."""
         self.touch()
         await self.page.mouse.click(x, y)
         try:
@@ -124,8 +381,22 @@ class BrowserSession:
         else:
             await self.page.keyboard.type(text)
 
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
     async def close(self):
-        """Close this browser session."""
+        """Close this browser session, cleaning up CDP and Playwright resources."""
+        # Stop screencast first
+        await self.stop_screencast()
+        # Detach CDP session
+        if self._cdp_session:
+            try:
+                await self._cdp_session.detach()
+            except Exception:
+                pass
+            self._cdp_session = None
+        # Close Playwright resources
         try:
             await self.context.close()
         except Exception:
@@ -189,7 +460,7 @@ class BrowserSessionManager:
             raise
 
         context = await browser.new_context(
-            viewport=DEFAULT_VIEWPORT,
+            viewport=INITIAL_VIEWPORT,
             user_agent=DEFAULT_USER_AGENT,
             ignore_https_errors=True,
         )

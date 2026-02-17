@@ -2,16 +2,21 @@
 	/**
 	 * BrowserPanel - Interactive side panel for AI + user browser collaboration
 	 *
+	 * Uses CDP screencast for live frame streaming rendered to a <canvas>.
+	 * User input (mouse, keyboard, scroll) is forwarded via dedicated browser
+	 * WebSocket for zero-latency interaction. The viewport dynamically matches
+	 * the panel dimensions — no letterboxing.
+	 *
 	 * Features:
-	 * - Editable URL bar with navigation
+	 * - Live canvas rendering of CDP screencast frames (not static screenshots)
+	 * - Direct mouse/keyboard/scroll forwarding via WebSocket (not REST API)
+	 * - Dynamic viewport resizing via ResizeObserver (fills panel 1:1)
+	 * - Editable URL bar with navigation (REST API for intentional nav)
 	 * - Back/Forward/Refresh controls
-	 * - Clickable screenshot (click sends coordinates to browser)
-	 * - Shift+click to select area and reference in chat
-	 * - Resizable panel width
+	 * - Resizable panel width (desktop)
 	 * - Full-screen overlay on mobile
 	 */
-	import { browserState } from '$lib/stores/browser';
-
+	import { browserState, type BrowserState } from '$lib/stores/browser';
 	import { onMount } from 'svelte';
 
 	// Detect mobile using same heuristic as AppLayout
@@ -34,19 +39,115 @@
 	let startX = $state(0);
 	let startWidth = $state(0);
 	let urlInput = $state($browserState.url || '');
-	let screenshotContainer: HTMLDivElement | undefined = $state();
-	let clickIndicator = $state<{ x: number; y: number; visible: boolean }>({
-		x: 0,
-		y: 0,
-		visible: false,
-	});
+
+	// Canvas + container refs
+	let canvasEl: HTMLCanvasElement | undefined = $state();
+	let canvasContainer: HTMLDivElement | undefined = $state();
+
+	// Track current canvas dimensions for coordinate mapping
+	let canvasWidth = $state(0);
+	let canvasHeight = $state(0);
 
 	// Keep URL input synced with store (when AI navigates or session switches)
 	$effect(() => {
 		urlInput = $browserState.url || '';
 	});
 
-	// --- Resize ---
+	// --- Canvas frame rendering ---
+	// Register the frame callback so the browser store can push JPEG frames to us.
+	// Each frame is a raw JPEG ArrayBuffer from CDP screencast via browser WebSocket.
+	$effect(() => {
+		if (canvasEl) {
+			const canvas = canvasEl;
+			const ctx = canvas.getContext('2d');
+			if (!ctx) return;
+
+			browserState.setFrameCallback((data: ArrayBuffer) => {
+				// Decode JPEG to ImageBitmap (hardware-accelerated, off main thread)
+				const blob = new Blob([data], { type: 'image/jpeg' });
+				createImageBitmap(blob).then((bitmap) => {
+					// Resize canvas to match frame dimensions (if changed)
+					if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+						canvas.width = bitmap.width;
+						canvas.height = bitmap.height;
+					}
+					ctx.drawImage(bitmap, 0, 0);
+					bitmap.close();
+				}).catch(() => {
+					// Ignore decode errors (e.g. partial frames during disconnect)
+				});
+			});
+
+			return () => {
+				browserState.setFrameCallback(null);
+			};
+		}
+	});
+
+	// --- Screencast lifecycle ---
+	// Connect/disconnect screencast when panel opens/closes or session changes.
+	$effect(() => {
+		const state: BrowserState = $browserState;
+		const container = canvasContainer;
+
+		if (state.isOpen && state.sessionId && container) {
+			const rect = container.getBoundingClientRect();
+			const width = Math.round(rect.width) || 800;
+			const height = Math.round(rect.height) || 600;
+			browserState.connectScreencast(state.sessionId, width, height);
+			canvasWidth = width;
+			canvasHeight = height;
+		}
+
+		// Note: disconnecting is handled by switchSession/closePanel in the store
+	});
+
+	// --- Dynamic viewport via ResizeObserver ---
+	// When the canvas container resizes (panel resize, window resize), update the
+	// backend viewport + restart screencast at the new dimensions.
+	onMount(() => {
+		let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
+
+		const observer = new ResizeObserver((entries) => {
+			for (const entry of entries) {
+				const { width, height } = entry.contentRect;
+				if (width < 10 || height < 10) continue; // Ignore collapsed states
+
+				const w = Math.round(width);
+				const h = Math.round(height);
+
+				// Only send resize if dimensions actually changed meaningfully
+				if (Math.abs(w - canvasWidth) < 5 && Math.abs(h - canvasHeight) < 5) continue;
+
+				canvasWidth = w;
+				canvasHeight = h;
+
+				// Debounce resize to avoid spamming during drag
+				if (resizeTimeout) clearTimeout(resizeTimeout);
+				resizeTimeout = setTimeout(() => {
+					const ws = browserState.getBrowserWs();
+					if (ws.isConnected()) {
+						ws.sendResize(w, h);
+					}
+				}, 200);
+			}
+		});
+
+		// Observe when container becomes available
+		const unsubscribe = browserState.subscribe(() => {
+			if (canvasContainer) {
+				observer.observe(canvasContainer);
+			}
+		});
+
+		return () => {
+			observer.disconnect();
+			unsubscribe();
+			if (resizeTimeout) clearTimeout(resizeTimeout);
+		};
+	});
+
+	// --- Panel Resize (drag left edge) ---
 	function handleResizeStart(e: PointerEvent) {
 		isResizing = true;
 		startX = e.clientX;
@@ -66,7 +167,7 @@
 		(e.target as HTMLElement).releasePointerCapture(e.pointerId);
 	}
 
-	// --- Navigation ---
+	// --- Navigation (REST API for intentional nav) ---
 	function handleUrlKeydown(e: KeyboardEvent) {
 		if (e.key === 'Enter') {
 			e.preventDefault();
@@ -87,109 +188,134 @@
 		browserState.refresh();
 	}
 
-	// --- Screenshot click interaction ---
-	let screenshotWrapper: HTMLDivElement | undefined = $state();
+	// --- Mouse forwarding via WebSocket ---
+	// Map canvas display coordinates to viewport coordinates.
+	// CSS may scale the canvas (width:100%; height:100%), so we need the ratio.
+	function getCanvasCoords(e: MouseEvent): { x: number; y: number } | null {
+		if (!canvasEl) return null;
+		const rect = canvasEl.getBoundingClientRect();
+		if (rect.width === 0 || rect.height === 0) return null;
 
-	function handleScreenshotClick(e: MouseEvent) {
-		if (!screenshotContainer) return;
-		const img = screenshotContainer.querySelector('img');
-		if (!img) return;
+		// Scale from CSS display size to actual canvas/viewport size
+		const scaleX = canvasEl.width / rect.width;
+		const scaleY = canvasEl.height / rect.height;
+		return {
+			x: Math.round((e.clientX - rect.left) * scaleX),
+			y: Math.round((e.clientY - rect.top) * scaleY),
+		};
+	}
 
-		// Map display coordinates to viewport coordinates (1280x720)
-		const rect = img.getBoundingClientRect();
-		const scaleX = 1280 / rect.width;
-		const scaleY = 720 / rect.height;
-		const viewportX = (e.clientX - rect.left) * scaleX;
-		const viewportY = (e.clientY - rect.top) * scaleY;
+	function handleCanvasClick(e: MouseEvent) {
+		const coords = getCanvasCoords(e);
+		if (!coords) return;
 
-		if (e.shiftKey) {
-			// Shift+click: show click indicator for chat reference
-			clickIndicator = {
-				x: e.clientX - rect.left,
-				y: e.clientY - rect.top,
-				visible: true,
-			};
-			setTimeout(() => {
-				clickIndicator = { ...clickIndicator, visible: false };
-			}, 1500);
+		const ws = browserState.getBrowserWs();
+		if (!ws.isConnected()) return;
+
+		ws.sendMouse('click', coords.x, coords.y, 'left');
+
+		// Focus canvas container for keyboard input
+		if (isMobile) {
+			showInputBar = true;
+			requestAnimationFrame(() => inputBarEl?.focus());
 		} else {
-			// Normal click: send to browser + focus wrapper for keyboard input
-			clickIndicator = {
-				x: e.clientX - rect.left,
-				y: e.clientY - rect.top,
-				visible: true,
-			};
-			setTimeout(() => {
-				clickIndicator = { ...clickIndicator, visible: false };
-			}, 600);
-
-			browserState.clickAt(viewportX, viewportY);
-
-			if (isMobile) {
-				// On mobile, auto-show the input bar and focus it
-				showInputBar = true;
-				requestAnimationFrame(() => inputBarEl?.focus());
-			} else {
-				// Desktop: focus the screenshot wrapper for keyboard forwarding
-				screenshotWrapper?.focus();
-			}
+			canvasContainer?.focus();
 		}
 	}
 
-	// --- Keyboard forwarding to Playwright browser (desktop only) ---
-	// After clicking on the screenshot, keystrokes go to the remote browser.
-	// Printable characters are batched (debounced), special keys sent immediately.
-	let _typingBuffer = '';
-	let _flushTimer: ReturnType<typeof setTimeout> | null = null;
+	function handleCanvasDblClick(e: MouseEvent) {
+		const coords = getCanvasCoords(e);
+		if (!coords) return;
 
-	function flushTypingBuffer() {
-		if (_typingBuffer) {
-			const text = _typingBuffer;
-			_typingBuffer = '';
-			browserState.typeText(text);
-		}
-		_flushTimer = null;
+		const ws = browserState.getBrowserWs();
+		if (!ws.isConnected()) return;
+
+		ws.sendMouse('dblclick', coords.x, coords.y, 'left');
 	}
 
-	const SPECIAL_KEYS: Record<string, string> = {
-		Enter: 'Enter',
-		Tab: 'Tab',
-		Backspace: 'Backspace',
-		Delete: 'Delete',
-		Escape: 'Escape',
-		ArrowUp: 'ArrowUp',
-		ArrowDown: 'ArrowDown',
-		ArrowLeft: 'ArrowLeft',
-		ArrowRight: 'ArrowRight',
-		Home: 'Home',
-		End: 'End',
-		PageUp: 'PageUp',
-		PageDown: 'PageDown',
-	};
+	function handleCanvasMouseMove(e: MouseEvent) {
+		// Only forward mousemove when a button is pressed (drag)
+		if (e.buttons === 0) return;
 
-	function handleScreenshotKeydown(e: KeyboardEvent) {
-		if (isMobile) return; // Mobile uses the input bar instead
-		if (e.ctrlKey || e.metaKey || e.altKey) return;
+		const coords = getCanvasCoords(e);
+		if (!coords) return;
 
-		const specialKey = SPECIAL_KEYS[e.key];
-		if (specialKey) {
-			e.preventDefault();
-			if (_typingBuffer) flushTypingBuffer();
-			browserState.keypress(specialKey);
-			return;
-		}
+		const ws = browserState.getBrowserWs();
+		if (!ws.isConnected()) return;
 
-		if (e.key.length === 1) {
-			e.preventDefault();
-			_typingBuffer += e.key;
-			if (_flushTimer) clearTimeout(_flushTimer);
-			_flushTimer = setTimeout(flushTypingBuffer, 150);
-		}
+		ws.sendMouse('move', coords.x, coords.y, 'left');
 	}
 
-	// --- Input bar (works on both mobile and desktop) ---
-	// Visible whenever the browser has an active screenshot.
-	// Primary input method on mobile; supplementary on desktop.
+	function handleCanvasMouseDown(e: MouseEvent) {
+		const coords = getCanvasCoords(e);
+		if (!coords) return;
+
+		const ws = browserState.getBrowserWs();
+		if (!ws.isConnected()) return;
+
+		const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
+		ws.sendMouse('down', coords.x, coords.y, button);
+	}
+
+	function handleCanvasMouseUp(e: MouseEvent) {
+		const coords = getCanvasCoords(e);
+		if (!coords) return;
+
+		const ws = browserState.getBrowserWs();
+		if (!ws.isConnected()) return;
+
+		const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
+		ws.sendMouse('up', coords.x, coords.y, button);
+	}
+
+	// --- Keyboard forwarding via WebSocket (desktop) ---
+	// Direct key events with no batching — instant feedback via live screencast.
+	function getModifiers(e: KeyboardEvent): number {
+		let mod = 0;
+		if (e.altKey) mod |= 1;
+		if (e.ctrlKey) mod |= 2;
+		if (e.metaKey) mod |= 4;
+		if (e.shiftKey) mod |= 8;
+		return mod;
+	}
+
+	function handleCanvasKeydown(e: KeyboardEvent) {
+		if (isMobile) return; // Mobile uses the input bar
+
+		// Don't intercept browser shortcuts (Ctrl+T, Ctrl+W, etc.)
+		if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+			const key = e.key.toLowerCase();
+			if (['t', 'w', 'n', 'l', 'r', 'f5'].includes(key)) return;
+		}
+
+		e.preventDefault();
+
+		const ws = browserState.getBrowserWs();
+		if (!ws.isConnected()) return;
+
+		const text = e.key.length === 1 ? e.key : '';
+		ws.sendKey('press', e.key, e.code, text, getModifiers(e));
+	}
+
+	// --- Scroll forwarding via WebSocket ---
+	function handleCanvasWheel(e: WheelEvent) {
+		e.preventDefault();
+
+		const coords = getCanvasCoords(e as unknown as MouseEvent);
+		if (!coords) return;
+
+		const ws = browserState.getBrowserWs();
+		if (!ws.isConnected()) return;
+
+		ws.sendScroll(coords.x, coords.y, e.deltaX, e.deltaY);
+	}
+
+	// --- Context menu prevention ---
+	function handleContextMenu(e: MouseEvent) {
+		e.preventDefault(); // Prevent browser context menu on right-click
+	}
+
+	// --- Input bar (mobile primary, desktop supplementary) ---
 	let inputBarText = $state('');
 	let inputBarEl: HTMLInputElement | undefined = $state();
 	let showInputBar = $state(false);
@@ -205,21 +331,33 @@
 		const text = inputBarText;
 		if (!text) return;
 		inputBarText = '';
-		browserState.typeText(text);
+
+		const ws = browserState.getBrowserWs();
+		if (ws.isConnected()) {
+			// Send each character as a key press for proper form input
+			for (const char of text) {
+				ws.sendKey('press', char, '', char, 0);
+			}
+		}
 	}
 
 	function sendEnterKey() {
-		browserState.keypress('Enter');
+		const ws = browserState.getBrowserWs();
+		if (ws.isConnected()) {
+			ws.sendKey('press', 'Enter', 'Enter', '', 0);
+		}
 	}
 
 	function sendTabKey() {
-		browserState.keypress('Tab');
+		const ws = browserState.getBrowserWs();
+		if (ws.isConnected()) {
+			ws.sendKey('press', 'Tab', 'Tab', '', 0);
+		}
 	}
 
 	function toggleInputBar() {
 		showInputBar = !showInputBar;
 		if (showInputBar) {
-			// Focus the input bar after it renders
 			requestAnimationFrame(() => inputBarEl?.focus());
 		}
 	}
@@ -288,7 +426,7 @@
 
 			<!-- URL bar -->
 			<div class="url-bar">
-				<div class="status-dot" class:active={$browserState.isActive}></div>
+				<div class="status-dot" class:active={$browserState.isActive} class:streaming={$browserState.isStreaming}></div>
 				<input
 					type="text"
 					class="url-input"
@@ -318,39 +456,36 @@
 			</div>
 		{/if}
 
-		<!-- Screenshot area (interactive) -->
-		<div class="screenshot-area" bind:this={screenshotContainer}>
-			{#if $browserState.isLoading && !$browserState.screenshot}
+		<!-- Canvas area (interactive) -->
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+		<div
+			class="canvas-area"
+			bind:this={canvasContainer}
+			tabindex="0"
+			onclick={handleCanvasClick}
+			ondblclick={handleCanvasDblClick}
+			onmousedown={handleCanvasMouseDown}
+			onmouseup={handleCanvasMouseUp}
+			onmousemove={handleCanvasMouseMove}
+			onkeydown={handleCanvasKeydown}
+			onwheel={handleCanvasWheel}
+			oncontextmenu={handleContextMenu}
+		>
+			{#if $browserState.isStreaming}
+				<canvas
+					bind:this={canvasEl}
+					class="browser-canvas"
+				></canvas>
+			{:else if $browserState.isLoading}
 				<div class="loading-state">
 					<div class="spinner"></div>
-					<span>Loading...</span>
+					<span>Connecting...</span>
 				</div>
-			{:else if $browserState.screenshot}
-				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<div
-					class="screenshot-wrapper"
-					bind:this={screenshotWrapper}
-					tabindex="0"
-					onclick={handleScreenshotClick}
-					onkeydown={handleScreenshotKeydown}
-				>
-					<img
-						src="data:image/jpeg;base64,{$browserState.screenshot}"
-						alt="Browser screenshot"
-						class="screenshot-img"
-						draggable="false"
-					/>
-					{#if clickIndicator.visible}
-						<div
-							class="click-indicator"
-							style="left: {clickIndicator.x}px; top: {clickIndicator.y}px"
-						></div>
-					{/if}
-					{#if $browserState.isLoading}
-						<div class="screenshot-loading-overlay">
-							<div class="spinner-small"></div>
-						</div>
-					{/if}
+			{:else if $browserState.isActive}
+				<div class="loading-state">
+					<div class="spinner"></div>
+					<span>Starting screencast...</span>
 				</div>
 			{:else}
 				<div class="empty-state">
@@ -365,7 +500,7 @@
 		</div>
 
 		<!-- Input bar — type text into the focused browser element -->
-		{#if showInputBar && $browserState.screenshot}
+		{#if showInputBar && ($browserState.isStreaming || $browserState.isActive)}
 			<div class="input-bar">
 				<input
 					type="text"
@@ -378,7 +513,7 @@
 				<button
 					class="input-bar-btn"
 					title="Send text"
-					disabled={!inputBarText || $browserState.isLoading}
+					disabled={!inputBarText}
 					onclick={sendInputBarText}
 				>
 					<!-- Send arrow icon -->
@@ -402,7 +537,7 @@
 
 		<!-- Status bar -->
 		<div class="status-bar">
-			{#if $browserState.screenshot}
+			{#if $browserState.isActive}
 				<button
 					class="keyboard-toggle"
 					class:active={showInputBar}
@@ -425,14 +560,19 @@
 				</button>
 			{/if}
 			<span class="status-label">
-				{#if $browserState.isLoading}
-					Loading...
+				{#if $browserState.isStreaming}
+					Live · Shared with AI
+				{:else if $browserState.isLoading}
+					Connecting...
 				{:else if $browserState.isActive}
-					Click to interact · Shared with AI
+					Starting...
 				{:else}
 					Ready — enter a URL to browse
 				{/if}
 			</span>
+			{#if $browserState.isStreaming}
+				<span class="streaming-indicator"></span>
+			{/if}
 		</div>
 	</div>
 </div>
@@ -542,6 +682,11 @@
 	}
 
 	.status-dot.active {
+		background: #f59e0b;
+		opacity: 1;
+	}
+
+	.status-dot.streaming {
 		background: #22c55e;
 		opacity: 1;
 		box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
@@ -603,8 +748,8 @@
 		display: block;
 	}
 
-	/* Screenshot area */
-	.screenshot-area {
+	/* Canvas area — replaces screenshot area */
+	.canvas-area {
 		flex: 1;
 		min-height: 0;
 		overflow: hidden;
@@ -612,73 +757,20 @@
 		align-items: stretch;
 		justify-content: center;
 		background: color-mix(in oklch, var(--muted) 50%, var(--card));
-	}
-
-	.screenshot-wrapper {
-		position: relative;
-		width: 100%;
-		height: 100%;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		cursor: crosshair;
+		cursor: default;
 		outline: none;
+		position: relative;
 	}
 
-	.screenshot-wrapper:focus {
-		box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--primary) 40%, transparent);
+	.canvas-area:focus {
+		box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--primary) 30%, transparent);
 	}
 
-	.screenshot-img {
+	.browser-canvas {
 		width: 100%;
 		height: 100%;
 		display: block;
-		object-fit: contain;
-		pointer-events: none;
-	}
-
-	/* Click indicator */
-	.click-indicator {
-		position: absolute;
-		width: 20px;
-		height: 20px;
-		border-radius: 50%;
-		border: 2px solid var(--primary);
-		background: color-mix(in oklch, var(--primary) 25%, transparent);
-		transform: translate(-50%, -50%);
-		pointer-events: none;
-		animation: clickPulse 0.6s ease-out forwards;
-	}
-
-	@keyframes clickPulse {
-		0% {
-			transform: translate(-50%, -50%) scale(0.5);
-			opacity: 1;
-		}
-		100% {
-			transform: translate(-50%, -50%) scale(2);
-			opacity: 0;
-		}
-	}
-
-	/* Loading overlay on screenshot */
-	.screenshot-loading-overlay {
-		position: absolute;
-		inset: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: color-mix(in oklch, var(--background) 40%, transparent);
-		pointer-events: none;
-	}
-
-	.spinner-small {
-		width: 20px;
-		height: 20px;
-		border: 2px solid var(--border);
-		border-top-color: var(--primary);
-		border-radius: 50%;
-		animation: spin 0.8s linear infinite;
+		object-fit: fill;
 	}
 
 	.empty-state {
@@ -724,7 +816,7 @@
 		}
 	}
 
-	/* Input bar — between screenshot and status bar */
+	/* Input bar — between canvas and status bar */
 	.input-bar {
 		display: flex;
 		align-items: center;
@@ -831,6 +923,22 @@
 		font-size: 0.6875rem;
 		color: var(--muted-foreground);
 		letter-spacing: 0.02em;
+		flex: 1;
+	}
+
+	/* Streaming indicator — pulsing green dot */
+	.streaming-indicator {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: #22c55e;
+		flex-shrink: 0;
+		animation: pulse 2s ease-in-out infinite;
+	}
+
+	@keyframes pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.4; }
 	}
 
 	/* ========================================
