@@ -234,16 +234,11 @@ async def chat_websocket(
         from app.core.query_engine import stream_to_websocket
         from app.core.jsonl_parser import parse_session_history
         from app.core.config import settings
+        from app.api.ws_event_handlers import EventContext, MutableStreamState, dispatch_event
         import time
 
         # Generate a message ID for this streaming session
         message_id = str(uuid.uuid4())
-        stream_started = False
-        connection_lost_logged = False  # Only log WebSocket disconnect once
-        query_start_time = time.time()  # Track duration for webhooks
-        final_metadata: Dict[str, Any] = {}  # Store metadata from done event
-        current_tool_id: Optional[str] = None  # Track current tool for input streaming
-        current_tool_name: Optional[str] = None  # Track current tool name for result broadcasts
 
         # Structured logging context for this streaming request
         ctx = StreamingContext(
@@ -252,6 +247,17 @@ async def chat_websocket(
             message_id=message_id,
             user_id=user_id,
         )
+
+        # Event dispatch context and mutable state
+        event_ctx = EventContext(
+            ctx=ctx,
+            session_id=session_id,
+            message_id=message_id,
+            user_id=user_id,
+            project_id=project_id,
+            worktree_id=worktree_id,
+        )
+        stream_state = MutableStreamState()
 
         # Unregister this device from SyncEngine while streaming
         # This prevents duplicate events (we get direct events via send_json)
@@ -360,455 +366,19 @@ async def chat_websocket(
                 # The live_session_store must be updated regardless of WebSocket state
                 # so that polling clients can receive updates.
                 ws_connected = await send_json(event)
-                if not ws_connected and not connection_lost_logged:
-                    connection_lost_logged = True
+                if not ws_connected and not stream_state.connection_lost_logged:
+                    stream_state.connection_lost_logged = True
                     ctx.debug(logger, "WebSocket disconnected during streaming, updates continue via sync_engine + polling")
 
-                # Broadcast to other devices via SyncEngine
-                # Start streaming on first content event
-                # Note: We pass source_device_id=None to NOT exclude any device.
-                # The source device gets direct events via send_json(), but if it
-                # disconnects and reconnects, its NEW websocket should receive sync events.
-                # The frontend handles any potential duplication.
-                if not stream_started and event_type in ('stream_start', 'stream_delta', 'chunk', 'tool_use'):
-                    # Extract usage data from stream_start event if available
-                    usage_data = None
-                    if event_type == 'stream_start':
-                        message_data = event.get('message', {})
-                        if isinstance(message_data, dict):
-                            usage_data = message_data.get('usage')
-                            # Update live session store with usage for polling clients
-                            if usage_data:
-                                await live_session_store.update_usage(
-                                    session_id,
-                                    input_tokens=usage_data.get('input_tokens', 0),
-                                    output_tokens=usage_data.get('output_tokens', 0),
-                                    cache_creation_tokens=usage_data.get('cache_creation_input_tokens', 0),
-                                    cache_read_tokens=usage_data.get('cache_read_input_tokens', 0)
-                                )
-
-                    await sync_engine.broadcast_stream_start(
-                        session_id=session_id,
-                        message_id=message_id,
-                        source_device_id=None,  # Don't exclude - let all registered devices receive
-                        usage=usage_data,
-                        user_id=user_id,  # Enable user-level broadcast for side panel sync
-                        project_id=project_id,  # Enable workspace-level streaming awareness
-                        worktree_id=worktree_id  # Worktree sessions have independent working dirs
-                    )
-                    stream_started = True
-                elif stream_started and event_type == 'stream_start':
-                    # Subsequent stream_start events (agentic loops with tool calls)
-                    # Each new assistant turn has updated token usage that should be broadcast
-                    message_data = event.get('message', {})
-                    if isinstance(message_data, dict):
-                        usage_data = message_data.get('usage')
-                        if usage_data:
-                            # Update live session store with latest usage for polling clients
-                            await live_session_store.update_usage(
-                                session_id,
-                                input_tokens=usage_data.get('input_tokens', 0),
-                                output_tokens=usage_data.get('output_tokens', 0),
-                                cache_creation_tokens=usage_data.get('cache_creation_input_tokens', 0),
-                                cache_read_tokens=usage_data.get('cache_read_input_tokens', 0)
-                            )
-                            # Broadcast usage update to synced devices
-                            await sync_engine.broadcast_usage_update(
-                                session_id=session_id,
-                                usage=usage_data
-                            )
-                            ctx.debug(logger, f"Broadcast usage update: {usage_data}")
-
-                # Broadcast stream chunks AND update LiveSessionStore
-                # LiveSessionStore is the server-authoritative state for reconnecting clients
-                if event_type == 'stream_delta':
-                    # Real-time streaming delta - handle different delta types
-                    delta_type = event.get('delta_type', 'text')
-                    content = event.get('content', '')
-
-                    if delta_type == 'tool_input':
-                        # Tool input streaming - update live store
-                        if current_tool_id:
-                            await live_session_store.update_tool_input_streaming(
-                                session_id, current_tool_id, content
-                            )
-                        # Broadcast as tool_input type
-                        chunk_data = {
-                            'content': content,
-                            'delta_type': delta_type,
-                            'index': event.get('index', 0)
-                        }
-                        await sync_engine.broadcast_stream_chunk(
-                            session_id=session_id,
-                            message_id=message_id,
-                            chunk_type='tool_input',
-                            chunk_data=chunk_data,
-                            source_device_id=None
-                        )
-                    elif delta_type == 'thinking':
-                        # Thinking delta - update live store with thinking type
-                        await live_session_store.append_thinking(session_id, content)
-                        # Broadcast with thinking chunk_type so StreamingBuffer handles it correctly
-                        chunk_data = {
-                            'content': content,
-                            'delta_type': delta_type,
-                            'index': event.get('index', 0)
-                        }
-                        await sync_engine.broadcast_stream_chunk(
-                            session_id=session_id,
-                            message_id=message_id,
-                            chunk_type='thinking',  # Fixed: was 'text', causing thinking to mix with text
-                            chunk_data=chunk_data,
-                            source_device_id=None
-                        )
-                    else:
-                        # Text delta - finalize any streaming thinking, then update live store
-                        await live_session_store.finalize_thinking(session_id)
-                        await live_session_store.append_text(session_id, content)
-                        # Broadcast as text
-                        chunk_data = {
-                            'content': content,
-                            'delta_type': delta_type,
-                            'index': event.get('index', 0)
-                        }
-                        await sync_engine.broadcast_stream_chunk(
-                            session_id=session_id,
-                            message_id=message_id,
-                            chunk_type='text',
-                            chunk_data=chunk_data,
-                            source_device_id=None
-                        )
-                elif event_type == 'chunk':
-                    # Legacy chunk event (when include_partial_messages=False)
-                    content = event.get('content', '')
-                    # Update live store
-                    await live_session_store.append_text(session_id, content)
-                    # Broadcast
-                    chunk_data = {'content': content}
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='text',
-                        chunk_data=chunk_data,
-                        source_device_id=None
-                    )
-                elif event_type == 'tool_use':
-                    # Tool use event - update live store
-                    tool_id = event.get('id')
-                    current_tool_id = tool_id  # Track for input streaming
-                    current_tool_name = event.get('name')  # Track for result broadcasts
-                    await live_session_store.add_tool_use(
-                        session_id=session_id,
-                        tool_id=tool_id,
-                        name=event.get('name'),
-                        tool_input=event.get('input', {})
-                    )
-                    # Broadcast
-                    chunk_data = {
-                        'content': '',
-                        'tool_name': event.get('name'),
-                        'tool_id': tool_id,
-                        'tool_input': event.get('input')
-                    }
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='tool_use',
-                        chunk_data=chunk_data,
-                        source_device_id=None
-                    )
-                elif event_type == 'tool_result':
-                    # Tool result event - update live store
-                    tool_id = event.get('tool_use_id')
-                    tool_name = current_tool_name  # Capture before clearing
-                    current_tool_id = None  # Clear tool tracking
-                    current_tool_name = None
-                    await live_session_store.add_tool_result(
-                        session_id=session_id,
-                        tool_id=tool_id,
-                        result=event.get('output', ''),
-                        is_error=event.get('is_error', False)
-                    )
-                    # Broadcast
-                    chunk_data = {
-                        'content': event.get('output', ''),
-                        'tool_id': tool_id,
-                        'tool_name': tool_name,
-                        'is_error': event.get('is_error', False)
-                    }
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='tool_result',
-                        chunk_data=chunk_data,
-                        source_device_id=None
-                    )
-                elif event_type == 'system':
-                    # System message - update live store
-                    await live_session_store.add_system_message(
-                        session_id=session_id,
-                        content='',
-                        subtype=event.get('subtype'),
-                        data=event.get('data')
-                    )
-                    # Broadcast
-                    chunk_data = {
-                        'content': '',
-                        'subtype': event.get('subtype'),
-                        'data': event.get('data')
-                    }
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='system',
-                        chunk_data=chunk_data,
-                        source_device_id=None
-                    )
-                elif event_type == 'subagent_start':
-                    # Subagent task started - update live store
-                    # Try to convert the early tool_use (from stream_block_start)
-                    # to a subagent message. If no early tool exists, create fresh.
-                    agent_id = event.get('agent_id')
-                    converted = await live_session_store.convert_tool_to_subagent(
-                        session_id=session_id,
-                        tool_id=event.get('tool_id') or agent_id,
-                        agent_id=agent_id,
-                        agent_type=event.get('agent_type', 'unknown'),
-                        description=event.get('description', ''),
-                        prompt=event.get('prompt', '')
-                    )
-                    if not converted:
-                        await live_session_store.add_subagent_start(
-                            session_id=session_id,
-                            agent_id=agent_id,
-                            agent_type=event.get('agent_type'),
-                            description=event.get('description'),
-                            prompt=event.get('prompt'),
-                            tool_id=event.get('tool_id')
-                        )
-                    # Broadcast
-                    chunk_data = {
-                        'agent_id': event.get('agent_id'),
-                        'agent_type': event.get('agent_type'),
-                        'description': event.get('description'),
-                        'prompt': event.get('prompt'),
-                        'tool_id': event.get('tool_id')
-                    }
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='subagent_start',
-                        chunk_data=chunk_data,
-                        source_device_id=None
-                    )
-                elif event_type == 'subagent_chunk':
-                    # Text chunk from subagent - update live store
-                    await live_session_store.append_subagent_text(
-                        session_id=session_id,
-                        agent_id=event.get('agent_id'),
-                        content=event.get('content', '')
-                    )
-                    # Broadcast
-                    chunk_data = {
-                        'agent_id': event.get('agent_id'),
-                        'content': event.get('content', '')
-                    }
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='subagent_chunk',
-                        chunk_data=chunk_data,
-                        source_device_id=None
-                    )
-                elif event_type == 'subagent_tool_use':
-                    # Tool use within subagent - update live store
-                    await live_session_store.add_subagent_tool_use(
-                        session_id=session_id,
-                        agent_id=event.get('agent_id'),
-                        tool_id=event.get('id'),
-                        tool_name=event.get('name'),
-                        tool_input=event.get('input', {})
-                    )
-                    # Broadcast
-                    chunk_data = {
-                        'agent_id': event.get('agent_id'),
-                        'name': event.get('name'),
-                        'id': event.get('id'),
-                        'input': event.get('input')
-                    }
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='subagent_tool_use',
-                        chunk_data=chunk_data,
-                        source_device_id=None
-                    )
-                elif event_type == 'subagent_tool_result':
-                    # Tool result within subagent - update live store
-                    await live_session_store.add_subagent_tool_result(
-                        session_id=session_id,
-                        agent_id=event.get('agent_id'),
-                        tool_id=event.get('tool_use_id'),
-                        result=event.get('output', ''),
-                        is_error=event.get('is_error', False)
-                    )
-                    # Broadcast
-                    chunk_data = {
-                        'agent_id': event.get('agent_id'),
-                        'tool_use_id': event.get('tool_use_id'),
-                        'output': event.get('output', ''),
-                        'is_error': event.get('is_error', False)
-                    }
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='subagent_tool_result',
-                        chunk_data=chunk_data,
-                        source_device_id=None
-                    )
-                elif event_type == 'subagent_done':
-                    # Subagent completed - update live store
-                    await live_session_store.complete_subagent(
-                        session_id=session_id,
-                        agent_id=event.get('agent_id'),
-                        result=event.get('result', ''),
-                        is_error=event.get('is_error', False)
-                    )
-                    # Broadcast
-                    chunk_data = {
-                        'agent_id': event.get('agent_id'),
-                        'result': event.get('result'),
-                        'is_error': event.get('is_error', False)
-                    }
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='subagent_done',
-                        chunk_data=chunk_data,
-                        source_device_id=None
-                    )
-                elif event_type == 'stream_block_start':
-                    # Start of a content block (text, tool_use, etc.)
-                    block_type = event.get('block_type')
-                    content_block = event.get('content_block', {})
-
-                    # For tool_use blocks, create the tool message in the live store
-                    # immediately so polling clients see it right away instead of
-                    # waiting for the full AssistantMessage (which can take seconds
-                    # for large tool inputs like Write/Edit/Bash).
-                    if block_type == 'tool_use':
-                        early_tool_id = content_block.get('id')
-                        early_tool_name = content_block.get('name', 'unknown')
-                        if early_tool_id:
-                            current_tool_id = early_tool_id
-                            await live_session_store.add_early_tool_use(
-                                session_id=session_id,
-                                tool_id=early_tool_id,
-                                name=early_tool_name
-                            )
-
-                    chunk_data = {
-                        'block_type': block_type,
-                        'index': event.get('index'),
-                        'content_block': content_block
-                    }
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='stream_block_start',
-                        chunk_data=chunk_data,
-                        source_device_id=None
-                    )
-                elif event_type == 'stream_block_stop':
-                    # End of a content block
-                    chunk_data = {
-                        'index': event.get('index')
-                    }
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='stream_block_stop',
-                        chunk_data=chunk_data,
-                        source_device_id=None
-                    )
-                elif event_type == 'stream_message_delta':
-                    # Final message metadata with output token usage
-                    # Broadcast to sync output tokens across devices
-                    chunk_data = {
-                        'delta': event.get('delta', {}),
-                        'usage': event.get('usage', {})
-                    }
-                    await sync_engine.broadcast_stream_chunk(
-                        session_id=session_id,
-                        message_id=message_id,
-                        chunk_type='stream_message_delta',
-                        chunk_data=chunk_data,
-                        source_device_id=None
-                    )
-                elif event_type in ('done', 'interrupted'):
-                    # Store metadata for webhook dispatch
-                    is_interrupted = event_type == 'interrupted'
-                    final_metadata = event.get('metadata', {})
-
-                    # End live session store streaming
-                    # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
-                    await live_session_store.end_streaming(
-                        session_id=session_id,
-                        metadata=final_metadata,
-                        interrupted=is_interrupted
-                    )
-
-                    # Pre-seed JSONL parse cache with live store messages instead of
-                    # invalidating. This avoids expensive JSONL re-parsing on the next
-                    # load - the live store already has the final messages in memory.
-                    from app.core.jsonl_parser import pre_seed_parse_cache, invalidate_parse_cache
-                    session_row = database.get_session(session_id)
-                    sdk_sid = session_row.get("sdk_session_id") if session_row else None
-                    if sdk_sid:
-                        live_data = live_session_store.get_session_dict(session_id)
-                        if live_data and live_data.get("messages"):
-                            # Build working_dir for JSONL path lookup
-                            seed_working_dir = str(settings.workspace_dir)
-                            seed_project_id = session_row.get("project_id") if session_row else None
-                            if seed_project_id:
-                                seed_project = database.get_project(seed_project_id)
-                                if seed_project:
-                                    seed_working_dir = get_project_working_dir(seed_project)
-
-                            # Build usage_data from final metadata + live store
-                            live_usage = live_data.get("usage", {})
-                            seed_usage = {
-                                "total_tokens_in": live_usage.get("input_tokens", 0),
-                                "total_tokens_out": live_usage.get("output_tokens", 0),
-                                "cache_creation_tokens": final_metadata.get("cache_creation_tokens", live_usage.get("cache_creation_tokens", 0)),
-                                "cache_read_tokens": final_metadata.get("cache_read_tokens", live_usage.get("cache_read_tokens", 0)),
-                                "last_input_tokens": final_metadata.get("tokens_in", 0),
-                                "model": final_metadata.get("model")
-                            }
-
-                            pre_seed_parse_cache(sdk_sid, live_data["messages"], seed_usage, seed_working_dir)
-                        else:
-                            # Live store empty - fall back to invalidation
-                            invalidate_parse_cache(sdk_sid)
-
-                    # Schedule delayed cleanup (gives clients time to reconnect)
-                    asyncio.create_task(_delayed_session_cleanup(session_id, delay_seconds=30))
-
-                    # Stream completed/interrupted - broadcast end
-                    if stream_started:
-                        await sync_engine.broadcast_stream_end(
-                            session_id=session_id,
-                            message_id=message_id,
-                            metadata=final_metadata,
-                            interrupted=is_interrupted,
-                            source_device_id=None
-                        )
+                # Dispatch to handler — updates live_session_store and broadcasts via sync_engine
+                await dispatch_event(event, event_ctx, stream_state)
 
             ctx.debug(logger, "Query completed")
 
             # Dispatch notifications for session completion (non-blocking)
             import time as time_module
-            duration = time_module.time() - query_start_time
+            duration = time_module.time() - stream_state.query_start_time
+            final_metadata = stream_state.final_metadata
             session_data = database.get_session(session_id)
             try:
                 # Legacy webhook dispatch
@@ -854,7 +424,7 @@ async def chat_websocket(
             asyncio.create_task(_delayed_session_cleanup(session_id, delay_seconds=30))
 
             # Broadcast stream end with interrupted flag
-            if stream_started:
+            if stream_state.stream_started:
                 await sync_engine.broadcast_stream_end(
                     session_id=session_id,
                     message_id=message_id,
@@ -879,7 +449,7 @@ async def chat_websocket(
             asyncio.create_task(_delayed_session_cleanup(session_id, delay_seconds=30))
 
             # Broadcast stream end on error
-            if stream_started:
+            if stream_state.stream_started:
                 await sync_engine.broadcast_stream_end(
                     session_id=session_id,
                     message_id=message_id,
@@ -931,7 +501,7 @@ async def chat_websocket(
             # ALWAYS ensure streaming state is cleared, even if stream_started was never set
             # This prevents stuck streaming state after errors or early termination
             if sync_engine.is_session_streaming(session_id):
-                if not stream_started:
+                if not stream_state.stream_started:
                     # Stream was marked but never actually started - clean up silently
                     ctx.debug(logger, "Cleaning up streaming state (never started)")
                     await sync_engine.broadcast_stream_end(
