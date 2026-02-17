@@ -52,6 +52,15 @@ class SessionPoller {
 	/** Consecutive error counts per session */
 	private _errorCounts: Map<string, number> = new Map();
 
+	/**
+	 * Streaming generation counter per session. Incremented each time
+	 * startStreaming() is called. Captured before each _poll() so that
+	 * _applyPollResult can detect stale responses — if the generation
+	 * changed between poll start and response, a new streaming session
+	 * was started and the old poll's streamingJustEnded is invalid.
+	 */
+	private _streamingGeneration: Map<string, number> = new Map();
+
 	/** Callback when streaming ends */
 	private _onStreamEnd: StreamEndCallback | null = null;
 
@@ -80,6 +89,12 @@ class SessionPoller {
 	 * If already polling this session, this is a no-op.
 	 */
 	startStreaming(sessionId: string): void {
+		// Bump generation FIRST — any in-flight or debounced polls from a
+		// previous streaming session will see a stale generation and skip
+		// their streamingJustEnded transition.
+		const nextGen = (this._streamingGeneration.get(sessionId) ?? 0) + 1;
+		this._streamingGeneration.set(sessionId, nextGen);
+
 		if (this._timers.has(sessionId)) {
 			// Already polling - maybe speed up if was idle
 			const existing = this._timers.get(sessionId)!;
@@ -147,6 +162,9 @@ class SessionPoller {
 		}
 		this._inFlight.delete(sessionId);
 		this._errorCounts.delete(sessionId);
+		// NOTE: Do NOT clear _streamingGeneration here. The generation must
+		// persist across stop/start cycles so that stale poll responses from
+		// a stopped session are still detected as stale when a new session starts.
 
 		// Clear any pending debounced poll
 		const pending = this._pendingPollNow.get(sessionId);
@@ -166,6 +184,7 @@ class SessionPoller {
 		this._timers.clear();
 		this._inFlight.clear();
 		this._errorCounts.clear();
+		this._streamingGeneration.clear();
 
 		// Clear all pending debounced polls
 		for (const timer of this._pendingPollNow.values()) {
@@ -188,6 +207,12 @@ class SessionPoller {
 		if (this._inFlight.has(sessionId)) return;
 		this._inFlight.add(sessionId);
 
+		// Capture the streaming generation BEFORE the async fetch.
+		// If startStreaming() is called while this fetch is in-flight,
+		// the generation will advance and _applyPollResult will know
+		// this response is stale (belongs to a previous streaming session).
+		const pollGeneration = this._streamingGeneration.get(sessionId) ?? 0;
+
 		try {
 			const lastUpdateId = sessionState.getLastUpdateId(sessionId);
 
@@ -208,7 +233,7 @@ class SessionPoller {
 			}
 
 			const data = await response.json();
-			this._applyPollResult(sessionId, data);
+			this._applyPollResult(sessionId, data, pollGeneration);
 			// Reset error counter on successful poll
 			this._errorCounts.delete(sessionId);
 		} catch (e) {
@@ -241,7 +266,7 @@ class SessionPoller {
 	 *   The backend skips initial history messages the frontend already has,
 	 *   dramatically reducing payload for long sessions near auto-compaction.
 	 */
-	private _applyPollResult(sessionId: string, data: Record<string, unknown>): void {
+	private _applyPollResult(sessionId: string, data: Record<string, unknown>, pollGeneration: number): void {
 		const newUpdateId = data.last_update_id as number;
 		const isStreaming = data.is_streaming as boolean;
 		const serverMessages = (data.messages as Array<Record<string, unknown>>) || [];
@@ -285,6 +310,21 @@ class SessionPoller {
 		} else {
 			// Full response or first poll — use as-is
 			messages = streamingMessages;
+		}
+
+		// Check if a new streaming session was started since this poll began.
+		// If so, this response is STALE — its data belongs to a previous query
+		// and must NOT be written to sessionState (which would trigger the bridge
+		// to overwrite the store's optimistic user message with old data).
+		const currentGeneration = this._streamingGeneration.get(sessionId) ?? 0;
+		const isStaleResponse = pollGeneration < currentGeneration;
+
+		if (isStaleResponse) {
+			// Stale poll response from a previous streaming session.
+			// Do NOT write to sessionState, stop the poller, or fire onStreamEnd.
+			// The new streaming session's polls will provide fresh data.
+			console.debug(`[Poller] Discarding stale poll response for ${sessionId} (gen ${pollGeneration} < ${currentGeneration})`);
+			return;
 		}
 
 		// Extract todos from all messages (including history for TodoWrite persistence)

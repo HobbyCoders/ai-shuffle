@@ -267,6 +267,12 @@ function createActiveSessionStore() {
 	let stopTimeout: ReturnType<typeof setTimeout> | null = null;
 	let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
+	// Tracked removeSession timers so they can be cancelled when a new
+	// streaming session starts for the same sessionId. Without this,
+	// onStreamEnd's removeSession fires 100ms later and deletes the
+	// new session's data from sessionState.
+	const removeSessionTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+
 	// Shared mutable state — passed by reference to ws-message-handlers and session-switcher
 	const internal: InternalMutableState = {
 		waitingForHistory: null,
@@ -365,6 +371,14 @@ function createActiveSessionStore() {
 	// ── Internal helpers ───────────────────────────────────────────────────
 
 	function startPolling(sessionId: string) {
+		// Cancel any pending removeSession timer from a previous onStreamEnd.
+		// Without this, the 100ms removeSession timer fires and deletes the
+		// session data that the new streaming session just initialized.
+		const pendingRemove = removeSessionTimers.get(sessionId);
+		if (pendingRemove) {
+			clearTimeout(pendingRemove);
+			removeSessionTimers.delete(sessionId);
+		}
 		sessionPoller.startStreaming(sessionId);
 	}
 
@@ -527,6 +541,16 @@ function createActiveSessionStore() {
 			// If in interrupt_and_query transition, skip cleanup
 			if (internal.interruptPending) return;
 
+			// If the store says isStreaming=true AND the poller is already
+			// running for this session, a new query was started while this
+			// onStreamEnd was deferred. This callback is stale — skip it
+			// to avoid tearing down the new query's state.
+			const currentState = get(store);
+			if (currentState.isStreaming && currentState.sessionId === sessionId && sessionPoller.isPolling(sessionId)) {
+				console.debug(`[ActiveSession] Skipping stale onStreamEnd for ${sessionId} — new streaming in progress`);
+				return;
+			}
+
 			// Refresh sessions list
 			appData.loadSessions();
 
@@ -539,6 +563,13 @@ function createActiveSessionStore() {
 			if (finalSession && finalSession.messages.length > 0) {
 				update(s => {
 					if (s.sessionId !== sessionId) return s;
+					// Defense-in-depth: if the store is currently streaming
+					// (a new query was started since onStreamEnd was deferred),
+					// do NOT overwrite isStreaming or messages.
+					if (s.isStreaming) {
+						console.debug(`[ActiveSession] onStreamEnd: store is streaming, preserving state`);
+						return s;
+					}
 					// If the bridge already flushed these exact messages, only
 					// update isStreaming and usage — skip the messages reference
 					// change to minimize reactive DOM churn.
@@ -558,8 +589,12 @@ function createActiveSessionStore() {
 				messageCache.set(sessionId, finalSession.messages);
 			}
 
-			// Clean up sessionState after reactive cycle completes
-			setTimeout(() => sessionState.removeSession(sessionId), 100);
+			// Clean up sessionState after reactive cycle completes.
+			// Use the tracked timer map so startStreaming can cancel it.
+			removeSessionTimers.set(sessionId, setTimeout(() => {
+				removeSessionTimers.delete(sessionId);
+				sessionState.removeSession(sessionId);
+			}, 100));
 
 			// Mark as handled so the safety timeout doesn't send redundant load_session
 			internal.streamEndCleanedUp = true;
@@ -674,6 +709,9 @@ function createActiveSessionStore() {
 		disconnect();
 		wsConn.destroy();
 		if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
+		// Cancel all pending removeSession timers
+		for (const timer of removeSessionTimers.values()) clearTimeout(timer);
+		removeSessionTimers.clear();
 		set(defaultState());
 	}
 
