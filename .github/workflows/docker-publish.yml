@@ -20,9 +20,9 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: blacksmith-8vcpu-ubuntu-2404
+            runner: blacksmith-16vcpu-ubuntu-2404
           - platform: linux/arm64
-            runner: blacksmith-8vcpu-ubuntu-2404-arm
+            runner: blacksmith-16vcpu-ubuntu-2404-arm
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -77,7 +77,7 @@ jobs:
           retention-days: 1
 
   merge:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: build
     permissions:
       contents: read
@@ -140,7 +140,7 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
   attest:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: merge
     if: github.ref == 'refs/heads/main'
     permissions:
