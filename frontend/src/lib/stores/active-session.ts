@@ -391,35 +391,76 @@ function createActiveSessionStore() {
 		const userMsgId = `user-${Date.now()}`;
 		const queryProfileId = state.currentQueryProfileId || state.profile;
 
-		update(s => ({
-			...s,
-			messages: [...s.messages, {
-				id: userMsgId,
-				role: 'user' as const,
-				content: nextQueued.content,
-				profileId: queryProfileId
-			}],
-			isStreaming: true,
-			error: null,
-			streamStartTime: Date.now()
-		}));
+		if (state.isStreaming && state.sessionId) {
+			// Currently streaming — use interrupt_and_query for clean transition.
+			// This mirrors the interrupt path in sendMessage().
+			sessionPoller.stop(state.sessionId);
+			sessionState.removeSession(state.sessionId);
+			internal.interruptPending = true;
 
-		const overrides: Record<string, string> = {};
-		const current = get(store);
-		if (current.modelOverride) overrides.model = current.modelOverride;
-		if (current.permissionModeOverride) overrides.permission_mode = current.permissionModeOverride;
-		if (current.thinkingModeOverride) overrides.thinking_mode = current.thinkingModeOverride;
+			update(s => {
+				const updatedMessages = s.messages.map(m => {
+					if (m.type === 'tool_use' && m.toolStatus === 'running') {
+						return { ...m, streaming: false, toolStatus: 'error' as const };
+					}
+					return m.streaming ? { ...m, streaming: false } : m;
+				});
+				return {
+					...s,
+					messages: [...updatedMessages, {
+						id: userMsgId,
+						role: 'user' as const,
+						content: nextQueued.content,
+						profileId: queryProfileId,
+					}],
+					isStreaming: true,
+					error: null,
+					streamStartTime: Date.now(),
+				};
+			});
 
-		wsConn.resetLastMessageTime();
-		wsConn.send({
-			type: 'query',
-			prompt: nextQueued.content,
-			session_id: state.sessionId,
-			profile: state.profile,
-			project: state.project || undefined,
-			worktree_id: state.worktreeId || undefined,
-			...(Object.keys(overrides).length > 0 ? { overrides } : {})
-		});
+			internal.pendingTools.clear();
+			wsConn.resetLastMessageTime();
+			wsConn.send({
+				type: 'interrupt_and_query',
+				prompt: nextQueued.content,
+				session_id: state.sessionId,
+				profile: state.profile,
+				project: state.project || undefined,
+				worktree_id: state.worktreeId || undefined,
+			});
+		} else {
+			// Not streaming — normal query (safety net from done/stopped handler)
+			update(s => ({
+				...s,
+				messages: [...s.messages, {
+					id: userMsgId,
+					role: 'user' as const,
+					content: nextQueued.content,
+					profileId: queryProfileId
+				}],
+				isStreaming: true,
+				error: null,
+				streamStartTime: Date.now()
+			}));
+
+			const overrides: Record<string, string> = {};
+			const current = get(store);
+			if (current.modelOverride) overrides.model = current.modelOverride;
+			if (current.permissionModeOverride) overrides.permission_mode = current.permissionModeOverride;
+			if (current.thinkingModeOverride) overrides.thinking_mode = current.thinkingModeOverride;
+
+			wsConn.resetLastMessageTime();
+			wsConn.send({
+				type: 'query',
+				prompt: nextQueued.content,
+				session_id: state.sessionId,
+				profile: state.profile,
+				project: state.project || undefined,
+				worktree_id: state.worktreeId || undefined,
+				...(Object.keys(overrides).length > 0 ? { overrides } : {})
+			});
+		}
 
 		persistSession();
 	}
