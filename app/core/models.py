@@ -130,6 +130,11 @@ class ProfileConfig(BaseModel):
     # File checkpointing for rewind (SDK 0.1.15+)
     enable_file_checkpointing: bool = False  # Enable file snapshots for rewind
 
+    # Plan mode behavior - what happens when ExitPlanMode is accepted
+    # "normal": keep conversation context, continue with full history
+    # "clear_context": clear SDK session context so execution starts fresh (like Claude Code CLI)
+    plan_exit_behavior: Optional[str] = "normal"  # normal, clear_context
+
 
 class ProfileBase(BaseModel):
     """Base profile fields"""

@@ -2887,21 +2887,34 @@ async def stream_to_websocket(
                 # Return updated input with answers - SDK expects PermissionResultAllow
                 return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
 
-            # ExitPlanMode always requires user approval (except in bypassPermissions)
-            # This ensures users can review plans before the agent exits planning mode
-            if tool_name == "ExitPlanMode" and permission_mode != "bypassPermissions":
-                request_id = f"perm-{session_id}-{uuid.uuid4().hex[:8]}"
-                logger.debug(f"[WS] ExitPlanMode requires approval in {permission_mode} mode: {request_id}")
+            # ExitPlanMode handling: require user approval (except in bypassPermissions),
+            # then optionally clear context based on profile's plan_exit_behavior setting
+            if tool_name == "ExitPlanMode":
+                # In non-bypass mode, require user approval first
+                if permission_mode != "bypassPermissions":
+                    request_id = f"perm-{session_id}-{uuid.uuid4().hex[:8]}"
+                    logger.debug(f"[WS] ExitPlanMode requires approval in {permission_mode} mode: {request_id}")
 
-                result = await permission_handler.request_permission(
-                    request_id=request_id,
-                    session_id=session_id,
-                    profile_id=profile_id,
-                    tool_name=tool_name,
-                    tool_input=tool_input,
-                    broadcast_func=broadcast_func
-                )
-                return result
+                    result = await permission_handler.request_permission(
+                        request_id=request_id,
+                        session_id=session_id,
+                        profile_id=profile_id,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        broadcast_func=broadcast_func
+                    )
+                    # If denied, return immediately without applying clear_context
+                    if result.behavior == "deny":
+                        return result
+
+                # Plan was accepted (auto-approved in bypass or user-approved)
+                # Check profile setting for clear context behavior
+                plan_exit_behavior = config.get("plan_exit_behavior", "normal")
+                if plan_exit_behavior == "clear_context":
+                    database.update_session(session_id=session_id, sdk_session_id="")
+                    logger.info(f"[WS] ExitPlanMode: clearing context for session {session_id} (plan_exit_behavior=clear_context)")
+
+                return PermissionResultAllow()
 
             # For other tools in default mode, route through permission handler
             if permission_mode == "default":

@@ -155,7 +155,9 @@
 		max_buffer_size: null as number | null,
 		env_vars: [] as { key: string; value: string }[],
 		// SDK 0.1.15+ file checkpointing for rewind
-		enable_file_checkpointing: false
+		enable_file_checkpointing: false,
+		// Plan mode exit behavior
+		plan_exit_behavior: 'normal' as 'normal' | 'clear_context'
 	});
 
 	// Common environment variable presets with valid ranges
@@ -306,7 +308,8 @@
 			user: '',
 			max_buffer_size: null,
 			env_vars: [],
-			enable_file_checkpointing: false
+			enable_file_checkpointing: false,
+			plan_exit_behavior: 'normal' as 'normal' | 'clear_context'
 		};
 		toolSelectionMode = 'all';
 		aiToolSelectionMode = 'custom';
@@ -373,7 +376,8 @@
 			user: (config as any).user || '',
 			max_buffer_size: (config as any).max_buffer_size || null,
 			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string })),
-			enable_file_checkpointing: (config as any).enable_file_checkpointing || false
+			enable_file_checkpointing: (config as any).enable_file_checkpointing || false,
+			plan_exit_behavior: (config as any).plan_exit_behavior || 'normal'
 		};
 
 		viewMode = 'form';
@@ -578,7 +582,9 @@
 			permission_mode: profileForm.permission_mode,
 			include_partial_messages: profileForm.include_partial_messages,
 			// SDK 0.1.15+ file checkpointing for rewind
-			enable_file_checkpointing: profileForm.enable_file_checkpointing
+			enable_file_checkpointing: profileForm.enable_file_checkpointing,
+			// Plan mode exit behavior
+			plan_exit_behavior: profileForm.plan_exit_behavior
 		};
 
 		// Opus uses effort-based reasoning, other models use thinking_mode with token budgets
@@ -791,7 +797,8 @@
 			user: '',
 			max_buffer_size: agent.max_buffer_size || null,
 			env_vars: agent.env ? Object.entries(agent.env).map(([key, value]) => ({ key, value: value as string })) : [],
-			enable_file_checkpointing: false
+			enable_file_checkpointing: false,
+			plan_exit_behavior: (agent as any).plan_exit_behavior || 'normal'
 		};
 
 		viewMode = 'form';
@@ -888,6 +895,13 @@
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'acceptEdits'} onclick={() => profileForm.permission_mode = 'acceptEdits'}>Accept Edits</button>
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'plan'} onclick={() => profileForm.permission_mode = 'plan'}>Plan</button>
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'bypassPermissions'} onclick={() => profileForm.permission_mode = 'bypassPermissions'}>Bypass</button>
+							</div>
+						</div>
+						<div class="form-field">
+							<label class="card-form-label">Plan Exit Behavior — {#if profileForm.plan_exit_behavior === 'normal'}keep conversation context when plan is approved{:else}clear conversation context when plan is approved for a fresh execution window{/if}</label>
+							<div class="card-mode-selector">
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.plan_exit_behavior === 'normal'} onclick={() => profileForm.plan_exit_behavior = 'normal'}>Normal</button>
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.plan_exit_behavior === 'clear_context'} onclick={() => profileForm.plan_exit_behavior = 'clear_context'}>Clear Context</button>
 							</div>
 						</div>
 						{#if profileForm.model === 'opus'}
