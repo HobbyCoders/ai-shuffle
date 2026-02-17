@@ -257,6 +257,25 @@
 		aiToolSelectionMode === 'all' ? getAllAIToolIds().length : profileForm.enabled_ai_tools.length
 	);
 
+	/**
+	 * Compute the effective tool count for a profile based on its selection mode.
+	 * - allowed_tools non-empty → "allow only" mode → count = allowed_tools.length
+	 * - disallowed_tools non-empty → "disallow" mode → count = total - disallowed_tools.length
+	 * - neither → "all" mode → count = total available tools
+	 */
+	function getProfileToolCount(profile: Profile): number {
+		const total = availableTools.all_tools.length;
+		const allowed = profile.config?.allowed_tools;
+		const disallowed = profile.config?.disallowed_tools;
+
+		if (allowed && allowed.length > 0) {
+			return allowed.length;
+		} else if (disallowed && disallowed.length > 0) {
+			return Math.max(0, total - disallowed.length);
+		}
+		return total;
+	}
+
 	// Load AI tools when form opens
 	$effect(() => {
 		if (viewMode === 'form') {
@@ -1410,7 +1429,7 @@
 										<span class="fp-item-description">{profile.description}</span>
 									{/if}
 									<div class="fp-item-meta">
-										<span class="fp-meta-chip"><Wrench size={12} /> {profile.config?.allowed_tools?.length || profile.config?.disallowed_tools?.length || 0} tools</span>
+										<span class="fp-meta-chip"><Wrench size={12} /> {getProfileToolCount(profile)} tools</span>
 										<span class="fp-meta-dot"></span>
 										<span class="fp-meta-chip"><Bot size={12} /> {profile.config?.enabled_agents?.length || 0} agents</span>
 										<span class="fp-meta-dot"></span>
