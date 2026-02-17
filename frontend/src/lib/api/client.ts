@@ -9,6 +9,43 @@ export interface ApiError {
 	status: number;
 }
 
+/**
+ * Extract a meaningful error message from a failed HTTP response.
+ * Tries JSON first, then plain text, then falls back to status description.
+ */
+async function extractErrorDetail(response: Response): Promise<string> {
+	try {
+		const json = await response.json();
+		if (json.detail) return json.detail;
+		if (json.message) return json.message;
+		if (json.error) return typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
+	} catch {
+		// JSON parsing failed — try plain text
+		try {
+			const text = await response.text();
+			if (text && text.length < 500) return text.trim();
+		} catch {
+			// Text extraction also failed
+		}
+	}
+	// Fall back to a descriptive status-based message
+	const statusMessages: Record<number, string> = {
+		400: 'Bad request — the server rejected the input',
+		401: 'Authentication required — please log in again',
+		403: 'Permission denied — you don\'t have access to this resource',
+		404: 'Not found — the requested resource doesn\'t exist',
+		408: 'Request timed out — the server took too long to respond',
+		409: 'Conflict — the operation conflicts with the current state',
+		422: 'Validation error — the input data is invalid',
+		429: 'Rate limited — too many requests, try again shortly',
+		500: 'Internal server error — something went wrong on the server',
+		502: 'Bad gateway — the server is temporarily unavailable',
+		503: 'Service unavailable — the server is overloaded or under maintenance',
+		504: 'Gateway timeout — the upstream server didn\'t respond in time',
+	};
+	return statusMessages[response.status] || `Server error (HTTP ${response.status}: ${response.statusText || 'no details'})`;
+}
+
 export class ApiClient {
 	private async request<T>(
 		method: string,
@@ -25,9 +62,9 @@ export class ApiClient {
 		});
 
 		if (!response.ok) {
-			const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+			const detail = await extractErrorDetail(response);
 			throw {
-				detail: error.detail || 'Request failed',
+				detail,
 				status: response.status
 			} as ApiError;
 		}
@@ -66,9 +103,9 @@ export class ApiClient {
 		});
 
 		if (!response.ok) {
-			const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+			const detail = await extractErrorDetail(response);
 			throw {
-				detail: error.detail || 'Request failed',
+				detail,
 				status: response.status
 			} as ApiError;
 		}
@@ -98,9 +135,9 @@ export class ApiClient {
 		});
 
 		if (!response.ok) {
-			const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+			const detail = await extractErrorDetail(response);
 			throw {
-				detail: error.detail || 'Upload failed',
+				detail,
 				status: response.status
 			} as ApiError;
 		}

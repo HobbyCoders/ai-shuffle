@@ -162,29 +162,89 @@ describe('ApiClient', () => {
 	});
 
 	describe('error handling', () => {
-		it('should handle unknown error when json parsing fails', async () => {
+		it('should fall back to text body when json parsing fails', async () => {
 			fetchMock.mockResolvedValueOnce({
 				ok: false,
 				status: 500,
-				json: () => Promise.reject(new Error('Invalid JSON'))
+				statusText: 'Internal Server Error',
+				json: () => Promise.reject(new Error('Invalid JSON')),
+				text: () => Promise.resolve('git worktree add failed')
 			});
 
 			await expect(client.get('/error')).rejects.toEqual({
-				detail: 'Unknown error',
+				detail: 'git worktree add failed',
 				status: 500
 			});
 		});
 
-		it('should use default message when detail is missing', async () => {
+		it('should use status-based message when both json and text fail', async () => {
 			fetchMock.mockResolvedValueOnce({
 				ok: false,
-				status: 400,
-				json: () => Promise.resolve({})
+				status: 500,
+				statusText: 'Internal Server Error',
+				json: () => Promise.reject(new Error('Invalid JSON')),
+				text: () => Promise.reject(new Error('Read failed'))
 			});
 
 			await expect(client.get('/error')).rejects.toEqual({
-				detail: 'Request failed',
+				detail: 'Internal server error — something went wrong on the server',
+				status: 500
+			});
+		});
+
+		it('should provide descriptive error for common HTTP status codes', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 404,
+				statusText: 'Not Found',
+				json: () => Promise.reject(new Error('Invalid JSON')),
+				text: () => Promise.resolve('')
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: 'Not found — the requested resource doesn\'t exist',
+				status: 404
+			});
+		});
+
+		it('should extract message field from json if detail is missing', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 400,
+				json: () => Promise.resolve({ message: 'Branch name is required' })
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: 'Branch name is required',
 				status: 400
+			});
+		});
+
+		it('should extract error field from json if detail and message are missing', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 422,
+				json: () => Promise.resolve({ error: 'Validation failed' })
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: 'Validation failed',
+				status: 422
+			});
+		});
+
+		it('should use status description for unknown status when body is empty', async () => {
+			fetchMock.mockResolvedValueOnce({
+				ok: false,
+				status: 418,
+				statusText: 'I\'m a teapot',
+				json: () => Promise.reject(new Error('no json')),
+				text: () => Promise.resolve('')
+			});
+
+			await expect(client.get('/error')).rejects.toEqual({
+				detail: 'Server error (HTTP 418: I\'m a teapot)',
+				status: 418
 			});
 		});
 	});

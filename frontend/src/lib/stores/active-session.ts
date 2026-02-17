@@ -146,28 +146,57 @@ function getAuthToken(): string | null {
 }
 
 function formatWorktreeError(rawError: string, branchName: string): string {
-	const lowerError = rawError.toLowerCase();
-	if (lowerError.includes('already checked out') || lowerError.includes('is already used by worktree')) {
-		return `A worktree already exists for branch '${branchName}'. Select it from Active Worktrees instead.`;
+	const lower = rawError.toLowerCase();
+
+	// Git-specific errors
+	if (lower.includes('already checked out') || lower.includes('is already used by worktree')) {
+		return `Branch '${branchName}' already has an active worktree. Select it from Active Worktrees instead.`;
 	}
-	if (lowerError.includes('not a valid branch') || lowerError.includes('branch not found') ||
-		lowerError.includes('unknown revision') || (lowerError.includes('pathspec') && lowerError.includes('did not match'))) {
-		return `Branch '${branchName}' doesn't exist. Try fetching from remote first or create a new branch.`;
+	if (lower.includes('not a valid branch') || lower.includes('branch not found') ||
+		lower.includes('unknown revision') || (lower.includes('pathspec') && lower.includes('did not match'))) {
+		return `Branch '${branchName}' doesn't exist. Fetch from remote first or create a new branch.`;
 	}
-	if (lowerError.includes('already exists') && (lowerError.includes('path') || lowerError.includes('folder') || lowerError.includes('directory'))) {
-		return `Cannot create worktree: a folder already exists at the target path. Try a different branch name.`;
+	if (lower.includes('already exists') && (lower.includes('path') || lower.includes('folder') || lower.includes('directory'))) {
+		return `A folder already exists at the worktree path for '${branchName}'. Try a different branch name.`;
 	}
-	if (lowerError.includes('.lock') || lowerError.includes('unable to lock') || lowerError.includes('index.lock')) {
-		return `Git operation in progress. Please wait a moment and try again.`;
+	if (lower.includes('.lock') || lower.includes('unable to lock') || lower.includes('index.lock')) {
+		return 'A git operation is in progress. Wait a moment and try again.';
 	}
-	if (lowerError.includes('permission denied') || lowerError.includes('access denied')) {
-		return `Permission denied while creating worktree. Check folder permissions.`;
+	if (lower.includes('permission denied') || lower.includes('access denied')) {
+		return 'Permission denied creating worktree. Check folder permissions on the server.';
 	}
-	if (lowerError.includes('could not resolve') || lowerError.includes('connection refused') ||
-		lowerError.includes('network') || lowerError.includes('timeout')) {
-		return `Network error while creating worktree. Check your connection and try again.`;
+	if (lower.includes('not a git repository')) {
+		return 'The project directory is not a git repository. Initialize git first.';
 	}
-	return `Failed to create worktree: ${rawError}`;
+	if (lower.includes('dirty') || lower.includes('uncommitted') || lower.includes('unstaged')) {
+		return 'Uncommitted changes detected. Commit or stash your changes before creating a worktree.';
+	}
+
+	// Network / HTTP errors
+	if (lower.includes('could not resolve') || lower.includes('connection refused') ||
+		lower.includes('failed to fetch') || lower.includes('networkerror')) {
+		return 'Network error — cannot reach the server. Check your connection.';
+	}
+	if (lower.includes('timeout') || lower.includes('aborted')) {
+		return 'Request timed out. The server may be overloaded — try again.';
+	}
+
+	// HTTP status-based errors from the API client
+	if (lower.includes('bad request')) {
+		return `Invalid worktree request for '${branchName}'. Check the branch name and try again.`;
+	}
+	if (lower.includes('authentication required') || lower.includes('permission denied')) {
+		return 'Authentication error. Try refreshing the page and logging in again.';
+	}
+	if (lower.includes('not found') && lower.includes('resource')) {
+		return 'Project not found. It may have been deleted or moved.';
+	}
+	if (lower.includes('internal server error') || lower.includes('server error')) {
+		return `Server error creating worktree for '${branchName}'. Check the backend logs.`;
+	}
+
+	// Fallback with the raw error for debugging
+	return `Failed to create worktree for '${branchName}': ${rawError}`;
 }
 
 /** Build a partial store update from SessionUsage, skipping if no context data. */
@@ -891,12 +920,15 @@ function createActiveSessionStore() {
 					setTimeout(() => storeApi.sendMessage(prompt, { skipWorktreeSetup: true }), 500);
 				}
 			} catch (error) {
-				const err = error as { detail?: string; message?: string };
-				const rawError = err.detail || err.message || 'Unknown error';
+				const err = error as { detail?: string; message?: string; status?: number };
+				const rawError = err.detail || err.message || '';
+				const formatted = rawError
+					? formatWorktreeError(rawError, state.worktreeBranch)
+					: `Failed to create worktree session for '${state.worktreeBranch}'. Check the backend logs for details.`;
 				update(s => ({
 					...s,
 					isCreatingWorktree: false,
-					worktreeError: formatWorktreeError(rawError, state.worktreeBranch),
+					worktreeError: formatted,
 				}));
 			}
 		},

@@ -113,14 +113,72 @@
 				// Refresh so new worktree appears in list
 				await git.loadWorktrees();
 			} else {
-				localWorktreeError = response.message || 'Failed to create worktree';
+				localWorktreeError = response.message || `Failed to create worktree for branch '${branchName}'`;
 			}
 		} catch (err: any) {
-			const msg = err?.detail || err?.message || 'Failed to create worktree';
-			localWorktreeError = msg;
+			const rawMsg = err?.detail || err?.message || '';
+			localWorktreeError = formatLocalWorktreeError(rawMsg, branchName, err?.status);
 		} finally {
 			creatingWorktree = false;
 		}
+	}
+
+	/** Format worktree creation errors into actionable user-facing messages */
+	function formatLocalWorktreeError(raw: string, branchName: string, httpStatus?: number): string {
+		const lower = raw.toLowerCase();
+
+		// Git-specific errors
+		if (lower.includes('already checked out') || lower.includes('is already used by worktree')) {
+			return `Branch '${branchName}' already has an active worktree. Select it from the dropdown instead.`;
+		}
+		if (lower.includes('not a valid branch') || lower.includes('branch not found') ||
+			lower.includes('unknown revision') || (lower.includes('pathspec') && lower.includes('did not match'))) {
+			return `Branch '${branchName}' doesn't exist. Fetch from remote first or create a new branch.`;
+		}
+		if (lower.includes('already exists') && (lower.includes('path') || lower.includes('folder') || lower.includes('directory'))) {
+			return `A folder already exists at the worktree path for '${branchName}'. Try a different branch name.`;
+		}
+		if (lower.includes('.lock') || lower.includes('unable to lock') || lower.includes('index.lock')) {
+			return 'A git operation is in progress. Wait a moment and try again.';
+		}
+		if (lower.includes('permission denied') || lower.includes('access denied')) {
+			return 'Permission denied creating worktree. Check folder permissions on the server.';
+		}
+		if (lower.includes('not a git repository')) {
+			return 'The project directory is not a git repository. Initialize git first.';
+		}
+		if (lower.includes('dirty') || lower.includes('uncommitted') || lower.includes('unstaged')) {
+			return 'Uncommitted changes detected. Commit or stash your changes before creating a worktree.';
+		}
+
+		// HTTP-level errors
+		if (httpStatus === 404) {
+			return `Project not found. The project may have been deleted or moved.`;
+		}
+		if (httpStatus === 401 || httpStatus === 403) {
+			return 'Authentication error. Try refreshing the page and logging in again.';
+		}
+		if (httpStatus && httpStatus >= 500) {
+			return raw
+				? `Server error creating worktree: ${raw}`
+				: 'Server error creating worktree. Check the backend logs for details.';
+		}
+
+		// Network errors (no HTTP status = fetch itself failed)
+		if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('network')) {
+			return 'Network error — cannot reach the server. Check your connection.';
+		}
+		if (lower.includes('timeout') || lower.includes('aborted')) {
+			return 'Request timed out creating worktree. The server may be overloaded.';
+		}
+
+		// If we have a raw message, include it with context
+		if (raw) {
+			return `Failed to create worktree for '${branchName}': ${raw}`;
+		}
+
+		// True last resort — should rarely hit this after API client improvements
+		return `Failed to create worktree for '${branchName}'. Check the backend logs for details.`;
 	}
 
 	function toggleDropdown() {
@@ -171,34 +229,30 @@
 <svelte:window onclick={handleClickOutside} />
 
 <div class="execution-mode-bar">
-	<!-- Segmented pill toggle -->
-	<div class="mode-toggle">
-		<button
-			class="mode-option"
-			class:active={$activeSession.executionMode === 'local'}
-			onclick={() => setMode('local')}
-		>
-			<Monitor size={13} strokeWidth={1.5} />
-			<span>Local</span>
-		</button>
-		<button
-			class="mode-option"
-			class:active={$activeSession.executionMode === 'worktree'}
-			onclick={() => setMode('worktree')}
-		>
-			<GitFork size={13} strokeWidth={1.5} />
-			<span>Worktree</span>
-		</button>
-	</div>
+	<div class="mode-bar-row">
+		<!-- Segmented pill toggle -->
+		<div class="mode-toggle">
+			<button
+				class="mode-option"
+				class:active={$activeSession.executionMode === 'local'}
+				onclick={() => setMode('local')}
+			>
+				<Monitor size={13} strokeWidth={1.5} />
+				<span>Local</span>
+			</button>
+			<button
+				class="mode-option"
+				class:active={$activeSession.executionMode === 'worktree'}
+				onclick={() => setMode('worktree')}
+			>
+				<GitFork size={13} strokeWidth={1.5} />
+				<span>Worktree</span>
+			</button>
+		</div>
 
-	<!-- Branch selector (shown when worktree mode active) -->
-	{#if $activeSession.executionMode === 'worktree'}
-		{#if worktreeError}
-			<div class="wt-status error">
-				<span>{worktreeError}</span>
-			</div>
-		{/if}
-		<div class="branch-selector" bind:this={dropdownRef}>
+		<!-- Branch selector (shown when worktree mode active) -->
+		{#if $activeSession.executionMode === 'worktree'}
+			<div class="branch-selector" bind:this={dropdownRef}>
 			<button
 				class="branch-trigger"
 				onclick={toggleDropdown}
@@ -273,6 +327,25 @@
 				</div>
 			{/if}
 		</div>
+		{/if}
+	</div>
+
+	<!-- Error shown below the pills row so it doesn't overflow on mobile -->
+	{#if $activeSession.executionMode === 'worktree' && worktreeError}
+		<div class="wt-error-row">
+			<div class="wt-error-banner">
+				<svg class="wt-error-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
+				</svg>
+				<span class="wt-error-text">{worktreeError}</span>
+				<button
+					type="button"
+					class="wt-error-dismiss"
+					onclick={() => { localWorktreeError = null; activeSession.clearWorktreeError(); }}
+					aria-label="Dismiss error"
+				>&times;</button>
+			</div>
+		</div>
 	{/if}
 </div>
 
@@ -288,12 +361,20 @@
 		position: relative;
 		z-index: 10;
 		display: flex;
+		flex-direction: column;
 		align-items: center;
-		justify-content: center;
-		gap: 12px;
+		gap: 6px;
 		padding: 8px 0 4px;
 		max-width: 100%;
 		overflow: visible;
+	}
+
+	.mode-bar-row {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 12px;
+		max-width: 100%;
 	}
 
 	/* Segmented pill */
@@ -481,17 +562,56 @@
 		color: var(--info);
 	}
 
-	.wt-status {
+	/* Error banner - displayed below the pills row */
+	.wt-error-row {
+		width: 100%;
 		display: flex;
-		align-items: center;
-		gap: 4px;
-		font-size: 0.6875rem;
-		padding: 2px 8px;
-		border-radius: 12px;
+		justify-content: center;
+		padding: 0 8px;
 	}
 
-	.wt-status.error {
+	.wt-error-banner {
+		display: flex;
+		align-items: flex-start;
+		gap: 6px;
+		padding: 6px 10px;
+		border-radius: 8px;
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+		border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
+		max-width: 100%;
+		min-width: 0;
+	}
+
+	.wt-error-icon {
+		flex-shrink: 0;
 		color: var(--destructive);
+		margin-top: 1px;
+	}
+
+	.wt-error-text {
+		flex: 1;
+		min-width: 0;
+		font-size: 0.6875rem;
+		line-height: 1.4;
+		color: var(--destructive);
+		word-break: break-word;
+	}
+
+	.wt-error-dismiss {
+		flex-shrink: 0;
+		background: none;
+		border: none;
+		color: var(--destructive);
+		font-size: 1rem;
+		line-height: 1;
+		cursor: pointer;
+		padding: 0 2px;
+		opacity: 0.7;
+		transition: opacity 150ms ease;
+	}
+
+	.wt-error-dismiss:hover {
+		opacity: 1;
 	}
 
 	/* Loading state */
