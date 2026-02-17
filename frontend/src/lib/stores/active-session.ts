@@ -15,6 +15,12 @@ import { notifySessionComplete, notifyWaitingForResponse } from '$lib/services/n
 import { sessionPoller } from './session/session-poller';
 import { sessionNotifier } from './session/session-notifier';
 import { sessionState, type SessionUsage } from './session/session-state';
+import { createWsConnection, type WsConnection } from './session/ws-connection';
+import { createMessageHandlers, type InternalMutableState } from './session/ws-message-handlers';
+import {
+	createSessionSwitcher,
+	getPersistedProfile, getPersistedProject,
+} from './session/session-switcher';
 
 // Caches and helpers
 import { messageCache } from './message-cache';
@@ -25,7 +31,7 @@ import { browserState } from './browser';
 
 // Shared types
 import type {
-	ChatMessage, MessageType, TodoItem, SubagentChildMessage,
+	ChatMessage, MessageType, TodoItem,
 	QueuedMessage, ExecutionMode
 } from './types';
 
@@ -105,87 +111,7 @@ export interface PersistedSession {
 	queuedMessages?: QueuedMessage[];
 }
 
-// ─── Constants ───────────────────────────────────────────────────────────────
-
-const CONNECTION_HEALTH_TIMEOUT_MS = 90_000;
-const STREAMING_HEALTH_TIMEOUT_MS = 45_000;
-const TOOL_EXECUTION_TIMEOUT_MS = 120_000;
-const MAX_RECONNECT_ATTEMPTS = 50;
-const MAX_RECONNECT_DELAY_MS = 30_000;
-const PING_INTERVAL_MS = 30_000;
-const SELECTION_SYNC_DEBOUNCE_MS = 1000;
-
 // ─── Module-Level Helpers ────────────────────────────────────────────────────
-
-function getPersistedProfile(): string {
-	if (typeof window !== 'undefined') {
-		return localStorage.getItem('aihub_selectedProfile') || '';
-	}
-	return '';
-}
-
-function getPersistedProject(): string {
-	if (typeof window !== 'undefined') {
-		return localStorage.getItem('aihub_selectedProject') || '';
-	}
-	return '';
-}
-
-async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; selectedProject: string } | null> {
-	if (typeof window === 'undefined') return null;
-	try {
-		const response = await fetch('/api/v1/preferences/selection', { credentials: 'include' });
-		if (response.ok) {
-			const data = await response.json();
-			if (data?.value) {
-				const sel = data.value as { selectedProfile?: string; selectedProject?: string };
-				const selectedProfile = sel.selectedProfile || '';
-				const selectedProject = sel.selectedProject || '';
-				if (selectedProfile) localStorage.setItem('aihub_selectedProfile', selectedProfile);
-				if (selectedProject) localStorage.setItem('aihub_selectedProject', selectedProject);
-				return { selectedProfile, selectedProject };
-			}
-		}
-	} catch (e) {
-		console.warn('[ActiveSession] Failed to load selection from backend:', e);
-	}
-	return null;
-}
-
-let pendingSelection: { profile: string; project: string } | null = null;
-let selectionSyncTimeout: ReturnType<typeof setTimeout> | null = null;
-
-function saveSelectionToBackend(profile: string, project: string) {
-	const effectiveProfile = profile || getPersistedProfile();
-	const effectiveProject = project || getPersistedProject();
-
-	if (typeof window !== 'undefined') {
-		if (effectiveProfile) localStorage.setItem('aihub_selectedProfile', effectiveProfile);
-		if (effectiveProject) localStorage.setItem('aihub_selectedProject', effectiveProject);
-	}
-
-	pendingSelection = { profile: effectiveProfile, project: effectiveProject };
-
-	if (selectionSyncTimeout) clearTimeout(selectionSyncTimeout);
-	selectionSyncTimeout = setTimeout(async () => {
-		if (!pendingSelection) return;
-		try {
-			await fetch('/api/v1/preferences/selection', {
-				method: 'PUT',
-				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
-				body: JSON.stringify({
-					key: 'selection',
-					value: { selectedProfile: pendingSelection.profile, selectedProject: pendingSelection.project }
-				})
-			});
-		} catch (e) {
-			console.error('[ActiveSession] Failed to sync selection to backend:', e);
-		}
-		pendingSelection = null;
-		selectionSyncTimeout = null;
-	}, SELECTION_SYNC_DEBOUNCE_MS);
-}
 
 function getOrCreateDeviceId(): string {
 	const CANONICAL_KEY = 'ai-shuffle-device-id';
@@ -208,13 +134,6 @@ function getOrCreateDeviceId(): string {
 	deviceId = `device-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 	localStorage.setItem(CANONICAL_KEY, deviceId);
 	return deviceId;
-}
-
-function getWsUrl(): string {
-	const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-	const host = window.location.host;
-	const deviceId = getOrCreateDeviceId();
-	return `${protocol}//${host}/api/v1/ws/chat?device_id=${encodeURIComponent(deviceId)}`;
 }
 
 function getAuthToken(): string | null {
@@ -316,20 +235,103 @@ function createActiveSessionStore() {
 
 	// ── Module-level scalars (replace per-tab Maps) ────────────────────────
 
-	let ws: WebSocket | null = null;
-	let pingTimer: ReturnType<typeof setInterval> | null = null;
-	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	let stopTimeout: ReturnType<typeof setTimeout> | null = null;
 	let persistTimer: ReturnType<typeof setTimeout> | null = null;
-	let waitingForHistory: Array<Record<string, unknown>> | null = null;
-	let expectedSessionId: string | null = null;
-	let pendingTools: Set<string> = new Set();
-	let lastMessageTime = 0;
-	let streamEndCleanedUp = false;
-	let streamingOnDisconnect: string | null = null;
-	let interruptPending = false;
-	let reconnectAttempts = 0;
-	let intentionalDisconnect = false;
+
+	// Shared mutable state — passed by reference to ws-message-handlers and session-switcher
+	const internal: InternalMutableState = {
+		waitingForHistory: null,
+		expectedSessionId: null,
+		pendingTools: new Set(),
+		streamEndCleanedUp: false,
+		streamingOnDisconnect: null,
+		interruptPending: false,
+	};
+
+	// ── WebSocket Connection (extracted module) ──────────────────────────
+
+	const wsConn: WsConnection = createWsConnection({
+		getAuthToken,
+		getDeviceId: getOrCreateDeviceId,
+		onMessage: (data) => {
+			handleMessage(data);
+		},
+		onConnected: () => {
+			update(s => ({ ...s, wsConnected: true, error: null }));
+
+			const state = get(store);
+			if (state.sessionId) {
+				internal.expectedSessionId = state.sessionId;
+				internal.waitingForHistory = [];
+				wsConn.send({ type: 'load_session', session_id: state.sessionId });
+			}
+		},
+		onDisconnected: (code, _reason, wasClean) => {
+			const state = get(store);
+			const wasStreaming = state.isStreaming;
+			const sessionId = state.sessionId;
+
+			update(s => ({ ...s, wsConnected: false }));
+
+			if (wasStreaming && sessionId) {
+				sessionPoller.startStreaming(sessionId);
+				internal.streamingOnDisconnect = sessionId;
+			}
+
+			if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
+
+			if (code === 4001) {
+				import('$app/navigation').then(({ goto }) => goto('/login'));
+			} else if (wasClean) {
+				// User-initiated disconnect (newChat, destroy, session switch, etc.)
+				// No action needed — intentionalDisconnect already reset by ws-connection
+			} else {
+				// Unexpected close — ws-connection handles reconnect scheduling.
+				// We only need to surface an error if max attempts were reached.
+				// (ws-connection logs the error; we check isConnected later)
+			}
+		},
+		isStreaming: () => {
+			const state = get(store);
+			// Also check if poller is active — WS is secondary during streaming
+			return state.isStreaming && (!state.sessionId || !sessionPoller.isPolling(state.sessionId));
+		},
+		hasPendingTools: () => internal.pendingTools.size > 0,
+		onMaxReconnectAttempts: () => {
+			update(s => ({ ...s, error: 'Connection lost. Please refresh the page.' }));
+		},
+		onVisibilityHidden: () => {
+			// Pause session polling — no one is looking at the UI
+			const state = get(store);
+			if (state.sessionId && sessionPoller.isPolling(state.sessionId)) {
+				sessionPoller.stop(state.sessionId);
+			}
+		},
+		onVisibilityVisible: () => {
+			// Resume streaming poll if session was streaming
+			const state = get(store);
+			if (state.isStreaming && state.sessionId) {
+				sessionPoller.startStreaming(state.sessionId);
+			}
+		},
+	});
+
+	// ── Session Switcher (extracted module) ─────────────────────────────
+
+	const switcher = createSessionSwitcher({
+		update,
+		getState: () => get(store),
+		wsSend: (data) => wsConn.send(data),
+		wsIsConnected: () => wsConn.isConnected(),
+		internal,
+		sessionEphemeralCache,
+		messageCache,
+		browserState,
+		onPersistTimerChanged: (timer) => { persistTimer = timer; },
+	});
+
+	// Alias for internal use (message handlers, queued messages, etc.)
+	const persistSession = switcher.persistSession;
 
 	// ── Internal helpers ───────────────────────────────────────────────────
 
@@ -347,7 +349,7 @@ function createActiveSessionStore() {
 	function processNextQueuedMessage() {
 		const state = get(store);
 		if (state.queuedMessages.length === 0) return;
-		if (!ws || ws.readyState !== WebSocket.OPEN) return;
+		if (!wsConn.isConnected()) return;
 		if (!state.sessionId) return;
 
 		const nextQueued = state.queuedMessages[0];
@@ -379,8 +381,8 @@ function createActiveSessionStore() {
 		if (current.permissionModeOverride) overrides.permission_mode = current.permissionModeOverride;
 		if (current.thinkingModeOverride) overrides.thinking_mode = current.thinkingModeOverride;
 
-		lastMessageTime = Date.now();
-		ws.send(JSON.stringify({
+		wsConn.resetLastMessageTime();
+		wsConn.send({
 			type: 'query',
 			prompt: nextQueued.content,
 			session_id: state.sessionId,
@@ -388,15 +390,15 @@ function createActiveSessionStore() {
 			project: state.project || undefined,
 			worktree_id: state.worktreeId || undefined,
 			...(Object.keys(overrides).length > 0 ? { overrides } : {})
-		}));
+		});
 
 		persistSession();
 	}
 
 	function processWaitingEvents() {
-		if (waitingForHistory && waitingForHistory.length > 0) {
-			const queued = waitingForHistory;
-			waitingForHistory = null;
+		if (internal.waitingForHistory && internal.waitingForHistory.length > 0) {
+			const queued = internal.waitingForHistory;
+			internal.waitingForHistory = null;
 			for (const queuedData of queued) {
 				// Re-route through notifier for poller triggers
 				const state = get(store);
@@ -405,7 +407,7 @@ function createActiveSessionStore() {
 				}
 			}
 		} else {
-			waitingForHistory = null;
+			internal.waitingForHistory = null;
 		}
 	}
 
@@ -453,7 +455,7 @@ function createActiveSessionStore() {
 	function setupOnStreamEnd() {
 		sessionPoller.onStreamEnd((sessionId, usage) => {
 			// If in interrupt_and_query transition, skip cleanup
-			if (interruptPending) return;
+			if (internal.interruptPending) return;
 
 			// Refresh sessions list
 			appData.loadSessions();
@@ -490,956 +492,60 @@ function createActiveSessionStore() {
 			setTimeout(() => sessionState.removeSession(sessionId), 100);
 
 			// Mark as handled so the safety timeout doesn't send redundant load_session
-			streamEndCleanedUp = true;
+			internal.streamEndCleanedUp = true;
 		});
 	}
 
-	// ── WebSocket Message Handler ──────────────────────────────────────────
-
-	function handleMessage(data: Record<string, unknown>) {
-		const msgType = data.type as string;
-		const eventType = data.event_type as string;
-
-		// Forward to notification system (triggers poller)
-		const state = get(store);
-		if (state.sessionId) {
-			const isInterruptTransition = interruptPending &&
-				(msgType === 'interrupted' || msgType === 'stopped');
-			if (!isInterruptTransition) {
-				sessionNotifier.handleMessage(state.sessionId, data);
-			}
-		}
-
-		// Handle sync events from other devices — queue if waiting for history
-		if (eventType) {
-			if (waitingForHistory !== null) {
-				waitingForHistory.push(data);
-			}
-			// Notifier already triggered pollNow for update events
-			return;
-		}
-
-		// ── User-level messages (not per-session) ─────────────────────────
-
-		if (msgType === 'tabs_sync') return; // No-op in single-session model
-
-		if (msgType === 'user_session_created') {
-			appData.loadSessions();
-			appData.loadApiUserSessions();
-			return;
-		}
-
-		if (msgType === 'user_streaming_changed') {
-			const sessionId = data.session_id as string;
-			const isStreaming = data.is_streaming as boolean;
-			const projectId = (data.project_id as string | null) ?? null;
-			const worktreeId = (data.worktree_id as string | null) ?? null;
-			streamingSessions.update(map => {
-				const newMap = new Map(map);
-				if (isStreaming) {
-					newMap.set(sessionId, { projectId, worktreeId });
-				} else {
-					newMap.delete(sessionId);
-				}
-				return newMap;
-			});
-			return;
-		}
-
-		if (msgType === 'user_streaming_sessions') {
-			const sessions = data.sessions as Array<{ session_id: string; project_id: string | null; worktree_id?: string | null }> | undefined;
-			const sessionIds = data.session_ids as string[] | undefined;
-			const newMap = new Map<string, StreamingSessionInfo>();
-			if (sessions) {
-				for (const s of sessions) {
-					newMap.set(s.session_id, { projectId: s.project_id ?? null, worktreeId: s.worktree_id ?? null });
-				}
-			} else if (sessionIds) {
-				for (const sid of sessionIds) {
-					newMap.set(sid, { projectId: null, worktreeId: null });
-				}
-			}
-			streamingSessions.set(newMap);
-			return;
-		}
-
-		if (msgType === 'user_branch_changed') {
-			const projectId = data.project_id as string;
-			const gitState = get(git);
-			if (gitState.projectId === projectId && !gitState.loading) {
-				git.refreshStatus();
-				git.refreshDiffStats();
-			}
-			return;
-		}
-
-		if (msgType === 'git_state_changed') {
-			const projectId = data.project_id as string;
-			const worktreeId = (data.worktree_id as string) || null;
-			const changes = data.changes as Record<string, unknown>;
-			if (projectId && changes) {
-				git.applyServerUpdate(projectId, worktreeId, changes);
-			}
-			return;
-		}
-
-		// ── Per-session message switch ────────────────────────────────────
-
-		switch (msgType) {
-			case 'history': {
-				const receivedSessionId = data.session_id as string;
-				if (expectedSessionId && receivedSessionId !== expectedSessionId) {
-					waitingForHistory = null;
-					break;
-				}
-				expectedSessionId = null;
-
-				const rawMessages = (data.messages as Array<Record<string, unknown>>) || [];
-				const toolResultMap: Map<string, { content: string; toolStatus: 'complete' | 'error' }> = new Map();
-				let latestTodos: TodoItem[] = [];
-
-				// Pre-scan for tool_results and todos
-				for (const m of rawMessages) {
-					const rawMsgType = m.type as MessageType | undefined;
-					const role = m.role as string;
-					const toolName = (m.toolName || m.tool_name) as string | undefined;
-					const toolInput = (m.toolInput || m.tool_input) as Record<string, unknown> | undefined;
-
-					if ((rawMsgType === 'tool_use' || role === 'tool_use') && toolName === 'TodoWrite' && toolInput?.todos && Array.isArray(toolInput.todos)) {
-						latestTodos = (toolInput.todos as TodoItem[]).map(todo => ({
-							content: todo.content || '',
-							status: todo.status || 'pending',
-							activeForm: todo.activeForm || todo.content || ''
-						}));
-					}
-
-					if (rawMsgType === 'tool_result' || role === 'tool_result') {
-						const toolUseId = m.toolId || m.tool_use_id;
-						if (toolUseId) {
-							toolResultMap.set(toolUseId as string, {
-								content: m.content as string || '',
-								toolStatus: 'complete'
-							});
-						}
-					}
-				}
-
-				const isStreaming = data.isStreaming as boolean || false;
-				const messages: ChatMessage[] = [];
-				const seenToolResults = new Set<string>();
-
-				for (let i = 0; i < rawMessages.length; i++) {
-					const m = rawMessages[i];
-					let rawMsgType: MessageType | undefined = m.type as MessageType | undefined;
-
-					if (!rawMsgType && m.role === 'assistant') rawMsgType = 'text';
-					else if (!rawMsgType && (m.role === 'tool_use' || m.role === 'tool_result')) rawMsgType = m.role as MessageType;
-
-					if (rawMsgType === 'system' || m.role === 'system') {
-						messages.push({
-							id: String(m.id || `msg-${i}`),
-							jsonlUuid: m.uuid as string | undefined,
-							role: 'system' as const,
-							content: m.content as string,
-							type: 'system' as const,
-							systemSubtype: (m.systemSubtype || m.subtype) as string | undefined,
-							systemData: (m.systemData as Record<string, unknown>) || { content: m.content },
-							metadata: m.metadata as Record<string, unknown>,
-							streaming: false
-						});
-						continue;
-					}
-
-					if (rawMsgType === 'tool_result') {
-						const toolUseId = m.toolId || m.tool_use_id;
-						if (toolUseId) seenToolResults.add(toolUseId as string);
-						continue;
-					}
-
-					const chatMessage: ChatMessage = {
-						id: String(m.id || `msg-${i}`),
-						jsonlUuid: m.uuid as string | undefined,
-						role: (m.role === 'tool_use' || m.role === 'tool_result' ? 'assistant' : m.role) as 'user' | 'assistant',
-						content: m.content as string,
-						type: rawMsgType,
-						toolName: (m.toolName || m.tool_name) as string | undefined,
-						toolId: m.toolId as string | undefined,
-						toolInput: (m.toolInput || m.tool_input) as Record<string, unknown> | undefined,
-						toolResult: m.toolResult as string | undefined,
-						toolStatus: m.toolStatus as 'running' | 'complete' | 'error' | undefined,
-						metadata: m.metadata as Record<string, unknown>,
-						streaming: isStreaming ? ((m.streaming as boolean) ?? false) : false
-					};
-
-					if (rawMsgType === 'tool_use' && chatMessage.toolId) {
-						const result = toolResultMap.get(chatMessage.toolId);
-						if (result && !chatMessage.toolResult) {
-							chatMessage.toolResult = result.content;
-							chatMessage.toolStatus = result.toolStatus;
-							seenToolResults.add(chatMessage.toolId);
-						}
-						if (!chatMessage.toolStatus) chatMessage.toolStatus = 'complete';
-					}
-
-					if (rawMsgType === 'subagent') {
-						chatMessage.agentId = m.agentId as string | undefined;
-						chatMessage.agentType = m.agentType as string | undefined;
-						chatMessage.agentDescription = m.agentDescription as string | undefined;
-						chatMessage.agentStatus = m.agentStatus as 'pending' | 'running' | 'completed' | 'error' | undefined;
-						chatMessage.agentChildren = m.agentChildren as SubagentChildMessage[] | undefined;
-					}
-
-					messages.push(chatMessage);
-				}
-
-				// Merge streaming buffer for late-joining devices
-				let finalMessages = messages;
-				const streamingBuffer = data.streamingBuffer as Array<Record<string, unknown>> | undefined;
-				if (isStreaming && streamingBuffer && streamingBuffer.length > 0) {
-					const existingContentHashes = new Set<string>();
-					for (const msg of messages) {
-						existingContentHashes.add(`${msg.type || 'text'}:${msg.toolId || ''}:${(msg.content || '').substring(0, 100)}`);
-					}
-
-					const bufferToolResults: Map<string, { content: string; status: 'complete' | 'error' }> = new Map();
-					for (const m of streamingBuffer) {
-						const bufferType = (m.type || m.chunk_type || 'text') as string;
-						if (bufferType === 'tool_result') {
-							const toolId = (m.tool_id || '') as string;
-							if (toolId) bufferToolResults.set(toolId, { content: (m.content || '') as string, status: 'complete' });
-						}
-					}
-
-					for (const m of streamingBuffer) {
-						const bufferType = (m.type || m.chunk_type || 'text') as MessageType;
-						const bufferToolId = (m.tool_id || '') as string;
-						const bufferContent = (m.content || '') as string;
-						const hash = `${bufferType}:${bufferToolId}:${bufferContent.substring(0, 100)}`;
-
-						if (bufferType === 'tool_result') continue;
-						if (existingContentHashes.has(hash)) continue;
-
-						if (bufferType === 'system') {
-							finalMessages.push({
-								id: `buffer-system-${Date.now()}-${Math.random()}`,
-								role: 'system' as const,
-								content: bufferContent,
-								type: 'system' as const,
-								systemSubtype: m.subtype as string | undefined,
-								systemData: m.data as Record<string, unknown> | undefined,
-								streaming: false
-							});
-							existingContentHashes.add(hash);
-							continue;
-						}
-
-						if (bufferType === 'subagent') {
-							finalMessages.push({
-								id: `buffer-subagent-${m.agent_id || Date.now()}-${Math.random()}`,
-								role: 'assistant' as const,
-								content: bufferContent,
-								type: 'subagent' as const,
-								toolId: m.tool_id as string | undefined,
-								agentId: m.agent_id as string | undefined,
-								agentType: m.agent_type as string | undefined,
-								agentDescription: m.agent_description as string | undefined,
-								agentPrompt: m.agent_prompt as string | undefined,
-								agentStatus: (m.agent_status as 'pending' | 'running' | 'completed' | 'error') || 'running',
-								agentChildren: (m.agent_children as SubagentChildMessage[]) || [],
-								streaming: (m.streaming as boolean) ?? (m.agent_status === 'running')
-							});
-							existingContentHashes.add(hash);
-							continue;
-						}
-
-						const bufferMsg: ChatMessage = {
-							id: `buffer-${Date.now()}-${Math.random()}`,
-							role: 'assistant' as const,
-							content: bufferContent,
-							type: bufferType,
-							toolName: m.tool_name as string | undefined,
-							toolId: bufferToolId || undefined,
-							toolInput: m.tool_input as Record<string, unknown> | undefined,
-							streaming: (m.streaming as boolean) ?? true
-						};
-
-						if (bufferType === 'tool_use' && bufferToolId) {
-							if (m.tool_result !== undefined) {
-								bufferMsg.toolResult = m.tool_result as string;
-								bufferMsg.toolStatus = (m.tool_status as 'complete' | 'error') || 'complete';
-								bufferMsg.streaming = false;
-							} else if (bufferToolResults.has(bufferToolId)) {
-								const result = bufferToolResults.get(bufferToolId)!;
-								bufferMsg.toolResult = result.content;
-								bufferMsg.toolStatus = result.status;
-								bufferMsg.streaming = false;
-							}
-						}
-
-						finalMessages.push(bufferMsg);
-						existingContentHashes.add(hash);
-					}
-				}
-
-				// Extract token counts and session context from session data
-				const session = data.session as Record<string, unknown> | undefined;
-				const tokenUpdates: Record<string, unknown> = {};
-				if (session) {
-					if (typeof session.total_tokens_in === 'number') tokenUpdates.totalTokensIn = session.total_tokens_in;
-					if (typeof session.total_tokens_out === 'number') tokenUpdates.totalTokensOut = session.total_tokens_out;
-					if (typeof session.cache_creation_tokens === 'number') tokenUpdates.totalCacheCreationTokens = session.cache_creation_tokens;
-					if (typeof session.cache_read_tokens === 'number') tokenUpdates.totalCacheReadTokens = session.cache_read_tokens;
-					if (typeof session.context_tokens === 'number') tokenUpdates.contextUsed = session.context_tokens;
-					if (typeof session.profile_id === 'string') tokenUpdates.sessionProfileId = session.profile_id;
-					// Restore profile and project from the loaded session so the header
-					// and profile selector reflect the session's actual context.
-					if (typeof session.profile_id === 'string') tokenUpdates.profile = session.profile_id;
-					if (typeof session.project_id === 'string') tokenUpdates.project = session.project_id;
-				}
-
-				// Late-joining context usage from streamingUsage
-				const streamingUsage = data.streamingUsage as Record<string, number> | undefined;
-				if (isStreaming && streamingUsage) {
-					const inputTokens = streamingUsage.input_tokens || 0;
-					const cacheCreationTokens = streamingUsage.cache_creation_input_tokens || 0;
-					const cacheReadTokens = streamingUsage.cache_read_input_tokens || 0;
-					const streamContextUsed = inputTokens + cacheCreationTokens + cacheReadTokens;
-					if (streamContextUsed > 0) {
-						tokenUpdates.contextUsed = streamContextUsed;
-						tokenUpdates.totalCacheCreationTokens = cacheCreationTokens;
-						tokenUpdates.totalCacheReadTokens = cacheReadTokens;
-					}
-				}
-
-				// Defensive check: don't replace messages with fewer/empty data
-				const currentState = get(store);
-				const currentAssistantMsgs = currentState.messages.filter(m => m.role === 'assistant' && m.type === 'text');
-				const incomingAssistantMsgs = finalMessages.filter(m => m.role === 'assistant' && m.type === 'text');
-				const shouldPreserveMessages = currentState.messages.length > 0 && !isStreaming && (
-					finalMessages.length === 0 ||
-					(currentAssistantMsgs.length > incomingAssistantMsgs.length) ||
-					(finalMessages.length > 0 && currentState.messages.length > finalMessages.length * 1.5)
-				);
-
-				if (shouldPreserveMessages) {
-					console.warn(`[ActiveSession] Received empty history but have ${currentState.messages.length} messages - preserving`);
-					update(s => ({
-						...s,
-						sessionId: data.session_id as string,
-						isStreaming,
-						error: null,
-						...tokenUpdates
-					}));
-				} else {
-					// Preserve existing message IDs to prevent Svelte component recreation
-					const existingMessages = currentState.messages;
-					const messagesWithPreservedIds = finalMessages.map((msg, i) => {
-						const existingMsg = existingMessages[i];
-						const canPreserveId = existingMsg && existingMsg.type === msg.type && existingMsg.role === msg.role;
-						return canPreserveId ? { ...msg, id: existingMsg.id } : msg;
-					});
-
-					const stateUpdate: Record<string, unknown> = {
-						sessionId: data.session_id as string,
-						messages: messagesWithPreservedIds,
-						isStreaming,
-						todos: latestTodos,
-						error: null,
-						...tokenUpdates
-					};
-
-					// Restore worktree state from session
-					const worktreeId = session?.worktree_id as string | undefined;
-					const worktreeBranch = session?.worktree_branch as string | undefined;
-					const worktreeDeletedFlag = session?.worktree_deleted as boolean | undefined;
-					if (worktreeId && worktreeBranch) {
-						stateUpdate.executionMode = 'worktree';
-						stateUpdate.worktreeId = worktreeId;
-						stateUpdate.worktreeBranch = worktreeBranch;
-						stateUpdate.selectedWorktreeBranch = worktreeBranch;
-						stateUpdate.worktreeMode = 'existing';
-						stateUpdate.worktreeDeleted = false;
-					} else if (worktreeDeletedFlag && worktreeBranch) {
-						stateUpdate.executionMode = 'worktree';
-						stateUpdate.worktreeId = null;
-						stateUpdate.worktreeBranch = worktreeBranch;
-						stateUpdate.selectedWorktreeBranch = worktreeBranch;
-						stateUpdate.worktreeMode = 'existing';
-						stateUpdate.worktreeDeleted = true;
-					} else {
-						// Non-worktree session: reset to local mode so stale worktree
-						// state from a previously viewed tab doesn't leak through.
-						stateUpdate.executionMode = 'local';
-						stateUpdate.worktreeId = null;
-						stateUpdate.worktreeBranch = '';
-						stateUpdate.selectedWorktreeBranch = null;
-						stateUpdate.worktreeDeleted = false;
-					}
-
-					// Restore pending permissions/questions on reconnect
-					const pendingPerms = data.pendingPermissions as PermissionRequestType[] | undefined;
-					const pendingQs = data.pendingQuestions as UserQuestionRequest[] | undefined;
-					if (pendingPerms && pendingPerms.length > 0) stateUpdate.pendingPermissions = pendingPerms;
-					if (pendingQs && pendingQs.length > 0) stateUpdate.pendingQuestions = pendingQs;
-
-					update(s => ({ ...s, ...stateUpdate }));
-
-					// Update title from first message
-					if (finalMessages.length > 0 && finalMessages[0].role === 'user') {
-						const title = finalMessages[0].content.substring(0, 100) + (finalMessages[0].content.length > 100 ? '...' : '');
-						update(s => ({ ...s, title }));
-					}
-				}
-
-				// Cache for instant rendering on next load
-				if (finalMessages.length > 0 && data.session_id) {
-					messageCache.set(data.session_id as string, finalMessages);
-				}
-
-				// Start polling if streaming
-				const receivedSession = data.session_id as string;
-				if (isStreaming && receivedSession) {
-					streamingOnDisconnect = null;
-					startPolling(receivedSession);
-					if (ws?.readyState === WebSocket.OPEN) {
-						ws.send(JSON.stringify({ type: 'get_pending_permissions' }));
-						ws.send(JSON.stringify({ type: 'get_pending_questions' }));
-					}
-				} else if (receivedSession) {
-					// Session is NOT streaming — ensure streamingSessions is clean.
-					// This handles the case where we missed a done/user_streaming_changed
-					// event during a WS disconnect, leaving stale entries that lock git.
-					streamingSessions.update(map => {
-						if (!map.has(receivedSession)) return map;
-						const newMap = new Map(map);
-						newMap.delete(receivedSession);
-						return newMap;
-					});
-					const disconnectSessionId = streamingOnDisconnect;
-					if (disconnectSessionId && disconnectSessionId === receivedSession) {
-						streamingOnDisconnect = null;
-						setTimeout(() => {
-							const gracedSession = sessionState.getSession(disconnectSessionId);
-							if (gracedSession && !gracedSession.isStreaming && sessionPoller.isPolling(disconnectSessionId)) {
-								sessionPoller.stop(disconnectSessionId);
-								sessionState.removeSession(disconnectSessionId);
-							}
-						}, 10000);
-					} else {
-						streamingOnDisconnect = null;
-						stopPolling();
-					}
-				}
-
-				// Clear background permissions for this session since we just loaded it
-				backgroundPermissions.update(map => {
-					if (!map.has(receivedSession)) return map;
-					const newMap = new Map(map);
-					newMap.delete(receivedSession);
-					return newMap;
-				});
-
-				processWaitingEvents();
-				break;
-			}
-
-			case 'session_created': {
-				const sessionId = data.session_id as string;
-				const currentState = get(store);
-				// Only adopt session ID for the active session or new chat (no session yet).
-				// Prevents stale session_created from overwriting a session switch.
-				if (!currentState.sessionId || currentState.sessionId === sessionId) {
-					update(s => ({ ...s, sessionId, sessionProfileId: s.profile }));
-					persistSession();
-				}
-				appData.loadSessions();
-				break;
-			}
-
-			case 'start': {
-				const sessionId = data.session_id as string;
-				interruptPending = false;
-				const currentStartState = get(store);
-				// Only update if this is for the active session or we just started a new chat (no session yet).
-				// Without this guard, a stale start from a previous session could hijack the current tab.
-				if (sessionId === currentStartState.sessionId || !currentStartState.sessionId) {
-					update(s => ({ ...s, sessionId, isStreaming: true, streamStartTime: Date.now() }));
-					persistSession();
-				}
-				break;
-			}
-
-			// Notification-only events — poller handles state via sessionNotifier
-			case 'chunk':
-			case 'stream_start':
-			case 'stream_block_start':
-			case 'stream_delta':
-			case 'stream_block_stop':
-			case 'stream_message_delta':
-			case 'system':
-			case 'subagent_start':
-			case 'subagent_chunk':
-			case 'subagent_done':
-			case 'plugin_message':
-				break;
-
-			case 'tool_use': {
-				const toolId = data.id as string;
-				if (toolId) pendingTools.add(toolId);
-				break;
-			}
-
-			case 'tool_result': {
-				const toolUseId = data.tool_use_id as string;
-				if (toolUseId) pendingTools.delete(toolUseId);
-				break;
-			}
-
-			case 'subagent_tool_use': {
-				const toolId = data.id as string;
-				if (toolId) pendingTools.add(toolId);
-				break;
-			}
-
-			case 'subagent_tool_result': {
-				const toolUseId = data.tool_use_id as string;
-				if (toolUseId) pendingTools.delete(toolUseId);
-				break;
-			}
-
-			case 'done': {
-				const metadata = data.metadata as Record<string, unknown>;
-				const sessionId = data.session_id as string;
-
-				interruptPending = false;
-
-				const currentDoneState = get(store);
-				// Determine if this done event is for the currently active session.
-				// If sessionId is falsy, assume it's for the active session (legacy compat).
-				const isActiveSession = !sessionId || sessionId === currentDoneState.sessionId;
-				const doneSessionId = sessionId || currentDoneState.sessionId;
-
-				if (doneSessionId) sessionPoller.pollNow(doneSessionId);
-
-				if (isActiveSession) {
-					if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
-					pendingTools.clear();
-				}
-
-				// Only update session-level store state for the active session.
-				// Without this guard, a done event from a previous session would
-				// overwrite sessionId and corrupt the current tab's state.
-				if (isActiveSession) {
-					const durationSeconds = currentDoneState.streamStartTime
-						? (Date.now() - currentDoneState.streamStartTime) / 1000
-						: undefined;
-
-					update(s => {
-						let title = s.title;
-						if (title === 'New Chat' && s.messages.length > 0) {
-							const firstUserMsg = s.messages.find(m => m.role === 'user');
-							if (firstUserMsg) {
-								title = firstUserMsg.content.substring(0, 100) + (firstUserMsg.content.length > 100 ? '...' : '');
-							}
-						}
-						return { ...s, isStreaming: false, streamStartTime: null, title };
-					});
-
-					const doneState = get(store);
-					notifySessionComplete({
-						sessionId: sessionId || '',
-						sessionTitle: doneState.title ?? null,
-						durationSeconds,
-						totalCostUsd: metadata?.total_cost_usd as number | undefined,
-						tokensIn: metadata?.tokens_in as number | undefined,
-						tokensOut: metadata?.tokens_out as number | undefined,
-						model: metadata?.model as string | undefined
-					});
-
-					persistSession();
-					setTimeout(() => processNextQueuedMessage(), 500);
-				}
-
-				// Always clean up streamingSessions (cross-session/cross-device)
-				if (doneSessionId) {
-					streamingSessions.update(map => {
-						if (!map.has(doneSessionId)) return map;
-						const newMap = new Map(map);
-						newMap.delete(doneSessionId);
-						return newMap;
-					});
-				}
-
-				appData.loadSessions();
-
-				// Safety: ensure cleanup if poller pipeline fails (only for active session)
-				if (isActiveSession && doneSessionId) {
-					const cleanupId = doneSessionId;
-					setTimeout(() => {
-						if (streamEndCleanedUp) { streamEndCleanedUp = false; return; }
-						console.warn(`[ActiveSession] Safety: onStreamEnd didn't fire for ${cleanupId}, running fallback`);
-						if (sessionPoller.isPolling(cleanupId)) sessionPoller.stop(cleanupId);
-						const sd = sessionState.getSession(cleanupId);
-						if (sd) sessionState.removeSession(cleanupId);
-						const refreshState = get(store);
-						if (!refreshState.isStreaming && refreshState.sessionId === cleanupId && ws?.readyState === WebSocket.OPEN) {
-							expectedSessionId = cleanupId;
-							waitingForHistory = [];
-							ws.send(JSON.stringify({ type: 'load_session', session_id: cleanupId }));
-						}
-					}, 5000);
-				}
-				break;
-			}
-
-			case 'stopped':
-			case 'interrupted': {
-				if (interruptPending) { pendingTools.clear(); break; }
-
-				const stoppedState = get(store);
-				const stoppedSessionId = stoppedState.sessionId;
-				if (stoppedSessionId) sessionPoller.pollNow(stoppedSessionId);
-
-				if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
-				pendingTools.clear();
-
-				update(s => ({ ...s, isStreaming: false }));
-
-				if (stoppedSessionId) {
-					streamingSessions.update(map => {
-						if (!map.has(stoppedSessionId)) return map;
-						const newMap = new Map(map);
-						newMap.delete(stoppedSessionId);
-						return newMap;
-					});
-				}
-
-				setTimeout(() => processNextQueuedMessage(), 500);
-
-				// Safety cleanup
-				if (stoppedSessionId) {
-					setTimeout(() => {
-						if (sessionPoller.isPolling(stoppedSessionId)) sessionPoller.stop(stoppedSessionId);
-						const sd = sessionState.getSession(stoppedSessionId);
-						if (sd) sessionState.removeSession(stoppedSessionId);
-					}, 5000);
-				}
-				break;
-			}
-
-			case 'error': {
-				interruptPending = false;
-				stopPolling();
-				update(s => ({ ...s, isStreaming: false, error: data.message as string }));
-				const errorSessionId = get(store).sessionId;
-				if (errorSessionId) {
-					streamingSessions.update(map => {
-						if (!map.has(errorSessionId)) return map;
-						const newMap = new Map(map);
-						newMap.delete(errorSessionId);
-						return newMap;
-					});
-				}
-				break;
-			}
-
-			case 'session_not_found': {
-				const missingId = data.session_id as string;
-				console.warn(`[ActiveSession] Session not found: ${missingId}`);
-				// Refresh sidebar to remove stale entry
-				appData.loadSessions();
-				// Navigate to new chat if this was the active session
-				const currentId = get(store).sessionId;
-				if (currentId === missingId) {
-					update(s => ({ ...s, error: 'This session no longer exists.' }));
-					storeApi.newChat();
-				}
-				break;
-			}
-
-			case 'message_queued':
-			case 'queued_message_processing':
-				break;
-
-			case 'session_locked': {
-				const lockedBy = data.locked_by as string;
-				console.warn(`[ActiveSession] Session locked by device ${lockedBy}`);
-				update(s => ({
-					...s,
-					error: 'This session is already open on another device. Click "Take Over" to use it here.',
-					sessionLocked: true,
-					sessionLockedBy: lockedBy
-				}));
-				break;
-			}
-
-			case 'session_takeover': {
-				const newDevice = data.new_device as string;
-				console.warn(`[ActiveSession] Session taken over by device ${newDevice}`);
-				update(s => ({
-					...s,
-					error: 'This session was taken over by another device.',
-					isStreaming: false,
-					sessionLocked: false,
-					sessionLockedBy: undefined
-				}));
-				break;
-			}
-
-			case 'ping': {
-				if (ws?.readyState === WebSocket.OPEN) {
-					ws.send(JSON.stringify({ type: 'pong' }));
-				}
-				break;
-			}
-
-			case 'heartbeat': {
-				const pendingPermCount = data.pending_permissions as number | undefined;
-				const pendingQCount = data.pending_questions as number | undefined;
-				if (pendingPermCount && pendingPermCount > 0) {
-					const cs = get(store);
-					if (!cs.pendingPermissions || cs.pendingPermissions.length === 0) {
-						if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'get_pending_permissions' }));
-					}
-				}
-				if (pendingQCount && pendingQCount > 0) {
-					const cs = get(store);
-					if (!cs.pendingQuestions || cs.pendingQuestions.length === 0) {
-						if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'get_pending_questions' }));
-					}
-				}
-				break;
-			}
-
-			case 'permission_request': {
-				const request = {
-					request_id: data.request_id as string,
-					tool_name: data.tool_name as string,
-					tool_input: data.tool_input as Record<string, unknown>,
-					queue_position: data.queue_position as number | undefined,
-					queue_total: data.queue_total as number | undefined
-				} as PermissionRequestType;
-
-				notifyWaitingForResponse('permission', { toolName: request.tool_name });
-				update(s => ({ ...s, pendingPermissions: [...s.pendingPermissions, request] }));
-				break;
-			}
-
-			case 'permission_queue_update': {
-				const resolvedIds = data.resolved_ids as string[];
-				update(s => ({
-					...s,
-					pendingPermissions: s.pendingPermissions.filter(p => !resolvedIds.includes(p.request_id))
-				}));
-				break;
-			}
-
-			case 'permission_response_ack':
-			case 'permission_timeout': {
-				const requestId = data.request_id as string;
-				update(s => ({
-					...s,
-					pendingPermissions: s.pendingPermissions.filter(p => p.request_id !== requestId)
-				}));
-				break;
-			}
-
-			case 'pending_permissions': {
-				const requests = data.requests as PermissionRequestType[];
-				update(s => ({ ...s, pendingPermissions: requests }));
-				break;
-			}
-
-			case 'user_question': {
-				const rawQuestions = data.questions as Array<Record<string, unknown>>;
-				const normalizedQuestions = rawQuestions.map((q, idx) => ({
-					question: q.question as string || '',
-					header: q.header as string || `Question ${idx + 1}`,
-					options: Array.isArray(q.options) ? q.options.map((opt: unknown) => ({
-						label: typeof opt === 'object' && opt !== null ? (opt as Record<string, unknown>).label as string || '' : String(opt),
-						description: typeof opt === 'object' && opt !== null ? (opt as Record<string, unknown>).description as string || '' : ''
-					})) : [],
-					multiSelect: Boolean(q.multiSelect)
-				}));
-
-				const request = {
-					request_id: data.request_id as string,
-					tool_use_id: data.tool_use_id as string,
-					questions: normalizedQuestions
-				} as UserQuestionRequest;
-
-				notifyWaitingForResponse('question', { questionCount: request.questions.length });
-				update(s => ({ ...s, pendingQuestions: [...s.pendingQuestions, request] }));
-				break;
-			}
-
-			case 'user_question_response_ack':
-			case 'user_question_timeout': {
-				const requestId = data.request_id as string;
-				update(s => ({
-					...s,
-					pendingQuestions: s.pendingQuestions.filter(q => q.request_id !== requestId)
-				}));
-				break;
-			}
-
-			case 'pending_questions': {
-				const questions = data.questions as UserQuestionRequest[];
-				// Only replace if the set of request IDs actually changed.
-				// Blindly replacing creates new object references which can
-				// trigger reactive effects in the UserQuestion component,
-				// wiping the user's in-progress answers and "Other" text.
-				update(s => {
-					const existingIds = new Set(s.pendingQuestions.map(q => q.request_id));
-					const newIds = new Set(questions.map(q => q.request_id));
-					const same = existingIds.size === newIds.size && [...existingIds].every(id => newIds.has(id));
-					if (same) return s; // No change — keep existing references
-					return { ...s, pendingQuestions: questions };
-				});
-				break;
-			}
-
-			default:
-				if (msgType) console.debug(`[ActiveSession] Unhandled message type: ${msgType}`);
-				break;
-		}
-	}
-
-	// ── WebSocket Connection ───────────────────────────────────────────────
-
-	function connect() {
-		if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-
-		const token = getAuthToken();
-		let url = getWsUrl();
-		if (token) url = `${url}&token=${encodeURIComponent(token)}`;
-
-		ws = new WebSocket(url);
-
-		ws.onopen = () => {
-			reconnectAttempts = 0;
-			update(s => ({ ...s, wsConnected: true, error: null }));
-
-			const state = get(store);
-			if (state.sessionId) {
-				expectedSessionId = state.sessionId;
-				waitingForHistory = [];
-				ws!.send(JSON.stringify({ type: 'load_session', session_id: state.sessionId }));
-			}
-
-			startPing();
-		};
-
-		ws.onclose = (event) => {
-			// Guard: ignore stale close events from a previous WebSocket instance.
-			// Without this, an old WS's onclose can call stopPing() and kill the
-			// health-check timer that belongs to the new, active connection.
-			if (event.target !== ws && ws !== null) {
-				return;
-			}
-
-			const state = get(store);
-			const wasStreaming = state.isStreaming;
-			const sessionId = state.sessionId;
-
-			update(s => ({ ...s, wsConnected: false }));
-
-			if (wasStreaming && sessionId) {
-				sessionPoller.startStreaming(sessionId);
-				streamingOnDisconnect = sessionId;
-			}
-
-			if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
-			stopPing();
-
-			if (event.code === 4001) {
-				console.warn('[ActiveSession] WebSocket auth failed (4001), redirecting to login');
-				import('$app/navigation').then(({ goto }) => goto('/login'));
-			} else if (intentionalDisconnect) {
-				// User-initiated disconnect (newChat, destroy, session switch, etc.)
-				intentionalDisconnect = false;
-			} else {
-				// Unexpected close — always reconnect regardless of close code.
-				// The server can close with code 1000 in many legitimate scenarios
-				// (handler exit, starlette cleanup) where the frontend should reconnect.
-				if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-					console.error('[ActiveSession] Max reconnect attempts reached');
-					update(s => ({ ...s, error: 'Connection lost. Please refresh the page.' }));
-					return;
-				}
-
-				if (reconnectTimer) clearTimeout(reconnectTimer);
-				const baseDelay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY_MS);
-				const jitter = Math.random() * 1000;
-				reconnectAttempts++;
-				reconnectTimer = setTimeout(() => connect(), baseDelay + jitter);
-			}
-		};
-
-		ws.onerror = (error) => {
-			console.error('[ActiveSession] WebSocket error:', error);
-		};
-
-		ws.onmessage = (event) => {
-			lastMessageTime = Date.now();
-			try {
-				handleMessage(JSON.parse(event.data));
-			} catch (e) {
-				console.error('[ActiveSession] Failed to parse message:', e);
-			}
-		};
-	}
+	// ── WebSocket Message Handler (extracted to session/ws-message-handlers.ts) ──
+
+	const { handleMessage } = createMessageHandlers({
+		update,
+		getState: () => get(store),
+		wsSend: (data) => wsConn.send(data),
+		sessionPoller,
+		sessionNotifier,
+		sessionState: {
+			getSession: (id) => sessionState.getSession(id),
+			removeSession: (id) => sessionState.removeSession(id),
+		},
+		streamingSessions,
+		backgroundPermissions,
+		gitRefreshStatus: () => git.refreshStatus(),
+		gitRefreshDiffStats: () => git.refreshDiffStats(),
+		gitGetProjectId: () => get(git).projectId,
+		gitGetLoading: () => get(git).loading,
+		gitApplyServerUpdate: (projectId, worktreeId, changes) => git.applyServerUpdate(projectId, worktreeId, changes),
+		appLoadSessions: () => appData.loadSessions(),
+		appLoadApiUserSessions: () => appData.loadApiUserSessions(),
+		internal,
+		onNewChat: () => storeApi.newChat(),
+		onPersistSession: () => persistSession(),
+		onStartPolling: (sessionId) => startPolling(sessionId),
+		onStopPolling: () => stopPolling(),
+		onProcessNextQueuedMessage: () => processNextQueuedMessage(),
+		onProcessWaitingEvents: () => processWaitingEvents(),
+		onNotifySessionComplete: (info) => notifySessionComplete(info),
+		onNotifyWaitingForResponse: (type, details) => notifyWaitingForResponse(type, details),
+		wsIsConnected: () => wsConn.isConnected(),
+		clearStopTimeout: () => { if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; } },
+	});
+
+	// ── WebSocket helpers (delegated to wsConn) ──────────────────────────
 
 	function disconnect() {
-		if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-		stopPing();
-
 		const state = get(store);
 		if (state.sessionId) sessionPoller.stop(state.sessionId);
 
-		waitingForHistory = null;
-		expectedSessionId = null;
-		lastMessageTime = 0;
-		pendingTools = new Set();
-		streamingOnDisconnect = null;
-		interruptPending = false;
+		internal.waitingForHistory = null;
+		internal.expectedSessionId = null;
+		internal.pendingTools = new Set();
+		internal.streamingOnDisconnect = null;
+		internal.interruptPending = false;
 
 		if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
 
-		intentionalDisconnect = true;
-		if (ws) { ws.close(1000); ws = null; }
+		wsConn.disconnect();
 		update(s => ({ ...s, wsConnected: false }));
-	}
-
-	function startPing() {
-		stopPing();
-		lastMessageTime = Date.now();
-
-		pingTimer = setInterval(() => {
-			if (ws?.readyState === WebSocket.OPEN) {
-				ws.send(JSON.stringify({ type: 'pong' }));
-
-				const state = get(store);
-				let healthTimeout: number;
-				if (pendingTools.size > 0) healthTimeout = TOOL_EXECUTION_TIMEOUT_MS;
-				else if (state.isStreaming) healthTimeout = STREAMING_HEALTH_TIMEOUT_MS;
-				else healthTimeout = CONNECTION_HEALTH_TIMEOUT_MS;
-
-				const timeSinceLastMessage = Date.now() - lastMessageTime;
-				if (timeSinceLastMessage > healthTimeout) {
-					if (state.isStreaming && state.sessionId && sessionPoller.isPolling(state.sessionId)) {
-						// Poller active — WS is secondary, skip force-close
-					} else {
-						console.warn(`[ActiveSession] Connection stale (${Math.round(timeSinceLastMessage / 1000)}s), forcing reconnect`);
-						ws.close(4000, 'Connection health timeout');
-					}
-				}
-			}
-		}, PING_INTERVAL_MS);
-	}
-
-	function stopPing() {
-		if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
 	}
 
 	// ── Init / Destroy ─────────────────────────────────────────────────────
@@ -1448,63 +554,15 @@ function createActiveSessionStore() {
 		setupOnStreamEnd();
 		setupStreamingBridge();
 
-		// Reconnect WebSocket when the tab regains focus.
-		// Browsers can silently drop WebSocket connections when tabs are backgrounded.
-		// Also pause pings + polling when hidden to reduce idle CPU usage.
-		if (typeof document !== 'undefined') {
-			document.addEventListener('visibilitychange', () => {
-				if (document.hidden) {
-					// Tab is hidden — pause pings to reduce idle CPU.
-					// The backend ping will keep the connection alive.
-					stopPing();
-					// Pause session polling — no one is looking at the UI
-					const state = get(store);
-					if (state.sessionId && sessionPoller.isPolling(state.sessionId)) {
-						sessionPoller.stop(state.sessionId);
-					}
-				} else {
-					// Tab is visible again — resume pings and check connection health
-					if (ws?.readyState === WebSocket.OPEN) {
-						startPing();
-					}
-
-					// Resume streaming poll if session was streaming
-					const state = get(store);
-					if (state.isStreaming && state.sessionId) {
-						sessionPoller.startStreaming(state.sessionId);
-					}
-
-					if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-						reconnectAttempts = 0;
-						connect();
-					} else if (ws.readyState === WebSocket.OPEN) {
-						// Don't blindly reset lastMessageTime — the connection may be
-						// half-open (browser reports OPEN but TCP is dead). Instead,
-						// send a pong and verify we get a server response within 5s.
-						const preVisibilityTime = lastMessageTime;
-						try { ws.send(JSON.stringify({ type: 'pong' })); } catch {
-							reconnectAttempts = 0;
-							connect();
-							return;
-						}
-						// If no server message arrives within 5s, force reconnect
-						setTimeout(() => {
-							if (lastMessageTime === preVisibilityTime && ws?.readyState === WebSocket.OPEN) {
-								console.warn('[ActiveSession] No server response after tab return, forcing reconnect');
-								ws.close(4000, 'Half-open connection detected');
-							}
-						}, 5000);
-					}
-				}
-			});
-		}
+		// Visibility change handling is managed by wsConn (ping/pong, reconnect).
+		// Polling pause/resume is handled via onVisibilityHidden/onVisibilityVisible callbacks.
 
 		try {
-			const backendSelection = await loadSelectionFromBackend();
-			const defaultProfile = backendSelection?.selectedProfile || getPersistedProfile();
-			const defaultProject = backendSelection?.selectedProject || getPersistedProject();
+			const backendSelection = await switcher.loadSelectionFromBackend();
+			const defaultProfile = backendSelection?.selectedProfile || switcher.getPersistedProfile();
+			const defaultProject = backendSelection?.selectedProject || switcher.getPersistedProject();
 
-			const persisted = await loadPersistedSession();
+			const persisted = await switcher.loadPersistedSession();
 
 			if (persisted) {
 				update(s => ({
@@ -1535,64 +593,18 @@ function createActiveSessionStore() {
 				update(s => ({ ...s, profile: defaultProfile, project: defaultProject }));
 			}
 
-			connect();
+			wsConn.connect();
 		} catch (error) {
 			console.error('[ActiveSession] Failed to initialize:', error);
-			connect();
+			wsConn.connect();
 		}
-	}
-
-	async function loadPersistedSession(): Promise<PersistedSession | null> {
-		try {
-			const response = await api.get<{ key: string; value: PersistedSession } | null>('/preferences/active_session');
-			if (response?.value) return response.value;
-		} catch {
-			// No persisted session — fresh start
-		}
-		return null;
 	}
 
 	function destroy() {
 		disconnect();
+		wsConn.destroy();
 		if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
 		set(defaultState());
-	}
-
-	// ── Persistence ────────────────────────────────────────────────────────
-
-	function persistSession() {
-		if (persistTimer) clearTimeout(persistTimer);
-		persistTimer = setTimeout(async () => {
-			const state = get(store);
-			try {
-				await fetch('/api/v1/preferences/active_session', {
-					method: 'PUT',
-					headers: { 'Content-Type': 'application/json' },
-					credentials: 'include',
-					body: JSON.stringify({
-						key: 'active_session',
-						value: {
-							sessionId: state.sessionId,
-							title: state.title,
-							profile: state.profile,
-							project: state.project,
-							modelOverride: state.modelOverride,
-							permissionModeOverride: state.permissionModeOverride,
-							thinkingModeOverride: state.thinkingModeOverride,
-							executionMode: state.executionMode,
-							worktreeId: state.worktreeId,
-							worktreeBranch: state.worktreeBranch,
-							selectedWorktreeBranch: state.selectedWorktreeBranch,
-							worktreeMode: state.worktreeMode,
-							worktreeDeleted: state.worktreeDeleted,
-							queuedMessages: state.queuedMessages,
-						} satisfies PersistedSession,
-					})
-				});
-			} catch (e) {
-				console.error('[ActiveSession] Failed to persist session:', e);
-			}
-		}, 500);
 	}
 
 	// ── Public API ─────────────────────────────────────────────────────────
@@ -1603,165 +615,10 @@ function createActiveSessionStore() {
 		init,
 		destroy,
 
-		// ── Session Navigation ──────────────────────────────────────────
+		// ── Session Navigation (delegated to session-switcher) ─────────
 
-		async switchSession(sessionId: string) {
-			const state = get(store);
-
-			// Save ephemeral for session we're leaving (use sentinel for new chat)
-			const leavingKey = state.sessionId || '__new_chat__';
-			sessionEphemeralCache.save(leavingKey, {
-				draft: state.draft,
-				scrollTop: state.scrollTop,
-				modelOverride: state.modelOverride,
-				permissionModeOverride: state.permissionModeOverride,
-				thinkingModeOverride: state.thinkingModeOverride,
-				executionMode: state.executionMode,
-				worktreeId: state.worktreeId,
-				worktreeBranch: state.worktreeBranch,
-				worktreeBaseBranch: state.worktreeBaseBranch,
-				selectedWorktreeBranch: state.selectedWorktreeBranch,
-				worktreeMode: state.worktreeMode,
-				worktreeDeleted: state.worktreeDeleted,
-				queuedMessages: state.queuedMessages,
-			});
-
-			// Hydrate from IndexedDB cache for instant render
-			const cachedMessages = await messageCache.get(sessionId);
-			update(s => ({
-				...s,
-				sessionId,
-				messages: cachedMessages && cachedMessages.length > 0 ? cachedMessages : [],
-				error: null,
-				// Reset session-specific state
-				draft: '',
-				pendingPermissions: [],
-				pendingQuestions: [],
-				isStreaming: false,
-				isCreatingWorktree: false,
-				worktreeError: null,
-				sessionLocked: false,
-				sessionLockedBy: undefined,
-			}));
-
-			// Switch browser panel to new session's context (saves/restores per-session).
-			// Panel stays open; only the content (URL, screenshot, etc.) swaps.
-			browserState.switchSession(state.sessionId, sessionId);
-
-			// Restore ephemeral from cache
-			const ephemeral = sessionEphemeralCache.restore(sessionId);
-			if (ephemeral) {
-				update(s => ({
-					...s,
-					draft: ephemeral.draft,
-					scrollTop: ephemeral.scrollTop,
-					modelOverride: ephemeral.modelOverride,
-					permissionModeOverride: ephemeral.permissionModeOverride,
-					thinkingModeOverride: ephemeral.thinkingModeOverride,
-					executionMode: ephemeral.executionMode,
-					worktreeId: ephemeral.worktreeId,
-					worktreeBranch: ephemeral.worktreeBranch,
-					worktreeBaseBranch: ephemeral.worktreeBaseBranch,
-					selectedWorktreeBranch: ephemeral.selectedWorktreeBranch,
-					worktreeMode: ephemeral.worktreeMode,
-					worktreeDeleted: ephemeral.worktreeDeleted,
-					queuedMessages: ephemeral.queuedMessages,
-				}));
-			}
-
-			// Load full session from backend via WS
-			if (ws?.readyState === WebSocket.OPEN) {
-				expectedSessionId = sessionId;
-				waitingForHistory = [];
-				ws.send(JSON.stringify({ type: 'load_session', session_id: sessionId }));
-			}
-
-			persistSession();
-		},
-
-		newChat() {
-			const state = get(store);
-
-			// Save ephemeral for the session we're leaving
-			const leavingKey = state.sessionId || '__new_chat__';
-			sessionEphemeralCache.save(leavingKey, {
-				draft: state.draft,
-				scrollTop: state.scrollTop,
-				modelOverride: state.modelOverride,
-				permissionModeOverride: state.permissionModeOverride,
-				thinkingModeOverride: state.thinkingModeOverride,
-				executionMode: state.executionMode,
-				worktreeId: state.worktreeId,
-				worktreeBranch: state.worktreeBranch,
-				worktreeBaseBranch: state.worktreeBaseBranch,
-				selectedWorktreeBranch: state.selectedWorktreeBranch,
-				worktreeMode: state.worktreeMode,
-				worktreeDeleted: state.worktreeDeleted,
-				queuedMessages: state.queuedMessages,
-			});
-
-			// Tell backend to release session lock
-			if (ws?.readyState === WebSocket.OPEN && state.sessionId) {
-				ws.send(JSON.stringify({ type: 'close_session' }));
-			}
-
-			// Reset session-specific state, restore profile/project to user defaults
-			update(s => ({
-				...s,
-				sessionId: null,
-				sessionProfileId: null,
-				currentQueryProfileId: null,
-				profile: getPersistedProfile() || s.profile,
-				project: getPersistedProject() || s.project,
-				messages: [],
-				isStreaming: false,
-				error: null,
-				title: 'New Chat',
-				totalTokensIn: 0,
-				totalTokensOut: 0,
-				totalCacheCreationTokens: 0,
-				totalCacheReadTokens: 0,
-				contextUsed: null,
-				contextMax: 200_000,
-				modelOverride: null,
-				permissionModeOverride: null,
-				thinkingModeOverride: null,
-				pendingPermissions: [],
-				pendingQuestions: [],
-				todos: [],
-				queuedMessages: [],
-				draft: '',
-				scrollTop: 0,
-				streamStartTime: null,
-				executionMode: 'local' as const,
-				worktreeBranch: '',
-				worktreeBaseBranch: 'main',
-				worktreeCreateNewBranch: false,
-				worktreeId: null,
-				worktreeMode: 'new' as const,
-				selectedWorktreeBranch: null,
-				isCreatingWorktree: false,
-				worktreeError: null,
-				worktreeDeleted: false,
-				sessionLocked: false,
-				sessionLockedBy: undefined,
-			}));
-
-			pendingTools.clear();
-			expectedSessionId = null;
-			waitingForHistory = null;
-
-			// Save current browser state and show empty for the new chat
-			browserState.switchSession(state.sessionId, null);
-
-			// Restore new chat draft if one was saved earlier
-			const newChatEphemeral = sessionEphemeralCache.restore('__new_chat__');
-			if (newChatEphemeral?.draft) {
-				update(s => ({ ...s, draft: newChatEphemeral.draft }));
-			}
-
-			persistSession();
-		},
+		switchSession: (sessionId: string) => switcher.switchSession(sessionId),
+		newChat: () => switcher.newChat(),
 
 		// ── Messaging ───────────────────────────────────────────────────
 
@@ -1782,15 +639,15 @@ function createActiveSessionStore() {
 				}
 			}
 
-			if (!ws || ws.readyState !== WebSocket.OPEN) {
+			if (!wsConn.isConnected()) {
 				// Attempt reconnection instead of just showing an error
-				reconnectAttempts = 0;
-				connect();
+				wsConn.resetReconnectAttempts();
+				wsConn.connect();
 				const connected = await new Promise<boolean>((resolve) => {
-					if (ws?.readyState === WebSocket.OPEN) { resolve(true); return; }
+					if (wsConn.isConnected()) { resolve(true); return; }
 					const timeout = setTimeout(() => { clearInterval(check); resolve(false); }, 3000);
 					const check = setInterval(() => {
-						if (ws?.readyState === WebSocket.OPEN) { clearTimeout(timeout); clearInterval(check); resolve(true); }
+						if (wsConn.isConnected()) { clearTimeout(timeout); clearInterval(check); resolve(true); }
 					}, 100);
 				});
 				if (!connected) {
@@ -1812,7 +669,7 @@ function createActiveSessionStore() {
 				// the sessionState subscriber from overwriting our update
 				sessionPoller.stop(state.sessionId);
 				sessionState.removeSession(state.sessionId);
-				interruptPending = true;
+				internal.interruptPending = true;
 
 				// Single atomic update: mark running tools as errored + append user message.
 				// Uses s.messages (current store state) instead of stale sessionState data.
@@ -1838,16 +695,16 @@ function createActiveSessionStore() {
 					};
 				});
 
-				pendingTools.clear();
-				lastMessageTime = Date.now();
-				ws!.send(JSON.stringify({
+				internal.pendingTools.clear();
+				wsConn.resetLastMessageTime();
+				wsConn.send({
 					type: 'interrupt_and_query',
 					prompt,
 					session_id: state.sessionId,
 					profile: state.profile,
 					project: state.project || undefined,
 					worktree_id: state.worktreeId || undefined,
-				}));
+				});
 				return;
 			}
 
@@ -1871,8 +728,8 @@ function createActiveSessionStore() {
 			if (state.permissionModeOverride) overrides.permission_mode = state.permissionModeOverride;
 			if (state.thinkingModeOverride) overrides.thinking_mode = state.thinkingModeOverride;
 
-			lastMessageTime = Date.now();
-			ws!.send(JSON.stringify({
+			wsConn.resetLastMessageTime();
+			wsConn.send({
 				type: 'query',
 				prompt,
 				session_id: state.sessionId,
@@ -1880,13 +737,13 @@ function createActiveSessionStore() {
 				project: state.project || undefined,
 				worktree_id: state.worktreeId || undefined,
 				overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
-			}));
+			});
 		},
 
 		stopGeneration() {
 			const state = get(store);
-			if (ws?.readyState === WebSocket.OPEN && state.sessionId) {
-				ws.send(JSON.stringify({ type: 'stop', session_id: state.sessionId }));
+			if (state.sessionId) {
+				wsConn.send({ type: 'stop', session_id: state.sessionId });
 			}
 
 			if (stopTimeout) clearTimeout(stopTimeout);
@@ -1910,23 +767,19 @@ function createActiveSessionStore() {
 		// ── Permission & Question Responses ─────────────────────────────
 
 		sendPermissionResponse(requestId: string, decision: 'allow' | 'deny', remember?: 'none' | 'session' | 'profile', pattern?: string) {
-			if (ws?.readyState === WebSocket.OPEN) {
-				ws.send(JSON.stringify({ type: 'permission_response', request_id: requestId, decision, remember: remember || 'none', pattern }));
-			}
+			wsConn.send({ type: 'permission_response', request_id: requestId, decision, remember: remember || 'none', pattern });
 		},
 
 		sendUserQuestionResponse(requestId: string, toolUseId: string, answers: Record<string, string | string[]>) {
-			if (ws?.readyState === WebSocket.OPEN) {
-				ws.send(JSON.stringify({ type: 'user_question_response', request_id: requestId, tool_use_id: toolUseId, answers }));
-			}
+			wsConn.send({ type: 'user_question_response', request_id: requestId, tool_use_id: toolUseId, answers });
 		},
 
 		syncPendingPermissions() {
-			if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'get_pending_permissions' }));
+			wsConn.send({ type: 'get_pending_permissions' });
 		},
 
 		syncPendingQuestions() {
-			if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'get_pending_questions' }));
+			wsConn.send({ type: 'get_pending_questions' });
 		},
 
 		// ── Profile & Project ───────────────────────────────────────────
@@ -1934,7 +787,7 @@ function createActiveSessionStore() {
 		setProfile(profileId: string) {
 			update(s => ({ ...s, profile: profileId }));
 			const state = get(store);
-			saveSelectionToBackend(profileId, state.project);
+			switcher.saveSelectionToBackend(profileId, state.project);
 			persistSession();
 		},
 
@@ -1945,7 +798,7 @@ function createActiveSessionStore() {
 				return;
 			}
 			update(s => ({ ...s, project: projectId }));
-			saveSelectionToBackend(state.profile, projectId);
+			switcher.saveSelectionToBackend(state.profile, projectId);
 			persistSession();
 		},
 
@@ -1970,12 +823,12 @@ function createActiveSessionStore() {
 		 */
 		reloadSession(forceJsonl = false) {
 			const state = get(store);
-			if (state.sessionId && ws?.readyState === WebSocket.OPEN) {
-				ws.send(JSON.stringify({
+			if (state.sessionId) {
+				wsConn.send({
 					type: 'load_session',
 					session_id: state.sessionId,
 					...(forceJsonl && { force_jsonl: true }),
-				}));
+				});
 			}
 		},
 
@@ -2032,7 +885,7 @@ function createActiveSessionStore() {
 
 				// Reconnect WS to register the new session
 				disconnect();
-				connect();
+				wsConn.connect();
 
 				if (prompt) {
 					setTimeout(() => storeApi.sendMessage(prompt, { skipWorktreeSetup: true }), 500);
@@ -2090,10 +943,10 @@ function createActiveSessionStore() {
 			if (!state.sessionId) return;
 			// After rewind completes externally (via MessageActions component),
 			// reload the session to pick up the truncated message list
-			if (ws?.readyState === WebSocket.OPEN) {
-				expectedSessionId = state.sessionId;
-				waitingForHistory = [];
-				ws.send(JSON.stringify({ type: 'load_session', session_id: state.sessionId }));
+			if (wsConn.isConnected()) {
+				internal.expectedSessionId = state.sessionId;
+				internal.waitingForHistory = [];
+				wsConn.send({ type: 'load_session', session_id: state.sessionId });
 			}
 		},
 
@@ -2102,11 +955,11 @@ function createActiveSessionStore() {
 		takeOverSession() {
 			const state = get(store);
 			if (!state.sessionId) return;
-			if (ws?.readyState === WebSocket.OPEN) {
+			if (wsConn.isConnected()) {
 				update(s => ({ ...s, error: null, sessionLocked: false, sessionLockedBy: undefined }));
-				expectedSessionId = state.sessionId;
-				waitingForHistory = [];
-				ws.send(JSON.stringify({ type: 'load_session', session_id: state.sessionId, force: true }));
+				internal.expectedSessionId = state.sessionId;
+				internal.waitingForHistory = [];
+				wsConn.send({ type: 'load_session', session_id: state.sessionId, force: true });
 			}
 		},
 
@@ -2121,14 +974,14 @@ function createActiveSessionStore() {
 		if (!state.profile) { update(s => ({ ...s, error: 'Please select a profile' })); return; }
 		if (!state.project) { update(s => ({ ...s, error: 'Please select a project' })); return; }
 		if (!state.worktreeId) { update(s => ({ ...s, error: 'Please select an existing worktree' })); return; }
-		if (!ws || ws.readyState !== WebSocket.OPEN) {
-			reconnectAttempts = 0;
-			connect();
+		if (!wsConn.isConnected()) {
+			wsConn.resetReconnectAttempts();
+			wsConn.connect();
 			const connected = await new Promise<boolean>((resolve) => {
-				if (ws?.readyState === WebSocket.OPEN) { resolve(true); return; }
+				if (wsConn.isConnected()) { resolve(true); return; }
 				const timeout = setTimeout(() => { clearInterval(check); resolve(false); }, 3000);
 				const check = setInterval(() => {
-					if (ws?.readyState === WebSocket.OPEN) { clearTimeout(timeout); clearInterval(check); resolve(true); }
+					if (wsConn.isConnected()) { clearTimeout(timeout); clearInterval(check); resolve(true); }
 				}, 100);
 			});
 			if (!connected) { update(s => ({ ...s, error: 'Unable to connect. Please check your connection and try again.' })); return; }
@@ -2166,15 +1019,15 @@ function createActiveSessionStore() {
 		if (state.permissionModeOverride) overrides.permission_mode = state.permissionModeOverride;
 		if (state.thinkingModeOverride) overrides.thinking_mode = state.thinkingModeOverride;
 
-		lastMessageTime = Date.now();
-		ws!.send(JSON.stringify({
+		wsConn.resetLastMessageTime();
+		wsConn.send({
 			type: 'query',
 			prompt,
 			profile: state.profile,
 			project: state.project,
 			worktree_id: state.worktreeId,
 			overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
-		}));
+		});
 	}
 }
 
