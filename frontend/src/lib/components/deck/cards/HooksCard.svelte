@@ -19,7 +19,11 @@
 		hookSaving,
 		hookStats
 	} from '$lib/stores/hooks';
-	import { selectedProject } from '$lib/stores/appState';
+	import { activeSession } from '$lib/stores/active-session';
+	import { derived } from 'svelte/store';
+
+	// Derive selectedProject from activeSession (replaced dead appState import)
+	const selectedProject = derived(activeSession, $s => $s.project);
 	import type { Hook, HookCreate, HookUpdate, HookTestResult } from '$lib/api/client';
 	import HookListItem from '$lib/components/hooks/HookListItem.svelte';
 	import HookForm from '$lib/components/hooks/HookForm.svelte';

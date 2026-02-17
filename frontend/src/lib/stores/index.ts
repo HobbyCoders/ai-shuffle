@@ -11,8 +11,7 @@
 // Auth and User
 export * from './auth';
 
-// App State (global preferences, connection state)
-export * from './appState';
+// App State - REMOVED: appState.ts was dead code (replaced by active-session.ts)
 
 // Git integration
 export * from './git';
@@ -31,8 +30,6 @@ export * from './hooks';
 
 // =============================================================================
 // Stores with overlapping exports - import directly from module if needed:
-// - ./device (deviceId also in chat)
+// - ./device (deviceId also in active-session)
 // - ./github (githubAuthenticated also in auth)
-// - ./sync (connectedDevices also in chat)
-// - ./tabs (ChatMessage, MessageType, Project, profiles, projects, sessions also in chat)
 // =============================================================================

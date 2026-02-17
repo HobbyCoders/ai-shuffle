@@ -37,7 +37,7 @@
 	} from '$lib/api/automations';
 	import { api } from '$lib/api/client';
 	import type { Profile } from '$lib/api/client';
-	import type { Project } from '$lib/stores/appState';
+	import type { Project } from '$lib/stores/types';
 	import { getConnectors } from '$lib/api/connectors';
 	import type { Connector } from '$lib/api/connectors';
 	import { slide, fade } from 'svelte/transition';

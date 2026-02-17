@@ -13,7 +13,7 @@
 	import { api } from '$lib/api/client';
 	import { theme, themePreference, isDark, currentPresetId, themePresets, type Theme } from '$lib/stores/theme';
 	import type { Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
-	import type { Project } from '$lib/stores/appState';
+	import type { Project } from '$lib/stores/types';
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword } from '$lib/api/auth';
 	import WebhookManager from '$lib/components/WebhookManager.svelte';
 	import ConnectorManager from '$lib/components/ConnectorManager.svelte';
