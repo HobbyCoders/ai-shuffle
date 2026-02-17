@@ -75,8 +75,12 @@
 	 * Open an existing session by ID
 	 */
 	function handleOpenSession(sessionId: string) {
+		// Look up the session's project so switchSession can set it immediately,
+		// avoiding a window where the old project's streaming/git state leaks.
+		const sessionProjectId = $sessions.find(s => s.id === sessionId)?.project_id;
+
 		const openChat = () => {
-			activeSession.switchSession(sessionId);
+			activeSession.switchSession(sessionId, sessionProjectId);
 			layout.openChat(sessionId);
 		};
 

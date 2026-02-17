@@ -725,7 +725,7 @@ function createActiveSessionStore() {
 
 		// ── Session Navigation (delegated to session-switcher) ─────────
 
-		switchSession: (sessionId: string) => switcher.switchSession(sessionId),
+		switchSession: (sessionId: string, projectId?: string | null) => switcher.switchSession(sessionId, projectId),
 		newChat: () => switcher.newChat(),
 
 		// ── Messaging ───────────────────────────────────────────────────

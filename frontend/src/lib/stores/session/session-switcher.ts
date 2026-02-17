@@ -54,7 +54,7 @@ export interface SessionSwitcherDeps {
 }
 
 export interface SessionSwitcher {
-	switchSession: (sessionId: string) => Promise<void>;
+	switchSession: (sessionId: string, projectId?: string | null) => Promise<void>;
 	newChat: () => void;
 	persistSession: () => void;
 	loadPersistedSession: () => Promise<PersistedSession | null>;
@@ -116,6 +116,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		return {
 			draft: state.draft,
 			scrollTop: state.scrollTop,
+			project: state.project,
 			modelOverride: state.modelOverride,
 			permissionModeOverride: state.permissionModeOverride,
 			thinkingModeOverride: state.thinkingModeOverride,
@@ -212,18 +213,24 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	// ── Session Navigation ──────────────────────────────────────────────
 
-	async function switchSession(sessionId: string) {
+	async function switchSession(sessionId: string, projectId?: string | null) {
 		const state = getState();
 
 		// Save ephemeral for session we're leaving (use sentinel for new chat)
 		const leavingKey = state.sessionId || '__new_chat__';
 		sessionEphemeralCache.save(leavingKey, buildEphemeral(state));
 
+		// Peek at ephemeral cache to get the target session's project immediately.
+		// Priority: explicit projectId arg > ephemeral cache > keep current project.
+		const ephemeral = sessionEphemeralCache.restore(sessionId);
+		const targetProject = projectId || ephemeral?.project || state.project;
+
 		// Hydrate from IndexedDB cache for instant render
 		const cachedMessages = await messageCache.get(sessionId);
 		update(s => ({
 			...s,
 			sessionId,
+			project: targetProject,
 			messages: cachedMessages && cachedMessages.length > 0 ? cachedMessages : [],
 			error: null,
 			// Reset session-specific state
@@ -241,8 +248,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// Panel stays open; only the content (URL, screenshot, etc.) swaps.
 		browserState.switchSession(state.sessionId, sessionId);
 
-		// Restore ephemeral from cache
-		const ephemeral = sessionEphemeralCache.restore(sessionId);
+		// Restore remaining ephemeral state from cache (project already applied above)
 		if (ephemeral) {
 			update(s => ({
 				...s,

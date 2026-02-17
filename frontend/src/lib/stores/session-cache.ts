@@ -13,6 +13,7 @@ import type { ExecutionMode, QueuedMessage } from './types';
 export interface SessionEphemeral {
 	draft: string;
 	scrollTop: number;
+	project: string;
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	thinkingModeOverride: string | null;
