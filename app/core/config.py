@@ -137,7 +137,7 @@ class Settings(BaseSettings):
         """Get the effective AI tools directory"""
         if self.tools_dir is not None:
             return self.tools_dir
-        # Default to /opt/ai-tools in Docker mode (bundled in image, accessible by Claude agent)
+        # Default to /opt/ai-tools in Docker mode (bundled in image with node_modules)
         if not self.is_local_mode():
             return Path("/opt/ai-tools")
         # In local mode, tools would be relative to install location

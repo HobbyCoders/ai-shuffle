@@ -145,6 +145,13 @@ if [ -f /root/.config/gh/hosts.yml ] && [ ! -f /home/appuser/.config/gh/hosts.ym
     echo "GitHub CLI auth copied and git configured"
 fi
 
+# Ensure AI tools node_modules exist (in case Docker image was built without them)
+if [ -d /opt/ai-tools ] && [ -f /opt/ai-tools/package.json ] && [ ! -d /opt/ai-tools/node_modules ]; then
+    echo "Installing AI tools Node.js dependencies..."
+    cd /opt/ai-tools && npm install --omit=dev 2>/dev/null || echo "AI tools npm install failed (continuing anyway)"
+    cd /app
+fi
+
 # Ensure data and workspace directories are writable
 chown -R appuser:appuser /data /workspace
 
