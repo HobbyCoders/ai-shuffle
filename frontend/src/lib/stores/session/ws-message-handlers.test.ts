@@ -540,6 +540,42 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('stream_message_delta should not process queued messages', () => {
+		it('should NOT process queued messages on stop_reason: tool_use', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.isStreaming = true;
+			state.queuedMessages = [{ id: 'q1', content: 'follow-up', queuedAt: Date.now() }];
+
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'stream_message_delta',
+				delta: { stop_reason: 'tool_use' },
+			});
+
+			expect(deps.onProcessNextQueuedMessage).not.toHaveBeenCalled();
+		});
+
+		it('should NOT process queued messages on stop_reason: end_turn', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.isStreaming = true;
+			state.queuedMessages = [{ id: 'q1', content: 'follow-up', queuedAt: Date.now() }];
+
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'stream_message_delta',
+				delta: { stop_reason: 'end_turn' },
+			});
+
+			expect(deps.onProcessNextQueuedMessage).not.toHaveBeenCalled();
+		});
+	});
+
 	describe('sync event forwarding', () => {
 		it('should forward sync events to session notifier', () => {
 			const state = mockState();
