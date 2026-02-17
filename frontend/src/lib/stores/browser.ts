@@ -33,10 +33,6 @@ export interface BrowserState {
 	sessionId: string | null;
 	/** Whether live screencast is streaming */
 	isStreaming: boolean;
-	/** Current browser viewport width (matches panel) */
-	viewportWidth: number;
-	/** Current browser viewport height (matches panel) */
-	viewportHeight: number;
 }
 
 /** Per-session browser content (saved/restored on session switch) */
@@ -57,8 +53,6 @@ const DEFAULT_STATE: BrowserState = {
 	isLoading: false,
 	sessionId: null,
 	isStreaming: false,
-	viewportWidth: 1280,
-	viewportHeight: 720,
 };
 
 /** Empty content for sessions with no browser activity */
@@ -176,15 +170,14 @@ function createBrowserStore() {
 		/**
 		 * Connect the screencast WebSocket to a session.
 		 * Called when the browser panel opens or session changes.
+		 *
+		 * Note: viewport dimensions are tracked locally in BrowserPanel (canvasWidth/canvasHeight),
+		 * NOT in this store — updating the store here would re-trigger the $effect that calls
+		 * this method, creating an infinite reactive loop.
 		 */
 		connectScreencast(sessionId: string, width: number, height: number) {
 			const ws = _ensureBrowserWs();
 			ws.connect(sessionId, width, height);
-			update((state) => ({
-				...state,
-				viewportWidth: Math.round(width),
-				viewportHeight: Math.round(height),
-			}));
 		},
 
 		/**

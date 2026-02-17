@@ -86,17 +86,32 @@
 
 	// --- Screencast lifecycle ---
 	// Connect/disconnect screencast when panel opens/closes or session changes.
+	//
+	// IMPORTANT: _connectedSessionId is intentionally a plain variable (not $state)
+	// so it is NOT tracked as a reactive dependency. This prevents an infinite loop:
+	// the $effect reads $browserState → connectScreencast updates the store →
+	// which would re-trigger the effect. The guard ensures connectScreencast is
+	// called exactly once per session ID.
+	let _connectedSessionId: string | null = null;
+
 	$effect(() => {
 		const state: BrowserState = $browserState;
 		const container = canvasContainer;
 
 		if (state.isOpen && state.sessionId && container) {
-			const rect = container.getBoundingClientRect();
-			const width = Math.round(rect.width) || 800;
-			const height = Math.round(rect.height) || 600;
-			browserState.connectScreencast(state.sessionId, width, height);
-			canvasWidth = width;
-			canvasHeight = height;
+			// Only connect if session changed — prevents infinite reactive loop
+			if (state.sessionId !== _connectedSessionId) {
+				_connectedSessionId = state.sessionId;
+				const rect = container.getBoundingClientRect();
+				const width = Math.round(rect.width) || 800;
+				const height = Math.round(rect.height) || 600;
+				browserState.connectScreencast(state.sessionId, width, height);
+				canvasWidth = width;
+				canvasHeight = height;
+			}
+		} else {
+			// Panel closed or no session — reset guard so next open reconnects
+			_connectedSessionId = null;
 		}
 
 		// Note: disconnecting is handled by switchSession/closePanel in the store

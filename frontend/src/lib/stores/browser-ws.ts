@@ -63,6 +63,11 @@ export function createBrowserWs(callbacks: BrowserWsCallbacks): BrowserWsConnect
 	}
 
 	function connect(sessionId: string, width: number, height: number): void {
+		// Skip if already connected (or connecting) to the same session
+		if (currentSessionId === sessionId && ws && ws.readyState <= WebSocket.OPEN) {
+			return;
+		}
+
 		// Clean up any existing connection
 		disconnect();
 
