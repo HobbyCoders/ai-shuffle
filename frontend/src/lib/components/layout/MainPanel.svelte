@@ -204,17 +204,35 @@
 	//    with 500ms debounce.
 	// 3. Programmatic broadcast — API mutation endpoints (commit, push, checkout, etc.)
 	//    immediately recompute and broadcast state after operations complete.
-	// A 10-second safety-net fallback poll catches any missed events
+	// A 60-second safety-net fallback poll catches any missed events
 	// (e.g. working-tree edits made outside the app, which don't touch .git/).
+	// Timer is paused entirely when the tab is hidden to avoid wasting CPU.
 
-	const GIT_FALLBACK_INTERVAL_MS = 10_000;
+	const GIT_FALLBACK_INTERVAL_MS = 60_000;
 	let _gitFallbackTimer: ReturnType<typeof setInterval> | null = null;
+	let _gitFallbackProject: string | null = null;
 
 	/**
 	 * Refresh diff stats via API (used for fallback poll and after streaming).
 	 */
 	async function refreshDiffStats(projectId: string) {
 		git.refreshDiffStats();
+	}
+
+	function startGitFallback(project: string) {
+		stopGitFallback();
+		_gitFallbackProject = project;
+		_gitFallbackTimer = setInterval(() => {
+			refreshDiffStats(project);
+		}, GIT_FALLBACK_INTERVAL_MS);
+	}
+
+	function stopGitFallback() {
+		if (_gitFallbackTimer) {
+			clearInterval(_gitFallbackTimer);
+			_gitFallbackTimer = null;
+		}
+		_gitFallbackProject = null;
 	}
 
 	/**
@@ -235,7 +253,20 @@
 		}
 	}
 
-	// Safety-net fallback poll: refreshes diff stats every 10s when tab is visible.
+	// Pause/resume git fallback poll when tab visibility changes.
+	// No point spawning git subprocesses if the user isn't looking.
+	function handleVisibilityChange() {
+		if (document.hidden) {
+			stopGitFallback();
+		} else if (_gitFallbackProject === null && activeProject && $githubAuthenticated) {
+			// Tab became visible again — restart
+			startGitFallback(activeProject);
+			// Do one immediate refresh on return
+			refreshDiffStats(activeProject);
+		}
+	}
+
+	// Safety-net fallback poll: refreshes diff stats every 60s when tab is visible.
 	// Real-time updates come via WebSocket from git hooks, file watcher, and API broadcasts.
 	$effect(() => {
 		const project = activeProject;
@@ -246,26 +277,17 @@
 		// Clear stale PR state immediately when any dependency changes.
 		branchPR = null;
 
-		if (_gitFallbackTimer) {
-			clearInterval(_gitFallbackTimer);
-			_gitFallbackTimer = null;
+		stopGitFallback();
+
+		if (project && authenticated && !document.hidden) {
+			startGitFallback(project);
 		}
 
-		if (project && authenticated) {
-			// Fallback poll — only when tab is visible
-			// (Initial load is handled by git.loadRepository / git.loadForWorktree above)
-			_gitFallbackTimer = setInterval(() => {
-				if (!document.hidden) {
-					refreshDiffStats(project);
-				}
-			}, GIT_FALLBACK_INTERVAL_MS);
-		}
+		document.addEventListener('visibilitychange', handleVisibilityChange);
 
 		return () => {
-			if (_gitFallbackTimer) {
-				clearInterval(_gitFallbackTimer);
-				_gitFallbackTimer = null;
-			}
+			stopGitFallback();
+			document.removeEventListener('visibilitychange', handleVisibilityChange);
 		};
 	});
 
