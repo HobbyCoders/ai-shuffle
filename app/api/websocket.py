@@ -21,6 +21,7 @@ from fastapi.websockets import WebSocketState
 from app.core.sync_engine import sync_engine
 from app.core.live_session_store import live_session_store
 from app.core.config import settings
+from app.core.streaming_context import StreamingContext
 from app.db import database
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
 from app.core.connectors.manager import connector_manager
@@ -244,11 +245,19 @@ async def chat_websocket(
         current_tool_id: Optional[str] = None  # Track current tool for input streaming
         current_tool_name: Optional[str] = None  # Track current tool name for result broadcasts
 
+        # Structured logging context for this streaming request
+        ctx = StreamingContext(
+            session_id=session_id,
+            device_id=device_id,
+            message_id=message_id,
+            user_id=user_id,
+        )
+
         # Unregister this device from SyncEngine while streaming
         # This prevents duplicate events (we get direct events via send_json)
         # If the device disconnects and reconnects, it will re-register and get sync events
         await sync_engine.unregister_device(device_id, session_id)
-        logger.debug(f"Unregistered device {device_id} during streaming to prevent duplicates")
+        ctx.debug(logger, "Unregistered device during streaming to prevent duplicates")
 
         # Initialize LiveSessionStore for server-authoritative state
         # IMPORTANT: Check live store first for complete messages from an interrupted session.
@@ -259,7 +268,7 @@ async def chat_websocket(
         if existing_live and not existing_live.is_streaming and existing_live.messages:
             # Use complete messages from the interrupted session's live store
             initial_messages = [m.to_dict() for m in existing_live.messages]
-            logger.debug(f"Using {len(initial_messages)} messages from live store (interrupted session) for {session_id}")
+            ctx.debug(logger, f"Using {len(initial_messages)} messages from live store (interrupted session)")
         else:
             # Fall back to JSONL parsing (normal path: no interrupted session in memory)
             initial_messages = []
@@ -275,7 +284,7 @@ async def chat_websocket(
                     try:
                         initial_messages, _usage = parse_session_history(sdk_session_id, working_dir)
                     except Exception as e:
-                        logger.warning(f"Failed to load history for live store: {e}")
+                        ctx.warning(logger, f"Failed to load history for live store: {e}")
 
         # Start live session with existing messages
         await live_session_store.start_streaming(session_id, initial_messages)
@@ -316,9 +325,9 @@ async def chat_websocket(
                     await send_json(heartbeat_data)
 
         try:
-            logger.debug(f"Starting query for session {session_id}, profile={profile_id}, project={project_id}, overrides={overrides}")
+            ctx.debug(logger, f"Starting query profile={profile_id}, project={project_id}, overrides={overrides}")
             if not await send_json({"type": "start", "session_id": session_id, "message_id": message_id}):
-                logger.warning(f"Connection lost before query could start for session {session_id}")
+                ctx.warning(logger, "Connection lost before query could start")
                 await live_session_store.cleanup_session(session_id)
                 return  # Exit early - connection is dead
 
@@ -330,7 +339,7 @@ async def chat_websocket(
             # Start heartbeat task
             heartbeat_task = asyncio.create_task(send_heartbeats())
 
-            logger.debug(f"Calling stream_to_websocket for session {session_id}, api_user_id={api_user_id}")
+            ctx.debug(logger, f"Calling stream_to_websocket, api_user_id={api_user_id}")
             async for event in stream_to_websocket(
                 prompt=prompt,
                 session_id=session_id,
@@ -342,9 +351,9 @@ async def chat_websocket(
             ):
                 event_type = event.get('type')
                 if event_type == 'plugin_message':
-                    logger.debug(f"[WS] Sending plugin_message to frontend: {event}")
+                    ctx.debug(logger, f"Sending plugin_message to frontend: {event}")
                 else:
-                    logger.debug(f"Streaming event for session {session_id}: {event_type}")
+                    ctx.debug(logger, f"Streaming event: {event_type}")
 
                 # Send to this websocket - may fail if connection died
                 # Important: Do NOT skip store updates if WebSocket fails!
@@ -353,7 +362,7 @@ async def chat_websocket(
                 ws_connected = await send_json(event)
                 if not ws_connected and not connection_lost_logged:
                     connection_lost_logged = True
-                    logger.debug(f"WebSocket disconnected during streaming for session {session_id}, updates continue via sync_engine + polling")
+                    ctx.debug(logger, "WebSocket disconnected during streaming, updates continue via sync_engine + polling")
 
                 # Broadcast to other devices via SyncEngine
                 # Start streaming on first content event
@@ -408,7 +417,7 @@ async def chat_websocket(
                                 session_id=session_id,
                                 usage=usage_data
                             )
-                            logger.debug(f"Broadcast usage update for session {session_id}: {usage_data}")
+                            ctx.debug(logger, f"Broadcast usage update: {usage_data}")
 
                 # Broadcast stream chunks AND update LiveSessionStore
                 # LiveSessionStore is the server-authoritative state for reconnecting clients
@@ -795,7 +804,7 @@ async def chat_websocket(
                             source_device_id=None
                         )
 
-            logger.debug(f"Query completed for session {session_id}")
+            ctx.debug(logger, "Query completed")
 
             # Dispatch notifications for session completion (non-blocking)
             import time as time_module
@@ -826,11 +835,11 @@ async def chat_websocket(
                     }
                 ))
             except Exception as webhook_error:
-                logger.warning(f"Failed to dispatch session.complete notifications: {webhook_error}")
+                ctx.warning(logger, f"Failed to dispatch session.complete notifications: {webhook_error}")
 
         except asyncio.CancelledError:
             await send_json({"type": "stopped", "session_id": session_id})
-            logger.debug(f"Query cancelled for session {session_id}")
+            ctx.debug(logger, "Query cancelled")
 
             # End live session store with interrupted flag
             # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
@@ -855,7 +864,7 @@ async def chat_websocket(
                 )
 
         except Exception as e:
-            logger.error(f"Query error for session {session_id}: {e}", exc_info=True)
+            ctx.error(logger, f"Query error: {e}", exc_info=True)
             await send_json({"type": "error", "message": str(e)})
 
             # End live session store on error
@@ -900,7 +909,7 @@ async def chat_websocket(
                     }
                 ))
             except Exception as webhook_error:
-                logger.warning(f"Failed to dispatch session.error notifications: {webhook_error}")
+                ctx.warning(logger, f"Failed to dispatch session.error notifications: {webhook_error}")
 
         finally:
             # Stop heartbeat task
@@ -916,7 +925,7 @@ async def chat_websocket(
             # If end_streaming WAS called, the session is kept in memory intentionally
             # for ~30 seconds so reconnecting clients can retrieve messages.
             if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
-                logger.debug(f"Cleaning up live session store for session {session_id} (finally block - streaming never ended)")
+                ctx.debug(logger, "Cleaning up live session store (finally block - streaming never ended)")
                 await live_session_store.cleanup_session(session_id)
 
             # ALWAYS ensure streaming state is cleared, even if stream_started was never set
@@ -924,7 +933,7 @@ async def chat_websocket(
             if sync_engine.is_session_streaming(session_id):
                 if not stream_started:
                     # Stream was marked but never actually started - clean up silently
-                    logger.debug(f"Cleaning up streaming state for session {session_id} (never started)")
+                    ctx.debug(logger, "Cleaning up streaming state (never started)")
                     await sync_engine.broadcast_stream_end(
                         session_id=session_id,
                         message_id=message_id,
@@ -946,12 +955,12 @@ async def chat_websocket(
                 current_connection = sync_engine._connections.get(session_id, {}).get(device_id)
                 if current_connection is not None and current_connection.websocket is not websocket:
                     # A newer connection exists - don't replace it with this old websocket
-                    logger.debug(f"Skipping re-register for device {device_id} - newer connection already exists")
+                    ctx.debug(logger, "Skipping re-register - newer connection already exists")
                 else:
                     await sync_engine.register_device(device_id, session_id, websocket)
-                    logger.debug(f"Re-registered device {device_id} after streaming complete")
+                    ctx.debug(logger, "Re-registered device after streaming complete")
             else:
-                logger.debug(f"Skipping re-register for device {device_id} - websocket disconnected during streaming")
+                ctx.debug(logger, "Skipping re-register - websocket disconnected during streaming")
 
             # Clean up task reference only if it's still our task (avoid TOCTOU race
             # where a different device started a new query for the same session)
@@ -963,11 +972,11 @@ async def chat_websocket(
             # (don't destroy immediately — user may reopen within 30s)
             remaining_devices = sync_engine.get_device_count(session_id)
             if remaining_devices == 0:
-                logger.debug(f"Query finished but no devices connected for session {session_id}, scheduling cleanup")
+                ctx.debug(logger, "Query finished but no devices connected, scheduling cleanup")
                 if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
                     # Only force-cleanup if still marked as streaming (abnormal state)
                     await live_session_store.cleanup_session(session_id)
-                    logger.debug(f"Cleaned up stuck streaming session {session_id}")
+                    ctx.debug(logger, "Cleaned up stuck streaming session")
 
     try:
         # Start ping task
