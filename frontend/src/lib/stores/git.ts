@@ -671,19 +671,27 @@ function createGitStore() {
             const key = _makeKey(projectId, worktreeId ?? undefined);
             const isActive = (_loadedKey === key);
 
-            // Helper to map branch data from server format to store format
-            const mapBranches = (branches: NonNullable<typeof changes.branches>) =>
-                branches.branches.map(b => ({
-                    name: b.name,
-                    current: b.is_current,
-                    remote: b.is_remote,
-                    upstream: b.upstream,
-                    ahead: b.ahead,
-                    behind: b.behind,
-                    lastCommit: b.commit_message,
-                    hasWorktree: b.has_worktree,
-                    worktreeId: b.worktree_id
-                }));
+            // Helper to map + deduplicate branch data from server format to store format
+            const mapBranches = (branches: NonNullable<typeof changes.branches>) => {
+                const seen = new Set<string>();
+                return branches.branches
+                    .map(b => ({
+                        name: b.name,
+                        current: b.is_current,
+                        remote: b.is_remote,
+                        upstream: b.upstream,
+                        ahead: b.ahead,
+                        behind: b.behind,
+                        lastCommit: b.commit_message,
+                        hasWorktree: b.has_worktree,
+                        worktreeId: b.worktree_id
+                    }))
+                    .filter(b => {
+                        if (seen.has(b.name)) return false;
+                        seen.add(b.name);
+                        return true;
+                    });
+            };
 
             // Phase 1: Always update LRU cache (even for background tabs)
             const cached = _cache.get(key);

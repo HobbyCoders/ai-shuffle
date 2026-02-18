@@ -54,6 +54,19 @@ export interface Branch {
     worktreeId?: string;
 }
 
+/**
+ * Deduplicate branches by name, keeping the first occurrence.
+ * Guards against duplicate entries regardless of source (API, WebSocket, cache).
+ */
+function deduplicateBranches(branches: Branch[]): Branch[] {
+    const seen = new Set<string>();
+    return branches.filter(b => {
+        if (seen.has(b.name)) return false;
+        seen.add(b.name);
+        return true;
+    });
+}
+
 // Transform raw branch to frontend format
 function transformBranch(raw: RawBranch): Branch {
     return {
@@ -233,7 +246,7 @@ export async function getBranches(projectId: string, includeRemote: boolean = fa
     if (worktreeId) searchParams.set('worktree_id', worktreeId);
     const qs = searchParams.toString();
     const response = await api.get<RawBranchListResponse>(`${BASE}/${projectId}/git/branches${qs ? `?${qs}` : ''}`);
-    return response.branches.map(transformBranch);
+    return deduplicateBranches(response.branches.map(transformBranch));
 }
 
 /**

@@ -36,6 +36,7 @@
 	const worktreeBranchNames = $derived(new Set(filteredWorktrees.map(w => w.branch_name)));
 
 	const filteredBranches = $derived.by(() => {
+		const seen = new Set<string>();
 		return $branchStore.filter(b => {
 			// Skip main/master (main worktree)
 			if (b.name === 'main' || b.name === 'master') return false;
@@ -47,6 +48,10 @@
 			// Skip branches that already have a worktree
 			const effectiveName = b.remote ? b.name.replace(/^[^\/]+\//, '') : b.name;
 			if (worktreeBranchNames.has(effectiveName)) return false;
+			// Deduplicate by effective display name to prevent duplicates from
+			// multiple remotes or any upstream data issues
+			if (seen.has(effectiveName)) return false;
+			seen.add(effectiveName);
 			return true;
 		});
 	});
