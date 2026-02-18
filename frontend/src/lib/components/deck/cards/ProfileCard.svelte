@@ -534,8 +534,6 @@
 				return 'Haiku';
 			case 'sonnet':
 				return 'Sonnet';
-			case 'sonnet-1m':
-				return 'Sonnet 1M';
 			case 'opus':
 				return 'Opus';
 			default:
@@ -549,8 +547,6 @@
 				return 'card-badge--haiku';
 			case 'sonnet':
 				return 'card-badge--sonnet';
-			case 'sonnet-1m':
-				return 'card-badge--sonnet-1m';
 			case 'opus':
 				return 'card-badge--opus';
 			default:
@@ -862,15 +858,14 @@
 					<div class="card-form-section">
 						<h3 class="card-form-title">Core Settings</h3>
 						<div class="form-field">
-							<label class="card-form-label">Model — {#if profileForm.model === 'haiku'}fastest and most compact, ideal for simple tasks{:else if profileForm.model === 'sonnet'}balanced performance, recommended for most use cases{:else if profileForm.model === 'sonnet-1m'}extended context (1M tokens) for large codebases{:else if profileForm.model === 'opus'}most capable, best for complex reasoning{:else}custom model string{/if}</label>
+							<label class="card-form-label">Model — {#if profileForm.model === 'haiku'}fastest and most compact, ideal for simple tasks{:else if profileForm.model === 'sonnet'}balanced performance, recommended for most use cases{:else if profileForm.model === 'opus'}most capable, best for complex reasoning{:else}custom model string{/if}</label>
 							<div class="card-mode-selector">
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'haiku'} onclick={() => profileForm.model = 'haiku'}>Haiku</button>
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'sonnet'} onclick={() => profileForm.model = 'sonnet'}>Sonnet</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'sonnet-1m'} onclick={() => profileForm.model = 'sonnet-1m'}>Sonnet 1M</button>
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'opus'} onclick={() => profileForm.model = 'opus'}>Opus</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={!['haiku','sonnet','sonnet-1m','opus'].includes(profileForm.model)} onclick={() => profileForm.model = ''}>Custom</button>
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={!['haiku','sonnet','opus'].includes(profileForm.model)} onclick={() => profileForm.model = ''}>Custom</button>
 							</div>
-							{#if !['haiku','sonnet','sonnet-1m','opus'].includes(profileForm.model)}
+							{#if !['haiku','sonnet','opus'].includes(profileForm.model)}
 								<input type="text" class="card-form-input" bind:value={profileForm.model} placeholder="e.g. claude-opus-4-6" />
 							{/if}
 						</div>
