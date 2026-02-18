@@ -571,6 +571,7 @@ class SessionState:
     is_connected: bool = False
     is_streaming: bool = False
     interrupt_requested: bool = False  # Flag to signal interrupt request
+    clear_context_pending: bool = False  # Set by ExitPlanMode clear_context; prevents end-of-query overwrite
     last_activity: datetime = field(default_factory=datetime.now)
     background_task: Optional[asyncio.Task] = None  # Track background streaming task
     written_agent_ids: list = field(default_factory=list)  # Track agents written to filesystem
@@ -2739,6 +2740,10 @@ async def stream_to_websocket(
                 plan_exit_behavior = config.get("plan_exit_behavior", "normal")
                 if plan_exit_behavior == "clear_context":
                     database.update_session(session_id=session_id, sdk_session_id="")
+                    # Set flag so end-of-query cleanup doesn't overwrite the cleared sdk_session_id
+                    active_state = _active_sessions.get(session_id)
+                    if active_state:
+                        active_state.clear_context_pending = True
                     logger.info(f"[WS] ExitPlanMode: clearing context for session {session_id} (plan_exit_behavior=clear_context)")
 
                 return PermissionResultAllow()
@@ -3412,16 +3417,25 @@ async def stream_to_websocket(
         if len(prompt) > 50:
             title_to_set += "..."
 
+    # If clear_context_pending was set by ExitPlanMode, don't overwrite the
+    # cleared sdk_session_id — the next query should start with a fresh context.
+    final_state = _active_sessions.get(session_id)
+    save_sdk_session_id = sdk_session_id
+    if final_state and final_state.clear_context_pending:
+        save_sdk_session_id = None  # None = don't update the sdk_session_id column
+        final_state.clear_context_pending = False
+        logger.info(f"[WS] Skipping sdk_session_id write for {session_id} (clear_context_pending)")
+
     database.update_session(
         session_id=session_id,
-        sdk_session_id=sdk_session_id,
+        sdk_session_id=save_sdk_session_id,
         title=title_to_set,
         cost_increment=metadata.get("total_cost_usd", 0),
         tokens_in_increment=metadata.get("tokens_in", 0),
         tokens_out_increment=metadata.get("tokens_out", 0),
         turn_increment=metadata.get("num_turns", 0)
     )
-    logger.debug(f"[WS] Updated session {session_id}, sdk_session_id={sdk_session_id}, title={title_to_set}")
+    logger.debug(f"[WS] Updated session {session_id}, sdk_session_id={save_sdk_session_id}, title={title_to_set}")
 
     # Store tool messages (tool_use and tool_result)
     for tool_msg in tool_messages:

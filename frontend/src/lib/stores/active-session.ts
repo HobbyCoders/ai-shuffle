@@ -105,6 +105,7 @@ export interface PersistedSession {
 	executionMode?: ExecutionMode;
 	worktreeId?: string | null;
 	worktreeBranch?: string;
+	worktreeBaseBranch?: string;
 	selectedWorktreeBranch?: string | null;
 	worktreeMode?: 'new' | 'existing';
 	worktreeDeleted?: boolean;
@@ -266,6 +267,7 @@ function createActiveSessionStore() {
 
 	let stopTimeout: ReturnType<typeof setTimeout> | null = null;
 	let persistTimer: ReturnType<typeof setTimeout> | null = null;
+	let streamingBridgeUnsub: (() => void) | null = null;
 
 	// Tracked removeSession timers so they can be cancelled when a new
 	// streaming session starts for the same sessionId. Without this,
@@ -278,7 +280,7 @@ function createActiveSessionStore() {
 		waitingForHistory: null,
 		expectedSessionId: null,
 		pendingTools: new Set(),
-		streamEndCleanedUp: false,
+		streamEndCleanedUp: null,
 		streamingOnDisconnect: null,
 		interruptPending: false,
 	};
@@ -501,7 +503,7 @@ function createActiveSessionStore() {
 	// stream end.
 
 	function setupStreamingBridge() {
-		sessionState.subscribe(($sessionState) => {
+		streamingBridgeUnsub = sessionState.subscribe(($sessionState) => {
 			const currentState = get(store);
 			if (!currentState.sessionId) return;
 
@@ -597,7 +599,7 @@ function createActiveSessionStore() {
 			}, 100));
 
 			// Mark as handled so the safety timeout doesn't send redundant load_session
-			internal.streamEndCleanedUp = true;
+			internal.streamEndCleanedUp = sessionId;
 		});
 	}
 
@@ -681,6 +683,7 @@ function createActiveSessionStore() {
 					thinkingModeOverride: persisted.thinkingModeOverride ?? null,
 					executionMode: persisted.executionMode || 'local',
 					worktreeBranch: persisted.worktreeBranch || '',
+					worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',
 					worktreeId: persisted.worktreeId ?? null,
 					worktreeMode: persisted.worktreeMode || 'new',
 					selectedWorktreeBranch: persisted.selectedWorktreeBranch ?? null,
@@ -708,6 +711,7 @@ function createActiveSessionStore() {
 	function destroy() {
 		disconnect();
 		wsConn.destroy();
+		if (streamingBridgeUnsub) { streamingBridgeUnsub(); streamingBridgeUnsub = null; }
 		if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
 		// Cancel all pending removeSession timers
 		for (const timer of removeSessionTimers.values()) clearTimeout(timer);

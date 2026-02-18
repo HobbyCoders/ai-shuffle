@@ -62,8 +62,12 @@ class BrowserSession:
     _screencast_callback: Optional[Callable[[bytes], Awaitable[None]]] = field(
         default=None, repr=False
     )
+    _screencast_handler: Optional[Callable] = field(default=None, repr=False)
+    _frame_tasks: set = field(default_factory=set, repr=False)
     _viewport_width: int = field(default=INITIAL_VIEWPORT["width"])
     _viewport_height: int = field(default=INITIAL_VIEWPORT["height"])
+    # Asyncio lock to serialize CDP operations between WS input and MCP tools
+    _cdp_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def touch(self):
         """Update last activity timestamp."""
@@ -115,7 +119,27 @@ class BrowserSession:
     # ------------------------------------------------------------------
 
     async def _ensure_cdp_session(self) -> CDPSession:
-        """Get or create a CDP session for the current page."""
+        """Get or create a CDP session for the current page.
+
+        Recreates the session if the current page changed (e.g., after tab switch),
+        because a CDP session is bound to the page target it was created for.
+        """
+        if self._cdp_session is not None:
+            # Check if the CDP session's page target still matches self.page.
+            # After browser_tab_switch, self.page changes but the cached CDP
+            # session still points at the old page. Detect this and recreate.
+            try:
+                # Attempt a lightweight CDP call to verify the session is alive
+                await self._cdp_session.send("Runtime.evaluate", {"expression": "1"})
+            except Exception:
+                # Session is stale or detached — recreate
+                try:
+                    await self._cdp_session.detach()
+                except Exception:
+                    pass
+                self._cdp_session = None
+                self._screencast_handler = None
+
         if self._cdp_session is None:
             self._cdp_session = await self.page.context.new_cdp_session(self.page)
         return self._cdp_session
@@ -153,17 +177,28 @@ class BrowserSession:
         cdp = await self._ensure_cdp_session()
         self._screencast_callback = callback
 
+        # Remove any previously registered handler to avoid accumulating
+        # duplicate handlers across start/stop/start cycles (e.g., resizes).
+        if self._screencast_handler is not None:
+            cdp.off("Page.screencastFrame", self._screencast_handler)
+            self._screencast_handler = None
+
         # Frame handler: decode base64 → invoke callback → ack frame
         def on_frame(params: dict) -> None:
+            # Capture callback ref locally to avoid TOCTOU race with stop_screencast
+            cb = self._screencast_callback
+            if not self._screencast_active or cb is None:
+                return
+
             frame_b64 = params.get("data", "")
             session_id = params.get("metadata", {}).get("sessionId", 0)
 
-            if frame_b64 and self._screencast_callback:
+            if frame_b64:
                 frame_bytes = base64.b64decode(frame_b64)
 
                 async def deliver_and_ack():
                     try:
-                        await self._screencast_callback(frame_bytes)
+                        await cb(frame_bytes)
                     except Exception as e:
                         logger.debug(f"Frame delivery failed: {e}")
                     try:
@@ -174,8 +209,11 @@ class BrowserSession:
                     except Exception:
                         pass
 
-                asyncio.create_task(deliver_and_ack())
+                task = asyncio.create_task(deliver_and_ack())
+                self._frame_tasks.add(task)
+                task.add_done_callback(self._frame_tasks.discard)
 
+        self._screencast_handler = on_frame
         cdp.on("Page.screencastFrame", on_frame)
 
         await cdp.send(
@@ -197,12 +235,24 @@ class BrowserSession:
     async def stop_screencast(self) -> None:
         """Stop the CDP screencast if active."""
         if self._cdp_session and self._screencast_active:
+            # Set flags first to prevent any in-flight on_frame from invoking callback
+            self._screencast_active = False
+            self._screencast_callback = None
+            # Cancel outstanding frame delivery tasks
+            for task in list(self._frame_tasks):
+                task.cancel()
+            self._frame_tasks.clear()
             try:
                 await self._cdp_session.send("Page.stopScreencast", {})
             except Exception:
                 pass
-            self._screencast_active = False
-            self._screencast_callback = None
+            # Remove the event handler to prevent accumulation
+            if self._screencast_handler is not None:
+                try:
+                    self._cdp_session.off("Page.screencastFrame", self._screencast_handler)
+                except Exception:
+                    pass
+                self._screencast_handler = None
             logger.debug(f"Stopped screencast for {self.session_id}")
 
     # ------------------------------------------------------------------
@@ -270,19 +320,20 @@ class BrowserSession:
             click_count: Number of clicks (1 for single, 2 for double)
         """
         self.touch()
-        cdp = await self._ensure_cdp_session()
-        params: Dict[str, Any] = {
-            "type": event_type,
-            "x": x,
-            "y": y,
-            "button": button,
-            "clickCount": click_count,
-        }
-        # mousePressed/mouseReleased require buttons bitmask
-        if event_type in ("mousePressed", "mouseReleased"):
-            buttons_map = {"left": 1, "right": 2, "middle": 4}
-            params["buttons"] = buttons_map.get(button, 1)
-        await cdp.send("Input.dispatchMouseEvent", params)
+        async with self._cdp_lock:
+            cdp = await self._ensure_cdp_session()
+            params: Dict[str, Any] = {
+                "type": event_type,
+                "x": x,
+                "y": y,
+                "button": button,
+                "clickCount": click_count,
+            }
+            # mousePressed/mouseReleased require buttons bitmask
+            if event_type in ("mousePressed", "mouseReleased"):
+                buttons_map = {"left": 1, "right": 2, "middle": 4}
+                params["buttons"] = buttons_map.get(button, 1)
+            await cdp.send("Input.dispatchMouseEvent", params)
 
     async def cdp_key_event(
         self,
@@ -302,17 +353,18 @@ class BrowserSession:
             modifiers: Bitmask — 1=Alt, 2=Ctrl, 4=Meta, 8=Shift
         """
         self.touch()
-        cdp = await self._ensure_cdp_session()
-        params: Dict[str, Any] = {"type": event_type}
-        if key:
-            params["key"] = key
-        if code:
-            params["code"] = code
-        if text:
-            params["text"] = text
-        if modifiers:
-            params["modifiers"] = modifiers
-        await cdp.send("Input.dispatchKeyEvent", params)
+        async with self._cdp_lock:
+            cdp = await self._ensure_cdp_session()
+            params: Dict[str, Any] = {"type": event_type}
+            if key:
+                params["key"] = key
+            if code:
+                params["code"] = code
+            if text:
+                params["text"] = text
+            if modifiers:
+                params["modifiers"] = modifiers
+            await cdp.send("Input.dispatchKeyEvent", params)
 
     async def cdp_scroll(
         self, x: float, y: float, delta_x: float, delta_y: float
@@ -326,17 +378,18 @@ class BrowserSession:
             delta_y: Vertical scroll delta
         """
         self.touch()
-        cdp = await self._ensure_cdp_session()
-        await cdp.send(
-            "Input.dispatchMouseEvent",
-            {
-                "type": "mouseWheel",
-                "x": x,
-                "y": y,
-                "deltaX": delta_x,
-                "deltaY": delta_y,
-            },
-        )
+        async with self._cdp_lock:
+            cdp = await self._ensure_cdp_session()
+            await cdp.send(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mouseWheel",
+                    "x": x,
+                    "y": y,
+                    "deltaX": delta_x,
+                    "deltaY": delta_y,
+                },
+            )
 
     # ------------------------------------------------------------------
     # Navigation helpers (unchanged from original)
@@ -387,8 +440,9 @@ class BrowserSession:
 
     async def close(self):
         """Close this browser session, cleaning up CDP and Playwright resources."""
-        # Stop screencast first
+        # Stop screencast first (also removes handler)
         await self.stop_screencast()
+        self._screencast_handler = None
         # Detach CDP session
         if self._cdp_session:
             try:

@@ -130,6 +130,10 @@ function createBrowserStore() {
 		if (!_browserWs) {
 			_browserWs = createBrowserWs({
 				onFrame: (data) => {
+					// Mark streaming on first frame, not on WS open
+					if (!_currentState.isStreaming) {
+						update((state) => ({ ...state, isStreaming: true }));
+					}
 					if (_frameCallback) _frameCallback(data);
 				},
 				onStateUpdate: (url, title) => {
@@ -139,7 +143,7 @@ function createBrowserStore() {
 					console.warn('[browser-ws] Error:', message);
 				},
 				onConnected: () => {
-					update((state) => ({ ...state, isStreaming: true }));
+					// isStreaming deferred to first frame arrival
 				},
 				onDisconnected: () => {
 					update((state) => ({ ...state, isStreaming: false }));
@@ -219,11 +223,18 @@ function createBrowserStore() {
 						newState.isOpen = true;
 					}
 
-					// Handle browser_close
+					// Handle browser_close — disconnect the screencast WS immediately
+					// so the frontend doesn't hold a zombie connection to a destroyed
+					// backend session.
 					if (toolName === 'browser_close') {
 						newState.isActive = false;
+						newState.isStreaming = false;
 						newState.url = '';
 						newState.title = '';
+						// Schedule disconnect after state update completes
+						queueMicrotask(() => {
+							if (_browserWs) _browserWs.disconnect();
+						});
 					}
 
 					return newState;
@@ -266,10 +277,9 @@ function createBrowserStore() {
 			// Close backend browser session
 			if (sid) {
 				try {
-					const token = localStorage.getItem('auth_token') || '';
 					await fetch(`/api/v1/browser/${sid}`, {
 						method: 'DELETE',
-						headers: { Authorization: `Bearer ${token}` },
+						credentials: 'include',
 					});
 				} catch {
 					// Best-effort cleanup
@@ -362,13 +372,10 @@ function createBrowserStore() {
 		async createSession(sessionId: string): Promise<boolean> {
 			update((state) => ({ ...state, isLoading: true }));
 			try {
-				const token = localStorage.getItem('auth_token') || '';
 				const response = await fetch(`/api/v1/browser/${sessionId}/create`, {
 					method: 'POST',
-					headers: {
-						Authorization: `Bearer ${token}`,
-						'Content-Type': 'application/json',
-					},
+					credentials: 'include',
+					headers: { 'Content-Type': 'application/json' },
 				});
 
 				if (!response.ok) {
@@ -409,13 +416,10 @@ function createBrowserStore() {
 		): Promise<boolean> {
 			update((state) => ({ ...state, isLoading: true }));
 			try {
-				const token = localStorage.getItem('auth_token') || '';
 				const response = await fetch(`/api/v1/browser/${sessionId}/${endpoint}`, {
 					method: 'POST',
-					headers: {
-						Authorization: `Bearer ${token}`,
-						'Content-Type': 'application/json',
-					},
+					credentials: 'include',
+					headers: { 'Content-Type': 'application/json' },
 					body: body ? JSON.stringify(body) : '{}',
 				});
 

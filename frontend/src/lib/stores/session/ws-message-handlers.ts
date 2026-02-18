@@ -30,7 +30,7 @@ export interface InternalMutableState {
 	waitingForHistory: Array<Record<string, unknown>> | null;
 	expectedSessionId: string | null;
 	pendingTools: Set<string>;
-	streamEndCleanedUp: boolean;
+	streamEndCleanedUp: string | null;
 	streamingOnDisconnect: string | null;
 	interruptPending: boolean;
 }
@@ -135,6 +135,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	// ── Handler: history ─────────────────────────────────────────────────
 
 	function handleHistory(data: Record<string, unknown>): void {
+		if (!data.session_id) return;
 		const receivedSessionId = data.session_id as string;
 		if (internal.expectedSessionId && receivedSessionId !== internal.expectedSessionId) {
 			internal.waitingForHistory = null;
@@ -548,7 +549,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		if (isActiveSession && doneSessionId) {
 			const cleanupId = doneSessionId;
 			setTimeout(() => {
-				if (internal.streamEndCleanedUp) { internal.streamEndCleanedUp = false; return; }
+				if (internal.streamEndCleanedUp === cleanupId) { internal.streamEndCleanedUp = null; return; }
 				console.warn(`[ActiveSession] Safety: onStreamEnd didn't fire for ${cleanupId}, running fallback`);
 				if (sessionPoller.isPolling(cleanupId)) sessionPoller.stop(cleanupId);
 				const sd = sessionStateDep.getSession(cleanupId);
@@ -634,6 +635,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		}
 
 		if (msgType === 'user_streaming_changed') {
+			if (!data.session_id) return;
 			const sessionId = data.session_id as string;
 			const isStreamingFlag = data.is_streaming as boolean;
 			const projectId = (data.project_id as string | null) ?? null;
@@ -695,6 +697,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				break;
 
 			case 'session_created': {
+				if (!data.session_id) break;
 				const sessionId = data.session_id as string;
 				const currentState = getState();
 				if (!currentState.sessionId || currentState.sessionId === sessionId) {
@@ -706,6 +709,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'start': {
+				if (!data.session_id) break;
 				const sessionId = data.session_id as string;
 				internal.interruptPending = false;
 				const currentStartState = getState();
@@ -786,6 +790,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'session_not_found': {
+				if (!data.session_id) break;
 				const missingId = data.session_id as string;
 				console.warn(`[ActiveSession] Session not found: ${missingId}`);
 				appLoadSessions();

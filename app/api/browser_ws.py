@@ -29,6 +29,8 @@ Message types FROM client:
 import asyncio
 import json
 import logging
+import secrets
+import time
 from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
@@ -36,6 +38,7 @@ from fastapi.websockets import WebSocketState
 
 from app.api.websocket import authenticate_websocket
 from app.core.config import INTERNAL_BROWSER_TOKEN
+from app.db import database
 from app.mcp.browser_session import browser_session_manager
 
 logger = logging.getLogger(__name__)
@@ -63,25 +66,34 @@ async def browser_websocket(
     await websocket.accept()
 
     # Authenticate — reuse existing WebSocket auth
-    is_authenticated, _ = await authenticate_websocket(websocket, token)
+    is_authenticated, user_id = await authenticate_websocket(websocket, token)
 
     # Also accept internal browser token (for future internal use)
     if not is_authenticated:
         internal_token = websocket.query_params.get("internal_token")
-        if internal_token and internal_token == INTERNAL_BROWSER_TOKEN:
+        if internal_token and INTERNAL_BROWSER_TOKEN and secrets.compare_digest(internal_token, INTERNAL_BROWSER_TOKEN):
             is_authenticated = True
+            user_id = "internal"
 
     if not is_authenticated:
         logger.warning(f"Browser WebSocket auth failed for session {session_id}")
         await websocket.close(code=4001, reason="Authentication failed")
         return
 
+    # Verify the session belongs to the authenticated user (skip for internal)
+    if user_id != "internal":
+        db_session = database.get_session(session_id)
+        if db_session and db_session.get("user_id") and db_session["user_id"] != user_id:
+            logger.warning(f"Browser WebSocket: user {user_id} denied access to session {session_id}")
+            await websocket.close(code=4003, reason="Access denied")
+            return
+
     # Get or create browser session
     try:
         session = await browser_session_manager.get_or_create_session(session_id)
     except Exception as e:
         logger.error(f"Failed to get/create browser session {session_id}: {e}")
-        await websocket.close(code=4002, reason=f"Browser session error: {e}")
+        await websocket.close(code=4002, reason="Browser session error")
         return
 
     screencast_active = False
@@ -143,7 +155,7 @@ async def browser_websocket(
     # Navigation listener — send state updates when the page navigates
     nav_listener_active = True
 
-    def on_page_load() -> None:
+    def on_page_load(_=None) -> None:
         """Handler for page load events — sends URL/title updates."""
         if not nav_listener_active or not connection_healthy:
             return
@@ -162,7 +174,12 @@ async def browser_websocket(
 
         asyncio.create_task(_send_state())
 
-    session.page.on("load", lambda _=None: on_page_load())
+    # Register the load listener — use a named reference so we can remove it in cleanup
+    session.page.on("load", on_page_load)
+
+    # Simple rate limiter for input events (mouse/key/scroll)
+    _last_input_time = 0.0
+    _INPUT_MIN_INTERVAL = 0.005  # 5ms minimum between input events (~200/sec max)
 
     try:
         while True:
@@ -230,6 +247,12 @@ async def browser_websocket(
                         await session.set_viewport(width, height)
 
                 elif msg_type == "mouse":
+                    # Rate-limit input events
+                    now = time.monotonic()
+                    if now - _last_input_time < _INPUT_MIN_INTERVAL:
+                        continue
+                    _last_input_time = now
+
                     action = data.get("action", "click")
                     x = float(data.get("x", 0))
                     y = float(data.get("y", 0))
@@ -254,6 +277,11 @@ async def browser_websocket(
                         logger.debug(f"Mouse event failed: {e}")
 
                 elif msg_type == "key":
+                    now = time.monotonic()
+                    if now - _last_input_time < _INPUT_MIN_INTERVAL:
+                        continue
+                    _last_input_time = now
+
                     action = data.get("action", "press")
                     key = data.get("key", "")
                     code = data.get("code", "")
@@ -274,6 +302,11 @@ async def browser_websocket(
                         logger.debug(f"Key event failed: {e}")
 
                 elif msg_type == "scroll":
+                    now = time.monotonic()
+                    if now - _last_input_time < _INPUT_MIN_INTERVAL:
+                        continue
+                    _last_input_time = now
+
                     x = float(data.get("x", 0))
                     y = float(data.get("y", 0))
                     delta_x = float(data.get("deltaX", 0))
@@ -300,6 +333,12 @@ async def browser_websocket(
         connection_healthy = False
         nav_listener_active = False
         ping_task.cancel()
+
+        # Remove the page load listener to prevent accumulating orphaned closures
+        try:
+            session.page.remove_listener("load", on_page_load)
+        except Exception:
+            pass
 
         if screencast_active:
             try:

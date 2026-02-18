@@ -58,8 +58,9 @@ export function createBrowserWs(callbacks: BrowserWsCallbacks): BrowserWsConnect
 	function getWsUrl(sessionId: string): string {
 		const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 		const host = window.location.host;
-		const token = localStorage.getItem('auth_token') || '';
-		return `${protocol}//${host}/api/v1/ws/browser/${sessionId}?token=${encodeURIComponent(token)}`;
+		// Auth is handled via cookies (same as chat WebSocket).
+		// No token query param needed — authenticate_websocket reads cookies.
+		return `${protocol}//${host}/api/v1/ws/browser/${sessionId}`;
 	}
 
 	function connect(sessionId: string, width: number, height: number): void {

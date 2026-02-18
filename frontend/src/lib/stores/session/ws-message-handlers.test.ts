@@ -19,7 +19,7 @@ function createMockInternal(): InternalMutableState {
 		waitingForHistory: null,
 		expectedSessionId: null,
 		pendingTools: new Set(),
-		streamEndCleanedUp: false,
+		streamEndCleanedUp: null,
 		streamingOnDisconnect: null,
 		interruptPending: false,
 	};

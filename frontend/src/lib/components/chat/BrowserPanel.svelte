@@ -99,8 +99,13 @@
 		const container = canvasContainer;
 
 		if (state.isOpen && state.sessionId && container) {
-			// Only connect if session changed — prevents infinite reactive loop
-			if (state.sessionId !== _connectedSessionId) {
+			// Connect if session changed OR if the WS disconnected (isStreaming went false)
+			// while the panel is still open. The second condition enables auto-reconnection
+			// after transient network errors.
+			const needsConnect = state.sessionId !== _connectedSessionId ||
+				(state.isActive && !state.isStreaming && _connectedSessionId === state.sessionId);
+
+			if (needsConnect) {
 				_connectedSessionId = state.sessionId;
 				const rect = container.getBoundingClientRect();
 				const width = Math.round(rect.width) || 800;
@@ -148,10 +153,12 @@
 			}
 		});
 
-		// Observe when container becomes available
+		// Observe container once when it becomes available
+		let isObserving = false;
 		const unsubscribe = browserState.subscribe(() => {
-			if (canvasContainer) {
+			if (canvasContainer && !isObserving) {
 				observer.observe(canvasContainer);
+				isObserving = true;
 			}
 		});
 
@@ -221,13 +228,10 @@
 	}
 
 	function handleCanvasClick(e: MouseEvent) {
-		const coords = getCanvasCoords(e);
-		if (!coords) return;
-
-		const ws = browserState.getBrowserWs();
-		if (!ws.isConnected()) return;
-
-		ws.sendMouse('click', coords.x, coords.y, 'left');
+		// NOTE: Don't send a CDP click here — mousedown/mouseup already dispatches
+		// the full mousePressed+mouseReleased sequence via their own handlers.
+		// Sending a "click" action here would duplicate the input (double clicks,
+		// double form submissions, etc.).
 
 		// Focus canvas container for keyboard input
 		if (isMobile) {

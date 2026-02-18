@@ -10,6 +10,7 @@ Both callers share the same Playwright browser instance per session.
 
 import json
 import logging
+import secrets
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -32,7 +33,7 @@ router = APIRouter(prefix="/api/v1/browser", tags=["Browser"])
 def require_browser_auth(request: Request):
     """Accept either normal user auth or internal MCP subprocess token."""
     internal_token = request.headers.get("X-Internal-Token")
-    if internal_token and internal_token == INTERNAL_BROWSER_TOKEN:
+    if internal_token and INTERNAL_BROWSER_TOKEN and secrets.compare_digest(internal_token, INTERNAL_BROWSER_TOKEN):
         return "internal"
     return require_auth(request)
 
