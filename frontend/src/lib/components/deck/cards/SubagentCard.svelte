@@ -104,7 +104,6 @@
 		{ value: '', label: 'Inherit', description: 'Use profile default' },
 		{ value: 'haiku', label: 'Haiku', description: 'Fast & cheap' },
 		{ value: 'sonnet', label: 'Sonnet', description: 'Balanced' },
-		{ value: 'sonnet-1m', label: 'Sonnet 1M', description: 'Extended context' },
 		{ value: 'opus', label: 'Opus', description: 'Most capable' }
 	];
 
@@ -780,7 +779,7 @@
 			<div class="editor-tab-content">
 				<!-- Model Selection -->
 				<div class="card-form-section">
-					<label class="card-form-label">Model — {#if formModel === ''}use profile default{:else if formModel === 'haiku'}fastest and most compact{:else if formModel === 'sonnet'}balanced performance{:else if formModel === 'sonnet-1m'}extended context (1M tokens){:else if formModel === 'opus'}most capable{/if}</label>
+					<label class="card-form-label">Model — {#if formModel === ''}use profile default{:else if formModel === 'haiku'}fastest and most compact{:else if formModel === 'sonnet'}balanced performance{:else if formModel === 'opus'}most capable{:else}custom model: {formModel}{/if}</label>
 					<div class="card-mode-selector">
 						<button
 							type="button"
@@ -809,20 +808,23 @@
 						<button
 							type="button"
 							class="card-mode-btn"
-							class:card-mode-btn--active={formModel === 'sonnet-1m'}
-							onclick={() => formModel = 'sonnet-1m'}
-						>
-							Sonnet 1M
-						</button>
-						<button
-							type="button"
-							class="card-mode-btn"
 							class:card-mode-btn--active={formModel === 'opus'}
 							onclick={() => formModel = 'opus'}
 						>
 							Opus
 						</button>
+						<button
+							type="button"
+							class="card-mode-btn"
+							class:card-mode-btn--active={!['', 'haiku', 'sonnet', 'opus'].includes(formModel)}
+							onclick={() => { if (['', 'haiku', 'sonnet', 'opus'].includes(formModel)) formModel = ''; }}
+						>
+							Custom
+						</button>
 					</div>
+					{#if !['', 'haiku', 'sonnet', 'opus'].includes(formModel)}
+						<input bind:value={formModel} class="card-form-input" style="margin-top: 8px;" placeholder="e.g. claude-sonnet-4-5-20250929" />
+					{/if}
 				</div>
 
 				<!-- Tool Access -->

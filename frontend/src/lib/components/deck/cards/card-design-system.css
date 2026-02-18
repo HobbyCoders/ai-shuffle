@@ -504,7 +504,6 @@
 /* Model badges — unified theme primary */
 .card-badge--haiku,
 .card-badge--sonnet,
-.card-badge--sonnet-1m,
 .card-badge--opus {
   background: color-mix(in oklch, var(--primary) 15%, transparent);
   color: var(--primary);

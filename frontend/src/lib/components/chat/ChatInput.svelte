@@ -183,31 +183,42 @@
 	let thinkingDropdownRef = $state<HTMLDivElement | null>(null);
 	let permissionDropdownRef = $state<HTMLDivElement | null>(null);
 
-	// Thinking mode options vary by model type
-	// Opus uses effort-based adaptive thinking; Sonnet/Haiku use token-budget thinking
+	// Effort levels (adaptive thinking depth)
 	const effortModes = [
-		{ value: null, label: 'Default', description: 'Use profile setting' },
 		{ value: 'low', label: 'Low', description: 'Light reasoning' },
 		{ value: 'medium', label: 'Medium', description: 'Balanced reasoning' },
 		{ value: 'high', label: 'High', description: 'Deep reasoning' },
 		{ value: 'max', label: 'Max', description: 'Maximum depth' }
 	];
+	// Extended thinking (token-budget based)
 	const tokenBudgetModes = [
-		{ value: null, label: 'Default', description: 'Use profile setting' },
-		{ value: 'default', label: 'Off', description: 'No extended thinking' },
 		{ value: 'think', label: 'Think', description: '~8k tokens' },
 		{ value: 'think_harder', label: 'Think Harder', description: '~24k tokens' },
 		{ value: 'ultra_think', label: 'Ultra Think', description: '~64k tokens' }
 	];
+	// All valid override values for label lookup
+	const allThinkingModes = [
+		{ value: null, label: 'Default', description: 'Use profile setting' },
+		...effortModes,
+		...tokenBudgetModes
+	];
 
-	// Determine effective model: override > profile config > fallback
-	const effectiveModel = $derived(
-		$activeSession.modelOverride ||
-		$profiles.find(p => p.id === $activeSession.profile)?.config?.model ||
-		'sonnet'
+	// Model override options
+	const PRESET_MODELS = ['haiku', 'sonnet', 'opus'] as const;
+	let showModelDropdown = $state(false);
+	let modelDropdownRef = $state<HTMLDivElement | null>(null);
+	let customModelInput = $state('');
+	const modelOptions = [
+		{ value: null, label: 'Default', description: 'Use profile model' },
+		{ value: 'haiku', label: 'Haiku', description: 'Fast & compact' },
+		{ value: 'sonnet', label: 'Sonnet', description: 'Balanced' },
+		{ value: 'opus', label: 'Opus', description: 'Most capable' }
+	];
+	const currentModelLabel = $derived(
+		$activeSession.modelOverride
+			? (modelOptions.find(m => m.value === $activeSession.modelOverride)?.label || $activeSession.modelOverride)
+			: 'Default'
 	);
-	const isOpusModel = $derived(effectiveModel.toLowerCase().includes('opus'));
-	const thinkingModes = $derived(isOpusModel ? effortModes : tokenBudgetModes);
 
 	// Permission mode options
 	const permissionModes = [
@@ -220,7 +231,7 @@
 
 	// Get display labels for current overrides
 	const currentThinkingLabel = $derived(
-		thinkingModes.find(m => m.value === $activeSession.thinkingModeOverride)?.label || 'Default'
+		allThinkingModes.find(m => m.value === $activeSession.thinkingModeOverride)?.label || 'Default'
 	);
 	const currentPermissionLabel = $derived(
 		permissionModes.find(m => m.value === $activeSession.permissionModeOverride)?.label || 'Default'
@@ -235,6 +246,9 @@
 	// Toggle profile dropdown
 	function handleProfileClick(e: MouseEvent) {
 		e.stopPropagation();
+		showThinkingDropdown = false;
+		showPermissionDropdown = false;
+		showModelDropdown = false;
 		showProfileDropdown = !showProfileDropdown;
 	}
 
@@ -249,6 +263,7 @@
 		e.stopPropagation();
 		showPermissionDropdown = false;
 		showProfileDropdown = false;
+		showModelDropdown = false;
 		showThinkingDropdown = !showThinkingDropdown;
 	}
 
@@ -256,25 +271,38 @@
 		e.stopPropagation();
 		showThinkingDropdown = false;
 		showProfileDropdown = false;
+		showModelDropdown = false;
 		showPermissionDropdown = !showPermissionDropdown;
 	}
-
-	// Clear thinking override when model type changes and override is incompatible
-	const effortValues = new Set(effortModes.map(m => m.value));
-	const tokenBudgetValues = new Set(tokenBudgetModes.map(m => m.value));
-	$effect(() => {
-		const override = $activeSession.thinkingModeOverride;
-		if (override === null) return; // null (Default) is always valid
-		const validValues = isOpusModel ? effortValues : tokenBudgetValues;
-		if (!validValues.has(override)) {
-			activeSession.setThinkingModeOverride(null);
-		}
-	});
 
 	// Select override values
 	function selectThinkingMode(value: string | null) {
 		activeSession.setThinkingModeOverride(value);
 		showThinkingDropdown = false;
+	}
+
+	// Model override
+	function handleModelClick(e: MouseEvent) {
+		e.stopPropagation();
+		showThinkingDropdown = false;
+		showPermissionDropdown = false;
+		showProfileDropdown = false;
+		showModelDropdown = !showModelDropdown;
+	}
+
+	function selectModelOverride(value: string | null) {
+		activeSession.setModelOverride(value);
+		showModelDropdown = false;
+		customModelInput = '';
+	}
+
+	function applyCustomModel() {
+		const trimmed = customModelInput.trim();
+		if (trimmed) {
+			activeSession.setModelOverride(trimmed);
+			showModelDropdown = false;
+			customModelInput = '';
+		}
 	}
 
 	function selectPermissionMode(value: string | null) {
@@ -294,6 +322,9 @@
 		if (permissionDropdownRef && !permissionDropdownRef.contains(target)) {
 			showPermissionDropdown = false;
 		}
+		if (modelDropdownRef && !modelDropdownRef.contains(target)) {
+			showModelDropdown = false;
+		}
 	}
 
 	// Close dropdowns on escape
@@ -302,6 +333,7 @@
 			showProfileDropdown = false;
 			showThinkingDropdown = false;
 			showPermissionDropdown = false;
+			showModelDropdown = false;
 		}
 	}
 
@@ -1153,8 +1185,24 @@
 
 							{#if showThinkingDropdown}
 								<div class="override-dropdown">
-									<div class="override-dropdown-header">{isOpusModel ? 'Reasoning Effort' : 'Thinking Mode'}</div>
-									{#each thinkingModes as mode}
+									<!-- Default (clear override) -->
+									<button
+										type="button"
+										class="override-dropdown-item"
+										class:selected={$activeSession.thinkingModeOverride === null}
+										onclick={() => selectThinkingMode(null)}
+									>
+										<span class="override-item-label">Default</span>
+										<span class="override-item-desc">Use profile setting</span>
+										{#if $activeSession.thinkingModeOverride === null}
+											<svg class="w-3.5 h-3.5 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+											</svg>
+										{/if}
+									</button>
+									<!-- Effort section -->
+									<div class="override-dropdown-header">Reasoning Effort</div>
+									{#each effortModes as mode}
 										<button
 											type="button"
 											class="override-dropdown-item"
@@ -1169,6 +1217,73 @@
 											{/if}
 										</button>
 									{/each}
+									<!-- Thinking section -->
+									<div class="override-dropdown-header">Extended Thinking</div>
+									{#each tokenBudgetModes as mode}
+										<button
+											type="button"
+											class="override-dropdown-item"
+											class:selected={$activeSession.thinkingModeOverride === mode.value}
+											onclick={() => selectThinkingMode(mode.value)}
+										>
+											<span class="override-item-label">{mode.label}</span>
+											{#if $activeSession.thinkingModeOverride === mode.value}
+												<svg class="w-3.5 h-3.5 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+												</svg>
+											{/if}
+										</button>
+									{/each}
+								</div>
+							{/if}
+						</div>
+
+						<!-- Model Override -->
+						<div class="override-wrapper" bind:this={modelDropdownRef}>
+							<button
+								type="button"
+								class="override-btn"
+								class:active={$activeSession.modelOverride !== null}
+								onclick={handleModelClick}
+								title="Model override (session only)"
+							>
+								<!-- CPU/chip icon -->
+								<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M9 3v2m6-2v2M9 19v2m6-2v2M3 9h2m-2 6h2m14-6h2m-2 6h2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+								</svg>
+								{#if $activeSession.modelOverride !== null}
+									<span class="override-indicator"></span>
+								{/if}
+							</button>
+
+							{#if showModelDropdown}
+								<div class="override-dropdown">
+									<div class="override-dropdown-header">Model</div>
+									{#each modelOptions as opt}
+										<button
+											type="button"
+											class="override-dropdown-item"
+											class:selected={$activeSession.modelOverride === opt.value}
+											onclick={() => selectModelOverride(opt.value)}
+										>
+											<span class="override-item-label">{opt.label}</span>
+											{#if $activeSession.modelOverride === opt.value}
+												<svg class="w-3.5 h-3.5 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+												</svg>
+											{/if}
+										</button>
+									{/each}
+									<!-- Custom model input -->
+									<div class="override-dropdown-header">Custom</div>
+									<div style="padding: 4px 8px;">
+										<input
+											class="override-custom-input"
+											bind:value={customModelInput}
+											placeholder="e.g. claude-sonnet-4-6"
+											onkeydown={(e) => { if (e.key === 'Enter') applyCustomModel(); }}
+										/>
+									</div>
 								</div>
 							{/if}
 						</div>
@@ -2271,10 +2386,35 @@
 		flex: 1;
 	}
 
+	.override-item-desc {
+		font-size: 11px;
+		color: var(--muted-foreground);
+		font-weight: 400;
+	}
+
 	.override-dropdown-item .check-icon {
 		flex-shrink: 0;
 		color: var(--primary);
 		margin-left: auto;
+	}
+
+	.override-custom-input {
+		width: 100%;
+		padding: 6px 8px;
+		font-size: 12px;
+		background: var(--input);
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius, 0.75rem) * 0.4);
+		color: var(--foreground);
+		outline: none;
+	}
+
+	.override-custom-input:focus {
+		border-color: var(--primary);
+	}
+
+	.override-custom-input::placeholder {
+		color: var(--muted-foreground);
 	}
 
 	/* Mobile: slightly more compact */
