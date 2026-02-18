@@ -74,7 +74,7 @@ class ProfileConfig(BaseModel):
     # Core settings
     model: Optional[str] = "sonnet"
     permission_mode: Optional[str] = "default"  # default, acceptEdits, plan, bypassPermissions
-    thinking_mode: Optional[str] = "default"  # default, think, think_harder, ultra_think (for Sonnet/Haiku)
+    thinking_mode: Optional[str] = "default"  # default, disabled, adaptive, think, think_harder, ultra_think
     # Opus 4.6+ uses effort-based reasoning instead of token budgets
     # effort: low, medium, high, max (only used when model is opus)
     effort: Optional[str] = None  # low, medium, high, max - for Opus 4.6+ models
@@ -339,6 +339,8 @@ class QueryOverrides(BaseModel):
     permission_mode: Optional[str] = None  # default, acceptEdits, plan, bypassPermissions
     system_prompt_append: Optional[str] = None
     max_turns: Optional[int] = None
+    thinking_mode: Optional[str] = None  # default, disabled, adaptive, think, think_harder, ultra_think
+    effort: Optional[str] = None  # low, medium, high, max
 
 
 class QueryRequest(BaseModel):

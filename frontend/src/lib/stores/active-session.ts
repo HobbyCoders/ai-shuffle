@@ -71,7 +71,8 @@ export interface ActiveSessionState {
 	contextMax: number;
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
-	thinkingModeOverride: string | null;
+	thinkingOverride: string | null;
+	effortOverride: string | null;
 	pendingPermissions: PermissionRequestType[];
 	pendingQuestions: UserQuestionRequest[];
 	todos: TodoItem[];
@@ -101,7 +102,8 @@ export interface PersistedSession {
 	project: string;
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
-	thinkingModeOverride: string | null;
+	thinkingOverride: string | null;
+	effortOverride: string | null;
 	executionMode?: ExecutionMode;
 	worktreeId?: string | null;
 	worktreeBranch?: string;
@@ -234,7 +236,8 @@ function defaultState(): ActiveSessionState {
 		contextMax: 200_000,
 		modelOverride: null,
 		permissionModeOverride: null,
-		thinkingModeOverride: null,
+		thinkingOverride: null,
+		effortOverride: null,
 		pendingPermissions: [],
 		pendingQuestions: [],
 		todos: [],
@@ -464,7 +467,8 @@ function createActiveSessionStore() {
 			const current = get(store);
 			if (current.modelOverride) overrides.model = current.modelOverride;
 			if (current.permissionModeOverride) overrides.permission_mode = current.permissionModeOverride;
-			if (current.thinkingModeOverride) overrides.thinking_mode = current.thinkingModeOverride;
+			if (current.thinkingOverride) overrides.thinking_mode = current.thinkingOverride;
+			if (current.effortOverride) overrides.effort = current.effortOverride;
 
 			wsConn.resetLastMessageTime();
 			wsConn.send({
@@ -680,7 +684,8 @@ function createActiveSessionStore() {
 					project: persisted.project || defaultProject,
 					modelOverride: persisted.modelOverride ?? null,
 					permissionModeOverride: persisted.permissionModeOverride ?? null,
-					thinkingModeOverride: persisted.thinkingModeOverride ?? null,
+					thinkingOverride: persisted.thinkingOverride ?? null,
+					effortOverride: persisted.effortOverride ?? null,
 					executionMode: persisted.executionMode || 'local',
 					worktreeBranch: persisted.worktreeBranch || '',
 					worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',
@@ -838,7 +843,8 @@ function createActiveSessionStore() {
 			const overrides: Record<string, string> = {};
 			if (state.modelOverride) overrides.model = state.modelOverride;
 			if (state.permissionModeOverride) overrides.permission_mode = state.permissionModeOverride;
-			if (state.thinkingModeOverride) overrides.thinking_mode = state.thinkingModeOverride;
+			if (state.thinkingOverride) overrides.thinking_mode = state.thinkingOverride;
+			if (state.effortOverride) overrides.effort = state.effortOverride;
 
 			wsConn.resetLastMessageTime();
 			wsConn.send({
@@ -918,7 +924,8 @@ function createActiveSessionStore() {
 
 		setModelOverride(model: string | null) { update(s => ({ ...s, modelOverride: model })); persistSession(); },
 		setPermissionModeOverride(mode: string | null) { update(s => ({ ...s, permissionModeOverride: mode })); persistSession(); },
-		setThinkingModeOverride(mode: string | null) { update(s => ({ ...s, thinkingModeOverride: mode })); persistSession(); },
+		setThinkingOverride(mode: string | null) { update(s => ({ ...s, thinkingOverride: mode })); persistSession(); },
+		setEffortOverride(effort: string | null) { update(s => ({ ...s, effortOverride: effort })); persistSession(); },
 
 		// ── Ephemeral UI State ──────────────────────────────────────────
 
@@ -1132,7 +1139,8 @@ function createActiveSessionStore() {
 		const overrides: Record<string, string> = {};
 		if (state.modelOverride) overrides.model = state.modelOverride;
 		if (state.permissionModeOverride) overrides.permission_mode = state.permissionModeOverride;
-		if (state.thinkingModeOverride) overrides.thinking_mode = state.thinkingModeOverride;
+		if (state.thinkingOverride) overrides.thinking_mode = state.thinkingOverride;
+		if (state.effortOverride) overrides.effort = state.effortOverride;
 
 		wsConn.resetLastMessageTime();
 		wsConn.send({
