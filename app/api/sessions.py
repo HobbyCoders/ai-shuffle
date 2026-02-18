@@ -671,6 +671,10 @@ async def delete_session(request: Request, session_id: str, token: str = Depends
 
     check_session_access(request, existing)
 
+    # Evict from session pool before deleting — terminates subprocess if alive
+    from app.core.session_pool import get_session_pool
+    await get_session_pool().remove(session_id)
+
     database.delete_session(session_id)
 
 
@@ -696,6 +700,9 @@ async def batch_delete_sessions(
                 continue
 
             check_session_access(request, existing)
+            # Evict from session pool before deleting
+            from app.core.session_pool import get_session_pool
+            await get_session_pool().remove(session_id)
             database.delete_session(session_id)
             deleted_count += 1
         except HTTPException as e:

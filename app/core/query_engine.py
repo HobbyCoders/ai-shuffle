@@ -16,7 +16,6 @@ import uuid
 import asyncio
 from pathlib import Path
 from typing import Optional, Dict, Any, AsyncGenerator
-from dataclasses import dataclass, field
 from datetime import datetime
 
 from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AgentDefinition
@@ -28,6 +27,10 @@ from claude_agent_sdk.types import StreamEvent, PermissionResultAllow, Permissio
 
 from app.db import database
 from app.core.config import settings
+from app.core.session_pool import (
+    SessionState, get_session_pool, is_subprocess_alive,
+    requires_reconnect, graceful_disconnect
+)
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
 from app.core.permission_handler import permission_handler
@@ -563,90 +566,9 @@ def _build_plugins_list(
     return plugins
 
 
-@dataclass
-class SessionState:
-    """Track state for an active SDK session"""
-    client: ClaudeSDKClient
-    sdk_session_id: Optional[str] = None
-    is_connected: bool = False
-    is_streaming: bool = False
-    interrupt_requested: bool = False  # Flag to signal interrupt request
-    clear_context_pending: bool = False  # Set by ExitPlanMode clear_context; prevents end-of-query overwrite
-    last_activity: datetime = field(default_factory=datetime.now)
-    background_task: Optional[asyncio.Task] = None  # Track background streaming task
-    written_agent_ids: list = field(default_factory=list)  # Track agents written to filesystem
-    agents_dir: Optional[Path] = None  # Path to .claude/agents/ directory
-
-
-# Track active sessions - key is our session_id, value is SessionState
-_active_sessions: Dict[str, SessionState] = {}
-
-# Grace period (seconds) for the SDK subprocess to flush JSONL writes before SIGTERM.
-# The Claude Code subprocess writes to JSONL and stdout independently. After sending
-# the ResultMessage to us, it may still be flushing the final JSONL entry. If we
-# terminate immediately, that write is lost and the session history is incomplete.
-_SUBPROCESS_EXIT_GRACE_SECONDS = 5.0
-
-
 def get_session_state(session_id: str) -> Optional[SessionState]:
-    """Get the active session state for a session ID"""
-    return _active_sessions.get(session_id)
-
-
-async def _graceful_disconnect(client: ClaudeSDKClient, session_id: str) -> None:
-    """Disconnect the SDK client, giving the subprocess time to flush JSONL writes.
-
-    The SDK's disconnect() immediately sends SIGTERM to the subprocess. But the
-    Claude Code subprocess writes to stdout (messages to us) and to JSONL (persistent
-    history) independently. After sending the result message, the subprocess may still
-    be flushing the final assistant message to JSONL. Terminating immediately causes
-    that write to be lost, resulting in sessions with missing final messages.
-
-    This function waits for the subprocess to exit naturally (with a timeout) before
-    calling disconnect(). If the process has already exited, disconnect() is a no-op.
-    """
-    try:
-        # Access the underlying anyio Process via the SDK's internal structure.
-        # This is necessary because the SDK's disconnect() offers no grace period.
-        query = getattr(client, '_query', None)
-        transport = getattr(query, 'transport', None) if query else None
-        process = getattr(transport, '_process', None) if transport else None
-
-        if process and process.returncode is None:
-            try:
-                await asyncio.wait_for(process.wait(), timeout=_SUBPROCESS_EXIT_GRACE_SECONDS)
-                logger.debug(f"[WS] Subprocess exited naturally for session {session_id} (rc={process.returncode})")
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"[WS] Subprocess for session {session_id} didn't exit in "
-                    f"{_SUBPROCESS_EXIT_GRACE_SECONDS}s, forcing disconnect"
-                )
-    except Exception as e:
-        # Don't let introspection errors prevent disconnect
-        logger.debug(f"[WS] Could not wait for subprocess for session {session_id}: {e}")
-
-    # Now disconnect (terminates the process if still running, no-op if already exited).
-    # NOTE: When called from asyncio.shield() during task cancellation, the shield
-    # creates a new internal task. client.disconnect() will fail because anyio's
-    # cancel scope was entered in the original task. In that case, fall back to
-    # directly terminating the subprocess.
-    try:
-        await client.disconnect()
-        logger.debug(f"[WS] Disconnected SDK client for session {session_id}")
-    except RuntimeError as e:
-        if "cancel scope" in str(e):
-            logger.debug(f"[WS] Cannot disconnect from shielded task for session {session_id}, terminating subprocess directly")
-            # Fall back to direct process termination
-            try:
-                query_obj = getattr(client, '_query', None)
-                transport = getattr(query_obj, 'transport', None) if query_obj else None
-                proc = getattr(transport, '_process', None) if transport else None
-                if proc and proc.returncode is None:
-                    proc.terminate()
-            except Exception:
-                pass
-        else:
-            raise
+    """Get the active session state for a session ID."""
+    return get_session_pool().peek(session_id)
 
 
 # Default instructions for displaying media and files in chat
@@ -1760,67 +1682,67 @@ async def stream_query(
     # Yield init event
     yield {"type": "init", "session_id": session_id}
 
-    # For now, always create a new client for each query.
-    # This is simpler and avoids issues with reusing clients that may be in an
-    # inconsistent state. The key fix from Anvil is to NOT disconnect after each
-    # query (which we do in the finally block now).
-    #
-    # Clean up any existing state for this session
-    state = _active_sessions.get(session_id)
-    if state:
-        logger.debug(f"Cleaning up existing state for session {session_id}")
-        try:
-            await state.client.disconnect()
-        except Exception:
-            pass
-        # Clean up agent files from previous session
-        if state.agents_dir and state.written_agent_ids:
-            cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
-        del _active_sessions[session_id]
+    # --- Session Pool: Acquire or create SDK client ---
+    pool = get_session_pool()
+    existing_state = pool.get(session_id)
+    reusing_client = False
 
-    # Always create new client
-    logger.debug(f"Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
-    logger.debug(f"Options cwd: {options.cwd}")
-    logger.debug(f"Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
-
-    # Wrap stderr callback to collect lines for error reporting
-    cli_stderr_lines: list[str] = []
-    original_stderr = options.stderr
-    def capturing_stderr(line: str):
-        cli_stderr_lines.append(line)
-        if original_stderr:
-            original_stderr(line)
-    options.stderr = capturing_stderr
-
-    client = ClaudeSDKClient(options=options)
-    logger.debug("ClaudeSDKClient created, attempting connect...")
-
-    # Connect without timeout - Anvil doesn't use timeout for connect()
-    try:
-        await client.connect()
-        logger.debug(f"Connected to Claude SDK for session {session_id}")
-    except Exception as e:
-        import traceback
-        logger.error(f"Failed to connect to Claude SDK for session {session_id}: {e}")
-        logger.error(f"Exception type: {type(e).__name__}")
-        logger.error(f"Full traceback:\n{traceback.format_exc()}")
-        # Surface actual CLI stderr in the error message for actionable feedback
-        if cli_stderr_lines:
-            stderr_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
-            logger.error(f"CLI stderr: {stderr_msg}")
-            yield {"type": "error", "message": stderr_msg}
+    if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
+        if not requires_reconnect(existing_state, options):
+            state = existing_state
+            reusing_client = True
+            logger.info(f"Reusing pooled client for session {session_id}")
         else:
-            yield {"type": "error", "message": f"Connection failed: {e}"}
-        return
+            logger.info(f"Options changed for session {session_id}, creating fresh client")
+            await pool.remove(session_id)
+            existing_state = None
+    elif existing_state:
+        logger.warning(f"Subprocess dead for pooled session {session_id}, creating fresh client")
+        await pool.remove_dead(session_id)
+        existing_state = None
 
-    state = SessionState(
-        client=client,
-        sdk_session_id=resume_id,
-        is_connected=True,
-        written_agent_ids=written_agent_ids,
-        agents_dir=agents_dir
-    )
-    _active_sessions[session_id] = state
+    if not reusing_client:
+        # Evict LRU if pool is full
+        await pool.evict_if_needed()
+
+        logger.debug(f"Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
+
+        # Wrap stderr callback to collect lines for error reporting
+        cli_stderr_lines: list[str] = []
+        original_stderr = options.stderr
+        def capturing_stderr(line: str):
+            cli_stderr_lines.append(line)
+            if original_stderr:
+                original_stderr(line)
+        options.stderr = capturing_stderr
+
+        client = ClaudeSDKClient(options=options)
+
+        try:
+            await client.connect()
+            logger.debug(f"Connected to Claude SDK for session {session_id}")
+        except Exception as e:
+            import traceback
+            logger.error(f"Failed to connect to Claude SDK for session {session_id}: {e}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
+            if cli_stderr_lines:
+                stderr_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
+                logger.error(f"CLI stderr: {stderr_msg}")
+                yield {"type": "error", "message": stderr_msg}
+            else:
+                yield {"type": "error", "message": f"Connection failed: {e}"}
+            return
+
+        state = SessionState(
+            client=client,
+            sdk_session_id=resume_id,
+            is_connected=True,
+            written_agent_ids=written_agent_ids,
+            agents_dir=agents_dir,
+            connect_options=options,
+        )
+        pool.put(session_id, state)
 
     # Mark as streaming
     state.is_streaming = True
@@ -1996,9 +1918,13 @@ async def stream_query(
         yield {"type": "error", "message": str(e)}
 
     finally:
-        # Mark as not streaming
+        # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
         state.last_activity = datetime.now()
+
+        # Remove dead clients from pool
+        if not state.is_connected:
+            await pool.remove_dead(session_id)
 
         # Broadcast stream end to other devices
         await sync_engine.broadcast_stream_end(
@@ -2154,62 +2080,69 @@ async def _run_background_query(
         agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
         written_agent_ids = list(agents_dict.keys())
 
-    # Clean up any existing state for this session
-    state = _active_sessions.get(session_id)
-    if state:
-        logger.debug(f"Cleaning up existing state for session {session_id}")
+    # --- Session Pool: Acquire or create SDK client ---
+    pool = get_session_pool()
+    existing_state = pool.get(session_id)
+    reusing_client = False
+
+    if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
+        if not requires_reconnect(existing_state, options):
+            state = existing_state
+            reusing_client = True
+            logger.info(f"[Background] Reusing pooled client for session {session_id}")
+        else:
+            logger.info(f"[Background] Options changed for session {session_id}, creating fresh client")
+            await pool.remove(session_id)
+            existing_state = None
+    elif existing_state:
+        logger.warning(f"[Background] Subprocess dead for pooled session {session_id}, creating fresh client")
+        await pool.remove_dead(session_id)
+        existing_state = None
+
+    if not reusing_client:
+        # Evict LRU if pool is full
+        await pool.evict_if_needed()
+
+        logger.debug(f"[Background] Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
+
+        # Wrap stderr callback to collect lines for error reporting
+        cli_stderr_lines: list[str] = []
+        original_stderr = options.stderr
+        def capturing_stderr(line: str):
+            cli_stderr_lines.append(line)
+            if original_stderr:
+                original_stderr(line)
+        options.stderr = capturing_stderr
+
+        client = ClaudeSDKClient(options=options)
+
         try:
-            await state.client.disconnect()
-        except Exception:
-            pass
-        # Clean up agent files from previous session
-        if state.agents_dir and state.written_agent_ids:
-            cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
-        del _active_sessions[session_id]
+            await client.connect()
+            logger.debug(f"[Background] Connected to Claude SDK for session {session_id}")
+        except Exception as e:
+            error_msg = str(e)
+            if cli_stderr_lines:
+                error_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
+                logger.error(f"[Background] CLI stderr: {error_msg}")
+            logger.error(f"[Background] Failed to connect to Claude SDK for session {session_id}: {error_msg}")
+            await sync_engine.broadcast_stream_end(
+                session_id=session_id,
+                message_id=f"error-{session_id}",
+                metadata={"error": error_msg},
+                interrupted=True,
+                source_device_id=device_id
+            )
+            return
 
-    # Always create new client
-    logger.debug(f"[Background] Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
-    logger.debug(f"[Background] Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
-
-    # Wrap stderr callback to collect lines for error reporting
-    cli_stderr_lines: list[str] = []
-    original_stderr = options.stderr
-    def capturing_stderr(line: str):
-        cli_stderr_lines.append(line)
-        if original_stderr:
-            original_stderr(line)
-    options.stderr = capturing_stderr
-
-    client = ClaudeSDKClient(options=options)
-
-    # Connect
-    try:
-        await client.connect()
-        logger.debug(f"[Background] Connected to Claude SDK for session {session_id}")
-    except Exception as e:
-        error_msg = str(e)
-        if cli_stderr_lines:
-            error_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
-            logger.error(f"[Background] CLI stderr: {error_msg}")
-        logger.error(f"[Background] Failed to connect to Claude SDK for session {session_id}: {error_msg}")
-        # Broadcast error
-        await sync_engine.broadcast_stream_end(
-            session_id=session_id,
-            message_id=f"error-{session_id}",
-            metadata={"error": error_msg},
-            interrupted=True,
-            source_device_id=device_id
+        state = SessionState(
+            client=client,
+            sdk_session_id=resume_id,
+            is_connected=True,
+            written_agent_ids=written_agent_ids,
+            agents_dir=agents_dir,
+            connect_options=options,
         )
-        return
-
-    state = SessionState(
-        client=client,
-        sdk_session_id=resume_id,
-        is_connected=True,
-        written_agent_ids=written_agent_ids,
-        agents_dir=agents_dir
-    )
-    _active_sessions[session_id] = state
+        pool.put(session_id, state)
 
     # Mark as streaming
     state.is_streaming = True
@@ -2363,9 +2296,14 @@ async def _run_background_query(
         metadata["error"] = str(e)
 
     finally:
+        # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
         state.last_activity = datetime.now()
         state.background_task = None
+
+        # Remove dead clients from pool
+        if not state.is_connected:
+            await pool.remove_dead(session_id)
 
         # Broadcast stream end to all devices
         await sync_engine.broadcast_stream_end(
@@ -2544,7 +2482,7 @@ async def start_background_query(
 
 def _store_background_task(session_id: str, task: asyncio.Task):
     """Store background task reference after state is created"""
-    state = _active_sessions.get(session_id)
+    state = get_session_pool().peek(session_id)
     if state:
         state.background_task = task
 
@@ -2556,7 +2494,8 @@ async def interrupt_session(session_id: str) -> bool:
     to stop processing. This is more reliable than just cancelling the
     asyncio task, which only takes effect at the next await point.
     """
-    state = _active_sessions.get(session_id)
+    # Use peek() to avoid promoting to MRU — interrupt is a read-only check
+    state = get_session_pool().peek(session_id)
     if not state:
         logger.warning(f"No active session found for {session_id}")
         return False
@@ -2587,20 +2526,12 @@ async def interrupt_session(session_id: str) -> bool:
 
 def get_active_sessions() -> list:
     """Get list of active session IDs (connected clients)"""
-    return [
-        session_id
-        for session_id, state in _active_sessions.items()
-        if state.is_connected
-    ]
+    return get_session_pool().active_session_ids()
 
 
 def get_streaming_sessions() -> list:
     """Get list of currently streaming session IDs"""
-    return [
-        session_id
-        for session_id, state in _active_sessions.items()
-        if state.is_streaming
-    ]
+    return get_session_pool().streaming_session_ids()
 
 
 async def stream_to_websocket(
@@ -2666,227 +2597,271 @@ async def stream_to_websocket(
     allowed_tools = config.get("allowed_tools") or []
     disallowed_tools = config.get("disallowed_tools") or []
 
-    # Create canUseTool callback if we have broadcast_func
-    # This handles both permission requests (in 'default' mode) and AskUserQuestion (in all modes)
-    can_use_tool_callback = None
-    if broadcast_func:
-        logger.debug(f"[WS] Creating canUseTool callback for session {session_id}")
-
-        async def can_use_tool_callback(tool_name: str, tool_input: dict, context):
-            """
-            Permission callback that routes tool requests through the permission handler
-            and handles AskUserQuestion tool specially.
-
-            Args:
-                tool_name: Name of the tool being requested
-                tool_input: Tool input parameters
-                context: ToolPermissionContext with signal and suggestions
-            """
-            # Check profile-level tool restrictions FIRST (applies to all tools including AskUserQuestion)
-            # These are set by the user in the profile settings (Allow Only / Disallow modes)
-            if disallowed_tools and tool_name in disallowed_tools:
-                logger.debug(f"[WS] Tool {tool_name} blocked by profile disallowed_tools")
-                return PermissionResultDeny(message=f"Tool '{tool_name}' is disabled in this profile")
-            if allowed_tools and tool_name not in allowed_tools:
-                logger.debug(f"[WS] Tool {tool_name} blocked by profile allowed_tools (not in whitelist)")
-                return PermissionResultDeny(message=f"Tool '{tool_name}' is not enabled in this profile")
-
-            # Handle AskUserQuestion specially - this is how the SDK expects it
-            if tool_name == "AskUserQuestion":
-                questions = tool_input.get("questions", [])
-                if not questions:
-                    # No questions, allow the tool to proceed
-                    return PermissionResultAllow(updated_input=tool_input)
-
-                request_id = f"question-{session_id}-{uuid.uuid4().hex[:8]}"
-                logger.debug(f"[WS] AskUserQuestion canUseTool triggered: {request_id} with {len(questions)} questions")
-
-                # Get answers from user via WebSocket
-                answers = await user_question_handler.request_answers(
-                    request_id=request_id,
-                    tool_use_id=request_id,  # Use request_id as tool_use_id placeholder
-                    session_id=session_id,
-                    questions=questions,
-                    broadcast_func=broadcast_func
-                )
-
-                logger.debug(f"[WS] Got answers for {request_id}: {list(answers.keys())}")
-
-                # Return updated input with answers - SDK expects PermissionResultAllow
-                return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
-
-            # ExitPlanMode handling: require user approval (except in bypassPermissions),
-            # then optionally clear context based on profile's plan_exit_behavior setting
-            if tool_name == "ExitPlanMode":
-                # In non-bypass mode, require user approval first
-                if permission_mode != "bypassPermissions":
-                    request_id = f"perm-{session_id}-{uuid.uuid4().hex[:8]}"
-                    logger.debug(f"[WS] ExitPlanMode requires approval in {permission_mode} mode: {request_id}")
-
-                    result = await permission_handler.request_permission(
-                        request_id=request_id,
-                        session_id=session_id,
-                        profile_id=profile_id,
-                        tool_name=tool_name,
-                        tool_input=tool_input,
-                        broadcast_func=broadcast_func
-                    )
-                    # If denied, return immediately without applying clear_context
-                    if result.behavior == "deny":
-                        return result
-
-                # Plan was accepted (auto-approved in bypass or user-approved)
-                # Check profile setting for clear context behavior
-                plan_exit_behavior = config.get("plan_exit_behavior", "normal")
-                if plan_exit_behavior == "clear_context":
-                    database.update_session(session_id=session_id, sdk_session_id="")
-                    # Set flag so end-of-query cleanup doesn't overwrite the cleared sdk_session_id
-                    active_state = _active_sessions.get(session_id)
-                    if active_state:
-                        active_state.clear_context_pending = True
-                    logger.info(f"[WS] ExitPlanMode: clearing context for session {session_id} (plan_exit_behavior=clear_context)")
-
-                return PermissionResultAllow()
-
-            # For other tools in default mode, route through permission handler
-            if permission_mode == "default":
-                request_id = f"perm-{session_id}-{uuid.uuid4().hex[:8]}"
-                logger.debug(f"[WS] Permission request for {tool_name}: {request_id}")
-
-                # Request permission through the handler
-                # The handler will broadcast to WebSocket and wait for response
-                result = await permission_handler.request_permission(
-                    request_id=request_id,
-                    session_id=session_id,
-                    profile_id=profile_id,
-                    tool_name=tool_name,
-                    tool_input=tool_input,
-                    broadcast_func=broadcast_func
-                )
-
-                return result
-            else:
-                # In non-default modes (bypassPermissions, acceptEdits), allow other tools
-                return PermissionResultAllow()
-
-    # Build options first without hooks (we need working_dir to build hooks)
-    options, agents_dict = build_options_from_profile(
-        profile=profile,
-        project=project,
-        overrides=overrides,
-        resume_session_id=resume_id,
-        can_use_tool=can_use_tool_callback,
-        hooks=None,  # Will be set after we have working_dir
-        api_user_id=api_user_id,
-        session_id=session_id
-    )
-
-    # Build hooks configuration from all sources (plugins, database)
-    # This enables plugin hooks (PreToolUse, Stop, etc.) and database hooks to work
-    # IMPORTANT: The SDK does NOT auto-execute plugin hooks from hooks.json!
-    # We must execute them ourselves via this hook configuration.
-    from app.core.hook_service import build_hooks_config
+    # --- Session Pool: Acquire or create SDK client ---
+    pool = get_session_pool()
+    existing_state = pool.get(session_id)
+    reusing_client = False
+    state = None
 
     # Create a queue for plugin stderr messages to be broadcast to frontend
     # Plugin hooks run in the SDK's async loop but need to send messages to our streaming loop
     stderr_queue: asyncio.Queue = asyncio.Queue()
 
-    async def stderr_callback(plugin_name: str, stderr_output: str, severity: str):
-        """Callback for plugin hooks to broadcast stderr to frontend."""
-        await stderr_queue.put({
-            "type": "plugin_message",
-            "plugin": plugin_name,
-            "message": stderr_output,
-            "severity": severity
-        })
-
-    if options.cwd:
-        # Extract plugin paths from options.plugins (list of {"type": "local", "path": str})
-        plugin_paths = []
-        if options.plugins:
-            for plugin_entry in options.plugins:
-                if isinstance(plugin_entry, dict) and plugin_entry.get("path"):
-                    plugin_paths.append(plugin_entry["path"])
-
-        hooks_config = build_hooks_config(
-            working_dir=options.cwd,
-            project_id=project_id,
-            plugin_paths=plugin_paths,
-            stderr_callback=stderr_callback
+    if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
+        # Candidate for reuse — check if critical options changed
+        # Build options without callback just for comparison
+        options, agents_dict = build_options_from_profile(
+            profile=profile,
+            project=project,
+            overrides=overrides,
+            resume_session_id=resume_id,
+            can_use_tool=None,  # Not needed for comparison
+            hooks=None,
+            api_user_id=api_user_id,
+            session_id=session_id
         )
-        if hooks_config:
-            options.hooks = hooks_config
-            logger.debug(f"[WS] Hooks configured: {list(hooks_config.keys())}")
 
-    # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
-    # On Docker/Linux, agents are already passed via SDK's --agents flag
-    agents_dir = None
-    written_agent_ids = []
-    if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
-        agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
-        written_agent_ids = list(agents_dict.keys())
+        if not requires_reconnect(existing_state, options):
+            # REUSE: Subprocess is alive and options are compatible
+            state = existing_state
+            reusing_client = True
 
-    # Clean up any existing state for this session
-    # IMPORTANT: Use _graceful_disconnect instead of disconnect() to give the
-    # subprocess time to flush JSONL writes. Without this, the new subprocess
-    # would read incomplete JSONL and lose conversation context.
-    state = _active_sessions.get(session_id)
-    if state:
-        logger.debug(f"[WS] Cleaning up existing state for session {session_id}")
-        try:
-            await _graceful_disconnect(state.client, session_id)
-        except Exception:
-            pass
-        # Clean up agent files from previous session
-        if state.agents_dir and state.written_agent_ids:
-            cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
-        del _active_sessions[session_id]
+            # Update callback refs so the existing can_use_tool closure sees current values
+            state.callback_refs.update({
+                "broadcast_func": broadcast_func,
+                "permission_mode": permission_mode,
+                "allowed_tools": allowed_tools,
+                "disallowed_tools": disallowed_tools,
+                "profile_id": profile_id,
+                "config": config,
+                "session_id": session_id,
+            })
 
-    # Create new client
-    logger.debug(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None}, include_partial={options.include_partial_messages})")
-    logger.debug(f"[WS] Options cwd: {options.cwd}")
-    logger.debug(f"[WS] Agents written to filesystem: {written_agent_ids if written_agent_ids else None}")
+            # Handle runtime-changeable options via SDK methods
+            old_opts = state.connect_options
+            if old_opts:
+                new_model = getattr(options, 'model', None)
+                old_model = getattr(old_opts, 'model', None)
+                if new_model and new_model != old_model:
+                    try:
+                        await state.client.set_model(new_model)
+                        logger.debug(f"[WS] Updated model to {new_model} for reused session {session_id}")
+                    except Exception as e:
+                        logger.warning(f"[WS] Failed to set model on reused session {session_id}: {e}")
 
-    # Wrap stderr callback to collect lines for error reporting
-    cli_stderr_lines: list[str] = []
-    original_stderr = options.stderr
-    def capturing_stderr(line: str):
-        cli_stderr_lines.append(line)
-        if original_stderr:
-            original_stderr(line)
-    options.stderr = capturing_stderr
-
-    client = ClaudeSDKClient(options=options)
-    logger.debug("[WS] ClaudeSDKClient created, attempting connect...")
-
-    # Connect
-    try:
-        await client.connect()
-        logger.debug(f"[WS] Connected to Claude SDK for session {session_id}")
-    except Exception as e:
-        import traceback
-        logger.error(f"[WS] Failed to connect for session {session_id}: {e}")
-        logger.error(f"[WS] Exception type: {type(e).__name__}")
-        logger.error(f"[WS] Full traceback:\n{traceback.format_exc()}")
-        # Surface actual CLI stderr in the error message for actionable feedback
-        if cli_stderr_lines:
-            stderr_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
-            logger.error(f"[WS] CLI stderr: {stderr_msg}")
-            yield {"type": "error", "message": stderr_msg}
+            logger.info(f"[WS] Reusing pooled client for session {session_id}")
         else:
-            yield {"type": "error", "message": f"Connection failed: {e}"}
-        return
+            # Options changed — need fresh subprocess
+            logger.info(f"[WS] Options changed for session {session_id}, creating fresh client")
+            await pool.remove(session_id)
+            existing_state = None
+    elif existing_state:
+        # Subprocess died — clean up dead entry
+        logger.warning(f"[WS] Subprocess dead for pooled session {session_id}, creating fresh client")
+        await pool.remove_dead(session_id)
+        existing_state = None
 
-    state = SessionState(
-        client=client,
-        sdk_session_id=resume_id,
-        is_connected=True,
-        written_agent_ids=written_agent_ids,
-        agents_dir=agents_dir
-    )
-    _active_sessions[session_id] = state
+    if not reusing_client:
+        # CREATE: Build full options with callback, connect new subprocess
 
-    # Mark as streaming
+        # Create callback_refs dict — the callback closure captures this dict reference
+        # so we can update values between queries without recreating the callback
+        callback_refs = {
+            "broadcast_func": broadcast_func,
+            "permission_mode": permission_mode,
+            "allowed_tools": allowed_tools,
+            "disallowed_tools": disallowed_tools,
+            "profile_id": profile_id,
+            "config": config,
+            "session_id": session_id,
+        }
+
+        # Create canUseTool callback that reads from callback_refs (mutable dict)
+        # This allows the callback to use current values even when the client is reused
+        can_use_tool_callback = None
+        if broadcast_func:
+            logger.debug(f"[WS] Creating canUseTool callback for session {session_id}")
+
+            async def can_use_tool_callback(tool_name: str, tool_input: dict, context):
+                """Permission callback that reads from mutable callback_refs dict."""
+                refs = callback_refs
+                _disallowed = refs["disallowed_tools"]
+                _allowed = refs["allowed_tools"]
+                _perm_mode = refs["permission_mode"]
+                _broadcast = refs["broadcast_func"]
+                _profile_id = refs["profile_id"]
+                _config = refs["config"]
+                _sid = refs["session_id"]
+
+                # Check profile-level tool restrictions FIRST
+                if _disallowed and tool_name in _disallowed:
+                    logger.debug(f"[WS] Tool {tool_name} blocked by profile disallowed_tools")
+                    return PermissionResultDeny(message=f"Tool '{tool_name}' is disabled in this profile")
+                if _allowed and tool_name not in _allowed:
+                    logger.debug(f"[WS] Tool {tool_name} blocked by profile allowed_tools (not in whitelist)")
+                    return PermissionResultDeny(message=f"Tool '{tool_name}' is not enabled in this profile")
+
+                # Handle AskUserQuestion specially
+                if tool_name == "AskUserQuestion":
+                    questions = tool_input.get("questions", [])
+                    if not questions:
+                        return PermissionResultAllow(updated_input=tool_input)
+
+                    request_id = f"question-{_sid}-{uuid.uuid4().hex[:8]}"
+                    logger.debug(f"[WS] AskUserQuestion canUseTool triggered: {request_id} with {len(questions)} questions")
+
+                    answers = await user_question_handler.request_answers(
+                        request_id=request_id,
+                        tool_use_id=request_id,
+                        session_id=_sid,
+                        questions=questions,
+                        broadcast_func=_broadcast
+                    )
+
+                    logger.debug(f"[WS] Got answers for {request_id}: {list(answers.keys())}")
+                    return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
+
+                # ExitPlanMode handling
+                if tool_name == "ExitPlanMode":
+                    if _perm_mode != "bypassPermissions":
+                        request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
+                        logger.debug(f"[WS] ExitPlanMode requires approval in {_perm_mode} mode: {request_id}")
+
+                        result = await permission_handler.request_permission(
+                            request_id=request_id,
+                            session_id=_sid,
+                            profile_id=_profile_id,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            broadcast_func=_broadcast
+                        )
+                        if result.behavior == "deny":
+                            return result
+
+                    plan_exit_behavior = _config.get("plan_exit_behavior", "normal")
+                    if plan_exit_behavior == "clear_context":
+                        database.update_session(session_id=_sid, sdk_session_id="")
+                        active_state = pool.peek(_sid)
+                        if active_state:
+                            active_state.clear_context_pending = True
+                        logger.info(f"[WS] ExitPlanMode: clearing context for session {_sid} (plan_exit_behavior=clear_context)")
+
+                    return PermissionResultAllow()
+
+                # For other tools in default mode, route through permission handler
+                if _perm_mode == "default":
+                    request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
+                    logger.debug(f"[WS] Permission request for {tool_name}: {request_id}")
+
+                    result = await permission_handler.request_permission(
+                        request_id=request_id,
+                        session_id=_sid,
+                        profile_id=_profile_id,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        broadcast_func=_broadcast
+                    )
+                    return result
+                else:
+                    return PermissionResultAllow()
+
+        # Build options with callback
+        options, agents_dict = build_options_from_profile(
+            profile=profile,
+            project=project,
+            overrides=overrides,
+            resume_session_id=resume_id,
+            can_use_tool=can_use_tool_callback,
+            hooks=None,  # Will be set after we have working_dir
+            api_user_id=api_user_id,
+            session_id=session_id
+        )
+
+        # Build hooks configuration from all sources (plugins, database)
+        from app.core.hook_service import build_hooks_config
+
+        async def stderr_callback(plugin_name: str, stderr_output: str, severity: str):
+            """Callback for plugin hooks to broadcast stderr to frontend."""
+            await stderr_queue.put({
+                "type": "plugin_message",
+                "plugin": plugin_name,
+                "message": stderr_output,
+                "severity": severity
+            })
+
+        if options.cwd:
+            plugin_paths = []
+            if options.plugins:
+                for plugin_entry in options.plugins:
+                    if isinstance(plugin_entry, dict) and plugin_entry.get("path"):
+                        plugin_paths.append(plugin_entry["path"])
+
+            hooks_config = build_hooks_config(
+                working_dir=options.cwd,
+                project_id=project_id,
+                plugin_paths=plugin_paths,
+                stderr_callback=stderr_callback
+            )
+            if hooks_config:
+                options.hooks = hooks_config
+                logger.debug(f"[WS] Hooks configured: {list(hooks_config.keys())}")
+
+        # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
+        agents_dir = None
+        written_agent_ids = []
+        if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
+            agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
+            written_agent_ids = list(agents_dict.keys())
+
+        # Evict LRU session if pool is full
+        evicted = await pool.evict_if_needed()
+        if evicted:
+            logger.debug(f"[WS] Evicted LRU session {evicted} to make room for {session_id}")
+
+        # Create and connect new client
+        logger.debug(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None}, include_partial={options.include_partial_messages})")
+        logger.debug(f"[WS] Options cwd: {options.cwd}")
+
+        # Wrap stderr callback to collect lines for error reporting
+        cli_stderr_lines: list[str] = []
+        original_stderr = options.stderr
+        def capturing_stderr(line: str):
+            cli_stderr_lines.append(line)
+            if original_stderr:
+                original_stderr(line)
+        options.stderr = capturing_stderr
+
+        client = ClaudeSDKClient(options=options)
+        logger.debug("[WS] ClaudeSDKClient created, attempting connect...")
+
+        try:
+            await client.connect()
+            logger.debug(f"[WS] Connected to Claude SDK for session {session_id}")
+        except Exception as e:
+            import traceback
+            logger.error(f"[WS] Failed to connect for session {session_id}: {e}")
+            logger.error(f"[WS] Exception type: {type(e).__name__}")
+            logger.error(f"[WS] Full traceback:\n{traceback.format_exc()}")
+            if cli_stderr_lines:
+                stderr_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
+                logger.error(f"[WS] CLI stderr: {stderr_msg}")
+                yield {"type": "error", "message": stderr_msg}
+            else:
+                yield {"type": "error", "message": f"Connection failed: {e}"}
+            return
+
+        state = SessionState(
+            client=client,
+            sdk_session_id=resume_id,
+            is_connected=True,
+            written_agent_ids=written_agent_ids,
+            agents_dir=agents_dir,
+            callback_refs=callback_refs,
+            connect_options=options,
+        )
+        pool.put(session_id, state)
+
+    # Mark as streaming (both reuse and create paths)
     state.is_streaming = True
     state.last_activity = datetime.now()
 
@@ -3372,41 +3347,27 @@ async def stream_to_websocket(
         state.interrupt_requested = False
         state.last_activity = datetime.now()
 
-        # Gracefully disconnect the SDK client.
-        # This MUST be done in the same task that created/connected the client
-        # (anyio cancel scopes are task-bound).
-        # We wait for the subprocess to exit naturally before sending SIGTERM,
-        # because the subprocess may still be flushing JSONL writes after sending
-        # the result message to us. See _graceful_disconnect() for details.
-        #
-        # CRITICAL: Shield from cancellation! During interrupt_and_query, the task
-        # may be cancelled a second time (wait_for timeout). Without shielding,
-        # the CancelledError would interrupt _graceful_disconnect, killing the
-        # subprocess before it flushes JSONL and causing context loss on resume.
-        if state.client:
-            try:
-                await asyncio.shield(_graceful_disconnect(state.client, session_id))
-            except (asyncio.CancelledError, Exception) as e:
-                if isinstance(e, asyncio.CancelledError):
-                    logger.debug(f"[WS] Graceful disconnect shielded from cancellation for session {session_id}")
-                else:
-                    logger.warning(f"[WS] Error disconnecting SDK client for session {session_id}: {e}")
-            state.is_connected = False
+        # Clear stale broadcast ref — will be set fresh on next query
+        if state.callback_refs:
+            state.callback_refs["broadcast_func"] = None
 
-        # Remove from active sessions and cleanup agent files
-        # Only delete if we're still the registered state (avoids race with interrupt_and_query
-        # where a new query may have already replaced our state)
-        if _active_sessions.get(session_id) is state:
-            if state.agents_dir and state.written_agent_ids:
-                cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
-                logger.debug(f"[WS] Cleaned up agent files for session {session_id}")
-            del _active_sessions[session_id]
-            logger.debug(f"[WS] Removed session {session_id} from active sessions")
+        # Session pool lifecycle: KEEP the client alive for reuse.
+        # Only remove from pool if the client died or clear_context was requested.
+        if state.clear_context_pending:
+            # Clear context requested — need fresh subprocess on next query
+            state.clear_context_pending = False
+            try:
+                await pool.remove(session_id)
+            except Exception as e:
+                logger.warning(f"[WS] Error removing session {session_id} after clear_context: {e}")
+            logger.info(f"[WS] Evicted session {session_id} from pool (clear_context)")
+        elif not state.is_connected:
+            # Client died during query — remove dead entry
+            await pool.remove_dead(session_id)
+            logger.debug(f"[WS] Removed dead session {session_id} from pool")
         else:
-            # Another query has already taken over this session - just cleanup our agent files
-            if state.agents_dir and state.written_agent_ids:
-                cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
-                logger.debug(f"[WS] Cleaned up agent files for superseded session {session_id}")
+            # Normal case: keep in pool for reuse!
+            logger.debug(f"[WS] Kept session {session_id} in pool for reuse")
 
     # Update session in database
     # Only set title for new sessions (when resume_id was None, meaning first message)
@@ -3419,7 +3380,7 @@ async def stream_to_websocket(
 
     # If clear_context_pending was set by ExitPlanMode, don't overwrite the
     # cleared sdk_session_id — the next query should start with a fresh context.
-    final_state = _active_sessions.get(session_id)
+    final_state = pool.peek(session_id)
     save_sdk_session_id = sdk_session_id
     if final_state and final_state.clear_context_pending:
         save_sdk_session_id = None  # None = don't update the sdk_session_id column

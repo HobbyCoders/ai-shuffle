@@ -194,6 +194,14 @@ async def lifespan(app: FastAPI):
     # Shutdown git file watcher
     await git_watcher.shutdown()
 
+    # Shutdown SDK session pool (disconnect all live subprocesses)
+    try:
+        from app.core.session_pool import get_session_pool
+        await get_session_pool().shutdown()
+        logger.info("SDK session pool shut down")
+    except Exception:
+        pass
+
     # Cleanup browser sessions on shutdown
     try:
         from app.mcp.browser_session import browser_session_manager

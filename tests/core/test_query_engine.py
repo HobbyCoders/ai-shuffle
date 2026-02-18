@@ -56,11 +56,11 @@ from app.core.query_engine import (
     interrupt_session,
     get_active_sessions,
     get_streaming_sessions,
-    _active_sessions,
     MAX_TOOL_OUTPUT_SIZE,
     MAX_DISPLAY_OUTPUT_SIZE,
     DEFAULT_SECURITY_INSTRUCTIONS,
 )
+from app.core.session_pool import get_session_pool
 
 
 # =============================================================================
@@ -410,8 +410,8 @@ class TestSessionManagement:
     """Test session state management functions."""
 
     def setup_method(self):
-        """Clear active sessions before each test."""
-        _active_sessions.clear()
+        """Clear session pool before each test."""
+        get_session_pool()._pool.clear()
 
     def test_get_session_state_not_found(self):
         """Should return None for unknown session."""
@@ -422,7 +422,7 @@ class TestSessionManagement:
         """Should return session state for known session."""
         mock_client = MagicMock()
         state = SessionState(client=mock_client, is_connected=True)
-        _active_sessions["test-session"] = state
+        get_session_pool().put("test-session", state)
 
         result = get_session_state("test-session")
 
@@ -1010,8 +1010,8 @@ class TestInterruptSession:
     """Test interrupt_session function."""
 
     def setup_method(self):
-        """Clear active sessions before each test."""
-        _active_sessions.clear()
+        """Clear session pool before each test."""
+        get_session_pool()._pool.clear()
 
     @pytest.mark.asyncio
     async def test_returns_false_for_unknown_session(self):
@@ -1024,7 +1024,7 @@ class TestInterruptSession:
         """Should return False when session not connected."""
         mock_client = MagicMock()
         state = SessionState(client=mock_client, is_connected=False)
-        _active_sessions["test-session"] = state
+        get_session_pool().put("test-session", state)
 
         result = await interrupt_session("test-session")
 
@@ -1039,7 +1039,7 @@ class TestInterruptSession:
             is_connected=True,
             is_streaming=True
         )
-        _active_sessions["test-session"] = state
+        get_session_pool().put("test-session", state)
 
         result = await interrupt_session("test-session")
 
@@ -1058,7 +1058,7 @@ class TestInterruptSession:
             is_connected=True,
             is_streaming=True
         )
-        _active_sessions["test-session"] = state
+        get_session_pool().put("test-session", state)
 
         result = await interrupt_session("test-session")
 
@@ -1076,8 +1076,8 @@ class TestSessionQueries:
     """Test session query functions."""
 
     def setup_method(self):
-        """Clear active sessions before each test."""
-        _active_sessions.clear()
+        """Clear session pool before each test."""
+        get_session_pool()._pool.clear()
 
     def test_get_active_sessions_empty(self):
         """Should return empty list when no sessions."""
@@ -1086,14 +1086,15 @@ class TestSessionQueries:
 
     def test_get_active_sessions_filters_disconnected(self):
         """Should only return connected sessions."""
-        _active_sessions["connected"] = SessionState(
+        pool = get_session_pool()
+        pool.put("connected", SessionState(
             client=MagicMock(),
             is_connected=True
-        )
-        _active_sessions["disconnected"] = SessionState(
+        ))
+        pool.put("disconnected", SessionState(
             client=MagicMock(),
             is_connected=False
-        )
+        ))
 
         result = get_active_sessions()
 
@@ -1107,14 +1108,15 @@ class TestSessionQueries:
 
     def test_get_streaming_sessions_filters_non_streaming(self):
         """Should only return streaming sessions."""
-        _active_sessions["streaming"] = SessionState(
+        pool = get_session_pool()
+        pool.put("streaming", SessionState(
             client=MagicMock(),
             is_streaming=True
-        )
-        _active_sessions["not-streaming"] = SessionState(
+        ))
+        pool.put("not-streaming", SessionState(
             client=MagicMock(),
             is_streaming=False
-        )
+        ))
 
         result = get_streaming_sessions()
 
@@ -1130,8 +1132,8 @@ class TestQueryEngineIntegration:
     """Integration-style tests for query engine scenarios."""
 
     def setup_method(self):
-        """Clear active sessions before each test."""
-        _active_sessions.clear()
+        """Clear session pool before each test."""
+        get_session_pool()._pool.clear()
 
     def test_security_instructions_present(self):
         """DEFAULT_SECURITY_INSTRUCTIONS should be defined."""
@@ -1149,6 +1151,7 @@ class TestQueryEngineIntegration:
     async def test_session_lifecycle(self):
         """Test complete session lifecycle."""
         mock_client = AsyncMock()
+        pool = get_session_pool()
 
         # Create session
         state = SessionState(
@@ -1156,7 +1159,7 @@ class TestQueryEngineIntegration:
             is_connected=True,
             is_streaming=False
         )
-        _active_sessions["lifecycle-session"] = state
+        pool.put("lifecycle-session", state)
 
         # Verify active
         assert "lifecycle-session" in get_active_sessions()
@@ -1172,7 +1175,7 @@ class TestQueryEngineIntegration:
         assert state.is_streaming is False
 
         # Cleanup
-        _active_sessions.clear()
+        pool._pool.clear()
         assert get_active_sessions() == []
 
 
@@ -1426,8 +1429,8 @@ class TestErrorHandling:
     """Test error handling scenarios."""
 
     def setup_method(self):
-        """Clear active sessions before each test."""
-        _active_sessions.clear()
+        """Clear session pool before each test."""
+        get_session_pool()._pool.clear()
 
     @pytest.mark.asyncio
     async def test_multiple_interrupts_safe(self):
@@ -1438,7 +1441,7 @@ class TestErrorHandling:
             is_connected=True,
             is_streaming=True
         )
-        _active_sessions["multi-interrupt"] = state
+        get_session_pool().put("multi-interrupt", state)
 
         # First interrupt
         result1 = await interrupt_session("multi-interrupt")
@@ -1454,13 +1457,14 @@ class TestErrorHandling:
         result = get_session_state("nonexistent-session-12345")
         assert result is None
 
-    def test_active_sessions_dict_isolation(self):
+    def test_pool_isolation(self):
         """Modifications to returned lists shouldn't affect internal state."""
+        pool = get_session_pool()
         state = SessionState(client=MagicMock(), is_connected=True)
-        _active_sessions["test-session"] = state
+        pool.put("test-session", state)
 
         sessions = get_active_sessions()
         sessions.clear()  # Try to clear the returned list
 
-        # Should still have the session internally
-        assert "test-session" in _active_sessions
+        # Should still have the session in the pool
+        assert pool.contains("test-session")

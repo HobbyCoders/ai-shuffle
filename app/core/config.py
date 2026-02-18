@@ -91,6 +91,10 @@ class Settings(BaseSettings):
     max_display_output_chars: int = 2_000  # What we show in the UI
     sdk_buffer_size: int = 50 * 1024 * 1024  # 50MB for base64 images/PDFs
 
+    # SDK Session Pool — max concurrent subprocess sessions kept alive between queries.
+    # Each idle subprocess uses ~100MB RAM, so 3 sessions ≈ 300MB worst case.
+    sdk_session_pool_size: int = 3
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
