@@ -7,6 +7,7 @@ These are not intended for external consumption.
 
 import asyncio
 import logging
+import os
 from typing import Optional
 
 from fastapi import APIRouter, Request, Response, HTTPException, status
@@ -28,42 +29,27 @@ async def git_hook_callback(request: Request, body: GitHookCallbackRequest):
     """Receive callbacks from git hooks installed in monitored repos.
 
     This endpoint is called by POSIX shell hook scripts installed by
-    GitHookManager. It validates the token, maps the repo path to a
+    GitTracker. It validates the token, maps the repo path to a
     project, and dispatches immediate state updates.
 
     Returns 202 Accepted immediately to never block git operations.
     """
-    from app.core.git_hook_manager import git_hook_manager
+    from app.core.git_tracker import git_tracker
 
     # Verify token
     token = request.headers.get("X-Hook-Token", "")
-    if not git_hook_manager.verify_hook_token(token):
+    if not git_tracker.verify_hook_token(token):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid hook token",
         )
 
-    hook_name = body.hook
-    repo_path = body.repo
-
-    if not repo_path:
+    if not body.repo:
         return Response(status_code=202)
 
-    # Normalize the repo path for consistent lookup
-    import os
-    repo_path = os.path.normpath(repo_path)
+    repo_path = os.path.normpath(body.repo)
 
     # Dispatch processing asynchronously (don't block the response)
-    asyncio.ensure_future(_process_hook(hook_name, repo_path))
+    asyncio.ensure_future(git_tracker.on_hook(body.hook, repo_path))
 
     return Response(status_code=202)
-
-
-async def _process_hook(hook_name: str, repo_path: str):
-    """Process a git hook event asynchronously."""
-    try:
-        from app.core.git_watcher import git_watcher
-
-        await git_watcher.process_hook_event(hook_name, repo_path)
-    except Exception as e:
-        logger.debug(f"Error processing git hook {hook_name} for {repo_path}: {e}")

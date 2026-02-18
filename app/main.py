@@ -167,11 +167,9 @@ async def lifespan(app: FastAPI):
     from app.core.automation_manager import automation_manager
     await automation_manager.start()
 
-    # Start git file watcher service and hook manager
-    from app.core.git_watcher import git_watcher
-    from app.core.git_hook_manager import git_hook_manager
-    await git_watcher.start()
-    await git_hook_manager.start(port=settings.port)
+    # Start consolidated git tracker (watcher + hooks + cache)
+    from app.core.git_tracker import git_tracker
+    git_tracker.start(port=settings.port)
 
     # Browser tools are now served in-process via SDK MCP server
     # (browser_sdk_tools.py), no startup registration needed.
@@ -188,11 +186,8 @@ async def lifespan(app: FastAPI):
     # Shutdown connectors
     await connector_manager.shutdown_all()
 
-    # Shutdown git hook manager (uninstalls hooks before watcher stops)
-    await git_hook_manager.shutdown()
-
-    # Shutdown git file watcher
-    await git_watcher.shutdown()
+    # Shutdown git tracker (uninstalls hooks + stops watchers)
+    await git_tracker.shutdown()
 
     # Shutdown SDK session pool (disconnect all live subprocesses)
     try:

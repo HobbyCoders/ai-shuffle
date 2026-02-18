@@ -21,8 +21,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.core.git_service import git_service
-from app.core.git_state_cache import git_state_cache, CachedGitState
-from app.core.git_watcher import git_watcher
+from app.core.git_tracker import git_tracker
 from app.core.worktree_manager import worktree_manager
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.db import database
@@ -324,27 +323,26 @@ def get_working_dir(project_id: str, worktree_id: Optional[str] = None) -> str:
     return get_project_path(project_id)
 
 
-async def _broadcast_git_update(
+async def _notify_git(
     request: Request,
     project_id: str,
-    working_dir: str,
     categories: set,
     worktree_id: Optional[str] = None,
+    working_dir: Optional[str] = None,
 ) -> None:
-    """Recompute changed categories and broadcast via WebSocket.
+    """Notify the git tracker that state has changed and broadcast via WebSocket.
 
     Called by mutation endpoints after git operations complete.
-    Bypasses the watchdog debounce for instant UI updates.
     """
     api_user = get_api_user_from_request(request)
     user_id = api_user["id"] if api_user else "admin"
     try:
-        await git_watcher.trigger_immediate_update(
+        await git_tracker.notify(
             project_id=project_id,
-            worktree_id=worktree_id,
-            working_dir=working_dir,
             categories=categories,
+            worktree_id=worktree_id,
             user_id=user_id,
+            working_dir=working_dir,
         )
     except Exception as e:
         logger.warning(f"Failed to broadcast git update for {project_id}: {e}")
@@ -425,32 +423,24 @@ async def get_git_status(
     When worktree_id is provided, returns status for the worktree directory.
     """
     check_project_access(request, project_id)
-    cache_key = git_state_cache.make_key(project_id, worktree_id)
-
-    # Check cache first
-    cached_status = await git_state_cache.get_category(cache_key, "status")
-    if cached_status is not None:
-        return GitStatusResponse(**cached_status)
-
     working_dir = get_working_dir(project_id, worktree_id)
 
-    # Get git status (run in thread to avoid blocking the event loop)
-    status_data = await asyncio.to_thread(git_service.get_status, working_dir)
+    # Get git status (cached internally by git_tracker)
+    status_data = await git_tracker.get_status(project_id, working_dir, worktree_id)
 
-    # Ensure the file watcher is running for this project (lazy start)
+    # Lazy-start tracking for this project
     if status_data.get("is_git_repo"):
         api_user = get_api_user_from_request(request)
         user_id = api_user["id"] if api_user else "admin"
         try:
-            from app.core.git_watcher import git_watcher
-            await git_watcher.watch_project(
+            await git_tracker.track(
                 project_id=project_id,
                 working_dir=working_dir,
                 user_id=user_id,
                 worktree_id=worktree_id,
             )
         except Exception as e:
-            logger.debug(f"Failed to start git watcher for {project_id}: {e}")
+            logger.debug(f"Failed to start git tracker for {project_id}: {e}")
 
     # Convert staged files to proper format
     staged_files = [
@@ -458,32 +448,27 @@ async def get_git_status(
         for s in status_data.get("staged", [])
     ]
 
-    # Ensure repository record exists and get additional info
+    # Ensure repository record exists and get additional info (DB-level, not cached)
     repo = await asyncio.to_thread(ensure_git_repository_record, project_id, working_dir)
 
-    response = GitStatusResponse(
-        is_git_repo=status_data["is_git_repo"],
-        current_branch=status_data["current_branch"],
-        is_detached=status_data["is_detached"],
-        head_commit=status_data["head_commit"],
-        remote_url=status_data["remote_url"],
-        is_clean=status_data["is_clean"],
+    return GitStatusResponse(
+        is_git_repo=status_data.get("is_git_repo", False),
+        current_branch=status_data.get("current_branch"),
+        is_detached=status_data.get("is_detached", False),
+        head_commit=status_data.get("head_commit"),
+        remote_url=status_data.get("remote_url"),
+        is_clean=status_data.get("is_clean", True),
         staged=staged_files,
-        modified=status_data["modified"],
-        untracked=status_data["untracked"],
-        ahead=status_data["ahead"],
-        behind=status_data["behind"],
-        conflicts=status_data["conflicts"],
+        modified=status_data.get("modified", []),
+        untracked=status_data.get("untracked", []),
+        ahead=status_data.get("ahead", 0),
+        behind=status_data.get("behind", 0),
+        conflicts=status_data.get("conflicts", []),
         repository_id=repo["id"] if repo else None,
         default_branch=repo["default_branch"] if repo else None,
         github_repo_name=repo["github_repo_name"] if repo else None,
         last_synced_at=repo["last_synced_at"] if repo else None
     )
-
-    # Cache the response
-    await git_state_cache.set_category(cache_key, "status", response.model_dump())
-
-    return response
 
 
 @router.post("/init", response_model=InitRepoResponse)
@@ -592,10 +577,11 @@ async def init_repository(
         )
 
     # Step 5: Invalidate cache and broadcast
-    await git_state_cache.invalidate_project(project_id)
-    await _broadcast_git_update(
-        request, project_id, working_dir,
-        {"status", "branches", "diff_stats"}
+    git_tracker.invalidate_project(project_id)
+    await _notify_git(
+        request, project_id,
+        {"status", "branches", "diff_stats"},
+        working_dir=working_dir,
     )
 
     message = "Git repository initialized"
@@ -630,13 +616,6 @@ async def list_branches(
         worktree_id: Optional worktree ID - marks the worktree's branch as current
     """
     check_project_access(request, project_id)
-    cache_key = git_state_cache.make_key(project_id, worktree_id)
-
-    # Check cache first
-    cached_branches = await git_state_cache.get_category(cache_key, "branches")
-    if cached_branches is not None:
-        return BranchListResponse(**cached_branches)
-
     working_dir = get_working_dir(project_id, worktree_id)
 
     if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
@@ -645,13 +624,10 @@ async def list_branches(
             detail="Project is not a git repository"
         )
 
-    # Run both git calls in parallel threads to avoid blocking the event loop
-    branches, current_branch = await asyncio.gather(
-        asyncio.to_thread(git_service.list_branches, working_dir, include_remote=include_remote),
-        asyncio.to_thread(git_service.get_current_branch, working_dir),
-    )
+    # Get branches (cached internally by git_tracker)
+    branch_data = await git_tracker.get_branches(project_id, working_dir, worktree_id, include_remote)
 
-    # Get worktrees for this project to check branch associations
+    # Enrich with worktree associations from database
     repo = database.get_git_repository_by_project(project_id)
     worktree_branch_map: dict[str, str] = {}  # branch_name -> worktree_id
     if repo:
@@ -665,26 +641,21 @@ async def list_branches(
             name=b["name"],
             is_current=b["is_current"],
             is_remote=b["is_remote"],
-            commit=b["commit"],
-            commit_message=b["commit_message"],
-            upstream=b["upstream"],
-            ahead=b["ahead"],
-            behind=b["behind"],
+            commit=b.get("commit"),
+            commit_message=b.get("commit_message"),
+            upstream=b.get("upstream"),
+            ahead=b.get("ahead", 0),
+            behind=b.get("behind", 0),
             has_worktree=b["name"] in worktree_branch_map,
             worktree_id=worktree_branch_map.get(b["name"])
         )
-        for b in branches
+        for b in branch_data.get("branches", [])
     ]
 
-    response = BranchListResponse(
+    return BranchListResponse(
         branches=branch_infos,
-        current_branch=current_branch
+        current_branch=branch_data.get("current_branch")
     )
-
-    # Cache the response
-    await git_state_cache.set_category(cache_key, "branches", response.model_dump())
-
-    return response
 
 
 @router.post("/branches", response_model=OperationResponse)
@@ -729,9 +700,9 @@ async def create_branch(
             detail=f"Failed to create branch '{body.name}'. Branch may already exist or start point is invalid."
         )
 
-    # Invalidate cache and broadcast — new branch affects branch list
-    await git_state_cache.invalidate_project(project_id)
-    await _broadcast_git_update(request, project_id, working_dir, {"branches"})
+    # Broadcast — new branch affects branch list
+    git_tracker.invalidate_project(project_id)
+    await _notify_git(request, project_id, {"branches"}, working_dir=working_dir)
 
     return OperationResponse(
         success=True,
@@ -782,9 +753,9 @@ async def delete_branch(
             detail=f"Failed to delete branch '{branch_name}'. It may not exist or is not fully merged (use force=true)."
         )
 
-    # Invalidate cache and broadcast — deleted branch affects branch list
-    await git_state_cache.invalidate_project(project_id)
-    await _broadcast_git_update(request, project_id, working_dir, {"branches"})
+    # Broadcast — deleted branch affects branch list
+    git_tracker.invalidate_project(project_id)
+    await _notify_git(request, project_id, {"branches"}, working_dir=working_dir)
 
     return OperationResponse(
         success=True,
@@ -841,10 +812,11 @@ async def checkout_branch(
             detail=f"Failed to checkout '{body.ref}'. It may not exist."
         )
 
-    # Invalidate cache and broadcast — checkout affects status, branches, and diff stats
-    await git_state_cache.invalidate_project(project_id)
-    await _broadcast_git_update(
-        request, project_id, working_dir, {"status", "branches", "diff_stats"}
+    # Broadcast — checkout affects status, branches, and diff stats
+    git_tracker.invalidate_project(project_id)
+    await _notify_git(
+        request, project_id, {"status", "branches", "diff_stats"},
+        working_dir=working_dir,
     )
 
     # Also broadcast branch_changed for backwards compatibility with other handlers
@@ -965,10 +937,11 @@ async def fetch_from_remote(
             detail=f"Failed to fetch from remote '{remote}'. Check network connection and authentication."
         )
 
-    # Invalidate cache and broadcast — fetch updates remote refs and ahead/behind counts
-    await git_state_cache.invalidate_project(project_id)
-    await _broadcast_git_update(
-        request, project_id, working_dir, {"status", "branches"}, worktree_id
+    # Broadcast — fetch updates remote refs and ahead/behind counts
+    git_tracker.invalidate_project(project_id)
+    await _notify_git(
+        request, project_id, {"status", "branches"},
+        worktree_id=worktree_id, working_dir=working_dir,
     )
 
     return FetchResponse(
@@ -998,13 +971,6 @@ async def get_diff_stats(
         worktree_id: Optional worktree ID to get diff stats for worktree
     """
     check_project_access(request, project_id)
-    cache_key = git_state_cache.make_key(project_id, worktree_id)
-
-    # Check cache first
-    cached_diff = await git_state_cache.get_category(cache_key, "diff_stats")
-    if cached_diff is not None:
-        return DiffStatsResponse(**cached_diff)
-
     working_dir = get_working_dir(project_id, worktree_id)
 
     if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
@@ -1013,20 +979,14 @@ async def get_diff_stats(
             detail="Project is not a git repository"
         )
 
-    stats = await asyncio.to_thread(
-        git_service.get_diff_stats, working_dir, include_unstaged=include_unstaged
+    # Get diff stats (cached internally by git_tracker)
+    stats = await git_tracker.get_diff_stats(project_id, working_dir, worktree_id, include_unstaged)
+
+    return DiffStatsResponse(
+        additions=stats.get("additions", 0),
+        deletions=stats.get("deletions", 0),
+        files_changed=stats.get("files_changed", 0),
     )
-
-    response = DiffStatsResponse(
-        additions=stats["additions"],
-        deletions=stats["deletions"],
-        files_changed=stats["files_changed"]
-    )
-
-    # Cache the response
-    await git_state_cache.set_category(cache_key, "diff_stats", response.model_dump())
-
-    return response
 
 
 @router.post("/commit", response_model=CommitResponse)
@@ -1078,11 +1038,10 @@ async def create_commit(
             detail="Failed to create commit. There may be no changes to commit."
         )
 
-    # Invalidate cache and broadcast — commit affects status, diff stats, and branches
-    cache_key = git_state_cache.make_key(project_id, worktree_id)
-    await git_state_cache.invalidate(cache_key)
-    await _broadcast_git_update(
-        request, project_id, working_dir, {"status", "diff_stats", "branches"}, worktree_id
+    # Broadcast — commit affects status, diff stats, and branches
+    await _notify_git(
+        request, project_id, {"status", "diff_stats", "branches"},
+        worktree_id=worktree_id, working_dir=working_dir,
     )
 
     return CommitResponse(
@@ -1139,11 +1098,10 @@ async def push_commits(
             detail=error_msg or "Failed to push commits"
         )
 
-    # Invalidate cache and broadcast — push affects ahead/behind counts
-    cache_key = git_state_cache.make_key(project_id, worktree_id)
-    await git_state_cache.invalidate(cache_key)
-    await _broadcast_git_update(
-        request, project_id, working_dir, {"status", "branches"}, worktree_id
+    # Broadcast — push affects ahead/behind counts
+    await _notify_git(
+        request, project_id, {"status", "branches"},
+        worktree_id=worktree_id, working_dir=working_dir,
     )
 
     return OperationResponse(
@@ -1200,10 +1158,11 @@ async def pull_from_remote(
         auto_stash=body.auto_stash,
     )
 
-    # Invalidate cache and broadcast — pull affects status, branches, and diff stats
-    await git_state_cache.invalidate_project(project_id)
-    await _broadcast_git_update(
-        request, project_id, working_dir, {"status", "branches", "diff_stats"}, worktree_id
+    # Broadcast — pull affects status, branches, and diff stats
+    git_tracker.invalidate_project(project_id)
+    await _notify_git(
+        request, project_id, {"status", "branches", "diff_stats"},
+        worktree_id=worktree_id, working_dir=working_dir,
     )
 
     if not success:
