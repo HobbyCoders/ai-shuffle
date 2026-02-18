@@ -18,6 +18,7 @@ Path pattern:
 
 import hashlib
 import logging
+import os
 import uuid
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
@@ -189,6 +190,8 @@ class WorktreeManager:
 
         main_dir = get_project_working_dir(project)
 
+        # Collect branches that need cleanup (path doesn't exist on disk)
+        branches_to_cleanup = set()
         for wt in active_worktrees:
             worktree_full_path = get_worktree_working_dir_as_path(wt)
 
@@ -198,33 +201,44 @@ class WorktreeManager:
                 logger.debug(f"Cleaning up stale worktree record: {branch_name} (path: {worktree_full_path})")
                 database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
 
-                # Also try to delete the orphaned branch if it exists and is not the default branch
-                default_branch = repo.get("default_branch", "main")
-                branch_deleted = False
-                if branch_name and branch_name != default_branch:
-                    try:
-                        # Check if the branch exists before trying to delete
-                        branches = self.git_service.list_branches(main_dir, include_remote=False)
-                        local_branch_names = [b["name"] for b in branches if not b["is_remote"]]
-                        if branch_name in local_branch_names:
-                            # Delete the orphaned branch
-                            success = self.git_service.delete_branch(main_dir, branch_name, force=True)
-                            if success:
-                                logger.debug(f"Deleted orphaned branch: {branch_name}")
-                                branch_deleted = True
-                            else:
-                                logger.warning(f"Failed to delete orphaned branch: {branch_name}")
-                    except Exception as e:
-                        logger.warning(f"Error cleaning up orphaned branch {branch_name}: {e}")
+                if branch_name:
+                    branches_to_cleanup.add(branch_name)
 
                 cleaned_up.append({
                     "id": wt["id"],
                     "branch_name": branch_name,
                     "reason": "path_not_found",
-                    "branch_deleted": branch_deleted
+                    "branch_deleted": False
                 })
             else:
                 still_active += 1
+
+        # Prune stale git worktree entries BEFORE attempting branch deletion.
+        # Git refuses to delete branches that are still referenced by worktree
+        # tracking entries, even when the worktree directory no longer exists.
+        if branches_to_cleanup:
+            self.git_service.prune_worktrees(main_dir)
+
+            default_branch = repo.get("default_branch", "main")
+            # Deduplicate: only attempt each branch deletion once
+            for branch_name in branches_to_cleanup:
+                if branch_name == default_branch:
+                    continue
+                try:
+                    branches = self.git_service.list_branches(main_dir, include_remote=False)
+                    local_branch_names = [b["name"] for b in branches if not b["is_remote"]]
+                    if branch_name in local_branch_names:
+                        success = self.git_service.delete_branch(main_dir, branch_name, force=True)
+                        if success:
+                            logger.debug(f"Deleted orphaned branch: {branch_name}")
+                            # Mark branch_deleted on all records for this branch
+                            for entry in cleaned_up:
+                                if entry["branch_name"] == branch_name:
+                                    entry["branch_deleted"] = True
+                        else:
+                            logger.warning(f"Failed to delete orphaned branch: {branch_name}")
+                except Exception as e:
+                    logger.warning(f"Error cleaning up orphaned branch {branch_name}: {e}")
 
         if cleaned_up:
             logger.debug(f"Cleaned up {len(cleaned_up)} stale worktree records for project {project_id}")
@@ -233,12 +247,24 @@ class WorktreeManager:
         imported = 0
         try:
             git_worktrees = self.git_service.list_worktrees(main_dir)
-            db_paths = {get_worktree_working_dir(wt) for wt in active_worktrees if wt["id"] not in {c["id"] for c in cleaned_up}}
+            # Normalize paths for comparison (git uses forward slashes, Python Path
+            # uses backslashes on Windows — they must match for deduplication)
+            db_paths = {
+                os.path.normpath(get_worktree_working_dir(wt))
+                for wt in active_worktrees
+                if wt["id"] not in {c["id"] for c in cleaned_up}
+            }
             for git_wt in git_worktrees:
                 if git_wt.get("is_main"):
                     continue
                 git_path = git_wt.get("path", "")
-                if git_path and git_path not in db_paths:
+                if not git_path:
+                    continue
+                # Only import worktrees that actually exist on disk
+                if not Path(git_path).exists():
+                    continue
+                normalized_git_path = os.path.normpath(git_path)
+                if normalized_git_path not in db_paths:
                     try:
                         worktree_folder = Path(git_path).name
                         branch_name = git_wt.get("branch", "unknown")
@@ -772,18 +798,24 @@ class WorktreeManager:
 
         main_dir = get_project_working_dir(project)
 
-        # Get actual worktrees from git
+        # Prune stale git worktree entries first — this removes git's internal
+        # tracking for worktrees whose directories no longer exist on disk.
+        self.git_service.prune_worktrees(main_dir)
+
+        # Get actual worktrees from git (after pruning)
         git_worktrees = self.git_service.list_worktrees(main_dir)
+        # Normalize paths for comparison (git uses forward slashes,
+        # Python Path uses backslashes on Windows)
         git_worktree_paths = set()
         for wt in git_worktrees:
             if not wt.get("is_main"):
-                git_worktree_paths.add(wt.get("path", ""))
+                git_worktree_paths.add(os.path.normpath(wt.get("path", "")))
 
         # Get database worktrees
         db_worktrees = database.get_worktrees_for_repository(repo["id"])
 
         for db_wt in db_worktrees:
-            worktree_abs_path = get_worktree_working_dir(db_wt)
+            worktree_abs_path = os.path.normpath(get_worktree_working_dir(db_wt))
 
             if worktree_abs_path in git_worktree_paths:
                 # Worktree exists in both git and database
@@ -799,13 +831,22 @@ class WorktreeManager:
                 result["cleaned_up"] += 1
 
         # Import external worktrees (created outside the app) into our database
-        db_paths = {get_worktree_working_dir(wt) for wt in db_worktrees}
+        db_paths = {
+            os.path.normpath(get_worktree_working_dir(wt))
+            for wt in db_worktrees
+        }
         for git_wt in git_worktrees:
             if git_wt.get("is_main"):
                 continue  # Skip main worktree
 
             git_path = git_wt.get("path", "")
-            if git_path and git_path not in db_paths:
+            if not git_path:
+                continue
+            # Only import worktrees that actually exist on disk
+            if not Path(git_path).exists():
+                continue
+            normalized_git_path = os.path.normpath(git_path)
+            if normalized_git_path not in db_paths:
                 # External worktree found - import it
                 try:
                     # Extract relative path (folder name) from absolute path

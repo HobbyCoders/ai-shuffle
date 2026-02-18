@@ -545,6 +545,33 @@ class GitService:
             logger.error(f"Error removing worktree: {e}")
             return False
 
+    def prune_worktrees(self, main_dir: str) -> bool:
+        """
+        Prune stale worktree tracking entries.
+
+        Removes git's internal worktree metadata for worktrees whose
+        directories no longer exist on disk. This must be called before
+        deleting branches that were associated with removed worktrees,
+        otherwise git refuses to delete them.
+
+        Args:
+            main_dir: Main repository directory
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            result = self._run_git(main_dir, ["worktree", "prune"], timeout=10)
+            if result.returncode == 0:
+                logger.debug("Pruned stale worktree entries")
+                return True
+
+            logger.warning(f"Failed to prune worktrees: {result.stderr}")
+            return False
+        except Exception as e:
+            logger.error(f"Error pruning worktrees: {e}")
+            return False
+
     # =========================================================================
     # Commit Graph and Status
     # =========================================================================
