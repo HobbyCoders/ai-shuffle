@@ -163,6 +163,7 @@
 	// Common environment variable presets with valid ranges
 	const envVarPresets = [
 		{ key: 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', placeholder: '1 - 64000' },
+		{ key: 'MAX_THINKING_TOKENS', placeholder: '1024 - 128000' },
 		{ key: 'MAX_MCP_OUTPUT_TOKENS', placeholder: '1 - 25000 (default)' },
 		{ key: 'BASH_DEFAULT_TIMEOUT_MS', placeholder: 'ms (default: 120000)' },
 		{ key: 'BASH_MAX_TIMEOUT_MS', placeholder: 'ms (default: 600000)' },
@@ -534,6 +535,8 @@
 				return 'Haiku';
 			case 'sonnet':
 				return 'Sonnet';
+			case 'sonnet-1m':
+				return 'Sonnet 1M';
 			case 'opus':
 				return 'Opus';
 			default:
@@ -542,16 +545,50 @@
 	}
 
 	function getModelBadgeClass(model?: string): string {
-		if (!model) return 'card-badge--muted';
 		switch (model) {
 			case 'haiku':
 				return 'card-badge--haiku';
 			case 'sonnet':
 				return 'card-badge--sonnet';
+			case 'sonnet-1m':
+				return 'card-badge--sonnet-1m';
 			case 'opus':
 				return 'card-badge--opus';
 			default:
-				return 'card-badge--sonnet';
+				return 'card-badge--muted';
+		}
+	}
+
+	// Token budgets for thinking modes
+	const THINKING_TOKEN_BUDGETS = {
+		think: '8000',
+		think_harder: '24000', 
+		ultra_think: '64000'
+	};
+
+	// Update thinking mode and sync env var
+	function updateThinkingMode(mode: 'default' | 'think' | 'think_harder' | 'ultra_think') {
+		profileForm.thinking_mode = mode;
+		
+		// Find existing MAX_THINKING_TOKENS env var index
+		const existingIndex = profileForm.env_vars.findIndex(v => v.key === 'MAX_THINKING_TOKENS');
+		
+		if (mode === 'default') {
+			// Remove the env var if it exists
+			if (existingIndex !== -1) {
+				profileForm.env_vars = profileForm.env_vars.filter((_, i) => i !== existingIndex);
+			}
+		} else {
+			// Add or update the env var
+			const tokenBudget = THINKING_TOKEN_BUDGETS[mode];
+			if (existingIndex !== -1) {
+				// Update existing
+				profileForm.env_vars[existingIndex].value = tokenBudget;
+				profileForm.env_vars = [...profileForm.env_vars]; // Trigger reactivity
+			} else {
+				// Add new
+				profileForm.env_vars = [...profileForm.env_vars, { key: 'MAX_THINKING_TOKENS', value: tokenBudget }];
+			}
 		}
 	}
 
@@ -569,9 +606,14 @@
 			plan_exit_behavior: profileForm.plan_exit_behavior
 		};
 
-		// Both are independent controls — save both regardless of model
-		config.thinking_mode = profileForm.thinking_mode;
-		if (profileForm.effort) config.effort = profileForm.effort;
+		// Opus uses effort-based reasoning, other models use thinking_mode with token budgets
+		if (profileForm.model === 'opus') {
+			if (profileForm.effort) {
+				config.effort = profileForm.effort;
+			}
+		} else {
+			config.thinking_mode = profileForm.thinking_mode;
+		}
 
 		if (profileForm.max_turns) config.max_turns = profileForm.max_turns;
 		if (toolSelectionMode === 'allow' && profileForm.allowed_tools.length > 0) {
@@ -857,16 +899,13 @@
 					<div class="card-form-section">
 						<h3 class="card-form-title">Core Settings</h3>
 						<div class="form-field">
-							<label class="card-form-label">Model — {#if profileForm.model === 'haiku'}fastest and most compact, ideal for simple tasks{:else if profileForm.model === 'sonnet'}balanced performance, recommended for most use cases{:else if profileForm.model === 'opus'}most capable, best for complex reasoning{:else if profileForm.model}custom model: {profileForm.model}{:else}enter a model string below{/if}</label>
+							<label class="card-form-label">Model — {#if profileForm.model === 'haiku'}fastest and most compact, ideal for simple tasks{:else if profileForm.model === 'sonnet'}balanced performance, recommended for most use cases{:else if profileForm.model === 'sonnet-1m'}extended context (1M tokens) for large codebases{:else if profileForm.model === 'opus'}most capable, best for complex reasoning{/if}</label>
 							<div class="card-mode-selector">
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'haiku'} onclick={() => profileForm.model = 'haiku'}>Haiku</button>
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'sonnet'} onclick={() => profileForm.model = 'sonnet'}>Sonnet</button>
+								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'sonnet-1m'} onclick={() => profileForm.model = 'sonnet-1m'}>Sonnet 1M</button>
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'opus'} onclick={() => profileForm.model = 'opus'}>Opus</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={!['haiku', 'sonnet', 'opus'].includes(profileForm.model)} onclick={() => { if (['haiku', 'sonnet', 'opus'].includes(profileForm.model)) profileForm.model = ''; }}>Custom</button>
 							</div>
-							{#if !['haiku', 'sonnet', 'opus'].includes(profileForm.model)}
-								<input bind:value={profileForm.model} class="card-form-input" style="margin-top: 8px;" placeholder="e.g. claude-sonnet-4-5-20250929" />
-							{/if}
 						</div>
 						<div class="form-field">
 							<label class="card-form-label">Permission Mode — {#if profileForm.permission_mode === 'default'}ask for confirmation before executing tools{:else if profileForm.permission_mode === 'acceptEdits'}auto-approve file edits, ask for other tools{:else if profileForm.permission_mode === 'plan'}create plans without executing, for review workflows{:else if profileForm.permission_mode === 'bypassPermissions'}execute all tools without confirmation{/if}</label>
@@ -884,25 +923,30 @@
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.plan_exit_behavior === 'clear_context'} onclick={() => profileForm.plan_exit_behavior = 'clear_context'}>Clear Context</button>
 							</div>
 						</div>
-						<div class="form-field">
-							<label class="card-form-label">Reasoning Effort — {#if !profileForm.effort}no effort override, uses model default{:else if profileForm.effort === 'low'}light reasoning, good for simple tasks{:else if profileForm.effort === 'medium'}balanced reasoning, good for most tasks{:else if profileForm.effort === 'high'}deep reasoning, good for complex problems{:else if profileForm.effort === 'max'}maximum reasoning depth, for challenging problems{/if}</label>
-							<div class="card-mode-selector">
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={!profileForm.effort} onclick={() => profileForm.effort = null}>Default</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'low'} onclick={() => profileForm.effort = 'low'}>Low</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'medium'} onclick={() => profileForm.effort = 'medium'}>Medium</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'high'} onclick={() => profileForm.effort = 'high'}>High</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'max'} onclick={() => profileForm.effort = 'max'}>Max</button>
+						{#if profileForm.model === 'opus'}
+							<!-- Opus 4.6+ uses effort-based reasoning -->
+							<div class="form-field">
+								<label class="card-form-label">Reasoning Effort — {#if !profileForm.effort}no extended reasoning, standard response mode{:else if profileForm.effort === 'low'}light reasoning, good for simple tasks{:else if profileForm.effort === 'medium'}balanced reasoning, good for most tasks{:else if profileForm.effort === 'high'}deep reasoning, good for complex problems{:else if profileForm.effort === 'max'}maximum reasoning depth, for challenging problems{/if}</label>
+								<div class="card-mode-selector">
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={!profileForm.effort} onclick={() => profileForm.effort = null}>Default</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'low'} onclick={() => profileForm.effort = 'low'}>Low</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'medium'} onclick={() => profileForm.effort = 'medium'}>Medium</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'high'} onclick={() => profileForm.effort = 'high'}>High</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'max'} onclick={() => profileForm.effort = 'max'}>Max</button>
+								</div>
 							</div>
-						</div>
-						<div class="form-field">
-							<label class="card-form-label">Extended Thinking — {#if profileForm.thinking_mode === 'default'}no extended thinking, standard response mode{:else if profileForm.thinking_mode === 'think'}light reasoning (8K tokens), good for simple tasks{:else if profileForm.thinking_mode === 'think_harder'}substantial reasoning (24K tokens), good for complex tasks{:else if profileForm.thinking_mode === 'ultra_think'}deep reasoning (64K tokens), for multi-step problem solving{/if}</label>
-							<div class="card-mode-selector">
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'default'} onclick={() => profileForm.thinking_mode = 'default'}>Default</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'think'} onclick={() => profileForm.thinking_mode = 'think'}>Think</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'think_harder'} onclick={() => profileForm.thinking_mode = 'think_harder'}>Think Harder</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'ultra_think'} onclick={() => profileForm.thinking_mode = 'ultra_think'}>Ultra Think</button>
+						{:else}
+							<!-- Sonnet/Haiku use token-budget based thinking -->
+							<div class="form-field">
+								<label class="card-form-label">Extended Thinking — {#if profileForm.thinking_mode === 'default'}no extended thinking, standard response mode{:else if profileForm.thinking_mode === 'think'}light reasoning (8K tokens), good for simple tasks{:else if profileForm.thinking_mode === 'think_harder'}substantial reasoning (24K tokens), good for complex tasks{:else if profileForm.thinking_mode === 'ultra_think'}deep reasoning (64K tokens), for multi-step problem solving{/if}</label>
+								<div class="card-mode-selector">
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'default'} onclick={() => updateThinkingMode('default')}>Default</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'think'} onclick={() => updateThinkingMode('think')}>Think</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'think_harder'} onclick={() => updateThinkingMode('think_harder')}>Think Harder</button>
+									<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'ultra_think'} onclick={() => updateThinkingMode('ultra_think')}>Ultra Think</button>
+								</div>
 							</div>
-						</div>
+						{/if}
 						<div class="form-field">
 							<label class="card-form-label">Max Turns — maximum agentic turns per query (leave empty for unlimited)</label>
 							<input type="number" bind:value={profileForm.max_turns} class="card-form-input" placeholder="Unlimited" />
@@ -1367,7 +1411,7 @@
 								tabindex="0"
 								onkeydown={(e) => e.key === 'Enter' && !profile.is_builtin && openEditForm(profile)}
 							>
-								<div class="fp-item-icon fp-item-icon--{['haiku', 'sonnet', 'opus'].includes(profile.config?.model ?? '') ? profile.config?.model : 'sonnet'}">
+								<div class="fp-item-icon fp-item-icon--{profile.config?.model || 'sonnet'}">
 									<span class="fp-model-initial">{getModelDisplay(profile.config?.model).charAt(0)}</span>
 								</div>
 								<div class="fp-item-content">
@@ -2162,6 +2206,7 @@
 	/* --- Model item icons — unified theme primary --- */
 	.fp-item-icon--haiku,
 	.fp-item-icon--sonnet,
+	.fp-item-icon--sonnet-1m,
 	.fp-item-icon--opus {
 		background: color-mix(in oklch, var(--primary) 15%, transparent);
 		color: var(--primary);

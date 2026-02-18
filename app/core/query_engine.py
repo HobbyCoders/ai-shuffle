@@ -130,33 +130,30 @@ def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -
     return f"{truncated}\n\n[... truncated - total size: {size_kb}KB]"
 
 
-# Token budgets for thinking modes (ThinkingConfigEnabled budget_tokens values)
+# Token budgets for thinking modes (for Sonnet/Haiku - token-based thinking)
 THINKING_TOKEN_BUDGETS = {
     'think': 8000,
     'think_harder': 24000,
     'ultra_think': 64000
 }
 
-# Valid effort levels for adaptive thinking
-EFFORT_LEVELS = ('low', 'medium', 'high', 'max')
-
 
 def _build_thinking_config(config: Dict[str, Any], model: Optional[str], overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    Build thinking/effort configuration for ClaudeAgentOptions.
+    Build thinking/effort configuration for ClaudeAgentOptions based on model type.
 
-    Both controls are independent (SDK 0.1.36+ ThinkingConfig):
-    - effort: 'low'/'medium'/'high'/'max' — adaptive thinking depth
-    - thinking: ThinkingConfigEnabled with budget_tokens — token-budget thinking
+    SDK 0.1.36+ introduces two thinking systems:
+    1. Opus 4.6+: Uses effort-based adaptive thinking (effort: low/medium/high/max)
+    2. Sonnet/Haiku: Uses token budget-based thinking (thinking: {type: "enabled", budget_tokens: N})
 
-    Chat-level overrides via 'thinking_mode' key take priority over profile config.
-    Effort values ('low','medium','high','max') route to the effort field.
-    Thinking values ('think','think_harder','ultra_think') route to the thinking field.
+    Chat-level overrides (from the thinking mode dropdown) take priority over profile config.
+    Opus overrides send effort values (low/medium/high/max).
+    Sonnet/Haiku overrides send thinking_mode values (think/think_harder/ultra_think).
 
     Args:
         config: Profile configuration dict
-        model: Model name (e.g., 'opus', 'sonnet', 'haiku', or full model string)
-        overrides: Optional query-level overrides dict
+        model: Model name (e.g., 'opus', 'sonnet', 'haiku')
+        overrides: Optional query-level overrides dict (may contain 'thinking_mode')
 
     Returns:
         Dict with thinking/effort configuration to spread into ClaudeAgentOptions
@@ -164,23 +161,27 @@ def _build_thinking_config(config: Dict[str, Any], model: Optional[str], overrid
     result: Dict[str, Any] = {}
     overrides = overrides or {}
 
-    # Chat-level override value (single key carries both effort and thinking modes)
-    override_value = overrides.get('thinking_mode')
+    # Determine if this is an Opus model (uses effort-based thinking)
+    is_opus = model and ('opus' in model.lower())
 
-    # --- Effort (adaptive thinking depth) ---
-    effort_override = override_value if override_value in EFFORT_LEVELS else None
-    effort = effort_override or config.get('effort')
-    if effort and effort in EFFORT_LEVELS:
-        result['effort'] = effort
-        logger.debug(f"Thinking effort: {effort}")
-
-    # --- Token-budget thinking (ThinkingConfigEnabled) ---
-    thinking_override = override_value if override_value in THINKING_TOKEN_BUDGETS else None
-    thinking_mode = thinking_override or config.get('thinking_mode', 'default')
-    if thinking_mode and thinking_mode != 'default' and thinking_mode in THINKING_TOKEN_BUDGETS:
-        budget_tokens = THINKING_TOKEN_BUDGETS[thinking_mode]
-        result['thinking'] = {'type': 'enabled', 'budget_tokens': budget_tokens}
-        logger.debug(f"Thinking config: enabled with budget={budget_tokens}")
+    if is_opus:
+        # Opus 4.6+ uses effort-based adaptive thinking
+        # Override takes priority over profile config
+        effort = overrides.get('thinking_mode') or config.get('effort')
+        if effort and effort in ('low', 'medium', 'high', 'max'):
+            result['thinking'] = {'type': 'adaptive'}
+            result['effort'] = effort
+            logger.debug(f"Opus model: using adaptive thinking with effort={effort}")
+        # If no effort specified, use defaults (no extended thinking)
+    else:
+        # Sonnet/Haiku use token budget-based thinking
+        # Override takes priority over profile config
+        thinking_mode = overrides.get('thinking_mode') or config.get('thinking_mode', 'default')
+        if thinking_mode and thinking_mode != 'default' and thinking_mode in THINKING_TOKEN_BUDGETS:
+            budget_tokens = THINKING_TOKEN_BUDGETS[thinking_mode]
+            result['thinking'] = {'type': 'enabled', 'budget_tokens': budget_tokens}
+            logger.debug(f"Non-opus model: using token-based thinking with budget={budget_tokens}")
+        # If default or not specified, no extended thinking
 
     return result
 

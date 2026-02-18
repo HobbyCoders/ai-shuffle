@@ -287,21 +287,14 @@ Profiles are pre-configured settings for Claude sessions. They control:
 - **model**: Claude model to use
   - "haiku": Fast, cheap - quick tasks, exploration
   - "sonnet": Balanced - general coding, analysis (default)
+  - "sonnet-1m": Sonnet with 1M context - large codebases
   - "opus": Most capable - complex reasoning, architecture
-  - Or any full model string, e.g. "claude-sonnet-4-5-20250929"
 
-- **effort**: Reasoning effort level (adaptive thinking depth)
-  - null: Use model default
-  - "low": Light reasoning
-  - "medium": Balanced reasoning
-  - "high": Deep reasoning
-  - "max": Maximum reasoning depth
-
-- **thinking_mode**: Extended thinking with token budgets
-  - "default": No extended thinking
-  - "think": Extended reasoning (~8K tokens)
-  - "think_harder": More thorough analysis (~24K tokens)
-  - "ultra_think": Maximum reasoning depth (~64K tokens)
+- **thinking_mode**: Depth of reasoning
+  - "default": Standard thinking
+  - "think": Extended reasoning, better for complex problems
+  - "think_harder": More thorough analysis
+  - "ultra_think": Maximum reasoning depth
 
 ### Permissions
 - **permission_mode**: How permissions are handled
