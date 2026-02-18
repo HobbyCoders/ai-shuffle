@@ -715,6 +715,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const currentStartState = getState();
 				if (sessionId === currentStartState.sessionId || !currentStartState.sessionId) {
 					update(s => ({ ...s, sessionId, isStreaming: true, streamStartTime: Date.now() }));
+					// Cancel any pending removeSession timer from a previous query's
+					// onStreamEnd and start streaming polling. Without this, the 100ms
+					// removeSession timer can delete session state mid-stream, and
+					// stale lastUpdateId causes all polls to return 304.
+					onStartPolling(sessionId);
 					onPersistSession();
 				}
 				break;

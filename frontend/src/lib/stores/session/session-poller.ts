@@ -106,7 +106,14 @@ class SessionPoller {
 			}
 		}
 
-		// Initialize session in state store if needed
+		// Reset session state for the new streaming session.
+		// Without this, a stale lastUpdateId from a previous query causes
+		// all polls to get HTTP 304 (backend's new session starts at
+		// last_update_id=1, but frontend sends since_update_id=50+).
+		// removeSession + initSession resets lastUpdateId to 0 while
+		// preserving a clean session entry. Messages are restored by
+		// the first successful poll.
+		sessionState.removeSession(sessionId);
 		sessionState.initSession(sessionId);
 
 		// Poll immediately, then on interval
