@@ -516,7 +516,7 @@ class GitWatcherService:
 
         try:
             if "status" in categories:
-                status_data = git_service.get_status(working_dir)
+                status_data = await asyncio.to_thread(git_service.get_status, working_dir)
                 changes["status"] = {
                     "is_git_repo": status_data.get("is_git_repo", False),
                     "current_branch": status_data.get("current_branch"),
@@ -533,7 +533,9 @@ class GitWatcherService:
                 }
 
             if "diff_stats" in categories:
-                stats = git_service.get_diff_stats(working_dir, include_unstaged=True)
+                stats = await asyncio.to_thread(
+                    git_service.get_diff_stats, working_dir, include_unstaged=True
+                )
                 changes["diff_stats"] = {
                     "additions": stats.get("additions", 0),
                     "deletions": stats.get("deletions", 0),
@@ -541,8 +543,10 @@ class GitWatcherService:
                 }
 
             if "branches" in categories:
-                branches_raw = git_service.list_branches(working_dir, include_remote=True)
-                current = git_service.get_current_branch(working_dir)
+                branches_raw, current = await asyncio.gather(
+                    asyncio.to_thread(git_service.list_branches, working_dir, include_remote=True),
+                    asyncio.to_thread(git_service.get_current_branch, working_dir),
+                )
                 changes["branches"] = {
                     "branches": [
                         {

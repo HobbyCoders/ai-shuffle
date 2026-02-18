@@ -10,6 +10,7 @@ Provides endpoints for git repository operations including:
 - Fetch from remote
 """
 
+import asyncio
 import uuid
 import logging
 from pathlib import Path
@@ -433,8 +434,8 @@ async def get_git_status(
 
     working_dir = get_working_dir(project_id, worktree_id)
 
-    # Get git status
-    status_data = git_service.get_status(working_dir)
+    # Get git status (run in thread to avoid blocking the event loop)
+    status_data = await asyncio.to_thread(git_service.get_status, working_dir)
 
     # Ensure the file watcher is running for this project (lazy start)
     if status_data.get("is_git_repo"):
@@ -458,7 +459,7 @@ async def get_git_status(
     ]
 
     # Ensure repository record exists and get additional info
-    repo = ensure_git_repository_record(project_id, working_dir)
+    repo = await asyncio.to_thread(ensure_git_repository_record, project_id, working_dir)
 
     response = GitStatusResponse(
         is_git_repo=status_data["is_git_repo"],
@@ -501,14 +502,16 @@ async def init_repository(
     working_dir = get_project_path(project_id)
 
     # Guard: don't re-init an existing repo
-    if git_service.is_git_repo(working_dir):
+    if await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is already a git repository"
         )
 
     # Step 1: git init
-    success = git_service.init_repo(working_dir, default_branch=body.default_branch)
+    success = await asyncio.to_thread(
+        git_service.init_repo, working_dir, default_branch=body.default_branch
+    )
     if not success:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -520,9 +523,9 @@ async def init_repository(
 
     # Step 2: Optional initial commit
     if body.create_initial_commit:
-        staged = git_service.stage_files(working_dir, ["."])
+        staged = await asyncio.to_thread(git_service.stage_files, working_dir, ["."])
         if staged:
-            git_service.commit(working_dir, "Initial commit")
+            await asyncio.to_thread(git_service.commit, working_dir, "Initial commit")
 
     # Step 3: Optional GitHub repo creation
     if body.create_github_repo and body.github_repo_name:
@@ -534,7 +537,8 @@ async def init_repository(
                 detail="GitHub CLI is not authenticated. Run 'gh auth login' in your terminal first."
             )
 
-        repo_info = github_service.create_repo(
+        repo_info = await asyncio.to_thread(
+            github_service.create_repo,
             name=body.github_repo_name,
             private=body.github_private,
         )
@@ -549,7 +553,8 @@ async def init_repository(
         clone_url = repo_info['clone_url']
 
         # Add remote origin
-        result = git_service._run_git(
+        result = await asyncio.to_thread(
+            git_service._run_git,
             working_dir,
             ["remote", "add", "origin", clone_url],
             timeout=10
@@ -562,7 +567,8 @@ async def init_repository(
 
         # Push initial commit if we made one
         if body.create_initial_commit:
-            push_success, push_error = git_service.push(
+            push_success, push_error = await asyncio.to_thread(
+                git_service.push,
                 working_dir,
                 remote="origin",
                 branch=body.default_branch,
@@ -575,13 +581,13 @@ async def init_repository(
                 )
 
     # Step 4: Create database record
-    repo = ensure_git_repository_record(project_id, working_dir)
+    repo = await asyncio.to_thread(ensure_git_repository_record, project_id, working_dir)
 
     # Update record with GitHub info if we created a repo
     if github_full_name and repo:
         database.update_git_repository(
             repo["id"],
-            remote_url=git_service.get_remote_url(working_dir),
+            remote_url=await asyncio.to_thread(git_service.get_remote_url, working_dir),
             github_repo_name=github_full_name,
         )
 
@@ -633,14 +639,17 @@ async def list_branches(
 
     working_dir = get_working_dir(project_id, worktree_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
         )
 
-    branches = git_service.list_branches(working_dir, include_remote=include_remote)
-    current_branch = git_service.get_current_branch(working_dir)
+    # Run both git calls in parallel threads to avoid blocking the event loop
+    branches, current_branch = await asyncio.gather(
+        asyncio.to_thread(git_service.list_branches, working_dir, include_remote=include_remote),
+        asyncio.to_thread(git_service.get_current_branch, working_dir),
+    )
 
     # Get worktrees for this project to check branch associations
     repo = database.get_git_repository_by_project(project_id)
@@ -695,7 +704,7 @@ async def create_branch(
     check_project_access(request, project_id)
     working_dir = get_project_path(project_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
@@ -710,10 +719,8 @@ async def create_branch(
                 detail=f"Invalid branch name: contains '{char}'"
             )
 
-    success = git_service.create_branch(
-        working_dir,
-        body.name,
-        start_point=body.start_point
+    success = await asyncio.to_thread(
+        git_service.create_branch, working_dir, body.name, start_point=body.start_point
     )
 
     if not success:
@@ -751,21 +758,23 @@ async def delete_branch(
     check_project_access(request, project_id)
     working_dir = get_project_path(project_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
         )
 
     # Don't allow deleting current branch
-    current = git_service.get_current_branch(working_dir)
+    current = await asyncio.to_thread(git_service.get_current_branch, working_dir)
     if current == branch_name:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete the currently checked out branch"
         )
 
-    success = git_service.delete_branch(working_dir, branch_name, force=force)
+    success = await asyncio.to_thread(
+        git_service.delete_branch, working_dir, branch_name, force=force
+    )
 
     if not success:
         raise HTTPException(
@@ -810,21 +819,21 @@ async def checkout_branch(
 
     working_dir = get_project_path(project_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
         )
 
     # Check for uncommitted changes
-    status_data = git_service.get_status(working_dir)
+    status_data = await asyncio.to_thread(git_service.get_status, working_dir)
     if not status_data["is_clean"]:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot checkout: you have uncommitted changes. Commit or stash them first."
         )
 
-    success = git_service.checkout(working_dir, body.ref)
+    success = await asyncio.to_thread(git_service.checkout, working_dir, body.ref)
 
     if not success:
         raise HTTPException(
@@ -876,7 +885,7 @@ async def get_commit_graph(
     check_project_access(request, project_id)
     working_dir = get_project_path(project_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
@@ -885,7 +894,9 @@ async def get_commit_graph(
     # Cap limit to prevent excessive data
     limit = min(limit, 500)
 
-    commits = git_service.get_commit_graph(working_dir, limit=limit, branch=branch)
+    commits = await asyncio.to_thread(
+        git_service.get_commit_graph, working_dir, limit=limit, branch=branch
+    )
 
     commit_infos = [
         CommitInfo(
@@ -926,7 +937,7 @@ async def fetch_from_remote(
     check_project_access(request, project_id)
     working_dir = get_working_dir(project_id, worktree_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
@@ -940,7 +951,7 @@ async def fetch_from_remote(
             detail="Invalid remote name"
         )
 
-    success = git_service.fetch(working_dir, remote=remote)
+    success = await asyncio.to_thread(git_service.fetch, working_dir, remote=remote)
 
     # Update last_synced_at if we have a repository record
     if success:
@@ -996,13 +1007,15 @@ async def get_diff_stats(
 
     working_dir = get_working_dir(project_id, worktree_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
         )
 
-    stats = git_service.get_diff_stats(working_dir, include_unstaged=include_unstaged)
+    stats = await asyncio.to_thread(
+        git_service.get_diff_stats, working_dir, include_unstaged=include_unstaged
+    )
 
     response = DiffStatsResponse(
         additions=stats["additions"],
@@ -1033,7 +1046,7 @@ async def create_commit(
     check_project_access(request, project_id)
     working_dir = get_working_dir(project_id, worktree_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
@@ -1041,7 +1054,7 @@ async def create_commit(
 
     # Stage files if requested
     if body.include_unstaged:
-        success = git_service.stage_files(working_dir, ["."])
+        success = await asyncio.to_thread(git_service.stage_files, working_dir, ["."])
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1049,7 +1062,7 @@ async def create_commit(
             )
     else:
         # Check if there are staged changes
-        status_data = git_service.get_status(working_dir)
+        status_data = await asyncio.to_thread(git_service.get_status, working_dir)
         if not status_data["staged"]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1057,7 +1070,7 @@ async def create_commit(
             )
 
     # Create commit
-    success, commit_sha = git_service.commit(working_dir, body.message)
+    success, commit_sha = await asyncio.to_thread(git_service.commit, working_dir, body.message)
 
     if not success:
         raise HTTPException(
@@ -1095,7 +1108,7 @@ async def push_commits(
     check_project_access(request, project_id)
     working_dir = get_working_dir(project_id, worktree_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
@@ -1104,14 +1117,15 @@ async def push_commits(
     # Get current branch if not specified
     branch = body.branch
     if not branch:
-        branch = git_service.get_current_branch(working_dir)
+        branch = await asyncio.to_thread(git_service.get_current_branch, working_dir)
         if not branch:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Could not determine current branch"
             )
 
-    success, error_msg = git_service.push(
+    success, error_msg = await asyncio.to_thread(
+        git_service.push,
         working_dir,
         remote=body.remote,
         branch=branch,
@@ -1164,21 +1178,22 @@ async def pull_from_remote(
     check_project_access(request, project_id)
     working_dir = get_working_dir(project_id, worktree_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
         )
 
     # Check for uncommitted changes (allow if auto_stash is enabled)
-    status_data = git_service.get_status(working_dir)
+    status_data = await asyncio.to_thread(git_service.get_status, working_dir)
     if not status_data["is_clean"] and not body.auto_stash:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot pull: you have uncommitted changes. Commit or stash them first."
         )
 
-    success, error_msg, conflicts = git_service.pull(
+    success, error_msg, conflicts = await asyncio.to_thread(
+        git_service.pull,
         working_dir,
         remote=body.remote,
         strategy=body.strategy,
@@ -1227,13 +1242,15 @@ async def generate_commit_message(
     check_project_access(request, project_id)
     working_dir = get_working_dir(project_id, worktree_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
         )
 
-    diff_text = git_service.get_diff_text(working_dir, include_unstaged=body.include_unstaged)
+    diff_text = await asyncio.to_thread(
+        git_service.get_diff_text, working_dir, include_unstaged=body.include_unstaged
+    )
     if not diff_text.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1281,14 +1298,14 @@ async def generate_pr_description(
     check_project_access(request, project_id)
     working_dir = get_working_dir(project_id, worktree_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
         )
 
-    commit_log, diff_stat = git_service.get_branch_log(
-        working_dir, base_branch=body.base_branch
+    commit_log, diff_stat = await asyncio.to_thread(
+        git_service.get_branch_log, working_dir, base_branch=body.base_branch
     )
 
     if not commit_log.strip():
@@ -1434,7 +1451,7 @@ async def list_worktrees(
     check_project_access(request, project_id)
     working_dir = get_project_path(project_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
@@ -1442,16 +1459,20 @@ async def list_worktrees(
 
     worktrees = worktree_manager.get_worktrees_for_project(project_id)
 
-    # Optionally fetch git status for each existing worktree
+    # Optionally fetch git status for each existing worktree (in parallel threads)
     if include_status:
-        for wt in worktrees:
-            if wt.get("exists", True):  # Only fetch status for existing worktrees
+        async def _fetch_wt_status(wt):
+            if wt.get("exists", True):
                 worktree_full_path = get_worktree_working_dir(wt)
                 try:
-                    wt["git_status"] = git_service.get_status(worktree_full_path)
+                    wt["git_status"] = await asyncio.to_thread(
+                        git_service.get_status, worktree_full_path
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to get git status for worktree {wt['id']}: {e}")
                     wt["git_status"] = None
+
+        await asyncio.gather(*[_fetch_wt_status(wt) for wt in worktrees])
 
     worktree_infos = [_convert_worktree_to_info(wt) for wt in worktrees]
 
@@ -1581,7 +1602,7 @@ async def create_worktree(
     check_project_access(request, project_id)
     working_dir = get_project_path(project_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
@@ -1632,7 +1653,9 @@ async def create_worktree(
     copy_result = None
     if body.copy_uncommitted and worktree:
         worktree_abs_path = get_worktree_working_dir(worktree)
-        copy_result = _copy_uncommitted_files(working_dir, worktree_abs_path)
+        copy_result = await asyncio.to_thread(
+            _copy_uncommitted_files, working_dir, worktree_abs_path
+        )
 
     # Get full worktree details for response
     worktree_details = worktree_manager.get_worktree_details(worktree["id"])
@@ -1751,13 +1774,13 @@ async def sync_worktrees(
     check_project_access(request, project_id)
     working_dir = get_project_path(project_id)
 
-    if not git_service.is_git_repo(working_dir):
+    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project is not a git repository"
         )
 
-    result = worktree_manager.sync_worktrees(project_id)
+    result = await asyncio.to_thread(worktree_manager.sync_worktrees, project_id)
 
     return WorktreeSyncResponse(
         synced=result.get("synced", 0),
