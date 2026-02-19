@@ -606,14 +606,22 @@ async def get_live_session(
     attach_cost_metadata(messages, session_id)
 
     # Build response in live format
-    input_tokens = session.get("total_tokens_in", 0)
+    # IMPORTANT: For context window calculation, the frontend needs per-turn
+    # input tokens (last API call), NOT cumulative total_tokens_in across all turns.
+    # During streaming, the live store provides per-turn values from update_usage().
+    # For non-streaming (historical) sessions, use last_input_tokens from JSONL
+    # which is the last turn's input_tokens (= context window non-cached portion).
     output_tokens = session.get("total_tokens_out", 0)
     cache_creation = session.get("cache_creation_tokens", 0)
     cache_read = session.get("cache_read_tokens", 0)
+    # Default to 0 — we want per-turn, not cumulative
+    input_tokens = 0
 
     # Override with JSONL data if available
     if sdk_session_id and usage_data:
-        input_tokens = usage_data.get("total_tokens_in", input_tokens)
+        # Use last_input_tokens (per-turn) for context window calculation,
+        # NOT total_tokens_in (cumulative sum across all turns)
+        input_tokens = usage_data.get("last_input_tokens", 0)
         output_tokens = usage_data.get("total_tokens_out", output_tokens)
         cache_creation = usage_data.get("cache_creation_tokens", cache_creation)
         cache_read = usage_data.get("cache_read_tokens", cache_read)

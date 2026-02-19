@@ -63,10 +63,13 @@
 			? sessionStateManager.getSession($activeSession.sessionId)?.usage
 			: undefined
 	);
+	// IMPORTANT: The fallback must use $activeSession.contextUsed (per-turn context window
+	// tokens set by onStreamEnd/bridge), NOT totalTokensIn which is CUMULATIVE across all
+	// turns and would massively overcount for multi-turn sessions (showing 100% always).
 	const baseContextUsed = $derived(
 		(sessionUsage && sessionUsage.contextUsed > 0)
 			? sessionUsage.contextUsed
-			: ($activeSession.contextUsed ?? ($activeSession.totalTokensIn + $activeSession.totalCacheCreationTokens + $activeSession.totalCacheReadTokens))
+			: ($activeSession.contextUsed ?? 0)
 	);
 	const contextUsed = $derived(baseContextUsed + autoCompactionReserve);
 	const contextPercent = $derived(Math.min((contextUsed / CONTEXT_MAX) * 100, 100));
