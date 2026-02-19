@@ -191,10 +191,10 @@ async def list_global_mcp_servers(token: str = Depends(require_auth)):
         servers = service.get_servers_for_scope(McpScope.USER)
         return [_server_to_response(s) for s in servers]
     except Exception as e:
-        logger.error(f"Error listing global MCP servers: {e}")
+        logger.exception("Failed to list MCP servers")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list MCP servers: {str(e)}"
+            detail="Failed to list MCP servers"
         )
 
 
@@ -228,10 +228,10 @@ async def add_global_mcp_server(
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Error adding global MCP server: {e}")
+        logger.exception("Failed to add MCP server")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to add MCP server: {str(e)}"
+            detail="Failed to add MCP server"
         )
 
 
@@ -296,10 +296,10 @@ async def update_global_mcp_server(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error updating global MCP server: {e}")
+        logger.exception("Failed to update MCP server")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update MCP server: {str(e)}"
+            detail="Failed to update MCP server"
         )
 
 
@@ -318,10 +318,10 @@ async def remove_global_mcp_server(
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Error removing global MCP server: {e}")
+        logger.exception("Failed to remove MCP server")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to remove MCP server: {str(e)}"
+            detail="Failed to remove MCP server"
         )
 
 
@@ -354,10 +354,10 @@ async def list_project_mcp_servers(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error listing project MCP servers: {e}")
+        logger.exception("Failed to list project MCP servers")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list MCP servers: {str(e)}"
+            detail="Failed to list MCP servers"
         )
 
 
@@ -410,10 +410,10 @@ async def add_project_mcp_server(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error adding project MCP server: {e}")
+        logger.exception("Failed to add project MCP server")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to add MCP server: {str(e)}"
+            detail="Failed to add MCP server"
         )
 
 
@@ -491,10 +491,10 @@ async def update_project_mcp_server(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error updating project MCP server: {e}")
+        logger.exception("Failed to update project MCP server")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update MCP server: {str(e)}"
+            detail="Failed to update MCP server"
         )
 
 
@@ -532,10 +532,10 @@ async def remove_project_mcp_server(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error removing project MCP server: {e}")
+        logger.exception("Failed to remove project MCP server")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to remove MCP server: {str(e)}"
+            detail="Failed to remove MCP server"
         )
 
 
@@ -579,10 +579,10 @@ async def list_mcp_tools(
         return mcp_tools
 
     except Exception as e:
-        logger.error(f"Error listing MCP tools: {e}")
+        logger.exception("Failed to list MCP tools")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list MCP tools: {str(e)}"
+            detail="Failed to list MCP tools"
         )
 
 
@@ -597,8 +597,8 @@ async def get_mcp_stats(token: str = Depends(require_auth)):
             "global_server_count": len(user_servers),
         }
     except Exception as e:
-        logger.error(f"Error getting MCP stats: {e}")
+        logger.exception("Failed to get MCP stats")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get MCP stats: {str(e)}"
+            detail="Failed to get MCP stats"
         )

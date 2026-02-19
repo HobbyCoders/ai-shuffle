@@ -75,192 +75,6 @@ class UserDeviceConnection:
             return False
 
 
-@dataclass
-class StreamingBuffer:
-    """Buffer to store in-progress streaming content for a session"""
-    session_id: str
-    messages: List[Dict[str, Any]] = field(default_factory=list)
-    started_at: datetime = field(default_factory=datetime.utcnow)
-    # Store usage data from stream_start for late-joining devices
-    usage: Optional[Dict[str, Any]] = None
-    # Track the currently active block type for late-joining devices
-    # This allows them to initialize their streaming buffer correctly
-    active_block_type: Optional[str] = None  # 'thinking', 'text', 'tool_use', or None
-
-    def add_chunk(self, chunk_type: str, content: str, tool_name: str = None, tool_id: str = None, tool_input: Dict = None, subtype: str = None, data: Dict = None,
-                  agent_id: str = None, agent_type: str = None, description: str = None, prompt: str = None,
-                  tool_use_id: str = None, output: str = None, is_error: bool = False, result: str = None,
-                  block_type: str = None):
-        """Add a streaming chunk to the buffer"""
-        # Handle block start/stop events to track active block type
-        if chunk_type == 'stream_block_start':
-            # Update active block type when a new block starts
-            if block_type in ('thinking', 'text', 'tool_use'):
-                self.active_block_type = block_type
-            return
-        elif chunk_type == 'stream_block_stop':
-            # Clear active block type when block ends
-            self.active_block_type = None
-            return
-
-        # Find or create message for this chunk type
-        if chunk_type == 'text':
-            # Find existing text message or create new one
-            text_msg = next((m for m in self.messages if m.get('type') == 'text' and m.get('streaming')), None)
-            if text_msg:
-                text_msg['content'] = (text_msg.get('content') or '') + content
-            else:
-                self.messages.append({
-                    'type': 'text',
-                    'role': 'assistant',
-                    'content': content,
-                    'streaming': True
-                })
-        elif chunk_type == 'thinking':
-            # Find existing thinking message or create new one
-            # This ensures late-joining devices see thinking content separately from text
-            thinking_msg = next((m for m in self.messages if m.get('type') == 'thinking' and m.get('streaming')), None)
-            if thinking_msg:
-                thinking_msg['content'] = (thinking_msg.get('content') or '') + content
-            else:
-                self.messages.append({
-                    'type': 'thinking',
-                    'role': 'assistant',
-                    'content': content,
-                    'streaming': True
-                })
-        elif chunk_type == 'tool_use':
-            # Add tool use message
-            self.messages.append({
-                'type': 'tool_use',
-                'role': 'assistant',
-                'content': content,
-                'tool_name': tool_name,
-                'tool_id': tool_id,
-                'tool_input': tool_input,
-                'streaming': True
-            })
-            # Mark any previous text message as complete
-            for m in self.messages:
-                if m.get('type') == 'text':
-                    m['streaming'] = False
-        elif chunk_type == 'tool_result':
-            # Find the tool_use message and merge the result into it (for proper grouping)
-            # This ensures late-joining devices see tool_use with embedded result
-            found_tool_use = False
-            for m in self.messages:
-                if m.get('type') == 'tool_use' and m.get('tool_id') == tool_id:
-                    m['streaming'] = False
-                    m['tool_result'] = content
-                    m['tool_status'] = 'complete'
-                    found_tool_use = True
-                    break
-
-            # Only create separate tool_result if no matching tool_use found (shouldn't happen normally)
-            if not found_tool_use:
-                self.messages.append({
-                    'type': 'tool_result',
-                    'role': 'assistant',
-                    'content': content,
-                    'tool_id': tool_id,
-                    'streaming': False
-                })
-        elif chunk_type == 'system':
-            # System message (e.g., /context output, local commands)
-            # These need to be buffered so late-joining devices see them
-            self.messages.append({
-                'type': 'system',
-                'role': 'system',
-                'content': content,
-                'subtype': subtype,
-                'data': data,
-                'streaming': False
-            })
-        elif chunk_type == 'subagent_start':
-            # Subagent task started - create a new subagent message group
-            self.messages.append({
-                'type': 'subagent',
-                'role': 'assistant',
-                'content': '',
-                'agent_id': agent_id,
-                'agent_type': agent_type,
-                'agent_description': description,
-                'agent_prompt': prompt,
-                'agent_status': 'running',
-                'tool_id': tool_id,
-                'agent_children': [],
-                'streaming': True
-            })
-        elif chunk_type == 'subagent_chunk':
-            # Text chunk from subagent - add to subagent's children
-            subagent = next((m for m in self.messages if m.get('type') == 'subagent' and m.get('agent_id') == agent_id), None)
-            if subagent:
-                children = subagent.get('agent_children', [])
-                # Find or create text child
-                text_child = next((c for c in children if c.get('type') == 'text' and c.get('streaming')), None)
-                if text_child:
-                    text_child['content'] = (text_child.get('content') or '') + content
-                else:
-                    children.append({
-                        'id': f'{agent_id}-text-{len(children)}',
-                        'type': 'text',
-                        'content': content,
-                        'streaming': True
-                    })
-                subagent['agent_children'] = children
-        elif chunk_type == 'subagent_tool_use':
-            # Tool use within subagent
-            subagent = next((m for m in self.messages if m.get('type') == 'subagent' and m.get('agent_id') == agent_id), None)
-            if subagent:
-                children = subagent.get('agent_children', [])
-                # Mark any previous text child as complete
-                for c in children:
-                    if c.get('type') == 'text':
-                        c['streaming'] = False
-                # Add tool use child
-                children.append({
-                    'id': f'{agent_id}-tool-{tool_id}',
-                    'type': 'tool_use',
-                    'toolName': tool_name,
-                    'toolId': tool_id,
-                    'toolInput': tool_input,
-                    'toolStatus': 'running',
-                    'streaming': True
-                })
-                subagent['agent_children'] = children
-        elif chunk_type == 'subagent_tool_result':
-            # Tool result within subagent - embed in matching tool_use
-            subagent = next((m for m in self.messages if m.get('type') == 'subagent' and m.get('agent_id') == agent_id), None)
-            if subagent:
-                children = subagent.get('agent_children', [])
-                # Find matching tool_use and embed result
-                for c in children:
-                    if c.get('type') == 'tool_use' and c.get('toolId') == tool_use_id:
-                        c['toolResult'] = output
-                        c['toolStatus'] = 'error' if is_error else 'complete'
-                        c['streaming'] = False
-                        break
-                subagent['agent_children'] = children
-        elif chunk_type == 'subagent_done':
-            # Subagent completed - update status
-            subagent = next((m for m in self.messages if m.get('type') == 'subagent' and m.get('agent_id') == agent_id), None)
-            if subagent:
-                subagent['agent_status'] = 'error' if is_error else 'completed'
-                subagent['content'] = result or ''
-                subagent['streaming'] = False
-                # Mark all children as not streaming
-                for c in subagent.get('agent_children', []):
-                    c['streaming'] = False
-
-    def get_messages(self) -> List[Dict[str, Any]]:
-        """Get all buffered messages"""
-        return self.messages.copy()
-
-    def clear(self):
-        """Clear the buffer"""
-        self.messages = []
-
-
 class SyncEngine:
     """
     Manages real-time synchronization between devices.
@@ -270,8 +84,11 @@ class SyncEngine:
     - Broadcast events to all devices watching a session
     - Support for streaming events (message chunks)
     - Exclude source device from broadcasts (to avoid echo)
-    - Buffer streaming content for late-joining devices
     - Enforce single active device per session (session locking)
+
+    Late-joining devices get streaming state from LiveSessionStore, not from
+    this engine. SyncEngine only tracks whether a session is streaming and
+    broadcasts real-time events to already-connected devices.
     """
 
     def __init__(self):
@@ -281,8 +98,6 @@ class SyncEngine:
         self._lock = asyncio.Lock()
         # Track streaming state per session
         self._streaming_sessions: Set[str] = set()
-        # Buffer for in-progress streaming content per session
-        self._streaming_buffers: Dict[str, StreamingBuffer] = {}
         # Session locks: session_id -> device_id that owns the lock
         self._session_locks: Dict[str, str] = {}
         # User connections for tab sync: user_id -> {device_id -> UserDeviceConnection}
@@ -379,7 +194,6 @@ class SyncEngine:
         Used during cleanup when no devices are connected to receive broadcasts.
         """
         self._streaming_sessions.discard(session_id)
-        self._streaming_buffers.pop(session_id, None)
         self._session_user_map.pop(session_id, None)
         self._session_project_map.pop(session_id, None)
         self._session_worktree_map.pop(session_id, None)
@@ -510,7 +324,7 @@ class SyncEngine:
         """Notify all devices that streaming has started for a session.
 
         This method is idempotent - calling it multiple times for the same session
-        is safe and won't clear the streaming buffer.
+        is safe.
 
         Args:
             session_id: The session ID
@@ -522,13 +336,8 @@ class SyncEngine:
             worktree_id: Optional worktree ID — worktree sessions have independent working
                 directories and should not lock git controls for project-mode sessions
         """
-        # Only create buffer if not already streaming (idempotent)
-        if session_id not in self._streaming_sessions:
-            self._streaming_sessions.add(session_id)
-            self._streaming_buffers[session_id] = StreamingBuffer(session_id=session_id, usage=usage)
-        elif usage and session_id in self._streaming_buffers:
-            # Update usage if buffer already exists (e.g., reconnection during streaming)
-            self._streaming_buffers[session_id].usage = usage
+        # Mark session as streaming (idempotent)
+        self._streaming_sessions.add(session_id)
 
         # Store user_id mapping so broadcast_stream_end can look it up
         if user_id:
@@ -577,17 +386,13 @@ class SyncEngine:
 
         This is called when subsequent stream_start events occur during a single query,
         such as when Claude uses tools and continues responding. Each new assistant turn
-        has updated token usage that synced devices and the buffer need to know about.
+        has updated token usage that synced devices need to know about.
 
         Args:
             session_id: The session ID
             usage: Token usage data (input_tokens, cache_creation_input_tokens, cache_read_input_tokens)
             source_device_id: Device that originated the event (will be excluded from broadcast)
         """
-        # Update the buffer's usage data for late-joining devices
-        if session_id in self._streaming_buffers:
-            self._streaming_buffers[session_id].usage = usage
-
         event = SyncEvent(
             event_type="usage_update",
             session_id=session_id,
@@ -605,30 +410,6 @@ class SyncEngine:
         source_device_id: Optional[str] = None
     ):
         """Broadcast a streaming chunk to all watching devices"""
-        # Add chunk to buffer for late-joining devices
-        if session_id in self._streaming_buffers:
-            buffer = self._streaming_buffers[session_id]
-            buffer.add_chunk(
-                chunk_type=chunk_type,
-                content=chunk_data.get('content', ''),
-                tool_name=chunk_data.get('tool_name') or chunk_data.get('name'),  # subagent uses 'name'
-                tool_id=chunk_data.get('tool_id') or chunk_data.get('id'),  # subagent uses 'id'
-                tool_input=chunk_data.get('tool_input') or chunk_data.get('input'),  # subagent uses 'input'
-                subtype=chunk_data.get('subtype'),
-                data=chunk_data.get('data'),
-                # Subagent-specific parameters
-                agent_id=chunk_data.get('agent_id'),
-                agent_type=chunk_data.get('agent_type'),
-                description=chunk_data.get('description'),
-                prompt=chunk_data.get('prompt'),
-                tool_use_id=chunk_data.get('tool_use_id'),
-                output=chunk_data.get('output'),
-                is_error=chunk_data.get('is_error', False),
-                result=chunk_data.get('result'),
-                # Block type for tracking active streaming block
-                block_type=chunk_data.get('block_type')
-            )
-
         event = SyncEvent(
             event_type="stream_chunk",
             session_id=session_id,
@@ -641,27 +422,6 @@ class SyncEngine:
         )
         await self.broadcast_event(event, exclude_device_id=source_device_id)
 
-    def get_streaming_buffer(self, session_id: str) -> Optional[List[Dict[str, Any]]]:
-        """Get the current streaming buffer for a session (for late-joining devices)"""
-        buffer = self._streaming_buffers.get(session_id)
-        if buffer:
-            return buffer.get_messages()
-        return None
-
-    def get_streaming_buffer_with_usage(self, session_id: str) -> tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]], Optional[str]]:
-        """Get the current streaming buffer, usage data, and active block type for a session (for late-joining devices).
-
-        Returns:
-            Tuple of (messages, usage, active_block_type) where:
-            - messages: buffered streaming messages
-            - usage: token usage data from stream_start
-            - active_block_type: currently active block type ('thinking', 'text', 'tool_use', or None)
-        """
-        buffer = self._streaming_buffers.get(session_id)
-        if buffer:
-            return buffer.get_messages(), buffer.usage, buffer.active_block_type
-        return None, None, None
-
     async def broadcast_stream_end(
         self,
         session_id: str,
@@ -672,8 +432,6 @@ class SyncEngine:
     ):
         """Notify all devices that streaming has ended"""
         self._streaming_sessions.discard(session_id)
-        # Clear the streaming buffer
-        self._streaming_buffers.pop(session_id, None)
         # Pop user_id mapping (used for user-level broadcast below)
         stored_user_id = self._session_user_map.pop(session_id, None)
         # Pop project_id mapping (used for user-level broadcast below)
@@ -795,16 +553,11 @@ class SyncEngine:
 
     async def get_session_state(self, session_id: str) -> Dict[str, Any]:
         """Get current state of a session for new device joining"""
-        state = {
+        return {
             "session_id": session_id,
             "is_streaming": self.is_session_streaming(session_id),
             "connected_devices": self.get_device_count(session_id)
         }
-        # Include streaming buffer if session is actively streaming
-        streaming_buffer = self.get_streaming_buffer(session_id)
-        if streaming_buffer:
-            state["streaming_messages"] = streaming_buffer
-        return state
 
     # ============= User-level connection management for tab sync =============
 

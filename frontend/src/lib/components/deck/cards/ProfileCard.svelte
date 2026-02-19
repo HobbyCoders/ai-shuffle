@@ -846,19 +846,19 @@
 					<div class="card-form-section">
 						<h3 class="card-form-title">Profile Information</h3>
 						<div class="form-field">
-							<label class="card-form-label">Name <span class="required">*</span></label>
-							<input bind:value={profileForm.name} class="card-form-input" placeholder="My Profile" />
+							<label class="card-form-label" for="profile-name">Name <span class="required">*</span></label>
+							<input id="profile-name" bind:value={profileForm.name} class="card-form-input" placeholder="My Profile" />
 						</div>
 						<div class="form-field full-width">
-							<label class="card-form-label">Description</label>
-							<input bind:value={profileForm.description} class="card-form-input" placeholder="Optional description" />
+							<label class="card-form-label" for="profile-description">Description</label>
+							<input id="profile-description" bind:value={profileForm.description} class="card-form-input" placeholder="Optional description" />
 						</div>
 					</div>
 
 					<div class="card-form-section">
 						<h3 class="card-form-title">Core Settings</h3>
 						<div class="form-field">
-							<label class="card-form-label">Model — {#if profileForm.model === 'haiku'}fastest and most compact, ideal for simple tasks{:else if profileForm.model === 'sonnet'}balanced performance, recommended for most use cases{:else if profileForm.model === 'opus'}most capable, best for complex reasoning{:else}custom model string{/if}</label>
+							<span class="card-form-label">Model — {#if profileForm.model === 'haiku'}fastest and most compact, ideal for simple tasks{:else if profileForm.model === 'sonnet'}balanced performance, recommended for most use cases{:else if profileForm.model === 'opus'}most capable, best for complex reasoning{:else}custom model string{/if}</span>
 							<div class="card-mode-selector">
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'haiku'} onclick={() => profileForm.model = 'haiku'}>Haiku</button>
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'sonnet'} onclick={() => profileForm.model = 'sonnet'}>Sonnet</button>
@@ -870,7 +870,7 @@
 							{/if}
 						</div>
 						<div class="form-field">
-							<label class="card-form-label">Permission Mode — {#if profileForm.permission_mode === 'default'}ask for confirmation before executing tools{:else if profileForm.permission_mode === 'acceptEdits'}auto-approve file edits, ask for other tools{:else if profileForm.permission_mode === 'plan'}create plans without executing, for review workflows{:else if profileForm.permission_mode === 'bypassPermissions'}execute all tools without confirmation{/if}</label>
+							<span class="card-form-label">Permission Mode — {#if profileForm.permission_mode === 'default'}ask for confirmation before executing tools{:else if profileForm.permission_mode === 'acceptEdits'}auto-approve file edits, ask for other tools{:else if profileForm.permission_mode === 'plan'}create plans without executing, for review workflows{:else if profileForm.permission_mode === 'bypassPermissions'}execute all tools without confirmation{/if}</span>
 							<div class="card-mode-selector">
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'default'} onclick={() => profileForm.permission_mode = 'default'}>Default</button>
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'acceptEdits'} onclick={() => profileForm.permission_mode = 'acceptEdits'}>Accept Edits</button>
@@ -879,7 +879,7 @@
 							</div>
 						</div>
 						<div class="form-field">
-							<label class="card-form-label">Plan Exit Behavior — {#if profileForm.plan_exit_behavior === 'normal'}keep conversation context when plan is approved{:else}clear conversation context when plan is approved for a fresh execution window{/if}</label>
+							<span class="card-form-label">Plan Exit Behavior — {#if profileForm.plan_exit_behavior === 'normal'}keep conversation context when plan is approved{:else}clear conversation context when plan is approved for a fresh execution window{/if}</span>
 							<div class="card-mode-selector">
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.plan_exit_behavior === 'normal'} onclick={() => profileForm.plan_exit_behavior = 'normal'}>Normal</button>
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.plan_exit_behavior === 'clear_context'} onclick={() => profileForm.plan_exit_behavior = 'clear_context'}>Clear Context</button>
@@ -887,7 +887,7 @@
 						</div>
 						<!-- Thinking config: controls whether/how the model uses extended thinking -->
 						<div class="form-field">
-							<label class="card-form-label">Thinking — {#if profileForm.thinking_mode === 'default'}SDK default behavior{:else if profileForm.thinking_mode === 'disabled'}extended thinking disabled{:else if profileForm.thinking_mode === 'adaptive'}adaptive thinking, model decides when to think{:else if profileForm.thinking_mode === 'think'}enabled with ~8K token budget{:else if profileForm.thinking_mode === 'think_harder'}enabled with ~24K token budget{:else if profileForm.thinking_mode === 'ultra_think'}enabled with ~64K token budget{/if}</label>
+							<span class="card-form-label">Thinking — {#if profileForm.thinking_mode === 'default'}SDK default behavior{:else if profileForm.thinking_mode === 'disabled'}extended thinking disabled{:else if profileForm.thinking_mode === 'adaptive'}adaptive thinking, model decides when to think{:else if profileForm.thinking_mode === 'think'}enabled with ~8K token budget{:else if profileForm.thinking_mode === 'think_harder'}enabled with ~24K token budget{:else if profileForm.thinking_mode === 'ultra_think'}enabled with ~64K token budget{/if}</span>
 							<div class="card-mode-selector">
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'default'} onclick={() => profileForm.thinking_mode = 'default'}>Default</button>
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'disabled'} onclick={() => profileForm.thinking_mode = 'disabled'}>Off</button>
@@ -899,7 +899,7 @@
 						</div>
 						<!-- Effort: controls reasoning depth (independent of thinking config) -->
 						<div class="form-field">
-							<label class="card-form-label">Effort — {#if !profileForm.effort}use model default{:else if profileForm.effort === 'low'}light reasoning, good for simple tasks{:else if profileForm.effort === 'medium'}balanced reasoning, good for most tasks{:else if profileForm.effort === 'high'}deep reasoning, good for complex problems{:else if profileForm.effort === 'max'}maximum reasoning depth, for challenging problems{/if}</label>
+							<span class="card-form-label">Effort — {#if !profileForm.effort}use model default{:else if profileForm.effort === 'low'}light reasoning, good for simple tasks{:else if profileForm.effort === 'medium'}balanced reasoning, good for most tasks{:else if profileForm.effort === 'high'}deep reasoning, good for complex problems{:else if profileForm.effort === 'max'}maximum reasoning depth, for challenging problems{/if}</span>
 							<div class="card-mode-selector">
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={!profileForm.effort} onclick={() => profileForm.effort = null}>Default</button>
 								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'low'} onclick={() => profileForm.effort = 'low'}>Low</button>
@@ -909,8 +909,8 @@
 							</div>
 						</div>
 						<div class="form-field">
-							<label class="card-form-label">Max Turns — maximum agentic turns per query (leave empty for unlimited)</label>
-							<input type="number" bind:value={profileForm.max_turns} class="card-form-input" placeholder="Unlimited" />
+							<label class="card-form-label" for="profile-max-turns">Max Turns — maximum agentic turns per query (leave empty for unlimited)</label>
+							<input id="profile-max-turns" type="number" bind:value={profileForm.max_turns} class="card-form-input" placeholder="Unlimited" />
 						</div>
 					</div>
 
@@ -1195,14 +1195,14 @@
 						</div>
 						{#if profileForm.system_prompt_type === 'preset'}
 							<div class="form-field full-width">
-								<label class="card-form-label">Append Instructions</label>
-								<textarea bind:value={profileForm.system_prompt_append} class="card-form-input card-form-textarea" rows="8" placeholder="Additional instructions to append to Claude Code's system prompt..."></textarea>
+								<label class="card-form-label" for="profile-append-instructions">Append Instructions</label>
+								<textarea id="profile-append-instructions" bind:value={profileForm.system_prompt_append} class="card-form-input card-form-textarea" rows="8" placeholder="Additional instructions to append to Claude Code's system prompt..."></textarea>
 								<p class="card-form-hint">These instructions will be added after Claude Code's built-in system prompt.</p>
 							</div>
 						{:else}
 							<div class="form-field full-width">
-								<label class="card-form-label">Custom System Prompt</label>
-								<textarea bind:value={profileForm.system_prompt_content} class="card-form-input card-form-textarea" rows="10" placeholder="Enter your custom system prompt (can be blank)..."></textarea>
+								<label class="card-form-label" for="profile-custom-prompt">Custom System Prompt</label>
+								<textarea id="profile-custom-prompt" bind:value={profileForm.system_prompt_content} class="card-form-input card-form-textarea" rows="10" placeholder="Enter your custom system prompt (can be blank)..."></textarea>
 							</div>
 							<label class="checkbox-item highlighted">
 								<input type="checkbox" bind:checked={profileForm.system_prompt_inject_env} class="checkbox-input" />
@@ -1231,24 +1231,24 @@
 						<h3 class="card-form-title">Environment</h3>
 						<div class="form-grid">
 							<div class="form-field">
-								<label class="card-form-label">Working Directory</label>
-								<input bind:value={profileForm.cwd} class="card-form-input card-form-input--mono" placeholder="/workspace/my-project" />
+								<label class="card-form-label" for="profile-cwd">Working Directory</label>
+								<input id="profile-cwd" bind:value={profileForm.cwd} class="card-form-input card-form-input--mono" placeholder="/workspace/my-project" />
 							</div>
 							<div class="form-field">
-								<label class="card-form-label">User Identifier</label>
-								<input bind:value={profileForm.user} class="card-form-input" placeholder="user@example.com" />
+								<label class="card-form-label" for="profile-user">User Identifier</label>
+								<input id="profile-user" bind:value={profileForm.user} class="card-form-input" placeholder="user@example.com" />
 							</div>
 						</div>
 						<div class="form-field full-width">
-							<label class="card-form-label">Additional Directories</label>
-							<input bind:value={profileForm.add_dirs} class="card-form-input card-form-input--mono" placeholder="/extra/dir1, /extra/dir2 (comma-separated)" />
+							<label class="card-form-label" for="profile-add-dirs">Additional Directories</label>
+							<input id="profile-add-dirs" bind:value={profileForm.add_dirs} class="card-form-input card-form-input--mono" placeholder="/extra/dir1, /extra/dir2 (comma-separated)" />
 						</div>
 					</div>
 					<div class="card-form-section">
 						<h3 class="card-form-title">Performance</h3>
 						<div class="form-field" style="max-width: 200px;">
-							<label class="card-form-label">Max Buffer Size (bytes)</label>
-							<input type="number" bind:value={profileForm.max_buffer_size} class="card-form-input" placeholder="Default" />
+							<label class="card-form-label" for="profile-max-buffer">Max Buffer Size (bytes)</label>
+							<input id="profile-max-buffer" type="number" bind:value={profileForm.max_buffer_size} class="card-form-input" placeholder="Default" />
 						</div>
 					</div>
 					<div class="card-form-section">
@@ -1397,8 +1397,7 @@
 										<span class="fp-meta-chip"><MessageSquare size={12} /> {profile.session_count || 0}</span>
 									</div>
 								</div>
-								<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()}>
+								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
 									<GroupDropdown entityType="profiles" entityId={profile.id} />
 									<button class="fp-action-btn" onclick={(e) => { e.stopPropagation(); handleExportProfile(profile.id); }} title="Export">
 										<Download size={14} />

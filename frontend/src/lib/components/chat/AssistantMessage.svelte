@@ -400,13 +400,12 @@
 	});
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
 <div
 	class="w-full overflow-hidden message-container"
 	onmouseenter={() => isHovered = true}
 	onmouseleave={() => { isHovered = false; showActionsOnMobile = false; }}
 	ontouchstart={handleTouchStart}
-	onclick={handleMessageClick}
+	ontouchend={(e) => { const target = e.target; if (target instanceof HTMLElement && !target.closest('a, button, pre, code, video, .media-overlay-buttons')) { showActionsOnMobile = !showActionsOnMobile; } }}
 	role="article"
 >
 	<div class="min-w-0 max-w-full">

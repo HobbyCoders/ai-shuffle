@@ -148,19 +148,19 @@
 </script>
 
 {#if show}
-	<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
 	<div
-		class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] bg-black/50 z-50 flex items-center justify-center p-4"
-		onclick={close}
-		onkeydown={(e) => e.key === 'Escape' && close()}
+		class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-center justify-center p-4"
 		role="dialog"
 		aria-modal="true"
-		tabindex="-1"
 	>
-		<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+		<button
+			class="absolute inset-0 w-full h-full bg-black/50 border-none p-0 cursor-default"
+			onclick={close}
+			tabindex="-1"
+			aria-label="Close dialog"
+		></button>
 		<div
-			class="bg-card rounded-xl w-full max-w-md overflow-hidden shadow-xl border border-border"
-			onclick={(e) => e.stopPropagation()}
+			class="relative bg-card rounded-xl w-full max-w-md overflow-hidden shadow-xl border border-border"
 		>
 			<!-- Header -->
 			<div class="px-4 py-3 border-b border-border flex items-center justify-between">
@@ -188,7 +188,6 @@
 
 				{#if !selectedFile || parseError}
 					<!-- Dropzone -->
-					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<div
 						class="border-2 border-dashed rounded-xl p-8 text-center transition-colors cursor-pointer {isDragOver ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50'}"
 						onclick={triggerFileSelect}

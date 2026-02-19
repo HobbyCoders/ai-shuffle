@@ -478,10 +478,10 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     try:
         return session
     except Exception as e:
-        logger.error(f"Failed to serialize session {session_id}: {e}\n{traceback.format_exc()}")
+        logger.exception(f"Failed to serialize session {session_id}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to serialize session: {str(e)}"
+            detail="Failed to serialize session"
         )
 
 
@@ -1174,9 +1174,10 @@ async def import_session(
             detail=f"Invalid JSON file: {str(e)}"
         )
     except Exception as e:
+        logger.exception("Failed to read session import file")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to read file: {str(e)}"
+            detail="Failed to read file"
         )
 
     # Validate import data structure
@@ -1732,12 +1733,12 @@ async def fork_session(
         logger.debug(f"Created forked JSONL file: {new_jsonl_path} with {fork_entry_index + 1} entries")
 
     except Exception as e:
-        logger.error(f"Failed to create JSONL file for forked session: {e}")
+        logger.exception("Failed to create JSONL file for forked session")
         # Delete the session we just created since fork failed
         database.delete_session(new_session_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create forked session: {str(e)}"
+            detail="Failed to create forked session"
         )
 
     logger.debug(f"Forked session {session_id} to {new_session_id} at message index {body.message_index}")
@@ -1834,10 +1835,10 @@ async def create_session_with_worktree(
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Unexpected error creating worktree: {e}")
+        logger.exception("Unexpected error creating worktree session")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unexpected error: {str(e)}"
+            detail="Failed to create worktree session"
         )
 
     logger.debug(f"Created worktree session: {session['id']} with worktree: {worktree['id']}")

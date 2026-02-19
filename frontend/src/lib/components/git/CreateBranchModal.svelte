@@ -115,12 +115,9 @@
 <svelte:window onkeydown={handleKeydown} />
 
 {#if open}
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<div class="modal-backdrop" onclick={onClose}>
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<!-- svelte-ignore a11y_click_events_have_key_events -->
-		<div class="modal" onclick={(e) => e.stopPropagation()}>
+	<div class="modal-backdrop" role="dialog" aria-modal="true">
+		<button class="modal-backdrop-close" onclick={onClose} tabindex="-1" aria-label="Close dialog"></button>
+		<div class="modal">
 			<!-- Close button -->
 			<button class="close-btn" onclick={onClose} aria-label="Close">
 				<X size={16} strokeWidth={1.5} />
@@ -197,9 +194,19 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		animation: fade-in 150ms ease;
+	}
+
+	.modal-backdrop-close {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
 		background: color-mix(in oklch, var(--background) 80%, transparent);
 		backdrop-filter: blur(4px);
-		animation: fade-in 150ms ease;
+		border: none;
+		cursor: default;
+		padding: 0;
 	}
 
 	@keyframes fade-in {

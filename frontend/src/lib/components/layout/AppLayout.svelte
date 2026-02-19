@@ -118,13 +118,13 @@
 
 	<!-- Resize handle (desktop only, when sidebar is open) -->
 	{#if !$sidebarOverlay && !$sidebarCollapsed}
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div
 			class="resize-handle"
 			onpointerdown={startResize}
 			role="separator"
 			aria-orientation="vertical"
 			aria-label="Resize sidebar"
+			tabindex="-1"
 		>
 			<div class="resize-handle-bar"></div>
 		</div>
@@ -132,18 +132,16 @@
 
 	<!-- Overlay backdrop for mobile sidebar -->
 	{#if $sidebarOverlay && !$sidebarCollapsed}
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<div
+		<button
 			class="sidebar-backdrop"
 			onclick={handleMainPanelClick}
-			role="presentation"
-		></div>
+			tabindex="-1"
+			aria-label="Close sidebar"
+		></button>
 	{/if}
 
 	<!-- Main content -->
-	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="main-content" onclick={$sidebarOverlay && !$sidebarCollapsed ? handleMainPanelClick : undefined}>
+	<div class="main-content" role="main">
 		<MainPanel
 			onOpenSession={onOpenSession}
 			onOpenPlugins={onOpenPlugins}
@@ -237,9 +235,14 @@
 		position: fixed;
 		inset: 0;
 		z-index: 999;
+		width: 100%;
+		height: 100%;
 		background: color-mix(in oklch, var(--background) 50%, transparent);
 		backdrop-filter: blur(4px);
 		-webkit-backdrop-filter: blur(4px);
+		border: none;
+		padding: 0;
+		cursor: default;
 	}
 
 	/* Mobile: safe area insets for notched devices */

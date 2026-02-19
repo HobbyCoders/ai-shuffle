@@ -174,6 +174,13 @@ export interface ProfileConfig {
 	effort?: 'low' | 'medium' | 'high' | 'max';  // Effort level for reasoning depth (independent of thinking config)
 	ai_tools?: Record<string, boolean>;  // AI tool toggles (image_generation, video_generation, etc.)
 	enabled_agents?: string[];  // Subagents enabled for this profile
+	setting_sources?: string[];  // Where to load settings from (e.g., 'claude_code')
+	cwd?: string;  // Working directory override
+	add_dirs?: string[];  // Additional directories to include
+	user?: string;  // User identifier override
+	max_buffer_size?: number;  // Maximum buffer size for output
+	env?: Record<string, string>;  // Environment variables to set
+	plan_exit_behavior?: 'normal' | 'clear_context';  // How to handle plan mode exit
 	system_prompt?: {
 		type: string;
 		preset?: string;
@@ -1745,4 +1752,22 @@ export async function getSubagentsForAutocomplete(
 	params.set('limit', limit.toString());
 
 	return api.get<AutocompleteSubagent[]>(`/profiles/${profileId}/subagents/all?${params.toString()}`);
+}
+
+/**
+ * Type guard: checks if a caught value is an ApiError thrown by ApiClient.
+ */
+export function isApiError(e: unknown): e is ApiError {
+	return e !== null && typeof e === 'object' && 'detail' in e && 'status' in e;
+}
+
+/**
+ * Extract a human-readable message from an unknown caught value.
+ * Handles ApiError (from ApiClient), standard Error, and arbitrary values.
+ */
+export function getErrorMessage(e: unknown, fallback = 'Unknown error'): string {
+	if (isApiError(e)) return e.detail;
+	if (e instanceof Error) return e.message;
+	if (typeof e === 'string') return e;
+	return fallback;
 }

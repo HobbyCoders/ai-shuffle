@@ -9,11 +9,14 @@ Provides REST endpoints for managing Claude Code plugins including:
 - File-based agents from plugins
 """
 
+import logging
 from typing import List, Optional
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 from app.api.auth import require_auth, require_admin
 from app.core.plugin_service import (
@@ -132,9 +135,10 @@ async def list_marketplaces(token: str = Depends(require_auth)):
             for mp in marketplaces
         ]
     except Exception as e:
+        logger.exception("Failed to load marketplaces")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load marketplaces: {str(e)}"
+            detail="Failed to load marketplaces"
         )
 
 
@@ -155,9 +159,10 @@ async def add_marketplace(
             last_updated=mp.last_updated
         )
     except RuntimeError as e:
+        logger.exception("Failed to add marketplace")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail="Failed to add marketplace"
         )
 
 
@@ -193,9 +198,10 @@ async def sync_marketplace(
             detail=str(e)
         )
     except RuntimeError as e:
+        logger.exception("Failed to sync marketplace")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail="Failed to sync marketplace"
         )
 
 
@@ -229,9 +235,10 @@ async def list_available_plugins(
             for p in plugins
         ]
     except Exception as e:
+        logger.exception("Failed to load available plugins")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load available plugins: {str(e)}"
+            detail="Failed to load available plugins"
         )
 
 
@@ -264,9 +271,10 @@ async def list_installed_plugins(token: str = Depends(require_auth)):
             for p in plugins
         ]
     except Exception as e:
+        logger.exception("Failed to load installed plugins")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load installed plugins: {str(e)}"
+            detail="Failed to load installed plugins"
         )
 
 
@@ -295,9 +303,10 @@ async def list_file_based_agents(token: str = Depends(require_auth)):
             for a in agents
         ]
     except Exception as e:
+        logger.exception("Failed to load file-based agents")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load file-based agents: {str(e)}"
+            detail="Failed to load file-based agents"
         )
 
 

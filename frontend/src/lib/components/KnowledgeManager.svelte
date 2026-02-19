@@ -216,6 +216,8 @@
 				ondragover={handleDragOver}
 				ondragleave={handleDragLeave}
 				ondrop={handleDrop}
+				role="region"
+				aria-label="File upload drop zone"
 			>
 				{#if uploading}
 					<div class="flex items-center justify-center gap-2">

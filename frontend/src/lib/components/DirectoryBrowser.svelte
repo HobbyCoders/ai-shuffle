@@ -119,6 +119,7 @@
 				class:hidden={!node.entry.has_children}
 				class:expanded={node.expanded}
 				onclick={(e) => { e.stopPropagation(); toggleNode(node); }}
+				onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleNode(node); } }}
 				tabindex={-1}
 			>
 				{#if node.loading}

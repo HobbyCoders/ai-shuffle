@@ -282,12 +282,18 @@ class SessionPoller {
 		// Convert server messages to ChatMessage format
 		const rawMessages = serverMessages.map((m, i) => convertServerMessage(m, i));
 
-		// Filter out whitespace-only assistant text messages.
-		// The SDK sometimes emits text blocks with just "\n\n" before thinking blocks.
-		// Backend's end_streaming() filters these at stream end, but during streaming
-		// they leak through and cause empty "Claude [time]" headers to flash in the UI.
+		// Filter out noise messages that shouldn't render in the chat UI.
 		const streamingMessages = rawMessages.filter(m => {
+			// Whitespace-only assistant text: SDK emits "\n\n" before thinking blocks.
+			// Backend's end_streaming() filters these at stream end, but during streaming
+			// they leak through and cause empty "Claude [time]" headers to flash.
 			if (m.type === 'text' && m.role === 'assistant' && !m.content?.trim()) {
+				return false;
+			}
+			// SDK task-notification: async completion callbacks for background agents.
+			// These are internal SDK plumbing (already displayed via SubagentMessage);
+			// the backend JSONL parser filters them, but guard the frontend too.
+			if (m.role === 'user' && m.content && typeof m.content === 'string' && m.content.includes('<task-notification>')) {
 				return false;
 			}
 			return true;

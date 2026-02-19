@@ -390,13 +390,11 @@
 >
 	{#if isMobile}
 		<!-- Mobile: swipe-down drag handle to dismiss -->
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<div class="mobile-drag-handle" onclick={() => browserState.closePanel()}>
+		<div class="mobile-drag-handle" onclick={() => browserState.closePanel()} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') browserState.closePanel(); }} role="button" tabindex="0" aria-label="Close browser panel">
 			<div class="drag-pill"></div>
 		</div>
 	{:else}
 		<!-- Desktop: Resize handle (left edge) -->
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div
 			class="resize-handle"
 			onpointerdown={handleResizeStart}
@@ -476,12 +474,13 @@
 		{/if}
 
 		<!-- Canvas area (interactive) -->
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -- role="application" is interactive per ARIA spec; Svelte checker false positive -->
 		<div
 			class="canvas-area"
 			bind:this={canvasContainer}
-			tabindex="0"
+			tabindex="-1"
+			role="application"
+			aria-label="Browser viewport"
 			onclick={handleCanvasClick}
 			ondblclick={handleCanvasDblClick}
 			onmousedown={handleCanvasMouseDown}

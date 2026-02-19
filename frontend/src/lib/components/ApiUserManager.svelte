@@ -295,10 +295,11 @@
 				<div class="space-y-3">
 					<!-- Name -->
 					<div>
-						<label class="block text-xs text-muted-foreground mb-1">
+						<label class="block text-xs text-muted-foreground mb-1" for="api-user-name">
 							Name <span class="text-destructive">*</span>
 						</label>
 						<input
+							id="api-user-name"
 							type="text"
 							bind:value={formName}
 							placeholder="e.g., Discord Bot, Mobile App"
@@ -308,8 +309,9 @@
 
 					<!-- Description -->
 					<div>
-						<label class="block text-xs text-muted-foreground mb-1">Description</label>
+						<label class="block text-xs text-muted-foreground mb-1" for="api-user-desc">Description</label>
 						<input
+							id="api-user-desc"
 							type="text"
 							bind:value={formDescription}
 							placeholder="Optional description for this API user"
@@ -319,8 +321,9 @@
 
 					<!-- Project -->
 					<div>
-						<label class="block text-xs text-muted-foreground mb-1">Project</label>
+						<label class="block text-xs text-muted-foreground mb-1" for="api-user-project">Project</label>
 						<select
+							id="api-user-project"
 							bind:value={formProjectId}
 							class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground focus:outline-none focus:border-primary transition-colors"
 						>
@@ -335,7 +338,7 @@
 					<!-- Profiles -->
 					{#if profiles.length > 0}
 						<div>
-							<label class="block text-xs text-muted-foreground mb-2">Profiles</label>
+							<span class="block text-xs text-muted-foreground mb-2">Profiles</span>
 							<div class="space-y-1.5 max-h-40 overflow-y-auto">
 								{#each profiles as profile}
 									<label class="flex items-center gap-2 cursor-pointer">

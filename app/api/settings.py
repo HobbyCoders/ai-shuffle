@@ -951,7 +951,8 @@ async def _transcribe_with_gemini(
     try:
         audio_data = await file.read()
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to read audio file: {str(e)}")
+        logger.exception("Failed to read audio file for Gemini transcription")
+        raise HTTPException(status_code=400, detail="Failed to read audio file")
 
     if len(audio_data) == 0:
         raise HTTPException(status_code=400, detail="Audio file is empty")
@@ -1135,10 +1136,10 @@ async def _transcribe_with_gemini(
             detail="Transcription timed out. Please try with a shorter audio clip."
         )
     except Exception as e:
-        logger.error(f"Gemini transcription error: {e}")
+        logger.exception("Gemini transcription failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Transcription failed: {str(e)}"
+            detail="Transcription failed"
         )
 
 
@@ -1179,7 +1180,8 @@ async def _transcribe_with_openai(
     try:
         audio_data = await file.read()
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to read audio file: {str(e)}")
+        logger.exception("Failed to read audio file for OpenAI transcription")
+        raise HTTPException(status_code=400, detail="Failed to read audio file")
 
     if len(audio_data) == 0:
         raise HTTPException(status_code=400, detail="Audio file is empty")
@@ -1319,10 +1321,10 @@ async def _transcribe_with_openai(
             detail="Transcription timed out. Please try with a shorter audio clip."
         )
     except Exception as e:
-        logger.error(f"OpenAI transcription error: {e}")
+        logger.exception("OpenAI transcription failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Transcription failed: {str(e)}"
+            detail="Transcription failed"
         )
 
 
@@ -1509,10 +1511,10 @@ async def _generate_tts_openai(
             detail="TTS generation timed out. Please try with shorter text."
         )
     except Exception as e:
-        logger.error(f"OpenAI TTS error: {e}")
+        logger.exception("OpenAI TTS generation failed")
         raise HTTPException(
             status_code=500,
-            detail=f"TTS generation failed: {str(e)}"
+            detail="TTS generation failed"
         )
 
 
@@ -1665,10 +1667,10 @@ async def _generate_tts_gemini(
             detail="TTS generation timed out. Please try with shorter text."
         )
     except Exception as e:
-        logger.error(f"Gemini TTS error: {e}")
+        logger.exception("Gemini TTS generation failed")
         raise HTTPException(
             status_code=500,
-            detail=f"TTS generation failed: {str(e)}"
+            detail="TTS generation failed"
         )
 
 
@@ -1841,10 +1843,10 @@ async def _generate_tts_google_cloud(
             detail="TTS generation timed out. Please try with shorter text."
         )
     except Exception as e:
-        logger.error(f"Google Cloud TTS error: {e}")
+        logger.exception("Google Cloud TTS generation failed")
         raise HTTPException(
             status_code=500,
-            detail=f"TTS generation failed: {str(e)}"
+            detail="TTS generation failed"
         )
 
 @router.post("/tts/stream")
@@ -2401,10 +2403,10 @@ async def generate_image(
             detail="Image generation timed out. Please try again with a simpler prompt."
         )
     except Exception as e:
-        logger.error(f"Image generation error: {e}")
+        logger.exception("Image generation failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Image generation failed: {str(e)}"
+            detail="Image generation failed"
         )
 
 

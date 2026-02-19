@@ -168,6 +168,9 @@ class LiveSession:
     # full snapshot instead of a stale delta merge.
     needs_full_refresh: bool = False
 
+    # Currently active block type: 'thinking', 'text', 'tool_use', or None
+    active_block_type: Optional[str] = None
+
     # Token usage (updated during streaming)
     input_tokens: int = 0
     output_tokens: int = 0
@@ -192,6 +195,7 @@ class LiveSession:
             "last_update_id": self.last_update_id,
             "messages": [m.to_dict() for m in messages],
             "initial_message_count": self.initial_message_count,
+            "active_block_type": self.active_block_type,
             "usage": {
                 "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens,
@@ -316,6 +320,8 @@ class LiveSessionStore:
                 logger.warning(f"append_text: session {session_id} not found (data dropped)")
                 return
 
+            session.active_block_type = "text"
+
             # Find the last streaming text message
             for msg in reversed(session.messages):
                 if msg.type == "text" and msg.role == "assistant" and msg.streaming:
@@ -341,6 +347,8 @@ class LiveSessionStore:
             if not session:
                 logger.warning(f"append_thinking: session {session_id} not found (data dropped)")
                 return
+
+            session.active_block_type = "thinking"
 
             # Find the last streaming thinking message
             for msg in reversed(session.messages):
@@ -400,6 +408,8 @@ class LiveSessionStore:
             if not session:
                 logger.warning(f"add_tool_use: session {session_id} not found (tool {name} dropped)")
                 return
+
+            session.active_block_type = "tool_use"
 
             # Check if this tool was already created early (by stream_block_start)
             for msg in session.messages:
@@ -513,6 +523,8 @@ class LiveSessionStore:
             if not session:
                 logger.warning(f"add_tool_result: session {session_id} not found (tool {tool_id} result dropped)")
                 return
+
+            session.active_block_type = None  # Tool result completes the tool
 
             # Find the tool_use message and add result to it
             for msg in session.messages:
@@ -839,11 +851,15 @@ class LiveSessionStore:
             for msg in session.messages:
                 msg.streaming = False
 
-            # Remove empty or whitespace-only text messages
-            # The SDK sometimes writes text blocks with just "\n\n" before thinking blocks
+            # Remove noise messages that shouldn't render in the chat UI
             session.messages = [
                 msg for msg in session.messages
-                if not (msg.type == "text" and msg.role == "assistant" and not msg.content.strip())
+                if not (
+                    # Whitespace-only assistant text blocks (SDK artifact before thinking blocks)
+                    (msg.type == "text" and msg.role == "assistant" and not msg.content.strip())
+                    # SDK task-notification callbacks (background agent completion, already in SubagentMessage)
+                    or (msg.role == "user" and "<task-notification>" in msg.content)
+                )
             ]
 
             # Add metadata to last assistant message
@@ -856,6 +872,7 @@ class LiveSessionStore:
                         break
 
             session.is_streaming = False
+            session.active_block_type = None
             self._increment_update_id(session)
             logger.debug(f"Ended streaming for session {session_id} with {len(session.messages)} messages (kept in memory)")
 

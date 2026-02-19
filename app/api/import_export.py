@@ -6,12 +6,15 @@ automatically included without needing to update models when new fields are adde
 Only system fields (is_builtin, created_at, updated_at) are excluded from export.
 """
 
+import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import json
 
 from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 from app.db import database
 from app.api.auth import require_admin
@@ -215,9 +218,10 @@ async def import_data(
             detail=f"Invalid JSON file: {str(e)}"
         )
     except Exception as e:
+        logger.exception("Failed to read import file")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to read file: {str(e)}"
+            detail="Failed to read file"
         )
 
     # Validate structure

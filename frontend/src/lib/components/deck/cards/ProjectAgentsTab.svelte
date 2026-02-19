@@ -326,9 +326,9 @@
 					<div class="editor-tab-content">
 						<!-- Model Selection -->
 						<div class="card-form-section">
-							<label class="card-form-label">
+							<span class="card-form-label">
 								Model — {#if formModel === ''}use profile default{:else if formModel === 'haiku'}fastest and most compact{:else if formModel === 'sonnet'}balanced performance{:else if formModel === 'opus'}most capable{/if}
-							</label>
+							</span>
 							<div class="card-mode-selector">
 								{#each MODEL_OPTIONS as opt}
 									<button
@@ -346,7 +346,7 @@
 						<!-- Tool Selection -->
 						<div class="card-form-section">
 							<div class="section-header">
-								<label class="card-form-label">Tools</label>
+								<span class="card-form-label">Tools</span>
 								<span class="card-badge card-badge--primary">
 									{formTools.length === 0 ? 'All' : formTools.length + ' selected'}
 								</span>
@@ -497,10 +497,12 @@
 								</div>
 							</div>
 						{:else}
-							<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 							<div
 								class="card-list-item"
 								onclick={() => handleEdit(agent.name)}
+								onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleEdit(agent.name); }}
+								role="button"
+								tabindex="0"
 							>
 								<div class="card-item-icon">
 									<Bot />

@@ -616,8 +616,9 @@
 		<div class="auto-form-body">
 			<!-- Name -->
 			<div class="card-form-section">
-				<label class="card-form-label">Name <span class="required">*</span></label>
+				<label class="card-form-label" for="auto-name">Name <span class="required">*</span></label>
 				<input
+					id="auto-name"
 					type="text"
 					class="card-form-input"
 					bind:value={formName}
@@ -627,8 +628,9 @@
 
 			<!-- Description -->
 			<div class="card-form-section">
-				<label class="card-form-label">Description</label>
+				<label class="card-form-label" for="auto-description">Description</label>
 				<textarea
+					id="auto-description"
 					class="card-form-input card-form-textarea"
 					style="min-height: 60px"
 					bind:value={formDescription}
@@ -638,7 +640,7 @@
 
 			<!-- Trigger type selector -->
 			<div class="card-form-section">
-				<label class="card-form-label">Trigger Type <span class="required">*</span></label>
+				<span class="card-form-label">Trigger Type <span class="required">*</span></span>
 				<div class="auto-trigger-selector">
 					<button
 						class="auto-trigger-btn"
@@ -678,24 +680,27 @@
 			<!-- Trigger config -->
 			<div class="card-form-section" transition:slide={{ duration: 150 }}>
 				{#if formTriggerType === 'cron'}
-					<label class="card-form-label">Cron Expression</label>
+					<label class="card-form-label" for="auto-cron-expr">Cron Expression</label>
 					<input
+						id="auto-cron-expr"
 						type="text"
 						class="card-form-input card-form-input--mono"
 						bind:value={formTriggerConfig.expression}
 						placeholder="0 9 * * *"
 					/>
 					<p class="card-form-hint">Standard cron expression (minute hour day month weekday)</p>
-					<label class="card-form-label" style="margin-top: 12px">Timezone</label>
+					<label class="card-form-label" for="auto-cron-tz" style="margin-top: 12px">Timezone</label>
 					<input
+						id="auto-cron-tz"
 						type="text"
 						class="card-form-input"
 						bind:value={formTriggerConfig.timezone}
 						placeholder="UTC"
 					/>
 				{:else if formTriggerType === 'interval'}
-					<label class="card-form-label">Interval (seconds)</label>
+					<label class="card-form-label" for="auto-interval-secs">Interval (seconds)</label>
 					<input
+						id="auto-interval-secs"
 						type="number"
 						class="card-form-input"
 						min="60"
@@ -704,15 +709,17 @@
 					/>
 					<p class="card-form-hint">Minimum 60 seconds</p>
 				{:else if formTriggerType === 'connector_event'}
-					<label class="card-form-label">Connector ID</label>
+					<label class="card-form-label" for="auto-connector-id">Connector ID</label>
 					<input
+						id="auto-connector-id"
 						type="text"
 						class="card-form-input"
 						bind:value={formTriggerConfig.connector_id}
 						placeholder="connector-uuid"
 					/>
-					<label class="card-form-label" style="margin-top: 12px">Event Type</label>
+					<label class="card-form-label" for="auto-event-type" style="margin-top: 12px">Event Type</label>
 					<input
+						id="auto-event-type"
 						type="text"
 						class="card-form-input"
 						bind:value={formTriggerConfig.event_type}
@@ -720,16 +727,18 @@
 					/>
 				{:else if formTriggerType === 'webhook'}
 					{#if currentView === 'edit' && selectedAutomation}
-						<label class="card-form-label">Webhook URL</label>
+						<label class="card-form-label" for="auto-webhook-url">Webhook URL</label>
 						<input
+							id="auto-webhook-url"
 							type="text"
 							class="card-form-input card-form-input--mono"
 							value={formTriggerConfig.webhook_url || 'Generated after creation'}
 							readonly
 						/>
 						{#if formTriggerConfig.secret}
-							<label class="card-form-label" style="margin-top: 12px">Secret</label>
+							<label class="card-form-label" for="auto-webhook-secret" style="margin-top: 12px">Secret</label>
 							<input
+								id="auto-webhook-secret"
 								type="text"
 								class="card-form-input card-form-input--mono"
 								value={formTriggerConfig.secret}
@@ -744,8 +753,9 @@
 
 			<!-- Prompt -->
 			<div class="card-form-section">
-				<label class="card-form-label">Prompt <span class="required">*</span></label>
+				<label class="card-form-label" for="auto-prompt">Prompt <span class="required">*</span></label>
 				<textarea
+					id="auto-prompt"
 					class="card-form-input card-form-textarea"
 					style="min-height: 120px"
 					bind:value={formPrompt}
@@ -756,8 +766,8 @@
 
 			<!-- Profile selector -->
 			<div class="card-form-section">
-				<label class="card-form-label">Profile <span class="required">*</span></label>
-				<select class="card-form-input" bind:value={formProfileId}>
+				<label class="card-form-label" for="auto-profile">Profile <span class="required">*</span></label>
+				<select id="auto-profile" class="card-form-input" bind:value={formProfileId}>
 					<option value="">Select a profile...</option>
 					{#each profiles as profile}
 						<option value={profile.id}>{profile.name}</option>
@@ -767,8 +777,8 @@
 
 			<!-- Project selector -->
 			<div class="card-form-section">
-				<label class="card-form-label">Project</label>
-				<select class="card-form-input" bind:value={formProjectId}>
+				<label class="card-form-label" for="auto-project">Project</label>
+				<select id="auto-project" class="card-form-input" bind:value={formProjectId}>
 					<option value="">None (global)</option>
 					{#each projects as project}
 						<option value={project.id}>{project.name}</option>
@@ -778,7 +788,7 @@
 
 			<!-- Output type -->
 			<div class="card-form-section">
-				<label class="card-form-label">Output Type</label>
+				<span class="card-form-label">Output Type</span>
 				<div class="auto-trigger-selector">
 					<button
 						class="auto-trigger-btn"
@@ -814,8 +824,9 @@
 			<!-- Output config -->
 			{#if formOutputType === 'connector'}
 				<div class="card-form-section" transition:slide={{ duration: 150 }}>
-					<label class="card-form-label">Connector</label>
+					<label class="card-form-label" for="auto-output-connector">Connector</label>
 					<select
+						id="auto-output-connector"
 						class="card-form-input"
 						bind:value={formOutputConfig.connector_id}
 					>
@@ -831,8 +842,9 @@
 							</optgroup>
 						{/if}
 					</select>
-					<label class="card-form-label" style="margin-top: 12px">Platform Chat ID</label>
+					<label class="card-form-label" for="auto-output-chat-id" style="margin-top: 12px">Platform Chat ID</label>
 					<input
+						id="auto-output-chat-id"
 						type="text"
 						class="card-form-input"
 						bind:value={formOutputConfig.platform_chat_id}
@@ -844,8 +856,9 @@
 				</div>
 			{:else if formOutputType === 'webhook'}
 				<div class="card-form-section" transition:slide={{ duration: 150 }}>
-					<label class="card-form-label">Webhook URL</label>
+					<label class="card-form-label" for="auto-output-webhook-url">Webhook URL</label>
 					<input
+						id="auto-output-webhook-url"
 						type="text"
 						class="card-form-input"
 						bind:value={formOutputConfig.url}
@@ -868,28 +881,28 @@
 				{#if showBudgetSection}
 					<div class="auto-budget-grid" transition:slide={{ duration: 150 }}>
 						<div class="auto-budget-field">
-							<label class="card-form-label">Max cost/run ($)</label>
-							<input type="number" class="card-form-input" step="0.01" min="0" bind:value={formMaxCostPerRun} placeholder="No limit" />
+							<label class="card-form-label" for="auto-max-cost-run">Max cost/run ($)</label>
+							<input id="auto-max-cost-run" type="number" class="card-form-input" step="0.01" min="0" bind:value={formMaxCostPerRun} placeholder="No limit" />
 						</div>
 						<div class="auto-budget-field">
-							<label class="card-form-label">Max cost/day ($)</label>
-							<input type="number" class="card-form-input" step="0.01" min="0" bind:value={formMaxCostPerDay} placeholder="No limit" />
+							<label class="card-form-label" for="auto-max-cost-day">Max cost/day ($)</label>
+							<input id="auto-max-cost-day" type="number" class="card-form-input" step="0.01" min="0" bind:value={formMaxCostPerDay} placeholder="No limit" />
 						</div>
 						<div class="auto-budget-field">
-							<label class="card-form-label">Max total cost ($)</label>
-							<input type="number" class="card-form-input" step="0.01" min="0" bind:value={formMaxCostTotal} placeholder="No limit" />
+							<label class="card-form-label" for="auto-max-cost-total">Max total cost ($)</label>
+							<input id="auto-max-cost-total" type="number" class="card-form-input" step="0.01" min="0" bind:value={formMaxCostTotal} placeholder="No limit" />
 						</div>
 						<div class="auto-budget-field">
-							<label class="card-form-label">Max runs/day</label>
-							<input type="number" class="card-form-input" min="1" bind:value={formMaxRunsPerDay} placeholder="No limit" />
+							<label class="card-form-label" for="auto-max-runs-day">Max runs/day</label>
+							<input id="auto-max-runs-day" type="number" class="card-form-input" min="1" bind:value={formMaxRunsPerDay} placeholder="No limit" />
 						</div>
 						<div class="auto-budget-field">
-							<label class="card-form-label">Max turns</label>
-							<input type="number" class="card-form-input" min="1" bind:value={formMaxTurns} />
+							<label class="card-form-label" for="auto-max-turns">Max turns</label>
+							<input id="auto-max-turns" type="number" class="card-form-input" min="1" bind:value={formMaxTurns} />
 						</div>
 						<div class="auto-budget-field">
-							<label class="card-form-label">Timeout (s)</label>
-							<input type="number" class="card-form-input" min="10" bind:value={formTimeoutSeconds} />
+							<label class="card-form-label" for="auto-timeout">Timeout (s)</label>
+							<input id="auto-timeout" type="number" class="card-form-input" min="10" bind:value={formTimeoutSeconds} />
 						</div>
 					</div>
 				{/if}
@@ -904,6 +917,7 @@
 						onclick={() => formRequiresApproval = !formRequiresApproval}
 						role="switch"
 						aria-checked={formRequiresApproval}
+						aria-label="Requires approval"
 					>
 						<span class="auto-toggle-thumb"></span>
 					</button>
@@ -1021,13 +1035,13 @@
 									<div class="auto-run-expanded" transition:slide={{ duration: 150 }}>
 										{#if run.response}
 											<div class="auto-run-response">
-												<label class="card-form-label">Response</label>
+												<span class="card-form-label">Response</span>
 												<pre class="auto-run-pre">{run.response}</pre>
 											</div>
 										{/if}
 										{#if run.error}
 											<div class="auto-run-error">
-												<label class="card-form-label">Error</label>
+												<span class="card-form-label">Error</span>
 												<pre class="auto-run-pre auto-run-pre--error">{run.error}</pre>
 											</div>
 										{/if}

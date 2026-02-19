@@ -387,7 +387,6 @@
 							{/if}
 							<span class="session-title">{session.title || 'Untitled'}</span>
 							<span class="session-time">{formatRelativeTime(session.updated_at || session.created_at)}</span>
-							<!-- svelte-ignore a11y_no_static_element_interactions -->
 							<span
 								class="favorite-btn"
 								class:is-favorite={session.is_favorite}
@@ -509,7 +508,6 @@
 												{/if}
 												<span class="session-title">{session.title || 'Untitled'}</span>
 												<span class="session-time">{formatRelativeTime(session.updated_at || session.created_at)}</span>
-												<!-- svelte-ignore a11y_no_static_element_interactions -->
 												<span
 													class="favorite-btn"
 													class:is-favorite={session.is_favorite}

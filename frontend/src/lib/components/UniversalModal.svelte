@@ -75,6 +75,7 @@
 		role="dialog"
 		aria-modal="true"
 		aria-labelledby="modal-title"
+		tabindex="-1"
 	>
 		<!-- Dark overlay backdrop -->
 		<button
@@ -97,7 +98,6 @@
 				transform transition-all duration-200 ease-out
 				animate-modal-in
 			"
-			onclick={(e) => e.stopPropagation()}
 		>
 			<!-- Header -->
 			<header class="shrink-0 px-6 py-4 border-b border-border bg-card">

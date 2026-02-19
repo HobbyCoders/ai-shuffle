@@ -739,7 +739,7 @@
 									<!-- Theme -->
 									<div class="setting-row">
 										<div class="setting-info">
-											<label>Theme</label>
+											<span>Theme</span>
 											<span class="setting-desc">Choose your preferred appearance</span>
 										</div>
 										<div class="theme-switcher">
@@ -747,6 +747,7 @@
 												class="theme-option"
 												class:active={$themePreference === 'light'}
 												onclick={() => theme.setTheme('light')}
+												aria-label="Light theme"
 											>
 												<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 													<circle cx="12" cy="12" r="5"/>
@@ -757,6 +758,7 @@
 												class="theme-option"
 												class:active={$themePreference === 'dark'}
 												onclick={() => theme.setTheme('dark')}
+												aria-label="Dark theme"
 											>
 												<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 													<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
@@ -766,6 +768,7 @@
 												class="theme-option"
 												class:active={$themePreference === 'system'}
 												onclick={() => theme.setTheme('system')}
+												aria-label="System theme"
 											>
 												<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 													<rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
@@ -798,11 +801,12 @@
 									<!-- Workspace Path -->
 									<div class="setting-row vertical">
 										<div class="setting-info">
-											<label>Workspace Path</label>
+											<label for="settings-workspace-path">Workspace Path</label>
 											<span class="setting-desc">Base directory for projects</span>
 										</div>
 										<div class="input-group">
 											<input
+												id="settings-workspace-path"
 												type="text"
 												bind:value={workspacePath}
 												placeholder="/path/to/workspace"
@@ -839,10 +843,11 @@
 									<!-- Timezone -->
 									<div class="setting-row">
 										<div class="setting-info">
-											<label>Timezone</label>
+											<label for="settings-timezone">Timezone</label>
 											<span class="setting-desc">Used for timestamps across the UI</span>
 										</div>
 										<select
+											id="settings-timezone"
 											class="select"
 											value={currentTimezone}
 											onchange={(e) => timezonePreference.setTimezone(e.currentTarget.value)}
@@ -892,7 +897,7 @@
 									<!-- Password Change -->
 									<div class="setting-row vertical">
 										<div class="setting-info">
-											<label>Change Password</label>
+											<span>Change Password</span>
 										</div>
 										<div class="password-form">
 											<input
@@ -932,7 +937,7 @@
 									<!-- 2FA -->
 									<div class="setting-row vertical">
 										<div class="setting-info">
-											<label>Two-Factor Authentication</label>
+											<span>Two-Factor Authentication</span>
 											<span class="setting-desc">Add an extra layer of security</span>
 										</div>
 										<TwoFactorSetup />
@@ -1052,13 +1057,16 @@
 										<!-- Show Thinking Blocks -->
 										<div class="setting-row">
 											<div class="setting-info">
-												<label>Show Thinking Blocks</label>
+												<span>Show Thinking Blocks</span>
 												<span class="setting-desc">Display Claude's reasoning process</span>
 											</div>
 											<button
 												onclick={() => chatPreferences.setShowThinkingBlocks(!chatPrefs?.showThinkingBlocks)}
 												class="toggle"
 												class:active={chatPrefs.showThinkingBlocks}
+												role="switch"
+												aria-checked={chatPrefs.showThinkingBlocks}
+												aria-label="Show Thinking Blocks"
 											>
 												<span class="toggle-knob"></span>
 											</button>
@@ -1067,7 +1075,7 @@
 										<!-- Thinking Blocks Start Expanded -->
 										<div class="setting-row">
 											<div class="setting-info">
-												<label>Expand Thinking by Default</label>
+												<span>Expand Thinking by Default</span>
 												<span class="setting-desc">Thinking blocks start expanded</span>
 											</div>
 											<button
@@ -1075,6 +1083,9 @@
 												class="toggle"
 												class:active={chatPrefs.thinkingStartExpanded}
 												disabled={!chatPrefs.showThinkingBlocks}
+												role="switch"
+												aria-checked={chatPrefs.thinkingStartExpanded}
+												aria-label="Expand Thinking by Default"
 											>
 												<span class="toggle-knob"></span>
 											</button>
@@ -1083,7 +1094,7 @@
 										<!-- Thinking Summary on Collapse -->
 										<div class="setting-row">
 											<div class="setting-info">
-												<label>Show Thinking Summary</label>
+												<span>Show Thinking Summary</span>
 												<span class="setting-desc">Preview thinking content when collapsed</span>
 											</div>
 											<button
@@ -1091,6 +1102,9 @@
 												class="toggle"
 												class:active={chatPrefs.showThinkingSummary}
 												disabled={!chatPrefs.showThinkingBlocks}
+												role="switch"
+												aria-checked={chatPrefs.showThinkingSummary}
+												aria-label="Show Thinking Summary"
 											>
 												<span class="toggle-knob"></span>
 											</button>
@@ -1099,13 +1113,16 @@
 										<!-- Tools Start Expanded -->
 										<div class="setting-row">
 											<div class="setting-info">
-												<label>Expand Tools by Default</label>
+												<span>Expand Tools by Default</span>
 												<span class="setting-desc">Tool results start expanded</span>
 											</div>
 											<button
 												onclick={() => chatPreferences.setToolsStartExpanded(!chatPrefs?.toolsStartExpanded)}
 												class="toggle"
 												class:active={chatPrefs.toolsStartExpanded}
+												role="switch"
+												aria-checked={chatPrefs.toolsStartExpanded}
+												aria-label="Expand Tools by Default"
 											>
 												<span class="toggle-knob"></span>
 											</button>
@@ -1114,13 +1131,16 @@
 										<!-- Todo List Start Expanded -->
 										<div class="setting-row">
 											<div class="setting-info">
-												<label>Expand Todo List by Default</label>
+												<span>Expand Todo List by Default</span>
 												<span class="setting-desc">Task list starts expanded</span>
 											</div>
 											<button
 												onclick={() => chatPreferences.setTodosStartExpanded(!chatPrefs?.todosStartExpanded)}
 												class="toggle"
 												class:active={chatPrefs.todosStartExpanded}
+												role="switch"
+												aria-checked={chatPrefs.todosStartExpanded}
+												aria-label="Expand Todo List by Default"
 											>
 												<span class="toggle-knob"></span>
 											</button>
@@ -1131,13 +1151,16 @@
 										<!-- Auto-scroll on new messages -->
 										<div class="setting-row">
 											<div class="setting-info">
-												<label>Auto-scroll on New Messages</label>
+												<span>Auto-scroll on New Messages</span>
 												<span class="setting-desc">Automatically scroll to new content</span>
 											</div>
 											<button
 												onclick={() => chatPreferences.setAutoScrollOnNewMessage(!chatPrefs?.autoScrollOnNewMessage)}
 												class="toggle"
 												class:active={chatPrefs.autoScrollOnNewMessage}
+												role="switch"
+												aria-checked={chatPrefs.autoScrollOnNewMessage}
+												aria-label="Auto-scroll on New Messages"
 											>
 												<span class="toggle-knob"></span>
 											</button>
@@ -1146,13 +1169,16 @@
 										<!-- Show Message Timestamps -->
 										<div class="setting-row">
 											<div class="setting-info">
-												<label>Show Message Timestamps</label>
+												<span>Show Message Timestamps</span>
 												<span class="setting-desc">Display time on each message</span>
 											</div>
 											<button
 												onclick={() => chatPreferences.setShowMessageTimestamps(!chatPrefs?.showMessageTimestamps)}
 												class="toggle"
 												class:active={chatPrefs.showMessageTimestamps}
+												role="switch"
+												aria-checked={chatPrefs.showMessageTimestamps}
+												aria-label="Show Message Timestamps"
 											>
 												<span class="toggle-knob"></span>
 											</button>
@@ -1161,13 +1187,16 @@
 										<!-- Compact Message View -->
 										<div class="setting-row">
 											<div class="setting-info">
-												<label>Compact Message View</label>
+												<span>Compact Message View</span>
 												<span class="setting-desc">Reduce spacing between messages</span>
 											</div>
 											<button
 												onclick={() => chatPreferences.setCompactMessageView(!chatPrefs?.compactMessageView)}
 												class="toggle"
 												class:active={chatPrefs.compactMessageView}
+												role="switch"
+												aria-checked={chatPrefs.compactMessageView}
+												aria-label="Compact Message View"
 											>
 												<span class="toggle-knob"></span>
 											</button>
@@ -1192,7 +1221,7 @@
 									<!-- Global Voice Input -->
 									<div class="setting-row">
 										<div class="setting-info">
-											<label>Global Voice Input</label>
+											<span>Global Voice Input</span>
 											<span class="setting-desc">Press hotkey anywhere to start voice-to-text</span>
 										</div>
 										<button
@@ -1201,6 +1230,7 @@
 										onclick={() => hotkeyPreferences.setGlobalSttEnabled(!$hotkeyPreferences.globalSttEnabled)}
 										class="toggle"
 										class:active={$hotkeyPreferences.globalSttEnabled}
+										aria-label="Global Voice Input"
 									>
 										<span class="toggle-knob"></span>
 									</button>
@@ -1209,7 +1239,7 @@
 									{#if $hotkeyPreferences.globalSttEnabled}
 										<div class="setting-row vertical">
 											<div class="setting-info">
-												<label>Voice Input Hotkey</label>
+												<span>Voice Input Hotkey</span>
 												<span class="setting-desc">Click to capture a new key combination</span>
 											</div>
 											<HotkeyCapture
@@ -1411,8 +1441,9 @@
 								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
 									<!-- TTS Model -->
 									<div class="setting-row">
-										<label class="setting-label">Text-to-Speech Model</label>
+										<label class="setting-label" for="settings-tts-model">Text-to-Speech Model</label>
 										<select
+											id="settings-tts-model"
 											bind:value={selectedTtsModel}
 											onchange={updateTtsModel}
 											disabled={savingTtsModel}
@@ -1430,8 +1461,8 @@
 
 									<!-- TTS Voice -->
 									<div class="setting-row">
-										<label class="setting-label">Voice</label>
-										<select bind:value={selectedTtsVoice} class="input select">
+										<label class="setting-label" for="settings-tts-voice">Voice</label>
+										<select id="settings-tts-voice" bind:value={selectedTtsVoice} class="input select">
 											{#each getAvailableVoices() as voice}
 												<option value={voice.id}>{voice.name} {voice.gender ? `(${voice.gender})` : ''}</option>
 											{/each}
@@ -1448,14 +1479,14 @@
 
 									<!-- TTS Speed -->
 									<div class="setting-row">
-										<label class="setting-label">Speed ({ttsSpeed.toFixed(1)}x)</label>
-										<input type="range" min="0.25" max="4.0" step="0.1" bind:value={ttsSpeed} class="slider" />
+										<label class="setting-label" for="settings-tts-speed">Speed ({ttsSpeed.toFixed(1)}x)</label>
+										<input id="settings-tts-speed" type="range" min="0.25" max="4.0" step="0.1" bind:value={ttsSpeed} class="slider" />
 									</div>
 
 									<!-- TTS Format -->
 									<div class="setting-row">
-										<label class="setting-label">Output Format</label>
-										<select bind:value={ttsOutputFormat} class="input select compact">
+										<label class="setting-label" for="settings-tts-format">Output Format</label>
+										<select id="settings-tts-format" bind:value={ttsOutputFormat} class="input select compact">
 											<option value="mp3">MP3</option>
 											<option value="wav">WAV</option>
 											<option value="opus">Opus</option>
@@ -1467,8 +1498,9 @@
 									<!-- Voice Instructions (if steerable) -->
 									{#if isCurrentModelSteerable()}
 										<div class="setting-row vertical">
-											<label class="setting-label">Voice Instructions <span class="badge primary">Steerable</span></label>
+											<label class="setting-label" for="settings-tts-instructions">Voice Instructions <span class="badge primary">Steerable</span></label>
 											<textarea
+												id="settings-tts-instructions"
 												bind:value={ttsInstructions}
 												placeholder="e.g., Speak in a warm, friendly tone..."
 												class="input textarea"
@@ -1489,8 +1521,9 @@
 
 									<!-- STT Model -->
 									<div class="setting-row">
-										<label class="setting-label">Speech-to-Text Model</label>
+										<label class="setting-label" for="settings-stt-model">Speech-to-Text Model</label>
 										<select
+											id="settings-stt-model"
 											bind:value={selectedSttModel}
 											onchange={updateSttModel}
 											disabled={savingSttModel}

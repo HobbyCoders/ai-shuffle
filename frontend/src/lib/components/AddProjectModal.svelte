@@ -97,10 +97,9 @@
 </script>
 
 {#if open}
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<div class="create-modal-backdrop" onclick={onClose}>
-		<div class="create-modal add-project-modal" onclick={(e) => e.stopPropagation()}>
+	<div class="create-modal-backdrop" role="dialog" aria-modal="true">
+		<button class="create-modal-backdrop-btn" onclick={onClose} tabindex="-1" aria-label="Close dialog"></button>
+		<div class="create-modal add-project-modal">
 			<div class="create-modal-header">
 				<h3 class="create-modal-title">Add Project</h3>
 				<button class="create-modal-close" onclick={onClose}>
@@ -115,7 +114,7 @@
 			{/if}
 
 			<div class="create-modal-field">
-				<label class="create-modal-label">Location</label>
+				<span class="create-modal-label">Location</span>
 				<DirectoryBrowser
 					selectedPath={projectPath}
 					onSelect={handleDirectorySelect}
@@ -123,8 +122,9 @@
 			</div>
 
 			<div class="create-modal-field">
-				<label class="create-modal-label">Path</label>
+				<label class="create-modal-label" for="add-project-path">Path</label>
 				<input
+					id="add-project-path"
 					type="text"
 					class="create-modal-input create-modal-input--mono"
 					placeholder={isLocalMode ? '/path/to/project' : 'my-project'}
@@ -137,8 +137,9 @@
 
 			<div class="create-modal-row">
 				<div class="create-modal-field create-modal-field--half">
-					<label class="create-modal-label">Display Name</label>
+					<label class="create-modal-label" for="add-project-name">Display Name</label>
 					<input
+						id="add-project-name"
 						type="text"
 						class="create-modal-input"
 						placeholder="My Project"
@@ -148,8 +149,9 @@
 					/>
 				</div>
 				<div class="create-modal-field create-modal-field--half">
-					<label class="create-modal-label">Project ID</label>
+					<label class="create-modal-label" for="add-project-id">Project ID</label>
 					<input
+						id="add-project-id"
 						type="text"
 						class="create-modal-input create-modal-input--mono"
 						placeholder="my-project"
@@ -180,15 +182,27 @@
 	.create-modal-backdrop {
 		position: fixed;
 		inset: 0;
-		background: color-mix(in oklch, var(--background) 70%, transparent);
-		backdrop-filter: blur(4px);
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		z-index: 1000;
 	}
 
+	.create-modal-backdrop-btn {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		background: color-mix(in oklch, var(--background) 70%, transparent);
+		backdrop-filter: blur(4px);
+		border: none;
+		cursor: default;
+		padding: 0;
+	}
+
 	.create-modal {
+		position: relative;
+		z-index: 1;
 		background: var(--card);
 		border: 1px solid var(--border);
 		border-radius: 12px;

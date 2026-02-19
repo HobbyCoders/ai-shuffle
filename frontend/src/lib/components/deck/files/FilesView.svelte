@@ -350,6 +350,8 @@
 	ondragleave={handleDragLeave}
 	ondragover={handleDragOver}
 	ondrop={handleDrop}
+	role="region"
+	aria-label="File browser with drag and drop"
 >
 	<!-- Drag overlay -->
 	{#if isDragging}
@@ -579,6 +581,7 @@
 						onclick={(e) => handleItemClick(e, item)}
 						ondblclick={() => handleNavigate(item)}
 						oncontextmenu={(e) => handleContextMenu(e, item)}
+						onkeydown={(e) => { if (e.key === 'Enter') handleNavigate(item); else if (e.key === ' ') { e.preventDefault(); files.toggleSelection(item.path); } }}
 						role="button"
 						tabindex="0"
 					>
@@ -650,6 +653,9 @@
 			class="context-menu"
 			style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
 			onclick={(e) => e.stopPropagation()}
+			onkeydown={(e) => e.stopPropagation()}
+			role="menu"
+			tabindex="-1"
 		>
 			{#if contextMenu.item.type === 'file'}
 				<button class="ctx-btn" onclick={() => handleDownload(contextMenu!.item)}>

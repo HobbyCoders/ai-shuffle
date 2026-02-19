@@ -184,6 +184,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			if (!rawMsgType && m.role === 'assistant') rawMsgType = 'text';
 			else if (!rawMsgType && (m.role === 'tool_use' || m.role === 'tool_result')) rawMsgType = m.role as MessageType;
 
+			// Skip SDK task-notification messages (background agent completion callbacks).
+			// Backend JSONL parser filters these, but guard the frontend too.
+			if (m.role === 'user' && typeof m.content === 'string' && (m.content as string).includes('<task-notification>')) {
+				continue;
+			}
+
 			if (rawMsgType === 'system' || m.role === 'system') {
 				messages.push({
 					id: String(m.id || `msg-${i}`),

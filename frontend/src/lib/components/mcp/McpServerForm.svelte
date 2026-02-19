@@ -142,12 +142,12 @@
 </script>
 
 {#if show}
-	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 	<div
 		class="fixed inset-0 z-50 flex items-center justify-center p-4"
 		role="dialog"
 		aria-modal="true"
 		onkeydown={handleKeydown}
+		tabindex="-1"
 	>
 		<!-- Backdrop -->
 		<button
@@ -207,9 +207,9 @@
 
 				<!-- Type -->
 				<div>
-					<label class="block text-sm font-medium text-foreground mb-1.5">
+					<span class="block text-sm font-medium text-foreground mb-1.5">
 						Server Type
-					</label>
+					</span>
 					<div class="flex gap-2">
 						<button
 							type="button"
@@ -238,9 +238,9 @@
 				<!-- Scope selector (for project servers) -->
 				{#if showScopeSelector}
 					<div>
-						<label class="block text-sm font-medium text-foreground mb-1.5">
+						<span class="block text-sm font-medium text-foreground mb-1.5">
 							Scope
-						</label>
+						</span>
 						<div class="flex gap-2">
 							<button
 								type="button"
@@ -310,9 +310,9 @@
 					<!-- Headers -->
 					<div>
 						<div class="flex items-center justify-between mb-1.5">
-							<label class="text-sm font-medium text-foreground">
+							<span class="text-sm font-medium text-foreground">
 								Headers <span class="text-muted-foreground font-normal">(optional)</span>
-							</label>
+							</span>
 							<button
 								type="button"
 								onclick={addHeaderPair}
@@ -341,6 +341,7 @@
 											type="button"
 											onclick={() => removeHeaderPair(i)}
 											class="p-2 hover:bg-destructive/10 rounded-lg transition-colors"
+											aria-label="Remove header"
 										>
 											<svg class="w-4 h-4 text-destructive" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -358,9 +359,9 @@
 				<!-- Environment Variables (for all types) -->
 				<div>
 					<div class="flex items-center justify-between mb-1.5">
-						<label class="text-sm font-medium text-foreground">
+						<span class="text-sm font-medium text-foreground">
 							Environment Variables <span class="text-muted-foreground font-normal">(optional)</span>
-						</label>
+						</span>
 						<button
 							type="button"
 							onclick={addEnvPair}
@@ -389,6 +390,7 @@
 										type="button"
 										onclick={() => removeEnvPair(i)}
 										class="p-2 hover:bg-destructive/10 rounded-lg transition-colors"
+										aria-label="Remove variable"
 									>
 										<svg class="w-4 h-4 text-destructive" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />

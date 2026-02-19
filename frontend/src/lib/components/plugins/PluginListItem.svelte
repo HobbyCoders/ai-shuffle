@@ -39,10 +39,12 @@
 	const availablePlugin = $derived(!isInstalled ? (plugin as AvailablePlugin) : null);
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 <div
 	class="plugin-grid-card card-system {selected ? 'plugin-grid-card--selected' : ''}"
 	onclick={onDetails}
+	onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') onDetails?.(); }}
+	role="button"
+	tabindex="0"
 >
 	<!-- Card header: icon + info -->
 	<div class="plugin-grid-card-header">
@@ -105,8 +107,7 @@
 	{/if}
 
 	<!-- Actions row -->
-	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-	<div class="plugin-grid-card-actions" onclick={(e) => e.stopPropagation()}>
+	<div class="plugin-grid-card-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
 		{#if mode === 'available'}
 			{#if availablePlugin?.installed}
 				<span class="version-info">v{availablePlugin.installed_version}</span>

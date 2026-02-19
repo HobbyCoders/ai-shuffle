@@ -377,6 +377,20 @@ def _parse_slash_command(content: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _is_task_notification(content: str) -> bool:
+    """
+    Check if content is a Claude SDK task-notification message.
+
+    These are internal async completion callbacks from the Task/subagent system.
+    The SDK injects them as user-role messages when a background agent finishes,
+    but they're only meant for Claude's internal context — the subagent's work
+    is already displayed via the tool_use/tool_result pair in SubagentMessage.
+    """
+    if not content:
+        return False
+    return "<task-notification>" in content
+
+
 def _extract_local_command_output(content: str) -> Optional[str]:
     """
     Extract content from <local-command-stdout> tags if present.
@@ -855,6 +869,10 @@ def _parse_session_history_uncached(
                     })
                     continue
 
+                # Skip SDK-internal task notifications (background agent callbacks)
+                if _is_task_notification(content):
+                    continue
+
                 # Plain user message - skip empty content and system/command-related messages
                 if content and not _is_system_content(content):
                     msg_counter += 1
@@ -988,7 +1006,7 @@ def _parse_session_history_uncached(
                         elif block.get("type") == "text":
                             # Text block in user content array
                             text = block.get("text", "")
-                            if text and not _is_system_content(text):
+                            if text and not _is_system_content(text) and not _is_task_notification(text):
                                 has_text_content = True
                                 text_parts.append(text)
 
@@ -1308,7 +1326,7 @@ def _get_session_title_and_preview(jsonl_path: Path) -> tuple[Optional[str], Opt
             content = message_data.get("content")
 
             if entry_type == "user" and role == "user":
-                if isinstance(content, str) and not _is_system_content(content):
+                if isinstance(content, str) and not _is_system_content(content) and not _is_task_notification(content):
                     message_count += 1
                     if title is None:
                         # First user message is the title
@@ -1320,7 +1338,7 @@ def _get_session_title_and_preview(jsonl_path: Path) -> tuple[Optional[str], Opt
                     for block in content:
                         if isinstance(block, dict) and block.get("type") == "text":
                             text = block.get("text", "")
-                            if text and not _is_system_content(text):
+                            if text and not _is_system_content(text) and not _is_task_notification(text):
                                 message_count += 1
                                 if title is None:
                                     title = text[:100].strip()

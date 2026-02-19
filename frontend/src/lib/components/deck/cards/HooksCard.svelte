@@ -260,12 +260,12 @@
 
 	<!-- Add/Edit Hook Form Modal -->
 	{#if showForm}
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<!-- svelte-ignore a11y_click_events_have_key_events -->
 		<div
 			class="form-overlay"
-			onclick={(e) => e.target === e.currentTarget && (showForm = false)}
+			role="dialog"
+			aria-modal="true"
 		>
+			<button class="form-overlay-close" onclick={() => (showForm = false)} tabindex="-1" aria-label="Close dialog"></button>
 			<HookForm
 				hook={editingHook}
 				saving={formSaving}
@@ -632,9 +632,19 @@
 		align-items: center;
 		justify-content: center;
 		padding: 16px;
+	}
+
+	.form-overlay-close {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
 		background: color-mix(in oklch, var(--background) 80%, transparent);
 		backdrop-filter: blur(8px);
 		-webkit-backdrop-filter: blur(8px);
+		border: none;
+		cursor: default;
+		padding: 0;
 	}
 
 	/* Spinner animation */

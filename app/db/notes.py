@@ -1,0 +1,292 @@
+"""Notes database operations."""
+
+from __future__ import annotations
+
+import sqlite3
+import json
+import logging
+from datetime import datetime
+from typing import Optional, List, Dict, Any, TypedDict
+
+from app.db.base import get_db, row_to_dict, rows_to_list, logger
+
+
+# ============================================================================
+# TypedDict definitions
+# ============================================================================
+
+class NoteRow(TypedDict):
+    """Full note row from SELECT * FROM notes."""
+    id: str
+    title: str
+    content: str
+    tags: List[str]
+    is_pinned: bool
+    file_path: Optional[str]
+    created_at: str
+    updated_at: str
+
+
+class NoteAutocomplete(TypedDict):
+    """Simplified note info for autocomplete."""
+    id: str
+    title: str
+    preview: str
+    tags: List[str]
+    file_path: Optional[str]
+
+
+class NoteTagCount(TypedDict):
+    """Tag with usage count from notes."""
+    name: str
+    color: None
+    count: int
+
+
+# ============================================================================
+# Notes Operations
+# ============================================================================
+
+def get_note(note_id: str) -> Optional[NoteRow]:
+    """Get a note by ID"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM notes WHERE id = ?", (note_id,))
+        row = row_to_dict(cursor.fetchone())
+        if row:
+            row["tags"] = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+        return row
+
+
+def get_all_notes(
+    search: Optional[str] = None,
+    tag: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+) -> List[NoteRow]:
+    """
+    Get all notes with optional search and tag filtering.
+    Notes are ordered by pinned status (pinned first) then by updated_at descending.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Build query with filters
+        query = "SELECT * FROM notes WHERE 1=1"
+        params: List[Any] = []
+
+        if search:
+            query += " AND (title LIKE ? OR content LIKE ?)"
+            search_term = f"%{search}%"
+            params.extend([search_term, search_term])
+
+        if tag:
+            # JSON array contains check using JSON functions
+            query += " AND json_array_length(json_extract(tags, '$')) > 0 AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)"
+            params.append(tag)
+
+        query += " ORDER BY is_pinned DESC, updated_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        cursor.execute(query, params)
+        rows = rows_to_list(cursor.fetchall())
+
+        # Parse JSON fields
+        for row in rows:
+            row["tags"] = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+
+        return rows
+
+
+def create_note(
+    note_id: str,
+    title: str,
+    content: str = "",
+    tags: Optional[List[str]] = None,
+    is_pinned: bool = False,
+    file_path: Optional[str] = None
+) -> NoteRow:
+    """Create a new note"""
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO notes (id, title, content, tags, is_pinned, file_path, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                note_id,
+                title,
+                content,
+                json.dumps(tags or []),
+                is_pinned,
+                file_path,
+                now,
+                now
+            )
+        )
+    return get_note(note_id)
+
+
+def update_note(
+    note_id: str,
+    title: Optional[str] = None,
+    content: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    is_pinned: Optional[bool] = None,
+    file_path: Optional[str] = None
+) -> Optional[NoteRow]:
+    """Update a note"""
+    existing = get_note(note_id)
+    if not existing:
+        return None
+
+    updates = []
+    values = []
+
+    if title is not None:
+        updates.append("title = ?")
+        values.append(title)
+    if content is not None:
+        updates.append("content = ?")
+        values.append(content)
+    if tags is not None:
+        updates.append("tags = ?")
+        values.append(json.dumps(tags))
+    if is_pinned is not None:
+        updates.append("is_pinned = ?")
+        values.append(is_pinned)
+    if file_path is not None:
+        updates.append("file_path = ?")
+        values.append(file_path)
+
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(note_id)
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE notes SET {', '.join(updates)} WHERE id = ?",
+                values
+            )
+
+    return get_note(note_id)
+
+
+def delete_note(note_id: str) -> bool:
+    """Delete a note"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        return cursor.rowcount > 0
+
+
+def get_all_note_tags() -> List[NoteTagCount]:
+    """
+    Get all unique tags used in notes with their counts.
+    Returns list of {name: str, count: int}.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Get all notes
+        cursor.execute("SELECT tags FROM notes")
+        rows = cursor.fetchall()
+
+        # Count tags
+        tag_counts: Dict[str, int] = {}
+        for row in rows:
+            tags = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+            for tag in tags:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+        # Sort by count descending, then name
+        return sorted(
+            [{"name": name, "color": None, "count": count} for name, count in tag_counts.items()],
+            key=lambda x: (-x["count"], x["name"])
+        )
+
+
+def get_notes_autocomplete(
+    search: Optional[str] = None,
+    limit: int = 20
+) -> List[NoteAutocomplete]:
+    """
+    Get notes for autocomplete in chat.
+    Returns simplified note info with preview.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        query = "SELECT id, title, content, tags, file_path FROM notes WHERE 1=1"
+        params: List[Any] = []
+
+        if search:
+            query += " AND (title LIKE ? OR content LIKE ?)"
+            search_term = f"%{search}%"
+            params.extend([search_term, search_term])
+
+        query += " ORDER BY is_pinned DESC, updated_at DESC LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        result = []
+        for row in rows:
+            content = row["content"] or ""
+            preview = content[:100] + "..." if len(content) > 100 else content
+            tags = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+            result.append({
+                "id": row["id"],
+                "title": row["title"],
+                "preview": preview,
+                "tags": tags,
+                "file_path": row["file_path"]
+            })
+
+        return result
+
+
+def count_all_notes() -> int:
+    """Count total notes"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as count FROM notes")
+        row = cursor.fetchone()
+        return row["count"] if row else 0
+
+
+def get_all_note_filenames() -> set:
+    """Get the set of all note filenames (extracted from file_path) for collision detection."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT file_path FROM notes WHERE file_path IS NOT NULL")
+        filenames = set()
+        for row in cursor.fetchall():
+            if row["file_path"]:
+                # file_path is stored as 'notes/{filename}', extract just the filename
+                filenames.add(row["file_path"].split("/")[-1])
+        return filenames
+
+
+def get_notes_without_file_path() -> List[NoteRow]:
+    """Get all notes that don't have a file_path set (need materialization)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM notes WHERE file_path IS NULL")
+        rows = rows_to_list(cursor.fetchall())
+        for row in rows:
+            row["tags"] = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
+        return rows
+
+
+def bulk_update_note_file_paths(updates: Dict[str, str]) -> None:
+    """Bulk update file_path for multiple notes. updates is {note_id: file_path}."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for note_id, file_path in updates.items():
+            cursor.execute(
+                "UPDATE notes SET file_path = ? WHERE id = ?",
+                (file_path, note_id)
+            )

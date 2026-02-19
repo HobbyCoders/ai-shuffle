@@ -266,8 +266,9 @@
 				<div class="space-y-3">
 					<!-- URL -->
 					<div>
-						<label class="block text-xs text-muted-foreground mb-1">Webhook URL</label>
+						<label class="block text-xs text-muted-foreground mb-1" for="webhook-url">Webhook URL</label>
 						<input
+							id="webhook-url"
 							type="url"
 							bind:value={formUrl}
 							placeholder="https://example.com/webhook"
@@ -277,8 +278,9 @@
 
 					<!-- Secret -->
 					<div>
-						<label class="block text-xs text-muted-foreground mb-1">Secret (optional)</label>
+						<label class="block text-xs text-muted-foreground mb-1" for="webhook-secret">Secret (optional)</label>
 						<input
+							id="webhook-secret"
 							type="password"
 							bind:value={formSecret}
 							placeholder="For HMAC signature verification"
@@ -289,7 +291,7 @@
 
 					<!-- Events -->
 					<div>
-						<label class="block text-xs text-muted-foreground mb-2">Events</label>
+						<span class="block text-xs text-muted-foreground mb-2">Events</span>
 						<div class="space-y-2">
 							{#each eventTypes as event}
 								<label class="flex items-center gap-2 cursor-pointer">

@@ -122,7 +122,7 @@ async def chat_websocket(
 
     Message types FROM server:
     - history: Full message history for session (on connect or session switch)
-      - Includes isStreaming and streamingBuffer for late-joining devices
+      - Includes isStreaming for late-joining devices
     - start: Query started, streaming will begin
     - chunk: Text content chunk
     - stream_delta: Real-time streaming delta (when include_partial_messages=True)
@@ -146,7 +146,7 @@ async def chat_websocket(
     Multi-device sync features:
     - Automatic device registration with SyncEngine when session is used
     - Broadcasts all streaming events to other devices watching same session
-    - Late-joining devices receive buffered streaming content
+    - Late-joining devices receive streaming state from LiveSessionStore
     - Devices are automatically unregistered on disconnect or session switch
     """
     # Must accept connection first before we can send close with reason
@@ -899,7 +899,6 @@ async def chat_websocket(
 
                                 # Check if session is currently streaming (late-joining device)
                                 is_streaming = sync_engine.is_session_streaming(session_id)
-                                streaming_buffer = None
                                 logger.debug(f"Session {session_id} streaming status: {is_streaming}")
 
                                 # Also check for queries that are about to stream but haven't
@@ -932,20 +931,21 @@ async def chat_websocket(
                                         )
                                         is_streaming = False
                                     else:
-                                        # Use live_session_store for complete, authoritative state
+                                        # Use live_session_store for complete, authoritative state.
                                         # This provides ALL messages with ALL fields (subagent, tool, etc.)
-                                        # instead of DB messages (incomplete) + StreamingBuffer (lossy)
                                         live_data = live_session_store.get_session_dict(session_id)
                                         if live_data:
                                             messages = live_data["messages"]
                                             streaming_usage = live_data.get("usage")
-                                            # No streamingBuffer needed - messages already include everything
-                                            streaming_buffer = None
+                                            active_block_type = live_data.get("active_block_type")
                                             logger.debug(f"Session {session_id} is streaming, using live_session_store with {len(messages)} messages, usage: {streaming_usage}")
                                         else:
-                                            # Fallback to StreamingBuffer if live store doesn't have session
-                                            streaming_buffer, streaming_usage, active_block_type = sync_engine.get_streaming_buffer_with_usage(session_id)
-                                            logger.debug(f"Session {session_id} is streaming (live store miss), sending buffer with {len(streaming_buffer) if streaming_buffer else 0} messages, usage: {streaming_usage}, activeBlockType: {active_block_type}")
+                                            # LiveSessionStore should always have data for streaming sessions now.
+                                            # If not, log a warning and return empty state.
+                                            logger.warning(f"[WS] LiveSessionStore missing for streaming session {session_id}")
+                                            messages = []
+                                            streaming_usage = None
+                                            active_block_type = None
 
                                 # Add worktree info if session is linked to a worktree
                                 worktree_id = session.get("worktree_id")
@@ -972,7 +972,6 @@ async def chat_websocket(
                                     "session": session,
                                     "messages": messages,
                                     "isStreaming": is_streaming,
-                                    "streamingBuffer": streaming_buffer
                                 }
                                 if streaming_usage:
                                     history_response["streamingUsage"] = streaming_usage

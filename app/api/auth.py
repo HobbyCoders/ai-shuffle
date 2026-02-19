@@ -702,10 +702,10 @@ async def claude_login_complete(request: Request, token: str = Depends(require_a
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Claude complete login error: {e}")
+        logger.exception("Claude complete login error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail="Failed to complete Claude login"
         )
 
 
@@ -743,10 +743,10 @@ async def github_login(request: Request, token: str = Depends(require_admin)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"GitHub login error: {e}")
+        logger.exception("GitHub login error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail="Failed to complete GitHub login"
         )
 
 
@@ -760,10 +760,10 @@ async def github_login_web(request: Request, token: str = Depends(require_admin)
     try:
         return await auth_service.github_login_web()
     except Exception as e:
-        logger.error(f"GitHub web login error: {e}")
+        logger.exception("GitHub web login error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail="Failed to start GitHub web login"
         )
 
 

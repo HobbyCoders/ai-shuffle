@@ -172,9 +172,8 @@
 </script>
 
 {#if isOpen}
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<div class="dialog-overlay" onclick={handleBackdropClick}>
+	<div class="dialog-overlay" role="dialog" aria-modal="true">
+		<button class="dialog-overlay-close" onclick={handleBackdropClick} tabindex="-1" aria-label="Close dialog"></button>
 		<div class="dialog-container" class:clarifying={dialogState === 'clarifying'}>
 			<div class="dialog-header">
 				<div class="dialog-title">
@@ -208,7 +207,7 @@
 
 					{#each clarificationQuestions as question (question.id)}
 						<div class="question-section">
-							<label class="question-label">{question.question}</label>
+							<label class="question-label" for="question-{question.id}">{question.question}</label>
 							{#if question.context}
 								<p class="question-context">{question.context}</p>
 							{/if}
@@ -228,6 +227,7 @@
 								</div>
 								<div class="custom-answer">
 									<input
+										id="question-{question.id}"
 										type="text"
 										class="custom-input"
 										placeholder="Or type a custom answer..."
@@ -387,12 +387,24 @@
 		align-items: center;
 		justify-content: center;
 		padding: 16px;
+	}
+
+	.dialog-overlay-close {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
 		background: color-mix(in oklch, var(--background) 85%, transparent);
 		backdrop-filter: blur(8px);
 		-webkit-backdrop-filter: blur(8px);
+		border: none;
+		cursor: default;
+		padding: 0;
 	}
 
 	.dialog-container {
+		position: relative;
+		z-index: 1;
 		width: 100%;
 		max-width: 500px;
 		max-height: calc(100% - 32px);

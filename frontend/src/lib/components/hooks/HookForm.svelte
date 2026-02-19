@@ -111,7 +111,7 @@
 		{/if}
 
 		<div class="form-group">
-			<label>Hook Type</label>
+			<span>Hook Type</span>
 			<div class="hook-type-selector">
 				<button
 					type="button"
@@ -211,6 +211,8 @@
 
 <style>
 	.hook-form {
+		position: relative;
+		z-index: 1;
 		padding: 20px;
 		background: var(--card);
 		border: 1px solid var(--border);

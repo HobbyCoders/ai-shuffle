@@ -40,13 +40,13 @@
 	const showActions = $derived(isHovered || showActionsOnMobile);
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events -->
 <div
 	class="w-full user-message overflow-hidden message-container"
 	onmouseenter={() => isHovered = true}
 	onmouseleave={() => { isHovered = false; showActionsOnMobile = false; }}
 	ontouchstart={handleTouchStart}
 	onclick={handleClick}
+	onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showActionsOnMobile = !showActionsOnMobile; } }}
 	role="button"
 	tabindex="0"
 >

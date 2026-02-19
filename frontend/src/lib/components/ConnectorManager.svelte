@@ -863,10 +863,11 @@
 				<div class="space-y-4">
 					<!-- Name -->
 					<div>
-						<label class="block text-xs font-medium text-muted-foreground mb-1">
+						<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-name">
 							Connector Name <span class="text-destructive">*</span>
 						</label>
 						<input
+							id="connector-name"
 							type="text"
 							bind:value={formName}
 							placeholder="e.g., My Telegram Bot"
@@ -877,10 +878,11 @@
 					<!-- API User -->
 					{#if view === 'setup'}
 						<div>
-							<label class="block text-xs font-medium text-muted-foreground mb-1">
+							<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-api-user">
 								API User
 							</label>
 							<select
+								id="connector-api-user"
 								bind:value={formApiUserId}
 								class="w-full px-3 py-2 bg-input border border-border rounded-md text-sm text-foreground focus:outline-none focus:border-primary transition-colors"
 							>
@@ -902,7 +904,7 @@
 					{#if selectedType}
 						{#each selectedType.config_fields as field (field.key)}
 							<div>
-								<label class="block text-xs font-medium text-muted-foreground mb-1">
+								<label class="block text-xs font-medium text-muted-foreground mb-1" for="connector-field-{field.key}">
 									{field.label}
 									{#if field.required}
 										<span class="text-destructive">*</span>
@@ -910,6 +912,7 @@
 								</label>
 								{#if field.type === 'textarea'}
 									<textarea
+										id="connector-field-{field.key}"
 										bind:value={formConfig[field.key]}
 										placeholder={field.placeholder || ''}
 										rows="3"
@@ -917,6 +920,7 @@
 									></textarea>
 								{:else if field.type === 'password'}
 									<input
+										id="connector-field-{field.key}"
 										type="password"
 										bind:value={formConfig[field.key]}
 										placeholder={field.placeholder || ''}
@@ -924,6 +928,7 @@
 									/>
 								{:else}
 									<input
+										id="connector-field-{field.key}"
 										type="text"
 										bind:value={formConfig[field.key]}
 										placeholder={field.placeholder || ''}
@@ -939,9 +944,9 @@
 
 					<!-- Event Selection -->
 					<div>
-						<label class="block text-xs font-medium text-muted-foreground mb-2">
+						<span class="block text-xs font-medium text-muted-foreground mb-2">
 							Events <span class="text-destructive">*</span>
-						</label>
+						</span>
 						<p class="text-xs text-muted-foreground mb-2">
 							Select which events this connector should listen to
 						</p>

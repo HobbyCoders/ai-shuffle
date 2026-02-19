@@ -288,18 +288,19 @@
 
 	<!-- Add Marketplace Modal -->
 	{#if showAddMarketplace}
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<!-- svelte-ignore a11y_click_events_have_key_events -->
 		<div
 			class="add-marketplace-overlay"
-			onclick={(e) => e.target === e.currentTarget && (showAddMarketplace = false)}
+			role="dialog"
+			aria-modal="true"
 		>
+			<button class="add-marketplace-overlay-close" onclick={() => (showAddMarketplace = false)} tabindex="-1" aria-label="Close dialog"></button>
 			<div class="add-marketplace-modal">
 				<h3>Add Plugin Source</h3>
 
 				<div class="form-group">
-					<label>Name</label>
+					<label for="plugin-source-name">Name</label>
 					<input
+						id="plugin-source-name"
 						type="text"
 						bind:value={newMarketplaceName}
 						placeholder="e.g., my-plugins"
@@ -308,8 +309,9 @@
 				</div>
 
 				<div class="form-group">
-					<label>Git URL</label>
+					<label for="plugin-source-url">Git URL</label>
 					<input
+						id="plugin-source-url"
 						type="text"
 						bind:value={newMarketplaceUrl}
 						placeholder="https://github.com/user/plugins.git"
@@ -696,12 +698,24 @@
 		align-items: center;
 		justify-content: center;
 		padding: 16px;
+	}
+
+	.add-marketplace-overlay-close {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
 		background: color-mix(in oklch, var(--background) 80%, transparent);
 		backdrop-filter: blur(8px);
 		-webkit-backdrop-filter: blur(8px);
+		border: none;
+		cursor: default;
+		padding: 0;
 	}
 
 	.add-marketplace-modal {
+		position: relative;
+		z-index: 1;
 		width: 100%;
 		max-width: 400px;
 		padding: 24px;

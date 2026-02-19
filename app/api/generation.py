@@ -186,10 +186,10 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
                     if isinstance(block, TextBlock):
                         response_text.append(block.text)
     except Exception as e:
-        logger.error(f"Claude SDK error during generation: {e}")
+        logger.exception("AI generation failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"AI generation failed: {str(e)}"
+            detail="AI generation failed"
         )
 
     return "".join(response_text)
@@ -251,7 +251,7 @@ async def _generate_profile_internal(
         logger.error(f"Raw response: {response_text[:1000]}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to parse AI response: {str(e)}"
+            detail="Failed to parse AI response"
         )
 
     # Validate required fields
@@ -338,7 +338,7 @@ async def _generate_subagent_internal(
         logger.error(f"Raw response: {response_text[:1000]}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to parse AI response: {str(e)}"
+            detail="Failed to parse AI response"
         )
 
     # Validate required fields

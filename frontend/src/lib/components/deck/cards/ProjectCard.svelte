@@ -235,7 +235,6 @@
 						{#if deletingId === project.id}
 							{@render deleteConfirmation(project)}
 						{:else}
-							<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
 							<div
 								class="fp-list-item"
 								onclick={() => handleProjectClick(project.id)}
@@ -260,7 +259,7 @@
 										<span class="fp-meta-chip"><MessageSquare size={12} /> {project.session_count || 0} sessions</span>
 									</div>
 								</div>
-								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()}>
+								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
 									<GroupDropdown entityType="projects" entityId={project.id} />
 									<button
 										class="fp-action-btn fp-action-btn--destructive"

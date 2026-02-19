@@ -398,9 +398,10 @@ async def upload_file(
         content = await file.read()
         file_path.write_bytes(content)
     except Exception as e:
+        logger.exception("Failed to save uploaded file")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to save file: {str(e)}"
+            detail="Failed to save file"
         )
 
     # Return relative path for reference (relative to the effective base path)
@@ -499,9 +500,10 @@ async def create_folder(
     try:
         folder_path.mkdir(parents=True, exist_ok=False)
     except Exception as e:
+        logger.exception("Failed to create folder")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create folder: {str(e)}"
+            detail="Failed to create folder"
         )
 
     base_path = get_project_working_dir_as_path(project)
@@ -556,9 +558,10 @@ async def rename_file_or_folder(
     try:
         current_path.rename(new_path)
     except Exception as e:
+        logger.exception("Failed to rename file or folder")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to rename: {str(e)}"
+            detail="Failed to rename"
         )
 
     base_path = get_project_working_dir_as_path(project)
@@ -607,9 +610,10 @@ async def delete_file_or_folder(
         else:
             target_path.unlink()
     except Exception as e:
+        logger.exception("Failed to delete file or folder")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete: {str(e)}"
+            detail="Failed to delete"
         )
 
     return {"deleted": path}

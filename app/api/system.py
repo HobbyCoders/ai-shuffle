@@ -454,9 +454,10 @@ async def set_workspace_config(
             detail=f"Permission denied: Cannot write to '{path}'"
         )
     except Exception as e:
+        logger.exception("Invalid workspace path")
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid path: {str(e)}"
+            detail="Invalid path"
         )
 
     # Save to database

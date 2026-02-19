@@ -25,6 +25,47 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import StreamEvent, PermissionResultAllow, PermissionResultDeny
 
+# Monkey-patch SDK message parser to handle unknown message types gracefully.
+#
+# Root cause: SDK 0.1.38 bundles CLI 2.1.47 which emits "rate_limit_event"
+# messages, but the SDK's parse_message() doesn't handle them and raises
+# MessageParseError. Since parse_message runs inside an async generator,
+# the unhandled exception terminates the entire streaming loop.
+#
+# Fix: Convert unknown message types into SystemMessage with the raw data
+# preserved, so they flow through the pipeline normally instead of crashing.
+# This also future-proofs against new CLI message types being added before
+# the SDK is updated to handle them.
+def _patch_sdk_message_parser():
+    import claude_agent_sdk._internal.message_parser as _parser
+    import claude_agent_sdk._internal.client as _internal_client
+    from claude_agent_sdk._errors import MessageParseError
+
+    _original_parse = _parser.parse_message
+
+    def _safe_parse_message(data):
+        try:
+            return _original_parse(data)
+        except MessageParseError as e:
+            if "Unknown message type" in str(e):
+                _msg_type = data.get("type", "?") if isinstance(data, dict) else "?"
+                logging.getLogger(__name__).warning(
+                    f"[SDK] Unrecognized message type from CLI: {_msg_type}"
+                )
+                # Wrap as SystemMessage so it flows through the pipeline
+                # instead of killing the stream
+                return SystemMessage(subtype=_msg_type, data=data)
+            raise
+
+    _parser.parse_message = _safe_parse_message
+    # Also patch the direct reference in _internal/client.py, which imports
+    # parse_message at the top level (from .message_parser import parse_message).
+    # Without this, _internal/client.py holds a reference to the original function
+    # and the query() code path (used by generation.py) still crashes.
+    _internal_client.parse_message = _safe_parse_message
+
+_patch_sdk_message_parser()
+
 from app.db import database
 from app.core.config import settings
 from app.core.session_pool import (
@@ -40,6 +81,8 @@ from app.core import encryption
 
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.core.mcp_service import get_mcp_service, McpServerType
+from app.core.live_session_store import live_session_store
+from app.core.message_resolver import message_resolver, resolve_working_dir
 
 logger = logging.getLogger(__name__)
 
@@ -2126,6 +2169,11 @@ async def _run_background_query(
                 error_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
                 logger.error(f"[Background] CLI stderr: {error_msg}")
             logger.error(f"[Background] Failed to connect to Claude SDK for session {session_id}: {error_msg}")
+            # Clean up LiveSessionStore on connect failure
+            try:
+                await live_session_store.cleanup_session(session_id)
+            except Exception:
+                pass
             await sync_engine.broadcast_stream_end(
                 session_id=session_id,
                 message_id=f"error-{session_id}",
@@ -2193,6 +2241,13 @@ async def _run_background_query(
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         response_text.append(block.text)
+
+                        # Update LiveSessionStore for late-joining devices
+                        try:
+                            await live_session_store.append_text(session_id, block.text)
+                        except Exception as e:
+                            logger.warning(f"[Background] Failed to append text to live store for {session_id}: {e}")
+
                         # Broadcast text chunk to all devices
                         await sync_engine.broadcast_stream_chunk(
                             session_id=session_id,
@@ -2210,6 +2265,14 @@ async def _run_background_query(
                             "tool_id": getattr(block, 'id', None),
                             "input": block.input
                         })
+
+                        # Update LiveSessionStore for late-joining devices
+                        try:
+                            tool_id = getattr(block, 'id', None) or f"tool-{uuid.uuid4().hex[:12]}"
+                            tool_input = block.input if isinstance(block.input, dict) else {}
+                            await live_session_store.add_tool_use(session_id, tool_id, block.name, tool_input)
+                        except Exception as e:
+                            logger.warning(f"[Background] Failed to add tool_use to live store for {session_id}: {e}")
 
                         await sync_engine.broadcast_stream_chunk(
                             session_id=session_id,
@@ -2233,6 +2296,17 @@ async def _run_background_query(
                             "tool_id": getattr(block, 'tool_use_id', None),
                             "output": output
                         })
+
+                        # Update LiveSessionStore for late-joining devices
+                        try:
+                            result_tool_id = getattr(block, 'tool_use_id', None) or ""
+                            output_text = str(output) if output else ""
+                            await live_session_store.add_tool_result(
+                                session_id, result_tool_id, output_text,
+                                is_error=getattr(block, 'is_error', False)
+                            )
+                        except Exception as e:
+                            logger.warning(f"[Background] Failed to add tool_result to live store for {session_id}: {e}")
 
                         await sync_engine.broadcast_stream_chunk(
                             session_id=session_id,
@@ -2263,6 +2337,16 @@ async def _run_background_query(
                             "output": output
                         })
 
+                        # Update LiveSessionStore for late-joining devices
+                        try:
+                            output_text = str(output) if output else ""
+                            await live_session_store.add_tool_result(
+                                session_id, block.tool_use_id or "", output_text,
+                                is_error=getattr(block, 'is_error', False)
+                            )
+                        except Exception as e:
+                            logger.warning(f"[Background] Failed to add UserMessage tool_result to live store for {session_id}: {e}")
+
                         await sync_engine.broadcast_stream_chunk(
                             session_id=session_id,
                             message_id=assistant_msg_id,
@@ -2287,6 +2371,18 @@ async def _run_background_query(
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
 
+                    # Update LiveSessionStore usage for late-joining devices
+                    try:
+                        await live_session_store.update_usage(
+                            session_id,
+                            input_tokens=message.usage.get("input_tokens", 0),
+                            output_tokens=message.usage.get("output_tokens", 0),
+                            cache_creation_tokens=message.usage.get("cache_creation_input_tokens", 0),
+                            cache_read_tokens=message.usage.get("cache_read_input_tokens", 0),
+                        )
+                    except Exception as e:
+                        logger.warning(f"[Background] Failed to update usage in live store for {session_id}: {e}")
+
     except asyncio.CancelledError:
         interrupted = True
         logger.debug(f"[Background] Query interrupted for session {session_id}")
@@ -2306,6 +2402,12 @@ async def _run_background_query(
         if not state.is_connected:
             await pool.remove_dead(session_id)
 
+        # End LiveSessionStore streaming BEFORE broadcast_stream_end
+        try:
+            await live_session_store.end_streaming(session_id, metadata=metadata, interrupted=interrupted)
+        except Exception as e:
+            logger.warning(f"[Background] Failed to end live session store streaming for {session_id}: {e}")
+
         # Broadcast stream end to all devices
         await sync_engine.broadcast_stream_end(
             session_id=session_id,
@@ -2314,6 +2416,13 @@ async def _run_background_query(
             interrupted=interrupted,
             source_device_id=None
         )
+
+        # Schedule delayed cleanup of live store data (keep for 30s for late joiners)
+        async def _delayed_cleanup():
+            await asyncio.sleep(30)
+            await live_session_store.cleanup_ended_session(session_id)
+
+        asyncio.create_task(_delayed_cleanup())
 
     # Update session in database
     if sdk_session_id:
@@ -2450,6 +2559,20 @@ async def start_background_query(
         user_id=api_user_id
     )
     logger.debug(f"[Background] Broadcast stream_start for session {session_id}")
+
+    # Initialize LiveSessionStore for late-joining devices
+    try:
+        working_dir = resolve_working_dir(session)
+        sdk_sid = session.get("sdk_session_id") if session else None
+        initial_messages = message_resolver.resolve_for_streaming_init(session_id, sdk_sid, working_dir)
+    except Exception:
+        initial_messages = []
+
+    await live_session_store.start_streaming(session_id, initial_messages)
+
+    # Add user message to live store
+    user_msg_id = f"user-{int(datetime.now().timestamp() * 1000)}"
+    await live_session_store.add_user_message(session_id, prompt, user_msg_id)
 
     # Start background task
     task = asyncio.create_task(
@@ -2926,6 +3049,7 @@ async def stream_to_websocket(
                     # with new subtypes (e.g., skill errors, command output).
                     SUPPRESSED_SUBTYPES = {
                         'init',  # Already handled above
+                        'rate_limit_event',  # Internal API rate limit info, not useful in chat
                     }
 
                     # Suppress system messages from subagent execution.

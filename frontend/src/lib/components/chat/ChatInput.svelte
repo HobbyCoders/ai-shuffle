@@ -879,6 +879,8 @@
 	ondragleave={handleDragLeave}
 	ondragover={handleDragOver}
 	ondrop={handleDrop}
+	role="region"
+	aria-label="Chat input with file drop"
 >
 	{#if isDragging}
 		<div class="drag-overlay">

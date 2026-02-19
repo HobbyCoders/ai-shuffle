@@ -75,10 +75,10 @@ async def one_shot_query(
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Query error: {e}")
+        logger.exception("Query execution failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Query execution failed: {str(e)}"
+            detail="Query execution failed"
         )
 
 
@@ -183,10 +183,10 @@ async def conversation(
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Conversation error: {e}")
+        logger.exception("Conversation failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Conversation failed: {str(e)}"
+            detail="Conversation failed"
         )
 
 
@@ -304,10 +304,10 @@ async def start_conversation(
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Start conversation error: {e}")
+        logger.exception("Failed to start conversation")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to start conversation: {str(e)}"
+            detail="Failed to start conversation"
         )
 
 

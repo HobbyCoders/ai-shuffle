@@ -281,14 +281,10 @@
 
 <!-- Rewind Confirmation Dialog - portaled to body to escape content-visibility containment -->
 {#if showRewindDialog}
-	<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-	<div use:portal class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onclick={handleRewindCancel} role="presentation">
-		<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+	<div use:portal class="fixed inset-0 z-50 flex items-center justify-center" role="dialog" aria-modal="true">
+		<button class="absolute inset-0 w-full h-full bg-black/50 border-none p-0 cursor-default" onclick={handleRewindCancel} tabindex="-1" aria-label="Close dialog"></button>
 		<div
-			class="bg-card border border-border rounded-lg shadow-lg max-w-md w-full mx-4 p-4"
-			onclick={(e) => e.stopPropagation()}
-			role="dialog"
-			aria-modal="true"
+			class="relative bg-card border border-border rounded-lg shadow-lg max-w-md w-full mx-4 p-4"
 			aria-labelledby="rewind-dialog-title"
 		>
 			<h3 id="rewind-dialog-title" class="text-lg font-semibold text-foreground mb-2">Rewind Conversation?</h3>

@@ -198,16 +198,22 @@
 {#if visible}
   <!-- Backdrop with blur -->
   <div
-    class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-start justify-center pt-[15vh] max-sm:pt-[10vh] bg-black/60 backdrop-blur-sm"
-    onclick={handleBackdropClick}
+    class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-start justify-center pt-[15vh] max-sm:pt-[10vh]"
     role="dialog"
     aria-modal="true"
     aria-label="Spotlight search"
+    tabindex="-1"
   >
+    <button
+      class="absolute inset-0 w-full h-full bg-black/60 backdrop-blur-sm border-none p-0 cursor-default"
+      onclick={onClose}
+      tabindex="-1"
+      aria-label="Close dialog"
+    ></button>
     <!-- Modal -->
     <div
-      class="w-full max-w-xl bg-card border border-border rounded-xl overflow-hidden"
-      style="box-shadow: var(--shadow-l);"
+      class="relative w-full max-w-xl bg-card border border-border rounded-xl overflow-hidden"
+      style="box-shadow: var(--shadow-l); z-index: 1;"
     >
       <!-- Search Input -->
       <div class="flex items-center gap-3 px-4 py-3 border-b border-border">

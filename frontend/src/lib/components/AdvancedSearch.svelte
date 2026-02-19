@@ -210,16 +210,22 @@
 {#if visible}
 	<!-- Backdrop with blur -->
 	<div
-		class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-start justify-center pt-[10vh] bg-black/60 backdrop-blur-sm"
-		onclick={handleBackdropClick}
+		class="fixed inset-0 max-sm:bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] z-50 flex items-start justify-center pt-[10vh]"
 		role="dialog"
 		aria-modal="true"
 		aria-label="Advanced search"
+		tabindex="-1"
 	>
+		<button
+			class="absolute inset-0 w-full h-full bg-black/60 backdrop-blur-sm border-none p-0 cursor-default"
+			onclick={onClose}
+			tabindex="-1"
+			aria-label="Close dialog"
+		></button>
 		<!-- Modal -->
 		<div
-			class="w-full max-w-2xl bg-card border border-border rounded-xl overflow-hidden"
-			style="box-shadow: var(--shadow-l);"
+			class="relative w-full max-w-2xl bg-card border border-border rounded-xl overflow-hidden"
+			style="box-shadow: var(--shadow-l); z-index: 1;"
 		>
 			<!-- Header -->
 			<div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted/30">
