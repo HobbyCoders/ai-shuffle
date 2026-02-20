@@ -1031,7 +1031,21 @@ export const activeSession = {
 			console.warn('[ActiveSession] Cannot change project after session has started');
 			return;
 		}
-		_update(s => ({ ...s, project: projectId }));
+		// Reset execution mode & worktree state when project changes —
+		// the previous worktree context is no longer valid for the new project.
+		_update(s => ({
+			...s,
+			project: projectId,
+			executionMode: 'local' as const,
+			worktreeBranch: '',
+			worktreeBaseBranch: 'main',
+			worktreeCreateNewBranch: false,
+			worktreeId: null,
+			worktreeMode: 'new' as const,
+			selectedWorktreeBranch: null,
+			isCreatingWorktree: false,
+			worktreeError: null,
+		}));
 		switcher.saveSelectionToBackend(_state.profile, projectId);
 		persistSession();
 	},
