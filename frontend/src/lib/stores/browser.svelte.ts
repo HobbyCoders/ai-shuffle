@@ -17,6 +17,7 @@
  */
 import { sessionNotifier } from './session/session-notifier';
 import { createBrowserWs, type BrowserWsConnection } from './browser-ws';
+import { untrack } from 'svelte';
 
 export interface BrowserState {
 	/** Whether the browser panel is open */
@@ -95,13 +96,11 @@ type Subscriber = (value: BrowserState) => void;
 const _subscribers = new Set<Subscriber>();
 
 function _notifySubscribers() {
-	for (const fn of _subscribers) {
-		fn(_state);
-	}
+	untrack(() => { for (const fn of _subscribers) fn(_state); });
 }
 
 function _update(fn: (s: BrowserState) => BrowserState) {
-	_state = fn(_state);
+	_state = fn(untrack(() => _state));
 	_notifySubscribers();
 }
 
@@ -185,7 +184,7 @@ export const browserState = {
 
 	subscribe(fn: Subscriber) {
 		_subscribers.add(fn);
-		fn(_state);
+		untrack(() => fn(_state));
 		return () => {
 			_subscribers.delete(fn);
 		};

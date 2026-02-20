@@ -6,6 +6,7 @@
  */
 
 import { browser } from '$app/environment';
+import { untrack } from 'svelte';
 
 interface PWAState {
 	isInstalled: boolean;
@@ -41,7 +42,7 @@ let _state = $state<PWAState>({
 // ============================================================================
 
 function _update(fn: (s: PWAState) => PWAState) {
-	_state = fn(_state);
+	_state = fn(untrack(() => _state));
 }
 
 function checkInstallState() {
@@ -126,9 +127,7 @@ const _subscribers = new Set<Subscriber>();
  * Called via $effect in components that import the store.
  */
 function _notifySubscribers() {
-	for (const fn of _subscribers) {
-		fn(_state);
-	}
+	untrack(() => { for (const fn of _subscribers) fn(_state); });
 }
 
 // ============================================================================
@@ -146,7 +145,7 @@ export const pwa = {
 	 */
 	subscribe(fn: Subscriber) {
 		_subscribers.add(fn);
-		fn(_state);
+		untrack(() => fn(_state));
 		return () => {
 			_subscribers.delete(fn);
 		};
@@ -284,7 +283,7 @@ function createDerivedBool(getter: () => boolean) {
 			// We piggyback on the parent store's subscriber mechanism
 			const handler: Subscriber = () => fn(getter());
 			_subscribers.add(handler);
-			fn(getter());
+			untrack(() => fn(getter()));
 			return () => {
 				_subscribers.delete(handler);
 			};

@@ -9,6 +9,7 @@
  */
 
 import { get } from 'svelte/store';
+import { untrack } from 'svelte';
 import { activeSession } from '../active-session';
 import { sessionState } from '../session/session-state';
 import type { SessionUsage } from '../session/session-state.svelte';
@@ -33,8 +34,10 @@ function createMultiDerived<T>(
 		initialized = true;
 		for (const parent of parents) {
 			parent.subscribe(() => {
-				const value = getter();
-				for (const fn of subscribers) fn(value);
+				untrack(() => {
+					const value = getter();
+					for (const fn of subscribers) fn(value);
+				});
 			});
 		}
 	}
@@ -46,7 +49,7 @@ function createMultiDerived<T>(
 		subscribe(fn: Subscriber<T>) {
 			setup();
 			subscribers.add(fn);
-			fn(getter());
+			untrack(() => fn(getter()));
 			return () => {
 				subscribers.delete(fn);
 			};
@@ -72,11 +75,11 @@ const EMPTY_USAGE: SessionUsage = {
 export const activeUsage = createMultiDerived<SessionUsage>(
 	[activeSession, sessionState],
 	() => {
-		const $activeSession = get(activeSession);
-		const $sessionState = get(sessionState);
+		const active = get(activeSession);
+		const state = get(sessionState);
 
-		if ($activeSession.sessionId) {
-			const session = $sessionState.sessions.get($activeSession.sessionId);
+		if (active.sessionId) {
+			const session = state.sessions.get(active.sessionId);
 			if (session && session.usage.contextUsed > 0) {
 				return session.usage;
 			}
@@ -84,11 +87,11 @@ export const activeUsage = createMultiDerived<SessionUsage>(
 
 		// Fallback to activeSession store values
 		return {
-			inputTokens: $activeSession.totalTokensIn,
-			outputTokens: $activeSession.totalTokensOut,
-			cacheCreationTokens: $activeSession.totalCacheCreationTokens,
-			cacheReadTokens: $activeSession.totalCacheReadTokens,
-			contextUsed: $activeSession.contextUsed ?? 0,
+			inputTokens: active.totalTokensIn,
+			outputTokens: active.totalTokensOut,
+			cacheCreationTokens: active.totalCacheCreationTokens,
+			cacheReadTokens: active.totalCacheReadTokens,
+			contextUsed: active.contextUsed ?? 0,
 		};
 	}
 );

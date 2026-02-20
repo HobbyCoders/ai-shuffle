@@ -10,6 +10,7 @@
  */
 
 import { browser } from '$app/environment';
+import { untrack } from 'svelte';
 
 // ─── Types (re-exported) ─────────────────────────────────────────────────────
 
@@ -202,13 +203,11 @@ function _notifySubscribers() {
 		}
 	}
 
-	for (const fn of _subscribers) {
-		fn(_state);
-	}
+	untrack(() => { for (const fn of _subscribers) fn(_state); });
 }
 
 function _update(fn: (s: GroupsState) => GroupsState) {
-	_state = fn(_state);
+	_state = fn(untrack(() => _state));
 	_notifySubscribers();
 }
 
@@ -227,9 +226,7 @@ if (browser) {
 			saveToLocalStorage(backendState);
 			backendLoaded = true;
 			// Notify subscribers of the backend-loaded state
-			for (const fn of _subscribers) {
-				fn(_state);
-			}
+			untrack(() => { for (const fn of _subscribers) fn(_state); });
 		} else {
 			// No backend data, sync localStorage to backend
 			if (_state.projects.groups.length > 0 ||
@@ -260,7 +257,7 @@ export const groups = {
 
 	subscribe(fn: Subscriber<GroupsState>) {
 		_subscribers.add(fn);
-		fn(_state);
+		untrack(() => fn(_state));
 		return () => { _subscribers.delete(fn); };
 	},
 
@@ -498,7 +495,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: Subscriber<T>) {
 			const handler: Subscriber<GroupsState> = () => fn(getter());
 			_subscribers.add(handler);
-			fn(getter());
+			untrack(() => fn(getter()));
 			return () => { _subscribers.delete(handler); };
 		}
 	};

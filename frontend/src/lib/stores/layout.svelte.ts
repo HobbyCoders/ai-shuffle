@@ -5,6 +5,7 @@
  * compatibility with $storeName auto-subscription in .svelte files.
  */
 import { browser } from '$app/environment';
+import { untrack } from 'svelte';
 
 // ============================================
 // Types
@@ -103,13 +104,11 @@ const _subscribers = new Set<Subscriber<LayoutState>>();
 
 function _notifyAndPersist() {
 	persistState(_state);
-	for (const fn of _subscribers) {
-		fn(_state);
-	}
+	untrack(() => { for (const fn of _subscribers) fn(_state); });
 }
 
 function _update(fn: (s: LayoutState) => LayoutState) {
-	_state = fn(_state);
+	_state = fn(untrack(() => _state));
 	_notifyAndPersist();
 }
 
@@ -124,7 +123,7 @@ export const layout = {
 
 	subscribe(fn: Subscriber<LayoutState>) {
 		_subscribers.add(fn);
-		fn(_state);
+		untrack(() => fn(_state));
 		return () => {
 			_subscribers.delete(fn);
 		};
@@ -201,7 +200,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: Subscriber<T>) {
 			const handler: Subscriber<LayoutState> = () => fn(getter());
 			_subscribers.add(handler);
-			fn(getter());
+			untrack(() => fn(getter()));
 			return () => {
 				_subscribers.delete(handler);
 			};

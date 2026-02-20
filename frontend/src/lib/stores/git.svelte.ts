@@ -9,6 +9,7 @@
  */
 
 import * as gitApi from '$lib/api/git';
+import { untrack } from 'svelte';
 
 // Re-export types from API
 export type {
@@ -79,13 +80,11 @@ type Subscriber = (value: GitState) => void;
 const _subscribers = new Set<Subscriber>();
 
 function _notifySubscribers() {
-	for (const fn of _subscribers) {
-		fn(_state);
-	}
+	untrack(() => { for (const fn of _subscribers) fn(_state); });
 }
 
 function _update(fn: (s: GitState) => GitState) {
-	_state = fn(_state);
+	_state = fn(untrack(() => _state));
 	_notifySubscribers();
 }
 
@@ -239,7 +238,7 @@ export const git = {
 
 	subscribe(fn: Subscriber) {
 		_subscribers.add(fn);
-		fn(_state);
+		untrack(() => fn(_state));
 		return () => {
 			_subscribers.delete(fn);
 		};
@@ -715,7 +714,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: (value: T) => void) {
 			const handler: Subscriber = () => fn(getter());
 			_subscribers.add(handler);
-			fn(getter());
+			untrack(() => fn(getter()));
 			return () => {
 				_subscribers.delete(handler);
 			};

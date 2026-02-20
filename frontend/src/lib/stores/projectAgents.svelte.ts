@@ -15,6 +15,7 @@ import type {
 	UpdateProjectAgentRequest
 } from '$lib/api/projectAgents';
 import * as projectAgentsApi from '$lib/api/projectAgents';
+import { untrack } from 'svelte';
 
 // ============================================================================
 // Types
@@ -57,13 +58,11 @@ type Subscriber<T> = (value: T) => void;
 const _subscribers = new Set<Subscriber<ProjectAgentsState>>();
 
 function _notifySubscribers() {
-	for (const fn of _subscribers) {
-		fn(_state);
-	}
+	untrack(() => { for (const fn of _subscribers) fn(_state); });
 }
 
 function _update(fn: (s: ProjectAgentsState) => ProjectAgentsState) {
-	_state = fn(_state);
+	_state = fn(untrack(() => _state));
 	_notifySubscribers();
 }
 
@@ -78,7 +77,7 @@ export const projectAgents = {
 
 	subscribe(fn: Subscriber<ProjectAgentsState>) {
 		_subscribers.add(fn);
-		fn(_state);
+		untrack(() => fn(_state));
 		return () => {
 			_subscribers.delete(fn);
 		};
@@ -268,7 +267,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: Subscriber<T>) {
 			const handler: Subscriber<ProjectAgentsState> = () => fn(getter());
 			_subscribers.add(handler);
-			fn(getter());
+			untrack(() => fn(getter()));
 			return () => {
 				_subscribers.delete(handler);
 			};

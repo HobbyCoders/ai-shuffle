@@ -13,6 +13,7 @@
 
 import type { Hook, HookCreate, HookUpdate, HookTestResult, PluginHookInfo } from '$lib/api/client';
 import * as api from '$lib/api/client';
+import { untrack } from 'svelte';
 
 // ============================================================================
 // Types
@@ -57,13 +58,11 @@ type Subscriber<T> = (value: T) => void;
 const _subscribers = new Set<Subscriber<HooksState>>();
 
 function _notifySubscribers() {
-	for (const fn of _subscribers) {
-		fn(_state);
-	}
+	untrack(() => { for (const fn of _subscribers) fn(_state); });
 }
 
 function _update(fn: (s: HooksState) => HooksState) {
-	_state = fn(_state);
+	_state = fn(untrack(() => _state));
 	_notifySubscribers();
 }
 
@@ -78,7 +77,7 @@ export const hooks = {
 
 	subscribe(fn: Subscriber<HooksState>) {
 		_subscribers.add(fn);
-		fn(_state);
+		untrack(() => fn(_state));
 		return () => {
 			_subscribers.delete(fn);
 		};
@@ -318,7 +317,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: Subscriber<T>) {
 			const handler: Subscriber<HooksState> = () => fn(getter());
 			_subscribers.add(handler);
-			fn(getter());
+			untrack(() => fn(getter()));
 			return () => {
 				_subscribers.delete(handler);
 			};
