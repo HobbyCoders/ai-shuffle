@@ -9,13 +9,16 @@
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
-	import { Users, Search, Upload, Sparkles, Plus, Download, Trash2, Wrench, Bot, MessageSquare } from 'lucide-svelte';
+	import { Users, Search, Upload, Sparkles, Plus, Download, Trash2, Wrench, Bot, MessageSquare, Settings, FileText, SlidersHorizontal, ChevronRight, Check, Info } from 'lucide-svelte';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data';
 	import { groups as groupsStore } from '$lib/stores/groups';
 	import { plugins, fileBasedAgents } from '$lib/stores/plugins';
 	import type { PluginInfo, FileBasedAgent } from '$lib/api/plugins';
 	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
 	import './card-design-system.css';
+
+	// Icon map for tabs
+	const tabIcons = { general: Settings, tools: Wrench, agents: Bot, prompt: FileText, advanced: SlidersHorizontal } as const;
 
 	// Types
 	interface AITool {
@@ -828,198 +831,227 @@
 				{ label: 'Profiles', onclick: backToList },
 				{ label: editingProfile ? editingProfile.name : 'New Profile' }
 			]}
+			noPadding={true}
 		>
 			{#snippet headerTabs()}
 				<div class="fp-tab-bar">
 					{#each tabs as tab}
+						{@const IconComponent = tabIcons[tab.id as keyof typeof tabIcons]}
 						<button class="fp-tab" class:active={activeTab === tab.id} onclick={() => (activeTab = tab.id)}>
-							{tab.label}
+							<IconComponent size={14} />
+							<span class="tab-label">{tab.label}</span>
 						</button>
 					{/each}
 				</div>
 			{/snippet}
 
-			<!-- Tab Content (reuses card-system classes) -->
-			<div class="card-system">
+			<!-- Tab Content -->
+			<div class="card-system pf-content">
 				{#if activeTab === 'general'}
-					<!-- General Tab -->
-					<div class="card-form-section">
-						<h3 class="card-form-title">Profile Information</h3>
-						<div class="form-field">
-							<label class="card-form-label" for="profile-name">Name <span class="required">*</span></label>
-							<input id="profile-name" bind:value={profileForm.name} class="card-form-input" placeholder="My Profile" />
+				<!-- ═══ GENERAL TAB ═══ -->
+					<div class="pf-section">
+						<div class="pf-section-header">
+							<Users size={16} />
+							<h3>Profile Information</h3>
 						</div>
-						<div class="form-field full-width">
-							<label class="card-form-label" for="profile-description">Description</label>
-							<input id="profile-description" bind:value={profileForm.description} class="card-form-input" placeholder="Optional description" />
+						<div class="pf-field-grid">
+							<div class="pf-field">
+								<label class="pf-label">Name <span class="required">*</span></label>
+								<input bind:value={profileForm.name} class="pf-input" placeholder="My Custom Agent" />
+							</div>
+							<div class="pf-field">
+								<label class="pf-label">Description</label>
+								<input bind:value={profileForm.description} class="pf-input" placeholder="A coding assistant for frontend work" />
+							</div>
 						</div>
 					</div>
 
-					<div class="card-form-section">
-						<h3 class="card-form-title">Core Settings</h3>
-						<div class="form-field">
-							<span class="card-form-label">Model — {#if profileForm.model === 'haiku'}fastest and most compact, ideal for simple tasks{:else if profileForm.model === 'sonnet'}balanced performance, recommended for most use cases{:else if profileForm.model === 'opus'}most capable, best for complex reasoning{:else}custom model string{/if}</span>
-							<div class="card-mode-selector">
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'haiku'} onclick={() => profileForm.model = 'haiku'}>Haiku</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'sonnet'} onclick={() => profileForm.model = 'sonnet'}>Sonnet</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.model === 'opus'} onclick={() => profileForm.model = 'opus'}>Opus</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={!['haiku','sonnet','opus'].includes(profileForm.model)} onclick={() => profileForm.model = ''}>Custom</button>
-							</div>
-							{#if !['haiku','sonnet','opus'].includes(profileForm.model)}
-								<input type="text" class="card-form-input" bind:value={profileForm.model} placeholder="e.g. claude-opus-4-6" />
-							{/if}
-						</div>
-						<div class="form-field">
-							<span class="card-form-label">Permission Mode — {#if profileForm.permission_mode === 'default'}ask for confirmation before executing tools{:else if profileForm.permission_mode === 'acceptEdits'}auto-approve file edits, ask for other tools{:else if profileForm.permission_mode === 'plan'}create plans without executing, for review workflows{:else if profileForm.permission_mode === 'bypassPermissions'}execute all tools without confirmation{/if}</span>
-							<div class="card-mode-selector">
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'default'} onclick={() => profileForm.permission_mode = 'default'}>Default</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'acceptEdits'} onclick={() => profileForm.permission_mode = 'acceptEdits'}>Accept Edits</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'plan'} onclick={() => profileForm.permission_mode = 'plan'}>Plan</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.permission_mode === 'bypassPermissions'} onclick={() => profileForm.permission_mode = 'bypassPermissions'}>Bypass</button>
-							</div>
-						</div>
-						<div class="form-field">
-							<span class="card-form-label">Plan Exit Behavior — {#if profileForm.plan_exit_behavior === 'normal'}keep conversation context when plan is approved{:else}clear conversation context when plan is approved for a fresh execution window{/if}</span>
-							<div class="card-mode-selector">
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.plan_exit_behavior === 'normal'} onclick={() => profileForm.plan_exit_behavior = 'normal'}>Normal</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.plan_exit_behavior === 'clear_context'} onclick={() => profileForm.plan_exit_behavior = 'clear_context'}>Clear Context</button>
-							</div>
-						</div>
-						<!-- Thinking config: controls whether/how the model uses extended thinking -->
-						<div class="form-field">
-							<span class="card-form-label">Thinking — {#if profileForm.thinking_mode === 'default'}SDK default behavior{:else if profileForm.thinking_mode === 'disabled'}extended thinking disabled{:else if profileForm.thinking_mode === 'adaptive'}adaptive thinking, model decides when to think{:else if profileForm.thinking_mode === 'think'}enabled with ~8K token budget{:else if profileForm.thinking_mode === 'think_harder'}enabled with ~24K token budget{:else if profileForm.thinking_mode === 'ultra_think'}enabled with ~64K token budget{/if}</span>
-							<div class="card-mode-selector">
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'default'} onclick={() => profileForm.thinking_mode = 'default'}>Default</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'disabled'} onclick={() => profileForm.thinking_mode = 'disabled'}>Off</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'adaptive'} onclick={() => profileForm.thinking_mode = 'adaptive'}>Adaptive</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'think'} onclick={() => profileForm.thinking_mode = 'think'}>8K</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'think_harder'} onclick={() => profileForm.thinking_mode = 'think_harder'}>24K</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.thinking_mode === 'ultra_think'} onclick={() => profileForm.thinking_mode = 'ultra_think'}>64K</button>
-							</div>
-						</div>
-						<!-- Effort: controls reasoning depth (independent of thinking config) -->
-						<div class="form-field">
-							<span class="card-form-label">Effort — {#if !profileForm.effort}use model default{:else if profileForm.effort === 'low'}light reasoning, good for simple tasks{:else if profileForm.effort === 'medium'}balanced reasoning, good for most tasks{:else if profileForm.effort === 'high'}deep reasoning, good for complex problems{:else if profileForm.effort === 'max'}maximum reasoning depth, for challenging problems{/if}</span>
-							<div class="card-mode-selector">
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={!profileForm.effort} onclick={() => profileForm.effort = null}>Default</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'low'} onclick={() => profileForm.effort = 'low'}>Low</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'medium'} onclick={() => profileForm.effort = 'medium'}>Medium</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'high'} onclick={() => profileForm.effort = 'high'}>High</button>
-								<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.effort === 'max'} onclick={() => profileForm.effort = 'max'}>Max</button>
-							</div>
-						</div>
-						<div class="form-field">
-							<label class="card-form-label" for="profile-max-turns">Max Turns — maximum agentic turns per query (leave empty for unlimited)</label>
-							<input id="profile-max-turns" type="number" bind:value={profileForm.max_turns} class="card-form-input" placeholder="Unlimited" />
-						</div>
-					</div>
+					<div class="pf-divider"></div>
 
-					<div class="card-form-section">
-						<h3 class="card-form-title">Behavior</h3>
-						<div class="checkbox-group">
-							<label class="checkbox-item">
-								<input type="checkbox" bind:checked={profileForm.include_partial_messages} class="checkbox-input" />
-								<div class="checkbox-content">
-									<span class="checkbox-label">Include Partial Messages</span>
-									<p class="checkbox-desc">Stream partial text as it's being generated</p>
-								</div>
-							</label>
+					<div class="pf-section">
+						<div class="pf-section-header">
+							<Settings size={16} />
+							<h3>Model & AI Settings</h3>
 						</div>
-					</div>
-				{:else if activeTab === 'tools'}
-					<!-- Unified Tools Tab -->
-
-					<!-- SDK Tool Access Mode -->
-					<div class="card-form-section">
-						<div class="section-header">
-							<h3 class="card-form-title">Tool Access Mode</h3>
-							<span class="card-badge card-badge--primary">{availableTools.all_tools.length} total</span>
-						</div>
-						<div class="card-mode-selector">
-							<button type="button" class="card-mode-btn" class:card-mode-btn--active={toolSelectionMode === 'all'} onclick={() => { toolSelectionMode = 'all'; profileForm.allowed_tools = []; profileForm.disallowed_tools = []; }}>All Tools</button>
-							<button type="button" class="card-mode-btn" class:card-mode-btn--active={toolSelectionMode === 'allow'} onclick={() => { toolSelectionMode = 'allow'; profileForm.disallowed_tools = []; }}>Allow Only</button>
-							<button type="button" class="card-mode-btn" class:card-mode-btn--active={toolSelectionMode === 'disallow'} onclick={() => { toolSelectionMode = 'disallow'; profileForm.allowed_tools = []; }}>Disallow</button>
-						</div>
-						<p class="card-form-hint">
-							{#if toolSelectionMode === 'all'}Agent can use all available SDK and MCP tools.
-							{:else if toolSelectionMode === 'allow'}Agent can ONLY use selected SDK and MCP tools.
-							{:else}Agent can use all SDK and MCP tools EXCEPT selected ones.{/if}
-						</p>
-					</div>
-
-					<!-- Section 1: Built-in SDK Tools -->
-					<div class="tool-source-section">
-						<button type="button" class="source-section-header" onclick={() => toggleSection('sdk')}>
-							<span class="source-section-title">Built-in Tools</span>
-							<span class="card-badge card-badge--muted">{sdkToolCategories.reduce((sum, c) => sum + c.tools.length, 0)}</span>
-							<svg class="chevron" class:expanded={expandedSections.sdk} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
-						</button>
-						{#if expandedSections.sdk}
-							<div class="source-section-body">
-								{#if toolSelectionMode !== 'all'}
-									<div class="tools-list">
-										{#each sdkToolCategories as category}
-											{#if category.tools.length > 0}
-												{@const state = getCategorySelectionState(category)}
-												<div class="tool-category">
-													<button type="button" class="category-header" onclick={() => toggleCategory(category)}>
-														<div class="category-checkbox" class:checked={state !== 'none'} class:partial={state === 'some'}>
-															{#if state === 'all'}
-																<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
-															{:else if state === 'some'}
-																<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" /></svg>
-															{/if}
-														</div>
-														<span class="category-name">{category.name}</span>
-														<span class="category-count">{category.tools.length}</span>
-													</button>
-													<div class="category-tools">
-														{#each category.tools as tool}
-															{@const isSelected = toolSelectionMode === 'allow' ? profileForm.allowed_tools.includes(tool.name) : profileForm.disallowed_tools.includes(tool.name)}
-															<label class="tool-item">
-																<input type="checkbox" checked={isSelected} onchange={() => toggleTool(tool.name)} class="tool-checkbox" />
-																<span class="tool-name" title={tool.description}>{tool.name}</span>
-															</label>
-														{/each}
-													</div>
-												</div>
-											{/if}
-										{/each}
-									</div>
-									<div class="selection-count">
-										{#if toolSelectionMode === 'allow'}{profileForm.allowed_tools.length} tool{profileForm.allowed_tools.length !== 1 ? 's' : ''} allowed
-										{:else}{profileForm.disallowed_tools.length} tool{profileForm.disallowed_tools.length !== 1 ? 's' : ''} blocked{/if}
-									</div>
-								{:else}
-									<p class="card-form-hint" style="padding: 0 var(--space-4, 16px) var(--space-3, 12px);">All built-in tools are available.</p>
+						<div class="pf-field-grid">
+							<div class="pf-field">
+								<label class="pf-label">Model</label>
+								<select class="pf-select" value={['haiku','sonnet','opus'].includes(profileForm.model) ? profileForm.model : '__custom__'} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; profileForm.model = v === '__custom__' ? '' : v; }}>
+									<option value="haiku">Haiku</option>
+									<option value="sonnet">Sonnet</option>
+									<option value="opus">Opus</option>
+									<option value="__custom__">Custom...</option>
+								</select>
+								{#if !['haiku','sonnet','opus'].includes(profileForm.model)}
+									<input type="text" bind:value={profileForm.model} class="pf-input pf-input--mono" placeholder="e.g. claude-opus-4-6" style="margin-top: 6px;" />
 								{/if}
 							</div>
-						{/if}
+							<div class="pf-field">
+								<label class="pf-label">Permission Mode</label>
+								<select bind:value={profileForm.permission_mode} class="pf-select">
+									<option value="default">Default</option>
+									<option value="acceptEdits">Accept Edits</option>
+									<option value="plan">Plan</option>
+									<option value="bypassPermissions">Bypass Permissions</option>
+								</select>
+							</div>
+							<div class="pf-field">
+								<label class="pf-label">Thinking Mode</label>
+								<select bind:value={profileForm.thinking_mode} class="pf-select">
+									<option value="default">Default</option>
+									<option value="disabled">Off</option>
+									<option value="adaptive">Adaptive</option>
+									<option value="think">8K Budget</option>
+									<option value="think_harder">24K Budget</option>
+									<option value="ultra_think">64K Budget</option>
+								</select>
+							</div>
+							<div class="pf-field">
+								<label class="pf-label">Effort Level</label>
+								<select class="pf-select" value={profileForm.effort || ''} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; profileForm.effort = v ? v as 'low' | 'medium' | 'high' | 'max' : null; }}>
+									<option value="">Default</option>
+									<option value="low">Low</option>
+									<option value="medium">Medium</option>
+									<option value="high">High</option>
+									<option value="max">Max</option>
+								</select>
+							</div>
+							<div class="pf-field">
+								<label class="pf-label">Max Turns</label>
+								<input type="number" bind:value={profileForm.max_turns} class="pf-input" placeholder="Unlimited" />
+							</div>
+							<div class="pf-field">
+								<label class="pf-label">Plan Exit Behavior</label>
+								<select bind:value={profileForm.plan_exit_behavior} class="pf-select">
+									<option value="normal">Normal</option>
+									<option value="clear_context">Clear Context</option>
+								</select>
+							</div>
+						</div>
 					</div>
 
-					<!-- Section 2: AI Tools -->
-					<div class="tool-source-section">
-						<button type="button" class="source-section-header" onclick={() => toggleSection('ai')}>
-							<span class="source-section-title">AI Tools</span>
-							{#if !aiToolsLoading}
-								<span class="card-badge card-badge--primary">{aiToolCount} enabled</span>
-							{/if}
-							<svg class="chevron" class:expanded={expandedSections.ai} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
-						</button>
-						{#if expandedSections.ai}
-							<div class="source-section-body">
-								<div class="source-section-controls">
-									<div class="card-mode-selector">
-										<button type="button" class="card-mode-btn" class:card-mode-btn--active={aiToolSelectionMode === 'all'} onclick={() => (aiToolSelectionMode = 'all')}>All Tools</button>
-										<button type="button" class="card-mode-btn" class:card-mode-btn--active={aiToolSelectionMode === 'custom'} onclick={() => (aiToolSelectionMode = 'custom')}>Custom</button>
-									</div>
+					<div class="pf-divider"></div>
+
+					<div class="pf-section">
+						<div class="pf-section-header">
+							<SlidersHorizontal size={16} />
+							<h3>Behavior</h3>
+						</div>
+						<div class="pf-toggle-row">
+							<div class="pf-toggle-info">
+								<span class="pf-toggle-title">Include Partial Messages</span>
+								<span class="pf-toggle-desc">Stream partial text during AI generation for real-time feedback</span>
+							</div>
+							<button
+								type="button"
+								class="pf-toggle"
+								class:active={profileForm.include_partial_messages}
+								role="switch"
+								aria-checked={profileForm.include_partial_messages}
+								onclick={() => profileForm.include_partial_messages = !profileForm.include_partial_messages}
+							>
+								<span class="pf-toggle-knob"></span>
+							</button>
+						</div>
+					</div>
+
+				{:else if activeTab === 'tools'}
+					<!-- ═══ TOOLS TAB ═══ -->
+					<div class="pf-section">
+						<div class="pf-section-header">
+							<Wrench size={16} />
+							<h3>Tool Access</h3>
+						</div>
+						<p class="pf-desc">Control which tools this profile can access during conversations.</p>
+						<select class="pf-select" bind:value={toolSelectionMode} onchange={() => { if (toolSelectionMode === 'all') { profileForm.allowed_tools = []; profileForm.disallowed_tools = []; } else if (toolSelectionMode === 'allow') { profileForm.disallowed_tools = []; } else { profileForm.allowed_tools = []; } }}>
+							<option value="all">All Tools Allowed</option>
+							<option value="allow">Allow Only Selected</option>
+							<option value="disallow">Disallow Selected</option>
+						</select>
+					</div>
+
+					<div class="pf-section">
+						<div class="pf-section-header">
+							<Settings size={16} />
+							<h3>Tool Categories</h3>
+						</div>
+						<p class="pf-desc">Browse and manage tools by category. Toggle entire categories on or off.</p>
+						<div class="pf-category-list">
+							<!-- Built-in SDK Tools -->
+							<button type="button" class="pf-category-card" onclick={() => toggleSection('sdk')}>
+								<div class="pf-category-icon">
+									<Wrench size={18} />
 								</div>
-								{#if aiToolSelectionMode === 'custom'}
+								<div class="pf-category-info">
+									<span class="pf-category-name">Built-in Tools</span>
+									<span class="pf-category-desc">{sdkToolCategories.map(c => c.name).join(', ')}</span>
+								</div>
+								<span class="pf-category-count">{sdkToolCategories.reduce((sum, c) => sum + c.tools.length, 0)}</span>
+								<ChevronRight size={16} class="pf-category-chevron" />
+							</button>
+
+							{#if expandedSections.sdk}
+								<div class="pf-category-expanded">
+									{#if toolSelectionMode !== 'all'}
+										<div class="tools-list">
+											{#each sdkToolCategories as category}
+												{#if category.tools.length > 0}
+													{@const state = getCategorySelectionState(category)}
+													<div class="tool-category">
+														<button type="button" class="category-header" onclick={() => toggleCategory(category)}>
+															<div class="category-checkbox" class:checked={state !== 'none'} class:partial={state === 'some'}>
+																{#if state === 'all'}
+																	<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
+																{:else if state === 'some'}
+																	<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" /></svg>
+																{/if}
+															</div>
+															<span class="category-name">{category.name}</span>
+															<span class="category-count">{category.tools.length}</span>
+														</button>
+														<div class="category-tools">
+															{#each category.tools as tool}
+																{@const isSelected = toolSelectionMode === 'allow' ? profileForm.allowed_tools.includes(tool.name) : profileForm.disallowed_tools.includes(tool.name)}
+																<label class="tool-item">
+																	<input type="checkbox" checked={isSelected} onchange={() => toggleTool(tool.name)} class="tool-checkbox" />
+																	<span class="tool-name" title={tool.description}>{tool.name}</span>
+																</label>
+															{/each}
+														</div>
+													</div>
+												{/if}
+											{/each}
+										</div>
+										<div class="selection-count">
+											{#if toolSelectionMode === 'allow'}{profileForm.allowed_tools.length} tool{profileForm.allowed_tools.length !== 1 ? 's' : ''} allowed
+											{:else}{profileForm.disallowed_tools.length} tool{profileForm.disallowed_tools.length !== 1 ? 's' : ''} blocked{/if}
+										</div>
+									{:else}
+										<p class="pf-desc" style="padding: 12px 16px;">All built-in tools are available.</p>
+									{/if}
+								</div>
+							{/if}
+
+							<!-- AI Tools -->
+							<button type="button" class="pf-category-card" onclick={() => toggleSection('ai')}>
+								<div class="pf-category-icon">
+									<Sparkles size={18} />
+								</div>
+								<div class="pf-category-info">
+									<span class="pf-category-name">AI Tools</span>
+									<span class="pf-category-desc">Image generation, video, 3D models, web search</span>
+								</div>
+								<span class="pf-category-count">{aiToolCount}</span>
+								<ChevronRight size={16} class="pf-category-chevron" />
+							</button>
+
+							{#if expandedSections.ai}
+								<div class="pf-category-expanded">
 									{#if aiToolsLoading}
 										<div class="loading-state">Loading AI tools...</div>
 									{:else if aiToolCategories.length === 0}
 										<div class="card-empty-state"><p class="card-empty-description">No AI tools available. Configure API keys in Settings.</p></div>
-									{:else}
+									{:else if toolSelectionMode !== 'all'}
 										<div class="tools-list">
 											{#each aiToolCategories as category}
 												{#if category.tools.length > 0}
@@ -1053,171 +1085,282 @@
 												{/if}
 											{/each}
 										</div>
+									{:else}
+										<p class="pf-desc" style="padding: 12px 16px;">All AI tools are available.</p>
 									{/if}
-								{:else}
-									<p class="card-form-hint" style="padding: 0 var(--space-4, 16px) var(--space-3, 12px);">All configured AI tools are enabled.</p>
-								{/if}
-							</div>
-						{/if}
-					</div>
-
-					<!-- Section 3: MCP Server Tools (read-only) -->
-					<div class="tool-source-section">
-						<button type="button" class="source-section-header" onclick={() => toggleSection('mcp')}>
-							<span class="source-section-title">MCP Tools</span>
-							<span class="card-badge card-badge--muted">{mcpToolCount}</span>
-							<span class="card-badge card-badge--info">read-only</span>
-							<svg class="chevron" class:expanded={expandedSections.mcp} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
-						</button>
-						{#if expandedSections.mcp}
-							<div class="source-section-body">
-								{#if mcpServerNames.length === 0}
-									<div class="card-empty-state" style="padding: var(--space-3, 12px) var(--space-4, 16px);">
-										<p class="card-empty-description">No MCP tools discovered.</p>
-										<p class="card-empty-description small">Configure MCP servers in Settings.</p>
-									</div>
-								{:else}
-									<p class="card-form-hint" style="padding: 0 var(--space-4, 16px) var(--space-2, 8px);">MCP tools are globally configured. Subject to the tool access mode above.</p>
-									<div class="tools-list">
-										{#each mcpServerNames as server}
-											{@const tools = mcpToolsByServer[server]}
-											<div class="tool-category">
-												<div class="category-header readonly">
-													<span class="category-name">{server}</span>
-													<span class="category-count">{tools.length}</span>
-												</div>
-												<div class="category-tools">
-													{#each tools as tool}
-														<div class="tool-item readonly">
-															<span class="tool-name" title={tool.description}>{tool.name}</span>
-														</div>
-													{/each}
-												</div>
-											</div>
-										{/each}
-									</div>
-								{/if}
-							</div>
-						{/if}
-					</div>
-
-					<!-- Section 4: Plugin Tools (read-only) -->
-					<div class="tool-source-section">
-						<button type="button" class="source-section-header" onclick={() => toggleSection('plugins')}>
-							<span class="source-section-title">Plugin Tools</span>
-							<span class="card-badge card-badge--muted">{pluginAgents.reduce((sum, a) => sum + (a.tools?.length || 0), 0)}</span>
-							<span class="card-badge card-badge--info">read-only</span>
-							<svg class="chevron" class:expanded={expandedSections.plugins} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
-						</button>
-						{#if expandedSections.plugins}
-							<div class="source-section-body">
-								<div class="source-section-actions">
-									<button type="button" class="text-btn primary" onclick={() => onOpenPlugins?.()}>Manage Plugins</button>
 								</div>
-								{#if pluginAgents.length === 0}
-									<div class="card-empty-state" style="padding: var(--space-3, 12px) var(--space-4, 16px);">
-										<p class="card-empty-description">No plugin tools available.</p>
-										<p class="card-empty-description small">Install and enable plugins to get tools.</p>
-									</div>
-								{:else}
-									<p class="card-form-hint" style="padding: 0 var(--space-4, 16px) var(--space-2, 8px);">Tools from enabled plugins (managed via plugin settings)</p>
-									<div class="plugin-agents-list" style="padding: 0 var(--space-4, 16px) var(--space-3, 12px);">
-										{#each pluginAgents as agent (agent.id)}
-											<div class="plugin-agent-item">
-												<div class="plugin-agent-info">
-													<div class="plugin-agent-header">
-														<span class="plugin-agent-name">{agent.name}</span>
-														<span class="card-badge card-badge--muted">{agent.plugin_name}</span>
+							{/if}
+
+							<!-- MCP Server Tools -->
+							<button type="button" class="pf-category-card" onclick={() => toggleSection('mcp')}>
+								<div class="pf-category-icon">
+									<Bot size={18} />
+								</div>
+								<div class="pf-category-info">
+									<span class="pf-category-name">MCP Server Tools</span>
+									<span class="pf-category-desc">Browser, Pencil, external integrations</span>
+								</div>
+								<span class="pf-category-count">{mcpToolCount}</span>
+								<ChevronRight size={16} class="pf-category-chevron" />
+							</button>
+
+							{#if expandedSections.mcp}
+								<div class="pf-category-expanded">
+									{#if mcpServerNames.length === 0}
+										<p class="pf-desc" style="padding: 12px 16px;">No MCP tools discovered. Configure MCP servers in Settings.</p>
+									{:else}
+										<p class="pf-desc" style="padding: 12px 16px;">MCP tools are globally configured. Subject to the tool access mode above.</p>
+										<div class="tools-list">
+											{#each mcpServerNames as server}
+												{@const tools = mcpToolsByServer[server]}
+												<div class="tool-category">
+													<div class="category-header readonly">
+														<span class="category-name">{server}</span>
+														<span class="category-count">{tools.length}</span>
+													</div>
+													<div class="category-tools">
+														{#each tools as tool}
+															<div class="tool-item readonly">
+																<span class="tool-name" title={tool.description}>{tool.name}</span>
+															</div>
+														{/each}
 													</div>
 												</div>
-												{#if agent.tools && agent.tools.length > 0}
-													<div class="plugin-agent-tools">
-														{#each agent.tools as tool}<span class="tool-badge">{tool}</span>{/each}
-													</div>
-												{/if}
-											</div>
-										{/each}
-									</div>
-								{/if}
-							</div>
-						{/if}
-					</div>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							{/if}
 
-					<!-- Tools Summary -->
-					<div class="tools-summary">
-						{sdkToolCategories.reduce((sum, c) => sum + c.tools.length, 0)} built-in &middot;
-						{aiToolCount} AI &middot;
-						{mcpToolCount} MCP &middot;
-						{pluginAgents.reduce((sum, a) => sum + (a.tools?.length || 0), 0)} plugin
-					</div>
-				{:else if activeTab === 'agents'}
-					<!-- Agents Tab -->
-					<div class="card-form-section">
-						<div class="section-header">
-							<h3 class="card-form-title">Database Subagents</h3>
-							{#if allSubagents.length > 0}
-								<div class="header-actions">
-									<button type="button" class="text-btn muted" onclick={() => (profileForm.enabled_agents = [])}>Clear</button>
-									<button type="button" class="text-btn primary" onclick={() => (profileForm.enabled_agents = allSubagents.map((a) => a.id))}>Select All</button>
+							<!-- Plugin Tools -->
+							<button type="button" class="pf-category-card" onclick={() => toggleSection('plugins')}>
+								<div class="pf-category-icon">
+									<Sparkles size={18} />
+								</div>
+								<div class="pf-category-info">
+									<span class="pf-category-name">Plugin Tools</span>
+									<span class="pf-category-desc">Community extensions and custom plugins</span>
+								</div>
+								<span class="pf-category-count">{pluginAgents.reduce((sum, a) => sum + (a.tools?.length || 0), 0)}</span>
+								<ChevronRight size={16} class="pf-category-chevron" />
+							</button>
+
+							{#if expandedSections.plugins}
+								<div class="pf-category-expanded">
+									<div class="source-section-actions">
+										<button type="button" class="text-btn primary" onclick={() => onOpenPlugins?.()}>Manage Plugins</button>
+									</div>
+									{#if pluginAgents.length === 0}
+										<p class="pf-desc" style="padding: 12px 16px;">No plugin tools available. Install plugins to get tools.</p>
+									{:else}
+										<div class="plugin-agents-list" style="padding: 0 16px 12px;">
+											{#each pluginAgents as agent (agent.id)}
+												<div class="plugin-agent-item">
+													<div class="plugin-agent-info">
+														<div class="plugin-agent-header">
+															<span class="plugin-agent-name">{agent.name}</span>
+															<span class="card-badge card-badge--muted">{agent.plugin_name}</span>
+														</div>
+													</div>
+													{#if agent.tools && agent.tools.length > 0}
+														<div class="plugin-agent-tools">
+															{#each agent.tools as tool}<span class="tool-badge">{tool}</span>{/each}
+														</div>
+													{/if}
+												</div>
+											{/each}
+										</div>
+									{/if}
 								</div>
 							{/if}
 						</div>
-						{#if allSubagents.length === 0}
-							<div class="card-empty-state"><p class="card-empty-description">No database subagents configured</p></div>
-						{:else}
-							<p class="card-form-hint">Select which subagents this profile can use</p>
-							<div class="agents-grid">
-								{#each allSubagents as agent (agent.id)}
-									{@const isSelected = profileForm.enabled_agents.includes(agent.id)}
-									<label class="agent-item" class:selected={isSelected}>
-										<input type="checkbox" checked={isSelected} onchange={() => toggleAgent(agent.id)} class="agent-checkbox" />
-										<div class="agent-info">
-											<div class="agent-header">
-												<span class="agent-name">{agent.name}</span>
-												<span class="card-badge {getModelBadgeClass(agent.model)}">{getModelDisplay(agent.model)}</span>
-											</div>
-											<p class="agent-desc">{agent.description}</p>
-										</div>
-									</label>
-								{/each}
-							</div>
-							<div class="selection-count">{profileForm.enabled_agents.length} of {allSubagents.length} enabled</div>
-						{/if}
 					</div>
-					<!-- Plugin agents now shown in the unified Tools tab -->
+
+					<!-- Tools Summary Bar -->
+					<div class="pf-summary-bar">
+						<div class="pf-summary-left">
+							<Wrench size={14} />
+							<span>{sdkToolCategories.reduce((sum, c) => sum + c.tools.length, 0) + aiToolCount + mcpToolCount + pluginAgents.reduce((sum, a) => sum + (a.tools?.length || 0), 0)} tools enabled across {4} categories</span>
+						</div>
+						<span class="pf-summary-link">Manage individually →</span>
+					</div>
+
+				{:else if activeTab === 'agents'}
+					<!-- ═══ AGENTS TAB ═══ -->
+					<div class="pf-section">
+						<div class="pf-section-header">
+							<Bot size={16} />
+							<h3>Sub-Agents</h3>
+							{#if allSubagents.length > 0}
+								<div class="pf-section-actions">
+									<button type="button" class="text-btn primary" onclick={() => (profileForm.enabled_agents = allSubagents.map((a) => a.id))}>Select All</button>
+									<button type="button" class="text-btn muted" onclick={() => (profileForm.enabled_agents = [])}>Clear All</button>
+								</div>
+							{/if}
+						</div>
+						<p class="pf-desc">Choose which sub-agents this profile can delegate tasks to.</p>
+					</div>
+
+					{#if allSubagents.length === 0}
+						<div class="card-empty-state"><p class="card-empty-description">No database subagents configured</p></div>
+					{:else}
+						<div class="pf-agent-list">
+							{#each allSubagents as agent (agent.id)}
+								{@const isSelected = profileForm.enabled_agents.includes(agent.id)}
+								<label class="pf-agent-card" class:selected={isSelected}>
+									<input type="checkbox" checked={isSelected} onchange={() => toggleAgent(agent.id)} class="pf-agent-checkbox" />
+									<div class="pf-agent-icon" class:active={isSelected}>
+										{#if agent.model === 'opus'}
+											<Bot size={18} />
+										{:else if agent.model === 'haiku'}
+											<Sparkles size={18} />
+										{:else}
+											<MessageSquare size={18} />
+										{/if}
+									</div>
+									<div class="pf-agent-info">
+										<div class="pf-agent-header">
+											<span class="pf-agent-name">{agent.name}</span>
+											<span class="card-badge {getModelBadgeClass(agent.model)}">{getModelDisplay(agent.model)}</span>
+										</div>
+										<p class="pf-agent-desc">{agent.description}</p>
+									</div>
+								</label>
+							{/each}
+						</div>
+
+						<!-- Agents Summary Bar -->
+						<div class="pf-summary-bar">
+							<div class="pf-summary-left">
+								<Bot size={14} />
+								<span>{profileForm.enabled_agents.length} of {allSubagents.length} agents enabled</span>
+							</div>
+							<span class="pf-summary-link">Configure agents →</span>
+						</div>
+					{/if}
+
 				{:else if activeTab === 'prompt'}
-					<!-- System Prompt Tab -->
-					<div class="card-form-section">
-						<h3 class="card-form-title">System Prompt Configuration</h3>
-						<div class="card-mode-selector large">
-							<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.system_prompt_type === 'preset'} onclick={() => (profileForm.system_prompt_type = 'preset')}>Claude Code + Append</button>
-							<button type="button" class="card-mode-btn" class:card-mode-btn--active={profileForm.system_prompt_type === 'custom'} onclick={() => (profileForm.system_prompt_type = 'custom')}>Custom Prompt</button>
+					<!-- ═══ PROMPT TAB ═══ -->
+					<div class="pf-section">
+						<div class="pf-section-header">
+							<FileText size={16} />
+							<h3>System Prompt Mode</h3>
+						</div>
+						<p class="pf-desc">Choose how the system prompt is configured for this profile.</p>
+						<select class="pf-select" bind:value={profileForm.system_prompt_type}>
+							<option value="preset">Claude Code Default + Append</option>
+							<option value="custom">Custom Prompt</option>
+						</select>
+
+						<div class="pf-info-banner">
+							<Info size={14} />
+							<span>
+								{#if profileForm.system_prompt_type === 'preset'}
+									Uses the default Claude Code system prompt with your custom text appended at the end.
+								{:else}
+									Replaces the entire system prompt with your custom content.
+								{/if}
+							</span>
+						</div>
+					</div>
+
+					<div class="pf-section">
+						<div class="pf-section-header">
+							<MessageSquare size={16} />
+							<h3>Custom Prompt</h3>
+							<span class="pf-char-count">
+								{(profileForm.system_prompt_type === 'preset' ? profileForm.system_prompt_append : profileForm.system_prompt_content).length.toLocaleString()} / 10,000
+							</span>
 						</div>
 						{#if profileForm.system_prompt_type === 'preset'}
-							<div class="form-field full-width">
-								<label class="card-form-label" for="profile-append-instructions">Append Instructions</label>
-								<textarea id="profile-append-instructions" bind:value={profileForm.system_prompt_append} class="card-form-input card-form-textarea" rows="8" placeholder="Additional instructions to append to Claude Code's system prompt..."></textarea>
-								<p class="card-form-hint">These instructions will be added after Claude Code's built-in system prompt.</p>
-							</div>
+							<textarea
+								bind:value={profileForm.system_prompt_append}
+								class="pf-textarea"
+								rows="8"
+								placeholder="Additional instructions to append to Claude Code's system prompt..."
+							></textarea>
 						{:else}
-							<div class="form-field full-width">
-								<label class="card-form-label" for="profile-custom-prompt">Custom System Prompt</label>
-								<textarea id="profile-custom-prompt" bind:value={profileForm.system_prompt_content} class="card-form-input card-form-textarea" rows="10" placeholder="Enter your custom system prompt (can be blank)..."></textarea>
-							</div>
-							<label class="checkbox-item highlighted">
-								<input type="checkbox" bind:checked={profileForm.system_prompt_inject_env} class="checkbox-input" />
-								<div class="checkbox-content">
-									<span class="checkbox-label">Inject Environment Details</span>
-									<p class="checkbox-desc">Adds working directory, platform, git status, and today's date</p>
-								</div>
-							</label>
+							<textarea
+								bind:value={profileForm.system_prompt_content}
+								class="pf-textarea"
+								rows="10"
+								placeholder="Enter your custom system prompt..."
+							></textarea>
 						{/if}
 					</div>
+
+					<div class="pf-toggle-row">
+						<div class="pf-toggle-info">
+							<span class="pf-toggle-title">Inject Environment Details</span>
+							<span class="pf-toggle-desc">Automatically inject OS, platform, and working directory info into the prompt.</span>
+						</div>
+						<button
+							type="button"
+							class="pf-toggle"
+							class:active={profileForm.system_prompt_inject_env}
+							role="switch"
+							aria-checked={profileForm.system_prompt_inject_env}
+							onclick={() => profileForm.system_prompt_inject_env = !profileForm.system_prompt_inject_env}
+						>
+							<span class="pf-toggle-knob"></span>
+						</button>
+					</div>
+
 				{:else if activeTab === 'advanced'}
-					<!-- Advanced Tab -->
-					<div class="card-form-section">
-						<h3 class="card-form-title">Settings Sources</h3>
-						<p class="card-form-hint">Load settings from filesystem locations</p>
+					<!-- ═══ ADVANCED TAB ═══ -->
+					<div class="pf-section">
+						<div class="pf-section-header">
+							<SlidersHorizontal size={16} />
+							<h3>Environment</h3>
+						</div>
+						<p class="pf-desc">Configure the working environment for this profile.</p>
+						<div class="pf-field-grid">
+							<div class="pf-field">
+								<label class="pf-label">Working Directory</label>
+								<input bind:value={profileForm.cwd} class="pf-input pf-input--mono" placeholder="/home/user/projects/my-api" />
+							</div>
+							<div class="pf-field">
+								<label class="pf-label">Run as User</label>
+								<input bind:value={profileForm.user} class="pf-input" placeholder="default" />
+							</div>
+						</div>
+					</div>
+
+					<div class="pf-section">
+						<div class="pf-section-header">
+							<Settings size={16} />
+							<h3>Performance & Limits</h3>
+						</div>
+						<div class="pf-field-grid">
+							<div class="pf-field">
+								<label class="pf-label">Max Output Buffer</label>
+								<input type="number" bind:value={profileForm.max_buffer_size} class="pf-input" placeholder="200,000 chars" />
+							</div>
+						</div>
+						<div class="pf-toggle-row" style="margin-top: 12px;">
+							<div class="pf-toggle-info">
+								<span class="pf-toggle-title">File Checkpointing</span>
+								<span class="pf-toggle-desc">Create restore points before file modifications.</span>
+							</div>
+							<button
+								type="button"
+								class="pf-toggle"
+								class:active={profileForm.enable_file_checkpointing}
+								role="switch"
+								aria-checked={profileForm.enable_file_checkpointing}
+								onclick={() => profileForm.enable_file_checkpointing = !profileForm.enable_file_checkpointing}
+							>
+								<span class="pf-toggle-knob"></span>
+							</button>
+						</div>
+					</div>
+
+					<div class="pf-section">
+						<div class="pf-section-header">
+							<FileText size={16} />
+							<h3>Settings Sources</h3>
+						</div>
+						<p class="pf-desc">Load settings from filesystem locations</p>
 						<div class="inline-checkboxes">
 							{#each [{ id: 'user', label: 'User (~/.claude)' }, { id: 'project', label: 'Project (.claude)' }, { id: 'local', label: 'Local' }] as source}
 								<label class="inline-checkbox">
@@ -1227,81 +1370,61 @@
 							{/each}
 						</div>
 					</div>
-					<div class="card-form-section">
-						<h3 class="card-form-title">Environment</h3>
-						<div class="form-grid">
-							<div class="form-field">
-								<label class="card-form-label" for="profile-cwd">Working Directory</label>
-								<input id="profile-cwd" bind:value={profileForm.cwd} class="card-form-input card-form-input--mono" placeholder="/workspace/my-project" />
-							</div>
-							<div class="form-field">
-								<label class="card-form-label" for="profile-user">User Identifier</label>
-								<input id="profile-user" bind:value={profileForm.user} class="card-form-input" placeholder="user@example.com" />
-							</div>
+
+					<div class="pf-section">
+						<div class="pf-section-header">
+							<SlidersHorizontal size={16} />
+							<h3>Environment Variables</h3>
+							<button type="button" class="pf-add-var-btn" onclick={() => { profileForm.env_vars = [...profileForm.env_vars, { key: '', value: '' }]; }}>
+								+ Add Variable
+							</button>
 						</div>
-						<div class="form-field full-width">
-							<label class="card-form-label" for="profile-add-dirs">Additional Directories</label>
-							<input id="profile-add-dirs" bind:value={profileForm.add_dirs} class="card-form-input card-form-input--mono" placeholder="/extra/dir1, /extra/dir2 (comma-separated)" />
-						</div>
-					</div>
-					<div class="card-form-section">
-						<h3 class="card-form-title">Performance</h3>
-						<div class="form-field" style="max-width: 200px;">
-							<label class="card-form-label" for="profile-max-buffer">Max Buffer Size (bytes)</label>
-							<input id="profile-max-buffer" type="number" bind:value={profileForm.max_buffer_size} class="card-form-input" placeholder="Default" />
-						</div>
-					</div>
-					<div class="card-form-section">
-						<h3 class="card-form-title">Rewind & Recovery</h3>
-						<div class="checkbox-group">
-							<label class="checkbox-item">
-								<input type="checkbox" bind:checked={profileForm.enable_file_checkpointing} class="checkbox-input" />
-								<div class="checkbox-content">
-									<span class="checkbox-label">Enable File Checkpointing</span>
-									<p class="checkbox-desc">Create file snapshots for rewind operations. Allows restoring both conversation history and file changes. (SDK 0.1.15+)</p>
-								</div>
-							</label>
-						</div>
-					</div>
-					<div class="card-form-section">
-						<h3 class="card-form-title">Environment Variables</h3>
-						<p class="card-form-description">Set environment variables for Claude Code sessions using this profile.</p>
-						<div class="env-var-add">
-							<select class="card-form-input" onchange={(e) => { const target = e.target as HTMLSelectElement; const key = target.value; if (key === '__custom__') { profileForm.env_vars = [...profileForm.env_vars, { key: '', value: '' }]; } else if (key && !profileForm.env_vars.some(v => v.key === key)) { profileForm.env_vars = [...profileForm.env_vars, { key, value: '' }]; } target.value = ''; }}>
-								<option value="">+ Add variable...</option>
-								{#each envVarPresets as preset}
-									{#if !profileForm.env_vars.some(v => v.key === preset.key)}
-										<option value={preset.key}>{preset.key}</option>
-									{/if}
-								{/each}
-								<option value="__custom__">Custom variable...</option>
-							</select>
-						</div>
+						<select class="pf-select" onchange={(e) => { const target = e.target as HTMLSelectElement; const key = target.value; if (key && !profileForm.env_vars.some(v => v.key === key)) { profileForm.env_vars = [...profileForm.env_vars, { key, value: '' }]; } target.value = ''; }}>
+							<option value="">Select a known variable to add...</option>
+							{#each envVarPresets as preset}
+								{#if !profileForm.env_vars.some(v => v.key === preset.key)}
+									<option value={preset.key}>{preset.key}</option>
+								{/if}
+							{/each}
+						</select>
 						{#if profileForm.env_vars.length > 0}
-							<div class="env-var-list">
+							<div class="pf-env-list">
 								{#each profileForm.env_vars as envVar, index}
 									{@const preset = envVarPresets.find(p => p.key === envVar.key)}
-									<div class="env-var-row">
-										<input type="text" bind:value={envVar.key} class="card-form-input card-form-input--mono env-var-key" placeholder="VARIABLE_NAME" oninput={(e) => { const target = e.target as HTMLInputElement; if (target.value.includes(',')) { target.value = target.value.replace(/,/g, ''); envVar.key = target.value; } }} />
-										<input type="text" bind:value={envVar.value} class="card-form-input card-form-input--mono env-var-value" placeholder={preset?.placeholder || 'value'} oninput={(e) => { const target = e.target as HTMLInputElement; if (target.value.includes(',')) { target.value = target.value.replace(/,/g, ''); envVar.value = target.value; } }} />
-										<button type="button" class="env-var-remove" title="Remove variable" onclick={() => { profileForm.env_vars = profileForm.env_vars.filter((_, i) => i !== index); }}>
-											<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+									<div class="pf-env-row">
+										<input type="text" bind:value={envVar.key} class="pf-input pf-input--mono pf-env-key" placeholder="VARIABLE_NAME" oninput={(e) => { const target = e.target as HTMLInputElement; if (target.value.includes(',')) { target.value = target.value.replace(/,/g, ''); envVar.key = target.value; } }} />
+										<input type="text" bind:value={envVar.value} class="pf-input pf-input--mono pf-env-value" placeholder={preset?.placeholder || 'value'} oninput={(e) => { const target = e.target as HTMLInputElement; if (target.value.includes(',')) { target.value = target.value.replace(/,/g, ''); envVar.value = target.value; } }} />
+										<button type="button" class="pf-env-remove" title="Remove variable" onclick={() => { profileForm.env_vars = profileForm.env_vars.filter((_, i) => i !== index); }}>
+											<Trash2 size={14} />
 										</button>
 									</div>
 								{/each}
 							</div>
 						{:else}
-							<p class="env-var-empty">No environment variables configured.</p>
+							<p class="pf-desc">No environment variables configured.</p>
 						{/if}
 					</div>
 				{/if}
 			</div>
 
 			{#snippet footer()}
-				<button class="fp-btn fp-btn--secondary" onclick={backToList}>Cancel</button>
-				<button class="fp-btn fp-btn--primary" onclick={saveProfile} disabled={!profileForm.name}>
-					{editingProfile ? 'Save Changes' : 'Create Profile'}
-				</button>
+				<div class="pf-footer">
+					<div class="pf-footer-left">
+						{#if editingProfile && !editingProfile.is_builtin}
+							<button type="button" class="pf-btn-delete" onclick={() => { deletingId = editingProfile?.id ?? null; }}>
+								<Trash2 size={14} />
+								<span>Delete</span>
+							</button>
+						{/if}
+					</div>
+					<div class="pf-footer-right">
+						<button type="button" class="pf-btn-cancel" onclick={backToList}>Cancel</button>
+						<button type="button" class="pf-btn-save" onclick={saveProfile} disabled={!profileForm.name}>
+							<Check size={14} />
+							<span>Save Profile</span>
+						</button>
+					</div>
+				</div>
 			{/snippet}
 		</FeaturePageLayout>
 	{:else}
@@ -1426,46 +1549,15 @@
 
 
 <style>
-	/* Profile Card Container */
-	.profile-card {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		min-height: 0;
-		overflow: hidden;
-	}
-
-	.profile-card-mobile {
-		height: 100%;
-		display: flex;
-		flex-direction: column;
-	}
+	/* ═══════════════════════════════════════════════════════════════════════════
+	   PROFILE CARD REDESIGN — Clean, card-based editing interface
+	   ═══════════════════════════════════════════════════════════════════════════ */
 
 	.hidden {
 		display: none;
 	}
 
-	/* Centered content wrapper */
-	.centered-content {
-		width: 100%;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4, 16px);
-	}
-
-	/* Search Wrapper - for padding around search */
-	.card-search-wrapper {
-		padding: var(--space-3, 12px) var(--space-4, 16px);
-		padding-top: 0;
-		flex-shrink: 0;
-	}
-
-	/* Tab icon sizing */
-	.tab-icon {
-		width: 16px;
-		height: 16px;
-	}
-
+	/* Tab labels — hide on small screens, icons only */
 	.tab-label {
 		display: none;
 	}
@@ -1476,59 +1568,593 @@
 		}
 	}
 
-	/* Form Grid */
-	.form-grid {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		gap: var(--space-3, 12px);
-		margin-top: var(--space-3, 12px);
+	/* ─── Content Area ─── */
+	.pf-content {
+		padding: 24px 20px;
+		display: flex;
+		flex-direction: column;
+		gap: 28px;
 	}
 
-	.form-grid.cols-3 {
-		grid-template-columns: repeat(3, 1fr);
+	/* ─── Sections ─── */
+	.pf-section {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.pf-section-header {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		color: var(--text-primary);
+	}
+
+	.pf-section-header h3 {
+		font-size: var(--text-md, 0.875rem);
+		font-weight: 600;
+		margin: 0;
+		color: var(--text-primary);
+	}
+
+	.pf-section-actions {
+		margin-left: auto;
+		display: flex;
+		gap: 12px;
+	}
+
+	.pf-divider {
+		height: 1px;
+		background: var(--border-subtle);
+		width: 100%;
+	}
+
+	.pf-desc {
+		font-size: var(--text-sm, 0.75rem);
+		color: var(--text-secondary);
+		margin: 0;
+	}
+
+	.pf-char-count {
+		margin-left: auto;
+		font-size: var(--text-xs, 0.6875rem);
+		color: var(--text-secondary);
+		font-weight: 400;
+	}
+
+	/* ─── Field Grid (two-column) ─── */
+	.pf-field-grid {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 16px;
 	}
 
 	@media (max-width: 480px) {
-		.form-grid,
-		.form-grid.cols-3 {
+		.pf-field-grid {
 			grid-template-columns: 1fr;
 		}
 	}
 
-	.form-field {
+	.pf-field {
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-2, 8px);
+		gap: 6px;
 	}
 
-	.form-field.full-width {
-		grid-column: 1 / -1;
-		margin-top: var(--space-3, 12px);
+	.pf-label {
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 500;
+		color: var(--text-secondary);
 	}
 
-	/* Section Header */
-	.section-header {
+	/* ─── Inputs ─── */
+	.pf-input {
+		width: 100%;
+		padding: 10px 14px;
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		color: var(--text-primary);
+		font-size: var(--text-md, 0.875rem);
+		font-family: inherit;
+		transition: border-color 200ms, box-shadow 200ms;
+		outline: none;
+	}
+
+	.pf-input:focus {
+		border-color: var(--primary);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
+	}
+
+	.pf-input::placeholder {
+		color: var(--text-tertiary);
+	}
+
+	.pf-input--mono {
+		font-family: var(--card-font-mono, 'JetBrains Mono', monospace);
+		font-size: var(--text-sm, 0.75rem);
+	}
+
+	/* ─── Selects ─── */
+	.pf-select {
+		width: 100%;
+		padding: 10px 14px;
+		padding-right: 36px;
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		color: var(--text-primary);
+		font-size: var(--text-md, 0.875rem);
+		font-family: inherit;
+		cursor: pointer;
+		outline: none;
+		appearance: none;
+		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239090A8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+		background-repeat: no-repeat;
+		background-position: right 12px center;
+		background-size: 16px;
+		transition: border-color 200ms, box-shadow 200ms;
+	}
+
+	.pf-select:focus {
+		border-color: var(--primary);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
+	}
+
+	/* ─── Textarea ─── */
+	.pf-textarea {
+		width: 100%;
+		min-height: 200px;
+		padding: 12px 14px;
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		color: var(--text-primary);
+		font-size: var(--text-md, 0.875rem);
+		font-family: inherit;
+		resize: vertical;
+		outline: none;
+		transition: border-color 200ms, box-shadow 200ms;
+	}
+
+	.pf-textarea:focus {
+		border-color: var(--primary);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
+	}
+
+	.pf-textarea::placeholder {
+		color: var(--text-tertiary);
+	}
+
+	/* ─── Toggle Switch ─── */
+	.pf-toggle-row {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		margin-bottom: var(--space-3, 12px);
+		padding: 14px 16px;
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
 	}
 
-	.section-header .card-form-title {
-		margin: 0;
-	}
-
-	.header-actions {
+	.pf-toggle-info {
 		display: flex;
-		gap: var(--space-3, 12px);
+		flex-direction: column;
+		gap: 2px;
+		flex: 1;
+		min-width: 0;
 	}
+
+	.pf-toggle-title {
+		font-size: var(--text-md, 0.875rem);
+		font-weight: 500;
+		color: var(--text-primary);
+	}
+
+	.pf-toggle-desc {
+		font-size: var(--text-xs, 0.6875rem);
+		color: var(--text-secondary);
+	}
+
+	.pf-toggle {
+		position: relative;
+		width: 44px;
+		height: 24px;
+		background: var(--muted);
+		border: 1px solid var(--border-subtle);
+		border-radius: 12px;
+		cursor: pointer;
+		transition: all 200ms ease;
+		flex-shrink: 0;
+		margin-left: 16px;
+	}
+
+	.pf-toggle.active {
+		background: var(--primary);
+		border-color: var(--primary);
+	}
+
+	.pf-toggle-knob {
+		position: absolute;
+		top: 2px;
+		left: 2px;
+		width: 18px;
+		height: 18px;
+		background: var(--primary-foreground);
+		border-radius: 50%;
+		transition: transform 200ms ease;
+	}
+
+	.pf-toggle.active .pf-toggle-knob {
+		transform: translateX(20px);
+	}
+
+	/* ─── Info Banner ─── */
+	.pf-info-banner {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 10px 14px;
+		background: color-mix(in oklch, var(--info, #4488DD) 5%, transparent);
+		border: 1px solid color-mix(in oklch, var(--info, #4488DD) 20%, transparent);
+		border-radius: 8px;
+		font-size: var(--text-sm, 0.75rem);
+		color: var(--text-secondary);
+	}
+
+	.pf-info-banner :global(svg) {
+		flex-shrink: 0;
+		color: var(--info, #4488DD);
+	}
+
+	/* ─── Category Cards (Tools Tab) ─── */
+	.pf-category-list {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.pf-category-card {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		width: 100%;
+		padding: 14px;
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		cursor: pointer;
+		transition: all 200ms;
+		color: var(--text-primary);
+		text-align: left;
+	}
+
+	.pf-category-card:hover {
+		border-color: color-mix(in oklch, var(--primary) 30%, transparent);
+		background: var(--surface-hover);
+	}
+
+	.pf-category-icon {
+		width: 36px;
+		height: 36px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		border-radius: 8px;
+		color: var(--primary);
+		flex-shrink: 0;
+	}
+
+	.pf-category-info {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.pf-category-name {
+		font-size: var(--text-md, 0.875rem);
+		font-weight: 500;
+	}
+
+	.pf-category-desc {
+		font-size: var(--text-xs, 0.6875rem);
+		color: var(--text-secondary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.pf-category-count {
+		font-size: var(--text-md, 0.875rem);
+		font-weight: 600;
+		color: var(--primary);
+		padding: 2px 8px;
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		border-radius: 6px;
+	}
+
+	.pf-category-card :global(.pf-category-chevron) {
+		color: var(--text-secondary);
+		flex-shrink: 0;
+	}
+
+	.pf-category-expanded {
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		overflow: hidden;
+		margin-top: -4px;
+	}
+
+	/* ─── Summary Bar ─── */
+	.pf-summary-bar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 12px 16px;
+		background: color-mix(in oklch, var(--primary) 3%, transparent);
+		border: 1px solid color-mix(in oklch, var(--primary) 20%, transparent);
+		border-radius: var(--radius-md, 10px);
+	}
+
+	.pf-summary-left {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: var(--text-sm, 0.75rem);
+		color: var(--text-secondary);
+	}
+
+	.pf-summary-left :global(svg) {
+		color: var(--primary);
+	}
+
+	.pf-summary-link {
+		font-size: var(--text-xs, 0.6875rem);
+		font-weight: 500;
+		color: var(--text-secondary);
+	}
+
+	/* ─── Agent Cards ─── */
+	.pf-agent-list {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 0 20px;
+	}
+
+	.pf-agent-card {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 14px;
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		cursor: pointer;
+		transition: all 200ms;
+	}
+
+	.pf-agent-card:hover {
+		border-color: var(--border-emphasis);
+	}
+
+	.pf-agent-card.selected {
+		border-color: color-mix(in oklch, var(--primary) 40%, transparent);
+		background: color-mix(in oklch, var(--primary) 5%, transparent);
+	}
+
+	.pf-agent-checkbox {
+		width: 18px;
+		height: 18px;
+		flex-shrink: 0;
+		accent-color: var(--primary);
+	}
+
+	.pf-agent-icon {
+		width: 36px;
+		height: 36px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--surface-0);
+		border-radius: 8px;
+		color: var(--text-secondary);
+		flex-shrink: 0;
+		border: 1px solid var(--border-subtle);
+	}
+
+	.pf-agent-icon.active {
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		color: var(--primary);
+		border-color: color-mix(in oklch, var(--primary) 30%, transparent);
+	}
+
+	.pf-agent-info {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.pf-agent-header {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.pf-agent-name {
+		font-size: var(--text-md, 0.875rem);
+		font-weight: 500;
+		color: var(--text-primary);
+	}
+
+	.pf-agent-desc {
+		font-size: var(--text-sm, 0.75rem);
+		color: var(--text-secondary);
+		margin-top: 2px;
+	}
+
+	/* ─── Environment Variables ─── */
+	.pf-env-list {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.pf-env-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.pf-env-key {
+		width: 200px;
+		flex-shrink: 0;
+	}
+
+	.pf-env-value {
+		flex: 1;
+	}
+
+	.pf-env-remove {
+		width: 32px;
+		height: 32px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+		border: none;
+		border-radius: 6px;
+		color: var(--destructive);
+		cursor: pointer;
+		transition: all 150ms;
+		flex-shrink: 0;
+	}
+
+	.pf-env-remove:hover {
+		background: color-mix(in oklch, var(--destructive) 20%, transparent);
+	}
+
+	.pf-add-var-btn {
+		margin-left: auto;
+		background: none;
+		border: none;
+		color: var(--primary);
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 500;
+		cursor: pointer;
+	}
+
+	.pf-add-var-btn:hover {
+		text-decoration: underline;
+	}
+
+	@media (max-width: 480px) {
+		.pf-env-row {
+			flex-direction: column;
+		}
+
+		.pf-env-key {
+			width: 100%;
+		}
+	}
+
+	/* ─── Footer ─── */
+	.pf-footer {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		width: 100%;
+	}
+
+	.pf-footer-left {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.pf-footer-right {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+	}
+
+	.pf-btn-delete {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 14px;
+		background: transparent;
+		border: 1px solid color-mix(in oklch, var(--destructive) 25%, transparent);
+		border-radius: var(--radius-md, 10px);
+		color: var(--destructive);
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 200ms;
+	}
+
+	.pf-btn-delete:hover {
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+		border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
+	}
+
+	.pf-btn-cancel {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 18px;
+		background: var(--secondary);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		color: var(--text-primary);
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 200ms;
+	}
+
+	.pf-btn-cancel:hover {
+		background: var(--surface-hover);
+		border-color: var(--border-emphasis);
+	}
+
+	.pf-btn-save {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 22px;
+		background: linear-gradient(135deg, var(--primary), color-mix(in oklch, var(--primary) 80%, #2FA88D));
+		border: none;
+		border-radius: var(--radius-md, 10px);
+		color: var(--primary-foreground);
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 600;
+		cursor: pointer;
+		transition: all 200ms;
+	}
+
+	.pf-btn-save:hover {
+		filter: brightness(1.1);
+		box-shadow: 0 0 12px color-mix(in oklch, var(--primary) 30%, transparent);
+	}
+
+	.pf-btn-save:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+		filter: none;
+		box-shadow: none;
+	}
+
+	/* ─── Existing styles retained ─── */
 
 	.text-btn {
 		background: transparent;
 		border: none;
 		font-size: var(--text-xs, 0.75rem);
 		cursor: pointer;
-		transition: color var(--transition-fast, 100ms);
+		transition: color 100ms;
 	}
 
 	.text-btn.muted {
@@ -1547,47 +2173,28 @@
 		text-decoration: underline;
 	}
 
-	/* Checkboxes */
-	.checkbox-group {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3, 12px);
+	.required {
+		color: var(--destructive);
 	}
 
-	.checkbox-item {
+	/* Inline checkboxes (Advanced tab: Settings Sources) */
+	.inline-checkboxes {
 		display: flex;
-		align-items: flex-start;
-		gap: var(--space-3, 12px);
-		padding: var(--space-3, 12px);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
+		flex-wrap: wrap;
+		gap: 16px;
+	}
+
+	.inline-checkbox {
+		display: flex;
+		align-items: center;
+		gap: 8px;
 		cursor: pointer;
-		transition: all var(--transition-smooth, 200ms);
-	}
-
-	.checkbox-item:hover {
-		background: var(--surface-hover);
-		border-color: var(--border-emphasis);
-	}
-
-	.checkbox-item.highlighted {
-		padding: var(--space-3, 12px);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		margin-top: var(--space-3, 12px);
 	}
 
 	.checkbox-input {
-		margin-top: 2px;
 		width: 16px;
 		height: 16px;
-		flex-shrink: 0;
-	}
-
-	.checkbox-content {
-		flex: 1;
+		accent-color: var(--primary);
 	}
 
 	.checkbox-label {
@@ -1595,58 +2202,33 @@
 		color: var(--text-primary);
 	}
 
-	.checkbox-desc {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-		margin-top: 2px;
-	}
-
-	.inline-checkboxes {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-4, 16px);
-	}
-
-	.inline-checkbox {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2, 8px);
-		cursor: pointer;
-	}
-
-	/* Mode Selector */
-	.card-mode-selector.large .card-mode-btn {
-		padding: var(--space-3, 12px) var(--space-4, 16px);
-		font-size: var(--text-md, 0.875rem);
-	}
-
-	/* Tools List */
+	/* Tool details (reused from existing) */
 	.tools-list {
 		max-height: 256px;
 		overflow-y: auto;
-		padding-right: var(--space-2, 8px);
-		margin-top: var(--space-3, 12px);
+		padding-right: 8px;
+		margin-top: 12px;
 	}
 
 	.tool-category {
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-md, 10px);
 		overflow: hidden;
-		margin-bottom: var(--space-2, 8px);
+		margin-bottom: 8px;
 	}
 
 	.category-header {
 		display: flex;
 		align-items: center;
-		gap: var(--space-3, 12px);
+		gap: 12px;
 		width: 100%;
-		padding: var(--space-3, 12px);
+		padding: 12px;
 		background: var(--surface-1);
 		border: none;
 		color: var(--text-primary);
 		font-size: var(--text-md, 0.875rem);
 		cursor: pointer;
-		transition: all var(--transition-smooth, 200ms);
+		transition: background 200ms;
 	}
 
 	.category-header:hover {
@@ -1662,14 +2244,10 @@
 		justify-content: center;
 		background: var(--surface-1);
 		border: 1px solid var(--border-default);
-		transition: all var(--transition-fast, 100ms);
+		transition: all 100ms;
 	}
 
-	.category-checkbox.checked {
-		background: var(--primary);
-		border-color: var(--primary);
-	}
-
+	.category-checkbox.checked,
 	.category-checkbox.partial {
 		background: var(--primary);
 		border-color: var(--primary);
@@ -1679,12 +2257,6 @@
 		width: 12px;
 		height: 12px;
 		color: var(--primary-foreground);
-	}
-
-	.check-icon.small {
-		width: 12px;
-		height: 12px;
-		color: var(--primary);
 	}
 
 	.category-name {
@@ -1702,7 +2274,7 @@
 		display: grid;
 		grid-template-columns: repeat(2, 1fr);
 		gap: 4px;
-		padding: var(--space-2, 8px);
+		padding: 8px;
 		background: var(--surface-0);
 	}
 
@@ -1715,11 +2287,11 @@
 	.tool-item {
 		display: flex;
 		align-items: center;
-		gap: var(--space-2, 8px);
-		padding: 6px var(--space-2, 8px);
+		gap: 8px;
+		padding: 6px 8px;
 		border-radius: var(--radius-sm, 6px);
 		cursor: pointer;
-		transition: background var(--transition-fast, 100ms);
+		transition: background 100ms;
 	}
 
 	.tool-item:hover {
@@ -1730,6 +2302,7 @@
 		width: 14px;
 		height: 14px;
 		flex-shrink: 0;
+		accent-color: var(--primary);
 	}
 
 	.tool-name {
@@ -1743,66 +2316,19 @@
 	.selection-count {
 		font-size: var(--text-sm, 0.75rem);
 		color: var(--text-secondary);
-		margin-top: var(--space-3, 12px);
-		padding-top: var(--space-3, 12px);
-		border-top: 1px solid var(--border-subtle);
-	}
-
-	/* Tool Source Sections (collapsible accordion) */
-	.tool-source-section {
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		overflow: hidden;
-		margin-top: var(--space-2, 8px);
-	}
-
-	.source-section-header {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2, 8px);
-		width: 100%;
-		padding: var(--space-3, 12px) var(--space-4, 16px);
-		background: var(--surface-1);
-		border: none;
-		color: var(--text-primary);
-		font-size: var(--text-md, 0.875rem);
-		cursor: pointer;
-		transition: background var(--transition-smooth, 200ms);
-	}
-
-	.source-section-header:hover {
-		background: var(--surface-hover);
-	}
-
-	.source-section-title {
-		flex: 1;
-		text-align: left;
-		font-weight: 600;
-	}
-
-	.source-section-body {
+		margin-top: 12px;
+		padding: 12px 16px 0;
 		border-top: 1px solid var(--border-subtle);
 	}
 
 	.source-section-controls {
-		padding: var(--space-2, 8px) var(--space-4, 16px);
+		padding: 8px 16px;
 	}
 
 	.source-section-actions {
 		display: flex;
 		justify-content: flex-end;
-		padding: var(--space-2, 8px) var(--space-4, 16px) 0;
-	}
-
-	.chevron {
-		color: var(--text-secondary);
-		transform: rotate(0deg);
-		transition: transform var(--transition-fast, 100ms);
-		flex-shrink: 0;
-	}
-
-	.chevron.expanded {
-		transform: rotate(180deg);
+		padding: 8px 16px 0;
 	}
 
 	.category-header.readonly {
@@ -1815,42 +2341,29 @@
 
 	.tool-item.readonly {
 		cursor: default;
-		padding-left: var(--space-4, 16px);
+		padding-left: 16px;
 	}
 
 	.tool-item.readonly:hover {
 		background: transparent;
 	}
 
-	.tools-summary {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-		padding: var(--space-3, 12px) 0;
-		text-align: center;
-	}
-
-	.card-badge--info {
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		color: var(--primary);
-		font-size: var(--text-xs, 0.6875rem);
-	}
-
-	/* AI Tools - Category Tools with descriptions */
+	/* AI tool rows */
 	.ai-category-tools {
 		display: flex;
 		flex-direction: column;
-		padding: var(--space-2, 8px);
+		padding: 8px;
 		background: var(--surface-0);
 	}
 
 	.ai-tool-row {
 		display: flex;
 		align-items: center;
-		gap: var(--space-2, 8px);
-		padding: 6px var(--space-2, 8px);
+		gap: 8px;
+		padding: 6px 8px;
 		border-radius: var(--radius-sm, 6px);
 		cursor: pointer;
-		transition: background var(--transition-fast, 100ms);
+		transition: background 100ms;
 	}
 
 	.ai-tool-row:hover {
@@ -1884,158 +2397,13 @@
 	.ai-tool-description::before {
 		content: "—";
 		margin-right: 6px;
-		color: var(--text-muted);
 	}
 
-	/* Agents Grid */
-	.agents-grid {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		gap: var(--space-2, 8px);
-		max-height: 320px;
-		overflow-y: auto;
-		padding-right: 4px;
-	}
-
-	@media (max-width: 480px) {
-		.agents-grid {
-			grid-template-columns: 1fr;
-		}
-	}
-
-	.agent-item {
-		display: flex;
-		align-items: flex-start;
-		gap: var(--space-3, 12px);
-		padding: var(--space-3, 12px);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		cursor: pointer;
-		transition: all var(--transition-smooth, 200ms);
-	}
-
-	.agent-item:hover {
-		border-color: var(--border-emphasis);
-		transform: translateY(-1px);
-	}
-
-	.agent-item.selected {
-		border-color: var(--selection-ring);
-		background: var(--selection-bg);
-		box-shadow: var(--selection-shadow-subtle);
-	}
-
-	.agent-checkbox {
-		margin-top: 2px;
-		width: 16px;
-		height: 16px;
-		flex-shrink: 0;
-	}
-
-	.agent-info {
-		flex: 1;
-		min-width: 0;
-	}
-
-	.agent-header {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-	}
-
-	.agent-name {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 500;
-		color: var(--text-primary);
-	}
-
-	.agent-desc {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-		margin-top: 4px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		-webkit-box-orient: vertical;
-	}
-
-	/* Loading State */
-	.loading-state {
-		text-align: center;
-		padding: var(--space-8, 32px);
-		color: var(--text-secondary);
-		font-size: var(--text-md, 0.875rem);
-	}
-
-	/* Dropdown */
-	.dropdown-container {
-		position: relative;
-	}
-
-	.dropdown-menu {
-		position: absolute;
-		right: 0;
-		top: 100%;
-		margin-top: 4px;
-		min-width: 160px;
-		background: var(--surface-0);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-md, 10px);
-		box-shadow: var(--shadow-lg);
-		opacity: 0;
-		visibility: hidden;
-		transition: all var(--transition-fast, 100ms);
-		z-index: 50;
-		max-height: 200px;
-		overflow-y: auto;
-		backdrop-filter: blur(8px);
-	}
-
-	.dropdown-container:hover .dropdown-menu {
-		opacity: 1;
-		visibility: visible;
-	}
-
-	.dropdown-item {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2, 8px);
-		width: 100%;
-		padding: var(--space-2, 8px) var(--space-3, 12px);
-		background: transparent;
-		border: none;
-		font-size: var(--text-base, 0.8125rem);
-		color: var(--text-primary);
-		cursor: pointer;
-		text-align: left;
-		transition: background var(--transition-fast, 100ms);
-	}
-
-	.dropdown-item:hover {
-		background: var(--surface-1);
-	}
-
-	.dropdown-item.muted {
-		color: var(--text-secondary);
-	}
-
-	.dropdown-divider {
-		height: 1px;
-		background: var(--border-subtle);
-		margin: 4px 0;
-	}
-
-	.spacer {
-		width: 12px;
-	}
-
-	/* Plugin Agent Styles */
+	/* Plugin agents */
 	.plugin-agents-list {
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-2, 8px);
+		gap: 8px;
 		max-height: 200px;
 		overflow-y: auto;
 	}
@@ -2044,11 +2412,11 @@
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
-		padding: var(--space-3, 12px);
+		padding: 12px;
 		background: var(--surface-1);
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-md, 10px);
-		transition: all var(--transition-smooth, 200ms);
+		transition: all 200ms;
 	}
 
 	.plugin-agent-item:hover {
@@ -2072,17 +2440,6 @@
 		color: var(--text-primary);
 	}
 
-	.plugin-agent-desc {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-		margin-top: 4px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		-webkit-box-orient: vertical;
-	}
-
 	.plugin-agent-tools {
 		display: flex;
 		flex-wrap: wrap;
@@ -2099,63 +2456,43 @@
 		border-radius: 4px;
 	}
 
-	.tool-badge.more {
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		color: var(--primary);
-	}
-
-	/* Button modifiers */
-	.card-btn-secondary.small,
-	.card-btn-primary.small {
-		padding: 6px var(--space-3, 12px);
-		font-size: var(--text-sm, 0.75rem);
-	}
-
-	/* Required indicator */
-	.required {
-		color: var(--destructive);
+	/* Loading state */
+	.loading-state {
+		text-align: center;
+		padding: 32px;
+		color: var(--text-secondary);
+		font-size: var(--text-md, 0.875rem);
 	}
 
 	/* Scrollbar styling */
 	.tools-list,
-	.agents-grid,
-	.plugin-agents-list,
-	.ai-tools-list {
+	.pf-agent-list,
+	.plugin-agents-list {
 		scrollbar-width: thin;
 		scrollbar-color: var(--border-default) transparent;
 	}
 
 	.tools-list::-webkit-scrollbar,
-	.agents-grid::-webkit-scrollbar,
-	.plugin-agents-list::-webkit-scrollbar,
-	.ai-tools-list::-webkit-scrollbar {
+	.pf-agent-list::-webkit-scrollbar,
+	.plugin-agents-list::-webkit-scrollbar {
 		width: 6px;
 	}
 
 	.tools-list::-webkit-scrollbar-track,
-	.agents-grid::-webkit-scrollbar-track,
-	.plugin-agents-list::-webkit-scrollbar-track,
-	.ai-tools-list::-webkit-scrollbar-track {
+	.pf-agent-list::-webkit-scrollbar-track,
+	.plugin-agents-list::-webkit-scrollbar-track {
 		background: transparent;
 	}
 
 	.tools-list::-webkit-scrollbar-thumb,
-	.agents-grid::-webkit-scrollbar-thumb,
-	.plugin-agents-list::-webkit-scrollbar-thumb,
-	.ai-tools-list::-webkit-scrollbar-thumb {
+	.pf-agent-list::-webkit-scrollbar-thumb,
+	.plugin-agents-list::-webkit-scrollbar-thumb {
 		background-color: var(--border-default);
 		border-radius: 3px;
 	}
 
-	.tools-list::-webkit-scrollbar-thumb:hover,
-	.agents-grid::-webkit-scrollbar-thumb:hover,
-	.plugin-agents-list::-webkit-scrollbar-thumb:hover,
-	.ai-tools-list::-webkit-scrollbar-thumb:hover {
-		background-color: var(--text-tertiary);
-	}
-
 	/* ═══════════════════════════════════════════════════════════════════════════
-	   FEATURE PAGE (fp-) EMBEDDED MODE STYLES — ProfileCard-specific overrides
+	   LIST VIEW STYLES (unchanged)
 	   ═══════════════════════════════════════════════════════════════════════════ */
 
 	.fp-btn--sm {
@@ -2163,7 +2500,6 @@
 		font-size: 0.75rem;
 	}
 
-	/* --- Model item icons — unified theme primary --- */
 	.fp-item-icon--haiku,
 	.fp-item-icon--sonnet,
 	.fp-item-icon--sonnet-1m,
@@ -2179,7 +2515,6 @@
 		line-height: 1;
 	}
 
-	/* --- Responsive adjustments for ProfileCard-specific classes --- */
 	@media (max-width: 639px) {
 		.fp-model-initial {
 			font-size: 0.875rem;
