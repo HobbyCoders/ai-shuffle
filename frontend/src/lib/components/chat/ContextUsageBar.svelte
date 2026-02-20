@@ -4,7 +4,6 @@
 	 * Reads directly from stores.
 	 */
 	import { activeSession } from '$lib/stores/active-session';
-	import { profiles } from '$lib/stores/app-data';
 	import { AUTO_COMPACTION_BASE, CONTEXT_MAX } from '$lib/constants/chat';
 	import { sessionStateManager } from '$lib/stores/session/session-state.svelte';
 
@@ -17,15 +16,6 @@
 		}
 		return count.toString();
 	}
-
-	// Get current profile to access env vars for auto-compaction reserve calculation
-	const currentProfile = $derived($profiles.find(p => p.id === $activeSession.profile));
-
-	// Auto-compaction reserve: 13k base + CLAUDE_CODE_MAX_OUTPUT_TOKENS from profile env vars
-	const maxOutputTokens = $derived(
-		parseInt(currentProfile?.config?.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS || '0', 10) || 0
-	);
-	const autoCompactionReserve = $derived(AUTO_COMPACTION_BASE + maxOutputTokens);
 
 	// Context usage: prefer real-time session state (updated by poller during streaming),
 	// fall back to tab store values for idle/resumed sessions.
@@ -42,7 +32,7 @@
 			? sessionUsage.contextUsed
 			: ($activeSession.contextUsed ?? 0)
 	);
-	const contextUsed = $derived(baseContextUsed + autoCompactionReserve);
+	const contextUsed = $derived(baseContextUsed + AUTO_COMPACTION_BASE);
 	const contextPercent = $derived(Math.min((contextUsed / CONTEXT_MAX) * 100, 100));
 
 	// Context color - always themed (no usage-based color changes)
