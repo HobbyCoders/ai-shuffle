@@ -166,42 +166,57 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	// ── Persistence ─────────────────────────────────────────────────────
 
+	function buildPersistBody() {
+		const state = getState();
+		return JSON.stringify({
+			key: 'active_session',
+			value: {
+				sessionId: state.sessionId,
+				title: state.title,
+				profile: state.profile,
+				project: state.project,
+				modelOverride: state.modelOverride,
+				permissionModeOverride: state.permissionModeOverride,
+				thinkingOverride: state.thinkingOverride,
+				effortOverride: state.effortOverride,
+				executionMode: state.executionMode,
+				worktreeId: state.worktreeId,
+				worktreeBranch: state.worktreeBranch,
+				worktreeBaseBranch: state.worktreeBaseBranch,
+				selectedWorktreeBranch: state.selectedWorktreeBranch,
+				worktreeMode: state.worktreeMode,
+				worktreeDeleted: state.worktreeDeleted,
+				queuedMessages: state.queuedMessages,
+			} satisfies PersistedSession,
+		});
+	}
+
+	async function doPersist() {
+		try {
+			await fetch('/api/v1/preferences/active_session', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'include',
+				body: buildPersistBody(),
+			});
+		} catch (e) {
+			console.error('[ActiveSession] Failed to persist session:', e);
+		}
+	}
+
 	function persistSession() {
 		if (persistTimer) clearTimeout(persistTimer);
-		persistTimer = setTimeout(async () => {
-			const state = getState();
-			try {
-				await fetch('/api/v1/preferences/active_session', {
-					method: 'PUT',
-					headers: { 'Content-Type': 'application/json' },
-					credentials: 'include',
-					body: JSON.stringify({
-						key: 'active_session',
-						value: {
-							sessionId: state.sessionId,
-							title: state.title,
-							profile: state.profile,
-							project: state.project,
-							modelOverride: state.modelOverride,
-							permissionModeOverride: state.permissionModeOverride,
-							thinkingOverride: state.thinkingOverride,
-							effortOverride: state.effortOverride,
-							executionMode: state.executionMode,
-							worktreeId: state.worktreeId,
-							worktreeBranch: state.worktreeBranch,
-							worktreeBaseBranch: state.worktreeBaseBranch,
-							selectedWorktreeBranch: state.selectedWorktreeBranch,
-							worktreeMode: state.worktreeMode,
-							worktreeDeleted: state.worktreeDeleted,
-							queuedMessages: state.queuedMessages,
-						} satisfies PersistedSession,
-					})
-				});
-			} catch (e) {
-				console.error('[ActiveSession] Failed to persist session:', e);
-			}
-		}, PERSIST_DEBOUNCE_MS);
+		persistTimer = setTimeout(doPersist, PERSIST_DEBOUNCE_MS);
 		onPersistTimerChanged(persistTimer);
+	}
+
+	/** Persist immediately, bypassing the debounce. Use for deliberate user
+	 *  actions (e.g. newChat) where a subsequent init() must see the update. */
+	function persistSessionImmediate() {
+		if (persistTimer) clearTimeout(persistTimer);
+		persistTimer = null;
+		onPersistTimerChanged(persistTimer);
+		doPersist();
 	}
 
 	async function loadPersistedSession(): Promise<PersistedSession | null> {
@@ -350,7 +365,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			update(s => ({ ...s, draft: newChatEphemeral.draft }));
 		}
 
-		persistSession();
+		// Persist immediately (not debounced) — this is a deliberate user action
+		// and init() may re-run on WS reconnect, reading the persisted state.
+		// If the persist is still debounced, init() would restore the old session.
+		persistSessionImmediate();
 	}
 
 	// ── Return public API ───────────────────────────────────────────────

@@ -793,6 +793,12 @@ async function startSessionOnExistingWorktree(prompt: string) {
 
 // ─── Init / Destroy ──────────────────────────────────────────────────────────
 
+// Module-level flag: when newChat() is called, it sets this so that if the
+// component remounts (triggering destroy → init), init() skips restoring the
+// old session from the backend.  This survives the destroy/init cycle because
+// destroy() does NOT reset it — only init() consumes it.
+let _skipNextSessionRestore = false;
+
 async function init() {
 	setupOnStreamEnd();
 	setupStreamingBridge();
@@ -800,42 +806,55 @@ async function init() {
 	// Visibility change handling is managed by wsConn (ping/pong, reconnect).
 	// Polling pause/resume is handled via onVisibilityHidden/onVisibilityVisible callbacks.
 
+	const skipRestore = _skipNextSessionRestore;
+	_skipNextSessionRestore = false;
+
 	try {
 		const backendSelection = await switcher.loadSelectionFromBackend();
 		const defaultProfile = backendSelection?.selectedProfile || switcher.getPersistedProfile();
 		const defaultProject = backendSelection?.selectedProject || switcher.getPersistedProject();
 
-		const persisted = await switcher.loadPersistedSession();
-
-		if (persisted) {
+		if (skipRestore) {
+			// newChat() was called before this init — keep the cleared state,
+			// just apply default profile/project if not already set.
 			_update(s => ({
 				...s,
-				sessionId: persisted.sessionId,
-				title: persisted.title || 'New Chat',
-				profile: persisted.profile || defaultProfile,
-				project: persisted.project || defaultProject,
-				modelOverride: persisted.modelOverride ?? null,
-				permissionModeOverride: persisted.permissionModeOverride ?? null,
-				thinkingOverride: persisted.thinkingOverride ?? null,
-				effortOverride: persisted.effortOverride ?? null,
-				executionMode: persisted.executionMode || 'local',
-				worktreeBranch: persisted.worktreeBranch || '',
-				worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',
-				worktreeId: persisted.worktreeId ?? null,
-				worktreeMode: persisted.worktreeMode || 'new',
-				selectedWorktreeBranch: persisted.selectedWorktreeBranch ?? null,
-				worktreeDeleted: persisted.worktreeDeleted ?? false,
-				queuedMessages: persisted.queuedMessages || [],
+				profile: s.profile || defaultProfile,
+				project: s.project || defaultProject,
 			}));
-
-			if (persisted.sessionId) {
-				const cached = await messageCache.get(persisted.sessionId);
-				if (cached && cached.length > 0) {
-					_update(s => ({ ...s, messages: cached }));
-				}
-			}
 		} else {
-			_update(s => ({ ...s, profile: defaultProfile, project: defaultProject }));
+			const persisted = await switcher.loadPersistedSession();
+
+			if (persisted) {
+				_update(s => ({
+					...s,
+					sessionId: persisted.sessionId,
+					title: persisted.title || 'New Chat',
+					profile: persisted.profile || defaultProfile,
+					project: persisted.project || defaultProject,
+					modelOverride: persisted.modelOverride ?? null,
+					permissionModeOverride: persisted.permissionModeOverride ?? null,
+					thinkingOverride: persisted.thinkingOverride ?? null,
+					effortOverride: persisted.effortOverride ?? null,
+					executionMode: persisted.executionMode || 'local',
+					worktreeBranch: persisted.worktreeBranch || '',
+					worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',
+					worktreeId: persisted.worktreeId ?? null,
+					worktreeMode: persisted.worktreeMode || 'new',
+					selectedWorktreeBranch: persisted.selectedWorktreeBranch ?? null,
+					worktreeDeleted: persisted.worktreeDeleted ?? false,
+					queuedMessages: persisted.queuedMessages || [],
+				}));
+
+				if (persisted.sessionId) {
+					const cached = await messageCache.get(persisted.sessionId);
+					if (cached && cached.length > 0) {
+						_update(s => ({ ...s, messages: cached }));
+					}
+				}
+			} else {
+				_update(s => ({ ...s, profile: defaultProfile, project: defaultProject }));
+			}
 		}
 
 		wsConn.connect();
@@ -874,7 +893,13 @@ export const activeSession = {
 	// ── Session Navigation (delegated to session-switcher) ─────────
 
 	switchSession: (sessionId: string, projectId?: string | null) => switcher.switchSession(sessionId, projectId),
-	newChat: () => switcher.newChat(),
+	newChat: () => {
+		// Tell init() to skip restoring the old session if the component remounts.
+		// This must be set BEFORE switcher.newChat() because destroy() runs
+		// synchronously during remount and must not clear this flag.
+		_skipNextSessionRestore = true;
+		switcher.newChat();
+	},
 
 	// ── Messaging ───────────────────────────────────────────────────
 
