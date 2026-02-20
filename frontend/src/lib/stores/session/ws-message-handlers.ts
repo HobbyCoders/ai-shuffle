@@ -737,7 +737,18 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			case 'stream_block_start':
 			case 'stream_delta':
 			case 'stream_block_stop':
-			case 'system':
+			case 'system': {
+				// Slash commands (e.g., /context, /compact) may only produce system
+				// events — no text/chunk/tool_use. The backend's _maybe_broadcast_first_start
+				// only broadcasts via sync_engine (other devices), so the originating
+				// device never receives a 'start' event and polling never begins.
+				// Without polling, the streaming bridge skips forwarding → "no output".
+				const sysState = getState();
+				if (sysState.isStreaming && sysState.sessionId && !sessionPoller.isPolling(sysState.sessionId)) {
+					onStartPolling(sysState.sessionId);
+				}
+				break;
+			}
 			case 'subagent_start':
 			case 'subagent_chunk':
 			case 'subagent_done':

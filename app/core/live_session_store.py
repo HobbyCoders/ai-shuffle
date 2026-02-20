@@ -533,11 +533,18 @@ class LiveSessionStore:
                     msg.tool_status = ToolStatus.ERROR.value if is_error else ToolStatus.COMPLETE.value
                     msg.streaming = False
                     self._increment_update_id(session)
-                    logger.debug(f"Added tool result to {tool_id} in session {session_id}")
+                    logger.debug(f"Added tool result to {tool_id} in session {session_id} (result_len={len(result) if result else 0})")
                     # Note: We don't create a continuation text message here.
                     # Empty text messages cause UI flickering (showing "Claude [time]" header
                     # with no content). The next text chunk will create a message if needed.
                     return
+
+            # No matching tool_use found — the result will be lost
+            tool_types = [(m.type, m.tool_id) for m in session.messages if m.type == "tool_use"]
+            logger.warning(
+                f"add_tool_result: no matching tool_use for {tool_id} in session {session_id}. "
+                f"Existing tool_use messages: {tool_types}"
+            )
 
     async def add_system_message(
         self,

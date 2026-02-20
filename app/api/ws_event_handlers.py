@@ -125,7 +125,7 @@ async def _maybe_broadcast_first_start(
 
     Called for stream_delta, chunk, and tool_use events that arrive before any stream_start.
     """
-    if not state.stream_started and event_type in ("stream_delta", "chunk", "tool_use"):
+    if not state.stream_started and event_type in ("stream_delta", "chunk", "tool_use", "system"):
         await sync_engine.broadcast_stream_start(
             session_id=ectx.session_id,
             message_id=ectx.message_id,
@@ -260,10 +260,16 @@ async def handle_tool_result(
     tool_name = state.current_tool_name  # Capture before clearing
     state.current_tool_id = None
     state.current_tool_name = None
+    output = event.get("output", "")
+    if not output:
+        logger.warning(
+            f"handle_tool_result: EMPTY output for tool {tool_name} ({tool_id}) "
+            f"in session {ectx.session_id}. Event keys: {list(event.keys())}"
+        )
     await live_session_store.add_tool_result(
         session_id=ectx.session_id,
         tool_id=tool_id,
-        result=event.get("output", ""),
+        result=output,
         is_error=event.get("is_error", False),
     )
     chunk_data = {
@@ -287,6 +293,11 @@ async def handle_system(
     state: MutableStreamState,
 ) -> None:
     """Handle system message event."""
+    # Slash commands (e.g., /context, /compact) may only produce system events
+    # with no text/chunk/tool_use. Without broadcasting start, the frontend
+    # never starts polling and the streaming bridge skips the response.
+    await _maybe_broadcast_first_start("system", ectx, state)
+
     await live_session_store.add_system_message(
         session_id=ectx.session_id,
         content="",

@@ -573,7 +573,7 @@ async def get_live_session(
                     }
                     for field in _OPTIONAL_LIVE_FIELDS:
                         value = m.get(field)
-                        if value:
+                        if value is not None:
                             msg[field] = value
 
                     messages.append(msg)

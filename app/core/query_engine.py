@@ -132,13 +132,17 @@ def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -
     if content is None:
         return ""
 
-    # Handle MCP-style content block lists: [{"type": "text", "text": "..."}, {"type": "image", ...}]
+    # Handle content block lists: [{"type": "text", "text": "..."}, {"type": "image", ...}]
+    # Supports both dict-based (MCP) and Pydantic model-based (SDK) content blocks.
     # Extract text content so downstream consumers get usable strings instead of Python repr
     if isinstance(content, list):
         text_parts = []
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
                 text_parts.append(block.get("text", ""))
+            elif hasattr(block, "type") and hasattr(block, "text") and getattr(block, "type") == "text":
+                # Pydantic TextBlock objects from the Anthropic SDK
+                text_parts.append(getattr(block, "text", ""))
         if text_parts:
             content = "\n".join(text_parts)
         # else: fall through to str() for non-standard lists
@@ -3268,6 +3272,16 @@ async def stream_to_websocket(
                         tool_use_id = getattr(block, 'tool_use_id', None)
                         tool_name = tool_id_to_name.get(tool_use_id, getattr(block, 'name', 'unknown'))
 
+                        # Diagnostic: log when tool result content is empty/missing
+                        if not output:
+                            content_type = type(block.content).__name__
+                            content_repr = repr(block.content)[:200] if block.content else "None"
+                            logger.warning(
+                                f"[WS] AssistantMsg ToolResultBlock EMPTY output - "
+                                f"tool={tool_name}, tool_use_id={tool_use_id}, "
+                                f"content_type={content_type}, content_repr={content_repr}"
+                            )
+
                         # Collect tool result for storage
                         tool_messages.append({
                             "type": "tool_result",
@@ -3383,7 +3397,19 @@ async def stream_to_websocket(
                         tool_use_id = block.tool_use_id
                         # Look up tool name from preceding ToolUseBlock
                         tool_name = tool_id_to_name.get(tool_use_id, "unknown")
-                        logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {tool_use_id}, tool_name: {tool_name}, parent_tool_id: {parent_tool_id}, content length: {len(str(block.content) if block.content else '')}, has_screenshot: {screenshot_b64 is not None}, is_error: {block.is_error}")
+                        content_len = len(str(block.content) if block.content else '')
+                        logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {tool_use_id}, tool_name: {tool_name}, parent_tool_id: {parent_tool_id}, content length: {content_len}, has_screenshot: {screenshot_b64 is not None}, is_error: {block.is_error}")
+
+                        # Diagnostic: log when tool result content is empty/missing
+                        if not output:
+                            content_type = type(block.content).__name__
+                            content_repr = repr(block.content)[:200] if block.content else "None"
+                            logger.warning(
+                                f"[WS] UserMessage ToolResultBlock EMPTY output - "
+                                f"tool={tool_name}, tool_use_id={tool_use_id}, "
+                                f"content_type={content_type}, content_repr={content_repr}, "
+                                f"block.content falsy={not block.content}"
+                            )
 
                         # Collect tool result for storage
                         tool_messages.append({
