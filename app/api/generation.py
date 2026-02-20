@@ -175,6 +175,9 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
         max_turns=1,
         permission_mode="bypassPermissions",
         tools=[],  # No tools needed for generation
+        # Strip CLAUDECODE env var to prevent "nested session" detection when
+        # the server is started from within a Claude Code session.
+        env={"CLAUDECODE": ""},
     )
 
     response_text = []

@@ -1251,17 +1251,6 @@
 							<option value="preset">Claude Code Default + Append</option>
 							<option value="custom">Custom Prompt</option>
 						</select>
-
-						<div class="pf-info-banner">
-							<Info size={14} />
-							<span>
-								{#if profileForm.system_prompt_type === 'preset'}
-									Uses the default Claude Code system prompt with your custom text appended at the end.
-								{:else}
-									Replaces the entire system prompt with your custom content.
-								{/if}
-							</span>
-						</div>
 					</div>
 
 					<div class="pf-section">

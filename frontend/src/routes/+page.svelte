@@ -134,9 +134,22 @@
 			loadAllTags()
 		]);
 
-		// If no active view, open a new chat
+		// Sync layout.activeView with the restored session from activeSession.init().
+		// These two stores persist independently (localStorage vs backend API) and can
+		// diverge. The backend-persisted session is authoritative.
+		const restoredSessionId = $activeSession?.sessionId ?? null;
+		const currentViewSessionId = $activeView?.type === 'chat' ? ($activeView.sessionId ?? null) : null;
+
 		if (!$activeView) {
-			handleNewSession();
+			// No persisted layout view — open the restored session or a new chat
+			if (restoredSessionId) {
+				layout.openChat(restoredSessionId);
+			} else {
+				handleNewSession();
+			}
+		} else if ($activeView.type === 'chat' && currentViewSessionId !== restoredSessionId) {
+			// Layout view and active session disagree — backend is authoritative
+			layout.openChat(restoredSessionId);
 		}
 
 		// Sync from server when window regains focus

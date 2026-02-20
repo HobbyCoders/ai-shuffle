@@ -365,10 +365,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		}
 
 		// Defensive check: don't replace messages with fewer/empty data
+		// BUT skip this guard when switching sessions — it's normal for a new session
+		// to have fewer (or zero) messages than the one we're leaving.
 		const currentState = getState();
+		const isSameSession = currentState.sessionId === (data.session_id as string);
 		const currentAssistantMsgs = currentState.messages.filter(m => m.role === 'assistant' && m.type === 'text');
 		const incomingAssistantMsgs = finalMessages.filter(m => m.role === 'assistant' && m.type === 'text');
-		const shouldPreserveMessages = currentState.messages.length > 0 && !isStreaming && (
+		const shouldPreserveMessages = isSameSession && currentState.messages.length > 0 && !isStreaming && (
 			finalMessages.length === 0 ||
 			(currentAssistantMsgs.length > incomingAssistantMsgs.length) ||
 			(finalMessages.length > 0 && currentState.messages.length > finalMessages.length * 1.5)
