@@ -13,6 +13,7 @@
  * compatibility with $storeName auto-subscription in .svelte files.
  */
 
+import { untrack } from 'svelte';
 import { browser } from '$app/environment';
 import {
 	themePresets,
@@ -316,9 +317,7 @@ type Subscriber = (value: ThemeState) => void;
 const _subscribers = new Set<Subscriber>();
 
 function _notifySubscribers() {
-	for (const fn of _subscribers) {
-		fn(_state);
-	}
+	untrack(() => { for (const fn of _subscribers) fn(_state); });
 }
 
 // ============================================================================
@@ -332,7 +331,7 @@ export const theme = {
 
 	subscribe(fn: Subscriber) {
 		_subscribers.add(fn);
-		fn(_state);
+		untrack(() => fn(_state));
 		return () => {
 			_subscribers.delete(fn);
 		};
@@ -459,7 +458,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: (value: T) => void) {
 			const handler: Subscriber = () => fn(getter());
 			_subscribers.add(handler);
-			fn(getter());
+			untrack(() => fn(getter()));
 			return () => {
 				_subscribers.delete(handler);
 			};

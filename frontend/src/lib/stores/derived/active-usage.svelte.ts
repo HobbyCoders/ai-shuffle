@@ -9,6 +9,7 @@
  */
 
 import { get } from 'svelte/store';
+import { untrack } from 'svelte';
 import { activeSession } from '../active-session';
 import { sessionState } from '../session/session-state';
 import type { SessionUsage } from '../session/session-state.svelte';
@@ -33,8 +34,10 @@ function createMultiDerived<T>(
 		initialized = true;
 		for (const parent of parents) {
 			parent.subscribe(() => {
-				const value = getter();
-				for (const fn of subscribers) fn(value);
+				untrack(() => {
+					const value = getter();
+					for (const fn of subscribers) fn(value);
+				});
 			});
 		}
 	}
@@ -46,7 +49,7 @@ function createMultiDerived<T>(
 		subscribe(fn: Subscriber<T>) {
 			setup();
 			subscribers.add(fn);
-			fn(getter());
+			untrack(() => fn(getter()));
 			return () => {
 				subscribers.delete(fn);
 			};

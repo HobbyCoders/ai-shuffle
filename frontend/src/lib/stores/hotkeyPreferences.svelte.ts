@@ -9,6 +9,7 @@
  * compatibility with $storeName auto-subscription in .svelte files.
  */
 
+import { untrack } from 'svelte';
 import { browser } from '$app/environment';
 import { getPreference, setPreference } from '$lib/api/client';
 
@@ -204,9 +205,7 @@ type Subscriber<T> = (value: T) => void;
 const _subscribers = new Set<Subscriber<HotkeyPreferences>>();
 
 function _notifySubscribers() {
-	for (const fn of _subscribers) {
-		fn(_state);
-	}
+	untrack(() => { for (const fn of _subscribers) fn(_state); });
 }
 
 function _update(fn: (s: HotkeyPreferences) => HotkeyPreferences) {
@@ -331,7 +330,7 @@ export const hotkeyPreferences = {
 
 	subscribe(fn: Subscriber<HotkeyPreferences>) {
 		_subscribers.add(fn);
-		fn(_state);
+		untrack(() => fn(_state));
 		return () => {
 			_subscribers.delete(fn);
 		};

@@ -9,6 +9,7 @@
  * compatibility with $storeName auto-subscription in .svelte files.
  */
 
+import { untrack } from 'svelte';
 import type { ProjectPluginInfo, AvailablePluginInfo } from '$lib/api/projectPlugins';
 import * as projectPluginsApi from '$lib/api/projectPlugins';
 import { hooks } from './hooks';
@@ -56,9 +57,7 @@ type Subscriber<T> = (value: T) => void;
 const _subscribers = new Set<Subscriber<ProjectPluginsState>>();
 
 function _notifySubscribers() {
-	for (const fn of _subscribers) {
-		fn(_state);
-	}
+	untrack(() => { for (const fn of _subscribers) fn(_state); });
 }
 
 function _update(fn: (s: ProjectPluginsState) => ProjectPluginsState) {
@@ -77,7 +76,7 @@ export const projectPlugins = {
 
 	subscribe(fn: Subscriber<ProjectPluginsState>) {
 		_subscribers.add(fn);
-		fn(_state);
+		untrack(() => fn(_state));
 		return () => {
 			_subscribers.delete(fn);
 		};
@@ -322,7 +321,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: Subscriber<T>) {
 			const handler: Subscriber<ProjectPluginsState> = () => fn(getter());
 			_subscribers.add(handler);
-			fn(getter());
+			untrack(() => fn(getter()));
 			return () => {
 				_subscribers.delete(handler);
 			};

@@ -4,6 +4,7 @@
  * Migrated to Svelte 5 runes. Provides subscribe() shim for backward
  * compatibility with $storeName auto-subscription in .svelte files.
  */
+import { untrack } from 'svelte';
 import { browser } from '$app/environment';
 
 // ============================================
@@ -124,7 +125,7 @@ export const layout = {
 
 	subscribe(fn: Subscriber<LayoutState>) {
 		_subscribers.add(fn);
-		fn(_state);
+		untrack(() => fn(_state));
 		return () => {
 			_subscribers.delete(fn);
 		};
@@ -201,7 +202,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: Subscriber<T>) {
 			const handler: Subscriber<LayoutState> = () => fn(getter());
 			_subscribers.add(handler);
-			fn(getter());
+			untrack(() => fn(getter()));
 			return () => {
 				_subscribers.delete(handler);
 			};

@@ -15,6 +15,7 @@
  * Migrated to Svelte 5 runes. Provides subscribe() shim for backward
  * compatibility with $browserState auto-subscription in .svelte files.
  */
+import { untrack } from 'svelte';
 import { sessionNotifier } from './session/session-notifier';
 import { createBrowserWs, type BrowserWsConnection } from './browser-ws';
 
@@ -95,9 +96,7 @@ type Subscriber = (value: BrowserState) => void;
 const _subscribers = new Set<Subscriber>();
 
 function _notifySubscribers() {
-	for (const fn of _subscribers) {
-		fn(_state);
-	}
+	untrack(() => { for (const fn of _subscribers) fn(_state); });
 }
 
 function _update(fn: (s: BrowserState) => BrowserState) {
@@ -185,7 +184,7 @@ export const browserState = {
 
 	subscribe(fn: Subscriber) {
 		_subscribers.add(fn);
-		fn(_state);
+		untrack(() => fn(_state));
 		return () => {
 			_subscribers.delete(fn);
 		};
