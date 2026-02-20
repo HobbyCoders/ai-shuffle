@@ -375,21 +375,19 @@ class SessionPoller {
 				this.stop(sessionId);
 			}
 			if (this._onStreamEnd) {
-				// Defer onStreamEnd to the next microtask. This prevents a
-				// double-update to activeSession in the same synchronous call:
-				// 1. applyServerState() → _sync() → streaming bridge → store update
-				// 2. onStreamEnd → store update (same messages + isStreaming:false)
+				// Defer onStreamEnd to the next macrotask via setTimeout(0).
+				// This gives Svelte a full task boundary to finish reconciling the
+				// DOM from the streaming bridge's _update() (triggered by
+				// applyServerState → _sync()) before onStreamEnd fires a second
+				// _update(). Without this separation, two store updates in the
+				// same microtask flush corrupt Svelte 5's effect linked-list
+				// (TypeError: Cannot read 'prev' of undefined), freezing the UI.
 				//
-				// During compaction, the full refresh (needs_full_refresh) can
-				// coincide with stream end in the same poll response. The bridge's
-				// update causes DOM reconciliation; an immediate second update from
-				// onStreamEnd while Svelte is still processing the first corrupts
-				// the effect linked list (TypeError: Cannot read 'prev' of undefined).
-				//
-				// Deferring ensures Svelte completes the bridge's reactive cycle
-				// before onStreamEnd triggers the next one.
+				// Previously used queueMicrotask, but microtasks run before
+				// Svelte's DOM reconciliation completes — they share the same
+				// microtask checkpoint, so the double-update still collides.
 				const cb = this._onStreamEnd;
-				queueMicrotask(() => cb(sessionId, usage));
+				setTimeout(() => cb(sessionId, usage), 0);
 			}
 		} else if (!isStreaming && this._timers.has(sessionId)) {
 			// Non-transition case: poll returns !isStreaming but session wasn't previously
@@ -400,7 +398,7 @@ class SessionPoller {
 				if (this._onStreamEnd) {
 					// Defer for same reason as streamingJustEnded (avoid double-update)
 					const cb = this._onStreamEnd;
-					queueMicrotask(() => cb(sessionId, usage));
+					setTimeout(() => cb(sessionId, usage), 0);
 				}
 			}
 		}

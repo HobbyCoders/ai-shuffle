@@ -632,33 +632,49 @@ function setupOnStreamEnd() {
 		appData.loadSessions();
 
 		// Flush final messages AND usage from sessionState to the store.
-		// NOTE: This callback is deferred via queueMicrotask() from the poller
-		// to avoid a double-update with the streaming bridge in the same
-		// synchronous call stack (which can corrupt Svelte's effect list
-		// during compaction full refresh + stream end).
+		// NOTE: This callback is deferred via setTimeout(0) from the poller
+		// to give Svelte a full task boundary to reconcile the bridge's
+		// reactive update before this second update fires.
 		const finalSession = sessionState.getSession(sessionId);
 		if (finalSession && finalSession.messages.length > 0) {
-			_update(s => {
-				if (s.sessionId !== sessionId) return s;
-				// Defense-in-depth: if the store is currently streaming
-				// (a new query was started since onStreamEnd was deferred),
-				// do NOT overwrite isStreaming or messages.
-				if (s.isStreaming) {
-					console.debug(`[ActiveSession] onStreamEnd: store is streaming, preserving state`);
-					return s;
-				}
-				// If the bridge already flushed these exact messages, only
-				// update isStreaming and usage — skip the messages reference
-				// change to minimize reactive DOM churn.
-				const messagesChanged = s.messages !== finalSession.messages;
-				return {
-					...s,
-					messages: messagesChanged ? finalSession.messages : s.messages,
-					isStreaming: false,
-					todos: finalSession.todos.length > 0 ? finalSession.todos : s.todos,
-					...usageStoreUpdate(finalSession.usage),
-				};
-			});
+			// Check if an _update is actually needed before firing one.
+			// The streaming bridge may have already applied these exact
+			// messages, and handleDone already set isStreaming=false.
+			// Skipping the redundant _update avoids a second reactive
+			// cycle that could collide with Svelte's DOM reconciliation.
+			const currentState = _state;
+			const messagesChanged = currentState.messages !== finalSession.messages;
+			const streamingChanged = currentState.isStreaming !== false;
+			const todosChanged = finalSession.todos.length > 0 && currentState.todos !== finalSession.todos;
+			const usageDelta = usageStoreUpdate(finalSession.usage);
+			// usageStoreUpdate returns {} when contextUsed <= 0, so check
+			// whether the delta actually contains token updates that differ.
+			const usageChanged = ('totalTokensIn' in usageDelta)
+				&& (usageDelta.totalTokensIn !== currentState.totalTokensIn
+					|| usageDelta.totalTokensOut !== currentState.totalTokensOut);
+
+			if (currentState.sessionId !== sessionId) {
+				// Different session active — skip entirely
+			} else if (currentState.isStreaming) {
+				// Defense-in-depth: a new query started since onStreamEnd
+				// was deferred — do NOT overwrite streaming state.
+				console.debug(`[ActiveSession] onStreamEnd: store is streaming, preserving state`);
+			} else if (!messagesChanged && !streamingChanged && !todosChanged && !usageChanged) {
+				// Bridge already flushed everything — no update needed.
+				console.debug(`[ActiveSession] onStreamEnd: bridge already applied final state, skipping update`);
+			} else {
+				_update(s => {
+					if (s.sessionId !== sessionId) return s;
+					if (s.isStreaming) return s;
+					return {
+						...s,
+						messages: messagesChanged ? finalSession.messages : s.messages,
+						isStreaming: false,
+						todos: todosChanged ? finalSession.todos : s.todos,
+						...usageDelta,
+					};
+				});
+			}
 		}
 
 		// Update cache with final post-streaming messages
