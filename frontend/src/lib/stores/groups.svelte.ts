@@ -9,7 +9,6 @@
  * compatibility with $storeName auto-subscription in .svelte files.
  */
 
-import { untrack } from 'svelte';
 import { browser } from '$app/environment';
 
 // ─── Types (re-exported) ─────────────────────────────────────────────────────
@@ -261,7 +260,7 @@ export const groups = {
 
 	subscribe(fn: Subscriber<GroupsState>) {
 		_subscribers.add(fn);
-		untrack(() => fn(_state));
+		fn(_state);
 		return () => { _subscribers.delete(fn); };
 	},
 
@@ -499,7 +498,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: Subscriber<T>) {
 			const handler: Subscriber<GroupsState> = () => fn(getter());
 			_subscribers.add(handler);
-			untrack(() => fn(getter()));
+			fn(getter());
 			return () => { _subscribers.delete(handler); };
 		}
 	};

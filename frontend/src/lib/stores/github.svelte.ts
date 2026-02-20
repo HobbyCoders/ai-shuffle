@@ -6,7 +6,6 @@
  * Migrated to Svelte 5 runes.
  */
 
-import { untrack } from 'svelte';
 import * as githubApi from '$lib/api/github';
 
 // Re-export types from API
@@ -75,7 +74,9 @@ type Subscriber<T> = (value: T) => void;
 const _subscribers = new Set<Subscriber<GitHubState>>();
 
 function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
+	for (const fn of _subscribers) {
+		fn(_state);
+	}
 }
 
 function _update(fn: (s: GitHubState) => GitHubState) {
@@ -94,7 +95,7 @@ export const github = {
 
 	subscribe(fn: Subscriber<GitHubState>) {
 		_subscribers.add(fn);
-		untrack(() => fn(_state));
+		fn(_state);
 		return () => {
 			_subscribers.delete(fn);
 		};
@@ -314,7 +315,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: Subscriber<T>) {
 			const handler: Subscriber<GitHubState> = () => fn(getter());
 			_subscribers.add(handler);
-			untrack(() => fn(getter()));
+			fn(getter());
 			return () => {
 				_subscribers.delete(handler);
 			};

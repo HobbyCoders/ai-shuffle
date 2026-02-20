@@ -12,7 +12,6 @@
  * compatibility with $storeName auto-subscription in .svelte files.
  */
 
-import { untrack } from 'svelte';
 import { browser } from '$app/environment';
 import { getPreference, setPreference } from '$lib/api/client';
 
@@ -225,7 +224,9 @@ type Subscriber<T> = (value: T) => void;
 const _subscribers = new Set<Subscriber<FilesState>>();
 
 function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
+	for (const fn of _subscribers) {
+		fn(_state);
+	}
 }
 
 function _update(fn: (s: FilesState) => FilesState) {
@@ -244,7 +245,7 @@ export const files = {
 
 	subscribe(fn: Subscriber<FilesState>) {
 		_subscribers.add(fn);
-		untrack(() => fn(_state));
+		fn(_state);
 		return () => {
 			_subscribers.delete(fn);
 		};
@@ -653,7 +654,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: Subscriber<T>) {
 			const handler: Subscriber<FilesState> = () => fn(getter());
 			_subscribers.add(handler);
-			untrack(() => fn(getter()));
+			fn(getter());
 			return () => {
 				_subscribers.delete(handler);
 			};

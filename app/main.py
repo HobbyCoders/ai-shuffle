@@ -43,11 +43,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
             "script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob:; "
             "media-src 'self' blob:; "
             "connect-src 'self' ws: wss:; "
-            "font-src 'self' https://fonts.gstatic.com; "
+            "font-src 'self'; "
             "frame-ancestors 'self';"
         )
 
@@ -401,18 +401,6 @@ if static_dir.exists():
     @app.get("/favicon.svg")
     async def serve_favicon():
         return FileResponse(static_dir / "favicon.svg")
-
-    @app.get("/sw.js")
-    async def serve_sw():
-        return FileResponse(static_dir / "sw.js", media_type="application/javascript")
-
-    @app.get("/manifest.json")
-    async def serve_manifest():
-        return FileResponse(static_dir / "manifest.json", media_type="application/json")
-
-    @app.get("/offline.html")
-    async def serve_offline():
-        return FileResponse(static_dir / "offline.html", media_type="text/html")
 
 
 if __name__ == "__main__":

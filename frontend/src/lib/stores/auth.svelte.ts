@@ -4,7 +4,6 @@
  * Migrated to Svelte 5 runes.
  */
 
-import { untrack } from 'svelte';
 import type { AuthStatus } from '$lib/api/client';
 import { getAuthStatus, login as apiLogin, logout as apiLogout, setup as apiSetup } from '$lib/api/auth';
 
@@ -37,7 +36,9 @@ type Subscriber<T> = (value: T) => void;
 const _subscribers = new Set<Subscriber<AuthState>>();
 
 function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
+	for (const fn of _subscribers) {
+		fn(_state);
+	}
 }
 
 function _update(fn: (s: AuthState) => AuthState) {
@@ -56,7 +57,7 @@ export const auth = {
 
 	subscribe(fn: Subscriber<AuthState>) {
 		_subscribers.add(fn);
-		untrack(() => fn(_state));
+		fn(_state);
 		return () => {
 			_subscribers.delete(fn);
 		};
@@ -131,7 +132,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: Subscriber<T>) {
 			const handler: Subscriber<AuthState> = () => fn(getter());
 			_subscribers.add(handler);
-			untrack(() => fn(getter()));
+			fn(getter());
 			return () => {
 				_subscribers.delete(handler);
 			};

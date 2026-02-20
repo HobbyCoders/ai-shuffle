@@ -8,7 +8,6 @@
  * compatibility with $storeName auto-subscription in .svelte files.
  */
 
-import { untrack } from 'svelte';
 import * as gitApi from '$lib/api/git';
 
 // Re-export types from API
@@ -80,7 +79,9 @@ type Subscriber = (value: GitState) => void;
 const _subscribers = new Set<Subscriber>();
 
 function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
+	for (const fn of _subscribers) {
+		fn(_state);
+	}
 }
 
 function _update(fn: (s: GitState) => GitState) {
@@ -238,7 +239,7 @@ export const git = {
 
 	subscribe(fn: Subscriber) {
 		_subscribers.add(fn);
-		untrack(() => fn(_state));
+		fn(_state);
 		return () => {
 			_subscribers.delete(fn);
 		};
@@ -714,7 +715,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: (value: T) => void) {
 			const handler: Subscriber = () => fn(getter());
 			_subscribers.add(handler);
-			untrack(() => fn(getter()));
+			fn(getter());
 			return () => {
 				_subscribers.delete(handler);
 			};

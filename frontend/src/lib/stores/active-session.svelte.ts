@@ -9,7 +9,6 @@
  * compatibility with $storeName auto-subscription in .svelte files.
  */
 
-import { untrack } from 'svelte';
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import { api } from '$lib/api/client';
 import { notifySessionComplete, notifyWaitingForResponse } from '$lib/services/notifications';
@@ -56,7 +55,7 @@ let _streamingSessions = $state<Map<string, StreamingSessionInfo>>(new Map());
 const _ssSubs = new Set<Subscriber<Map<string, StreamingSessionInfo>>>();
 
 function _notifySsSubs() {
-	untrack(() => { for (const fn of _ssSubs) fn(_streamingSessions); });
+	for (const fn of _ssSubs) fn(_streamingSessions);
 }
 
 /** Track which sessions are streaming across all user devices */
@@ -64,7 +63,7 @@ export const streamingSessions = {
 	get current() { return _streamingSessions; },
 	subscribe(fn: Subscriber<Map<string, StreamingSessionInfo>>) {
 		_ssSubs.add(fn);
-		untrack(() => fn(_streamingSessions));
+		fn(_streamingSessions);
 		return () => { _ssSubs.delete(fn); };
 	},
 	set(value: Map<string, StreamingSessionInfo>) {
@@ -83,7 +82,7 @@ let _backgroundPermissions = $state<Map<string, number>>(new Map());
 const _bpSubs = new Set<Subscriber<Map<string, number>>>();
 
 function _notifyBpSubs() {
-	untrack(() => { for (const fn of _bpSubs) fn(_backgroundPermissions); });
+	for (const fn of _bpSubs) fn(_backgroundPermissions);
 }
 
 /** Track pending permissions for non-active sessions ("needs attention" indicator) */
@@ -91,7 +90,7 @@ export const backgroundPermissions = {
 	get current() { return _backgroundPermissions; },
 	subscribe(fn: Subscriber<Map<string, number>>) {
 		_bpSubs.add(fn);
-		untrack(() => fn(_backgroundPermissions));
+		fn(_backgroundPermissions);
 		return () => { _bpSubs.delete(fn); };
 	},
 	set(value: Map<string, number>) {
@@ -324,7 +323,7 @@ let _state = $state<ActiveSessionState>(defaultState());
 const _subscribers = new Set<Subscriber<ActiveSessionState>>();
 
 function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
+	for (const fn of _subscribers) fn(_state);
 }
 
 function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
@@ -848,7 +847,7 @@ export const activeSession = {
 
 	subscribe(fn: Subscriber<ActiveSessionState>) {
 		_subscribers.add(fn);
-		untrack(() => fn(_state));
+		fn(_state);
 		return () => { _subscribers.delete(fn); };
 	},
 
@@ -1225,7 +1224,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: Subscriber<T>) {
 			const handler: Subscriber<ActiveSessionState> = () => fn(getter());
 			_subscribers.add(handler);
-			untrack(() => fn(getter()));
+			fn(getter());
 			return () => { _subscribers.delete(handler); };
 		}
 	};

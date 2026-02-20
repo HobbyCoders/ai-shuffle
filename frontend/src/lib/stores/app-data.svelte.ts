@@ -8,7 +8,6 @@
  * compatibility with $storeName auto-subscription in .svelte files.
  */
 
-import { untrack } from 'svelte';
 import type { Session, Profile, PaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
 import { api, searchSessionsPaginated } from '$lib/api/client';
 import type { Project } from './types';
@@ -85,7 +84,9 @@ type Subscriber<T> = (value: T) => void;
 const _subscribers = new Set<Subscriber<AppDataState>>();
 
 function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
+	for (const fn of _subscribers) {
+		fn(_state);
+	}
 }
 
 function _update(fn: (s: AppDataState) => AppDataState) {
@@ -225,7 +226,7 @@ export const appData = {
 
 	subscribe(fn: Subscriber<AppDataState>) {
 		_subscribers.add(fn);
-		untrack(() => fn(_state));
+		fn(_state);
 		return () => { _subscribers.delete(fn); };
 	},
 
@@ -392,7 +393,7 @@ function createDerived<T>(getter: () => T) {
 		subscribe(fn: Subscriber<T>) {
 			const handler: Subscriber<AppDataState> = () => fn(getter());
 			_subscribers.add(handler);
-			untrack(() => fn(getter()));
+			fn(getter());
 			return () => { _subscribers.delete(handler); };
 		}
 	};

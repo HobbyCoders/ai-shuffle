@@ -8,7 +8,6 @@
  * Migrated to Svelte 5 runes.
  */
 
-import { untrack } from 'svelte';
 import { browser } from '$app/environment';
 import { getPreference, setPreference } from '$lib/api/client';
 
@@ -105,7 +104,9 @@ type Subscriber<T> = (value: T) => void;
 const _subscribers = new Set<Subscriber<string>>();
 
 function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
+	for (const fn of _subscribers) {
+		fn(_state);
+	}
 }
 
 // ============================================
@@ -119,7 +120,7 @@ export const timezonePreference = {
 
 	subscribe(fn: Subscriber<string>) {
 		_subscribers.add(fn);
-		untrack(() => fn(_state));
+		fn(_state);
 		return () => {
 			_subscribers.delete(fn);
 		};
