@@ -2848,23 +2848,24 @@ async def stream_to_websocket(
                     logger.debug(f"[WS] Got answers for {request_id}: {list(answers.keys())}")
                     return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
 
-                # ExitPlanMode handling — always show approval modal regardless
-                # of permission mode. Plan approval is a user decision, not a
-                # regular permission that can be bypassed.
+                # ExitPlanMode handling — show approval modal in default mode
+                # only. In bypass mode, auto-approve so fire-and-forget
+                # workflows aren't blocked waiting for user input.
                 if tool_name == "ExitPlanMode":
-                    request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
-                    logger.debug(f"[WS] ExitPlanMode requires approval (mode={_perm_mode}): {request_id}")
+                    if _perm_mode != "bypassPermissions":
+                        request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
+                        logger.debug(f"[WS] ExitPlanMode requires approval in {_perm_mode} mode: {request_id}")
 
-                    result = await permission_handler.request_permission(
-                        request_id=request_id,
-                        session_id=_sid,
-                        profile_id=_profile_id,
-                        tool_name=tool_name,
-                        tool_input=tool_input,
-                        broadcast_func=_broadcast
-                    )
-                    if result.behavior == "deny":
-                        return result
+                        result = await permission_handler.request_permission(
+                            request_id=request_id,
+                            session_id=_sid,
+                            profile_id=_profile_id,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            broadcast_func=_broadcast
+                        )
+                        if result.behavior == "deny":
+                            return result
 
                     plan_exit_behavior = _config.get("plan_exit_behavior", "normal")
                     if plan_exit_behavior == "clear_context":
