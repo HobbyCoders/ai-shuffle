@@ -1,5 +1,6 @@
 <script lang="ts">
 	import './deck/cards/card-design-system.css';
+	import { activeSession } from '$lib/stores/active-session';
 
 	export interface PermissionRequestData {
 		request_id: string;
@@ -244,6 +245,35 @@
 			: []
 	);
 
+	// Extract plan content from recent assistant messages (current turn, after last user message)
+	const planContent = $derived.by(() => {
+		if (!isExitPlanMode) return '';
+		const messages = $activeSession.messages;
+		if (!messages || messages.length === 0) return '';
+
+		// Find the last user message index — plan content is everything after it
+		let lastUserIdx = -1;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			if (messages[i].role === 'user') {
+				lastUserIdx = i;
+				break;
+			}
+		}
+
+		// Collect assistant text messages from after the last user message
+		const planParts: string[] = [];
+		const startIdx = lastUserIdx + 1;
+		for (let i = startIdx; i < messages.length; i++) {
+			const msg = messages[i];
+			if (msg.role === 'assistant' && (!msg.type || msg.type === 'text') && msg.content?.trim()) {
+				planParts.push(msg.content.trim());
+			}
+		}
+		return planParts.join('\n\n');
+	});
+
+	let planExpanded = $state(true);
+
 	// Plan mode icon: clipboard/list
 	const planIcon = 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01';
 </script>
@@ -317,9 +347,34 @@
 
 	<!-- Plan Content -->
 	<div class="px-4 py-3">
-		<p class="text-sm text-muted-foreground leading-relaxed">
-			Claude has created a plan and is requesting approval to proceed.
-		</p>
+		{#if planContent}
+			<!-- Actual plan text from assistant messages -->
+			<button
+				type="button"
+				class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 hover:text-foreground transition-colors"
+				onclick={() => planExpanded = !planExpanded}
+			>
+				<svg class="w-3 h-3 transition-transform" class:rotate-90={planExpanded} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+				</svg>
+				Plan Details
+			</button>
+			{#if planExpanded}
+				<div
+					class="plan-content-preview rounded-lg border p-3 text-sm leading-relaxed overflow-y-auto whitespace-pre-wrap"
+					style="
+						max-height: 320px;
+						border-color: color-mix(in oklch, var(--purple, #8b5cf6) 20%, var(--border));
+						background: color-mix(in oklch, var(--purple, #8b5cf6) 5%, var(--card));
+						color: var(--foreground);
+					"
+				>{planContent}</div>
+			{/if}
+		{:else}
+			<p class="text-sm text-muted-foreground leading-relaxed">
+				Claude has created a plan and is requesting approval to proceed.
+			</p>
+		{/if}
 
 		<!-- Requested Permissions -->
 		{#if allowedPrompts.length > 0}

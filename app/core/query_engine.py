@@ -3504,6 +3504,9 @@ async def stream_to_websocket(
 
         # Session pool lifecycle: KEEP the client alive for reuse.
         # Only remove from pool if the client died or clear_context was requested.
+        # Track locally BEFORE pool removal — pool.remove() destroys the state,
+        # so we can't check state.clear_context_pending later.
+        context_was_cleared = state.clear_context_pending
         if state.clear_context_pending:
             # Clear context requested — need fresh subprocess on next query
             state.clear_context_pending = False
@@ -3529,14 +3532,14 @@ async def stream_to_websocket(
         if len(prompt) > 50:
             title_to_set += "..."
 
-    # If clear_context_pending was set by ExitPlanMode, don't overwrite the
+    # If clear_context was triggered by ExitPlanMode, don't overwrite the
     # cleared sdk_session_id — the next query should start with a fresh context.
-    final_state = pool.peek(session_id)
+    # We use the local `context_was_cleared` flag because the session was already
+    # evicted from the pool above (pool.peek would return None).
     save_sdk_session_id = sdk_session_id
-    if final_state and final_state.clear_context_pending:
+    if context_was_cleared:
         save_sdk_session_id = None  # None = don't update the sdk_session_id column
-        final_state.clear_context_pending = False
-        logger.info(f"[WS] Skipping sdk_session_id write for {session_id} (clear_context_pending)")
+        logger.info(f"[WS] Skipping sdk_session_id write for {session_id} (clear_context)")
 
     database.update_session(
         session_id=session_id,
