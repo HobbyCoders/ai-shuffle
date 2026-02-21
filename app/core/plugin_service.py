@@ -302,6 +302,11 @@ class PluginService:
         """
         # Validate URL before passing to subprocess
         import re
+
+        # Accept GitHub shorthand (owner/repo) and expand to full URL
+        if re.match(r'^[\w\-]+/[\w\-.]+$', url):
+            url = f"https://github.com/{url}"
+
         if not re.match(r'^https?://[\w\-.]+(:\d+)?(/[\w\-./%+@]*)*$', url) and \
            not re.match(r'^git@[\w\-.]+:[\w\-./]+$', url):
             raise ValueError(f"Invalid git URL: {url[:100]}")

@@ -158,6 +158,11 @@ async def add_marketplace(
             install_location=mp.install_location,
             last_updated=mp.last_updated
         )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
     except RuntimeError as e:
         logger.exception("Failed to add marketplace")
         raise HTTPException(
