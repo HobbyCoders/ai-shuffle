@@ -105,12 +105,12 @@
 		<div class="chat-with-browser">
 			<div class="chat-column">
 				<div class="message-area-wrapper">
-					<!-- Key by sessionId so MessageArea is destroyed/recreated on session switch.
-					     Without this, Svelte reuses the same component instance and the
-					     onMount/onDestroy scroll-position save/restore logic never fires. -->
-					{#key $activeSession.sessionId}
-						<MessageArea />
-					{/key}
+					<!-- MessageArea handles session-switch scroll save/restore internally
+					     via $effect watching sessionId. No {#key} needed — avoiding
+					     component destruction prevents a Svelte 5 reactivity edge case
+					     where the recreated component loses reactive updates during
+					     new session creation (sessionId: undefined → new ID). -->
+					<MessageArea />
 				</div>
 
 				<!-- Queued Messages Bar (Send Later) -->

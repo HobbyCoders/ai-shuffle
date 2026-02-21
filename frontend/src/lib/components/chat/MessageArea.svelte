@@ -13,7 +13,7 @@
 	 * - Scroll position is restored on component mount (not on every tab prop change)
 	 * - This prevents scroll jumping when switching between cards
 	 */
-	import { tick, onMount, onDestroy } from 'svelte';
+	import { tick, untrack, onMount, onDestroy } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles } from '$lib/stores/app-data';
 	import type { ChatMessage, TodoItem } from '$lib/stores/types';
@@ -316,6 +316,66 @@
 			resizeObserver.disconnect();
 			resizeObserver = null;
 		}
+	});
+
+	// ── Session-switch scroll save/restore ─────────────────────────────
+	// Replaces the old {#key $activeSession.sessionId} pattern in ChatView
+	// that destroyed/recreated this component on every sessionId change.
+	// That pattern caused a Svelte 5 reactivity edge case where the
+	// recreated component lost reactive store updates during new session
+	// creation (sessionId: undefined → new ID).
+	let prevTrackedSessionId = $state<string | null | undefined>(undefined);
+
+	$effect(() => {
+		const currentId = $activeSession.sessionId;
+		const prevId = untrack(() => prevTrackedSessionId);
+
+		if (currentId === prevId) return;
+
+		// Save scroll state for the old session (if any)
+		if (prevId && containerRef) {
+			scrollPositionCache.set(prevId, containerRef.scrollTop);
+			autoScrollCache.set(prevId, shouldAutoScroll);
+			activeSession.setScrollTop(containerRef.scrollTop);
+		}
+
+		prevTrackedSessionId = currentId;
+
+		// Skip scroll restore for initial sessionId assignment on new sessions
+		// (undefined → new ID). The component is already at the correct position
+		// (bottom) from onMount, and restoring would fight the initial render.
+		if (!prevId) return;
+
+		// Restore scroll state for the new session
+		const cacheKey = currentId ?? 'new';
+		const wasAutoScrolling = autoScrollCache.get(cacheKey);
+		const userScrolledUp = wasAutoScrolling === false;
+
+		// Wait for DOM to update with new messages before restoring scroll
+		tick().then(() => {
+			if (!containerRef) return;
+
+			if (userScrolledUp) {
+				const cachedPosition = scrollPositionCache.get(cacheKey);
+				const storedPosition = cachedPosition ?? $activeSession.scrollTop;
+
+				if (storedPosition > 0) {
+					isScrollingProgrammatically = true;
+					containerRef.scrollTop = storedPosition;
+					shouldAutoScroll = false;
+					requestAnimationFrame(() => {
+						isScrollingProgrammatically = false;
+					});
+				} else {
+					shouldAutoScroll = true;
+					scrollToBottom();
+				}
+			} else {
+				// Default: scroll to bottom for the new session
+				shouldAutoScroll = true;
+				scrollToBottom();
+			}
+		});
 	});
 
 	// Observe container size changes (e.g., when input area expands/contracts)
