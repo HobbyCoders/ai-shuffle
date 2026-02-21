@@ -92,8 +92,6 @@ function mockState(): ActiveSessionState {
 		contextMax: 0,
 		modelOverride: null,
 		permissionModeOverride: null,
-		thinkingOverride: null,
-		effortOverride: null,
 		pendingPermissions: [],
 		pendingQuestions: [],
 		todos: [],

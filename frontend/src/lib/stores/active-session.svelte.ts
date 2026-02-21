@@ -126,8 +126,6 @@ export interface ActiveSessionState {
 	contextMax: number;
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
-	thinkingOverride: string | null;
-	effortOverride: string | null;
 	pendingPermissions: PermissionRequestType[];
 	pendingQuestions: UserQuestionRequest[];
 	todos: TodoItem[];
@@ -157,8 +155,6 @@ export interface PersistedSession {
 	project: string;
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
-	thinkingOverride: string | null;
-	effortOverride: string | null;
 	executionMode?: ExecutionMode;
 	worktreeId?: string | null;
 	worktreeBranch?: string;
@@ -291,8 +287,6 @@ function defaultState(): ActiveSessionState {
 		contextMax: 200_000,
 		modelOverride: null,
 		permissionModeOverride: null,
-		thinkingOverride: null,
-		effortOverride: null,
 		pendingPermissions: [],
 		pendingQuestions: [],
 		todos: [],
@@ -525,8 +519,6 @@ function processNextQueuedMessage() {
 		const overrides: Record<string, string> = {};
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
 		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
-		if (_state.thinkingOverride) overrides.thinking_mode = _state.thinkingOverride;
-		if (_state.effortOverride) overrides.effort = _state.effortOverride;
 
 		wsConn.resetLastMessageTime();
 		wsConn.send({
@@ -777,8 +769,6 @@ async function startSessionOnExistingWorktree(prompt: string) {
 	const overrides: Record<string, string> = {};
 	if (_state.modelOverride) overrides.model = _state.modelOverride;
 	if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
-	if (_state.thinkingOverride) overrides.thinking_mode = _state.thinkingOverride;
-	if (_state.effortOverride) overrides.effort = _state.effortOverride;
 
 	wsConn.resetLastMessageTime();
 	wsConn.send({
@@ -834,8 +824,6 @@ async function init() {
 					project: persisted.project || defaultProject,
 					modelOverride: persisted.modelOverride ?? null,
 					permissionModeOverride: persisted.permissionModeOverride ?? null,
-					thinkingOverride: persisted.thinkingOverride ?? null,
-					effortOverride: persisted.effortOverride ?? null,
 					executionMode: persisted.executionMode || 'local',
 					worktreeBranch: persisted.worktreeBranch || '',
 					worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',
@@ -1005,8 +993,6 @@ export const activeSession = {
 		const overrides: Record<string, string> = {};
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
 		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
-		if (_state.thinkingOverride) overrides.thinking_mode = _state.thinkingOverride;
-		if (_state.effortOverride) overrides.effort = _state.effortOverride;
 
 		wsConn.resetLastMessageTime();
 		wsConn.send({
@@ -1096,8 +1082,6 @@ export const activeSession = {
 
 	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model })); persistSession(); },
 	setPermissionModeOverride(mode: string | null) { _update(s => ({ ...s, permissionModeOverride: mode })); persistSession(); },
-	setThinkingOverride(mode: string | null) { _update(s => ({ ...s, thinkingOverride: mode })); persistSession(); },
-	setEffortOverride(effort: string | null) { _update(s => ({ ...s, effortOverride: effort })); persistSession(); },
 
 	// ── Ephemeral UI State ──────────────────────────────────────────
 

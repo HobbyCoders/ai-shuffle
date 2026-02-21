@@ -19,24 +19,6 @@
 
 	let { isUploading, onAttachClick }: Props = $props();
 
-	// Override mode constant arrays
-	const thinkingModes = [
-		{ value: null, label: 'Default', description: 'Use profile setting' },
-		{ value: 'disabled', label: 'Off', description: 'Disable extended thinking' },
-		{ value: 'adaptive', label: 'Adaptive', description: 'Model decides when to think' },
-		{ value: 'think', label: '8K', description: 'Enabled with ~8K token budget' },
-		{ value: 'think_harder', label: '24K', description: 'Enabled with ~24K token budget' },
-		{ value: 'ultra_think', label: '64K', description: 'Enabled with ~64K token budget' }
-	];
-
-	const effortModes = [
-		{ value: null, label: 'Default', description: 'Use profile setting' },
-		{ value: 'low', label: 'Low', description: 'Light reasoning' },
-		{ value: 'medium', label: 'Medium', description: 'Balanced reasoning' },
-		{ value: 'high', label: 'High', description: 'Deep reasoning' },
-		{ value: 'max', label: 'Max', description: 'Maximum depth' }
-	];
-
 	const permissionModes = [
 		{ value: null, label: 'Default', description: 'Use profile setting' },
 		{ value: 'default', label: 'Ask', description: 'Confirm before tools' },
@@ -59,34 +41,6 @@
 
 	<!-- Right: Override buttons, Attach & Mic buttons -->
 	<div class="controls-right">
-		<!-- Thinking Config Override -->
-		<OverrideDropdown
-			modes={thinkingModes}
-			currentValue={$activeSession.thinkingOverride}
-			onSelect={(v) => activeSession.setThinkingOverride(v)}
-			title="Thinking"
-		>
-			{#snippet icon()}
-				<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-				</svg>
-			{/snippet}
-		</OverrideDropdown>
-
-		<!-- Effort Override -->
-		<OverrideDropdown
-			modes={effortModes}
-			currentValue={$activeSession.effortOverride}
-			onSelect={(v) => activeSession.setEffortOverride(v)}
-			title="Effort"
-		>
-			{#snippet icon()}
-				<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M13 10V3L4 14h7v7l9-11h-7z" />
-				</svg>
-			{/snippet}
-		</OverrideDropdown>
-
 		<!-- Permission Mode Override -->
 		<OverrideDropdown
 			modes={permissionModes}
