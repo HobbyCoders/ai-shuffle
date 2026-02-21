@@ -161,17 +161,26 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
     """
     Generate a response using Claude SDK.
 
+    Uses the Default AI profile's model setting unless an explicit model override
+    is provided. This allows users to control which model is used for all
+    internal AI generation (commit messages, PR descriptions, profile generation, etc.)
+    by editing the built-in "Default AI" profile.
+
     Args:
         prompt: The prompt to send to Claude
-        model: Optional model override (haiku, sonnet, opus)
+        model: Optional model override (haiku, sonnet, opus). If None, uses the
+               model from the Default AI profile.
 
     Returns:
         Text response from Claude
     """
-    # Use sonnet by default for better quality generation
-    # The prompts are comprehensive and benefit from a more capable model
+    from app.core.profiles import get_default_ai_model
+
+    # Use the model from the Default AI profile unless explicitly overridden
+    effective_model = model or get_default_ai_model()
+
     options = ClaudeAgentOptions(
-        model=model or "sonnet",
+        model=effective_model,
         max_turns=1,
         permission_mode="bypassPermissions",
         tools=[],  # No tools needed for generation

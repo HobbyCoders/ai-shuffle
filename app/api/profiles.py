@@ -545,12 +545,18 @@ async def update_profile(
 
 @router.delete("/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_profile(profile_id: str, token: str = Depends(require_admin)):
-    """Delete a profile - Admin only. All profiles can be deleted."""
+    """Delete a profile - Admin only. Built-in profiles cannot be deleted."""
     existing = database.get_profile(profile_id)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Profile not found: {profile_id}"
+        )
+
+    if existing.get("is_builtin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Built-in profiles cannot be deleted"
         )
 
     database.delete_profile(profile_id)

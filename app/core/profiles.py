@@ -1,12 +1,17 @@
 """
 Profile and subagent utilities
 
-No built-in profiles or subagents are seeded automatically.
-Users must create their own profiles and projects before starting chats.
+Seeds a built-in "Default AI" profile on first run. This profile is used
+for all internal AI generation tasks (commit messages, PR descriptions,
+profile/subagent generation, etc.) when no user profile is selected.
+Built-in profiles can be edited but not deleted.
 """
 
+import logging
 from typing import Dict, Any, Optional
 from app.db import database
+
+logger = logging.getLogger(__name__)
 
 
 # Default profile configuration template (for reference when creating new profiles)
@@ -33,26 +38,88 @@ DEFAULT_PROFILE_CONFIG: Dict[str, Any] = {
 }
 
 
+# ============================================================================
+# Built-in Default AI Profile
+# ============================================================================
+# This profile controls the model and settings used for all internal AI
+# generation tasks: commit messages, PR descriptions, profile/subagent
+# generation, and any other AI-powered feature that doesn't use a user profile.
+# Users can edit these settings but cannot delete the profile.
+
+DEFAULT_AI_PROFILE_ID = "default-ai"
+
+DEFAULT_AI_PROFILE: Dict[str, Any] = {
+    "id": DEFAULT_AI_PROFILE_ID,
+    "name": "Default AI",
+    "description": "Built-in profile used for AI-powered features like commit message generation, "
+                   "PR descriptions, profile/subagent generation, and other internal AI tasks. "
+                   "Edit this profile to change the model and settings used by these features.",
+    "config": {
+        "model": "sonnet",
+        "permission_mode": "bypassPermissions",
+        "system_prompt": {
+            "type": "preset",
+            "preset": "claude_code"
+        },
+        "setting_sources": ["user"],
+    },
+}
+
+
+def get_default_ai_profile() -> Optional[Dict[str, Any]]:
+    """Get the default AI profile from the database.
+
+    Returns the profile dict or None if it hasn't been seeded yet.
+    """
+    return database.get_profile(DEFAULT_AI_PROFILE_ID)
+
+
+def get_default_ai_model() -> str:
+    """Get the model configured in the default AI profile.
+
+    Falls back to 'sonnet' if the profile doesn't exist or has no model set.
+    """
+    profile = get_default_ai_profile()
+    if profile:
+        return profile.get("config", {}).get("model", "sonnet") or "sonnet"
+    return "sonnet"
+
+
 def run_migrations():
     """Run any necessary database migrations on startup.
 
     This function is called on app startup to ensure data consistency.
     """
-    # Migration: Ensure ALL profiles have is_builtin = False
-    # This fixes any profiles that were created with is_builtin = True before the policy change
-    all_profiles = database.get_all_profiles()
-    for profile in all_profiles:
-        if profile.get("is_builtin"):
-            database.set_profile_builtin(profile["id"], False)
-
-    # Migration: Ensure ALL subagents have is_builtin = False
-    all_subagents = database.get_all_subagents()
-    for subagent in all_subagents:
-        if subagent.get("is_builtin"):
-            database.set_subagent_builtin(subagent["id"], False)
+    # Seed the built-in default AI profile
+    _seed_default_ai_profile()
 
     # Seed default templates if none exist
     _seed_default_templates()
+
+
+def _seed_default_ai_profile():
+    """Ensure the built-in Default AI profile exists.
+
+    Creates it on first run. If it already exists, ensures it's marked as built-in.
+    Does NOT overwrite user edits to the profile config.
+    """
+    existing = database.get_profile(DEFAULT_AI_PROFILE_ID)
+    if existing:
+        # Ensure it's marked as built-in (in case of upgrade from older version)
+        if not existing.get("is_builtin"):
+            database.set_profile_builtin(DEFAULT_AI_PROFILE_ID, True)
+            logger.info("Marked existing default-ai profile as built-in")
+        return
+
+    # Create the default AI profile
+    database.create_profile(
+        profile_id=DEFAULT_AI_PROFILE["id"],
+        name=DEFAULT_AI_PROFILE["name"],
+        description=DEFAULT_AI_PROFILE["description"],
+        config=DEFAULT_AI_PROFILE["config"],
+        is_builtin=True,
+    )
+    logger.info("Seeded built-in Default AI profile")
 
 
 # Default templates to seed on first run

@@ -1479,10 +1479,10 @@
 						{:else}
 							<div
 								class="fp-list-item"
-								onclick={() => !profile.is_builtin && openEditForm(profile)}
+								onclick={() => openEditForm(profile)}
 								role="button"
 								tabindex="0"
-								onkeydown={(e) => e.key === 'Enter' && !profile.is_builtin && openEditForm(profile)}
+								onkeydown={(e) => e.key === 'Enter' && openEditForm(profile)}
 							>
 								<div class="fp-item-icon fp-item-icon--{profile.config?.model || 'sonnet'}">
 									<span class="fp-model-initial">{getModelDisplay(profile.config?.model).charAt(0)}</span>

@@ -1295,14 +1295,15 @@ async def generate_commit_message(
     prompt = f"""Based on the following git diff, write a concise commit message.
 Use conventional commit format (e.g., "feat:", "fix:", "refactor:", "docs:", "chore:", "perf:", "style:", "test:").
 The first line should be under 72 characters.
-If the change is complex, add a blank line followed by 1-3 bullet points.
+If the change is complex, add a blank line followed by bullet points covering all significant changes.
 Return ONLY the commit message text, nothing else.
 
 <diff>
 {diff_text}
 </diff>"""
 
-    response_text = await generate_with_claude(prompt, model="sonnet")
+    # Use the Default AI profile's model (no explicit override - respects user config)
+    response_text = await generate_with_claude(prompt)
 
     # Clean up: remove any markdown code blocks the model may have wrapped around the message
     message = response_text.strip()
@@ -1353,7 +1354,7 @@ async def generate_pr_description(
 Return a JSON object with "title" and "body" keys.
 
 The title should be concise (under 72 characters) and descriptive.
-The body should have a "## Summary" section with 2-4 bullet points describing what changed and why.
+The body should have a "## Summary" section with bullet points describing what changed and why. Include as many bullet points as needed to cover all significant changes.
 
 <commits>
 {commit_log}
@@ -1365,7 +1366,8 @@ The body should have a "## Summary" section with 2-4 bullet points describing wh
 
 Return ONLY the JSON object, no markdown code blocks or explanation."""
 
-    response_text = await generate_with_claude(prompt, model="sonnet")
+    # Use the Default AI profile's model (no explicit override - respects user config)
+    response_text = await generate_with_claude(prompt)
 
     try:
         parsed = extract_json_from_response(response_text)
