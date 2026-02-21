@@ -61,8 +61,16 @@ class SessionPoller {
 	 */
 	private _streamingGeneration: Map<string, number> = new Map();
 
-	/** Callback when streaming ends */
+	/** Callback when streaming ends (cleanup: cache, remove session, refresh list) */
 	private _onStreamEnd: StreamEndCallback | null = null;
+
+	/** Callback after each successful poll applies state (direct path to activeSession) */
+	private _onPollApplied: ((sessionId: string, data: {
+		messages: ChatMessage[];
+		isStreaming: boolean;
+		usage: SessionUsage;
+		todos: TodoItem[];
+	}) => void) | null = null;
 
 	/** Callback when consecutive poll errors exceed threshold */
 	private _onPollError: PollErrorCallback | null = null;
@@ -73,6 +81,20 @@ class SessionPoller {
 	 */
 	onStreamEnd(callback: StreamEndCallback): void {
 		this._onStreamEnd = callback;
+	}
+
+	/**
+	 * Register a callback invoked after each successful poll writes to sessionState.
+	 * This is the direct path from poller → activeSession, replacing the old
+	 * bridge subscription pattern that caused double-update Svelte crashes.
+	 */
+	onPollApplied(callback: (sessionId: string, data: {
+		messages: ChatMessage[];
+		isStreaming: boolean;
+		usage: SessionUsage;
+		todos: TodoItem[];
+	}) => void): void {
+		this._onPollApplied = callback;
 	}
 
 	/**
@@ -367,6 +389,21 @@ class SessionPoller {
 			existingMessages
 		);
 
+		// Direct callback to activeSession — replaces the old bridge subscription.
+		// This is a single _update() call per poll cycle, eliminating the
+		// double-update that corrupted Svelte 5's effect linked-list.
+		if (this._onPollApplied) {
+			const session = sessionState.getSession(sessionId);
+			if (session) {
+				this._onPollApplied(sessionId, {
+					messages: session.messages,
+					isStreaming: session.isStreaming,
+					usage: session.usage,
+					todos: session.todos,
+				});
+			}
+		}
+
 		// Handle streaming state transitions
 		if (streamingJustEnded) {
 			// Streaming→not-streaming transition detected.
@@ -374,20 +411,10 @@ class SessionPoller {
 			if (this._timers.has(sessionId)) {
 				this.stop(sessionId);
 			}
+			// onStreamEnd is cleanup-only (cache, remove session, refresh list) —
+			// it does NOT call _update(), so no setTimeout(0) deferral needed.
 			if (this._onStreamEnd) {
-				// Defer onStreamEnd to the next macrotask via setTimeout(0).
-				// This gives Svelte a full task boundary to finish reconciling the
-				// DOM from the streaming bridge's _update() (triggered by
-				// applyServerState → _sync()) before onStreamEnd fires a second
-				// _update(). Without this separation, two store updates in the
-				// same microtask flush corrupt Svelte 5's effect linked-list
-				// (TypeError: Cannot read 'prev' of undefined), freezing the UI.
-				//
-				// Previously used queueMicrotask, but microtasks run before
-				// Svelte's DOM reconciliation completes — they share the same
-				// microtask checkpoint, so the double-update still collides.
-				const cb = this._onStreamEnd;
-				setTimeout(() => cb(sessionId, usage), 0);
+				this._onStreamEnd(sessionId, usage);
 			}
 		} else if (!isStreaming && this._timers.has(sessionId)) {
 			// Non-transition case: poll returns !isStreaming but session wasn't previously
@@ -396,9 +423,7 @@ class SessionPoller {
 			if (entry.interval === STREAMING_POLL_INTERVAL_MS) {
 				this.stop(sessionId);
 				if (this._onStreamEnd) {
-					// Defer for same reason as streamingJustEnded (avoid double-update)
-					const cb = this._onStreamEnd;
-					setTimeout(() => cb(sessionId, usage), 0);
+					this._onStreamEnd(sessionId, usage);
 				}
 			}
 		}

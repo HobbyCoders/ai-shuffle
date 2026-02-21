@@ -330,13 +330,6 @@ function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
 
 let stopTimeout: ReturnType<typeof setTimeout> | null = null;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
-let streamingBridgeUnsub: (() => void) | null = null;
-
-// Tracked removeSession timers so they can be cancelled when a new
-// streaming session starts for the same sessionId. Without this,
-// onStreamEnd's removeSession fires 100ms later and deletes the
-// new session's data from sessionState.
-const removeSessionTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
 // Shared mutable state — passed by reference to ws-message-handlers and session-switcher
 const internal: InternalMutableState = {
@@ -422,6 +415,7 @@ const switcher = createSessionSwitcher({
 	sessionEphemeralCache,
 	messageCache,
 	browserState,
+	sessionPoller,
 	onPersistTimerChanged: (timer) => { persistTimer = timer; },
 });
 
@@ -431,14 +425,6 @@ const persistSession = switcher.persistSession;
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
 function startPolling(sessionId: string) {
-	// Cancel any pending removeSession timer from a previous onStreamEnd.
-	// Without this, the 100ms removeSession timer fires and deletes the
-	// session data that the new streaming session just initialized.
-	const pendingRemove = removeSessionTimers.get(sessionId);
-	if (pendingRemove) {
-		clearTimeout(pendingRemove);
-		removeSessionTimers.delete(sessionId);
-	}
 	sessionPoller.startStreaming(sessionId);
 }
 
@@ -567,54 +553,47 @@ function disconnect() {
 	_update(s => ({ ...s, wsConnected: false }));
 }
 
-// ─── Streaming bridge ────────────────────────────────────────────────────────
-// Subscribes to sessionState so that polling updates flow to
-// activeSession.messages in real-time during streaming — not just at
-// stream end.
+// ─── Poll callback ───────────────────────────────────────────────────────────
+// Direct callback from the poller → activeSession, replacing the old bridge
+// subscription pattern. One _update() call per poll cycle — no double-update
+// risk that corrupted Svelte 5's effect linked-list.
 
-function setupStreamingBridge() {
-	streamingBridgeUnsub = sessionState.subscribe(($sessionState) => {
-		if (!_state.sessionId) return;
+function setupPollCallback() {
+	sessionPoller.onPollApplied((sessionId, data) => {
+		if (sessionId !== _state.sessionId) return;
 
-		const sessionData = $sessionState.sessions.get(_state.sessionId);
-		if (!sessionData || sessionData.messages.length === 0) return;
+		// Forward if streaming OR poller still has data
+		if (!_state.isStreaming && !data.isStreaming && !sessionPoller.isPolling(sessionId)) return;
 
-		// Forward if the store says we're streaming OR the poller still has
-		// data (sessionState tracks server-side streaming independently).
-		// This closes the gap where `done` sets store.isStreaming=false but
-		// the poller's final poll hasn't been applied yet.
-		if (!_state.isStreaming && !sessionData.isStreaming && !sessionPoller.isPolling(_state.sessionId)) return;
+		// Skip if nothing actually changed — messages, todos, AND usage all identical.
+		// Only checking messages reference isn't enough because preserveMessageIds
+		// can return the same array when content matches, which would silently
+		// drop todos and usage updates on the final poll.
+		const usageDelta = usageStoreUpdate(data.usage);
+		const usageHasUpdate = 'totalTokensIn' in usageDelta;
+		const todosHaveUpdate = data.todos.length > 0;
+		if (_state.messages === data.messages && !todosHaveUpdate && !usageHasUpdate) return;
 
-		// Skip if messages reference hasn't changed. During compaction's full
-		// refresh, preserveMessageIds may return the same array when content
-		// matches. Skipping here avoids a redundant reactive update that the
-		// deferred onStreamEnd would also trigger, reducing DOM churn.
-		if (_state.messages === sessionData.messages) return;
-
-		_update(s => {
-			if (s.sessionId !== _state.sessionId) return s;
-			return {
-				...s,
-				messages: sessionData.messages,
-				todos: sessionData.todos.length > 0 ? sessionData.todos : s.todos,
-				...usageStoreUpdate(sessionData.usage),
-			};
-		});
+		_update(s => ({
+			...s,
+			messages: data.messages,
+			todos: todosHaveUpdate ? data.todos : s.todos,
+			...usageDelta,
+		}));
 	});
 }
 
 // ─── onStreamEnd callback ────────────────────────────────────────────────────
-// Flushes final messages from sessionState to the store before cleanup.
+// Cleanup-only: caches messages, removes session from sessionState, refreshes
+// sidebar. Does NOT call _update() — the poll callback already wrote final
+// messages, and handleDone already set isStreaming: false.
 
 function setupOnStreamEnd() {
-	sessionPoller.onStreamEnd((sessionId, usage) => {
+	sessionPoller.onStreamEnd((sessionId, _usage) => {
 		// If in interrupt_and_query transition, skip cleanup
 		if (internal.interruptPending) return;
 
-		// If the store says isStreaming=true AND the poller is already
-		// running for this session, a new query was started while this
-		// onStreamEnd was deferred. This callback is stale — skip it
-		// to avoid tearing down the new query's state.
+		// If a new query started, this callback is stale — skip it
 		if (_state.isStreaming && _state.sessionId === sessionId && sessionPoller.isPolling(sessionId)) {
 			console.debug(`[ActiveSession] Skipping stale onStreamEnd for ${sessionId} — new streaming in progress`);
 			return;
@@ -623,67 +602,15 @@ function setupOnStreamEnd() {
 		// Refresh sessions list
 		appData.loadSessions();
 
-		// Flush final messages AND usage from sessionState to the store.
-		// NOTE: This callback is deferred via setTimeout(0) from the poller
-		// to give Svelte a full task boundary to reconcile the bridge's
-		// reactive update before this second update fires.
+		// Cache final messages for instant rendering on next load
 		const finalSession = sessionState.getSession(sessionId);
-		if (finalSession && finalSession.messages.length > 0) {
-			// Check if an _update is actually needed before firing one.
-			// The streaming bridge may have already applied these exact
-			// messages, and handleDone already set isStreaming=false.
-			// Skipping the redundant _update avoids a second reactive
-			// cycle that could collide with Svelte's DOM reconciliation.
-			const currentState = _state;
-			const messagesChanged = currentState.messages !== finalSession.messages;
-			const streamingChanged = currentState.isStreaming !== false;
-			const todosChanged = finalSession.todos.length > 0 && currentState.todos !== finalSession.todos;
-			const usageDelta = usageStoreUpdate(finalSession.usage);
-			// usageStoreUpdate returns {} when contextUsed <= 0, so check
-			// whether the delta actually contains token updates that differ.
-			const usageChanged = ('totalTokensIn' in usageDelta)
-				&& (usageDelta.totalTokensIn !== currentState.totalTokensIn
-					|| usageDelta.totalTokensOut !== currentState.totalTokensOut);
-
-			if (currentState.sessionId !== sessionId) {
-				// Different session active — skip entirely
-			} else if (currentState.isStreaming && sessionPoller.isPolling(sessionId)) {
-				// A genuinely new query started since onStreamEnd was deferred
-				// (poller is running for this session) — do NOT overwrite.
-				console.debug(`[ActiveSession] onStreamEnd: new query in progress, preserving state`);
-			} else if (!messagesChanged && !streamingChanged && !todosChanged && !usageChanged) {
-				// Bridge already flushed everything — no update needed.
-				console.debug(`[ActiveSession] onStreamEnd: bridge already applied final state, skipping update`);
-			} else {
-				_update(s => {
-					if (s.sessionId !== sessionId) return s;
-					// Only preserve state if a genuinely new query started (poller
-					// running). Without the isPolling check, a missed WS 'done'
-					// event would leave isStreaming stuck at true forever since
-					// onStreamEnd is the only remaining path to clear it.
-					if (s.isStreaming && sessionPoller.isPolling(sessionId)) return s;
-					return {
-						...s,
-						messages: messagesChanged ? finalSession.messages : s.messages,
-						isStreaming: false,
-						todos: todosChanged ? finalSession.todos : s.todos,
-						...usageDelta,
-					};
-				});
-			}
-		}
-
-		// Update cache with final post-streaming messages
 		if (finalSession && finalSession.messages.length > 0) {
 			messageCache.set(sessionId, finalSession.messages);
 		}
 
-		// Clean up sessionState after reactive cycle completes.
-		// Use the tracked timer map so startStreaming can cancel it.
-		removeSessionTimers.set(sessionId, setTimeout(() => {
-			removeSessionTimers.delete(sessionId);
-			sessionState.removeSession(sessionId);
-		}, 100));
+		// Clean up sessionState immediately — no timer needed since
+		// we don't call _update(), so no Svelte reconciliation race
+		sessionState.removeSession(sessionId);
 
 		// Mark as handled so the safety timeout doesn't send redundant load_session
 		internal.streamEndCleanedUp = sessionId;
@@ -795,7 +722,7 @@ let _skipNextSessionRestore = false;
 
 async function init() {
 	setupOnStreamEnd();
-	setupStreamingBridge();
+	setupPollCallback();
 
 	// Visibility change handling is managed by wsConn (ping/pong, reconnect).
 	// Polling pause/resume is handled via onVisibilityHidden/onVisibilityVisible callbacks.
@@ -859,11 +786,7 @@ async function init() {
 function destroy() {
 	disconnect();
 	wsConn.destroy();
-	if (streamingBridgeUnsub) { streamingBridgeUnsub(); streamingBridgeUnsub = null; }
 	if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
-	// Cancel all pending removeSession timers
-	for (const timer of removeSessionTimers.values()) clearTimeout(timer);
-	removeSessionTimers.clear();
 	_state = defaultState();
 	_notifySubscribers();
 }

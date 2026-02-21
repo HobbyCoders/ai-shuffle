@@ -48,6 +48,9 @@ export interface SessionSwitcherDeps {
 	browserState: {
 		switchSession: (fromSessionId: string | null, toSessionId: string | null) => void;
 	};
+	sessionPoller: {
+		stop: (sessionId: string) => void;
+	};
 
 	// Callbacks
 	onPersistTimerChanged: (timer: ReturnType<typeof setTimeout> | null) => void;
@@ -104,7 +107,7 @@ export async function loadSelectionFromBackend(): Promise<{ selectedProfile: str
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitcher {
-	const { update, getState, wsSend, wsIsConnected, internal, sessionEphemeralCache, messageCache, browserState, onPersistTimerChanged } = deps;
+	const { update, getState, wsSend, wsIsConnected, internal, sessionEphemeralCache, messageCache, browserState, sessionPoller, onPersistTimerChanged } = deps;
 
 	let persistTimer: ReturnType<typeof setTimeout> | null = null;
 	let pendingSelection: { profile: string; project: string } | null = null;
@@ -229,6 +232,21 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	async function switchSession(sessionId: string, projectId?: string | null) {
 		const state = getState();
+
+		// Stop polling for the session we're leaving — prevents stale poll
+		// callbacks from writing into _state after sessionId changes.
+		if (state.sessionId) {
+			sessionPoller.stop(state.sessionId);
+		}
+
+		// Reset cross-session internal state to prevent contamination.
+		// Without this, pendingTools from the old session extend WS health
+		// timeouts, and streamingOnDisconnect/interruptPending from the old
+		// session corrupt the new session's event handling.
+		internal.pendingTools.clear();
+		internal.streamEndCleanedUp = null;
+		internal.streamingOnDisconnect = null;
+		internal.interruptPending = false;
 
 		// Save ephemeral for session we're leaving (use sentinel for new chat)
 		const leavingKey = state.sessionId || '__new_chat__';
