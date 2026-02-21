@@ -186,6 +186,18 @@ class InitRepoResponse(BaseModel):
     github_repo_name: Optional[str] = None
 
 
+class CloneRepoRequest(BaseModel):
+    """Request to clone a remote repository"""
+    clone_url: str = Field(..., min_length=1, max_length=500, description="Remote repository URL (HTTPS or SSH)")
+
+
+class CloneRepoResponse(BaseModel):
+    """Response for clone repo endpoint"""
+    success: bool
+    message: str
+    repository_id: Optional[str] = None
+
+
 class GenerateCommitMessageRequest(BaseModel):
     """Request to generate a commit message using AI"""
     include_unstaged: bool = Field(default=True)
@@ -596,6 +608,70 @@ async def init_repository(
         repository_id=repo["id"] if repo else None,
         github_repo_url=github_repo_url,
         github_repo_name=github_full_name,
+    )
+
+
+@router.post("/clone", response_model=CloneRepoResponse)
+async def clone_repository(
+    request: Request,
+    project_id: str,
+    body: CloneRepoRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Clone a remote repository into a project's working directory.
+
+    The project directory must not already be a git repository.
+    """
+    check_project_access(request, project_id)
+    working_dir = get_project_path(project_id)
+
+    # Guard: don't clone into an existing repo
+    if await asyncio.to_thread(git_service.is_git_repo, working_dir):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project is already a git repository"
+        )
+
+    # Ensure directory exists
+    working_path = Path(working_dir)
+    working_path.mkdir(parents=True, exist_ok=True)
+
+    # Clone
+    success, error = await asyncio.to_thread(
+        git_service.clone_repo, working_dir, body.clone_url
+    )
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to clone repository: {error}"
+        )
+
+    # Create database record
+    repo = await asyncio.to_thread(ensure_git_repository_record, project_id, working_dir)
+
+    # Update record with remote info from cloned repo
+    if repo:
+        remote_url = await asyncio.to_thread(git_service.get_remote_url, working_dir)
+        current_branch = await asyncio.to_thread(git_service.get_current_branch, working_dir)
+        database.update_git_repository(
+            repo["id"],
+            remote_url=remote_url,
+            default_branch=current_branch or "main",
+        )
+
+    # Invalidate cache and broadcast
+    git_tracker.invalidate_project(project_id)
+    await _notify_git(
+        request, project_id,
+        {"status", "branches", "diff_stats"},
+        working_dir=working_dir,
+    )
+
+    return CloneRepoResponse(
+        success=True,
+        message=f"Repository cloned from {body.clone_url}",
+        repository_id=repo["id"] if repo else None,
     )
 
 

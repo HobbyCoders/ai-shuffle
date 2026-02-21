@@ -533,6 +533,30 @@ export async function initRepository(
 }
 
 // ============================================================================
+// Clone Repo API
+// ============================================================================
+
+export interface CloneRepoRequest {
+    clone_url: string;
+}
+
+export interface CloneRepoResponse {
+    success: boolean;
+    message: string;
+    repository_id: string | null;
+}
+
+/**
+ * Clone a remote repository into a project's working directory
+ */
+export async function cloneRepository(
+    projectId: string,
+    request: CloneRepoRequest
+): Promise<CloneRepoResponse> {
+    return api.post<CloneRepoResponse>(`${BASE}/${projectId}/git/clone`, request);
+}
+
+// ============================================================================
 // AI Generation API
 // ============================================================================
 

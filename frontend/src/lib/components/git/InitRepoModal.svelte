@@ -1,11 +1,13 @@
 <script lang="ts">
 	/**
-	 * InitRepoModal - Initialize a git repository for a project
+	 * InitRepoModal - Initialize or clone a git repository for a project
 	 *
-	 * Offers git init with optional initial commit and GitHub repo creation.
+	 * Offers two modes:
+	 * - "init": git init with optional initial commit and GitHub repo creation
+	 * - "clone": clone an existing remote repository by URL
 	 */
-	import { FolderGit2, X, Github, Lock, Globe } from 'lucide-svelte';
-	import { initRepository } from '$lib/api/git';
+	import { FolderGit2, X, Github, Lock, Globe, Download } from 'lucide-svelte';
+	import { initRepository, cloneRepository } from '$lib/api/git';
 
 	interface Props {
 		open: boolean;
@@ -17,22 +19,41 @@
 
 	let { open, projectId, projectName = '', onClose, onInitialized }: Props = $props();
 
+	type Mode = 'init' | 'clone';
+
+	let mode = $state<Mode>('init');
 	let loading = $state(false);
 	let error = $state<string | null>(null);
+
+	// Init mode state
 	let createInitialCommit = $state(true);
 	let createGithubRepo = $state(false);
 	let githubRepoName = $state('');
 	let githubPrivate = $state(true);
 	let repoNameRef = $state<HTMLInputElement | null>(null);
 
+	// Clone mode state
+	let cloneUrl = $state('');
+	let cloneUrlRef = $state<HTMLInputElement | null>(null);
+
+	// Derived
+	const isCloneMode = $derived(mode === 'clone');
+	const canSubmit = $derived(
+		isCloneMode
+			? cloneUrl.trim().length > 0
+			: !createGithubRepo || githubRepoName.trim().length > 0
+	);
+
 	// Reset state when modal opens
 	$effect(() => {
 		if (open) {
+			mode = 'init';
 			loading = false;
 			error = null;
 			createInitialCommit = true;
 			createGithubRepo = false;
 			githubPrivate = true;
+			cloneUrl = '';
 			// Pre-fill repo name from project name
 			githubRepoName = (projectName || '')
 				.toLowerCase()
@@ -49,21 +70,34 @@
 		}
 	});
 
-	async function handleInit() {
+	// Auto-focus clone URL input when switching to clone mode
+	$effect(() => {
+		if (isCloneMode && cloneUrlRef) {
+			setTimeout(() => cloneUrlRef?.focus(), 50);
+		}
+	});
+
+	async function handleSubmit() {
 		loading = true;
 		error = null;
 
 		try {
-			await initRepository(projectId, {
-				create_initial_commit: createInitialCommit,
-				create_github_repo: createGithubRepo,
-				github_repo_name: createGithubRepo ? githubRepoName.trim() : undefined,
-				github_private: githubPrivate,
-			});
+			if (isCloneMode) {
+				await cloneRepository(projectId, {
+					clone_url: cloneUrl.trim(),
+				});
+			} else {
+				await initRepository(projectId, {
+					create_initial_commit: createInitialCommit,
+					create_github_repo: createGithubRepo,
+					github_repo_name: createGithubRepo ? githubRepoName.trim() : undefined,
+					github_private: githubPrivate,
+				});
+			}
 			onInitialized?.();
 			onClose();
 		} catch (e: any) {
-			error = e?.detail || e?.message || 'Failed to initialize repository';
+			error = e?.detail || e?.message || (isCloneMode ? 'Failed to clone repository' : 'Failed to initialize repository');
 		} finally {
 			loading = false;
 		}
@@ -75,11 +109,9 @@
 			e.preventDefault();
 			onClose();
 		}
-		if (e.key === 'Enter' && !loading) {
-			if (!createGithubRepo || githubRepoName.trim()) {
-				e.preventDefault();
-				handleInit();
-			}
+		if (e.key === 'Enter' && !loading && canSubmit) {
+			e.preventDefault();
+			handleSubmit();
 		}
 	}
 </script>
@@ -97,78 +129,127 @@
 
 			<!-- Icon -->
 			<div class="modal-icon">
-				<FolderGit2 size={20} strokeWidth={1.5} />
+				{#if isCloneMode}
+					<Download size={20} strokeWidth={1.5} />
+				{:else}
+					<FolderGit2 size={20} strokeWidth={1.5} />
+				{/if}
 			</div>
 
 			<!-- Title & description -->
 			<h2 class="modal-title">Set up Git</h2>
 			<p class="modal-description">
-				Initialize a git repository for this project to track changes,
-				create branches, and collaborate.
+				{#if isCloneMode}
+					Clone an existing repository into this project.
+				{:else}
+					Initialize a git repository for this project to track changes,
+					create branches, and collaborate.
+				{/if}
 			</p>
 
-			<!-- Initial commit option -->
-			<label class="checkbox-row">
-				<input
-					type="checkbox"
-					bind:checked={createInitialCommit}
+			<!-- Mode toggle -->
+			<div class="mode-toggle">
+				<button
+					class="mode-btn"
+					class:active={mode === 'init'}
+					onclick={() => mode = 'init'}
 					disabled={loading}
-				/>
-				<span class="checkbox-label">Create initial commit</span>
-				<span class="checkbox-hint">Stage and commit all existing files</span>
-			</label>
-
-			<!-- GitHub repo option -->
-			<label class="checkbox-row">
-				<input
-					type="checkbox"
-					bind:checked={createGithubRepo}
+				>
+					<FolderGit2 size={13} strokeWidth={1.5} />
+					New repo
+				</button>
+				<button
+					class="mode-btn"
+					class:active={mode === 'clone'}
+					onclick={() => mode = 'clone'}
 					disabled={loading}
-				/>
-				<span class="checkbox-label">
-					<Github size={14} strokeWidth={1.5} />
-					Create GitHub repository
-				</span>
-				<span class="checkbox-hint">Create a new repo and set it as remote</span>
-			</label>
+				>
+					<Download size={13} strokeWidth={1.5} />
+					Clone
+				</button>
+			</div>
 
-			<!-- GitHub options (expanded) -->
-			{#if createGithubRepo}
-				<div class="github-options">
+			{#if isCloneMode}
+				<!-- Clone URL input -->
+				<div class="clone-section">
 					<div class="field">
-						<label class="field-label" for="repo-name-input">Repository name</label>
+						<label class="field-label" for="clone-url-input">Repository URL</label>
 						<input
-							id="repo-name-input"
+							id="clone-url-input"
 							type="text"
 							class="input"
-							placeholder="my-project"
-							bind:value={githubRepoName}
-							bind:this={repoNameRef}
+							placeholder="https://github.com/user/repo.git"
+							bind:value={cloneUrl}
+							bind:this={cloneUrlRef}
 							disabled={loading}
 						/>
-					</div>
-
-					<div class="visibility-toggle">
-						<button
-							class="vis-btn"
-							class:active={githubPrivate}
-							onclick={() => githubPrivate = true}
-							disabled={loading}
-						>
-							<Lock size={13} strokeWidth={1.5} />
-							Private
-						</button>
-						<button
-							class="vis-btn"
-							class:active={!githubPrivate}
-							onclick={() => githubPrivate = false}
-							disabled={loading}
-						>
-							<Globe size={13} strokeWidth={1.5} />
-							Public
-						</button>
+						<span class="field-hint">HTTPS or SSH URL of the repository to clone</span>
 					</div>
 				</div>
+			{:else}
+				<!-- Initial commit option -->
+				<label class="checkbox-row">
+					<input
+						type="checkbox"
+						bind:checked={createInitialCommit}
+						disabled={loading}
+					/>
+					<span class="checkbox-label">Create initial commit</span>
+					<span class="checkbox-hint">Stage and commit all existing files</span>
+				</label>
+
+				<!-- GitHub repo option -->
+				<label class="checkbox-row">
+					<input
+						type="checkbox"
+						bind:checked={createGithubRepo}
+						disabled={loading}
+					/>
+					<span class="checkbox-label">
+						<Github size={14} strokeWidth={1.5} />
+						Create GitHub repository
+					</span>
+					<span class="checkbox-hint">Create a new repo and set it as remote</span>
+				</label>
+
+				<!-- GitHub options (expanded) -->
+				{#if createGithubRepo}
+					<div class="github-options">
+						<div class="field">
+							<label class="field-label" for="repo-name-input">Repository name</label>
+							<input
+								id="repo-name-input"
+								type="text"
+								class="input"
+								placeholder="my-project"
+								bind:value={githubRepoName}
+								bind:this={repoNameRef}
+								disabled={loading}
+							/>
+						</div>
+
+						<div class="visibility-toggle">
+							<button
+								class="vis-btn"
+								class:active={githubPrivate}
+								onclick={() => githubPrivate = true}
+								disabled={loading}
+							>
+								<Lock size={13} strokeWidth={1.5} />
+								Private
+							</button>
+							<button
+								class="vis-btn"
+								class:active={!githubPrivate}
+								onclick={() => githubPrivate = false}
+								disabled={loading}
+							>
+								<Globe size={13} strokeWidth={1.5} />
+								Public
+							</button>
+						</div>
+					</div>
+				{/if}
 			{/if}
 
 			{#if error}
@@ -178,10 +259,14 @@
 			<!-- Action -->
 			<button
 				class="continue-btn"
-				disabled={loading || (createGithubRepo && !githubRepoName.trim())}
-				onclick={handleInit}
+				disabled={loading || !canSubmit}
+				onclick={handleSubmit}
 			>
-				{loading ? 'Initializing...' : 'Initialize'}
+				{#if loading}
+					{isCloneMode ? 'Cloning...' : 'Initializing...'}
+				{:else}
+					{isCloneMode ? 'Clone' : 'Initialize'}
+				{/if}
 			</button>
 		</div>
 	</div>
@@ -283,6 +368,57 @@
 		line-height: 1.5;
 	}
 
+	/* Mode toggle (segmented control) */
+	.mode-toggle {
+		display: flex;
+		gap: 2px;
+		padding: 3px;
+		background: var(--background);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+	}
+
+	.mode-btn {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		padding: 7px 12px;
+		font-size: 0.8125rem;
+		font-weight: 500;
+		border: 1px solid transparent;
+		border-radius: 8px;
+		background: transparent;
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: all 150ms ease;
+	}
+
+	.mode-btn:hover:not(:disabled):not(.active) {
+		color: var(--foreground);
+	}
+
+	.mode-btn.active {
+		background: var(--card);
+		border-color: var(--border);
+		color: var(--foreground);
+		box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground) 5%, transparent);
+	}
+
+	.mode-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	/* Clone section */
+	.clone-section {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		animation: expand-in 150ms ease;
+	}
+
 	/* Checkbox rows */
 	.checkbox-row {
 		display: grid;
@@ -355,6 +491,12 @@
 		font-size: 0.8125rem;
 		font-weight: 500;
 		color: var(--foreground);
+	}
+
+	.field-hint {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+		line-height: 1.3;
 	}
 
 	.input {

@@ -102,6 +102,38 @@ class GitService:
             logger.error(f"Error initializing git repository: {e}")
             return False
 
+    def clone_repo(self, working_dir: str, clone_url: str, timeout: int = 120) -> Tuple[bool, Optional[str]]:
+        """Clone a remote repository into the working directory.
+
+        The working directory must already exist and be empty (or nearly empty).
+        Clones with `git clone <url> .` to place contents directly in working_dir.
+
+        Args:
+            working_dir: Target directory to clone into (must exist)
+            clone_url: Remote repository URL (HTTPS or SSH)
+            timeout: Command timeout in seconds (default 120 for network ops)
+
+        Returns:
+            Tuple of (success, error_message)
+        """
+        try:
+            result = self._run_git(
+                working_dir,
+                ["clone", clone_url, "."],
+                timeout=timeout
+            )
+            if result.returncode == 0:
+                logger.debug(f"Cloned repository from {clone_url} into {working_dir}")
+                return True, None
+            error = result.stderr.strip() or "Unknown error"
+            logger.warning(f"Failed to clone repo: {error}")
+            return False, error
+        except subprocess.TimeoutExpired:
+            return False, f"Clone timed out after {timeout}s — the repository may be too large"
+        except Exception as e:
+            logger.error(f"Error cloning repository: {e}")
+            return False, str(e)
+
     def get_remote_url(self, working_dir: str) -> Optional[str]:
         """Get the remote URL for origin."""
         try:
