@@ -27,15 +27,14 @@ from claude_agent_sdk.types import StreamEvent, PermissionResultAllow, Permissio
 
 # Monkey-patch SDK message parser to handle unknown message types gracefully.
 #
-# Root cause: SDK 0.1.38 bundles CLI 2.1.47 which emits "rate_limit_event"
-# messages, but the SDK's parse_message() doesn't handle them and raises
-# MessageParseError. Since parse_message runs inside an async generator,
-# the unhandled exception terminates the entire streaming loop.
+# Root cause: The bundled CLI (v2.1.49) emits "rate_limit_event" messages, but
+# the Python SDK v0.1.39 (latest on PyPI) raises MessageParseError for unknown
+# types. The upstream fix (returning None for unknown types) is merged on main
+# at github.com/anthropics/claude-agent-sdk-python but not yet released.
 #
 # Fix: Convert unknown message types into SystemMessage with the raw data
 # preserved, so they flow through the pipeline normally instead of crashing.
-# This also future-proofs against new CLI message types being added before
-# the SDK is updated to handle them.
+# Remove this patch once a new SDK version is released with the catch-all fix.
 def _patch_sdk_message_parser():
     import claude_agent_sdk._internal.message_parser as _parser
     import claude_agent_sdk._internal.client as _internal_client
@@ -49,7 +48,7 @@ def _patch_sdk_message_parser():
         except MessageParseError as e:
             if "Unknown message type" in str(e):
                 _msg_type = data.get("type", "?") if isinstance(data, dict) else "?"
-                logging.getLogger(__name__).warning(
+                logging.getLogger(__name__).debug(
                     f"[SDK] Unrecognized message type from CLI: {_msg_type}"
                 )
                 # Wrap as SystemMessage so it flows through the pipeline
