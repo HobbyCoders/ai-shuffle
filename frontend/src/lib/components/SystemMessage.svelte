@@ -221,6 +221,17 @@
 				};
 			}
 
+			case 'task_started': {
+				// Task/subagent launch notifications - hide as they're internal SDK events
+				return {
+					title: 'Task Started',
+					content: (data.description as string) || message.content || '',
+					badge: 'task_started',
+					badgeColor: 'gray',
+					hidden: true
+				};
+			}
+
 			case 'stop_hook_summary': {
 				// Stop hook completion summary
 				const hookCount = data.hookCount as number || 0;
