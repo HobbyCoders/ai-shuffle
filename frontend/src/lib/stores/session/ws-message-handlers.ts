@@ -524,7 +524,14 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						title = firstUserMsg.content.substring(0, 100) + (firstUserMsg.content.length > 100 ? '...' : '');
 					}
 				}
-				return { ...s, isStreaming: false, streamStartTime: null, title };
+				// Clear per-message streaming flags immediately. The poller will
+			// bring in definitive final messages from the server, but clearing
+			// here prevents stuck bouncing dots / streaming cursor if the
+			// poller/bridge pipeline races or fails.
+			const messages = s.messages.some(m => m.streaming)
+				? s.messages.map(m => m.streaming ? { ...m, streaming: false } : m)
+				: s.messages;
+			return { ...s, isStreaming: false, streamStartTime: null, title, messages };
 			});
 
 			const doneState = getState();

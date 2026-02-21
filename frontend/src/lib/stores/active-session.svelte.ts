@@ -647,17 +647,21 @@ function setupOnStreamEnd() {
 
 			if (currentState.sessionId !== sessionId) {
 				// Different session active — skip entirely
-			} else if (currentState.isStreaming) {
-				// Defense-in-depth: a new query started since onStreamEnd
-				// was deferred — do NOT overwrite streaming state.
-				console.debug(`[ActiveSession] onStreamEnd: store is streaming, preserving state`);
+			} else if (currentState.isStreaming && sessionPoller.isPolling(sessionId)) {
+				// A genuinely new query started since onStreamEnd was deferred
+				// (poller is running for this session) — do NOT overwrite.
+				console.debug(`[ActiveSession] onStreamEnd: new query in progress, preserving state`);
 			} else if (!messagesChanged && !streamingChanged && !todosChanged && !usageChanged) {
 				// Bridge already flushed everything — no update needed.
 				console.debug(`[ActiveSession] onStreamEnd: bridge already applied final state, skipping update`);
 			} else {
 				_update(s => {
 					if (s.sessionId !== sessionId) return s;
-					if (s.isStreaming) return s;
+					// Only preserve state if a genuinely new query started (poller
+					// running). Without the isPolling check, a missed WS 'done'
+					// event would leave isStreaming stuck at true forever since
+					// onStreamEnd is the only remaining path to clear it.
+					if (s.isStreaming && sessionPoller.isPolling(sessionId)) return s;
 					return {
 						...s,
 						messages: messagesChanged ? finalSession.messages : s.messages,
