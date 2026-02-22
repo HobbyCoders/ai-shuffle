@@ -312,6 +312,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	function newChat() {
 		const state = getState();
 
+		// Stop polling for the session we're leaving — prevents stale poll
+		// callbacks from writing into _state after sessionId changes.
+		// (switchSession does this; newChat must too.)
+		if (state.sessionId) {
+			sessionPoller.stop(state.sessionId);
+		}
+
 		// Save ephemeral for the session we're leaving
 		const leavingKey = state.sessionId || '__new_chat__';
 		sessionEphemeralCache.save(leavingKey, buildEphemeral(state));
@@ -362,9 +369,19 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			sessionLockedBy: undefined,
 		}));
 
+		// Reset ALL cross-session internal state (like switchSession does).
 		internal.pendingTools.clear();
-		internal.expectedSessionId = null;
+		// Sentinel value — rejects any in-flight history response from the
+		// old session. Without this, a delayed history response (from a
+		// load_session sent before newChat) would pass the null guard in
+		// handleHistory and overwrite the blank new chat state with the
+		// old session's messages. Any subsequent switchSession/onConnected
+		// will override this sentinel with the real session ID.
+		internal.expectedSessionId = '__reject_all__';
 		internal.waitingForHistory = null;
+		internal.streamEndCleanedUp = null;
+		internal.streamingOnDisconnect = null;
+		internal.interruptPending = false;
 
 		// Save current browser state and show empty for the new chat
 		browserState.switchSession(state.sessionId, null);

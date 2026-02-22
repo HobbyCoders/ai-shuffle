@@ -137,6 +137,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	function handleHistory(data: Record<string, unknown>): void {
 		if (!data.session_id) return;
 		const receivedSessionId = data.session_id as string;
+		// Track whether we explicitly requested this session's history
+		// (via switchSession, onConnected, or rewindToMessage setting expectedSessionId).
+		// Used below to bypass the shouldPreserveMessages guard for expected responses.
+		const wasExpected = !!internal.expectedSessionId && internal.expectedSessionId === receivedSessionId;
+
 		if (internal.expectedSessionId && receivedSessionId !== internal.expectedSessionId) {
 			internal.waitingForHistory = null;
 			return;
@@ -364,14 +369,17 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 		}
 
-		// Defensive check: don't replace messages with fewer/empty data
-		// BUT skip this guard when switching sessions — it's normal for a new session
-		// to have fewer (or zero) messages than the one we're leaving.
+		// Defensive check: don't replace messages with fewer/empty data.
+		// Skip this guard entirely for EXPECTED history responses — when we
+		// explicitly requested this session (via switchSession, reconnect, or
+		// rewind), the server response is authoritative and should always be
+		// applied. The guard only kicks in for unsolicited/unexpected responses
+		// where degraded data might overwrite good state.
 		const currentState = getState();
 		const isSameSession = currentState.sessionId === (data.session_id as string);
 		const currentAssistantMsgs = currentState.messages.filter(m => m.role === 'assistant' && m.type === 'text');
 		const incomingAssistantMsgs = finalMessages.filter(m => m.role === 'assistant' && m.type === 'text');
-		const shouldPreserveMessages = isSameSession && currentState.messages.length > 0 && !isStreaming && (
+		const shouldPreserveMessages = !wasExpected && isSameSession && currentState.messages.length > 0 && !isStreaming && (
 			finalMessages.length === 0 ||
 			(currentAssistantMsgs.length > incomingAssistantMsgs.length) ||
 			(finalMessages.length > 0 && currentState.messages.length > finalMessages.length * 1.5)

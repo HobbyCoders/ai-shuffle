@@ -111,12 +111,6 @@ class SessionPoller {
 	 * If already polling this session, this is a no-op.
 	 */
 	startStreaming(sessionId: string): void {
-		// Bump generation FIRST — any in-flight or debounced polls from a
-		// previous streaming session will see a stale generation and skip
-		// their streamingJustEnded transition.
-		const nextGen = (this._streamingGeneration.get(sessionId) ?? 0) + 1;
-		this._streamingGeneration.set(sessionId, nextGen);
-
 		if (this._timers.has(sessionId)) {
 			// Already polling - maybe speed up if was idle
 			const existing = this._timers.get(sessionId)!;
@@ -124,9 +118,23 @@ class SessionPoller {
 				this.stop(sessionId);
 				// Fall through to create new timer
 			} else {
+				// Already polling at streaming rate — no-op.
+				// Critically, do NOT bump the generation here. Both the
+				// sessionNotifier and the explicit 'start' handler call
+				// startStreaming(); if we bumped generation on this no-op
+				// path, the first poll (started by the earlier call) would
+				// be discarded as stale, causing a 300ms delay before any
+				// streaming data appears in the UI.
 				return;
 			}
 		}
+
+		// Bump generation ONLY when actually starting new polling.
+		// Any in-flight or debounced polls from a previous streaming
+		// session will see a stale generation and skip their
+		// streamingJustEnded transition.
+		const nextGen = (this._streamingGeneration.get(sessionId) ?? 0) + 1;
+		this._streamingGeneration.set(sessionId, nextGen);
 
 		// Reset session state for the new streaming session.
 		// Without this, a stale lastUpdateId from a previous query causes
