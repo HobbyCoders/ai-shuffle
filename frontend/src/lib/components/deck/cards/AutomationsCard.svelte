@@ -1141,23 +1141,24 @@
 				</button>
 			</div>
 		{/snippet}
-		{#snippet headerActions()}
-			<div class="fph-search-wrapper">
-				<Search size={14} />
-				<input
-					type="text"
-					bind:value={searchQuery}
-					placeholder="Search automations..."
-					class="fph-search-input"
-				/>
-			</div>
+		{#snippet footer()}
 			<button class="fp-btn fp-btn--primary" onclick={openCreate} title="New Automation">
-				<Plus size={14} />
-				<span class="hidden sm:inline">New</span>
+				<Plus size={14} /> <span class="btn-label">New Automation</span>
 			</button>
 		{/snippet}
 		{#snippet children()}
 			<div class="automations-card card-system" style="position: relative;">
+				<div class="fp-search-bar">
+					<div class="fph-search-wrapper">
+						<Search size={14} />
+						<input
+							type="text"
+							bind:value={searchQuery}
+							placeholder="Search automations..."
+							class="fph-search-input"
+						/>
+					</div>
+				</div>
 				{@render automationsMainContent()}
 			</div>
 		{/snippet}
@@ -1414,7 +1415,6 @@
 	.auto-content {
 		flex: 1;
 		overflow-y: auto;
-		background: var(--surface-0);
 	}
 
 	.auto-loading {
@@ -1444,15 +1444,16 @@
 		align-items: center;
 		gap: 8px;
 		padding: 12px 16px;
-		background: var(--surface-1);
+		background: var(--surface-0);
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-md, calc(var(--radius, 0.75rem) * 0.833));
-		transition: all 150ms ease;
+		transition: border-color 150ms, box-shadow 150ms, transform 150ms;
 	}
 
 	.auto-list-item:hover {
-		border-color: var(--accent);
-		box-shadow: var(--shadow-sm, 0 1px 3px rgba(0,0,0,0.12));
+		border-color: var(--border-emphasis);
+		box-shadow: var(--shadow-sm);
+		transform: translateY(-1px);
 	}
 
 	.auto-item-main {
@@ -2029,6 +2030,30 @@
 
 		.auto-approval-btn {
 			flex: 1;
+		}
+	}
+
+	.fp-search-bar {
+		max-width: 640px;
+		width: 100%;
+		margin: 0 auto;
+	}
+
+	.fp-search-bar :global(.fph-search-wrapper) {
+		width: 100%;
+	}
+
+	.fp-search-bar :global(.fph-search-input) {
+		width: 100% !important;
+	}
+
+	.btn-label {
+		display: inline;
+	}
+
+	@media (max-width: 768px) {
+		.btn-label {
+			display: none;
 		}
 	}
 </style>

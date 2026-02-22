@@ -3,7 +3,7 @@
 	 * GroupDropdown - Portal-based dropdown for group assignment
 	 * Renders dropdown to document.body to escape parent transform/overflow clipping
 	 */
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import { groups as groupsStore } from '$lib/stores/groups';
 
 	interface Props {
@@ -14,6 +14,8 @@
 	let { entityType, entityId }: Props = $props();
 
 	let isOpen = $state(false);
+	let isCreating = $state(false);
+	let newGroupName = $state('');
 	let buttonRef: HTMLButtonElement | undefined = $state();
 	let portalContainer: HTMLDivElement | null = $state(null);
 	let dropdownPosition = $state({ top: 0, left: 0 });
@@ -32,6 +34,8 @@
 		} else {
 			updatePosition();
 			isOpen = true;
+			isCreating = false;
+			newGroupName = '';
 			renderPortal();
 		}
 	}
@@ -41,12 +45,14 @@
 		const rect = buttonRef.getBoundingClientRect();
 		dropdownPosition = {
 			top: rect.bottom + 4,
-			left: Math.max(8, rect.right - 160) // Align right edge with button, but keep on screen
+			left: Math.max(8, rect.right - 180)
 		};
 	}
 
 	function closeDropdown() {
 		isOpen = false;
+		isCreating = false;
+		newGroupName = '';
 		removePortal();
 	}
 
@@ -68,13 +74,36 @@
 		closeDropdown();
 	}
 
-	function createGroup() {
-		const name = prompt('New group name:');
-		if (name?.trim()) {
-			groupsStore.createGroup(entityType, name.trim());
-			groupsStore.assignToGroup(entityType, entityId, name.trim());
+	function deleteGroup(groupName: string) {
+		groupsStore.deleteGroup(entityType, groupName);
+		// Re-render portal to reflect changes
+		updatePortalContent();
+	}
+
+	function startCreating() {
+		isCreating = true;
+		newGroupName = '';
+		updatePortalContent();
+		// Focus the input after render
+		requestAnimationFrame(() => {
+			const input = portalContainer?.querySelector('.group-name-input') as HTMLInputElement;
+			input?.focus();
+		});
+	}
+
+	function confirmCreate() {
+		const name = newGroupName.trim();
+		if (name) {
+			groupsStore.createGroup(entityType, name);
+			groupsStore.assignToGroup(entityType, entityId, name);
+			closeDropdown();
 		}
-		closeDropdown();
+	}
+
+	function cancelCreate() {
+		isCreating = false;
+		newGroupName = '';
+		updatePortalContent();
 	}
 
 	function renderPortal() {
@@ -84,7 +113,6 @@
 		portalContainer.className = 'group-dropdown-portal-root';
 		document.body.appendChild(portalContainer);
 
-		// Force re-render to update the portal content
 		updatePortalContent();
 	}
 
@@ -92,33 +120,65 @@
 		if (!portalContainer) return;
 
 		const groupItems = availableGroups.map(group => `
-			<button class="dropdown-item" data-action="assign" data-group="${group.name}">
-				${currentGroup === group.name
-					? `<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-					</svg>`
-					: `<span class="spacer"></span>`
-				}
-				${group.name}
-			</button>
+			<div class="dropdown-item-row">
+				<button class="dropdown-item" data-action="assign" data-group="${group.name}">
+					${currentGroup === group.name
+						? `<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+						</svg>`
+						: `<span class="spacer"></span>`
+					}
+					${group.name}
+				</button>
+				<button class="dropdown-delete-btn" data-action="delete-group" data-group="${group.name}" title="Delete group">
+					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="12" height="12">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+					</svg>
+				</button>
+			</div>
 		`).join('');
 
 		const removeItem = currentGroup ? `
 			<button class="dropdown-item muted" data-action="remove">
 				<span class="spacer"></span>
-				Remove
+				Remove from group
 			</button>
 		` : '';
+
+		const createSection = isCreating ? `
+			<div class="dropdown-divider"></div>
+			<div class="group-create-row">
+				<input
+					type="text"
+					class="group-name-input"
+					placeholder="Group name..."
+					value="${newGroupName}"
+					maxlength="30"
+				/>
+				<button class="group-create-confirm" data-action="confirm-create" title="Create">
+					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+					</svg>
+				</button>
+				<button class="group-create-cancel" data-action="cancel-create" title="Cancel">
+					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="14" height="14">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+					</svg>
+				</button>
+			</div>
+		` : `
+			<div class="dropdown-divider"></div>
+			<button class="dropdown-item muted" data-action="start-create">
+				<span class="spacer"></span>
+				+ New group
+			</button>
+		`;
 
 		portalContainer.innerHTML = `
 			<div class="group-dropdown-portal" style="top: ${dropdownPosition.top}px; left: ${dropdownPosition.left}px;">
 				${groupItems}
 				${removeItem}
-				<div class="dropdown-divider"></div>
-				<button class="dropdown-item muted" data-action="create">
-					<span class="spacer"></span>
-					+ New group
-				</button>
+				${createSection}
 			</div>
 		`;
 
@@ -132,11 +192,35 @@
 					if (groupName) assignToGroup(groupName);
 				} else if (action === 'remove') {
 					removeFromGroup();
-				} else if (action === 'create') {
-					createGroup();
+				} else if (action === 'start-create') {
+					startCreating();
+				} else if (action === 'confirm-create') {
+					confirmCreate();
+				} else if (action === 'cancel-create') {
+					cancelCreate();
+				} else if (action === 'delete-group') {
+					const groupName = (btn as HTMLElement).dataset.group;
+					if (groupName) deleteGroup(groupName);
 				}
 			});
 		});
+
+		// Handle input events for the create input
+		const input = portalContainer.querySelector('.group-name-input') as HTMLInputElement;
+		if (input) {
+			input.addEventListener('input', (e) => {
+				newGroupName = (e.target as HTMLInputElement).value;
+			});
+			input.addEventListener('keydown', (e) => {
+				if (e.key === 'Enter') {
+					e.preventDefault();
+					confirmCreate();
+				} else if (e.key === 'Escape') {
+					e.preventDefault();
+					cancelCreate();
+				}
+			});
+		}
 	}
 
 	function removePortal() {
@@ -228,7 +312,7 @@
 	:global(.group-dropdown-portal) {
 		position: fixed;
 		z-index: 99999;
-		min-width: 160px;
+		min-width: 180px;
 		background: var(--popover);
 		border: 1px solid var(--border);
 		border-radius: var(--radius, 0.75rem);
@@ -249,11 +333,16 @@
 		}
 	}
 
+	:global(.group-dropdown-portal .dropdown-item-row) {
+		display: flex;
+		align-items: center;
+	}
+
 	:global(.group-dropdown-portal .dropdown-item) {
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		width: 100%;
+		flex: 1;
 		padding: 8px 12px;
 		background: transparent;
 		border: none;
@@ -263,6 +352,10 @@
 		text-align: left;
 		cursor: pointer;
 		transition: background 0.1s ease;
+	}
+
+	:global(.group-dropdown-portal .dropdown-item-row .dropdown-item) {
+		padding-right: 4px;
 	}
 
 	:global(.group-dropdown-portal .dropdown-item:hover) {
@@ -283,6 +376,33 @@
 		color: var(--muted-foreground);
 	}
 
+	:global(.group-dropdown-portal .dropdown-delete-btn) {
+		width: 24px;
+		height: 24px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
+		color: var(--muted-foreground);
+		cursor: pointer;
+		opacity: 0;
+		transition: all 0.1s ease;
+		margin-right: 4px;
+		flex-shrink: 0;
+	}
+
+	:global(.group-dropdown-portal .dropdown-item-row:hover .dropdown-delete-btn) {
+		opacity: 1;
+	}
+
+	:global(.group-dropdown-portal .dropdown-delete-btn:hover) {
+		background: var(--destructive, #ef4444);
+		color: white;
+		opacity: 1;
+	}
+
 	:global(.group-dropdown-portal .dropdown-divider) {
 		height: 1px;
 		background: var(--border);
@@ -298,5 +418,67 @@
 	:global(.group-dropdown-portal .spacer) {
 		display: inline-block;
 		width: 14px;
+	}
+
+	/* Inline group creation input */
+	:global(.group-dropdown-portal .group-create-row) {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 4px;
+	}
+
+	:global(.group-dropdown-portal .group-name-input) {
+		flex: 1;
+		min-width: 0;
+		padding: 6px 8px;
+		background: var(--surface-0, var(--background));
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
+		color: var(--foreground);
+		font-size: 0.8125rem;
+		outline: none;
+		transition: border-color 0.15s ease;
+	}
+
+	:global(.group-dropdown-portal .group-name-input:focus) {
+		border-color: var(--primary);
+	}
+
+	:global(.group-dropdown-portal .group-name-input::placeholder) {
+		color: var(--muted-foreground);
+	}
+
+	:global(.group-dropdown-portal .group-create-confirm),
+	:global(.group-dropdown-portal .group-create-cancel) {
+		width: 26px;
+		height: 26px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
+		cursor: pointer;
+		transition: all 0.1s ease;
+		flex-shrink: 0;
+	}
+
+	:global(.group-dropdown-portal .group-create-confirm) {
+		color: var(--primary);
+	}
+
+	:global(.group-dropdown-portal .group-create-confirm:hover) {
+		background: var(--primary);
+		color: white;
+	}
+
+	:global(.group-dropdown-portal .group-create-cancel) {
+		color: var(--muted-foreground);
+	}
+
+	:global(.group-dropdown-portal .group-create-cancel:hover) {
+		background: var(--hover-overlay, oklch(1 0 0 / 0.1));
+		color: var(--foreground);
 	}
 </style>

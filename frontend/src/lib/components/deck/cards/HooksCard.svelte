@@ -299,25 +299,26 @@
 			{/each}
 		</div>
 	{/snippet}
-	{#snippet headerActions()}
-		<div class="fph-search-wrapper">
-			<Search size={14} />
-			<input
-				type="text"
-				bind:value={searchQuery}
-				placeholder="Search hooks..."
-				class="fph-search-input"
-			/>
-		</div>
+	{#snippet footer()}
 		{#if activeTab === 'custom'}
 			<button class="fp-btn fp-btn--primary" onclick={() => { editingHook = null; showForm = true; }} title="New Hook">
-				<Plus size={14} />
-				<span class="hidden sm:inline">New Hook</span>
+				<Plus size={14} /> <span class="btn-label">New Hook</span>
 			</button>
 		{/if}
 	{/snippet}
 	{#snippet children()}
 		<div class="hooks-card card-system" style="position: relative;">
+			<div class="fp-search-bar">
+				<div class="fph-search-wrapper">
+					<Search size={14} />
+					<input
+						type="text"
+						bind:value={searchQuery}
+						placeholder="Search hooks..."
+						class="fph-search-input"
+					/>
+				</div>
+			</div>
 			{@render hooksMainContent()}
 		</div>
 	{/snippet}
@@ -540,7 +541,6 @@
 	.hooks-content {
 		flex: 1;
 		overflow-y: auto;
-		background: var(--surface-0);
 	}
 
 	.hooks-loading {
@@ -695,4 +695,27 @@
 		justify-content: center;
 	}
 
+	.fp-search-bar {
+		max-width: 640px;
+		width: 100%;
+		margin: 0 auto;
+	}
+
+	.fp-search-bar :global(.fph-search-wrapper) {
+		width: 100%;
+	}
+
+	.fp-search-bar :global(.fph-search-input) {
+		width: 100% !important;
+	}
+
+	.btn-label {
+		display: inline;
+	}
+
+	@media (max-width: 768px) {
+		.btn-label {
+			display: none;
+		}
+	}
 </style>

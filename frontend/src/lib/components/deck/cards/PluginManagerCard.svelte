@@ -379,18 +379,7 @@
 			{/if}
 		</div>
 	{/snippet}
-	{#snippet headerActions()}
-		{#if activeTab === 'available' || activeTab === 'installed'}
-			<div class="fph-search-wrapper">
-				<Search size={14} />
-				<input
-					type="text"
-					bind:value={searchQuery}
-					placeholder="Search plugins..."
-					class="fph-search-input"
-				/>
-			</div>
-		{/if}
+	{#snippet footer()}
 		{#if activeTab === 'available'}
 			{#if selectedForInstall.size > 0}
 				<button
@@ -408,6 +397,19 @@
 	{/snippet}
 	{#snippet children()}
 		<div class="plugin-card card-system">
+			{#if activeTab === 'available' || activeTab === 'installed'}
+				<div class="fp-search-bar">
+					<div class="fph-search-wrapper">
+						<Search size={14} />
+						<input
+							type="text"
+							bind:value={searchQuery}
+							placeholder="Search plugins..."
+							class="fph-search-input"
+						/>
+					</div>
+				</div>
+			{/if}
 			{@render pluginMainContent()}
 		</div>
 	{/snippet}
@@ -573,7 +575,6 @@
 	.plugin-content {
 		flex: 1;
 		overflow-y: auto;
-		background: var(--surface-0);
 	}
 
 	.plugin-error {
@@ -878,4 +879,17 @@
 		flex: 1;
 	}
 
+	.fp-search-bar {
+		max-width: 640px;
+		width: 100%;
+		margin: 0 auto;
+	}
+
+	.fp-search-bar :global(.fph-search-wrapper) {
+		width: 100%;
+	}
+
+	.fp-search-bar :global(.fph-search-input) {
+		width: 100% !important;
+	}
 </style>

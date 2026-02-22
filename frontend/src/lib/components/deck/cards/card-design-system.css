@@ -1283,15 +1283,9 @@
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 .plugin-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--space-3);
-}
-
-@media (max-width: 639px) {
-  .plugin-grid {
-    grid-template-columns: 1fr;
-  }
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
 }
 
 /* Individual plugin grid card */
@@ -1299,45 +1293,32 @@
   display: flex;
   flex-direction: column;
   padding: var(--space-4);
-  background: var(--surface-1);
+  background: var(--surface-0);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   cursor: pointer;
-  transition: all var(--transition-smooth);
-  box-shadow: var(--shadow-inset), var(--shadow-xs);
+  transition: border-color 150ms, box-shadow 150ms, transform 150ms;
   position: relative;
   overflow: hidden;
   min-height: 0;
 }
 
 .plugin-grid-card::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    135deg,
-    color-mix(in oklch, var(--primary) 4%, transparent) 0%,
-    transparent 50%
-  );
-  opacity: 0;
-  transition: opacity var(--transition-smooth);
-  pointer-events: none;
+  display: none;
 }
 
 .plugin-grid-card:hover {
-  border-color: var(--accent);
-  box-shadow: var(--shadow-inset), var(--shadow-md),
-    0 0 12px color-mix(in oklch, var(--accent) 25%, transparent);
-  transform: translateY(-2px);
+  border-color: var(--border-emphasis);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
 }
 
 .plugin-grid-card:hover::before {
-  opacity: 1;
+  display: none;
 }
 
 .plugin-grid-card:active {
   transform: translateY(0);
-  box-shadow: var(--shadow-inset), var(--shadow-sm);
 }
 
 .plugin-grid-card:focus-visible {
@@ -1366,24 +1347,12 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
+  width: 40px;
+  height: 40px;
   flex-shrink: 0;
-  border-radius: var(--radius-full);
-  background: linear-gradient(
-    135deg,
-    color-mix(in oklch, var(--primary) 18%, transparent) 0%,
-    color-mix(in oklch, var(--primary) 8%, transparent) 100%
-  );
-  border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
-  box-shadow: var(--shadow-xs), var(--shadow-glow-soft);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklch, var(--primary) 12%, transparent);
   color: var(--primary);
-  transition: all var(--transition-smooth);
-}
-
-.plugin-grid-card:hover .plugin-grid-card-icon {
-  box-shadow: var(--shadow-sm), var(--shadow-glow-primary);
-  transform: scale(1.05);
 }
 
 .plugin-grid-card-icon svg {

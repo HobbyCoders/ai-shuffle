@@ -482,20 +482,10 @@
 		{ label: editingNote ? editorTitle || 'Untitled' : 'New Note' }
 	] : undefined}
 >
-	{#snippet headerActions()}
+	{#snippet footer()}
 		{#if !(editingNote || isCreatingNew)}
-			<div class="fph-search-wrapper">
-				<SearchIcon size={14} />
-				<input
-					type="text"
-					placeholder="Search notes..."
-					bind:value={searchQuery}
-					class="fph-search-input"
-				/>
-			</div>
 			<button class="fp-btn fp-btn--primary" onclick={startNewNote} title="New Note">
-				<Plus size={14} />
-				<span class="hidden sm:inline">New Note</span>
+				<Plus size={14} /> <span class="btn-label">New Note</span>
 			</button>
 		{/if}
 	{/snippet}
@@ -504,6 +494,17 @@
 			{#if editingNote || isCreatingNew}
 				{@render editorView()}
 			{:else}
+				<div class="fp-search-bar">
+					<div class="fph-search-wrapper">
+						<SearchIcon size={14} />
+						<input
+							type="text"
+							placeholder="Search notes..."
+							bind:value={searchQuery}
+							class="fph-search-input"
+						/>
+					</div>
+				</div>
 				{@render listView()}
 			{/if}
 		</div>
@@ -520,13 +521,10 @@
 		flex-direction: column;
 		overflow: hidden;
 		min-height: 0;
-		background: var(--surface-0);
-		border-radius: 0 0 var(--radius-lg) var(--radius-lg);
 	}
 
 	.notes-card-content.mobile {
 		height: 100%;
-		border-radius: 0;
 	}
 
 	/* ============================================
@@ -603,7 +601,6 @@
 		flex-wrap: wrap;
 		gap: calc(var(--space-1) * 1.5);
 		padding: var(--space-2) var(--space-3);
-		border-bottom: 1px solid var(--border-default);
 	}
 
 	.tag-pill {
@@ -650,45 +647,29 @@
 		align-items: flex-start;
 		gap: var(--space-3);
 		padding: var(--space-3) var(--space-4);
-		background: var(--surface-1);
+		background: var(--surface-0);
 		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-lg);
+		border-radius: var(--radius-md);
 		margin-bottom: var(--space-2);
 		text-align: left;
 		cursor: pointer;
-		transition: all var(--transition-smooth);
-		box-shadow: var(--shadow-inset), var(--shadow-xs);
+		transition: border-color 150ms, box-shadow 150ms, transform 150ms;
 		position: relative;
 		overflow: hidden;
 	}
 
 	.note-item::before {
-		content: '';
-		position: absolute;
-		inset: 0;
-		background: linear-gradient(
-			135deg,
-			color-mix(in oklch, var(--primary) 4%, transparent) 0%,
-			transparent 50%
-		);
-		opacity: 0;
-		transition: opacity var(--transition-smooth);
-		pointer-events: none;
+		display: none;
 	}
 
 	.note-item:hover {
-		border-color: color-mix(in oklch, var(--accent) 50%, var(--border));
-		box-shadow: var(--shadow-inset), 0 0 12px color-mix(in oklch, var(--accent) 20%, transparent);
+		border-color: var(--border-emphasis);
+		box-shadow: var(--shadow-sm);
 		transform: translateY(-1px);
-	}
-
-	.note-item:hover::before {
-		opacity: 1;
 	}
 
 	.note-item:active {
 		transform: translateY(0);
-		box-shadow: var(--shadow-inset), var(--shadow-sm);
 	}
 
 	/* Icon box for note items */
@@ -699,21 +680,9 @@
 		width: 40px;
 		height: 40px;
 		flex-shrink: 0;
-		border-radius: var(--radius-md);
-		background: linear-gradient(
-			135deg,
-			color-mix(in oklch, var(--primary) 18%, transparent) 0%,
-			color-mix(in oklch, var(--primary) 8%, transparent) 100%
-		);
-		border: 1px solid color-mix(in oklch, var(--primary) 25%, transparent);
-		box-shadow: var(--shadow-xs), var(--shadow-glow-soft);
+		border-radius: var(--radius-sm);
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
 		color: var(--primary);
-		transition: all var(--transition-smooth);
-	}
-
-	.note-item:hover .note-item-icon {
-		box-shadow: var(--shadow-sm), var(--shadow-glow-primary);
-		transform: scale(1.02);
 	}
 
 	/* Content wrapper */
@@ -1135,5 +1104,28 @@
 		font-style: italic;
 	}
 
+	/* Search bar between header and list */
+	.fp-search-bar {
+		max-width: 640px;
+		width: 100%;
+		margin: 0 auto;
+	}
 
+	.fp-search-bar :global(.fph-search-wrapper) {
+		width: 100%;
+	}
+
+	.fp-search-bar :global(.fph-search-input) {
+		width: 100% !important;
+	}
+
+	.btn-label {
+		display: inline;
+	}
+
+	@media (max-width: 768px) {
+		.btn-label {
+			display: none;
+		}
+	}
 </style>

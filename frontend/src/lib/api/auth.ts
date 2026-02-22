@@ -120,34 +120,10 @@ export async function validateWorkspacePath(workspace_path: string): Promise<imp
 	return api.post('/workspace/validate', { workspace_path });
 }
 
-// ============================================================================
-// Two-Factor Authentication
-// ============================================================================
-
-export interface TwoFactorSetupResponse {
-	secret: string;
-	qr_code: string;
-	uri: string;
-}
-
-export interface TwoFactorStatusResponse {
-	enabled: boolean;
-	has_recovery_codes: boolean;
-	recovery_codes_count: number;
-	verified_at: string | null;
-}
-
-export interface RecoveryCodesResponse {
-	codes: string[];
-	count: number;
-}
-
 export interface LoginResponse {
 	status: string;
 	message: string;
 	is_admin: boolean;
-	requires_2fa?: boolean;
-	pending_2fa_token?: string;
 	// FastAPI returns errors in 'detail' field
 	detail?: string;
 }
@@ -168,45 +144,6 @@ export interface AuditLogResponse {
 	total: number;
 	limit: number;
 	offset: number;
-}
-
-export async function get2FAStatus(): Promise<TwoFactorStatusResponse> {
-	return api.get('/security/2fa/status');
-}
-
-export async function setup2FA(): Promise<TwoFactorSetupResponse> {
-	return api.post('/security/2fa/setup');
-}
-
-export async function verify2FA(code: string): Promise<{
-	status: string;
-	message: string;
-	recovery_codes: string[];
-}> {
-	return api.post('/security/2fa/verify', { code });
-}
-
-export async function disable2FA(code: string, password: string): Promise<{
-	status: string;
-	message: string;
-}> {
-	return api.post('/security/2fa/disable', { code, password });
-}
-
-export async function regenerateRecoveryCodes(): Promise<RecoveryCodesResponse> {
-	return api.post('/security/2fa/recovery-codes');
-}
-
-export async function verify2FALogin(code: string, pendingToken: string, useRecoveryCode: boolean = false): Promise<{
-	status: string;
-	message: string;
-	is_admin: boolean;
-}> {
-	return api.post('/auth/verify-2fa', {
-		code,
-		pending_2fa_token: pendingToken,
-		use_recovery_code: useRecoveryCode
-	});
 }
 
 export async function getAuditLog(options: {

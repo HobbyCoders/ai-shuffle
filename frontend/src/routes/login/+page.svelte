@@ -1,20 +1,11 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { auth, authLoading, authError } from '$lib/stores/auth';
-	import { verify2FALogin, type LoginResponse } from '$lib/api/auth';
-
-	let requires2FA = false;
-	let pending2FAToken = '';
+	import type { LoginResponse } from '$lib/api/auth';
 
 	// Login fields
 	let username = '';
 	let password = '';
-
-	// 2FA fields
-	let twoFactorCode = '';
-	let useRecoveryCode = false;
-	let verifying2FA = false;
-	let twoFactorError = '';
 
 	// Password visibility
 	let showPassword = false;
@@ -32,13 +23,6 @@
 		const data: LoginResponse = await response.json();
 
 		if (response.ok) {
-			// Check if 2FA is required
-			if (data.requires_2fa && data.pending_2fa_token) {
-				requires2FA = true;
-				pending2FAToken = data.pending_2fa_token;
-				return;
-			}
-
 			// Admin login successful, refresh auth status and redirect
 			await auth.checkAuth();
 			goto('/');
@@ -47,34 +31,6 @@
 
 		// Login failed
 		auth.setError(data.detail || data.message || 'Login failed');
-	}
-
-	async function handle2FAVerify() {
-		if (!twoFactorCode) {
-			twoFactorError = 'Please enter a verification code';
-			return;
-		}
-
-		verifying2FA = true;
-		twoFactorError = '';
-
-		try {
-			await verify2FALogin(twoFactorCode, pending2FAToken, useRecoveryCode);
-			await auth.checkAuth();
-			goto('/');
-		} catch (e: any) {
-			twoFactorError = e.detail || 'Invalid verification code';
-		} finally {
-			verifying2FA = false;
-		}
-	}
-
-	function cancel2FA() {
-		requires2FA = false;
-		pending2FAToken = '';
-		twoFactorCode = '';
-		twoFactorError = '';
-		useRecoveryCode = false;
 	}
 </script>
 
@@ -89,142 +45,78 @@
 			<div class="text-4xl mb-3">🤖</div>
 			<h1 class="text-xl sm:text-2xl font-bold text-foreground mb-2">AI Shuffle</h1>
 			<p class="text-muted-foreground text-sm sm:text-base">
-				{#if requires2FA}
-					Enter your verification code
-				{:else}
-					Sign in to continue
-				{/if}
+				Sign in to continue
 			</p>
 		</div>
 
-		{#if requires2FA}
-			<!-- 2FA Verification Form -->
-			<form on:submit|preventDefault={handle2FAVerify} class="space-y-4">
-				<div>
-					<label for="twoFactorCode" class="block text-sm font-medium text-muted-foreground mb-1">
-						{useRecoveryCode ? 'Recovery Code' : 'Authenticator Code'}
-					</label>
+		<!-- Login Form -->
+		<form on:submit|preventDefault={handleLogin} class="space-y-4">
+			<div>
+				<label for="username" class="block text-sm font-medium text-muted-foreground mb-1">
+					Username
+				</label>
+				<input
+					type="text"
+					id="username"
+					bind:value={username}
+					class="input"
+					placeholder="Username"
+					required
+					autocomplete="username"
+				/>
+			</div>
+
+			<div>
+				<label for="password" class="block text-sm font-medium text-muted-foreground mb-1">
+					Password
+				</label>
+				<div class="relative">
 					<input
-						type="text"
-						id="twoFactorCode"
-						bind:value={twoFactorCode}
-						class="input text-center text-xl tracking-widest font-mono"
-						placeholder={useRecoveryCode ? "XXXX-XXXX-XXXX" : "000000"}
-						maxlength={useRecoveryCode ? 14 : 6}
-						autocomplete="one-time-code"
-						inputmode={useRecoveryCode ? "text" : "numeric"}
+						type={showPassword ? "text" : "password"}
+						id="password"
+						bind:value={password}
+						class="input pr-10"
+						placeholder="Password"
+						required
+						autocomplete="current-password"
 					/>
-				</div>
-
-				<div class="flex items-center gap-2">
-					<input
-						type="checkbox"
-						id="useRecoveryCode"
-						bind:checked={useRecoveryCode}
-						class="rounded border-border bg-input text-primary"
-					/>
-					<label for="useRecoveryCode" class="text-sm text-muted-foreground">
-						Use a recovery code instead
-					</label>
-				</div>
-
-				{#if twoFactorError}
-					<div class="bg-destructive/10 border border-destructive text-destructive px-3 sm:px-4 py-3 rounded-lg text-sm">
-						{twoFactorError}
-					</div>
-				{/if}
-
-				<button
-					type="submit"
-					class="btn btn-primary w-full py-3"
-					disabled={verifying2FA}
-				>
-					{#if verifying2FA}
-						<span class="inline-block animate-spin mr-2">&#9696;</span>
-					{/if}
-					Verify
-				</button>
-
-				<div class="text-center">
 					<button
 						type="button"
-						class="text-sm text-[var(--color-primary)] hover:underline"
-						on:click={cancel2FA}
+						class="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+						on:click={() => showPassword = !showPassword}
+						tabindex="-1"
+						aria-label={showPassword ? "Hide password" : "Show password"}
 					>
-						Back to login
+						{#if showPassword}
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+							</svg>
+						{:else}
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+								<path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+							</svg>
+						{/if}
 					</button>
 				</div>
-			</form>
-		{:else}
-			<!-- Login Form -->
-			<form on:submit|preventDefault={handleLogin} class="space-y-4">
-				<div>
-					<label for="username" class="block text-sm font-medium text-muted-foreground mb-1">
-						Username
-					</label>
-					<input
-						type="text"
-						id="username"
-						bind:value={username}
-						class="input"
-						placeholder="Username"
-						required
-						autocomplete="username"
-					/>
-				</div>
+			</div>
 
-				<div>
-					<label for="password" class="block text-sm font-medium text-muted-foreground mb-1">
-						Password
-					</label>
-					<div class="relative">
-						<input
-							type={showPassword ? "text" : "password"}
-							id="password"
-							bind:value={password}
-							class="input pr-10"
-							placeholder="Password"
-							required
-							autocomplete="current-password"
-						/>
-						<button
-							type="button"
-							class="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-							on:click={() => showPassword = !showPassword}
-							tabindex="-1"
-							aria-label={showPassword ? "Hide password" : "Show password"}
-						>
-							{#if showPassword}
-								<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-									<path stroke-linecap="round" stroke-linejoin="round" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-								</svg>
-							{:else}
-								<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-									<path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-									<path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-								</svg>
-							{/if}
-						</button>
-					</div>
-				</div>
-
-			{#if $authError}
-				<div class="bg-destructive/10 border border-destructive text-destructive px-3 sm:px-4 py-3 rounded-lg text-sm">
-					{$authError}
-				</div>
-			{/if}
-
-			<button
-				type="submit"
-				class="btn btn-primary w-full py-3"
-				disabled={$authLoading}
-			>
-				{#if $authLoading}
-					<span class="inline-block animate-spin mr-2">&#9696;</span>
-				{/if}
-				Sign In
-			</button>
-			</form>
+		{#if $authError}
+			<div class="bg-destructive/10 border border-destructive text-destructive px-3 sm:px-4 py-3 rounded-lg text-sm">
+				{$authError}
+			</div>
 		{/if}
+
+		<button
+			type="submit"
+			class="btn btn-primary w-full py-3"
+			disabled={$authLoading}
+		>
+			{#if $authLoading}
+				<span class="inline-block animate-spin mr-2">&#9696;</span>
+			{/if}
+			Sign In
+		</button>
+		</form>
 	</div>
 </div>

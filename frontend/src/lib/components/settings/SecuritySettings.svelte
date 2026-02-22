@@ -1,13 +1,12 @@
 <script lang="ts">
 	/**
-	 * SecuritySettings - Password change and Two-Factor Authentication
+	 * SecuritySettings - Password change
 	 */
 	import '../deck/cards/card-design-system.css';
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
 	import { changePassword } from '$lib/api/auth';
 	import { getErrorMessage } from '$lib/api/client-core';
-	import TwoFactorSetup from '../TwoFactorSetup.svelte';
 
 	let expanded = $state(false);
 
@@ -93,15 +92,6 @@
 				{#if passwordChangeError}
 					<div class="error-msg">{passwordChangeError}</div>
 				{/if}
-			</div>
-
-			<!-- 2FA -->
-			<div class="setting-row vertical">
-				<div class="setting-info">
-					<span>Two-Factor Authentication</span>
-					<span class="setting-desc">Add an extra layer of security</span>
-				</div>
-				<TwoFactorSetup />
 			</div>
 		</div>
 	{/if}

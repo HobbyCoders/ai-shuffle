@@ -190,17 +190,18 @@
 			itemCount={$projects.length}
 			itemLabel="projects"
 		>
-			{#snippet headerActions()}
-				<!-- Search -->
-				<div class="fph-search-wrapper">
-					<Search size={14} />
-					<input type="text" bind:value={searchQuery} placeholder="Search..." class="fph-search-input" />
-				</div>
-				<!-- Create button -->
+			{#snippet footer()}
 				<button class="fp-btn fp-btn--primary" onclick={() => (showAddModal = true)}>
-					<Plus size={14} /> New Project
+					<Plus size={14} /> <span class="btn-label">New Project</span>
 				</button>
 			{/snippet}
+
+			<div class="fp-search-bar">
+				<div class="fph-search-wrapper">
+					<Search size={14} />
+					<input type="text" bind:value={searchQuery} placeholder="Search projects..." class="fph-search-input" />
+				</div>
+			</div>
 
 			<!-- Error banner if any -->
 			{#if error}
@@ -497,6 +498,31 @@
 	@media (prefers-reduced-motion: reduce) {
 		.fp-spinner {
 			animation: none;
+		}
+	}
+
+	/* Search bar between header and list */
+	.fp-search-bar {
+		max-width: 640px;
+		width: 100%;
+		margin: 0 auto;
+	}
+
+	.fp-search-bar :global(.fph-search-wrapper) {
+		width: 100%;
+	}
+
+	.fp-search-bar :global(.fph-search-input) {
+		width: 100% !important;
+	}
+
+	.btn-label {
+		display: inline;
+	}
+
+	@media (max-width: 768px) {
+		.btn-label {
+			display: none;
 		}
 	}
 </style>

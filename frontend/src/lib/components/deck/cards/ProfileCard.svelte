@@ -9,10 +9,9 @@
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
-	import { Users, Search, Upload, Sparkles, Plus, Download, Trash2, Wrench, Bot, MessageSquare, Settings, FileText, SlidersHorizontal, ChevronRight, Check, Info } from 'lucide-svelte';
+	import { Users, Search, Upload, Sparkles, Plus, Download, Trash2, Wrench, Bot, MessageSquare, Settings, FileText, SlidersHorizontal, ChevronRight, Check, Info, Lock, Cpu } from 'lucide-svelte';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data';
 	import { groups as groupsStore } from '$lib/stores/groups';
-	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
 	import './card-design-system.css';
 
 	// Icon map for tabs
@@ -798,12 +797,27 @@
 		groupsStore.removeFromGroup('profiles', profileId);
 	}
 
-	function createGroup(profileId: string) {
-		const name = prompt('New group name:');
-		if (name?.trim()) {
-			groupsStore.createGroup('profiles', name.trim());
-			groupsStore.assignToGroup('profiles', profileId, name.trim());
+	let creatingGroup = $state(false);
+	let newGroupName = $state('');
+
+	function startGroupCreate() {
+		creatingGroup = true;
+		newGroupName = '';
+	}
+
+	function confirmGroupCreate(profileId: string) {
+		const name = newGroupName.trim();
+		if (name) {
+			groupsStore.createGroup('profiles', name);
+			groupsStore.assignToGroup('profiles', profileId, name);
 		}
+		creatingGroup = false;
+		newGroupName = '';
+	}
+
+	function cancelGroupCreate() {
+		creatingGroup = false;
+		newGroupName = '';
 	}
 </script>
 
@@ -848,6 +862,49 @@
 								<label class="pf-label">Description</label>
 								<input bind:value={profileForm.description} class="pf-input" placeholder="A coding assistant for frontend work" />
 							</div>
+							{#if editingProfile}
+								<div class="pf-field">
+									<label class="pf-label">Group</label>
+									<div class="pf-group-row">
+										<select
+											class="pf-select"
+											value={groups?.profiles?.assignments?.[editingProfile.id] ?? ''}
+											onchange={(e) => {
+												const v = (e.target as HTMLSelectElement).value;
+												if (editingProfile) {
+													if (v) assignToGroup(editingProfile.id, v);
+													else removeFromGroup(editingProfile.id);
+												}
+											}}
+										>
+											<option value="">No group</option>
+											{#each groups?.profiles?.groups ?? [] as group}
+												<option value={group.name}>{group.name}</option>
+											{/each}
+										</select>
+										{#if creatingGroup}
+											<input
+												type="text"
+												class="pf-input pf-group-input"
+												placeholder="Group name..."
+												bind:value={newGroupName}
+												onkeydown={(e) => {
+													if (e.key === 'Enter') { e.preventDefault(); editingProfile && confirmGroupCreate(editingProfile.id); }
+													if (e.key === 'Escape') { e.preventDefault(); cancelGroupCreate(); }
+												}}
+												autofocus
+											/>
+											<button type="button" class="pf-btn-new-group" onclick={() => editingProfile && confirmGroupCreate(editingProfile.id)} title="Create">
+												<Check size={14} />
+											</button>
+										{:else}
+											<button type="button" class="pf-btn-new-group" onclick={startGroupCreate} title="New group">
+												<Plus size={14} />
+											</button>
+										{/if}
+									</div>
+								</div>
+							{/if}
 						</div>
 					</div>
 
@@ -1304,6 +1361,12 @@
 								<span>Delete</span>
 							</button>
 						{/if}
+						{#if editingProfile}
+							<button type="button" class="pf-btn-export" onclick={() => editingProfile && handleExportProfile(editingProfile.id)}>
+								<Download size={14} />
+								<span>Export</span>
+							</button>
+						{/if}
 					</div>
 					<div class="pf-footer-right">
 						<button type="button" class="pf-btn-cancel" onclick={backToList}>Cancel</button>
@@ -1323,23 +1386,26 @@
 			itemCount={profiles.length}
 			itemLabel="profiles"
 		>
-			{#snippet headerActions()}
-				<div class="fph-search-wrapper">
-					<Search size={14} />
-					<input type="text" bind:value={searchQuery} placeholder="Search..." class="fph-search-input" />
-				</div>
-				<button class="fp-btn fp-btn--ghost" onclick={triggerImport} disabled={profileImporting} title="Import">
-					<Upload size={14} />
+			{#snippet footer()}
+				<button class="fp-btn fp-btn--secondary" onclick={triggerImport} disabled={profileImporting} title="Import">
+					<Upload size={14} /> <span class="btn-label">Import</span>
 				</button>
-				<button class="fp-btn fp-btn--ghost" onclick={() => showGenerateDialog = true} title="AI Generate">
-					<Sparkles size={14} />
+				<button class="fp-btn fp-btn--secondary" onclick={() => showGenerateDialog = true} title="AI Generate">
+					<Sparkles size={14} /> <span class="btn-label">AI Generate</span>
 				</button>
 				<button class="fp-btn fp-btn--primary" onclick={openNewForm} title="New Profile">
-					<Plus size={14} /> <span class="hidden sm:inline">New Profile</span>
+					<Plus size={14} /> <span class="btn-label">New Profile</span>
 				</button>
 			{/snippet}
 
 			<input type="file" accept=".json" bind:this={profileImportInput} onchange={handleImport} class="hidden" />
+
+			<div class="fp-search-bar">
+				<div class="fph-search-wrapper">
+					<Search size={14} />
+					<input type="text" bind:value={searchQuery} placeholder="Search profiles..." class="fph-search-input" />
+				</div>
+			</div>
 
 			{#if filteredProfiles.length === 0}
 				<div class="card-empty-state">
@@ -1389,35 +1455,27 @@
 								<div class="fp-item-content">
 									<div class="fp-item-header">
 										<span class="fp-item-name">{profile.name}</span>
-										<span class="card-badge {getModelBadgeClass(profile.config?.model)}">{getModelDisplay(profile.config?.model)}</span>
-										{#if profile.is_builtin}
-											<span class="card-badge card-badge--muted">Built-in</span>
-										{/if}
-										{#if groups?.profiles?.assignments?.[profile.id]}
-											<span class="card-badge card-badge--primary">{groups.profiles.assignments[profile.id]}</span>
-										{/if}
 									</div>
 									{#if profile.description}
 										<span class="fp-item-description">{profile.description}</span>
 									{/if}
 									<div class="fp-item-meta">
+										<span class="fp-meta-chip"><Cpu size={12} /> {getModelDisplay(profile.config?.model)}</span>
+										<span class="fp-meta-dot"></span>
 										<span class="fp-meta-chip"><Wrench size={12} /> {getProfileToolCount(profile)} tools</span>
 										<span class="fp-meta-dot"></span>
 										<span class="fp-meta-chip"><Bot size={12} /> {profile.config?.enabled_agents?.length || 0} agents</span>
 										<span class="fp-meta-dot"></span>
 										<span class="fp-meta-chip"><MessageSquare size={12} /> {profile.session_count || 0}</span>
+										{#if profile.is_builtin}
+											<span class="fp-meta-dot"></span>
+											<span class="fp-meta-chip"><Lock size={12} /> Built-in</span>
+										{/if}
+										{#if groups?.profiles?.assignments?.[profile.id]}
+											<span class="fp-meta-dot"></span>
+											<span class="fp-meta-chip" style="color: var(--primary);">{groups.profiles.assignments[profile.id]}</span>
+										{/if}
 									</div>
-								</div>
-								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
-									<GroupDropdown entityType="profiles" entityId={profile.id} />
-									<button class="fp-action-btn" onclick={(e) => { e.stopPropagation(); handleExportProfile(profile.id); }} title="Export">
-										<Download size={14} />
-									</button>
-									{#if !profile.is_builtin}
-										<button class="fp-action-btn fp-action-btn--destructive" onclick={(e) => { e.stopPropagation(); deletingId = profile.id; }} title="Delete">
-											<Trash2 size={14} />
-										</button>
-									{/if}
 								</div>
 							</div>
 						{/if}
@@ -1443,6 +1501,32 @@
 
 	.hidden {
 		display: none;
+	}
+
+	/* Header button labels — visible on desktop, hidden on mobile */
+	.btn-label {
+		display: inline;
+	}
+
+	@media (max-width: 768px) {
+		.btn-label {
+			display: none;
+		}
+	}
+
+	/* Search bar between header and list */
+	.fp-search-bar {
+		max-width: 640px;
+		width: 100%;
+		margin: 0 auto;
+	}
+
+	.fp-search-bar :global(.fph-search-wrapper) {
+		width: 100%;
+	}
+
+	.fp-search-bar :global(.fph-search-input) {
+		width: 100% !important;
 	}
 
 	/* Tab labels — hide on small screens, icons only */
@@ -1986,6 +2070,63 @@
 	.pf-btn-delete:hover {
 		background: color-mix(in oklch, var(--destructive) 10%, transparent);
 		border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
+	}
+
+	.pf-btn-export {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 14px;
+		background: transparent;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		color: var(--text-secondary);
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 200ms;
+	}
+
+	.pf-btn-export:hover {
+		background: var(--surface-1);
+		color: var(--text-primary);
+		border-color: var(--border-default);
+	}
+
+	.pf-group-row {
+		display: flex;
+		gap: 6px;
+		align-items: center;
+	}
+
+	.pf-group-row .pf-select {
+		flex: 1;
+	}
+
+	.pf-btn-new-group {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 36px;
+		height: 36px;
+		flex-shrink: 0;
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		color: var(--text-secondary);
+		cursor: pointer;
+		transition: all 200ms;
+	}
+
+	.pf-btn-new-group:hover {
+		background: var(--surface-hover);
+		color: var(--text-primary);
+		border-color: var(--border-default);
+	}
+
+	.pf-group-input {
+		width: 120px;
+		flex-shrink: 1;
 	}
 
 	.pf-btn-cancel {

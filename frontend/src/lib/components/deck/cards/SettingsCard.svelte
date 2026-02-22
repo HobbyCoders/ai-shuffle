@@ -17,8 +17,7 @@
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword } from '$lib/api/auth';
 	import WebhookManager from '$lib/components/WebhookManager.svelte';
 	import ConnectorManager from '$lib/components/ConnectorManager.svelte';
-	import TwoFactorSetup from '$lib/components/TwoFactorSetup.svelte';
-	import RateLimitManager from '$lib/components/RateLimitManager.svelte';
+import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	import ApiUserManager from '$lib/components/ApiUserManager.svelte';
 	import { slide, fade } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
@@ -848,7 +847,7 @@
 										</div>
 										<select
 											id="settings-timezone"
-											class="select"
+											class="input"
 											value={currentTimezone}
 											onchange={(e) => timezonePreference.setTimezone(e.currentTarget.value)}
 										>
@@ -934,14 +933,6 @@
 										{/if}
 									</div>
 
-									<!-- 2FA -->
-									<div class="setting-row vertical">
-										<div class="setting-info">
-											<span>Two-Factor Authentication</span>
-											<span class="setting-desc">Add an extra layer of security</span>
-										</div>
-										<TwoFactorSetup />
-									</div>
 								</div>
 							{/if}
 						</section>
@@ -1719,7 +1710,7 @@
 		display: flex;
 		flex-direction: column;
 		height: 100%;
-		background: var(--card);
+		background: transparent;
 		color: var(--card-foreground);
 		font-family: var(--font-sans);
 	}
@@ -1788,7 +1779,7 @@
 
 	/* Sections */
 	.section {
-		background: var(--card);
+		background: transparent;
 		border: 1px solid var(--border);
 		border-radius: var(--radius);
 		overflow: hidden;

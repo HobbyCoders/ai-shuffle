@@ -366,7 +366,6 @@
 		display: flex;
 		flex-direction: column;
 		height: 100%;
-		background: var(--card);
 		color: var(--card-foreground);
 		position: relative;
 		overflow: hidden;
@@ -575,8 +574,8 @@
 	/* Base card styling */
 	.bento-card {
 		border-radius: var(--radius);
-		background: color-mix(in oklch, var(--card) 80%, var(--muted) 20%);
-		border: 1px solid var(--border);
+		background: var(--surface-0);
+		border: 1px solid var(--border-subtle);
 		overflow: hidden;
 		transition: all 250ms ease;
 		opacity: 0;
@@ -590,8 +589,8 @@
 	}
 
 	.bento-card:hover {
-		border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
-		box-shadow: 0 4px 20px -4px color-mix(in oklch, var(--primary) 15%, transparent);
+		border-color: var(--border-emphasis);
+		box-shadow: var(--shadow-sm);
 	}
 
 	.bento-card-inner {
