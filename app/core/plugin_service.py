@@ -307,6 +307,10 @@ class PluginService:
         if re.match(r'^[\w\-]+/[\w\-.]+$', url):
             url = f"https://github.com/{url}"
 
+        # Ensure GitHub URLs end with .git
+        if re.match(r'^https?://github\.com/', url) and not url.endswith('.git'):
+            url = url.rstrip('/') + '.git'
+
         if not re.match(r'^https?://[\w\-.]+(:\d+)?(/[\w\-./%+@]*)*$', url) and \
            not re.match(r'^git@[\w\-.]+:[\w\-./]+$', url):
             raise ValueError(f"Invalid git URL: {url[:100]}")
