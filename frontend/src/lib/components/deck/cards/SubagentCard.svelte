@@ -17,7 +17,7 @@
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import { api, type SubagentExport } from '$lib/api/client';
 	import { groups } from '$lib/stores/groups';
-	import { Bot, Search, Plus, Trash2, Download, Upload, X, ArrowLeft, Monitor, User, Settings, Terminal, Check, Lock, RotateCcw, Zap, Sparkles } from 'lucide-svelte';
+	import { Bot, Search, Plus, Trash2, Download, Upload, X, ArrowLeft, Monitor, User, Settings, Terminal, Check, Lock, RotateCcw, Zap, Sparkles, Cpu, Wrench, ChevronRight } from 'lucide-svelte';
 	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
 	import './card-design-system.css';
 
@@ -98,6 +98,7 @@
 	// Tools state
 	let availableTools = $state<ToolsResponse>({ categories: [], all_tools: [] });
 	let toolSelectionMode = $state<'all' | 'select'>('all');
+	let expandedSections = $state<Record<string, boolean>>({ sdk: false });
 
 	// Model options
 	const MODEL_OPTIONS = [
@@ -398,6 +399,10 @@
 	}
 
 	// Tool helpers
+	function toggleSection(section: string) {
+		expandedSections = { ...expandedSections, [section]: !expandedSections[section] };
+	}
+
 	function toggleTool(toolName: string) {
 		if (formTools.includes(toolName)) {
 			formTools = formTools.filter(t => t !== toolName);
@@ -437,7 +442,7 @@
 	// Editor tabs config
 	const tabs: { id: EditorTab; label: string; icon: typeof User }[] = [
 		{ id: 'identity', label: 'Identity', icon: User },
-		{ id: 'config', label: 'Config', icon: Settings },
+		{ id: 'config', label: 'Tools', icon: Wrench },
 		{ id: 'prompt', label: 'Prompt', icon: Terminal }
 	];
 </script>
@@ -452,24 +457,13 @@
 		itemCount={subagents.length}
 		itemLabel="subagents"
 	>
-		{#snippet headerActions()}
-			{#if subagents.length > 3}
-				<div class="fph-search-wrapper">
-					<Search />
-					<input
-						type="text"
-						bind:value={searchQuery}
-						placeholder="Search subagents..."
-						class="fph-search-input"
-					/>
-				</div>
-			{/if}
+		{#snippet footer()}
 			<button
 				onclick={() => showGenerateDialog = true}
 				class="fp-btn fp-btn--secondary"
 				title="Generate with AI"
 			>
-				<Sparkles />
+				<Sparkles size={14} /> <span class="btn-label">AI Generate</span>
 			</button>
 			<button
 				onclick={triggerImport}
@@ -480,17 +474,30 @@
 				{#if importing}
 					<div class="card-spinner card-spinner--small"></div>
 				{:else}
-					<Upload />
+					<Upload size={14} /> <span class="btn-label">Import</span>
 				{/if}
 			</button>
 			<button
 				onclick={handleCreate}
 				class="fp-btn fp-btn--primary"
 			>
-				<Plus />
-				<span class="btn-label-hide-mobile">New Subagent</span>
+				<Plus size={14} /> <span class="btn-label">New Subagent</span>
 			</button>
 		{/snippet}
+
+		{#if subagents.length > 3}
+			<div class="fp-search-bar">
+				<div class="fph-search-wrapper">
+					<Search />
+					<input
+						type="text"
+						bind:value={searchQuery}
+						placeholder="Search subagents..."
+						class="fph-search-input"
+					/>
+				</div>
+			</div>
+		{/if}
 
 		{#if error}
 			<div class="card-error-banner">
@@ -602,19 +609,14 @@
 								</div>
 								<p class="fp-item-description">{agent.description}</p>
 								<div class="fp-item-meta">
-									<span class="fp-meta-chip">{agent.id}</span>
-									<span class="fp-meta-dot"></span>
-									<span class="fp-meta-chip">{getModelDisplay(agent.model)}</span>
+									<span class="fp-meta-chip"><Cpu size={12} /> {getModelDisplay(agent.model)}</span>
 									{#if agent.tools && agent.tools.length > 0}
 										<span class="fp-meta-dot"></span>
-										<span class="fp-meta-chip">{agent.tools.length} tools</span>
+										<span class="fp-meta-chip"><Wrench size={12} /> {agent.tools.length} tools</span>
 									{/if}
 									{#if agent.is_builtin}
 										<span class="fp-meta-dot"></span>
-										<span class="fp-meta-chip">
-											<Lock style="width: 10px; height: 10px;" />
-											Built-in
-										</span>
+										<span class="fp-meta-chip"><Lock size={12} /> Built-in</span>
 										{#if agent.is_modified}
 											<span class="fp-meta-dot"></span>
 											<span class="fp-meta-chip" style="color: var(--warning);">Modified</span>
@@ -678,37 +680,43 @@
 			{ label: isEditMode ? (editingSubagent?.name || 'Edit') : 'New Subagent' }
 		]}
 	>
-		{#snippet headerActions()}
-			<button
-				onclick={handleBack}
-				class="fp-btn fp-btn--secondary"
-			>
-				Cancel
-			</button>
-			<button
-				onclick={handleSave}
-				disabled={!isValid() || saving}
-				class="fp-btn fp-btn--primary"
-			>
-				{#if saving}
-					<div class="card-spinner card-spinner--small"></div>
-					Saving...
-				{:else}
-					{isEditMode ? 'Save Changes' : 'Create'}
-				{/if}
-			</button>
+		{#snippet footer()}
+			<div class="pf-footer">
+				<div class="pf-footer-left">
+					{#if isEditMode && editingSubagent && !editingSubagent.is_builtin}
+						<button type="button" class="pf-btn-delete" onclick={() => { if (editingSubagent) { deletingId = editingSubagent.id; handleBack(); } }}>
+							<Trash2 size={14} />
+							<span>Delete</span>
+						</button>
+					{/if}
+					{#if isEditMode && editingSubagent}
+						<button type="button" class="pf-btn-export" onclick={(e) => editingSubagent && exportSubagent(editingSubagent.id, e)}>
+							<Download size={14} />
+							<span>Export</span>
+						</button>
+					{/if}
+				</div>
+				<div class="pf-footer-right">
+					<button type="button" class="pf-btn-cancel" onclick={handleBack}>Cancel</button>
+					<button type="button" class="pf-btn-save" onclick={handleSave} disabled={!isValid() || saving}>
+						{#if saving}
+							<div class="card-spinner card-spinner--small"></div>
+							<span>Saving...</span>
+						{:else}
+							<Check size={14} />
+							<span>{isEditMode ? 'Save Changes' : 'Create'}</span>
+						{/if}
+					</button>
+				</div>
+			</div>
 		{/snippet}
 
 		{#snippet headerTabs()}
 			<div class="fp-tab-bar">
 				{#each tabs as tab}
-					<button
-						onclick={() => activeTab = tab.id}
-						class="fp-tab"
-						class:active={activeTab === tab.id}
-					>
-						<tab.icon />
-						{tab.label}
+					<button class="fp-tab" class:active={activeTab === tab.id} onclick={() => (activeTab = tab.id)}>
+						<tab.icon size={14} />
+						<span class="tab-label">{tab.label}</span>
 					</button>
 				{/each}
 			</div>
@@ -772,145 +780,103 @@
 						Describes when Claude should invoke this subagent.
 					</p>
 				</div>
+
+				<div class="card-form-section">
+					<label for="agent-model" class="card-form-label">Model</label>
+					<select
+						id="agent-model"
+						class="card-form-input"
+						value={formModel}
+						onchange={(e) => { formModel = (e.target as HTMLSelectElement).value; }}
+					>
+						{#each MODEL_OPTIONS as opt}
+							<option value={opt.value}>{opt.label} — {opt.description}</option>
+						{/each}
+					</select>
+				</div>
 			</div>
 		{/if}
 
-		<!-- Config Tab -->
+		<!-- Tools Tab -->
 		{#if activeTab === 'config'}
-			<div class="editor-tab-content">
-				<!-- Model Selection -->
-				<div class="card-form-section">
-					<span class="card-form-label">Model — {#if formModel === ''}use profile default{:else if formModel === 'haiku'}fastest and most compact{:else if formModel === 'sonnet'}balanced performance{:else if formModel === 'sonnet-1m'}extended context (1M tokens){:else if formModel === 'opus'}most capable{/if}</span>
-					<div class="card-mode-selector">
-						<button
-							type="button"
-							class="card-mode-btn"
-							class:card-mode-btn--active={formModel === ''}
-							onclick={() => formModel = ''}
-						>
-							Inherit
-						</button>
-						<button
-							type="button"
-							class="card-mode-btn"
-							class:card-mode-btn--active={formModel === 'haiku'}
-							onclick={() => formModel = 'haiku'}
-						>
-							Haiku
-						</button>
-						<button
-							type="button"
-							class="card-mode-btn"
-							class:card-mode-btn--active={formModel === 'sonnet'}
-							onclick={() => formModel = 'sonnet'}
-						>
-							Sonnet
-						</button>
-						<button
-							type="button"
-							class="card-mode-btn"
-							class:card-mode-btn--active={formModel === 'sonnet-1m'}
-							onclick={() => formModel = 'sonnet-1m'}
-						>
-							Sonnet 1M
-						</button>
-						<button
-							type="button"
-							class="card-mode-btn"
-							class:card-mode-btn--active={formModel === 'opus'}
-							onclick={() => formModel = 'opus'}
-						>
-							Opus
-						</button>
+			<div class="editor-tab-content card-system pf-content">
+				<div class="pf-section">
+					<div class="pf-section-header">
+						<Wrench size={16} />
+						<h3>Tool Access</h3>
 					</div>
+					<p class="pf-desc">Control which tools this subagent can use.</p>
+					<select class="pf-select" value={toolSelectionMode} onchange={(e) => { const v = (e.target as HTMLSelectElement).value as 'all' | 'select'; toolSelectionMode = v; if (v === 'all') formTools = []; }}>
+						<option value="all">All Tools</option>
+						<option value="select">Custom Selection</option>
+					</select>
 				</div>
 
-				<!-- Tool Access -->
-				<div class="card-form-section">
-					<div class="section-header">
-						<h3 class="card-form-title">Tool Access</h3>
-						<span class="card-badge card-badge--primary">{availableTools.all_tools.length} available</span>
-					</div>
+				{#if toolSelectionMode === 'select'}
+					<div class="pf-section">
+						<div class="pf-section-header">
+							<Settings size={16} />
+							<h3>Tool Categories</h3>
+						</div>
+						<p class="pf-desc">Select which tools this subagent can access.</p>
+						<div class="pf-category-list">
+							<button type="button" class="pf-category-card" onclick={() => toggleSection('sdk')}>
+								<div class="pf-category-icon">
+									<Wrench size={18} />
+								</div>
+								<div class="pf-category-info">
+									<span class="pf-category-name">Built-in Tools</span>
+									<span class="pf-category-desc">{availableTools.categories.map(c => c.name).join(', ')}</span>
+								</div>
+								<span class="pf-category-count">{formTools.length}/{availableTools.all_tools.length}</span>
+								<ChevronRight size={16} class="pf-category-chevron" />
+							</button>
 
-					<div class="card-mode-selector">
-						<button
-							type="button"
-							onclick={() => { toolSelectionMode = 'all'; formTools = []; }}
-							class="card-mode-btn"
-							class:card-mode-btn--active={toolSelectionMode === 'all'}
-						>
-							All Tools
-						</button>
-						<button
-							type="button"
-							onclick={() => toolSelectionMode = 'select'}
-							class="card-mode-btn"
-							class:card-mode-btn--active={toolSelectionMode === 'select'}
-						>
-							Custom
-						</button>
-					</div>
-
-					<p class="card-form-hint">
-						{#if toolSelectionMode === 'all'}
-							Subagent can use all tools available in the profile.
-						{:else}
-							Subagent can ONLY use selected tools.
-						{/if}
-					</p>
-
-					{#if toolSelectionMode === 'select'}
-						<div class="tools-list">
-							{#each availableTools.categories as category}
-								{#if category.tools.length > 0}
-									{@const state = getCategorySelectionState(category)}
-									<div class="tool-category">
-										<button
-											type="button"
-											class="category-header"
-											onclick={() => selectAllInCategory(category)}
-										>
-											<div
-												class="category-checkbox"
-												class:checked={state !== 'none'}
-												class:partial={state === 'partial'}
-											>
-												{#if state === 'all'}
-													<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
-													</svg>
-												{:else if state === 'partial'}
-													<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" />
-													</svg>
-												{/if}
-											</div>
-											<span class="category-name">{category.name}</span>
-											<span class="category-count">{category.tools.length}</span>
-										</button>
-										<div class="category-tools">
-											{#each category.tools as tool}
-												<label class="tool-item">
-													<input
-														type="checkbox"
-														checked={formTools.includes(tool.name)}
-														onchange={() => toggleTool(tool.name)}
-														class="tool-checkbox"
-													/>
-													<span class="tool-name" title={tool.description}>{tool.name}</span>
-												</label>
-											{/each}
-										</div>
+							{#if expandedSections.sdk}
+								<div class="pf-category-expanded">
+									<div class="tools-list">
+										{#each availableTools.categories as category}
+											{#if category.tools.length > 0}
+												{@const state = getCategorySelectionState(category)}
+												<div class="tool-category">
+													<button type="button" class="category-header" onclick={() => selectAllInCategory(category)}>
+														<div class="category-checkbox" class:checked={state !== 'none'} class:partial={state === 'partial'}>
+															{#if state === 'all'}
+																<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
+															{:else if state === 'partial'}
+																<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" /></svg>
+															{/if}
+														</div>
+														<span class="category-name">{category.name}</span>
+														<span class="category-count">{category.tools.length}</span>
+													</button>
+													<div class="category-tools">
+														{#each category.tools as tool}
+															<label class="tool-item">
+																<input type="checkbox" checked={formTools.includes(tool.name)} onchange={() => toggleTool(tool.name)} class="tool-checkbox" />
+																<span class="tool-name" title={tool.description}>{tool.name}</span>
+															</label>
+														{/each}
+													</div>
+												</div>
+											{/if}
+										{/each}
 									</div>
-								{/if}
-							{/each}
+									<div class="selection-count">
+										{formTools.length} tool{formTools.length !== 1 ? 's' : ''} selected
+									</div>
+								</div>
+							{/if}
 						</div>
-
-						<div class="selection-count">
-							{formTools.length} tool{formTools.length !== 1 ? 's' : ''} selected
+					</div>
+				{:else}
+					<div class="pf-summary-bar">
+						<div class="pf-summary-left">
+							<Wrench size={14} />
+							<span>{availableTools.all_tools.length} tools enabled</span>
 						</div>
-					{/if}
-				</div>
+					</div>
+				{/if}
 			</div>
 		{/if}
 
@@ -1201,10 +1167,298 @@
 		flex-wrap: wrap;
 	}
 
-	/* Hide button label text on mobile to save space */
-	@media (max-width: 639px) {
-		.btn-label-hide-mobile {
+	/* Search bar between header and list */
+	.fp-search-bar {
+		max-width: 640px;
+		width: 100%;
+		margin: 0 auto;
+	}
+
+	.fp-search-bar :global(.fph-search-wrapper) {
+		width: 100%;
+	}
+
+	.fp-search-bar :global(.fph-search-input) {
+		width: 100% !important;
+	}
+
+	/* Footer button labels — visible on desktop, hidden on mobile */
+	.btn-label {
+		display: inline;
+	}
+
+	@media (max-width: 768px) {
+		.btn-label {
 			display: none;
 		}
+	}
+
+	/* ─── Profile-style content & sections ─── */
+	.pf-content {
+		padding: 24px 20px;
+		display: flex;
+		flex-direction: column;
+		gap: 28px;
+	}
+
+	.pf-section {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.pf-section-header {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		color: var(--text-primary);
+	}
+
+	.pf-section-header h3 {
+		font-size: var(--text-md, 0.875rem);
+		font-weight: 600;
+		margin: 0;
+		color: var(--text-primary);
+	}
+
+	.pf-desc {
+		font-size: var(--text-sm, 0.75rem);
+		color: var(--text-secondary);
+		margin: 0;
+	}
+
+	.pf-select {
+		width: 100%;
+		padding: 10px 14px;
+		padding-right: 36px;
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		color: var(--text-primary);
+		font-size: var(--text-md, 0.875rem);
+		cursor: pointer;
+		appearance: none;
+		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+		background-repeat: no-repeat;
+		background-position: right 12px center;
+		transition: border-color 200ms, box-shadow 200ms;
+	}
+
+	.pf-select:focus {
+		border-color: var(--primary);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
+	}
+
+	/* ─── Category cards ─── */
+	.pf-category-list {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.pf-category-card {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		width: 100%;
+		padding: 14px;
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		cursor: pointer;
+		transition: all 200ms;
+		color: var(--text-primary);
+		font-size: var(--text-md, 0.875rem);
+	}
+
+	.pf-category-card:hover {
+		border-color: color-mix(in oklch, var(--primary) 30%, transparent);
+		background: var(--surface-hover);
+	}
+
+	.pf-category-icon {
+		width: 36px;
+		height: 36px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		border-radius: 8px;
+		color: var(--primary);
+		flex-shrink: 0;
+	}
+
+	.pf-category-info {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.pf-category-name {
+		font-size: var(--text-md, 0.875rem);
+		font-weight: 500;
+	}
+
+	.pf-category-desc {
+		font-size: var(--text-xs, 0.6875rem);
+		color: var(--text-secondary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.pf-category-count {
+		font-size: var(--text-md, 0.875rem);
+		font-weight: 600;
+		color: var(--primary);
+		padding: 2px 8px;
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		border-radius: 6px;
+	}
+
+	.pf-category-card :global(.pf-category-chevron) {
+		color: var(--text-secondary);
+		flex-shrink: 0;
+	}
+
+	.pf-category-expanded {
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		overflow: hidden;
+		margin-top: -4px;
+	}
+
+	/* ─── Summary bar ─── */
+	.pf-summary-bar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 12px 16px;
+		background: color-mix(in oklch, var(--primary) 3%, transparent);
+		border: 1px solid color-mix(in oklch, var(--primary) 20%, transparent);
+		border-radius: var(--radius-md, 10px);
+	}
+
+	.pf-summary-left {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: var(--text-sm, 0.75rem);
+		color: var(--text-secondary);
+	}
+
+	.pf-summary-left :global(svg) {
+		color: var(--primary);
+	}
+
+	/* ─── Footer (matches ProfileCard) ─── */
+	.pf-footer {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		width: 100%;
+	}
+
+	.pf-footer-left {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.pf-footer-right {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+	}
+
+	.pf-btn-delete {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 14px;
+		background: transparent;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		color: var(--destructive);
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 200ms;
+	}
+
+	.pf-btn-delete:hover {
+		background: color-mix(in oklch, var(--destructive) 10%, transparent);
+		border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
+	}
+
+	.pf-btn-export {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 14px;
+		background: transparent;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		color: var(--text-secondary);
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 200ms;
+	}
+
+	.pf-btn-export:hover {
+		background: var(--surface-1);
+		color: var(--text-primary);
+		border-color: var(--border-default);
+	}
+
+	.pf-btn-cancel {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 18px;
+		background: var(--secondary);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		color: var(--text-primary);
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 200ms;
+	}
+
+	.pf-btn-cancel:hover {
+		background: var(--surface-hover);
+		border-color: var(--border-emphasis);
+	}
+
+	.pf-btn-save {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px 22px;
+		background: linear-gradient(135deg, var(--primary), color-mix(in oklch, var(--primary) 80%, #2FA88D));
+		border: none;
+		border-radius: var(--radius-md, 10px);
+		color: var(--primary-foreground);
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 600;
+		cursor: pointer;
+		transition: all 200ms;
+		box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+	}
+
+	.pf-btn-save:hover {
+		filter: brightness(1.1);
+		box-shadow: 0 0 12px color-mix(in oklch, var(--primary) 30%, transparent);
+	}
+
+	.pf-btn-save:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+		filter: none;
+		box-shadow: none;
 	}
 </style>
