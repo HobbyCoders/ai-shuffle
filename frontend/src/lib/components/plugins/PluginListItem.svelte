@@ -46,28 +46,27 @@
 	role="button"
 	tabindex="0"
 >
-	<!-- Card header: icon + info -->
-	<div class="plugin-grid-card-header">
-		{#if mode === 'available' && !availablePlugin?.installed}
-			<button
-				onclick={(e) => { e.stopPropagation(); onSelect?.(); }}
-				class="batch-checkbox {selected ? 'selected' : ''}"
-			>
-				{#if selected}
-					<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
-					</svg>
-				{/if}
-			</button>
-		{/if}
+	{#if mode === 'available' && !availablePlugin?.installed}
+		<button
+			onclick={(e) => { e.stopPropagation(); onSelect?.(); }}
+			class="batch-checkbox {selected ? 'selected' : ''}"
+		>
+			{#if selected}
+				<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+				</svg>
+			{/if}
+		</button>
+	{/if}
 
-		<div class="plugin-grid-card-icon">
-			<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-			</svg>
-		</div>
+	<div class="plugin-grid-card-icon">
+		<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+		</svg>
+	</div>
 
-		<div class="plugin-grid-card-info">
+	<div class="plugin-grid-card-content">
+		<div class="plugin-grid-card-header">
 			<span class="plugin-grid-card-name">{plugin.name}</span>
 			<div class="plugin-grid-card-chips">
 				<span class="card-badge card-badge--muted">{plugin.marketplace}</span>
@@ -80,33 +79,31 @@
 				{/if}
 			</div>
 		</div>
+
+		<p class="plugin-grid-card-description">{plugin.description || 'No description available'}</p>
+
+		{#if plugin.has_commands || plugin.has_agents || plugin.has_skills || plugin.has_hooks || plugin.has_mcp}
+			<div class="plugin-grid-card-features">
+				{#if plugin.has_commands}
+					<span class="card-badge card-badge--feature-commands">Commands</span>
+				{/if}
+				{#if plugin.has_agents}
+					<span class="card-badge card-badge--feature-agents">Agents</span>
+				{/if}
+				{#if plugin.has_skills}
+					<span class="card-badge card-badge--feature-skills">Skills</span>
+				{/if}
+				{#if plugin.has_hooks}
+					<span class="card-badge card-badge--feature-hooks">Hooks</span>
+				{/if}
+				{#if plugin.has_mcp}
+					<span class="card-badge card-badge--feature-mcp">MCP</span>
+				{/if}
+			</div>
+		{/if}
 	</div>
 
-	<!-- Description -->
-	<p class="plugin-grid-card-description">{plugin.description || 'No description available'}</p>
-
-	<!-- Feature badges -->
-	{#if plugin.has_commands || plugin.has_agents || plugin.has_skills || plugin.has_hooks || plugin.has_mcp}
-		<div class="plugin-grid-card-features">
-			{#if plugin.has_commands}
-				<span class="card-badge card-badge--feature-commands">Commands</span>
-			{/if}
-			{#if plugin.has_agents}
-				<span class="card-badge card-badge--feature-agents">Agents</span>
-			{/if}
-			{#if plugin.has_skills}
-				<span class="card-badge card-badge--feature-skills">Skills</span>
-			{/if}
-			{#if plugin.has_hooks}
-				<span class="card-badge card-badge--feature-hooks">Hooks</span>
-			{/if}
-			{#if plugin.has_mcp}
-				<span class="card-badge card-badge--feature-mcp">MCP</span>
-			{/if}
-		</div>
-	{/if}
-
-	<!-- Actions row -->
+	<!-- Actions -->
 	<div class="plugin-grid-card-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
 		{#if mode === 'available'}
 			{#if availablePlugin?.installed}
@@ -128,7 +125,6 @@
 				</button>
 			{/if}
 		{:else if mode === 'installed' && installedPlugin}
-			<!-- Enable/Disable toggle -->
 			<button
 				onclick={onToggle}
 				class="toggle-switch {installedPlugin.enabled ? 'enabled' : ''}"
@@ -142,7 +138,6 @@
 					<span class="version-info">v{installedPlugin.version}</span>
 				{/if}
 
-				<!-- Details button -->
 				<button
 					onclick={onDetails}
 					class="card-action-btn"
@@ -153,7 +148,6 @@
 					</svg>
 				</button>
 
-				<!-- Uninstall button -->
 				<button
 					onclick={onUninstall}
 					disabled={installing}

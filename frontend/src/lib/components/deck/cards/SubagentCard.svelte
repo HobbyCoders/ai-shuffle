@@ -18,7 +18,6 @@
 	import { api, type SubagentExport } from '$lib/api/client';
 	import { groups } from '$lib/stores/groups';
 	import { Bot, Search, Plus, Trash2, Download, Upload, X, ArrowLeft, Monitor, User, Settings, Terminal, Check, Lock, RotateCcw, Zap, Sparkles, Cpu, Wrench, ChevronRight } from 'lucide-svelte';
-	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
 	import './card-design-system.css';
 
 	interface Subagent {
@@ -371,6 +370,38 @@
 		importing = false;
 	}
 
+	// Group assignment
+	let creatingGroup = $state(false);
+	let newGroupName = $state('');
+
+	function assignToGroup(agentId: string, groupName: string) {
+		groups.assignToGroup('subagents', agentId, groupName);
+	}
+
+	function removeFromGroup(agentId: string) {
+		groups.removeFromGroup('subagents', agentId);
+	}
+
+	function startGroupCreate() {
+		creatingGroup = true;
+		newGroupName = '';
+	}
+
+	function confirmGroupCreate(agentId: string) {
+		const name = newGroupName.trim();
+		if (name) {
+			groups.createGroup('subagents', name);
+			groups.assignToGroup('subagents', agentId, name);
+		}
+		creatingGroup = false;
+		newGroupName = '';
+	}
+
+	function cancelGroupCreate() {
+		creatingGroup = false;
+		newGroupName = '';
+	}
+
 	/**
 	 * Opens the editor view populated with AI-generated subagent data.
 	 * User can review/edit the values before saving.
@@ -629,7 +660,6 @@
 								</div>
 							</div>
 							<div class="fp-item-actions">
-								<GroupDropdown entityType="subagents" entityId={agent.id} />
 								{#if agent.is_builtin && agent.is_modified}
 									<button
 										onclick={(e) => handleRevert(agent.id, e)}
@@ -639,13 +669,6 @@
 										<RotateCcw />
 									</button>
 								{/if}
-								<button
-									onclick={(e) => exportSubagent(agent.id, e)}
-									class="fp-action-btn"
-									title="Export"
-								>
-									<Download />
-								</button>
 								{#if !agent.is_builtin}
 									<button
 										onclick={(e) => handleDeleteClick(agent.id, e)}
@@ -794,6 +817,50 @@
 						{/each}
 					</select>
 				</div>
+
+				{#if isEditMode && editingSubagent}
+					<div class="card-form-section">
+						<label class="card-form-label">Group</label>
+						<div class="pf-group-row">
+							<select
+								class="pf-select"
+								value={$groups.subagents.assignments[editingSubagent.id] ?? ''}
+								onchange={(e) => {
+									const v = (e.target as HTMLSelectElement).value;
+									if (editingSubagent) {
+										if (v) assignToGroup(editingSubagent.id, v);
+										else removeFromGroup(editingSubagent.id);
+									}
+								}}
+							>
+								<option value="">No group</option>
+								{#each $groups.subagents.groups as group}
+									<option value={group.name}>{group.name}</option>
+								{/each}
+							</select>
+							{#if creatingGroup}
+								<input
+									type="text"
+									class="card-form-input pf-group-input"
+									placeholder="Group name..."
+									bind:value={newGroupName}
+									onkeydown={(e) => {
+										if (e.key === 'Enter') { e.preventDefault(); editingSubagent && confirmGroupCreate(editingSubagent.id); }
+										if (e.key === 'Escape') { e.preventDefault(); cancelGroupCreate(); }
+									}}
+									autofocus
+								/>
+								<button type="button" class="pf-btn-new-group" onclick={() => editingSubagent && confirmGroupCreate(editingSubagent.id)} title="Create">
+									<Check size={14} />
+								</button>
+							{:else}
+								<button type="button" class="pf-btn-new-group" onclick={startGroupCreate} title="New group">
+									<Plus size={14} />
+								</button>
+							{/if}
+						</div>
+					</div>
+				{/if}
 			</div>
 		{/if}
 
@@ -1460,5 +1527,42 @@
 		cursor: not-allowed;
 		filter: none;
 		box-shadow: none;
+	}
+
+	/* ─── Group assignment ─── */
+	.pf-group-row {
+		display: flex;
+		gap: 6px;
+		align-items: center;
+	}
+
+	.pf-group-row .pf-select {
+		flex: 1;
+	}
+
+	.pf-btn-new-group {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 36px;
+		height: 36px;
+		flex-shrink: 0;
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md, 10px);
+		color: var(--text-secondary);
+		cursor: pointer;
+		transition: all 200ms;
+	}
+
+	.pf-btn-new-group:hover {
+		background: var(--surface-hover);
+		color: var(--text-primary);
+		border-color: var(--border-default);
+	}
+
+	.pf-group-input {
+		width: 120px;
+		flex-shrink: 1;
 	}
 </style>

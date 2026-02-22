@@ -1288,19 +1288,18 @@
   gap: var(--space-2);
 }
 
-/* Individual plugin grid card */
+/* Individual plugin list item — horizontal row matching fp-list-item */
 .plugin-grid-card {
   display: flex;
-  flex-direction: column;
-  padding: var(--space-4);
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
   background: var(--surface-0);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: border-color 150ms, box-shadow 150ms, transform 150ms;
   position: relative;
-  overflow: hidden;
-  min-height: 0;
 }
 
 .plugin-grid-card::before {
@@ -1333,16 +1332,7 @@
     0 0 0 2px color-mix(in oklch, var(--primary) 30%, transparent);
 }
 
-/* Card header: icon + name + badges */
-.plugin-grid-card-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  position: relative;
-  z-index: 1;
-}
-
-/* Circular icon with gradient background */
+/* Icon — same size as fp-item-icon */
 .plugin-grid-card-icon {
   display: flex;
   align-items: center;
@@ -1356,19 +1346,24 @@
 }
 
 .plugin-grid-card-icon svg {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
 }
 
-/* Name + badge chips */
-.plugin-grid-card-info {
+/* Content area — matches fp-item-content */
+.plugin-grid-card-content {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  position: relative;
-  z-index: 1;
+}
+
+/* Header row: name + badges inline */
+.plugin-grid-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 .plugin-grid-card-name {
@@ -1385,70 +1380,69 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
-/* Description */
+/* Description — single line to keep compact */
 .plugin-grid-card-description {
   font-size: var(--text-sm);
   color: var(--text-secondary);
   line-height: 1.4;
-  margin-top: var(--space-2);
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  position: relative;
-  z-index: 1;
 }
 
-/* Feature badges row */
+/* Feature badges — inline meta row */
 .plugin-grid-card-features {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-top: var(--space-2);
-  position: relative;
-  z-index: 1;
+  margin-top: 2px;
 }
 
-/* Actions row at card bottom */
+/* Actions — right-aligned, vertically centered */
 .plugin-grid-card-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-top: auto;
-  padding-top: var(--space-3);
   gap: var(--space-2);
-  position: relative;
-  z-index: 1;
+  flex-shrink: 0;
+  align-self: center;
 }
 
 .plugin-grid-card-actions-right {
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: auto;
 }
 
 /* Mobile adjustments */
 @media (max-width: 639px) {
   .plugin-grid-card {
     padding: var(--space-3);
+    flex-wrap: wrap;
   }
 
   .plugin-grid-card:hover {
     transform: none;
   }
 
-  .plugin-grid-card-icon {
-    width: 40px;
-    height: 40px;
-  }
-
   .plugin-grid-card-icon svg {
     width: 18px;
     height: 18px;
+  }
+
+  .plugin-grid-card-header {
+    flex-wrap: wrap;
+  }
+
+  .plugin-grid-card-actions {
+    flex: 1 0 100%;
+    justify-content: center;
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--border-subtle);
+    margin-top: var(--space-1);
   }
 }
 

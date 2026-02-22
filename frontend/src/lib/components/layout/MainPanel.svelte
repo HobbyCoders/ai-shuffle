@@ -71,7 +71,7 @@
 	// These don't need the generic PageHeader
 	const embeddedViews = new Set([
 		'profile', 'project', 'settings', 'subagent',
-		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'stats', 'docs'
+		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'automations', 'stats', 'docs'
 	]);
 
 	// Get the active session state (if in chat view)

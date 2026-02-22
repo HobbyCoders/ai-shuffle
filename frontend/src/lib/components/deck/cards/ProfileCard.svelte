@@ -901,6 +901,11 @@
 											<button type="button" class="pf-btn-new-group" onclick={startGroupCreate} title="New group">
 												<Plus size={14} />
 											</button>
+											{#if (groups?.profiles?.assignments?.[editingProfile.id] ?? "")}
+												<button type="button" class="pf-btn-new-group pf-btn-new-group--delete" onclick={() => { const g = groups?.profiles?.assignments?.[editingProfile.id]; if (g) { removeFromGroup(editingProfile.id); groupsStore.deleteGroup("profiles", g); } }} title="Delete group">
+													<Trash2 size={14} />
+												</button>
+											{/if}
 										{/if}
 									</div>
 								</div>
@@ -1369,10 +1374,9 @@
 						{/if}
 					</div>
 					<div class="pf-footer-right">
-						<button type="button" class="pf-btn-cancel" onclick={backToList}>Cancel</button>
 						<button type="button" class="pf-btn-save" onclick={saveProfile} disabled={!profileForm.name}>
 							<Check size={14} />
-							<span>Save Profile</span>
+							<span class="btn-label">Save</span>
 						</button>
 					</div>
 				</div>
@@ -1387,15 +1391,21 @@
 			itemLabel="profiles"
 		>
 			{#snippet footer()}
-				<button class="fp-btn fp-btn--secondary" onclick={triggerImport} disabled={profileImporting} title="Import">
-					<Upload size={14} /> <span class="btn-label">Import</span>
-				</button>
-				<button class="fp-btn fp-btn--secondary" onclick={() => showGenerateDialog = true} title="AI Generate">
-					<Sparkles size={14} /> <span class="btn-label">AI Generate</span>
-				</button>
-				<button class="fp-btn fp-btn--primary" onclick={openNewForm} title="New Profile">
-					<Plus size={14} /> <span class="btn-label">New Profile</span>
-				</button>
+				<div class="pf-footer">
+					<div class="pf-footer-left">
+						<button class="fp-btn fp-btn--secondary" onclick={triggerImport} disabled={profileImporting} title="Import">
+							<Upload size={14} /> <span class="btn-label">Import</span>
+						</button>
+						<button class="fp-btn fp-btn--secondary" onclick={() => showGenerateDialog = true} title="AI Generate">
+							<Sparkles size={14} /> <span class="btn-label">AI Generate</span>
+						</button>
+					</div>
+					<div class="pf-footer-right">
+						<button class="fp-btn fp-btn--primary" onclick={openNewForm} title="New Profile">
+							<Plus size={14} /> <span class="btn-label">New Profile</span>
+						</button>
+					</div>
+				</div>
 			{/snippet}
 
 			<input type="file" accept=".json" bind:this={profileImportInput} onchange={handleImport} class="hidden" />
@@ -1449,8 +1459,8 @@
 								tabindex="0"
 								onkeydown={(e) => e.key === 'Enter' && openEditForm(profile)}
 							>
-								<div class="fp-item-icon fp-item-icon--{profile.config?.model || 'sonnet'}">
-									<span class="fp-model-initial">{getModelDisplay(profile.config?.model).charAt(0)}</span>
+								<div class="fp-item-icon fp-item-icon--primary">
+									<Users size={18} />
 								</div>
 								<div class="fp-item-content">
 									<div class="fp-item-header">
@@ -1503,13 +1513,12 @@
 		display: none;
 	}
 
-	/* Header button labels — visible on desktop, hidden on mobile */
 	.btn-label {
 		display: inline;
 	}
 
-	@media (max-width: 768px) {
-		.btn-label {
+	@media (max-width: 639px) {
+		.btn-label-mobile-hide {
 			display: none;
 		}
 	}
@@ -2024,11 +2033,26 @@
 
 	@media (max-width: 480px) {
 		.pf-env-row {
-			flex-direction: column;
+			display: grid;
+			grid-template-columns: 1fr auto;
+			grid-template-rows: auto auto;
 		}
 
 		.pf-env-key {
 			width: 100%;
+			grid-column: 1;
+			grid-row: 1;
+		}
+
+		.pf-env-value {
+			grid-column: 1;
+			grid-row: 2;
+		}
+
+		.pf-env-remove {
+			grid-column: 2;
+			grid-row: 1 / 3;
+			align-self: center;
 		}
 	}
 
@@ -2122,6 +2146,16 @@
 		background: var(--surface-hover);
 		color: var(--text-primary);
 		border-color: var(--border-default);
+	}
+
+	.pf-btn-new-group--delete {
+		color: var(--destructive);
+	}
+
+	.pf-btn-new-group--delete:hover {
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
+		color: var(--destructive);
+		border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
 	}
 
 	.pf-group-input {
@@ -2224,6 +2258,7 @@
 		width: 16px;
 		height: 16px;
 		accent-color: var(--primary);
+		color-scheme: dark;
 	}
 
 	.checkbox-label {
