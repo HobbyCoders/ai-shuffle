@@ -158,7 +158,6 @@
 				{ label: 'Projects', onclick: handleBack },
 				{ label: selectedProject.name }
 			]}
-			subtitle={`/workspace/${selectedProject.path}/`}
 		>
 			{#snippet headerTabs()}
 				<div class="fp-tab-bar">
