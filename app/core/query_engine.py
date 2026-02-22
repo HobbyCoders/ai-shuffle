@@ -365,6 +365,7 @@ def _build_mcp_servers_dict(
     mcp_servers: dict = {}
 
     # --- Source 1: Scope-based .mcp.json files ---
+    service = None
     try:
         service = get_mcp_service(project_dir)
         all_servers = service.get_all_servers()
@@ -409,20 +410,25 @@ def _build_mcp_servers_dict(
     # Add browser-tools as an in-process SDK MCP server (replaces the old
     # stdio subprocess).  The server proxies tool calls to the FastAPI
     # browser REST API so agent and user share the same Playwright browser.
+    # Skip if user has globally disabled browser-tools via settings.json.
     if browser_session_id:
-        try:
-            from app.mcp.browser_sdk_tools import create_browser_tools_server
-            from app.core.config import INTERNAL_BROWSER_TOKEN
+        disabled_servers = service.get_disabled_servers() if service else []
+        if "browser-tools" not in disabled_servers:
+            try:
+                from app.mcp.browser_sdk_tools import create_browser_tools_server
+                from app.core.config import INTERNAL_BROWSER_TOKEN
 
-            browser_server = create_browser_tools_server(
-                base_url=f"http://127.0.0.1:{settings.port}",
-                session_id=browser_session_id,
-                auth_token=INTERNAL_BROWSER_TOKEN,
-            )
-            mcp_servers["browser-tools"] = browser_server
-            logger.debug("Added in-process SDK MCP server for browser-tools")
-        except Exception as e:
-            logger.warning(f"Failed to create browser-tools SDK MCP server: {e}")
+                browser_server = create_browser_tools_server(
+                    base_url=f"http://127.0.0.1:{settings.port}",
+                    session_id=browser_session_id,
+                    auth_token=INTERNAL_BROWSER_TOKEN,
+                )
+                mcp_servers["browser-tools"] = browser_server
+                logger.debug("Added in-process SDK MCP server for browser-tools")
+            except Exception as e:
+                logger.warning(f"Failed to create browser-tools SDK MCP server: {e}")
+        else:
+            logger.info("browser-tools is globally disabled, skipping")
 
     if mcp_servers:
         logger.info(f"Passing {len(mcp_servers)} MCP server(s) to SDK: {list(mcp_servers.keys())}")

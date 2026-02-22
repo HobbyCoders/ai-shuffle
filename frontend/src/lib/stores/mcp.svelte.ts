@@ -201,6 +201,25 @@ export const mcp = {
 		}
 	},
 
+	/**
+	 * Toggle a global MCP server enabled/disabled
+	 */
+	async toggleGlobalServer(serverName: string, enabled: boolean): Promise<void> {
+		try {
+			const updated = await mcpApi.toggleGlobalMcpServer(serverName, enabled);
+			_update((state) => ({
+				...state,
+				globalServers: state.globalServers.map((s) =>
+					s.name === serverName ? updated : s
+				)
+			}));
+		} catch (e) {
+			const error = extractError(e, 'Failed to toggle MCP server');
+			_update((state) => ({ ...state, error }));
+			throw e;
+		}
+	},
+
 	// ========================================================================
 	// Project Server Operations
 	// ========================================================================

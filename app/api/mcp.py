@@ -44,6 +44,7 @@ class McpServerResponse(BaseModel):
     scope: str
     enabled: bool = True
     description: Optional[str] = None
+    builtin: bool = False
 
 
 class McpServerCreateRequest(BaseModel):
@@ -93,6 +94,11 @@ class McpToolResponse(BaseModel):
 # Helper Functions
 # ============================================================================
 
+class McpServerToggleRequest(BaseModel):
+    """Request to toggle MCP server enabled/disabled"""
+    enabled: bool
+
+
 def _server_to_response(server: McpServerConfig) -> McpServerResponse:
     """Convert McpServerConfig to response model"""
     return McpServerResponse(
@@ -106,6 +112,7 @@ def _server_to_response(server: McpServerConfig) -> McpServerResponse:
         scope=server.scope,
         enabled=server.enabled,
         description=server.description,
+        builtin=server.builtin,
     )
 
 
@@ -185,10 +192,10 @@ def _parse_scope(scope_str: str) -> McpScope:
 
 @router.get("/mcp/servers", response_model=List[McpServerResponse])
 async def list_global_mcp_servers(token: str = Depends(require_auth)):
-    """List all global (USER scope) MCP servers"""
+    """List all globally available MCP servers including builtins"""
     try:
         service = get_mcp_service()
-        servers = service.get_servers_for_scope(McpScope.USER)
+        servers = service.get_all_servers_with_builtins()
         return [_server_to_response(s) for s in servers]
     except Exception as e:
         logger.exception("Failed to list MCP servers")
@@ -322,6 +329,42 @@ async def remove_global_mcp_server(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to remove MCP server"
+        )
+
+
+@router.patch("/mcp/servers/{server_name}/toggle", response_model=McpServerResponse)
+async def toggle_global_mcp_server(
+    server_name: str,
+    request: McpServerToggleRequest,
+    token: str = Depends(require_admin)
+):
+    """Toggle a global MCP server enabled/disabled via settings.json - Admin only"""
+    try:
+        service = get_mcp_service()
+
+        # Set enabled state in settings.json
+        success = service.set_server_enabled(server_name, request.enabled)
+        if not success:
+            raise RuntimeError("Failed to update settings.json")
+
+        # Return updated server info
+        servers = service.get_all_servers_with_builtins()
+        for s in servers:
+            if s.name == server_name:
+                return _server_to_response(s)
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"MCP server not found: {server_name}"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to toggle MCP server")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to toggle MCP server"
         )
 
 

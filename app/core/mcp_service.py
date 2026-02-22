@@ -4,10 +4,11 @@ MCP Server Management Service
 Provides functionality for managing MCP (Model Context Protocol) server configurations.
 
 MCP Scopes:
-- USER: ~/.claude/.mcp.json (global MCP servers for all projects)
+- USER: ~/.claude.json (global MCP servers in user home, mcpServers key)
 - LOCAL: <project>/.claude/.mcp.json (project-local, gitignored)
 - PROJECT: <project>/.mcp.json (project MCP config, committed to git)
 
+Enable/disable state is managed via ~/.claude/settings.json (disabledMcpServers key).
 Docker mode uses /home/appuser/.claude/ for user scope.
 """
 
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 class McpScope(str, Enum):
     """Scope for MCP server configuration"""
-    USER = "user"       # ~/.claude/.mcp.json
+    USER = "user"       # ~/.claude.json (mcpServers key)
     LOCAL = "local"     # <project>/.claude/.mcp.json
     PROJECT = "project" # <project>/.mcp.json
 
@@ -59,6 +60,7 @@ class McpServerConfig:
     scope: str = "user"
     enabled: bool = True
     description: Optional[str] = None
+    builtin: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
@@ -73,6 +75,7 @@ class McpServerConfig:
             "scope": self.scope,
             "enabled": self.enabled,
             "description": self.description,
+            "builtin": self.builtin,
         }
 
     def to_mcp_json_format(self) -> Dict[str, Any]:
@@ -157,17 +160,50 @@ def _get_claude_dir() -> Path:
     return get_claude_credentials_dir()
 
 
+def _get_user_home() -> Path:
+    """
+    Get the user home directory based on deployment mode.
+
+    Returns:
+        - Docker: /home/appuser
+        - Local: ~ (user home)
+    """
+    if is_docker_mode():
+        return Path("/home/appuser")
+    return Path.home()
+
+
+def _get_user_claude_json() -> Path:
+    """
+    Get the path to ~/.claude.json which stores global MCP server configs.
+
+    Claude Code stores MCP server definitions in ~/.claude.json under the
+    'mcpServers' key. This is in the user home directory, NOT inside
+    ~/.claude/.
+
+    In Docker mode, falls back to ~/.claude/.mcp.json since the Docker
+    volume mount may not include ~/.claude.json from the host.
+    """
+    if is_docker_mode():
+        # Docker: .claude.json may not be mounted. Fall back to .mcp.json
+        # inside the .claude directory which IS mounted.
+        return _get_claude_dir() / ".mcp.json"
+    return _get_user_home() / ".claude.json"
+
+
 class McpService:
     """
     Service for managing MCP server configurations.
 
-    Reads and writes to .mcp.json files at various scopes to maintain
-    compatibility with the Claude CLI.
+    Reads and writes to configuration files at various scopes:
 
     MCP Scopes:
-        - USER: ~/.claude/.mcp.json - Global MCP servers
+        - USER: ~/.claude.json (mcpServers key) - Global MCP servers
         - LOCAL: <project>/.claude/.mcp.json - Project-local (gitignored)
         - PROJECT: <project>/.mcp.json - Project MCP config (committed)
+
+    Enable/disable state is stored in ~/.claude/settings.json
+    under the 'disabledMcpServers' key.
     """
 
     def __init__(self, project_dir: Optional[Path] = None):
@@ -180,7 +216,8 @@ class McpService:
         """
         # User scope paths
         self.CLAUDE_DIR = _get_claude_dir()
-        self.USER_MCP_FILE = self.CLAUDE_DIR / ".mcp.json"
+        self.USER_MCP_FILE = _get_user_claude_json()
+        self.SETTINGS_FILE = self.CLAUDE_DIR / "settings.json"
 
         # Project scope paths
         self.project_dir = project_dir
@@ -231,9 +268,48 @@ class McpService:
     # Read Operations
     # =========================================================================
 
+    def get_disabled_servers(self) -> List[str]:
+        """
+        Get the list of globally disabled MCP server names from settings.json.
+
+        Returns:
+            List of disabled server names
+        """
+        data = self._read_json_file(self.SETTINGS_FILE, {})
+        return data.get("disabledMcpServers", [])
+
+    def set_server_enabled(self, name: str, enabled: bool) -> bool:
+        """
+        Enable or disable a built-in MCP server via settings.json.
+
+        Only used for built-in servers (like browser-tools) that are added
+        programmatically rather than from config files. Non-built-in servers
+        can only be disabled at the project level, not globally.
+
+        Args:
+            name: Server name
+            enabled: True to enable, False to disable
+
+        Returns:
+            True if successful
+        """
+        data = self._read_json_file(self.SETTINGS_FILE, {})
+        disabled = data.get("disabledMcpServers", [])
+
+        if enabled:
+            disabled = [s for s in disabled if s != name]
+        else:
+            if name not in disabled:
+                disabled.append(name)
+
+        data["disabledMcpServers"] = disabled
+        return self._write_json_file(self.SETTINGS_FILE, data)
+
     def get_servers_for_scope(self, scope: McpScope) -> List[McpServerConfig]:
         """
         Get all MCP servers configured in a specific scope.
+
+        For USER scope, also merges enabled/disabled state from settings.json.
 
         Args:
             scope: The scope to read from
@@ -248,10 +324,15 @@ class McpService:
         data = self._read_json_file(mcp_file, {})
         mcp_servers = data.get("mcpServers", {})
 
+        # Get disabled list for USER scope
+        disabled = self.get_disabled_servers() if scope == McpScope.USER else []
+
         servers = []
         for name, config in mcp_servers.items():
             try:
                 server = McpServerConfig.from_mcp_json(name, config, scope.value)
+                if name in disabled:
+                    server.enabled = False
                 servers.append(server)
             except Exception as e:
                 logger.error(f"Error parsing MCP server {name}: {e}")
@@ -307,6 +388,9 @@ class McpService:
         """
         Add a new MCP server to a specific scope.
 
+        For USER scope, writes to ~/.claude.json (preserving other keys).
+        For LOCAL/PROJECT scopes, writes to .mcp.json files.
+
         Args:
             name: Server name (must be unique within scope)
             config: Server configuration
@@ -319,8 +403,8 @@ class McpService:
         if not mcp_file:
             raise ValueError(f"Scope {scope} is not available (no project directory)")
 
-        # Read existing config
-        data = self._read_json_file(mcp_file, {"mcpServers": {}})
+        # Read existing file (preserve all existing content)
+        data = self._read_json_file(mcp_file, {})
         if "mcpServers" not in data:
             data["mcpServers"] = {}
 
@@ -360,8 +444,8 @@ class McpService:
         if not mcp_file:
             raise ValueError(f"Scope {scope} is not available")
 
-        # Read existing config
-        data = self._read_json_file(mcp_file, {"mcpServers": {}})
+        # Read existing file (preserve all existing content)
+        data = self._read_json_file(mcp_file, {})
         if "mcpServers" not in data:
             data["mcpServers"] = {}
 
@@ -395,8 +479,8 @@ class McpService:
         if not mcp_file:
             raise ValueError(f"Scope {scope} is not available")
 
-        # Read existing config
-        data = self._read_json_file(mcp_file, {"mcpServers": {}})
+        # Read existing file (preserve all existing content)
+        data = self._read_json_file(mcp_file, {})
         if "mcpServers" not in data:
             return False
 
@@ -416,6 +500,31 @@ class McpService:
     # =========================================================================
     # Utility Methods
     # =========================================================================
+
+    def get_all_servers_with_builtins(self) -> List[McpServerConfig]:
+        """
+        Get all USER scope servers plus built-in servers (like browser-tools).
+
+        Returns:
+            List of all globally available MCP servers including builtins.
+        """
+        servers = list(self.get_servers_for_scope(McpScope.USER))
+        disabled = self.get_disabled_servers()
+
+        # Add browser-tools as a built-in server
+        has_browser = any(s.name == "browser-tools" for s in servers)
+        if not has_browser:
+            browser_server = McpServerConfig(
+                name="browser-tools",
+                type=McpServerType.STDIO,
+                description="Built-in browser automation tools (provided by AI Shuffle SDK)",
+                scope="user",
+                enabled="browser-tools" not in disabled,
+                builtin=True,
+            )
+            servers.insert(0, browser_server)
+
+        return servers
 
     def get_server_count(self) -> int:
         """Get total count of MCP servers across all scopes"""

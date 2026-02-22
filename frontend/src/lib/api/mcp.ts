@@ -27,6 +27,7 @@ export interface McpServerInfo {
 	scope: McpScope;
 	enabled: boolean;
 	description?: string;
+	builtin?: boolean;
 }
 
 export interface McpServersResponse {
@@ -104,6 +105,19 @@ export async function updateGlobalMcpServer(
  */
 export async function removeGlobalMcpServer(serverName: string): Promise<void> {
 	await api.delete(`/mcp/servers/${encodeURIComponent(serverName)}`);
+}
+
+/**
+ * Toggle a global MCP server enabled/disabled
+ */
+export async function toggleGlobalMcpServer(
+	serverName: string,
+	enabled: boolean
+): Promise<McpServerInfo> {
+	return api.patch<McpServerInfo>(
+		`/mcp/servers/${encodeURIComponent(serverName)}/toggle`,
+		{ enabled }
+	);
 }
 
 // ============================================================================
