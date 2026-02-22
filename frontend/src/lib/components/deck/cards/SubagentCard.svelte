@@ -664,14 +664,30 @@
 									{/if}
 								</div>
 							</div>
-							<div class="fp-item-actions">
+							<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
 								{#if agent.is_builtin && agent.is_modified}
 									<button
 										onclick={(e) => handleRevert(agent.id, e)}
-										class="fp-action-btn"
+										class="card-action-btn"
 										title="Revert to defaults"
 									>
-										<RotateCcw />
+										<RotateCcw size={16} />
+									</button>
+								{/if}
+								<button
+									class="card-action-btn"
+									title="Export"
+									onclick={(e) => exportSubagent(agent.id, e)}
+								>
+									<Download size={16} />
+								</button>
+								{#if !agent.is_builtin}
+									<button
+										class="card-action-btn card-action-btn--destructive"
+										title="Delete"
+										onclick={(e) => { e.stopPropagation(); deletingId = agent.id; }}
+									>
+										<Trash2 size={16} />
 									</button>
 								{/if}
 							</div>
@@ -700,33 +716,15 @@
 		]}
 	>
 		{#snippet footer()}
-			<div class="pf-footer">
-				<div class="pf-footer-left">
-					{#if isEditMode && editingSubagent && !editingSubagent.is_builtin}
-						<button type="button" class="pf-btn-delete" onclick={() => { if (editingSubagent) { deletingId = editingSubagent.id; handleBack(); } }}>
-							<Trash2 size={14} />
-							<span>Delete</span>
-						</button>
-					{/if}
-					{#if isEditMode && editingSubagent}
-						<button type="button" class="pf-btn-export" onclick={(e) => editingSubagent && exportSubagent(editingSubagent.id, e)}>
-							<Download size={14} />
-							<span>Export</span>
-						</button>
-					{/if}
-				</div>
-				<div class="pf-footer-right">
-					<button type="button" class="pf-btn-save" onclick={handleSave} disabled={!isValid() || saving}>
-						{#if saving}
-							<div class="card-spinner card-spinner--small"></div>
-							<span>Saving...</span>
-						{:else}
-							<Check size={14} />
-							<span>{isEditMode ? 'Save Changes' : 'Create'}</span>
-						{/if}
-					</button>
-				</div>
-			</div>
+			<button type="button" class="pf-btn-save" onclick={handleSave} disabled={!isValid() || saving}>
+				{#if saving}
+					<div class="card-spinner card-spinner--small"></div>
+					<span>Saving...</span>
+				{:else}
+					<Check size={14} />
+					<span>{isEditMode ? 'Save Subagent' : 'Create Subagent'}</span>
+				{/if}
+			</button>
 		{/snippet}
 
 		{#snippet headerTabs()}
@@ -816,6 +814,7 @@
 				{#if isEditMode && editingSubagent}
 					<div class="card-form-section">
 						<label class="card-form-label">Group</label>
+						<div class="pf-group-wrapper">
 						<div class="pf-group-row">
 							<select
 								class="pf-select"
@@ -834,17 +833,6 @@
 								{/each}
 							</select>
 							{#if creatingGroup}
-								<input
-									type="text"
-									class="card-form-input pf-group-input"
-									placeholder="Group name..."
-									bind:value={newGroupName}
-									onkeydown={(e) => {
-										if (e.key === 'Enter') { e.preventDefault(); editingSubagent && confirmGroupCreate(editingSubagent.id); }
-										if (e.key === 'Escape') { e.preventDefault(); cancelGroupCreate(); }
-									}}
-									autofocus
-								/>
 								<button type="button" class="pf-btn-new-group" onclick={() => editingSubagent && confirmGroupCreate(editingSubagent.id)} title="Create">
 									<Check size={14} />
 								</button>
@@ -859,6 +847,20 @@
 								{/if}
 							{/if}
 						</div>
+						{#if creatingGroup}
+							<input
+								type="text"
+								class="card-form-input pf-group-input"
+								placeholder="Group name..."
+								bind:value={newGroupName}
+								onkeydown={(e) => {
+									if (e.key === 'Enter') { e.preventDefault(); editingSubagent && confirmGroupCreate(editingSubagent.id); }
+									if (e.key === 'Escape') { e.preventDefault(); cancelGroupCreate(); }
+								}}
+								autofocus
+							/>
+						{/if}
+					</div>
 					</div>
 				{/if}
 			</div>
@@ -1523,6 +1525,12 @@
 	}
 
 	/* ─── Group assignment ─── */
+	.pf-group-wrapper {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
 	.pf-group-row {
 		display: flex;
 		gap: 6px;
@@ -1565,7 +1573,6 @@
 	}
 
 	.pf-group-input {
-		width: 120px;
-		flex-shrink: 1;
+		width: 100%;
 	}
 </style>

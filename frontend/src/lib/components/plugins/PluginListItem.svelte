@@ -7,6 +7,7 @@
 	 * - installed: Shows enable/disable toggle, uninstall button
 	 */
 	import type { AvailablePlugin, PluginInfo } from '$lib/api/plugins';
+	import { ToggleLeft, ToggleRight } from 'lucide-svelte';
 	import '$lib/components/deck/cards/card-design-system.css';
 
 	interface Props {
@@ -112,32 +113,32 @@
 				<button
 					onclick={onInstall}
 					disabled={installing}
-					class="card-btn-primary card-btn-primary--small"
+					class="card-action-btn"
+					title="Install"
 				>
 					{#if installing}
 						<span class="card-spinner card-spinner--small"></span>
 					{:else}
-						<svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="16" height="16">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 						</svg>
 					{/if}
-					Install
 				</button>
 			{/if}
 		{:else if mode === 'installed' && installedPlugin}
 			<button
 				onclick={onToggle}
-				class="toggle-switch {installedPlugin.enabled ? 'enabled' : ''}"
+				class="card-action-btn"
 				title={installedPlugin.enabled ? 'Disable plugin' : 'Enable plugin'}
 			>
-				<span class="toggle-knob"></span>
+				{#if installedPlugin.enabled}
+					<ToggleRight size={16} />
+				{:else}
+					<ToggleLeft size={16} />
+				{/if}
 			</button>
 
 			<div class="plugin-grid-card-actions-right">
-				{#if installedPlugin}
-					<span class="version-info">v{installedPlugin.version}</span>
-				{/if}
-
 				<button
 					onclick={onDetails}
 					class="card-action-btn"
@@ -254,55 +255,11 @@
 		height: 14px;
 	}
 
-	/* Toggle switch */
-	.toggle-switch {
-		position: relative;
-		width: 44px;
-		height: 24px;
-		border-radius: 12px;
-		background: var(--muted);
-		border: none;
-		cursor: pointer;
-		transition: background var(--transition-fast, 100ms);
-		flex-shrink: 0;
-	}
-
-	.toggle-switch.enabled {
-		background: var(--primary);
-	}
-
-	.toggle-knob {
-		position: absolute;
-		top: 4px;
-		left: 4px;
-		width: 16px;
-		height: 16px;
-		border-radius: 50%;
-		background: var(--card, white);
-		box-shadow: 0 1px 3px color-mix(in oklch, var(--foreground, black) 20%, transparent);
-		transition: transform var(--transition-fast, 100ms);
-	}
-
-	.toggle-switch.enabled .toggle-knob {
-		transform: translateX(20px);
-	}
-
 	/* Mobile: larger touch targets */
 	@media (max-width: 639px) {
 		.card-btn-primary--small {
 			padding: 8px 16px;
 			min-height: 40px;
-		}
-
-		.toggle-switch {
-			width: 48px;
-			height: 28px;
-			border-radius: 14px;
-		}
-
-		.toggle-knob {
-			width: 20px;
-			height: 20px;
 		}
 	}
 </style>

@@ -189,6 +189,12 @@
 		testResult = null;
 	}
 
+	function backToList() {
+		currentView = 'list';
+		resetForm();
+		selectedAutomation = null;
+	}
+
 	function openCreate() {
 		resetForm();
 		currentView = 'create';
@@ -596,13 +602,6 @@
 <!-- ═══════════════════ FORM VIEW (Create / Edit) ═══════════════════ -->
 {#snippet formView()}
 	<div class="auto-form" transition:fade={{ duration: 150 }}>
-		<div class="auto-form-header">
-			<button class="card-back-btn" onclick={() => currentView = 'list'}>
-				<ArrowLeft size={16} />
-			</button>
-			<h3 class="auto-form-title">{currentView === 'edit' ? 'Edit Automation' : 'New Automation'}</h3>
-		</div>
-
 		{#if formError}
 			<div class="card-error-banner" transition:slide={{ duration: 150 }}>
 				<AlertCircle size={16} />
@@ -929,20 +928,6 @@
 			</div>
 		</div>
 
-		<!-- Form footer -->
-		<div class="auto-form-footer">
-			<button class="card-btn-secondary" onclick={() => currentView = 'list'}>
-				Cancel
-			</button>
-			<button class="card-btn-primary" onclick={handleSave} disabled={formSaving}>
-				{#if formSaving}
-					<Loader2 size={16} class="animate-spin" />
-					Saving...
-				{:else}
-					{currentView === 'edit' ? 'Save Changes' : 'Create Automation'}
-				{/if}
-			</button>
-		</div>
 	</div>
 {/snippet}
 
@@ -1113,56 +1098,84 @@
 
 <!-- ═══════════════════ RENDER ═══════════════════ -->
 {#if !mobile}
-	<FeaturePageLayout
-		icon={CalendarClock}
-		title="Automations"
-		itemCount={automations.length}
-		itemLabel="automation"
-	>
-		{#snippet headerTabs()}
-			<div class="fp-tab-bar">
-				<button
-					class="fp-tab"
-					class:active={currentView === 'list' || currentView === 'create' || currentView === 'edit' || currentView === 'detail'}
-					onclick={() => currentView = 'list'}
-				>
-					All
-					<span class="fp-tab-count">{automations.length}</span>
-				</button>
-				<button
-					class="fp-tab"
-					class:active={currentView === 'approvals'}
-					onclick={() => currentView = 'approvals'}
-				>
-					Approvals
-					{#if approvalCount > 0}
-						<span class="fp-tab-count auto-approval-badge">{approvalCount}</span>
+	{#if currentView === 'create' || currentView === 'edit'}
+		<FeaturePageLayout
+			icon={CalendarClock}
+			title="Automations"
+			breadcrumbs={[
+				{ label: 'Automations', onclick: backToList },
+				{ label: currentView === 'edit' && selectedAutomation ? selectedAutomation.name : 'New Automation' }
+			]}
+			noPadding={true}
+		>
+			{#snippet footer()}
+				<button class="fp-btn fp-btn--primary" onclick={handleSave} disabled={formSaving}>
+					{#if formSaving}
+						<Loader2 size={14} class="animate-spin" />
+						<span class="btn-label">Saving...</span>
+					{:else}
+						<span class="btn-label">{currentView === 'edit' ? 'Save Changes' : 'Create Automation'}</span>
 					{/if}
 				</button>
-			</div>
-		{/snippet}
-		{#snippet footer()}
-			<button class="fp-btn fp-btn--primary" onclick={openCreate} title="New Automation">
-				<Plus size={14} /> <span class="btn-label">New Automation</span>
-			</button>
-		{/snippet}
-		{#snippet children()}
-			<div class="automations-card card-system" style="position: relative;">
-				<div class="fp-search-bar">
-					<div class="fph-search-wrapper">
-						<Search size={14} />
-						<input
-							type="text"
-							bind:value={searchQuery}
-							placeholder="Search automations..."
-							class="fph-search-input"
-						/>
-					</div>
+			{/snippet}
+			{#snippet children()}
+				<div class="automations-card card-system" style="position: relative;">
+					{@render automationsMainContent()}
 				</div>
-				{@render automationsMainContent()}
-			</div>
-		{/snippet}
-	</FeaturePageLayout>
+			{/snippet}
+		</FeaturePageLayout>
+	{:else}
+		<FeaturePageLayout
+			icon={CalendarClock}
+			title="Automations"
+			itemCount={automations.length}
+			itemLabel="automation"
+		>
+			{#snippet headerTabs()}
+				<div class="fp-tab-bar">
+					<button
+						class="fp-tab"
+						class:active={currentView === 'list' || currentView === 'detail'}
+						onclick={() => currentView = 'list'}
+					>
+						All
+						<span class="fp-tab-count">{automations.length}</span>
+					</button>
+					<button
+						class="fp-tab"
+						class:active={currentView === 'approvals'}
+						onclick={() => currentView = 'approvals'}
+					>
+						Approvals
+						{#if approvalCount > 0}
+							<span class="fp-tab-count auto-approval-badge">{approvalCount}</span>
+						{/if}
+					</button>
+				</div>
+			{/snippet}
+			{#snippet footer()}
+				<button class="fp-btn fp-btn--primary" onclick={openCreate} title="New Automation">
+					<Plus size={14} /> <span class="btn-label">New Automation</span>
+				</button>
+			{/snippet}
+			{#snippet children()}
+				<div class="automations-card card-system" style="position: relative;">
+					<div class="fp-search-bar">
+						<div class="fph-search-wrapper">
+							<Search size={14} />
+							<input
+								type="text"
+								bind:value={searchQuery}
+								placeholder="Search automations..."
+								class="fph-search-input"
+							/>
+						</div>
+					</div>
+					{@render automationsMainContent()}
+				</div>
+			{/snippet}
+		</FeaturePageLayout>
+	{/if}
 {:else if mobile}
 	<div class="automations-card card-system mobile">
 		<!-- Tabs -->
@@ -1519,20 +1532,9 @@
 	.auto-item-actions {
 		display: flex;
 		align-items: center;
+		justify-content: center;
 		gap: 2px;
 		flex-shrink: 0;
-		opacity: 0;
-		transition: opacity 100ms;
-	}
-
-	.auto-list-item:hover .auto-item-actions {
-		opacity: 1;
-	}
-
-	@media (hover: none), (max-width: 639px) {
-		.auto-item-actions {
-			opacity: 1;
-		}
 	}
 
 	/* ═══════════════════ Form View ═══════════════════ */
@@ -1542,36 +1544,10 @@
 		height: 100%;
 	}
 
-	.auto-form-header {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 12px 16px;
-		border-bottom: 1px solid var(--border-subtle, var(--border));
-		flex-shrink: 0;
-	}
-
-	.auto-form-title {
-		font-size: var(--text-lg, 1rem);
-		font-weight: 600;
-		color: var(--text-primary, var(--foreground));
-		margin: 0;
-	}
-
 	.auto-form-body {
 		flex: 1;
 		overflow-y: auto;
 		padding: 16px;
-	}
-
-	.auto-form-footer {
-		display: flex;
-		justify-content: flex-end;
-		gap: 8px;
-		padding: 12px 16px;
-		border-top: 1px solid var(--border-subtle, var(--border));
-		flex-shrink: 0;
-		background: var(--surface-1);
 	}
 
 	/* Trigger selector */
@@ -2006,7 +1982,7 @@
 
 		.auto-item-actions {
 			flex: 1 0 100%;
-			justify-content: flex-end;
+			justify-content: center;
 			padding-top: 8px;
 			border-top: 1px solid var(--border-subtle, var(--border));
 		}

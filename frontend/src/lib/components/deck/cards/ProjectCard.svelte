@@ -254,7 +254,7 @@
 											</span>
 										{/if}
 									</div>
-									<span class="fp-item-id">/workspace/{project.path}/</span>
+									<span class="fp-item-id">{project.path}</span>
 									<div class="fp-item-meta">
 										<span class="fp-meta-chip"><MessageSquare size={12} /> {project.session_count || 0} sessions</span>
 									</div>

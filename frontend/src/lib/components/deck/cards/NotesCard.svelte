@@ -7,7 +7,7 @@
 
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import './card-design-system.css';
-	import { StickyNote, Search as SearchIcon, Plus } from 'lucide-svelte';
+	import { StickyNote, Search as SearchIcon, Plus, Pin, Trash2 } from 'lucide-svelte';
 	import {
 		getNotes,
 		createNote,
@@ -192,6 +192,19 @@
 		}
 	}
 
+	// Delete a note from list view
+	async function handleDeleteFromList(note: Note, e: Event) {
+		e.stopPropagation();
+		if (!confirm('Delete this note? This cannot be undone.')) return;
+
+		try {
+			await deleteNote(note.id);
+			loadData();
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Failed to delete note';
+		}
+	}
+
 	// Auto-resize textarea to fit content (desktop only)
 	function autoResizeTextarea() {
 		if (!textareaEl) return;
@@ -330,8 +343,8 @@
 				</div>
 			{:else}
 				{#each notes as note}
-					<div class="note-item" onclick={() => openNote(note)} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && openNote(note)}>
-						<div class="note-item-icon">
+					<div class="note-item fp-list-item" onclick={() => openNote(note)} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && openNote(note)}>
+						<div class="note-item-icon fp-item-icon fp-item-icon--primary">
 							<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 								<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
 								<polyline points="14 2 14 8 20 8"/>
@@ -340,25 +353,16 @@
 								<polyline points="10 9 9 9 8 9"/>
 							</svg>
 						</div>
-						<div class="note-item-content">
-							<div class="note-header">
+						<div class="note-item-content fp-item-content">
+							<div class="note-header fp-item-header">
 								{#if note.is_pinned}
 									<span class="pin-icon">
-										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-											<line x1="12" y1="17" x2="12" y2="22"/>
-											<path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>
-										</svg>
+										<Pin size={14} />
 									</span>
 								{/if}
-								<span class="note-title">{note.title}</span>
-								<button class="pin-btn" onclick={(e) => togglePin(note, e)} title={note.is_pinned ? 'Unpin' : 'Pin'}>
-									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-										<line x1="12" y1="17" x2="12" y2="22"/>
-										<path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>
-									</svg>
-								</button>
+								<span class="note-title fp-item-name">{note.title}</span>
 							</div>
-							<div class="note-meta">
+							<div class="note-meta fp-item-meta">
 							{#if note.tags.length > 0}
 								<span class="note-tags">
 									{#each note.tags.slice(0, 3) as tag}
@@ -371,6 +375,14 @@
 							{/if}
 							<span class="note-date">{formatRelativeTime(note.updated_at)}</span>
 							</div>
+						</div>
+						<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
+							<button class="card-action-btn" onclick={(e) => togglePin(note, e)} title={note.is_pinned ? 'Unpin' : 'Pin'}>
+								<Pin size={16} />
+							</button>
+							<button class="card-action-btn card-action-btn--destructive" onclick={(e) => handleDeleteFromList(note, e)} title="Delete">
+								<Trash2 size={16} />
+							</button>
 						</div>
 					</div>
 				{/each}
@@ -399,46 +411,6 @@
 				{#if saving}
 					<span class="autosave-status">Saving...</span>
 				{/if}
-				<label class="pin-toggle" title="Pin to top">
-					<input type="checkbox" bind:checked={editorPinned} onchange={markDirty} />
-					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-						<line x1="12" y1="17" x2="12" y2="22"/>
-						<path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>
-					</svg>
-				</label>
-				{#if editingNote}
-					<button class="delete-btn" onclick={handleDelete} title="Delete note">
-						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-							<polyline points="3 6 5 6 21 6"/>
-							<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-						</svg>
-					</button>
-				{/if}
-			</div>
-		</div>
-
-		<!-- Tags -->
-		<div class="tags-section">
-			<div class="tags-list">
-				{#each editorTags as tag}
-					<span class="editor-tag">
-						{tag}
-						<button class="remove-tag" onclick={() => removeTag(tag)}>×</button>
-					</span>
-				{/each}
-				<input
-					type="text"
-					class="tag-input"
-					placeholder="Add tag..."
-					bind:value={newTagInput}
-					onkeydown={(e) => {
-						if (e.key === 'Enter') {
-							e.preventDefault();
-							addTag();
-						}
-					}}
-					onblur={addTag}
-				/>
 			</div>
 		</div>
 
@@ -643,61 +615,8 @@
 	}
 
 	.note-item {
-		display: flex;
-		align-items: flex-start;
-		gap: var(--space-3);
-		padding: var(--space-3) var(--space-4);
-		background: var(--surface-0);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
 		margin-bottom: var(--space-2);
 		text-align: left;
-		cursor: pointer;
-		transition: border-color 150ms, box-shadow 150ms, transform 150ms;
-		position: relative;
-		overflow: hidden;
-	}
-
-	.note-item::before {
-		display: none;
-	}
-
-	.note-item:hover {
-		border-color: var(--border-emphasis);
-		box-shadow: var(--shadow-sm);
-		transform: translateY(-1px);
-	}
-
-	.note-item:active {
-		transform: translateY(0);
-	}
-
-	/* Icon box for note items */
-	.note-item-icon {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 40px;
-		height: 40px;
-		flex-shrink: 0;
-		border-radius: var(--radius-sm);
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		color: var(--primary);
-	}
-
-	/* Content wrapper */
-	.note-item-content {
-		flex: 1;
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: calc(var(--space-1) * 1.5);
-	}
-
-	.note-header {
-		display: flex;
-		align-items: center;
-		gap: calc(var(--space-1) * 1.5);
 	}
 
 	.pin-icon {
@@ -713,41 +632,6 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-	}
-
-	.pin-btn {
-		padding: var(--space-2);
-		background: none;
-		border: none;
-		color: var(--text-secondary);
-		cursor: pointer;
-		opacity: 0;
-		transition: all var(--transition-smooth);
-		min-width: 32px;
-		min-height: 32px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		flex-shrink: 0;
-		border-radius: var(--radius-sm);
-	}
-
-	.note-item:hover .pin-btn {
-		opacity: 1;
-	}
-
-	.pin-btn:hover {
-		color: var(--text-accent);
-		background: var(--surface-active);
-	}
-
-	/* Touch devices / mobile: always show pin button with larger target */
-	@media (pointer: coarse), (max-width: 639px) {
-		.pin-btn {
-			opacity: 1;
-			min-width: 44px;
-			min-height: 44px;
-		}
 	}
 
 	.note-meta {
@@ -783,7 +667,7 @@
 	}
 
 	.note-date {
-		margin-left: auto;
+		color: var(--text-tertiary);
 	}
 
 	/* ============================================
@@ -858,20 +742,6 @@
 		flex-shrink: 0;
 	}
 
-	.delete-btn {
-		padding: calc(var(--space-1) * 1.5) calc(var(--space-2) + 2px);
-		background: var(--surface-1);
-		border: none;
-		border-radius: var(--radius-sm);
-		color: var(--destructive);
-		cursor: pointer;
-		transition: all var(--transition-smooth);
-	}
-
-	.delete-btn:hover {
-		background: color-mix(in oklch, var(--destructive) 12%, transparent);
-	}
-
 	.autosave-status {
 		font-size: var(--text-sm);
 		color: var(--text-secondary);
@@ -894,93 +764,6 @@
 
 	.title-input::placeholder {
 		color: var(--text-secondary);
-	}
-
-	/* ============================================
-	   TAGS SECTION
-	   ============================================ */
-	.tags-section {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: var(--space-3);
-		padding: var(--space-2) var(--space-3);
-		border-bottom: 1px solid var(--border-default);
-	}
-
-	.tags-list {
-		display: flex;
-		flex-wrap: wrap;
-		gap: calc(var(--space-1) * 1.5);
-		align-items: center;
-		justify-content: center;
-	}
-
-	.editor-tag {
-		display: flex;
-		align-items: center;
-		gap: var(--space-1);
-		padding: var(--space-1) var(--space-2);
-		background: color-mix(in oklch, var(--success) 15%, transparent);
-		color: var(--success);
-		border-radius: var(--radius-sm);
-		font-size: var(--text-sm);
-	}
-
-	.remove-tag {
-		background: none;
-		border: none;
-		color: inherit;
-		font-size: var(--text-md);
-		cursor: pointer;
-		padding: 0;
-		line-height: 1;
-		opacity: 0.7;
-		transition: opacity var(--transition-fast);
-	}
-
-	.remove-tag:hover {
-		opacity: 1;
-	}
-
-	.tag-input {
-		min-width: 80px;
-		padding: var(--space-1) var(--space-2);
-		background: none;
-		border: 1px dashed var(--border-default);
-		border-radius: var(--radius-sm);
-		color: var(--text-primary);
-		font-size: var(--text-sm);
-		outline: none;
-		transition: all var(--transition-smooth);
-	}
-
-	.tag-input:focus {
-		border-style: solid;
-		border-color: var(--border-emphasis);
-	}
-
-	.pin-toggle {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: calc(var(--space-1) * 1.5) calc(var(--space-2) + 2px);
-		color: var(--text-secondary);
-		cursor: pointer;
-		border-radius: var(--radius-sm);
-		transition: all var(--transition-smooth);
-	}
-
-	.pin-toggle:hover {
-		background: var(--surface-hover);
-	}
-
-	.pin-toggle:has(input:checked) {
-		color: var(--text-accent);
-	}
-
-	.pin-toggle input {
-		display: none;
 	}
 
 	/* ============================================

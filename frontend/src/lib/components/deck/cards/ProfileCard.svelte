@@ -865,6 +865,7 @@
 							{#if editingProfile}
 								<div class="pf-field">
 									<label class="pf-label">Group</label>
+									<div class="pf-group-wrapper">
 									<div class="pf-group-row">
 										<select
 											class="pf-select"
@@ -883,17 +884,6 @@
 											{/each}
 										</select>
 										{#if creatingGroup}
-											<input
-												type="text"
-												class="pf-input pf-group-input"
-												placeholder="Group name..."
-												bind:value={newGroupName}
-												onkeydown={(e) => {
-													if (e.key === 'Enter') { e.preventDefault(); editingProfile && confirmGroupCreate(editingProfile.id); }
-													if (e.key === 'Escape') { e.preventDefault(); cancelGroupCreate(); }
-												}}
-												autofocus
-											/>
 											<button type="button" class="pf-btn-new-group" onclick={() => editingProfile && confirmGroupCreate(editingProfile.id)} title="Create">
 												<Check size={14} />
 											</button>
@@ -908,6 +898,20 @@
 											{/if}
 										{/if}
 									</div>
+									{#if creatingGroup}
+										<input
+											type="text"
+											class="pf-input pf-group-input"
+											placeholder="Group name..."
+											bind:value={newGroupName}
+											onkeydown={(e) => {
+												if (e.key === 'Enter') { e.preventDefault(); editingProfile && confirmGroupCreate(editingProfile.id); }
+												if (e.key === 'Escape') { e.preventDefault(); cancelGroupCreate(); }
+											}}
+											autofocus
+										/>
+									{/if}
+								</div>
 								</div>
 							{/if}
 						</div>
@@ -1358,28 +1362,10 @@
 			</div>
 
 			{#snippet footer()}
-				<div class="pf-footer">
-					<div class="pf-footer-left">
-						{#if editingProfile && !editingProfile.is_builtin}
-							<button type="button" class="pf-btn-delete" onclick={() => { deletingId = editingProfile?.id ?? null; }}>
-								<Trash2 size={14} />
-								<span>Delete</span>
-							</button>
-						{/if}
-						{#if editingProfile}
-							<button type="button" class="pf-btn-export" onclick={() => editingProfile && handleExportProfile(editingProfile.id)}>
-								<Download size={14} />
-								<span>Export</span>
-							</button>
-						{/if}
-					</div>
-					<div class="pf-footer-right">
-						<button type="button" class="pf-btn-save" onclick={saveProfile} disabled={!profileForm.name}>
-							<Check size={14} />
-							<span class="btn-label">Save</span>
-						</button>
-					</div>
-				</div>
+				<button type="button" class="pf-btn-save" onclick={saveProfile} disabled={!profileForm.name}>
+					<Check size={14} />
+					<span>Save Profile</span>
+				</button>
 			{/snippet}
 		</FeaturePageLayout>
 	{:else}
@@ -1486,6 +1472,25 @@
 											<span class="fp-meta-chip" style="color: var(--primary);">{groups.profiles.assignments[profile.id]}</span>
 										{/if}
 									</div>
+								</div>
+								<!-- Item actions -->
+								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
+									<button
+										class="card-action-btn"
+										title="Export"
+										onclick={() => handleExportProfile(profile.id)}
+									>
+										<Download size={16} />
+									</button>
+									{#if !profile.is_builtin}
+										<button
+											class="card-action-btn card-action-btn--destructive"
+											title="Delete"
+											onclick={() => { deletingId = profile.id; }}
+										>
+											<Trash2 size={16} />
+										</button>
+									{/if}
 								</div>
 							</div>
 						{/if}
@@ -2117,6 +2122,12 @@
 		border-color: var(--border-default);
 	}
 
+	.pf-group-wrapper {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
 	.pf-group-row {
 		display: flex;
 		gap: 6px;
@@ -2159,8 +2170,7 @@
 	}
 
 	.pf-group-input {
-		width: 120px;
-		flex-shrink: 1;
+		width: 100%;
 	}
 
 	.pf-btn-cancel {

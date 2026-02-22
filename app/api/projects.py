@@ -130,6 +130,8 @@ async def list_projects(request: Request, token: str = Depends(require_auth)):
         project = database.get_project(api_user["project_id"])
         if project:
             project["session_count"] = session_counts.get(project["id"], 0)
+            if not is_absolute_project_path(project["path"]):
+                project["path"] = get_project_working_dir(project)
             return [project]
         return []
 
@@ -137,6 +139,9 @@ async def list_projects(request: Request, token: str = Depends(require_auth)):
     projects = database.get_all_projects()
     for project in projects:
         project["session_count"] = session_counts.get(project["id"], 0)
+        # Resolve relative paths to absolute for display
+        if not is_absolute_project_path(project["path"]):
+            project["path"] = get_project_working_dir(project)
     return projects
 
 
@@ -152,6 +157,9 @@ async def get_project(request: Request, project_id: str, token: str = Depends(re
             detail=f"Project not found: {project_id}"
         )
     project["session_count"] = database.get_project_session_count(project_id)
+    # Resolve relative paths to absolute for display
+    if not is_absolute_project_path(project["path"]):
+        project["path"] = get_project_working_dir(project)
     return project
 
 
