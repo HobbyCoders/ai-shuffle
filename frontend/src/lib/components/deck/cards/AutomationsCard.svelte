@@ -2050,10 +2050,4 @@
 	.btn-label {
 		display: inline;
 	}
-
-	@media (max-width: 768px) {
-		.btn-label {
-			display: none;
-		}
-	}
 </style>

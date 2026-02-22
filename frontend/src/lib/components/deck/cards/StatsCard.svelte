@@ -458,7 +458,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: 1rem;
+		gap: 0.5rem 1rem;
+		flex-wrap: wrap;
 	}
 
 	.date-pills {
@@ -555,11 +556,7 @@
 		gap: 0.75rem;
 	}
 
-	.bento-grid.mobile {
-		grid-template-columns: 1fr 1fr;
-	}
-
-	/* Card placements */
+	/* Card placements - desktop (3 col) */
 	.bento-card.hero { grid-column: span 2; }
 	.bento-card.cost { grid-column: span 1; }
 	.bento-card.sessions { grid-column: span 1; }
@@ -567,9 +564,30 @@
 	.bento-card.breakdown { grid-column: span 2; grid-row: span 1; }
 	.bento-card.top-sessions { grid-column: span 3; }
 
-	.bento-grid.mobile .bento-card.hero { grid-column: span 2; }
-	.bento-grid.mobile .bento-card.breakdown { grid-column: span 2; }
-	.bento-grid.mobile .bento-card.top-sessions { grid-column: span 2; }
+	/* Tablet (2 col) */
+	@media (max-width: 767px) {
+		.bento-grid {
+			grid-template-columns: 1fr 1fr;
+		}
+		.bento-card.hero { grid-column: span 2; }
+		.bento-card.breakdown { grid-column: span 2; }
+		.bento-card.top-sessions { grid-column: span 2; }
+	}
+
+	/* Mobile (1 col) */
+	@media (max-width: 479px) {
+		.bento-grid {
+			grid-template-columns: 1fr;
+		}
+		.bento-card.hero,
+		.bento-card.cost,
+		.bento-card.sessions,
+		.bento-card.avg,
+		.bento-card.breakdown,
+		.bento-card.top-sessions {
+			grid-column: span 1;
+		}
+	}
 
 	/* Base card styling */
 	.bento-card {
@@ -710,9 +728,9 @@
 
 	.breakdown-item {
 		display: grid;
-		grid-template-columns: 90px 1fr 60px;
+		grid-template-columns: minmax(60px, 90px) 1fr auto;
 		align-items: center;
-		gap: 0.75rem;
+		gap: 0.5rem;
 		opacity: 0;
 		animation: slideIn 300ms ease forwards;
 		animation-delay: calc(var(--i, 0) * 50ms + 200ms);
@@ -833,20 +851,35 @@
 	/* ============================================
 	   MOBILE ADJUSTMENTS
 	   ============================================ */
-	.stats-container.mobile .stats-header {
-		padding: 0.75rem 1rem;
-	}
+	@media (max-width: 639px) {
+		.stats-header {
+			padding: 0.75rem 1rem;
+		}
 
-	.stats-container.mobile .stats-content {
-		padding: 0.75rem 1rem;
-	}
+		.stats-content {
+			padding: 0.75rem 1rem;
+		}
 
-	.stats-container.mobile .stat-value {
-		font-size: 1.5rem;
-	}
+		.stat-value {
+			font-size: 1.5rem;
+		}
 
-	.stats-container.mobile .bento-card-inner {
-		padding: 0.875rem;
+		.stat-value.small {
+			font-size: 1.25rem;
+		}
+
+		.bento-card-inner {
+			padding: 0.875rem;
+		}
+
+		.stat-breakdown {
+			flex-wrap: wrap;
+			gap: 0.25rem;
+		}
+
+		.stat-breakdown .separator {
+			display: none;
+		}
 	}
 
 	/* Touch targets */
@@ -864,16 +897,5 @@
 		.session-item {
 			min-height: 48px;
 		}
-	}
-
-	/* Embedded mode styles */
-	.fp-date-pills { display: flex; gap: 2px; padding: 3px; background: var(--surface-1); border-radius: var(--radius-md); }
-	.fp-date-pill { padding: 4px 12px; border-radius: calc(var(--radius-md) - 2px); font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.02em; border: none; background: transparent; color: var(--text-secondary); cursor: pointer; transition: all 100ms; }
-	.fp-date-pill:hover { color: var(--text-primary); }
-	.fp-date-pill.active { color: var(--selection-text); background: var(--selection-bg-emphasis); box-shadow: var(--selection-shadow); }
-
-	@media (max-width: 639px) {
-		.fp-date-pills { padding: 4px; }
-		.fp-date-pill { padding: 8px 14px; font-size: var(--text-sm); min-height: 36px; }
 	}
 </style>

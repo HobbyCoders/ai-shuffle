@@ -101,11 +101,10 @@
 
 	// Model options
 	const MODEL_OPTIONS = [
-		{ value: '', label: 'Inherit', description: 'Use profile default' },
-		{ value: 'haiku', label: 'Haiku', description: 'Fast & cheap' },
-		{ value: 'sonnet', label: 'Sonnet', description: 'Balanced' },
-		{ value: 'sonnet-1m', label: 'Sonnet 1M', description: 'Extended context' },
-		{ value: 'opus', label: 'Opus', description: 'Most capable' }
+		{ value: '', label: 'Inherit' },
+		{ value: 'haiku', label: 'Haiku' },
+		{ value: 'sonnet', label: 'Sonnet' },
+		{ value: 'opus', label: 'Opus' }
 	];
 
 	// Filtered subagents
@@ -489,31 +488,37 @@
 		itemLabel="subagents"
 	>
 		{#snippet footer()}
-			<button
-				onclick={() => showGenerateDialog = true}
-				class="fp-btn fp-btn--secondary"
-				title="Generate with AI"
-			>
-				<Sparkles size={14} /> <span class="btn-label">AI Generate</span>
-			</button>
-			<button
-				onclick={triggerImport}
-				disabled={importing}
-				class="fp-btn fp-btn--secondary"
-				title="Import from file"
-			>
-				{#if importing}
-					<div class="card-spinner card-spinner--small"></div>
-				{:else}
-					<Upload size={14} /> <span class="btn-label">Import</span>
-				{/if}
-			</button>
-			<button
-				onclick={handleCreate}
-				class="fp-btn fp-btn--primary"
-			>
-				<Plus size={14} /> <span class="btn-label">New Subagent</span>
-			</button>
+			<div class="pf-footer">
+				<div class="pf-footer-left">
+					<button
+						onclick={() => showGenerateDialog = true}
+						class="fp-btn fp-btn--secondary"
+						title="Generate with AI"
+					>
+						<Sparkles size={14} /> <span class="btn-label">AI Generate</span>
+					</button>
+					<button
+						onclick={triggerImport}
+						disabled={importing}
+						class="fp-btn fp-btn--secondary"
+						title="Import from file"
+					>
+						{#if importing}
+							<div class="card-spinner card-spinner--small"></div>
+						{:else}
+							<Upload size={14} /> <span class="btn-label">Import</span>
+						{/if}
+					</button>
+				</div>
+				<div class="pf-footer-right">
+					<button
+						onclick={handleCreate}
+						class="fp-btn fp-btn--primary"
+					>
+						<Plus size={14} /> <span class="btn-label">New Subagent</span>
+					</button>
+				</div>
+			</div>
 		{/snippet}
 
 		{#if subagents.length > 3}
@@ -669,15 +674,6 @@
 										<RotateCcw />
 									</button>
 								{/if}
-								{#if !agent.is_builtin}
-									<button
-										onclick={(e) => handleDeleteClick(agent.id, e)}
-										class="fp-action-btn fp-action-btn--destructive"
-										title="Delete"
-									>
-										<Trash2 />
-									</button>
-								{/if}
 							</div>
 						</div>
 					{/if}
@@ -720,7 +716,6 @@
 					{/if}
 				</div>
 				<div class="pf-footer-right">
-					<button type="button" class="pf-btn-cancel" onclick={handleBack}>Cancel</button>
 					<button type="button" class="pf-btn-save" onclick={handleSave} disabled={!isValid() || saving}>
 						{#if saving}
 							<div class="card-spinner card-spinner--small"></div>
@@ -813,7 +808,7 @@
 						onchange={(e) => { formModel = (e.target as HTMLSelectElement).value; }}
 					>
 						{#each MODEL_OPTIONS as opt}
-							<option value={opt.value}>{opt.label} — {opt.description}</option>
+							<option value={opt.value}>{opt.label}</option>
 						{/each}
 					</select>
 				</div>
@@ -857,6 +852,11 @@
 								<button type="button" class="pf-btn-new-group" onclick={startGroupCreate} title="New group">
 									<Plus size={14} />
 								</button>
+								{#if ($groups.subagents.assignments[editingSubagent.id] ?? "")}
+									<button type="button" class="pf-btn-new-group pf-btn-new-group--delete" onclick={() => { const g = $groups.subagents.assignments[editingSubagent?.id ?? ""]; if (g) { removeFromGroup(editingSubagent!.id); groups.deleteGroup("subagents", g); } }} title="Delete group">
+										<Trash2 size={14} />
+									</button>
+								{/if}
 							{/if}
 						</div>
 					</div>
@@ -1249,15 +1249,8 @@
 		width: 100% !important;
 	}
 
-	/* Footer button labels — visible on desktop, hidden on mobile */
 	.btn-label {
 		display: inline;
-	}
-
-	@media (max-width: 768px) {
-		.btn-label {
-			display: none;
-		}
 	}
 
 	/* ─── Profile-style content & sections ─── */
@@ -1559,6 +1552,16 @@
 		background: var(--surface-hover);
 		color: var(--text-primary);
 		border-color: var(--border-default);
+	}
+
+	.pf-btn-new-group--delete {
+		color: var(--destructive);
+	}
+
+	.pf-btn-new-group--delete:hover {
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
+		color: var(--destructive);
+		border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
 	}
 
 	.pf-group-input {
