@@ -12,8 +12,6 @@
 	import { Users, Search, Upload, Sparkles, Plus, Download, Trash2, Wrench, Bot, MessageSquare, Settings, FileText, SlidersHorizontal, ChevronRight, Check, Info } from 'lucide-svelte';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data';
 	import { groups as groupsStore } from '$lib/stores/groups';
-	import { plugins, fileBasedAgents } from '$lib/stores/plugins';
-	import type { PluginInfo, FileBasedAgent } from '$lib/api/plugins';
 	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
 	import './card-design-system.css';
 
@@ -69,12 +67,10 @@
 	}
 
 	interface Props {
-		onOpenPlugins?: () => void;
 		mobile?: boolean;
 	}
 
 	let {
-		onOpenPlugins,
 		mobile = false
 	}: Props = $props();
 
@@ -95,8 +91,6 @@
 	async function loadData() {
 		loading = true;
 		try {
-			// Load all data in parallel, with individual error handling
-			// Note: plugins.loadFileBasedAgents() updates the store directly, so we don't need its return value
 			const [subagentsResult, toolsResult] = await Promise.all([
 				api.get<Subagent[]>('/subagents').catch((err) => {
 					console.warn('Failed to load subagents:', err);
@@ -105,10 +99,6 @@
 				api.get<ToolsResponse>('/tools?refresh=true').catch((err) => {
 					console.warn('Failed to load tools:', err);
 					return { all_tools: [], categories: [] };
-				}),
-				plugins.loadFileBasedAgents().catch((err) => {
-					// Silently handle - store already sets error state
-					console.warn('Failed to load file-based agents:', err);
 				})
 			]);
 			allSubagents = subagentsResult;
@@ -157,9 +147,7 @@
 		max_buffer_size: null as number | null,
 		env_vars: [] as { key: string; value: string }[],
 		// SDK 0.1.15+ file checkpointing for rewind
-		enable_file_checkpointing: false,
-		// Plan mode exit behavior
-		plan_exit_behavior: 'normal' as 'normal' | 'clear_context'
+		enable_file_checkpointing: false
 	});
 
 	// Common environment variable presets with valid ranges
@@ -175,15 +163,13 @@
 	];
 
 	// Tool selection mode
-	let toolSelectionMode = $state<'all' | 'allow' | 'disallow'>('all');
+	let toolSelectionMode = $state<'all' | 'none' | 'allow' | 'disallow'>('all');
 	let aiToolSelectionMode = $state<'all' | 'custom'>('custom');
 
 	// Collapsible tool source sections
 	let expandedSections = $state<Record<string, boolean>>({
 		sdk: true,
-		ai: true,
-		mcp: false,
-		plugins: false
+		ai: true
 	});
 
 	function toggleSection(id: string) {
@@ -195,24 +181,6 @@
 		availableTools.categories.filter((c: ToolCategory) => c.id !== 'mcp' && c.id !== 'browser')
 	);
 
-	// MCP tools grouped by server name
-	const mcpToolsByServer = $derived.by(() => {
-		const groups: Record<string, { name: string; description: string }[]> = {};
-		for (const tool of availableTools.all_tools) {
-			if (tool.name.startsWith('mcp__')) {
-				const parts = tool.name.split('__');
-				const server = parts[1];
-				const toolName = parts.slice(2).join('__');
-				if (!groups[server]) groups[server] = [];
-				groups[server].push({ name: toolName, description: tool.description });
-			}
-		}
-		return groups;
-	});
-
-	const mcpServerNames = $derived(Object.keys(mcpToolsByServer));
-	const mcpToolCount = $derived(Object.values(mcpToolsByServer).reduce((sum, tools) => sum + tools.length, 0));
-
 	// AI Tools
 	let aiToolCategories = $state<AIToolCategory[]>([]);
 	let aiToolsLoading = $state(false);
@@ -221,9 +189,6 @@
 	let profileImportInput: HTMLInputElement | undefined = $state();
 	let profileImporting = $state(false);
 	let showGenerateDialog = $state(false);
-
-	// Plugin management
-	let pluginAgents = $derived($fileBasedAgents);
 
 	// Tab definitions
 	const tabs = [
@@ -247,17 +212,30 @@
 	);
 
 	// Tool counts
-	const selectedToolCount = $derived(
-		toolSelectionMode === 'allow'
-			? profileForm.allowed_tools.length
-			: toolSelectionMode === 'disallow'
-				? profileForm.disallowed_tools.length
-				: availableTools.all_tools.length
-	);
+	const sdkToolTotal = $derived(sdkToolCategories.reduce((sum, c) => sum + c.tools.length, 0));
 
-	const aiToolCount = $derived(
-		aiToolSelectionMode === 'all' ? getAllAIToolIds().length : profileForm.enabled_ai_tools.length
-	);
+	const enabledSdkToolCount = $derived.by(() => {
+		if (toolSelectionMode === 'none') return 0;
+		if (toolSelectionMode === 'allow') {
+			// Count only allowed SDK tools (exclude AI tool IDs)
+			const sdkToolNames = new Set(sdkToolCategories.flatMap(c => c.tools.map(t => t.name)));
+			return profileForm.allowed_tools.filter(t => sdkToolNames.has(t)).length;
+		}
+		if (toolSelectionMode === 'disallow') {
+			return sdkToolTotal - profileForm.disallowed_tools.length;
+		}
+		return sdkToolTotal;
+	});
+
+	const aiToolCount = $derived.by(() => {
+		if (toolSelectionMode === 'none') return 0;
+		if (toolSelectionMode === 'allow' || toolSelectionMode === 'disallow') {
+			return profileForm.enabled_ai_tools.length;
+		}
+		return aiToolSelectionMode === 'all' ? getAllAIToolIds().length : profileForm.enabled_ai_tools.length;
+	});
+
+	const effectiveToolCount = $derived(enabledSdkToolCount + aiToolCount);
 
 	/**
 	 * Compute the effective tool count for a profile based on its selection mode.
@@ -329,8 +307,7 @@
 			user: '',
 			max_buffer_size: null,
 			env_vars: [],
-			enable_file_checkpointing: false,
-			plan_exit_behavior: 'normal' as 'normal' | 'clear_context'
+			enable_file_checkpointing: false
 		};
 		toolSelectionMode = 'all';
 		aiToolSelectionMode = 'custom';
@@ -353,18 +330,22 @@
 			content?: string;
 			inject_env_details?: boolean;
 		};
-		const aiTools = config.ai_tools || {};
+		const aiTools = config.ai_tools;
+		const hasExplicitAIToolConfig = aiTools !== undefined && aiTools !== null && Object.keys(aiTools).length > 0;
 
 		const allowedTools = config.allowed_tools || [];
 		const disallowedTools = config.disallowed_tools || [];
 
 		// Build enabled AI tools array dynamically from config keys
-		const enabledAITools: string[] = Object.entries(aiTools)
-			.filter(([_, enabled]) => enabled)
-			.map(([key]) => key);
+		// If no ai_tools config exists, treat as "all enabled"
+		const enabledAITools: string[] = hasExplicitAIToolConfig
+			? Object.entries(aiTools).filter(([_, enabled]) => enabled).map(([key]) => key)
+			: [];
 
 		// Determine tool selection mode
-		if (allowedTools.length > 0) {
+		if (Array.isArray(config.allowed_tools) && config.allowed_tools.length === 0) {
+			toolSelectionMode = 'none';
+		} else if (allowedTools.length > 0) {
 			toolSelectionMode = 'allow';
 		} else if (disallowedTools.length > 0) {
 			toolSelectionMode = 'disallow';
@@ -397,8 +378,7 @@
 			user: (config as any).user || '',
 			max_buffer_size: (config as any).max_buffer_size || null,
 			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string })),
-			enable_file_checkpointing: (config as any).enable_file_checkpointing || false,
-			plan_exit_behavior: (config as any).plan_exit_behavior || 'normal'
+			enable_file_checkpointing: (config as any).enable_file_checkpointing || false
 		};
 
 		viewMode = 'form';
@@ -406,14 +386,19 @@
 
 		// Check if all AI tools are enabled after loading
 		loadAvailableAITools().then(() => {
-			const allIds = getAllAIToolIds();
-			if (
-				enabledAITools.length === allIds.length &&
-				allIds.every((id) => enabledAITools.includes(id))
-			) {
+			if (!hasExplicitAIToolConfig) {
+				// No explicit config = all AI tools enabled by default
 				aiToolSelectionMode = 'all';
 			} else {
-				aiToolSelectionMode = 'custom';
+				const allIds = getAllAIToolIds();
+				if (
+					enabledAITools.length === allIds.length &&
+					allIds.every((id) => enabledAITools.includes(id))
+				) {
+					aiToolSelectionMode = 'all';
+				} else {
+					aiToolSelectionMode = 'custom';
+				}
 			}
 		});
 	}
@@ -566,9 +551,7 @@
 			permission_mode: profileForm.permission_mode,
 			include_partial_messages: profileForm.include_partial_messages,
 			// SDK 0.1.15+ file checkpointing for rewind
-			enable_file_checkpointing: profileForm.enable_file_checkpointing,
-			// Plan mode exit behavior
-			plan_exit_behavior: profileForm.plan_exit_behavior
+			enable_file_checkpointing: profileForm.enable_file_checkpointing
 		};
 
 		// Thinking and effort are independent controls
@@ -578,10 +561,11 @@
 		}
 
 		if (profileForm.max_turns) config.max_turns = profileForm.max_turns;
-		if (toolSelectionMode === 'allow' && profileForm.allowed_tools.length > 0) {
+		if (toolSelectionMode === 'none') {
+			config.allowed_tools = [];
+		} else if (toolSelectionMode === 'allow' && profileForm.allowed_tools.length > 0) {
 			config.allowed_tools = profileForm.allowed_tools;
-		}
-		if (toolSelectionMode === 'disallow' && profileForm.disallowed_tools.length > 0) {
+		} else if (toolSelectionMode === 'disallow' && profileForm.disallowed_tools.length > 0) {
 			config.disallowed_tools = profileForm.disallowed_tools;
 		}
 		if (profileForm.enabled_agents.length > 0) {
@@ -715,7 +699,9 @@
 		const disallowedTools = agent.disallowed_tools || [];
 
 		// Determine tool selection mode
-		if (allowedTools.length > 0) {
+		if (Array.isArray(agent.allowed_tools) && agent.allowed_tools.length === 0) {
+			toolSelectionMode = 'none';
+		} else if (allowedTools.length > 0) {
 			toolSelectionMode = 'allow';
 		} else if (disallowedTools.length > 0) {
 			toolSelectionMode = 'disallow';
@@ -778,8 +764,7 @@
 			user: '',
 			max_buffer_size: agent.max_buffer_size || null,
 			env_vars: agent.env ? Object.entries(agent.env).map(([key, value]) => ({ key, value: value as string })) : [],
-			enable_file_checkpointing: false,
-			plan_exit_behavior: (agent as any).plan_exit_behavior || 'normal'
+			enable_file_checkpointing: false
 		};
 
 		viewMode = 'form';
@@ -920,14 +905,7 @@
 								<label class="pf-label">Max Turns</label>
 								<input type="number" bind:value={profileForm.max_turns} class="pf-input" placeholder="Unlimited" />
 							</div>
-							<div class="pf-field">
-								<label class="pf-label">Plan Exit Behavior</label>
-								<select bind:value={profileForm.plan_exit_behavior} class="pf-select">
-									<option value="normal">Normal</option>
-									<option value="clear_context">Clear Context</option>
-								</select>
 							</div>
-						</div>
 					</div>
 
 					<div class="pf-divider"></div>
@@ -963,13 +941,15 @@
 							<h3>Tool Access</h3>
 						</div>
 						<p class="pf-desc">Control which tools this profile can access during conversations.</p>
-						<select class="pf-select" bind:value={toolSelectionMode} onchange={() => { if (toolSelectionMode === 'all') { profileForm.allowed_tools = []; profileForm.disallowed_tools = []; } else if (toolSelectionMode === 'allow') { profileForm.disallowed_tools = []; } else { profileForm.allowed_tools = []; } }}>
+						<select class="pf-select" bind:value={toolSelectionMode} onchange={() => { if (toolSelectionMode === 'all') { profileForm.allowed_tools = []; profileForm.disallowed_tools = []; } else if (toolSelectionMode === 'none') { profileForm.allowed_tools = []; profileForm.disallowed_tools = []; } else if (toolSelectionMode === 'allow') { profileForm.disallowed_tools = []; } else { profileForm.allowed_tools = []; } }}>
 							<option value="all">All Tools Allowed</option>
+							<option value="none">Disable All Tools</option>
 							<option value="allow">Allow Only Selected</option>
 							<option value="disallow">Disallow Selected</option>
 						</select>
 					</div>
 
+					{#if toolSelectionMode !== 'none'}
 					<div class="pf-section">
 						<div class="pf-section-header">
 							<Settings size={16} />
@@ -986,7 +966,7 @@
 									<span class="pf-category-name">Built-in Tools</span>
 									<span class="pf-category-desc">{sdkToolCategories.map(c => c.name).join(', ')}</span>
 								</div>
-								<span class="pf-category-count">{sdkToolCategories.reduce((sum, c) => sum + c.tools.length, 0)}</span>
+								<span class="pf-category-count">{enabledSdkToolCount}</span>
 								<ChevronRight size={16} class="pf-category-chevron" />
 							</button>
 
@@ -1091,96 +1071,15 @@
 								</div>
 							{/if}
 
-							<!-- MCP Server Tools -->
-							<button type="button" class="pf-category-card" onclick={() => toggleSection('mcp')}>
-								<div class="pf-category-icon">
-									<Bot size={18} />
-								</div>
-								<div class="pf-category-info">
-									<span class="pf-category-name">MCP Server Tools</span>
-									<span class="pf-category-desc">Browser, Pencil, external integrations</span>
-								</div>
-								<span class="pf-category-count">{mcpToolCount}</span>
-								<ChevronRight size={16} class="pf-category-chevron" />
-							</button>
-
-							{#if expandedSections.mcp}
-								<div class="pf-category-expanded">
-									{#if mcpServerNames.length === 0}
-										<p class="pf-desc" style="padding: 12px 16px;">No MCP tools discovered. Configure MCP servers in Settings.</p>
-									{:else}
-										<p class="pf-desc" style="padding: 12px 16px;">MCP tools are globally configured. Subject to the tool access mode above.</p>
-										<div class="tools-list">
-											{#each mcpServerNames as server}
-												{@const tools = mcpToolsByServer[server]}
-												<div class="tool-category">
-													<div class="category-header readonly">
-														<span class="category-name">{server}</span>
-														<span class="category-count">{tools.length}</span>
-													</div>
-													<div class="category-tools">
-														{#each tools as tool}
-															<div class="tool-item readonly">
-																<span class="tool-name" title={tool.description}>{tool.name}</span>
-															</div>
-														{/each}
-													</div>
-												</div>
-											{/each}
-										</div>
-									{/if}
-								</div>
-							{/if}
-
-							<!-- Plugin Tools -->
-							<button type="button" class="pf-category-card" onclick={() => toggleSection('plugins')}>
-								<div class="pf-category-icon">
-									<Sparkles size={18} />
-								</div>
-								<div class="pf-category-info">
-									<span class="pf-category-name">Plugin Tools</span>
-									<span class="pf-category-desc">Community extensions and custom plugins</span>
-								</div>
-								<span class="pf-category-count">{pluginAgents.reduce((sum, a) => sum + (a.tools?.length || 0), 0)}</span>
-								<ChevronRight size={16} class="pf-category-chevron" />
-							</button>
-
-							{#if expandedSections.plugins}
-								<div class="pf-category-expanded">
-									<div class="source-section-actions">
-										<button type="button" class="text-btn primary" onclick={() => onOpenPlugins?.()}>Manage Plugins</button>
-									</div>
-									{#if pluginAgents.length === 0}
-										<p class="pf-desc" style="padding: 12px 16px;">No plugin tools available. Install plugins to get tools.</p>
-									{:else}
-										<div class="plugin-agents-list" style="padding: 0 16px 12px;">
-											{#each pluginAgents as agent (agent.id)}
-												<div class="plugin-agent-item">
-													<div class="plugin-agent-info">
-														<div class="plugin-agent-header">
-															<span class="plugin-agent-name">{agent.name}</span>
-															<span class="card-badge card-badge--muted">{agent.plugin_name}</span>
-														</div>
-													</div>
-													{#if agent.tools && agent.tools.length > 0}
-														<div class="plugin-agent-tools">
-															{#each agent.tools as tool}<span class="tool-badge">{tool}</span>{/each}
-														</div>
-													{/if}
-												</div>
-											{/each}
-										</div>
-									{/if}
-								</div>
-							{/if}
 						</div>
 					</div>
+					{/if}
 
 					<!-- Tools Summary Bar -->
 					<div class="pf-summary-bar">
 						<div class="pf-summary-left">
 							<Wrench size={14} />
-							<span>{sdkToolCategories.reduce((sum, c) => sum + c.tools.length, 0) + aiToolCount + mcpToolCount + pluginAgents.reduce((sum, a) => sum + (a.tools?.length || 0), 0)} tools enabled across {4} categories</span>
+							<span>{effectiveToolCount} tools enabled</span>
 						</div>
 						<span class="pf-summary-link">Manage individually →</span>
 					</div>

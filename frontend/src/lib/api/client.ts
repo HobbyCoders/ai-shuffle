@@ -180,7 +180,6 @@ export interface ProfileConfig {
 	user?: string;  // User identifier override
 	max_buffer_size?: number;  // Maximum buffer size for output
 	env?: Record<string, string>;  // Environment variables to set
-	plan_exit_behavior?: 'normal' | 'clear_context';  // How to handle plan mode exit
 	system_prompt?: {
 		type: string;
 		preset?: string;

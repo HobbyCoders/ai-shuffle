@@ -449,12 +449,59 @@ class PluginService:
     # Available Plugins (from marketplaces)
     # =========================================================================
 
+    def _get_marketplace_manifest(self, mp_path: Path) -> Optional[Dict[str, Any]]:
+        """Read and parse .claude-plugin/marketplace.json from a marketplace directory."""
+        manifest_path = mp_path / ".claude-plugin" / "marketplace.json"
+        if not manifest_path.exists():
+            return None
+        try:
+            return json.loads(manifest_path.read_text(encoding='utf-8'))
+        except (IOError, json.JSONDecodeError, UnicodeDecodeError):
+            logger.warning(f"Failed to parse marketplace.json at {manifest_path}")
+            return None
+
+    def _resolve_plugin_source(self, source, mp_path: Path, plugin_root: Optional[str] = None) -> Optional[Path]:
+        """
+        Resolve a plugin source to a local directory path.
+        Only works for relative-path sources within the marketplace repo.
+        Returns None for external sources (github, url, npm, pip).
+        """
+        if isinstance(source, str) and (source.startswith("./") or source.startswith(".\\")):
+            # Relative path - resolve against marketplace root or pluginRoot
+            if plugin_root:
+                resolved = mp_path / plugin_root / source.lstrip("./").lstrip(".\\")
+            else:
+                resolved = mp_path / source.lstrip("./").lstrip(".\\")
+            if resolved.exists() and resolved.is_dir():
+                return resolved
+        return None
+
+    def _detect_components_from_dir(self, plugin_dir: Path) -> Dict[str, bool]:
+        """Detect plugin components by scanning a local plugin directory."""
+        return {
+            "has_commands": (plugin_dir / "commands").exists(),
+            "has_agents": (plugin_dir / "agents").exists(),
+            "has_skills": (plugin_dir / "skills").exists(),
+            "has_hooks": (plugin_dir / "hooks").exists() or (plugin_dir / "hooks.json").exists(),
+            "has_mcp": (plugin_dir / ".mcp.json").exists(),
+        }
+
+    def _detect_components_from_entry(self, entry: Dict[str, Any]) -> Dict[str, bool]:
+        """Infer plugin components from marketplace.json entry keys."""
+        return {
+            "has_commands": "commands" in entry,
+            "has_agents": "agents" in entry,
+            "has_skills": "skills" in entry,
+            "has_hooks": "hooks" in entry,
+            "has_mcp": "mcpServers" in entry,
+        }
+
     def get_available_plugins(self, marketplace: Optional[str] = None) -> List[AvailablePlugin]:
         """
         Get all available plugins from marketplaces.
 
-        Scans both 'plugins/' (first-party) and 'external_plugins/' (third-party/MCP)
-        directories within each marketplace.
+        Reads .claude-plugin/marketplace.json from each marketplace to discover
+        plugins. Supports relative-path, github, url, npm, and pip source types.
 
         Args:
             marketplace: Optional filter by marketplace ID
@@ -476,74 +523,78 @@ class PluginService:
                 continue
 
             mp_path = Path(mp.install_location)
+            manifest = self._get_marketplace_manifest(mp_path)
 
-            # Scan both plugins/ and external_plugins/ directories
-            plugin_dirs_to_scan = [
-                mp_path / "plugins",
-                mp_path / "external_plugins",
-            ]
+            if not manifest:
+                logger.warning(f"No marketplace.json found for {mp.id} at {mp_path}")
+                continue
 
-            for plugins_dir in plugin_dirs_to_scan:
-                if not plugins_dir.exists():
+            plugin_root = manifest.get("metadata", {}).get("pluginRoot") if isinstance(manifest.get("metadata"), dict) else None
+
+            for entry in manifest.get("plugins", []):
+                plugin_name = entry.get("name")
+                if not plugin_name:
                     continue
 
-                for plugin_dir in plugins_dir.iterdir():
-                    if not plugin_dir.is_dir():
-                        continue
+                plugin_id = f"{plugin_name}@{mp.id}"
+                source = entry.get("source", "")
+                description = entry.get("description", "")[:200]
 
-                    plugin_name = plugin_dir.name
-                    plugin_id = f"{plugin_name}@{mp.id}"
+                # Try to resolve to a local directory for component detection
+                local_dir = self._resolve_plugin_source(source, mp_path, plugin_root)
 
-                    # Check if this is an external plugin (has .claude-plugin/plugin.json)
-                    is_external = (plugin_dir / ".claude-plugin" / "plugin.json").exists()
+                if local_dir:
+                    # Local source - scan directory for components
+                    components = self._detect_components_from_dir(local_dir)
+                    mp_path_str = str(local_dir)
 
-                    # Get description based on plugin type
-                    description = ""
-                    if is_external:
-                        # External plugins: read from .claude-plugin/plugin.json
-                        manifest_path = plugin_dir / ".claude-plugin" / "plugin.json"
-                        try:
-                            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-                            description = manifest.get("description", "")[:200]
-                        except (IOError, json.JSONDecodeError, UnicodeDecodeError):
-                            pass
-                    else:
-                        # Regular plugins: read from README.md
-                        readme_path = plugin_dir / "README.md"
-                        if readme_path.exists():
+                    # If description is empty, try reading from local plugin files
+                    if not description:
+                        # Try .claude-plugin/plugin.json
+                        pj = local_dir / ".claude-plugin" / "plugin.json"
+                        if pj.exists():
                             try:
-                                content = readme_path.read_text(encoding='utf-8')
-                                # Extract first paragraph as description
-                                lines = content.strip().split("\n")
-                                for line in lines:
-                                    line = line.strip()
-                                    if line and not line.startswith("#"):
-                                        description = line[:200]
-                                        break
-                            except (IOError, UnicodeDecodeError):
+                                pj_data = json.loads(pj.read_text(encoding='utf-8'))
+                                description = pj_data.get("description", "")[:200]
+                            except (IOError, json.JSONDecodeError, UnicodeDecodeError):
                                 pass
+                        # Try README.md
+                        if not description:
+                            readme = local_dir / "README.md"
+                            if readme.exists():
+                                try:
+                                    content = readme.read_text(encoding='utf-8')
+                                    for line in content.strip().split("\n"):
+                                        line = line.strip()
+                                        if line and not line.startswith("#"):
+                                            description = line[:200]
+                                            break
+                                except (IOError, UnicodeDecodeError):
+                                    pass
+                else:
+                    # External source - infer components from entry keys
+                    components = self._detect_components_from_entry(entry)
+                    # Store serialized source for install_plugin to use
+                    mp_path_str = json.dumps(source) if isinstance(source, dict) else str(source)
 
-                    # Check what components the plugin has
-                    has_commands = (plugin_dir / "commands").exists()
-                    has_agents = (plugin_dir / "agents").exists()
-                    has_skills = (plugin_dir / "skills").exists()
-                    has_hooks = (plugin_dir / "hooks").exists() or (plugin_dir / "hooks.json").exists()
-                    has_mcp = (plugin_dir / ".mcp.json").exists()
+                # Check for LSP servers (show as has_mcp since they're server-like)
+                if "lspServers" in entry and not components.get("has_mcp"):
+                    components["has_mcp"] = True
 
-                    available.append(AvailablePlugin(
-                        id=plugin_id,
-                        name=plugin_name,
-                        marketplace=mp.id,
-                        marketplace_path=str(plugin_dir),
-                        description=description,
-                        has_commands=has_commands,
-                        has_agents=has_agents,
-                        has_skills=has_skills,
-                        has_hooks=has_hooks,
-                        has_mcp=has_mcp,
-                        installed=plugin_id in installed_plugins,
-                        enabled=enabled_plugins.get(plugin_id, False)
-                    ))
+                available.append(AvailablePlugin(
+                    id=plugin_id,
+                    name=plugin_name,
+                    marketplace=mp.id,
+                    marketplace_path=mp_path_str,
+                    description=description,
+                    has_commands=components.get("has_commands", False),
+                    has_agents=components.get("has_agents", False),
+                    has_skills=components.get("has_skills", False),
+                    has_hooks=components.get("has_hooks", False),
+                    has_mcp=components.get("has_mcp", False),
+                    installed=plugin_id in installed_plugins,
+                    enabled=enabled_plugins.get(plugin_id, False)
+                ))
 
         return available
 
@@ -832,9 +883,59 @@ class PluginService:
     # Plugin Installation
     # =========================================================================
 
+    def _find_plugin_in_manifest(self, marketplace_id: str, plugin_name: str) -> Optional[Dict[str, Any]]:
+        """Find a plugin entry in a marketplace's marketplace.json."""
+        marketplaces = self._read_json_file(self.MARKETPLACES_FILE, {})
+        mp_data = marketplaces.get(marketplace_id)
+        if not mp_data:
+            return None
+
+        mp_path = Path(mp_data.get("installLocation", ""))
+        manifest = self._get_marketplace_manifest(mp_path)
+        if not manifest:
+            return None
+
+        for entry in manifest.get("plugins", []):
+            if entry.get("name") == plugin_name:
+                return entry
+        return None
+
+    def _clone_plugin_source(self, source: Dict[str, Any], dest: Path) -> None:
+        """Clone an external plugin source (github or url) to a destination directory."""
+        source_type = source.get("source", "")
+        ref = source.get("ref")
+
+        if source_type == "github":
+            repo = source.get("repo", "")
+            clone_url = f"https://github.com/{repo}.git"
+        elif source_type == "url":
+            clone_url = source.get("url", "")
+        else:
+            raise ValueError(f"Unsupported plugin source type: {source_type}")
+
+        if not clone_url:
+            raise ValueError("Plugin source URL is empty")
+
+        cmd = ["git", "clone", "--depth", "1"]
+        if ref:
+            cmd.extend(["--branch", ref])
+        cmd.extend([clone_url, str(dest)])
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to clone plugin: {result.stderr.strip()}")
+
     def install_plugin(self, plugin_id: str, scope: str = "user") -> PluginInfo:
         """
         Install a plugin from a marketplace.
+
+        Reads marketplace.json to find the plugin source and handles both
+        relative-path (local) and external (github/url) sources.
 
         Args:
             plugin_id: Plugin ID in format "name@marketplace"
@@ -855,40 +956,58 @@ class PluginService:
             raise ValueError(f"Marketplace not found: {marketplace_id}")
 
         mp_location = marketplaces[marketplace_id].get("installLocation")
+        mp_path = Path(mp_location)
 
-        # Check both plugins/ and external_plugins/ directories
-        plugin_source = Path(mp_location) / "plugins" / plugin_name
-        if not plugin_source.exists():
-            plugin_source = Path(mp_location) / "external_plugins" / plugin_name
-
-        if not plugin_source.exists():
+        # Look up plugin in marketplace.json
+        entry = self._find_plugin_in_manifest(marketplace_id, plugin_name)
+        if not entry:
             raise ValueError(f"Plugin not found in marketplace: {plugin_name}")
 
-        # Get version (git commit hash or version from plugin.json)
-        version = "1.0.0"
-        try:
-            result = subprocess.run(
-                ["git", "-C", mp_location, "rev-parse", "--short", "HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode == 0:
-                version = result.stdout.strip()
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            pass
+        source = entry.get("source", "")
+        version = entry.get("version", "1.0.0")
+        manifest = self._get_marketplace_manifest(mp_path)
+        plugin_root = manifest.get("metadata", {}).get("pluginRoot") if manifest and isinstance(manifest.get("metadata"), dict) else None
 
-        # Create cache directory for this plugin version
-        cache_path = self.CACHE_DIR / marketplace_id / plugin_name / version
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # Resolve plugin source
+        local_dir = self._resolve_plugin_source(source, mp_path, plugin_root)
 
-        # Copy plugin to cache
-        if cache_path.exists():
-            shutil.rmtree(cache_path)
-        shutil.copytree(plugin_source, cache_path)
+        if local_dir:
+            # Local source - get version from git if not in entry
+            if not entry.get("version"):
+                try:
+                    result = subprocess.run(
+                        ["git", "-C", mp_location, "rev-parse", "--short", "HEAD"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    if result.returncode == 0:
+                        version = result.stdout.strip()
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                    pass
+
+            # Create cache directory and copy plugin
+            cache_path = self.CACHE_DIR / marketplace_id / plugin_name / version
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+            if cache_path.exists():
+                shutil.rmtree(cache_path)
+            shutil.copytree(local_dir, cache_path)
+
+        elif isinstance(source, dict):
+            # External source - clone from remote
+            cache_path = self.CACHE_DIR / marketplace_id / plugin_name / version
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+            if cache_path.exists():
+                shutil.rmtree(cache_path)
+
+            self._clone_plugin_source(source, cache_path)
+
+        else:
+            raise ValueError(f"Plugin source not found or unsupported: {plugin_name}")
 
         # Ensure scripts have execute permissions
-        # This is needed because git may not preserve executable bits
         for script in cache_path.rglob("*.sh"):
             current_mode = script.stat().st_mode
             script.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -905,7 +1024,7 @@ class PluginService:
             "version": version,
             "installedAt": now,
             "lastUpdated": now,
-            "isLocal": True
+            "isLocal": isinstance(source, str)
         }]
         self._write_json_file(self.INSTALLED_FILE, installed)
 
@@ -1170,14 +1289,16 @@ class PluginService:
             raise ValueError(f"Marketplace not found: {marketplace_id}")
 
         mp_location = marketplaces[marketplace_id].get("installLocation")
+        mp_path = Path(mp_location)
 
-        # Check both plugins/ and external_plugins/ directories
-        plugin_source = Path(mp_location) / "plugins" / plugin_name
-        if not plugin_source.exists():
-            plugin_source = Path(mp_location) / "external_plugins" / plugin_name
-
-        if not plugin_source.exists():
+        # Look up plugin in marketplace.json
+        entry = self._find_plugin_in_manifest(marketplace_id, plugin_name)
+        if not entry:
             raise ValueError(f"Plugin not found in marketplace: {plugin_name}")
+
+        source = entry.get("source", "")
+        manifest = self._get_marketplace_manifest(mp_path)
+        plugin_root = manifest.get("metadata", {}).get("pluginRoot") if manifest and isinstance(manifest.get("metadata"), dict) else None
 
         # Determine target directory
         target_dir = self.get_plugins_dir_for_scope(scope)
@@ -1189,10 +1310,18 @@ class PluginService:
         # Create target directory
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        # Copy plugin to target
+        # Resolve and copy/clone plugin to target
+        local_dir = self._resolve_plugin_source(source, mp_path, plugin_root)
+
         if target_path.exists():
             shutil.rmtree(target_path)
-        shutil.copytree(plugin_source, target_path)
+
+        if local_dir:
+            shutil.copytree(local_dir, target_path)
+        elif isinstance(source, dict):
+            self._clone_plugin_source(source, target_path)
+        else:
+            raise ValueError(f"Plugin source not found or unsupported: {plugin_name}")
 
         # Ensure scripts have execute permissions
         for script in target_path.rglob("*.sh"):

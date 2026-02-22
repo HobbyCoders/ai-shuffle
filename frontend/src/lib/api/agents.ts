@@ -32,7 +32,6 @@ export interface AgentExportData {
 	env: Record<string, string> | null;
 	thinking_mode?: 'default' | 'disabled' | 'adaptive' | 'think' | 'think_harder' | 'ultra_think';
 	effort?: 'low' | 'medium' | 'high' | 'max' | null;
-	plan_exit_behavior?: 'normal' | 'clear_context';
 }
 
 export interface AgentExport {

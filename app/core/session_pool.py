@@ -46,7 +46,6 @@ class SessionState:
     is_connected: bool = False
     is_streaming: bool = False
     interrupt_requested: bool = False
-    clear_context_pending: bool = False
     last_activity: datetime = field(default_factory=datetime.now)
     background_task: Optional[asyncio.Task] = None
     written_agent_ids: list = field(default_factory=list)

@@ -2867,14 +2867,6 @@ async def stream_to_websocket(
                         if result.behavior == "deny":
                             return result
 
-                    plan_exit_behavior = _config.get("plan_exit_behavior", "normal")
-                    if plan_exit_behavior == "clear_context":
-                        database.update_session(session_id=_sid, sdk_session_id="")
-                        active_state = pool.peek(_sid)
-                        if active_state:
-                            active_state.clear_context_pending = True
-                        logger.info(f"[WS] ExitPlanMode: clearing context for session {_sid} (plan_exit_behavior=clear_context)")
-
                     return PermissionResultAllow()
 
                 # For other tools in default mode, route through permission handler
@@ -3504,19 +3496,8 @@ async def stream_to_websocket(
             state.callback_refs["broadcast_func"] = None
 
         # Session pool lifecycle: KEEP the client alive for reuse.
-        # Only remove from pool if the client died or clear_context was requested.
-        # Track locally BEFORE pool removal — pool.remove() destroys the state,
-        # so we can't check state.clear_context_pending later.
-        context_was_cleared = state.clear_context_pending
-        if state.clear_context_pending:
-            # Clear context requested — need fresh subprocess on next query
-            state.clear_context_pending = False
-            try:
-                await pool.remove(session_id)
-            except Exception as e:
-                logger.warning(f"[WS] Error removing session {session_id} after clear_context: {e}")
-            logger.info(f"[WS] Evicted session {session_id} from pool (clear_context)")
-        elif not state.is_connected:
+        # Only remove from pool if the client died.
+        if not state.is_connected:
             # Client died during query — remove dead entry
             await pool.remove_dead(session_id)
             logger.debug(f"[WS] Removed dead session {session_id} from pool")
@@ -3533,18 +3514,9 @@ async def stream_to_websocket(
         if len(prompt) > 50:
             title_to_set += "..."
 
-    # If clear_context was triggered by ExitPlanMode, don't overwrite the
-    # cleared sdk_session_id — the next query should start with a fresh context.
-    # We use the local `context_was_cleared` flag because the session was already
-    # evicted from the pool above (pool.peek would return None).
-    save_sdk_session_id = sdk_session_id
-    if context_was_cleared:
-        save_sdk_session_id = None  # None = don't update the sdk_session_id column
-        logger.info(f"[WS] Skipping sdk_session_id write for {session_id} (clear_context)")
-
     database.update_session(
         session_id=session_id,
-        sdk_session_id=save_sdk_session_id,
+        sdk_session_id=sdk_session_id,
         title=title_to_set,
         cost_increment=metadata.get("total_cost_usd", 0),
         tokens_in_increment=metadata.get("tokens_in", 0),
