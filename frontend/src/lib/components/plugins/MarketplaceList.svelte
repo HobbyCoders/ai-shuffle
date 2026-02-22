@@ -80,8 +80,8 @@
 		<div class="space-y-3">
 			{#each marketplaces as marketplace (marketplace.id)}
 				<div class="border border-border rounded-lg bg-card overflow-hidden">
-					<div class="px-4 py-3">
-						<div class="flex items-start gap-3">
+					<div class="px-4 py-3 source-row">
+						<div class="flex items-start gap-3 flex-1 min-w-0">
 							<!-- Icon -->
 							<div class="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
 								<svg class="w-5 h-5 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -211,14 +211,29 @@
 </div>
 
 <style>
+	.source-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
 	.source-actions {
 		display: flex;
 		align-items: center;
-		justify-content: center;
 		gap: 2px;
-		margin-top: 8px;
-		padding-top: 8px;
-		border-top: 1px solid var(--border-subtle, var(--border));
+		flex-shrink: 0;
+		align-self: center;
+	}
+
+	@media (max-width: 639px) {
+		.source-actions {
+			flex: 1 0 100%;
+			justify-content: center;
+			padding-top: 8px;
+			border-top: 1px solid var(--border-subtle, var(--border));
+			margin-top: 4px;
+		}
 	}
 
 	.add-source-btn-hover:hover {
