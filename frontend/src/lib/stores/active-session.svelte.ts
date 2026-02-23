@@ -659,23 +659,14 @@ async function startSessionOnExistingWorktree(prompt: string) {
 	if (!_state.profile) { _update(s => ({ ...s, error: 'Please select a profile' })); return; }
 	if (!_state.project) { _update(s => ({ ...s, error: 'Please select a project' })); return; }
 	if (!_state.worktreeId) { _update(s => ({ ...s, error: 'Please select an existing worktree' })); return; }
-	if (!wsConn.isConnected()) {
-		wsConn.resetReconnectAttempts();
-		wsConn.connect();
-		const connected = await new Promise<boolean>((resolve) => {
-			if (wsConn.isConnected()) { resolve(true); return; }
-			const timeout = setTimeout(() => { clearInterval(check); resolve(false); }, 3000);
-			const check = setInterval(() => {
-				if (wsConn.isConnected()) { clearTimeout(timeout); clearInterval(check); resolve(true); }
-			}, 100);
-		});
-		if (!connected) { _update(s => ({ ...s, error: 'Unable to connect. Please check your connection and try again.' })); return; }
-	}
 
+	// Add the worktree system message, then delegate to sendMessage() for
+	// the actual query. This ensures all session lifecycle flags (awaitingNewSession,
+	// expectedSessionId, etc.) are managed by a single code path — the same one
+	// used by local sessions. Previously this function duplicated the send logic
+	// but missed the lifecycle flags, causing session_created/start events to be
+	// silently rejected and polling never to start.
 	const branchDisplay = _state.selectedWorktreeBranch || 'existing branch';
-	const userMsgId = `user-${Date.now()}`;
-	const newTitle = prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '');
-
 	_update(s => ({
 		...s,
 		messages: [
@@ -688,30 +679,10 @@ async function startSessionOnExistingWorktree(prompt: string) {
 				systemSubtype: 'worktree_selected',
 				systemData: { branch_name: branchDisplay, worktree_id: _state.worktreeId },
 			},
-			{
-				id: userMsgId,
-				role: 'user' as const,
-				content: prompt,
-			}
 		],
-		isStreaming: true,
-		error: null,
-		title: newTitle,
 	}));
 
-	const overrides: Record<string, string> = {};
-	if (_state.modelOverride) overrides.model = _state.modelOverride;
-	if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
-
-	wsConn.resetLastMessageTime();
-	wsConn.send({
-		type: 'query',
-		prompt,
-		profile: _state.profile,
-		project: _state.project,
-		worktree_id: _state.worktreeId,
-		overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
-	});
+	await activeSession.sendMessage(prompt, { skipWorktreeSetup: true });
 }
 
 // ─── Init / Destroy ──────────────────────────────────────────────────────────
