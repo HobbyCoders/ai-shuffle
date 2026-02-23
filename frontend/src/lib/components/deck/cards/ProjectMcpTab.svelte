@@ -177,6 +177,9 @@
 							<div class="server-header">
 								<span class="server-name">{server.name}</span>
 								<span class="mcp-type-badge">{getTypeLabel(server.type)}</span>
+								{#if server.builtin}
+									<span class="card-badge card-badge--builtin">Built-in</span>
+								{/if}
 								<span class="card-badge {server.enabled ? 'card-badge--success' : 'card-badge--muted'}">
 									{server.enabled ? 'Enabled' : 'Disabled'}
 								</span>
@@ -204,13 +207,15 @@
 									<ToggleLeft size={16} />
 								{/if}
 							</button>
-							<button
-								class="card-action-btn card-action-btn--danger"
-								title="Remove server"
-								onclick={() => handleRemoveServer(server)}
-							>
-								<Trash2 size={14} />
-							</button>
+							{#if !server.builtin}
+								<button
+									class="card-action-btn card-action-btn--danger"
+									title="Remove server"
+									onclick={() => handleRemoveServer(server)}
+								>
+									<Trash2 size={14} />
+								</button>
+							{/if}
 						</div>
 					</div>
 				{/each}

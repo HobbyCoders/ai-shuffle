@@ -3529,7 +3529,7 @@ async def stream_to_websocket(
         tokens_out_increment=metadata.get("tokens_out", 0),
         turn_increment=metadata.get("num_turns", 0)
     )
-    logger.debug(f"[WS] Updated session {session_id}, sdk_session_id={save_sdk_session_id}, title={title_to_set}")
+    logger.debug(f"[WS] Updated session {session_id}, sdk_session_id={sdk_session_id}, title={title_to_set}")
 
     # Store tool messages (tool_use and tool_result)
     for tool_msg in tool_messages:

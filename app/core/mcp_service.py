@@ -541,8 +541,9 @@ class McpService:
         """
         result = {}
 
-        # Always include USER scope
-        result["user"] = self.get_servers_for_scope(McpScope.USER)
+        # Always include USER scope (with built-in servers like browser-tools)
+        user_servers = list(self.get_servers_for_scope(McpScope.USER))
+        result["user"] = self._inject_browser_tools_builtin(user_servers)
 
         # Include project scopes if available
         if self.project_dir:
@@ -695,6 +696,32 @@ class McpService:
     # Utility Methods
     # =========================================================================
 
+    def _inject_browser_tools_builtin(self, servers: List[McpServerConfig]) -> List[McpServerConfig]:
+        """
+        Ensure browser-tools is present and marked as built-in in a server list.
+
+        If browser-tools already exists (e.g. from a config file), marks it as
+        builtin=True. Otherwise inserts a synthetic built-in entry.
+        """
+        disabled = self.get_disabled_servers()
+
+        for s in servers:
+            if s.name == "browser-tools":
+                s.builtin = True
+                return servers
+
+        # Not found — inject a synthetic built-in entry
+        browser_server = McpServerConfig(
+            name="browser-tools",
+            type=McpServerType.STDIO,
+            description="Built-in browser automation tools (provided by AI Shuffle SDK)",
+            scope="user",
+            enabled="browser-tools" not in disabled,
+            builtin=True,
+        )
+        servers.insert(0, browser_server)
+        return servers
+
     def get_all_servers_with_builtins(self) -> List[McpServerConfig]:
         """
         Get all USER scope servers plus built-in servers (like browser-tools).
@@ -703,22 +730,7 @@ class McpService:
             List of all globally available MCP servers including builtins.
         """
         servers = list(self.get_servers_for_scope(McpScope.USER))
-        disabled = self.get_disabled_servers()
-
-        # Add browser-tools as a built-in server
-        has_browser = any(s.name == "browser-tools" for s in servers)
-        if not has_browser:
-            browser_server = McpServerConfig(
-                name="browser-tools",
-                type=McpServerType.STDIO,
-                description="Built-in browser automation tools (provided by AI Shuffle SDK)",
-                scope="user",
-                enabled="browser-tools" not in disabled,
-                builtin=True,
-            )
-            servers.insert(0, browser_server)
-
-        return servers
+        return self._inject_browser_tools_builtin(servers)
 
     def get_server_count(self) -> int:
         """Get total count of MCP servers across all scopes"""
