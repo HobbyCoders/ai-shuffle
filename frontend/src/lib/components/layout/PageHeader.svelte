@@ -158,14 +158,20 @@
 		line-height: 1;
 	}
 
-	/* Project / worktree context badge */
+	/* Project / worktree context badge — styled to match .git-btn */
 	.context-badge {
 		display: inline-flex;
 		align-items: center;
-		gap: 4px;
+		gap: 5px;
 		flex-shrink: 1;
 		min-width: 0;
+		height: 26px;
+		padding: 0 8px;
+		border: 1px solid var(--border);
+		border-radius: 6px;
 		color: var(--muted-foreground);
+		font-size: 0.6875rem;
+		font-weight: 500;
 		max-width: 320px;
 	}
 
@@ -295,6 +301,7 @@
 		.header-left {
 			flex: 1 1 100%;
 			min-width: 0;
+			min-height: 36px;
 			overflow: hidden;
 			justify-content: center;
 			padding-left: 36px;
@@ -305,19 +312,20 @@
 			position: absolute;
 			left: var(--space-3, 12px);
 			top: var(--space-2, 8px);
-			width: 32px;
-			height: 32px;
+			width: 36px;
+			height: 36px;
 		}
 
 		.header-btn {
-			width: 32px;
-			height: 32px;
+			width: 36px;
+			height: 36px;
 		}
 
 		.header-right {
 			flex: 1 0 100%;
 			flex-wrap: wrap;
 			justify-content: center;
+			min-height: 36px;
 			gap: var(--space-2, 8px);
 		}
 
@@ -333,8 +341,11 @@
 		}
 
 		.context-badge {
-			flex-shrink: 0;
+			flex-shrink: 1;
 			max-width: none;
+			height: 36px;
+			padding: 0 12px;
+			font-size: 0.75rem;
 		}
 	}
 
