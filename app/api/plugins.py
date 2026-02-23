@@ -60,6 +60,7 @@ class PluginResponse(BaseModel):
     has_agents: bool
     has_skills: bool
     has_hooks: bool
+    has_mcp: bool = False
 
 
 class PluginDetailsResponse(PluginResponse):
@@ -81,6 +82,7 @@ class AvailablePluginResponse(BaseModel):
     has_agents: bool
     has_skills: bool
     has_hooks: bool
+    has_mcp: bool = False
     installed: bool
     enabled: bool
 
@@ -234,6 +236,7 @@ async def list_available_plugins(
                 has_agents=p.has_agents,
                 has_skills=p.has_skills,
                 has_hooks=p.has_hooks,
+                has_mcp=p.has_mcp,
                 installed=p.installed,
                 enabled=p.enabled
             )
@@ -271,7 +274,8 @@ async def list_installed_plugins(token: str = Depends(require_auth)):
                 has_commands=p.has_commands,
                 has_agents=p.has_agents,
                 has_skills=p.has_skills,
-                has_hooks=p.has_hooks
+                has_hooks=p.has_hooks,
+                has_mcp=p.has_mcp
             )
             for p in plugins
         ]
@@ -348,6 +352,7 @@ async def get_plugin_details(
         has_agents=plugin.has_agents,
         has_skills=plugin.has_skills,
         has_hooks=plugin.has_hooks,
+        has_mcp=plugin.has_mcp,
         commands=plugin.commands,
         agents=plugin.agents,
         skills=plugin.skills,
@@ -381,7 +386,8 @@ async def install_plugin(
             has_commands=plugin.has_commands,
             has_agents=plugin.has_agents,
             has_skills=plugin.has_skills,
-            has_hooks=plugin.has_hooks
+            has_hooks=plugin.has_hooks,
+            has_mcp=plugin.has_mcp
         )
     except ValueError as e:
         raise HTTPException(
@@ -412,7 +418,8 @@ async def install_plugins_batch(
             has_commands=p.has_commands,
             has_agents=p.has_agents,
             has_skills=p.has_skills,
-            has_hooks=p.has_hooks
+            has_hooks=p.has_hooks,
+            has_mcp=p.has_mcp
         )
         for p in plugins
     ]

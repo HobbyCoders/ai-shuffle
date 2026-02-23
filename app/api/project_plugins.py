@@ -49,6 +49,7 @@ class ProjectPluginResponse(BaseModel):
     has_agents: bool = False
     has_skills: bool = False
     has_hooks: bool = False
+    has_mcp: bool = False
 
 
 class AvailablePluginResponse(BaseModel):
@@ -62,6 +63,7 @@ class AvailablePluginResponse(BaseModel):
     has_agents: bool = False
     has_skills: bool = False
     has_hooks: bool = False
+    has_mcp: bool = False
     installed: bool = False  # Already installed in project?
     enabled: bool = False
 
@@ -143,6 +145,7 @@ def _plugin_to_response(plugin: PluginInfo) -> ProjectPluginResponse:
         has_agents=plugin.has_agents,
         has_skills=plugin.has_skills,
         has_hooks=plugin.has_hooks,
+        has_mcp=plugin.has_mcp,
     )
 
 
@@ -161,6 +164,7 @@ def _available_to_response(
         has_agents=plugin.has_agents,
         has_skills=plugin.has_skills,
         has_hooks=plugin.has_hooks,
+        has_mcp=plugin.has_mcp,
         installed=plugin.id in installed_ids or plugin.name in installed_ids,
         enabled=plugin.enabled,
     )

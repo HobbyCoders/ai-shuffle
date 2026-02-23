@@ -309,16 +309,6 @@
 	aria-label="Sidebar navigation"
 >
 	{#if !$sidebarCollapsed}
-		<!-- Collapse toggle (only shown when sidebar is open; header handles collapsed state) -->
-		<button
-			class="collapse-toggle desktop-collapse"
-			onclick={() => layout.toggleSidebar()}
-			title="Collapse sidebar"
-			aria-expanded="true"
-		>
-			<PanelLeftClose size={16} strokeWidth={1.5} />
-		</button>
-
 		<!-- Mobile close button (visible only on mobile) -->
 		<button
 			class="collapse-toggle mobile-close-btn"
@@ -328,12 +318,24 @@
 			<X size={20} strokeWidth={2} />
 			<span class="mobile-close-label">Close</span>
 		</button>
-		<div class="side-panel-content">
-			<!-- New Session Button -->
+
+		<!-- Header: New Session + Collapse toggle -->
+		<div class="sidebar-header">
 			<button class="new-session-btn" onclick={onNewSession}>
 				<Plus size={16} strokeWidth={2} />
 				<span>New session</span>
 			</button>
+			<button
+				class="collapse-toggle desktop-collapse"
+				onclick={() => layout.toggleSidebar()}
+				title="Collapse sidebar"
+				aria-expanded="true"
+			>
+				<PanelLeftClose size={16} strokeWidth={1.5} />
+			</button>
+		</div>
+
+		<div class="side-panel-content">
 
 			<!-- Navigation Items -->
 			<div class="nav-section">
@@ -609,16 +611,28 @@
 		flex-direction: column;
 		width: var(--sidebar-width, 390px);
 		height: 100%;
-		background: var(--background);
-		border-right: 1px solid var(--border);
+		background: color-mix(in oklch, var(--background) 85%, black);
+		border-right: 1px solid var(--sidebar-border, var(--border));
+		box-shadow: 4px 0 16px -4px color-mix(in oklch, var(--foreground) 8%, transparent);
 		transition: width 200ms cubic-bezier(0.16, 1, 0.3, 1);
 		overflow: hidden;
 		flex-shrink: 0;
+		z-index: 1;
 	}
 
 	.side-panel.collapsed {
 		width: 0;
 		border-right: none;
+		box-shadow: none;
+	}
+
+	/* Sidebar header row */
+	.sidebar-header {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 12px 12px 0;
+		flex-shrink: 0;
 	}
 
 	/* Collapse toggle button */
@@ -631,10 +645,9 @@
 		flex-shrink: 0;
 		background: transparent;
 		border: none;
-		border-radius: 6px;
+		border-radius: calc(var(--radius) - 4px);
 		color: var(--muted-foreground);
 		cursor: pointer;
-		margin: 12px 12px 0;
 		transition: color 150ms ease, background-color 150ms ease;
 	}
 
@@ -645,7 +658,6 @@
 
 	/* Desktop: show PanelLeftClose, hide mobile close */
 	.desktop-collapse {
-		align-self: flex-end;
 	}
 
 	.mobile-close-btn {
@@ -687,16 +699,29 @@
 		flex-direction: column;
 		flex: 1;
 		min-height: 0;
-		padding: 12px 0;
-		overflow: hidden;
+		padding: 8px 0;
+		overflow-y: auto;
+		-webkit-overflow-scrolling: touch;
 		animation: fadeIn 150ms ease;
+		scrollbar-width: thin;
+		scrollbar-color: var(--scrollbar-thumb) transparent;
 	}
 
-	@media (max-width: 1023px) {
-		.side-panel-content {
-			overflow-y: auto;
-			-webkit-overflow-scrolling: touch;
-		}
+	.side-panel-content::-webkit-scrollbar {
+		width: 6px;
+	}
+
+	.side-panel-content::-webkit-scrollbar-track {
+		background: transparent;
+	}
+
+	.side-panel-content::-webkit-scrollbar-thumb {
+		background: var(--scrollbar-thumb);
+		border-radius: 3px;
+	}
+
+	.side-panel-content::-webkit-scrollbar-thumb:hover {
+		background: var(--scrollbar-thumb-hover);
 	}
 
 	@keyframes fadeIn {
@@ -708,25 +733,29 @@
 	.new-session-btn {
 		display: flex;
 		align-items: center;
+		justify-content: center;
+		flex: 1;
+		min-width: 0;
 		gap: 10px;
-		margin: 0 12px 8px;
 		padding: 8px 12px;
-		background: transparent;
+		background: var(--primary);
 		border: none;
-		border-radius: 8px;
-		color: var(--foreground);
+		border-radius: var(--radius);
+		color: var(--primary-foreground);
 		font-size: 0.8125rem;
-		font-weight: 500;
+		font-weight: 600;
 		cursor: pointer;
-		transition: background-color 150ms ease;
+		box-shadow: var(--shadow-s);
+		transition: opacity 150ms ease, box-shadow 150ms ease;
 	}
 
 	.new-session-btn:hover {
-		background: var(--hover-overlay);
+		opacity: 0.9;
+		box-shadow: var(--shadow-m);
 	}
 
 	.new-session-btn :global(svg) {
-		color: var(--muted-foreground);
+		color: var(--primary-foreground);
 	}
 
 	/* Navigation Section */
@@ -747,7 +776,7 @@
 		padding: 7px 12px;
 		background: transparent;
 		border: none;
-		border-radius: 7px;
+		border-radius: calc(var(--radius) - 2px);
 		color: var(--muted-foreground);
 		font-size: 0.8125rem;
 		font-weight: 400;
@@ -764,7 +793,7 @@
 	.nav-item.active {
 		background: var(--selection-bg-emphasis);
 		color: var(--selection-text);
-		box-shadow: var(--selection-shadow-subtle);
+		box-shadow: var(--shadow-s);
 	}
 
 	.nav-item.active :global(svg) {
@@ -783,16 +812,14 @@
 	.recent-section {
 		display: flex;
 		flex-direction: column;
-		gap: 1px;
-		padding: 0 8px;
+		gap: 2px;
+		padding: 0 12px;
 	}
 
 	/* Sessions Section */
 	.sessions-section {
 		display: flex;
 		flex-direction: column;
-		flex: 1;
-		min-height: 0;
 		padding: 0 8px;
 	}
 
@@ -844,13 +871,14 @@
 
 	.search-input {
 		width: 100%;
-		padding: 5px 24px 5px 28px;
-		background: var(--input);
-		border: 1px solid var(--border);
-		border-radius: 6px;
+		padding: 6px 24px 6px 28px;
+		background: var(--card, var(--input));
+		border: 1px solid var(--sidebar-border, var(--border));
+		border-radius: var(--radius);
 		color: var(--foreground);
 		font-size: 0.75rem;
 		outline: none;
+		box-shadow: var(--shadow-s);
 		transition: border-color 150ms ease, box-shadow 150ms ease;
 	}
 
@@ -875,7 +903,7 @@
 		height: 18px;
 		background: transparent;
 		border: none;
-		border-radius: 4px;
+		border-radius: calc(var(--radius) - 4px);
 		color: var(--muted-foreground);
 		cursor: pointer;
 	}
@@ -887,28 +915,30 @@
 
 	/* Session List */
 	.session-list {
-		flex: 1;
-		overflow-y: auto;
 		display: flex;
 		flex-direction: column;
-		gap: 2px;
-		padding-bottom: 12px;
+		gap: 6px;
+		padding: 0 4px 12px;
 	}
 
 	/* Project Group */
 	.project-group {
 		display: flex;
 		flex-direction: column;
+		background: var(--card, var(--background));
+		border-radius: var(--radius);
+		box-shadow: var(--shadow-s);
+		overflow: clip;
 	}
 
 	.project-group-header {
 		display: flex;
 		align-items: center;
 		gap: 6px;
-		padding: 5px 8px;
+		padding: 8px 12px;
 		background: transparent;
 		border: none;
-		border-radius: 6px;
+		border-radius: 0;
 		color: var(--muted-foreground);
 		font-size: 0.6875rem;
 		font-weight: 600;
@@ -945,12 +975,11 @@
 	.project-group-count {
 		flex-shrink: 0;
 		font-size: 0.625rem;
-		font-weight: 500;
-		color: var(--muted-foreground);
-		opacity: 0.6;
-		background: var(--hover-overlay);
-		padding: 1px 5px;
-		border-radius: 8px;
+		font-weight: 600;
+		color: var(--primary);
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		padding: 1px 7px;
+		border-radius: 9999px;
 	}
 
 	/* Project delete button */
@@ -963,7 +992,7 @@
 		padding: 0;
 		background: transparent;
 		border: none;
-		border-radius: 4px;
+		border-radius: calc(var(--radius) - 4px);
 		color: var(--muted-foreground);
 		cursor: pointer;
 		opacity: 0;
@@ -990,7 +1019,7 @@
 		padding: 0;
 		background: color-mix(in oklch, var(--destructive, #ef4444) 15%, transparent);
 		border: 1px solid var(--destructive, #ef4444);
-		border-radius: 4px;
+		border-radius: calc(var(--radius) - 4px);
 		color: var(--destructive, #ef4444);
 		cursor: pointer;
 		flex-shrink: 0;
@@ -1016,7 +1045,7 @@
 		padding: 0;
 		background: transparent;
 		border: 1px solid var(--border);
-		border-radius: 4px;
+		border-radius: calc(var(--radius) - 4px);
 		color: var(--muted-foreground);
 		cursor: pointer;
 		flex-shrink: 0;
@@ -1053,8 +1082,28 @@
 	.project-group-sessions {
 		display: flex;
 		flex-direction: column;
-		gap: 1px;
-		padding-left: 8px;
+		gap: 0;
+		padding-left: 0;
+	}
+
+	/* Sessions inside project group cards: reset card styling, use separator borders */
+	.project-group-sessions .session-item {
+		background: transparent;
+		box-shadow: none;
+		border-radius: 0;
+		border-left: 3px solid transparent;
+		border-top: 1px solid var(--sidebar-border, var(--border));
+		padding: 8px 12px;
+	}
+
+	.project-group-sessions .session-item:hover {
+		background: var(--hover-overlay);
+		box-shadow: none;
+	}
+
+	.project-group-sessions .session-item.active {
+		background: var(--selection-bg);
+		border-left-color: var(--primary);
 	}
 
 	/* Session Item */
@@ -1062,24 +1111,28 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		padding: 7px 12px;
-		background: transparent;
+		padding: 10px 12px;
+		background: var(--card, var(--background));
 		border: none;
-		border-radius: 7px;
+		border-radius: calc(var(--radius) - 2px);
+		border-left: 3px solid transparent;
 		color: var(--foreground);
 		font-size: 0.8125rem;
 		cursor: pointer;
 		text-align: left;
-		transition: background-color 120ms ease;
+		box-shadow: var(--shadow-s);
+		transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
 		position: relative;
 	}
 
 	.session-item:hover {
 		background: var(--hover-overlay);
+		box-shadow: var(--shadow-m);
 	}
 
 	.session-item.active {
 		background: var(--selection-bg);
+		border-left-color: var(--primary);
 	}
 
 	.session-item.active .session-title {
@@ -1119,7 +1172,7 @@
 		padding: 0;
 		background: transparent;
 		border: none;
-		border-radius: 4px;
+		border-radius: calc(var(--radius) - 4px);
 		color: var(--muted-foreground);
 		cursor: pointer;
 		opacity: 0;
@@ -1200,16 +1253,7 @@
 		font-size: 0.75rem;
 	}
 
-	/* Mobile: let .side-panel-content handle all scrolling */
-	@media (max-width: 1023px) {
-		.sessions-section {
-			flex: none;
-		}
-		.session-list {
-			overflow-y: visible;
-			flex: none;
-		}
-	}
+	/* Mobile: no extra overrides needed, side-panel-content handles all scrolling */
 
 	/* Reduced motion */
 	@media (prefers-reduced-motion: reduce) {
