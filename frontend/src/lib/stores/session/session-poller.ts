@@ -6,7 +6,7 @@
  *
  * Polling rates:
  * - 300ms during streaming (real-time feel)
- * - 30s when idle (detects remote session starts)
+ * - Stops entirely when streaming ends (no idle polling)
  *
  * Key behaviors:
  * - Sends ?since_update_id=N → gets 304 if nothing changed (cheap)
@@ -21,7 +21,6 @@ import { sessionState, type SessionUsage } from './session-state';
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const STREAMING_POLL_INTERVAL_MS = 300;
-const IDLE_POLL_INTERVAL_MS = 30_000;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -153,22 +152,6 @@ class SessionPoller {
 			timer,
 			sessionId,
 			interval: STREAMING_POLL_INTERVAL_MS,
-		});
-	}
-
-	/**
-	 * Start idle polling for a session (infrequent, for detecting remote starts).
-	 */
-	startIdle(sessionId: string): void {
-		if (this._timers.has(sessionId)) return;
-
-		sessionState.initSession(sessionId);
-
-		const timer = setInterval(() => this._poll(sessionId), IDLE_POLL_INTERVAL_MS);
-		this._timers.set(sessionId, {
-			timer,
-			sessionId,
-			interval: IDLE_POLL_INTERVAL_MS,
 		});
 	}
 

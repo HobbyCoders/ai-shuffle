@@ -15,7 +15,40 @@
 	import OfflineBanner from '$lib/components/OfflineBanner.svelte';
 
 	let initialized = false;
-	let authPollInterval: ReturnType<typeof setInterval> | null = null;
+
+	// Auth poll: detects gh login/logout happening in a terminal.
+	// Auth changes are rare, so 2-minute polling is plenty.
+	// Pauses entirely when tab is hidden; checks immediately on tab return.
+	const AUTH_POLL_INTERVAL_MS = 120_000;
+	let authPollTimer: ReturnType<typeof setInterval> | null = null;
+
+	function startAuthPoll() {
+		if (authPollTimer) return;
+		authPollTimer = setInterval(async () => {
+			try {
+				await auth.checkAuth();
+			} catch (e) {
+				console.debug('Auth poll failed:', e);
+			}
+		}, AUTH_POLL_INTERVAL_MS);
+	}
+
+	function stopAuthPoll() {
+		if (authPollTimer) {
+			clearInterval(authPollTimer);
+			authPollTimer = null;
+		}
+	}
+
+	function handleAuthVisibility() {
+		if (document.hidden) {
+			stopAuthPoll();
+		} else {
+			// Check immediately on tab return, then resume interval
+			auth.checkAuth().catch(() => {});
+			startAuthPoll();
+		}
+	}
 
 	onMount(async () => {
 		// Initialize theme on mount (applies from localStorage immediately to prevent flash)
@@ -60,18 +93,14 @@
 			initialized = true;
 		}
 
-		// Poll auth status to detect gh login/logout changes during the session
-		authPollInterval = setInterval(async () => {
-			try {
-				await auth.checkAuth();
-			} catch (e) {
-				console.debug('Auth poll failed:', e);
-			}
-		}, 30000);
+		// Start visibility-aware auth polling
+		startAuthPoll();
+		document.addEventListener('visibilitychange', handleAuthVisibility);
 	});
 
 	onDestroy(() => {
-		if (authPollInterval) clearInterval(authPollInterval);
+		stopAuthPoll();
+		document.removeEventListener('visibilitychange', handleAuthVisibility);
 	});
 </script>
 
