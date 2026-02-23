@@ -997,6 +997,22 @@
 								<span class="pf-toggle-knob"></span>
 							</button>
 						</div>
+						<div class="pf-toggle-row">
+							<div class="pf-toggle-info">
+								<span class="pf-toggle-title">File Checkpointing</span>
+								<span class="pf-toggle-desc">Create restore points before file modifications.</span>
+							</div>
+							<button
+								type="button"
+								class="pf-toggle"
+								class:active={profileForm.enable_file_checkpointing}
+								role="switch"
+								aria-checked={profileForm.enable_file_checkpointing}
+								onclick={() => profileForm.enable_file_checkpointing = !profileForm.enable_file_checkpointing}
+							>
+								<span class="pf-toggle-knob"></span>
+							</button>
+						</div>
 					</div>
 
 				{:else if activeTab === 'tools'}
@@ -1290,22 +1306,6 @@
 								<label class="pf-label">Max Output Buffer</label>
 								<input type="number" bind:value={profileForm.max_buffer_size} class="pf-input" placeholder="200,000 chars" />
 							</div>
-						</div>
-						<div class="pf-toggle-row" style="margin-top: 12px;">
-							<div class="pf-toggle-info">
-								<span class="pf-toggle-title">File Checkpointing</span>
-								<span class="pf-toggle-desc">Create restore points before file modifications.</span>
-							</div>
-							<button
-								type="button"
-								class="pf-toggle"
-								class:active={profileForm.enable_file_checkpointing}
-								role="switch"
-								aria-checked={profileForm.enable_file_checkpointing}
-								onclick={() => profileForm.enable_file_checkpointing = !profileForm.enable_file_checkpointing}
-							>
-								<span class="pf-toggle-knob"></span>
-							</button>
 						</div>
 					</div>
 

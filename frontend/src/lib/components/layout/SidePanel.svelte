@@ -774,7 +774,7 @@
 		align-items: center;
 		gap: 10px;
 		padding: 7px 12px;
-		background: transparent;
+		background: color-mix(in oklch, var(--background) 60%, var(--glass, transparent));
 		border: none;
 		border-radius: calc(var(--radius) - 2px);
 		color: var(--muted-foreground);
@@ -872,7 +872,7 @@
 	.search-input {
 		width: 100%;
 		padding: 6px 24px 6px 28px;
-		background: var(--card, var(--input));
+		background: color-mix(in oklch, var(--background) 60%, var(--glass, transparent));
 		border: 1px solid var(--sidebar-border, var(--border));
 		border-radius: var(--radius);
 		color: var(--foreground);
@@ -925,7 +925,7 @@
 	.project-group {
 		display: flex;
 		flex-direction: column;
-		background: var(--card, var(--background));
+		background: color-mix(in oklch, var(--background) 60%, var(--glass, transparent));
 		border-radius: var(--radius);
 		box-shadow: var(--shadow-s);
 		overflow: clip;
@@ -1112,7 +1112,7 @@
 		align-items: center;
 		gap: 8px;
 		padding: 10px 12px;
-		background: var(--card, var(--background));
+		background: color-mix(in oklch, var(--background) 60%, var(--glass, transparent));
 		border: none;
 		border-radius: calc(var(--radius) - 2px);
 		border-left: 3px solid transparent;

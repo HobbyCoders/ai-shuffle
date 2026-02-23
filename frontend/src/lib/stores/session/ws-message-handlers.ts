@@ -724,7 +724,14 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				if (!data.session_id) break;
 				const sessionId = data.session_id as string;
 				const currentState = getState();
-				if (!currentState.sessionId || currentState.sessionId === sessionId) {
+				// Accept if this session matches the current one, OR if sessionId is
+				// null (new chat waiting for a session) but ONLY if newChat's
+				// __reject_all__ sentinel isn't active. Without the sentinel check,
+				// a session_created from a previous query can hijack the clean
+				// new-chat state and re-set sessionId to the old session.
+				const acceptCreated = currentState.sessionId === sessionId ||
+					(!currentState.sessionId && internal.expectedSessionId !== '__reject_all__');
+				if (acceptCreated) {
 					update(s => ({ ...s, sessionId, sessionProfileId: s.profile }));
 					onPersistSession();
 				}
@@ -737,7 +744,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const sessionId = data.session_id as string;
 				internal.interruptPending = false;
 				const currentStartState = getState();
-				if (sessionId === currentStartState.sessionId || !currentStartState.sessionId) {
+				// Same guard as session_created: don't let a start event from a
+				// previous session overwrite the cleared new-chat state.
+				const acceptStart = currentStartState.sessionId === sessionId ||
+					(!currentStartState.sessionId && internal.expectedSessionId !== '__reject_all__');
+				if (acceptStart) {
 					update(s => ({ ...s, sessionId, isStreaming: true, streamStartTime: Date.now() }));
 					// Cancel any pending removeSession timer from a previous query's
 					// onStreamEnd and start streaming polling. Without this, the 100ms
