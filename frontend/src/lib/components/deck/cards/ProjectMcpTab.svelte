@@ -11,7 +11,7 @@
 	import { mcp, projectMcpServers, mcpLoading } from '$lib/stores/mcp';
 	import type { McpServerInfo } from '$lib/api/mcp';
 	import { McpServerForm } from '$lib/components/mcp';
-	import { Search, Server, Globe, Terminal, Zap, FolderGit2, FolderLock, Download, Trash2, ToggleLeft, ToggleRight } from 'lucide-svelte';
+	import { Search, Server, Globe, Terminal, Zap, FolderGit2, FolderLock, Download, Trash2, ToggleLeft, ToggleRight, Plus } from 'lucide-svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -77,6 +77,13 @@
 		}
 	}
 
+	// Add new local/project server
+	function handleAddServer() {
+		editingMcpServer = null;
+		mcpSelectedScope = 'local';
+		showMcpServerForm = true;
+	}
+
 	// Edit local/project/installed server
 	function handleEditServer(server: McpServerInfo) {
 		editingMcpServer = server;
@@ -104,6 +111,11 @@
 					config,
 					scope
 				);
+			} else {
+				await mcp.addProjectServer(projectId, {
+					...config,
+					scope: scope as 'installed' | 'local' | 'project'
+				});
 			}
 			showMcpServerForm = false;
 			editingMcpServer = null;
@@ -366,13 +378,23 @@
 		{/if}
 	</div>
 
-	<!-- MCP Server Form Modal (edit only) -->
+	<!-- Footer -->
+	<div class="card-footer">
+		<div class="card-footer-content">
+			<button class="card-btn-primary" onclick={handleAddServer}>
+				<Plus size={16} />
+				Add MCP Server
+			</button>
+		</div>
+	</div>
+
+	<!-- MCP Server Form Modal -->
 	<McpServerForm
 		show={showMcpServerForm}
 		server={editingMcpServer}
 		scope={mcpSelectedScope}
 		loading={$mcpLoading}
-		showScopeSelector={false}
+		showScopeSelector={!editingMcpServer}
 		onSave={handleSaveMcpServer}
 		onClose={() => {
 			showMcpServerForm = false;
