@@ -233,4 +233,17 @@
 		justify-content: center;
 		padding: var(--space-8);
 	}
+
+	/* Always show delete button on desktop, vertically centered */
+	.agents-tab :global(.card-item-actions) {
+		opacity: 1;
+		align-self: center;
+	}
+
+	/* Center actions on mobile */
+	@media (max-width: 639px) {
+		.agents-tab :global(.card-item-actions) {
+			justify-content: center;
+		}
+	}
 </style>

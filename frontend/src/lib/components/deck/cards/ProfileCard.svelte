@@ -891,8 +891,8 @@
 											<button type="button" class="pf-btn-new-group" onclick={startGroupCreate} title="New group">
 												<Plus size={14} />
 											</button>
-											{#if (groups?.profiles?.assignments?.[editingProfile.id] ?? "")}
-												<button type="button" class="pf-btn-new-group pf-btn-new-group--delete" onclick={() => { const g = groups?.profiles?.assignments?.[editingProfile.id]; if (g) { removeFromGroup(editingProfile.id); groupsStore.deleteGroup("profiles", g); } }} title="Delete group">
+											{#if editingProfile && (groups?.profiles?.assignments?.[editingProfile.id] ?? "")}
+												<button type="button" class="pf-btn-new-group pf-btn-new-group--delete" onclick={() => { if (!editingProfile) return; const g = groups?.profiles?.assignments?.[editingProfile.id]; if (g) { removeFromGroup(editingProfile.id); groupsStore.deleteGroup("profiles", g); } }} title="Delete group">
 													<Trash2 size={14} />
 												</button>
 											{/if}

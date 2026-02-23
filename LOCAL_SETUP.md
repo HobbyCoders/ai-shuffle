@@ -75,7 +75,7 @@ cd ..
 rm -rf app/static/_app && cp -r frontend/build/_app app/static/_app && cp frontend/build/index.html app/static/index.html
 
 # macOS/Linux:
-cp -r frontend/build app/static
+rm -rf app/static/_app && cp -r frontend/build/* app/static/
 ```
 
 ### 5. Authenticate Claude
@@ -155,7 +155,8 @@ claude --version
 cd frontend
 npm install
 npm run build
-cp -r build ../app/static
+cd ..
+rm -rf app/static/_app && cp -r frontend/build/* app/static/
 ```
 
 ### "Permission denied" on macOS/Linux
@@ -222,8 +223,8 @@ pip install -r requirements.txt
 cd frontend
 npm install
 npm run build
-cp -r build ../app/static
 cd ..
+rm -rf app/static/_app && cp -r frontend/build/* app/static/
 ```
 
 ## Security Notes

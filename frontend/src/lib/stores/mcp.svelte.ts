@@ -56,6 +56,7 @@ const initialState: McpState = {
 	globalServers: [],
 	projectServers: {
 		user: [],
+		installed: [],
 		local: [],
 		project: []
 	},

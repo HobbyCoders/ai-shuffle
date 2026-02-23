@@ -3,7 +3,7 @@
 	 * McpManagerCard - MCP Server management card for The Deck
 	 *
 	 * Two view modes (like ProfileCard):
-	 * - List view: Browse all globally available MCP servers with enable/disable toggles
+	 * - List view: Browse all globally available MCP servers (add/remove only)
 	 * - Form view: Add or edit an MCP server configuration (inline, not modal)
 	 */
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
@@ -17,7 +17,7 @@
 	} from '$lib/stores/mcp';
 	import type { McpServerInfo, McpServerType } from '$lib/api/mcp';
 	import { getServerTypeLabel, validateMcpServerConfig } from '$lib/api/mcp';
-	import { Server, AlertCircle, X, Plus, Search, Trash2, Check, Globe, Terminal, Zap, ToggleLeft, ToggleRight } from 'lucide-svelte';
+	import { Server, AlertCircle, X, Plus, Search, Trash2, Check, Globe, Terminal, Zap, Info } from 'lucide-svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -153,14 +153,6 @@
 			backToList();
 		} catch (e) {
 			console.error('Failed to save MCP server:', e);
-		}
-	}
-
-	async function handleToggle(server: McpServerInfo) {
-		try {
-			await mcp.toggleGlobalServer(server.name, !server.enabled);
-		} catch (e) {
-			console.error('Failed to toggle MCP server:', e);
 		}
 	}
 
@@ -399,6 +391,11 @@
 			</div>
 		{/if}
 
+		<div class="mcp-info-note">
+			<Info size={14} />
+			<span>Add and remove servers here. To enable or disable them per project, use the MCP tab in the Projects card.</span>
+		</div>
+
 		{#if filteredServers.length === 0}
 			<div class="card-empty-state">
 				{#if searchQuery}
@@ -436,13 +433,12 @@
 					{:else}
 						<div
 							class="fp-list-item"
-							class:mcp-disabled={server.builtin && !server.enabled}
 							onclick={() => { if (!server.builtin) openEditForm(server); }}
 							role="button"
 							tabindex="0"
 							onkeydown={(e) => e.key === 'Enter' && !server.builtin && openEditForm(server)}
 						>
-							<div class="fp-item-icon fp-item-icon--primary" class:fp-item-icon--muted={server.builtin && !server.enabled}>
+							<div class="fp-item-icon fp-item-icon--primary">
 								{#if server.type === 'stdio'}
 									<Terminal size={18} />
 								{:else if server.type === 'sse'}
@@ -461,9 +457,6 @@
 									</span>
 									{#if server.builtin}
 										<span class="mcp-builtin-badge">Built-in</span>
-										<span class="card-badge {server.enabled ? 'card-badge--success' : 'card-badge--muted'}">
-											{server.enabled ? 'Enabled' : 'Disabled'}
-										</span>
 									{/if}
 								</div>
 								{#if server.description}
@@ -480,20 +473,8 @@
 								</div>
 							</div>
 							<!-- Item actions -->
-							<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
-								{#if server.builtin}
-									<button
-										class="card-action-btn"
-										title={server.enabled ? 'Disable server' : 'Enable server'}
-										onclick={() => handleToggle(server)}
-									>
-										{#if server.enabled}
-											<ToggleRight size={16} />
-										{:else}
-											<ToggleLeft size={16} />
-										{/if}
-									</button>
-								{:else}
+							{#if !server.builtin}
+								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
 									<button
 										class="card-action-btn card-action-btn--destructive"
 										title="Delete"
@@ -501,8 +482,8 @@
 									>
 										<Trash2 size={16} />
 									</button>
-								{/if}
-							</div>
+								</div>
+							{/if}
 						</div>
 					{/if}
 				{/each}
@@ -547,11 +528,6 @@
 		border-radius: 4px;
 	}
 
-	/* Disabled server row */
-	.mcp-disabled {
-		opacity: 0.55;
-	}
-
 	/* Type badges */
 	.mcp-type-badge {
 		display: inline-flex;
@@ -590,8 +566,25 @@
 		color: var(--primary);
 	}
 
-	:global(.fp-item-icon--muted) {
-		opacity: 0.4;
+
+	/* Info note */
+	.mcp-info-note {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		padding: 10px 12px;
+		margin: 8px 16px 0;
+		border-radius: 8px;
+		background: color-mix(in oklch, var(--primary) 8%, transparent);
+		color: var(--muted-foreground);
+		font-size: 0.75rem;
+		line-height: 1.4;
+	}
+
+	.mcp-info-note :global(svg) {
+		flex-shrink: 0;
+		color: var(--primary);
+		margin-top: 1px;
 	}
 
 	/* ═══════════════════════════════════════════════════════════════════════════
@@ -727,9 +720,44 @@
 		background: color-mix(in oklch, var(--destructive) 10%, transparent);
 	}
 
-	/* Meta code styling */
+	/* Meta code styling — truncate long paths */
+	:global(.fp-meta-chip) {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		max-width: 100%;
+	}
+
 	:global(.fp-meta-chip code) {
 		font-family: var(--font-mono, monospace);
 		font-size: 0.6875rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	/* Constrain meta row to parent width so truncation works */
+	:global(.fp-item-meta) {
+		overflow: hidden;
+		min-width: 0;
+	}
+
+	/* Mobile: actions on centered bottom row */
+	@media (max-width: 639px) {
+		:global(.fp-list-item) {
+			flex-wrap: wrap;
+		}
+
+		:global(.fp-item-actions) {
+			flex: 1 0 100%;
+			justify-content: center;
+			padding-top: var(--space-2, 8px);
+			border-top: 1px solid var(--border-subtle);
+			margin-top: var(--space-1, 4px);
+		}
+
+		:global(.fp-item-content) {
+			min-width: 0;
+			overflow: hidden;
+		}
 	}
 </style>

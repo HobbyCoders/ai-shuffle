@@ -903,6 +903,15 @@ export const activeSession = {
 		}
 
 		// Normal path (not currently streaming)
+
+		// Clear the __reject_all__ sentinel that newChat() sets. Without this,
+		// session_created and start events from the backend are rejected by the
+		// guard condition, so sessionId never gets set, polling never starts,
+		// and the UI shows the user message with a stuck stop button.
+		if (internal.expectedSessionId === '__reject_all__') {
+			internal.expectedSessionId = null;
+		}
+
 		_update(s => ({
 			...s,
 			messages: [...s.messages, {

@@ -545,4 +545,37 @@
 		gap: var(--space-1, 4px);
 		flex-shrink: 0;
 	}
+
+	/* Truncate long paths/URLs */
+	.meta-chip {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		max-width: 100%;
+	}
+
+	.meta-chip code {
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.server-meta {
+		overflow: hidden;
+		min-width: 0;
+	}
+
+	/* Mobile: actions on centered bottom row */
+	@media (max-width: 639px) {
+		.server-item {
+			flex-wrap: wrap;
+		}
+
+		.server-actions {
+			flex: 1 0 100%;
+			justify-content: center;
+			padding-top: var(--space-2, 8px);
+			border-top: 1px solid var(--border-subtle, color-mix(in oklch, var(--border) 60%, transparent));
+			margin-top: var(--space-1, 4px);
+		}
+	}
 </style>

@@ -638,9 +638,7 @@
 		{:else if $activeView.type === 'profile'}
 			<!-- Embedded: uses FeaturePageLayout with its own header -->
 			<div class="feature-panel">
-				<ProfileCard
-					onOpenPlugins={onOpenPlugins || (() => {})}
-				/>
+				<ProfileCard />
 			</div>
 		{:else if $activeView.type === 'project'}
 			<!-- Embedded: uses FeaturePageLayout with its own header -->
