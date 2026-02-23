@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
+from app.core.project_utils import get_project_working_dir_as_path
 from app.core.mcp_service import (
     get_mcp_service,
     McpScope,
@@ -78,6 +79,7 @@ class ProjectMcpServerCreateRequest(McpServerCreateRequest):
 class McpServersResponse(BaseModel):
     """Response containing all MCP servers grouped by scope"""
     user: List[McpServerResponse] = []
+    installed: List[McpServerResponse] = []
     local: List[McpServerResponse] = []
     project: List[McpServerResponse] = []
     total_count: int = 0
@@ -169,8 +171,8 @@ def _validate_project_access(request: Request, project_id: str) -> dict:
 
 
 def _get_project_path(project: dict) -> Path:
-    """Get the filesystem path for a project"""
-    return Path(project["path"])
+    """Get the resolved filesystem path for a project"""
+    return get_project_working_dir_as_path(project)
 
 
 def _parse_scope(scope_str: str) -> McpScope:
@@ -388,10 +390,11 @@ async def list_project_mcp_servers(
 
         response = McpServersResponse(
             user=[_server_to_response(s) for s in all_servers.get("user", [])],
+            installed=[_server_to_response(s) for s in all_servers.get("installed", [])],
             local=[_server_to_response(s) for s in all_servers.get("local", [])],
             project=[_server_to_response(s) for s in all_servers.get("project", [])],
         )
-        response.total_count = len(response.user) + len(response.local) + len(response.project)
+        response.total_count = len(response.user) + len(response.installed) + len(response.local) + len(response.project)
         return response
 
     except HTTPException:
@@ -415,14 +418,12 @@ async def add_project_mcp_server(
     http_request: Request,
     token: str = Depends(require_admin)
 ):
-    """Add an MCP server to a project (LOCAL or PROJECT scope) - Admin only"""
+    """Add an MCP server to a project (LOCAL, PROJECT, or INSTALLED scope) - Admin only"""
     try:
         project = _validate_project_access(http_request, project_id)
         project_path = _get_project_path(project)
 
-        # Parse scope
-        scope = _parse_scope(request.scope)
-        if scope == McpScope.USER:
+        if request.scope == "user":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Use /mcp/servers endpoint for USER scope"
@@ -441,8 +442,12 @@ async def add_project_mcp_server(
                 detail="; ".join(errors)
             )
 
-        # Add server
-        server = service.add_server(request.name, config, scope)
+        # Add server — installed scope uses a different method
+        if request.scope == "installed":
+            server = service.add_project_installed_server(request.name, config)
+        else:
+            scope = _parse_scope(request.scope)
+            server = service.add_server(request.name, config, scope)
         return _server_to_response(server)
 
     except ValueError as e:
@@ -474,8 +479,7 @@ async def update_project_mcp_server(
         project = _validate_project_access(http_request, project_id)
         project_path = _get_project_path(project)
 
-        mcp_scope = _parse_scope(scope)
-        if mcp_scope == McpScope.USER:
+        if scope == "user":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Use /mcp/servers endpoint for USER scope"
@@ -484,7 +488,12 @@ async def update_project_mcp_server(
         service = get_mcp_service(project_path)
 
         # Get existing server
-        existing = service.get_server(server_name, mcp_scope)
+        if scope == "installed":
+            installed = service.get_project_installed_servers()
+            existing = next((s for s in installed if s.name == server_name), None)
+        else:
+            mcp_scope = _parse_scope(scope)
+            existing = service.get_server(server_name, mcp_scope)
         if not existing:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -522,8 +531,12 @@ async def update_project_mcp_server(
                 detail="; ".join(errors)
             )
 
-        # Update
-        server = service.update_server(server_name, updated, mcp_scope)
+        # Update — installed scope needs special handling
+        if scope == "installed":
+            service.remove_project_installed_server(server_name)
+            server = service.add_project_installed_server(server_name, updated)
+        else:
+            server = service.update_server(server_name, updated, mcp_scope)
         return _server_to_response(server)
 
     except ValueError as e:
@@ -552,20 +565,26 @@ async def remove_project_mcp_server(
     scope: str = "local",
     token: str = Depends(require_admin)
 ):
-    """Remove a project-scoped MCP server - Admin only"""
+    """Remove an MCP server from a project scope - Admin only
+
+    Supports scope: local, project, installed, user.
+    - installed: removes from ~/.claude.json projects[path].mcpServers
+    - user: removes from ~/.claude.json root mcpServers (global)
+    - local/project: removes from .claude/.mcp.json or .mcp.json
+    """
     try:
         project = _validate_project_access(http_request, project_id)
         project_path = _get_project_path(project)
 
-        mcp_scope = _parse_scope(scope)
-        if mcp_scope == McpScope.USER:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Use /mcp/servers endpoint for USER scope"
-            )
-
         service = get_mcp_service(project_path)
-        service.remove_server(server_name, mcp_scope)
+
+        if scope == "installed":
+            service.remove_project_installed_server(server_name)
+        elif scope == "user":
+            service.remove_server(server_name, McpScope.USER)
+        else:
+            mcp_scope = _parse_scope(scope)
+            service.remove_server(server_name, mcp_scope)
 
     except ValueError as e:
         raise HTTPException(
@@ -579,6 +598,57 @@ async def remove_project_mcp_server(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to remove MCP server"
+        )
+
+
+@router.patch(
+    "/projects/{project_id}/mcp/servers/{server_name}/toggle",
+    response_model=McpServerResponse
+)
+async def toggle_project_mcp_server(
+    project_id: str,
+    server_name: str,
+    request: McpServerToggleRequest,
+    http_request: Request,
+    token: str = Depends(require_admin)
+):
+    """Toggle an MCP server enabled/disabled for a project - Admin only
+
+    Writes to ~/.claude.json projects[path].disabledMcpServers.
+    This is the per-project disable mechanism that Claude Code uses.
+    """
+    try:
+        project = _validate_project_access(http_request, project_id)
+        project_path = _get_project_path(project)
+
+        service = get_mcp_service(project_path)
+        service.set_project_server_enabled(server_name, request.enabled)
+
+        # Return updated server info — check all scopes
+        server = service.get_server(server_name, McpScope.USER)
+        if not server:
+            # Check installed servers
+            installed = service.get_project_installed_servers()
+            server = next((s for s in installed if s.name == server_name), None)
+        if not server:
+            server = service.get_server(server_name, McpScope.LOCAL)
+        if not server:
+            server = service.get_server(server_name, McpScope.PROJECT)
+        if not server:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"MCP server not found: {server_name}"
+            )
+
+        return _server_to_response(server)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to toggle project MCP server")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to toggle MCP server"
         )
 
 

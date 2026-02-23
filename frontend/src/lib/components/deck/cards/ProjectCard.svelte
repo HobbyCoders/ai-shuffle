@@ -5,9 +5,10 @@
 	 * Features:
 	 * - Project list with name, path display
 	 * - Click project to view detail with tabs:
-	 *   - Plugins (LOCAL and PROJECT scope)
-	 *   - Agents (file-based in .claude/agents/)
-	 *   - Hooks (project-scoped custom hooks)
+	 *   - General (name edit, ID, path, group assignment)
+	 *   - MCP Servers (local and project scope)
+	 *   - Agents (read-only list from .claude/agents/)
+	 *   - Hooks (read-only list with toggle/test/delete)
 	 * - Group badge display
 	 * - Delete with inline confirmation
 	 * - Add project via shared modal with directory browser
@@ -15,9 +16,9 @@
 	 */
 	import { appData as tabs, projects } from '$lib/stores/app-data';
 	import { groups } from '$lib/stores/groups';
-	import { Search, Plus, Trash2, FolderOpen, X, ChevronLeft, Package, Bot, Zap, MessageSquare } from 'lucide-svelte';
-	import GroupDropdown from '$lib/components/GroupDropdown.svelte';
-	import ProjectPluginsTab from './ProjectPluginsTab.svelte';
+	import { Search, Plus, Trash2, FolderOpen, X, Settings, Server, Bot, Zap, MessageSquare } from 'lucide-svelte';
+	import ProjectGeneralTab from './ProjectGeneralTab.svelte';
+	import ProjectMcpTab from './ProjectMcpTab.svelte';
 	import ProjectAgentsTab from './ProjectAgentsTab.svelte';
 	import ProjectHooksTab from './ProjectHooksTab.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
@@ -38,8 +39,8 @@
 	let selectedProjectId = $state<string | null>(null);
 
 	// Detail view tab
-	type DetailTab = 'plugins' | 'agents' | 'hooks';
-	let activeTab = $state<DetailTab>('plugins');
+	type DetailTab = 'general' | 'mcp' | 'agents' | 'hooks';
+	let activeTab = $state<DetailTab>('general');
 
 	// Add project modal state
 	let showAddModal = $state(false);
@@ -73,7 +74,7 @@
 	function handleProjectClick(projectId: string) {
 		selectedProjectId = projectId;
 		viewMode = 'detail';
-		activeTab = 'plugins';
+		activeTab = 'general';
 	}
 
 	// Back to list view
@@ -161,8 +162,11 @@
 		>
 			{#snippet headerTabs()}
 				<div class="fp-tab-bar">
-					<button class="fp-tab" class:active={activeTab === 'plugins'} onclick={() => (activeTab = 'plugins')}>
-						<Package size={14} /> Plugins
+					<button class="fp-tab" class:active={activeTab === 'general'} onclick={() => (activeTab = 'general')}>
+						<Settings size={14} /> General
+					</button>
+					<button class="fp-tab" class:active={activeTab === 'mcp'} onclick={() => (activeTab = 'mcp')}>
+						<Server size={14} /> MCP Servers
 					</button>
 					<button class="fp-tab" class:active={activeTab === 'agents'} onclick={() => (activeTab = 'agents')}>
 						<Bot size={14} /> Agents
@@ -173,8 +177,10 @@
 				</div>
 			{/snippet}
 
-			{#if activeTab === 'plugins'}
-				<ProjectPluginsTab projectId={selectedProject.id} />
+			{#if activeTab === 'general'}
+				<ProjectGeneralTab projectId={selectedProject.id} />
+			{:else if activeTab === 'mcp'}
+				<ProjectMcpTab projectId={selectedProject.id} />
 			{:else if activeTab === 'agents'}
 				<ProjectAgentsTab projectId={selectedProject.id} />
 			{:else if activeTab === 'hooks'}
@@ -260,7 +266,6 @@
 									</div>
 								</div>
 								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
-									<GroupDropdown entityType="projects" entityId={project.id} />
 									<button
 										class="fp-action-btn fp-action-btn--destructive"
 										onclick={(e) => { e.stopPropagation(); deletingId = project.id; }}

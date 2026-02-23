@@ -14,7 +14,7 @@ import { api } from './client';
 // ============================================================================
 
 export type McpServerType = 'stdio' | 'sse' | 'http';
-export type McpScope = 'user' | 'local' | 'project';
+export type McpScope = 'user' | 'local' | 'project' | 'installed';
 
 export interface McpServerInfo {
 	name: string;
@@ -32,6 +32,7 @@ export interface McpServerInfo {
 
 export interface McpServersResponse {
 	user: McpServerInfo[];
+	installed: McpServerInfo[];
 	local: McpServerInfo[];
 	project: McpServerInfo[];
 	total_count: number;
@@ -59,7 +60,7 @@ export interface CreateMcpServerRequest {
 }
 
 export interface CreateProjectMcpServerRequest extends CreateMcpServerRequest {
-	scope: 'local' | 'project';
+	scope: 'installed' | 'local' | 'project';
 }
 
 export interface UpdateMcpServerRequest {
@@ -132,6 +133,21 @@ export async function getProjectMcpServers(projectId: string): Promise<McpServer
 }
 
 /**
+ * Toggle an MCP server enabled/disabled for a project
+ * Writes to ~/.claude.json projects[path].disabledMcpServers
+ */
+export async function toggleProjectMcpServer(
+	projectId: string,
+	serverName: string,
+	enabled: boolean
+): Promise<McpServerInfo> {
+	return api.patch<McpServerInfo>(
+		`/projects/${projectId}/mcp/servers/${encodeURIComponent(serverName)}/toggle`,
+		{ enabled }
+	);
+}
+
+/**
  * Add an MCP server to a project (LOCAL or PROJECT scope)
  */
 export async function addProjectMcpServer(
@@ -148,7 +164,7 @@ export async function updateProjectMcpServer(
 	projectId: string,
 	serverName: string,
 	request: UpdateMcpServerRequest,
-	scope: 'local' | 'project' = 'local'
+	scope: 'installed' | 'local' | 'project' = 'local'
 ): Promise<McpServerInfo> {
 	return api.put<McpServerInfo>(
 		`/projects/${projectId}/mcp/servers/${encodeURIComponent(serverName)}?scope=${scope}`,
@@ -162,7 +178,7 @@ export async function updateProjectMcpServer(
 export async function removeProjectMcpServer(
 	projectId: string,
 	serverName: string,
-	scope: 'local' | 'project' = 'local'
+	scope: 'user' | 'installed' | 'local' | 'project' = 'local'
 ): Promise<void> {
 	await api.delete(
 		`/projects/${projectId}/mcp/servers/${encodeURIComponent(serverName)}?scope=${scope}`

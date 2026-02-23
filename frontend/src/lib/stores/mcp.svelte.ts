@@ -33,6 +33,7 @@ export interface McpState {
 	// Project servers by scope
 	projectServers: {
 		user: McpServerInfo[];
+		installed: McpServerInfo[];
 		local: McpServerInfo[];
 		project: McpServerInfo[];
 	};
@@ -80,7 +81,7 @@ function extractError(e: unknown, fallback: string): string {
 // Reactive State
 // ============================================================================
 
-let _state = $state<McpState>({ ...initialState, projectServers: { user: [], local: [], project: [] } });
+let _state = $state<McpState>({ ...initialState, projectServers: { user: [], installed: [], local: [], project: [] } });
 
 // ============================================================================
 // Subscribe Shim
@@ -236,6 +237,7 @@ export const mcp = {
 				...state,
 				projectServers: {
 					user: response.user,
+					installed: response.installed || [],
 					local: response.local,
 					project: response.project
 				},
@@ -260,7 +262,7 @@ export const mcp = {
 		try {
 			const server = await mcpApi.addProjectMcpServer(projectId, config);
 			_update((state) => {
-				const scope = config.scope as 'local' | 'project';
+				const scope = config.scope as 'installed' | 'local' | 'project';
 				return {
 					...state,
 					projectServers: {
@@ -285,7 +287,7 @@ export const mcp = {
 		projectId: string,
 		serverName: string,
 		config: UpdateMcpServerRequest,
-		scope: 'local' | 'project'
+		scope: 'installed' | 'local' | 'project'
 	): Promise<McpServerInfo> {
 		_update((state) => ({ ...state, loading: true, error: null }));
 
@@ -315,23 +317,53 @@ export const mcp = {
 	async removeProjectServer(
 		projectId: string,
 		serverName: string,
-		scope: 'local' | 'project'
+		scope: 'user' | 'installed' | 'local' | 'project'
 	): Promise<void> {
 		_update((state) => ({ ...state, loading: true, error: null }));
 
 		try {
 			await mcpApi.removeProjectMcpServer(projectId, serverName, scope);
-			_update((state) => ({
-				...state,
-				projectServers: {
-					...state.projectServers,
-					[scope]: state.projectServers[scope].filter((s) => s.name !== serverName)
-				},
-				loading: false
-			}));
+			if (scope === 'user') {
+				// Global server removed — also remove from globalServers and reload project servers
+				_update((state) => ({
+					...state,
+					globalServers: state.globalServers.filter((s) => s.name !== serverName),
+					loading: false
+				}));
+				await mcp.loadProjectServers(projectId);
+			} else {
+				_update((state) => ({
+					...state,
+					projectServers: {
+						...state.projectServers,
+						[scope]: state.projectServers[scope].filter((s) => s.name !== serverName)
+					},
+					loading: false
+				}));
+			}
 		} catch (e) {
 			const error = e instanceof Error ? e.message : 'Failed to remove MCP server';
 			_update((state) => ({ ...state, error, loading: false }));
+			throw e;
+		}
+	},
+
+	/**
+	 * Toggle an MCP server enabled/disabled for a project.
+	 * Writes to ~/.claude.json projects[path].disabledMcpServers.
+	 */
+	async toggleProjectServer(
+		projectId: string,
+		serverName: string,
+		enabled: boolean
+	): Promise<void> {
+		try {
+			await mcpApi.toggleProjectMcpServer(projectId, serverName, enabled);
+			// Reload project servers to get updated enabled state
+			await mcp.loadProjectServers(projectId);
+		} catch (e) {
+			const error = extractError(e, 'Failed to toggle MCP server');
+			_update((state) => ({ ...state, error }));
 			throw e;
 		}
 	},
@@ -384,7 +416,7 @@ export const mcp = {
 	 * Reset store to initial state
 	 */
 	reset(): void {
-		_state = { ...initialState, projectServers: { user: [], local: [], project: [] } };
+		_state = { ...initialState, projectServers: { user: [], installed: [], local: [], project: [] } };
 		_notifySubscribers();
 	},
 
@@ -426,8 +458,9 @@ export const globalMcpServers = createDerived(() => _state.globalServers);
 // Project servers by scope
 export const projectMcpServers = createDerived(() => _state.projectServers);
 
-// All project servers (local + project scope, excludes user since that's shown separately)
+// All project servers (installed + local + project scope, excludes user since that's shown separately)
 export const allProjectMcpServers = createDerived(() => [
+	...(_state.projectServers.installed || []),
 	...(_state.projectServers.local || []),
 	...(_state.projectServers.project || [])
 ]);
@@ -460,6 +493,7 @@ export const mcpError = createDerived(() => _state.error);
 export const totalMcpServerCount = createDerived(() => {
 	return (
 		_state.globalServers.length +
+		(_state.projectServers.installed?.length || 0) +
 		(_state.projectServers.local?.length || 0) +
 		(_state.projectServers.project?.length || 0)
 	);
@@ -468,6 +502,7 @@ export const totalMcpServerCount = createDerived(() => {
 // Stats for display
 export const mcpDisplayStats = createDerived(() => ({
 	globalCount: _state.globalServers.length,
+	installedCount: _state.projectServers.installed?.length || 0,
 	localCount: _state.projectServers.local?.length || 0,
 	projectCount: _state.projectServers.project?.length || 0,
 	toolCount: _state.tools.length

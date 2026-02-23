@@ -1,11 +1,10 @@
 <script lang="ts">
 	/**
-	 * ProjectHooksTab - Hook management tab for project detail view
+	 * ProjectHooksTab - Hook list tab for project detail view
 	 *
-	 * Embeds hook functionality without needing project/profile selectors.
-	 * Reuses hooks store and existing hook components.
+	 * Read-only list of custom and plugin hooks.
+	 * Supports toggle, test, and delete for custom hooks.
 	 */
-	import { onMount } from 'svelte';
 	import {
 		hooks,
 		projectHooks,
@@ -16,11 +15,10 @@
 		hookSaving,
 		hookStats
 	} from '$lib/stores/hooks';
-	import type { Hook, HookCreate, HookUpdate, HookTestResult } from '$lib/api/client';
+	import type { Hook, HookUpdate, HookTestResult } from '$lib/api/client';
 	import HookListItem from '$lib/components/hooks/HookListItem.svelte';
-	import HookForm from '$lib/components/hooks/HookForm.svelte';
 	import PluginHookItem from '$lib/components/hooks/PluginHookItem.svelte';
-	import { Search, X, Loader2, Zap, Plus, Package } from 'lucide-svelte';
+	import { Search, X, Loader2, Zap, Package } from 'lucide-svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -33,11 +31,6 @@
 	type Tab = 'custom' | 'plugins';
 	let activeTab = $state<Tab>('custom');
 	let searchQuery = $state('');
-
-	// Form state
-	let showForm = $state(false);
-	let editingHook = $state<Hook | null>(null);
-	let formSaving = $state(false);
 
 	// Test result
 	let testResult = $state<{ hookId: string; result: HookTestResult } | null>(null);
@@ -80,26 +73,6 @@
 		return items;
 	});
 
-	// Handle hook save (create or update)
-	async function handleSaveHook(data: HookCreate | HookUpdate) {
-		formSaving = true;
-		try {
-			if (editingHook) {
-				// Update existing hook
-				await hooks.updateHook(editingHook.id, data as HookUpdate);
-			} else {
-				// Create new hook
-				await hooks.createHook(projectId, data as HookCreate);
-			}
-			showForm = false;
-			editingHook = null;
-		} catch (e) {
-			console.error('Failed to save hook:', e);
-		} finally {
-			formSaving = false;
-		}
-	}
-
 	// Handle hook deletion
 	async function handleDeleteHook(hookId: string) {
 		try {
@@ -123,7 +96,6 @@
 		try {
 			const result = await hooks.testHook(hookId);
 			testResult = { hookId, result };
-			// Auto-clear after 5 seconds
 			setTimeout(() => {
 				if (testResult?.hookId === hookId) {
 					testResult = null;
@@ -132,18 +104,6 @@
 		} catch (e) {
 			console.error('Failed to test hook:', e);
 		}
-	}
-
-	// Open edit form
-	function handleEdit(hook: Hook) {
-		editingHook = hook;
-		showForm = true;
-	}
-
-	// Cancel form
-	function handleCancelForm() {
-		showForm = false;
-		editingHook = null;
 	}
 </script>
 
@@ -159,16 +119,6 @@
 			<button onclick={() => hooks.clearError()}>
 				<X class="w-4 h-4" />
 			</button>
-		</div>
-	{:else if showForm}
-		<!-- Hook Form -->
-		<div class="form-container">
-			<HookForm
-				hook={editingHook}
-				onSave={handleSaveHook}
-				onCancel={handleCancelForm}
-				saving={formSaving}
-			/>
 		</div>
 	{:else}
 		<!-- Tabs -->
@@ -216,9 +166,9 @@
 		{#if testResult}
 			<div class="test-toast" class:success={testResult.result.success} class:error={!testResult.result.success}>
 				{#if testResult.result.success}
-					<span>✓ Test passed ({testResult.result.duration_ms}ms)</span>
+					<span>Test passed ({testResult.result.duration_ms}ms)</span>
 				{:else}
-					<span>✗ Test failed: {testResult.result.error}</span>
+					<span>Test failed: {testResult.result.error}</span>
 				{/if}
 				<button onclick={() => (testResult = null)}>
 					<X class="w-4 h-4" />
@@ -234,7 +184,7 @@
 						<Zap class="card-empty-icon" />
 						<p class="card-empty-title">No custom hooks</p>
 						<p class="card-empty-description">
-							Create hooks to automate actions on tool use events.
+							Create hooks from the Hooks card to automate actions on tool use events.
 						</p>
 					</div>
 				{:else}
@@ -243,7 +193,7 @@
 							{hook}
 							testing={$hookTesting[hook.id] || false}
 							saving={$hookSaving[hook.id] || false}
-							onEdit={() => handleEdit(hook)}
+							onEdit={() => {}}
 							onDelete={() => handleDeleteHook(hook.id)}
 							onToggle={() => handleToggleHook(hook.id, !hook.enabled)}
 							onTest={() => handleTestHook(hook.id)}
@@ -266,18 +216,6 @@
 				{/if}
 			{/if}
 		</div>
-
-		<!-- Footer -->
-		{#if activeTab === 'custom'}
-			<div class="card-footer">
-				<div class="card-footer-content">
-					<button onclick={() => (showForm = true)} class="card-btn-primary" title="New Hook">
-						<Plus />
-						<span class="hidden sm:inline">New Hook</span>
-					</button>
-				</div>
-			</div>
-		{/if}
 	{/if}
 </div>
 
@@ -345,12 +283,6 @@
 		gap: var(--space-2);
 	}
 
-	.form-container {
-		flex: 1;
-		overflow-y: auto;
-		padding: var(--space-4);
-	}
-
 	.test-toast {
 		display: flex;
 		align-items: center;
@@ -380,11 +312,7 @@
 	}
 
 	@keyframes spin {
-		from {
-			transform: rotate(0deg);
-		}
-		to {
-			transform: rotate(360deg);
-		}
+		from { transform: rotate(0deg); }
+		to { transform: rotate(360deg); }
 	}
 </style>

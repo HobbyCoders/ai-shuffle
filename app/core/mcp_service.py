@@ -278,6 +278,193 @@ class McpService:
         data = self._read_json_file(self.SETTINGS_FILE, {})
         return data.get("disabledMcpServers", [])
 
+    def get_project_disabled_servers(self) -> List[str]:
+        """
+        Get the list of disabled MCP server names for this project.
+
+        Reads from ~/.claude.json → projects[project_path].disabledMcpServers.
+        This is the per-project disable list that Claude Code uses.
+
+        Returns:
+            List of disabled server names for this project
+        """
+        if not self.project_dir:
+            return []
+
+        data = self._read_json_file(self.USER_MCP_FILE, {})
+        projects = data.get("projects", {})
+
+        # Try both forward-slash and original path formats
+        project_path_str = str(self.project_dir).replace("\\", "/")
+        project_data = projects.get(project_path_str)
+        if project_data is None:
+            # Try original OS path format
+            project_data = projects.get(str(self.project_dir))
+        if project_data is None:
+            return []
+
+        return project_data.get("disabledMcpServers", [])
+
+    def set_project_server_enabled(self, name: str, enabled: bool) -> bool:
+        """
+        Enable or disable an MCP server for this project.
+
+        Writes to ~/.claude.json → projects[project_path].disabledMcpServers.
+
+        Args:
+            name: Server name
+            enabled: True to enable, False to disable
+
+        Returns:
+            True if successful
+        """
+        if not self.project_dir:
+            raise ValueError("No project directory set")
+
+        data = self._read_json_file(self.USER_MCP_FILE, {})
+        projects = data.get("projects", {})
+
+        # Find the project entry (try forward-slash then OS path)
+        project_path_str = str(self.project_dir).replace("\\", "/")
+        project_key = None
+        if project_path_str in projects:
+            project_key = project_path_str
+        elif str(self.project_dir) in projects:
+            project_key = str(self.project_dir)
+
+        if project_key is None:
+            # Create project entry if it doesn't exist
+            project_key = project_path_str
+            projects[project_key] = {}
+
+        disabled = projects[project_key].get("disabledMcpServers", [])
+
+        if enabled:
+            disabled = [s for s in disabled if s != name]
+        else:
+            if name not in disabled:
+                disabled.append(name)
+
+        projects[project_key]["disabledMcpServers"] = disabled
+        data["projects"] = projects
+        return self._write_json_file(self.USER_MCP_FILE, data)
+
+    def _find_project_entry(self, data: Dict[str, Any]) -> tuple:
+        """
+        Find the project entry in ~/.claude.json projects dict.
+
+        Returns:
+            (project_key, project_data) or (None, None) if not found.
+        """
+        projects = data.get("projects", {})
+        project_path_str = str(self.project_dir).replace("\\", "/")
+        project_data = projects.get(project_path_str)
+        if project_data is not None:
+            return project_path_str, project_data
+        project_data = projects.get(str(self.project_dir))
+        if project_data is not None:
+            return str(self.project_dir), project_data
+        return None, None
+
+    def _ensure_project_entry(self, data: Dict[str, Any]) -> str:
+        """
+        Find or create the project entry in ~/.claude.json.
+
+        Returns:
+            The project key used in the projects dict.
+        """
+        if "projects" not in data:
+            data["projects"] = {}
+        project_key, _ = self._find_project_entry(data)
+        if project_key is None:
+            project_key = str(self.project_dir).replace("\\", "/")
+            data["projects"][project_key] = {}
+        return project_key
+
+    def get_project_installed_servers(self) -> List[McpServerConfig]:
+        """
+        Get MCP servers installed for this project.
+
+        Reads from ~/.claude.json → projects[project_path].mcpServers.
+        These are per-project installed MCPs managed by Claude Code.
+
+        Returns:
+            List of installed MCP server configurations
+        """
+        if not self.project_dir:
+            return []
+
+        data = self._read_json_file(self.USER_MCP_FILE, {})
+        _, project_data = self._find_project_entry(data)
+        if project_data is None:
+            return []
+
+        mcp_servers = project_data.get("mcpServers", {})
+        disabled = project_data.get("disabledMcpServers", [])
+        servers = []
+        for name, config in mcp_servers.items():
+            try:
+                server = McpServerConfig.from_mcp_json(name, config, "installed")
+                if name in disabled:
+                    server.enabled = False
+                servers.append(server)
+            except Exception as e:
+                logger.error(f"Error parsing installed MCP server {name}: {e}")
+
+        return servers
+
+    def add_project_installed_server(self, name: str, config: McpServerConfig) -> McpServerConfig:
+        """
+        Add an MCP server to this project's installed servers.
+
+        Writes to ~/.claude.json → projects[project_path].mcpServers[name].
+        """
+        if not self.project_dir:
+            raise ValueError("No project directory set")
+
+        data = self._read_json_file(self.USER_MCP_FILE, {})
+        project_key = self._ensure_project_entry(data)
+
+        if "mcpServers" not in data["projects"][project_key]:
+            data["projects"][project_key]["mcpServers"] = {}
+
+        if name in data["projects"][project_key]["mcpServers"]:
+            raise ValueError(f"MCP server '{name}' already exists in installed scope")
+
+        config.name = name
+        config.scope = "installed"
+        data["projects"][project_key]["mcpServers"][name] = config.to_mcp_json_format()
+
+        if not self._write_json_file(self.USER_MCP_FILE, data):
+            raise RuntimeError("Failed to write installed MCP server")
+
+        return config
+
+    def remove_project_installed_server(self, name: str) -> bool:
+        """
+        Remove an MCP server from this project's installed servers.
+
+        Removes from ~/.claude.json → projects[project_path].mcpServers[name].
+        """
+        if not self.project_dir:
+            raise ValueError("No project directory set")
+
+        data = self._read_json_file(self.USER_MCP_FILE, {})
+        project_key, project_data = self._find_project_entry(data)
+        if project_key is None or project_data is None:
+            raise ValueError(f"Project not found in ~/.claude.json")
+
+        mcp_servers = project_data.get("mcpServers", {})
+        if name not in mcp_servers:
+            raise ValueError(f"MCP server '{name}' not found in installed scope")
+
+        del data["projects"][project_key]["mcpServers"][name]
+
+        if not self._write_json_file(self.USER_MCP_FILE, data):
+            raise RuntimeError("Failed to remove installed MCP server")
+
+        return True
+
     def set_server_enabled(self, name: str, enabled: bool) -> bool:
         """
         Enable or disable a built-in MCP server via settings.json.
@@ -325,7 +512,13 @@ class McpService:
         mcp_servers = data.get("mcpServers", {})
 
         # Get disabled list for USER scope
-        disabled = self.get_disabled_servers() if scope == McpScope.USER else []
+        # Per-project disabled list takes priority if we have a project context
+        if scope == McpScope.USER and self.project_dir:
+            disabled = self.get_project_disabled_servers()
+        elif scope == McpScope.USER:
+            disabled = self.get_disabled_servers()
+        else:
+            disabled = []
 
         servers = []
         for name, config in mcp_servers.items():
@@ -353,6 +546,7 @@ class McpService:
 
         # Include project scopes if available
         if self.project_dir:
+            result["installed"] = self.get_project_installed_servers()
             result["local"] = self.get_servers_for_scope(McpScope.LOCAL)
             result["project"] = self.get_servers_for_scope(McpScope.PROJECT)
 

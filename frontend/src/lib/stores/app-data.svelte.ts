@@ -271,6 +271,11 @@ export const appData = {
 		await appData.loadProjects();
 	},
 
+	async updateProject(projectId: string, data: { name?: string; description?: string }) {
+		await api.put(`/projects/${projectId}`, data);
+		await appData.loadProjects();
+	},
+
 	async deleteProject(projectId: string) {
 		await api.delete(`/projects/${projectId}`);
 		await appData.loadProjects();
