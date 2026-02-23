@@ -16,6 +16,7 @@ and enabling/disabling plugins.
 
 import json
 import logging
+import re
 import stat
 import subprocess
 import shutil
@@ -496,6 +497,43 @@ class PluginService:
             "has_mcp": "mcpServers" in entry,
         }
 
+    @staticmethod
+    def _fetch_github_readme(marketplace_path: str) -> Optional[str]:
+        """Try to fetch README.md from a GitHub repo URL stored in marketplace_path.
+
+        marketplace_path for external sources is a JSON-serialized source dict like:
+            {"source": "url", "url": "https://github.com/user/repo.git"}
+        """
+        import httpx
+
+        try:
+            source = json.loads(marketplace_path)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        url = source.get("url", "") if isinstance(source, dict) else ""
+        if not url:
+            return None
+
+        # Extract GitHub owner/repo from URL, stripping .git suffix
+        match = re.match(r'https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$', url)
+        if not match:
+            return None
+
+        owner, repo = match.group(1), match.group(2)
+
+        # Try fetching raw README from common default branches
+        for branch in ("main", "master"):
+            raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/README.md"
+            try:
+                resp = httpx.get(raw_url, timeout=5, follow_redirects=True)
+                if resp.status_code == 200:
+                    return resp.text
+            except httpx.HTTPError:
+                continue
+
+        return None
+
     def get_available_plugins(self, marketplace: Optional[str] = None) -> List[AvailablePlugin]:
         """
         Get all available plugins from marketplaces.
@@ -816,13 +854,36 @@ class PluginService:
         if not plugin:
             return None
 
-        plugin_path = Path(plugin.marketplace_path)
-        if not plugin_path.exists():
-            return None
-
         parts = plugin_id.rsplit("@", 1)
         name = parts[0]
         marketplace = parts[1] if len(parts) > 1 else "unknown"
+
+        plugin_path = Path(plugin.marketplace_path)
+        if not plugin_path.exists():
+            # External source (github/url/npm/pip) — no local directory to scan.
+            # Try to fetch README from GitHub if the source is a GitHub URL.
+            readme = self._fetch_github_readme(plugin.marketplace_path)
+
+            return PluginDetails(
+                id=plugin_id,
+                name=name,
+                marketplace=marketplace,
+                description=plugin.description,
+                version="available",
+                scope="marketplace",
+                install_path=plugin.marketplace_path,
+                installed_at=None,
+                enabled=False,
+                has_commands=plugin.has_commands,
+                has_agents=plugin.has_agents,
+                has_skills=plugin.has_skills,
+                has_hooks=plugin.has_hooks,
+                has_mcp=plugin.has_mcp,
+                commands=[],
+                agents=[],
+                skills=[],
+                readme=readme
+            )
 
         # Collect commands
         commands = []
