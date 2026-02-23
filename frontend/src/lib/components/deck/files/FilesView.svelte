@@ -1403,17 +1403,13 @@
 		border-radius: 0.375rem;
 		color: var(--muted-foreground);
 		cursor: pointer;
-		opacity: 0;
+		opacity: 1;
 		transition: all 0.15s ease;
 	}
 
 	.file-menu :global(svg) {
 		width: 1rem;
 		height: 1rem;
-	}
-
-	.file-card:hover .file-menu {
-		opacity: 1;
 	}
 
 	.file-menu:hover {
@@ -1569,7 +1565,7 @@
 		border: none;
 		border-radius: 0.5rem;
 		font-size: 0.875rem;
-		color: var(--foreground);
+		color: oklch(0.9 0.005 260);
 		cursor: pointer;
 		text-align: left;
 		transition: background 0.15s ease;
@@ -1592,7 +1588,7 @@
 	.ctx-btn :global(.external) {
 		width: 0.75rem;
 		height: 0.75rem;
-		color: var(--muted-foreground);
+		color: oklch(0.6 0.005 260);
 	}
 
 	.ctx-btn.danger {

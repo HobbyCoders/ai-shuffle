@@ -247,6 +247,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		internal.streamEndCleanedUp = null;
 		internal.streamingOnDisconnect = null;
 		internal.interruptPending = false;
+		internal.awaitingNewSession = false;
 
 		// Save ephemeral for session we're leaving (use sentinel for new chat)
 		const leavingKey = state.sessionId || '__new_chat__';
@@ -382,6 +383,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		internal.streamEndCleanedUp = null;
 		internal.streamingOnDisconnect = null;
 		internal.interruptPending = false;
+		internal.awaitingNewSession = false;
 
 		// Save current browser state and show empty for the new chat
 		browserState.switchSession(state.sessionId, null);

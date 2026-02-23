@@ -33,6 +33,12 @@ export interface InternalMutableState {
 	streamEndCleanedUp: string | null;
 	streamingOnDisconnect: string | null;
 	interruptPending: boolean;
+	/** True when sendMessage() sent a query for a NEW session (no sessionId).
+	 *  The session_created/start handlers only accept events when this is true
+	 *  or when the event matches the current sessionId. This prevents unsolicited
+	 *  streaming events from the backend (e.g., for sessions running on other
+	 *  devices) from hijacking the new chat state. */
+	awaitingNewSession: boolean;
 }
 
 /**
@@ -725,8 +731,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const sessionId = data.session_id as string;
 				const currentState = getState();
 				const acceptCreated = currentState.sessionId === sessionId ||
-					(!currentState.sessionId && internal.expectedSessionId !== '__reject_all__');
+					(!currentState.sessionId && internal.awaitingNewSession);
 				if (acceptCreated) {
+					internal.awaitingNewSession = false;
+					if (internal.expectedSessionId === '__reject_all__') {
+						internal.expectedSessionId = null;
+					}
 					update(s => ({ ...s, sessionId, sessionProfileId: s.profile }));
 					onPersistSession();
 				}
@@ -740,8 +750,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				internal.interruptPending = false;
 				const currentStartState = getState();
 				const acceptStart = currentStartState.sessionId === sessionId ||
-					(!currentStartState.sessionId && internal.expectedSessionId !== '__reject_all__');
+					(!currentStartState.sessionId && internal.awaitingNewSession);
 				if (acceptStart) {
+					internal.awaitingNewSession = false;
+					if (internal.expectedSessionId === '__reject_all__') {
+						internal.expectedSessionId = null;
+					}
 					update(s => ({ ...s, sessionId, isStreaming: true, streamStartTime: Date.now() }));
 					onStartPolling(sessionId);
 					onPersistSession();

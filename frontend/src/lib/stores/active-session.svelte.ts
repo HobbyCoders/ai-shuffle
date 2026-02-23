@@ -339,6 +339,7 @@ const internal: InternalMutableState = {
 	streamEndCleanedUp: null,
 	streamingOnDisconnect: null,
 	interruptPending: false,
+	awaitingNewSession: false,
 };
 
 // ─── WebSocket Connection (extracted module) ─────────────────────────────────
@@ -546,6 +547,7 @@ function disconnect() {
 	internal.pendingTools = new Set();
 	internal.streamingOnDisconnect = null;
 	internal.interruptPending = false;
+	internal.awaitingNewSession = false;
 
 	if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
 
@@ -904,13 +906,11 @@ export const activeSession = {
 
 		// Normal path (not currently streaming)
 
-		// Clear the __reject_all__ sentinel that newChat() sets. Without this,
-		// session_created and start events from the backend are rejected by the
-		// guard condition, so sessionId never gets set, polling never starts,
-		// and the UI shows the user message with a stuck stop button.
-		if (internal.expectedSessionId === '__reject_all__') {
-			internal.expectedSessionId = null;
-		}
+		// Signal that we're awaiting a new session from the backend.
+		// The session_created/start WS handlers only accept events when this
+		// flag is true (or when the event matches the current sessionId).
+		// This prevents unsolicited streaming events from hijacking the chat.
+		internal.awaitingNewSession = true;
 
 		_update(s => ({
 			...s,
