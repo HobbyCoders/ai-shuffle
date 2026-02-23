@@ -17,6 +17,7 @@
 	import { appData as tabs, projects } from '$lib/stores/app-data';
 	import { groups } from '$lib/stores/groups';
 	import { Search, Plus, Trash2, FolderOpen, X, Settings, Server, Bot, Zap, MessageSquare } from 'lucide-svelte';
+	import type ProjectMcpTabType from './ProjectMcpTab.svelte';
 	import ProjectGeneralTab from './ProjectGeneralTab.svelte';
 	import ProjectMcpTab from './ProjectMcpTab.svelte';
 	import ProjectAgentsTab from './ProjectAgentsTab.svelte';
@@ -50,6 +51,9 @@
 
 	// Search state
 	let searchQuery = $state('');
+
+	// MCP tab ref (for triggering add from footer)
+	let mcpTabRef = $state<ProjectMcpTabType>();
 
 	// Delete confirmation state
 	let deletingId = $state<string | null>(null);
@@ -177,10 +181,18 @@
 				</div>
 			{/snippet}
 
+			{#snippet footer()}
+				{#if activeTab === 'mcp'}
+					<button class="fp-btn fp-btn--primary" onclick={() => mcpTabRef?.openAddForm()}>
+						<Plus size={14} /> <span class="btn-label">Add MCP Server</span>
+					</button>
+				{/if}
+			{/snippet}
+
 			{#if activeTab === 'general'}
 				<ProjectGeneralTab projectId={selectedProject.id} />
 			{:else if activeTab === 'mcp'}
-				<ProjectMcpTab projectId={selectedProject.id} />
+				<ProjectMcpTab bind:this={mcpTabRef} projectId={selectedProject.id} />
 			{:else if activeTab === 'agents'}
 				<ProjectAgentsTab projectId={selectedProject.id} />
 			{:else if activeTab === 'hooks'}

@@ -11,7 +11,7 @@
 	import { mcp, projectMcpServers, mcpLoading } from '$lib/stores/mcp';
 	import type { McpServerInfo } from '$lib/api/mcp';
 	import { McpServerForm } from '$lib/components/mcp';
-	import { Search, Server, Globe, Terminal, Zap, FolderGit2, FolderLock, Download, Trash2, ToggleLeft, ToggleRight, Plus } from 'lucide-svelte';
+	import { Search, Server, Globe, Terminal, Zap, FolderGit2, FolderLock, Download, Trash2, ToggleLeft, ToggleRight } from 'lucide-svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -78,7 +78,7 @@
 	}
 
 	// Add new local/project server
-	function handleAddServer() {
+	export function openAddForm() {
 		editingMcpServer = null;
 		mcpSelectedScope = 'local';
 		showMcpServerForm = true;
@@ -376,16 +376,6 @@
 				</p>
 			</div>
 		{/if}
-	</div>
-
-	<!-- Footer -->
-	<div class="card-footer">
-		<div class="card-footer-content">
-			<button class="card-btn-primary" onclick={handleAddServer}>
-				<Plus size={16} />
-				Add MCP Server
-			</button>
-		</div>
 	</div>
 
 	<!-- MCP Server Form Modal -->
