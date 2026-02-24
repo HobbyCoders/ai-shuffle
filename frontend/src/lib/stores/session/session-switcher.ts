@@ -110,6 +110,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	let persistTimer: ReturnType<typeof setTimeout> | null = null;
 	let pendingSelection: { profile: string; project: string } | null = null;
 	let selectionSyncTimeout: ReturnType<typeof setTimeout> | null = null;
+	let _switchGeneration = 0;
 
 	// ── Helpers ──────────────────────────────────────────────────────────
 
@@ -227,6 +228,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	// ── Session Navigation ──────────────────────────────────────────────
 
 	async function switchSession(sessionId: string, projectId?: string | null) {
+		const generation = ++_switchGeneration;
 		const state = getState();
 
 		// Stop polling for the session we're leaving
@@ -248,6 +250,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// Hydrate from IndexedDB cache for instant render
 		const cachedMessages = await messageCache.get(sessionId);
+
+		// A newer switchSession/newChat call was made while we were awaiting — bail out.
+		if (generation !== _switchGeneration) return;
 
 		// Single update: set sessionId, cached messages, reset + restore ephemeral state.
 		// This is one _update call instead of the previous two, preventing
@@ -287,6 +292,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// This replaces the old WS load_session → history flow.
 		const pollData = await sessionPoller.loadSession(sessionId);
 
+		// A newer switchSession/newChat call was made while we were awaiting — bail out.
+		// Stop the poller for this now-stale session to avoid leaking resources.
+		if (generation !== _switchGeneration) {
+			sessionPoller.stop(sessionId);
+			return;
+		}
+
 		if (pollData) {
 			// If session is streaming, start the poller for ongoing updates
 			if (pollData.isStreaming) {
@@ -301,6 +313,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	}
 
 	function newChat() {
+		++_switchGeneration;
 		const state = getState();
 		const leavingSessionId = state.sessionId;
 		console.debug(`[SessionSwitcher] newChat(): leaving sessionId=${leavingSessionId}, messages=${state.messages.length}`);
