@@ -2,6 +2,12 @@ name: Build and Push Docker Image
 
 on:
   workflow_dispatch:
+    inputs:
+      no_cache:
+        description: 'Build without Docker cache (forces full rebuild)'
+        required: false
+        type: boolean
+        default: false
 
 # Cancel in-progress builds when new commits arrive on the same branch
 # This prevents wasted builds when merging multiple PRs in quick succession
@@ -60,6 +66,9 @@ jobs:
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          no-cache: ${{ inputs.no_cache }}
+          build-args: |
+            ${{ inputs.no_cache && format('CACHEBUST={0}', github.run_id) || '' }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
