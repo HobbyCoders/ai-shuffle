@@ -349,6 +349,7 @@ const wsConn: WsConnection = createWsConnection({
 		handleMessage(data);
 	},
 	onConnected: () => {
+		console.debug(`[ActiveSession] onConnected: sessionId=${_state.sessionId}`);
 		_update(s => ({ ...s, wsConnected: true, error: null }));
 
 		// Reload session via HTTP — sole authority for session state.
@@ -356,6 +357,7 @@ const wsConn: WsConnection = createWsConnection({
 		if (_state.sessionId) {
 			const sessionId = _state.sessionId;
 			sessionPoller.loadSession(sessionId).then(pollData => {
+				console.debug(`[ActiveSession] onConnected loadSession result: streaming=${pollData?.isStreaming}, msgs=${pollData?.messages?.length ?? 0}`);
 				if (pollData && pollData.isStreaming) {
 					sessionPoller.startStreaming(sessionId);
 				}
@@ -529,7 +531,10 @@ function disconnect() {
 
 function setupPollCallback() {
 	sessionPoller.onPollApplied((sessionId, data) => {
-		if (sessionId !== _state.sessionId) return;
+		if (sessionId !== _state.sessionId) {
+			console.debug(`[PollCB] skipped: poll for ${sessionId} but active is ${_state.sessionId}`);
+			return;
+		}
 
 		// Build usage delta
 		const usageDelta = usageStoreUpdate(data.usage);
@@ -538,7 +543,13 @@ function setupPollCallback() {
 		const streamingChanged = _state.isStreaming !== data.isStreaming;
 
 		// Skip if nothing actually changed
-		if (_state.messages === data.messages && !todosHaveUpdate && !usageHasUpdate && !streamingChanged) return;
+		const msgsMatch = _state.messages === data.messages;
+		if (msgsMatch && !todosHaveUpdate && !usageHasUpdate && !streamingChanged) {
+			console.debug(`[PollCB] skipped: no changes for ${sessionId}`);
+			return;
+		}
+
+		console.debug(`[PollCB] applying: ${data.messages.length} msgs, streaming=${data.isStreaming}, msgsChanged=${!msgsMatch}, streamingChanged=${streamingChanged}`);
 
 		// Single authoritative update — poller is the sole writer of session state.
 		_update(s => ({
@@ -836,6 +847,7 @@ export const activeSession = {
 		// flag is true (or when the event matches the current sessionId).
 		// This prevents unsolicited streaming events from hijacking the chat.
 		internal.awaitingNewSession = true;
+		console.debug(`[ActiveSession] sendMessage: sessionId=${_state.sessionId}, awaitingNewSession=true, wsConnected=${wsConn.isConnected()}`);
 
 		_update(s => ({
 			...s,

@@ -190,8 +190,11 @@ class SessionStateManager {
 	): void {
 		const existing = this.sessions.get(sessionId);
 
-		// Fast path: if updateId hasn't changed, nothing to do
-		if (existing && existing.lastUpdateId === lastUpdateId) return;
+		// Fast path: if updateId hasn't changed AND is non-zero, nothing to do.
+		// When lastUpdateId === 0 (non-streaming session from /live endpoint),
+		// always apply — otherwise the session stays at the initSession() defaults
+		// and onPollApplied fires with stale empty data.
+		if (existing && lastUpdateId > 0 && existing.lastUpdateId === lastUpdateId) return;
 
 		// Preserve existing message IDs where possible to prevent
 		// Svelte component recreation (keeps expanded/collapsed state stable).

@@ -117,6 +117,7 @@ class SessionPoller {
 				// Fall through to create new timer
 			} else {
 				// Already polling at streaming rate — no-op.
+				console.debug(`[Poller] startStreaming(${sessionId}): already polling, no-op`);
 				return;
 			}
 		}
@@ -124,6 +125,8 @@ class SessionPoller {
 		// Bump generation ONLY when actually starting new polling.
 		const nextGen = (this._streamingGeneration.get(sessionId) ?? 0) + 1;
 		this._streamingGeneration.set(sessionId, nextGen);
+
+		console.debug(`[Poller] startStreaming(${sessionId}): gen=${nextGen}, starting poll`);
 
 		// Reset session state for the new streaming session.
 		sessionState.removeSession(sessionId);
@@ -209,6 +212,8 @@ class SessionPoller {
 	 * be streaming, the caller should call startStreaming() afterwards.
 	 */
 	async loadSession(sessionId: string): Promise<PollAppliedData | null> {
+		console.debug(`[Poller] loadSession(${sessionId}): starting`);
+
 		// Initialize session state for a fresh fetch (reset lastUpdateId to 0)
 		sessionState.removeSession(sessionId);
 		sessionState.initSession(sessionId);
@@ -220,11 +225,14 @@ class SessionPoller {
 			);
 
 			if (!response.ok) {
-				console.error(`[Poller] loadSession failed: HTTP ${response.status}`);
+				console.error(`[Poller] loadSession(${sessionId}): HTTP ${response.status}`);
 				return null;
 			}
 
 			const data = await response.json();
+			const msgCount = (data.messages as unknown[])?.length ?? 0;
+			console.debug(`[Poller] loadSession(${sessionId}): got ${msgCount} msgs, is_streaming=${data.is_streaming}, last_update_id=${data.last_update_id}`);
+
 			// Use generation 0 — loadSession is not part of a streaming cycle,
 			// so stale detection isn't needed. The generation check in
 			// _applyPollResult will pass because we're at generation 0 or matching.
@@ -269,14 +277,18 @@ class SessionPoller {
 			}
 
 			if (!response.ok) {
+				console.warn(`[Poller] _poll(${sessionId}): HTTP ${response.status}`);
 				this._recordError(sessionId, new Error(`HTTP ${response.status}`));
 				return;
 			}
 
 			const data = await response.json();
+			const msgCount = (data.messages as unknown[])?.length ?? 0;
+			console.debug(`[Poller] _poll(${sessionId}): got ${msgCount} msgs, is_streaming=${data.is_streaming}, last_update_id=${data.last_update_id}, gen=${pollGeneration}`);
 			this._applyPollResult(sessionId, data, pollGeneration);
 			this._errorCounts.delete(sessionId);
 		} catch (e) {
+			console.warn(`[Poller] _poll(${sessionId}): fetch error`, e);
 			this._recordError(sessionId, e);
 		} finally {
 			this._inFlight.delete(sessionId);
@@ -342,9 +354,11 @@ class SessionPoller {
 		const isStaleResponse = pollGeneration < currentGeneration;
 
 		if (isStaleResponse) {
-			console.debug(`[Poller] Discarding stale poll response for ${sessionId} (gen ${pollGeneration} < ${currentGeneration})`);
+			console.debug(`[Poller] Discarding stale response for ${sessionId} (gen ${pollGeneration} < ${currentGeneration})`);
 			return;
 		}
+
+		console.debug(`[Poller] _applyPollResult(${sessionId}): ${messages.length} msgs, streaming=${isStreaming}, wasStreaming=${wasStreaming}, updateId=${newUpdateId}`);
 
 		const todos = extractTodos(messages);
 
@@ -375,13 +389,18 @@ class SessionPoller {
 		if (this._onPollApplied) {
 			const session = sessionState.getSession(sessionId);
 			if (session) {
+				console.debug(`[Poller] onPollApplied(${sessionId}): ${session.messages.length} msgs, streaming=${session.isStreaming}`);
 				this._onPollApplied(sessionId, {
 					messages: session.messages,
 					isStreaming: session.isStreaming,
 					usage: session.usage,
 					todos: session.todos,
 				});
+			} else {
+				console.warn(`[Poller] onPollApplied(${sessionId}): session not found in sessionState after apply`);
 			}
+		} else {
+			console.warn(`[Poller] _onPollApplied callback not registered!`);
 		}
 
 		// Handle streaming state transitions
