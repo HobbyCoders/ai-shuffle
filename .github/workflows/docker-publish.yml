@@ -26,9 +26,9 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: blacksmith-16vcpu-ubuntu-2404
+            runner: blacksmith-8vcpu-ubuntu-2404
           - platform: linux/arm64
-            runner: blacksmith-16vcpu-ubuntu-2404-arm
+            runner: blacksmith-8vcpu-ubuntu-2404-arm
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
