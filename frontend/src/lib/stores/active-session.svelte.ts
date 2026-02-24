@@ -331,13 +331,11 @@ function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
 let stopTimeout: ReturnType<typeof setTimeout> | null = null;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
-// Shared mutable state — passed by reference to ws-message-handlers and session-switcher
+// Shared mutable state — passed by reference to ws-message-handlers and session-switcher.
+// Simplified: removed waitingForHistory, expectedSessionId, streamEndCleanedUp,
+// streamingOnDisconnect — these were only needed for the dual-authority WS+poller pattern.
 const internal: InternalMutableState = {
-	waitingForHistory: null,
-	expectedSessionId: null,
 	pendingTools: new Set(),
-	streamEndCleanedUp: null,
-	streamingOnDisconnect: null,
 	interruptPending: false,
 	awaitingNewSession: false,
 };
@@ -353,10 +351,15 @@ const wsConn: WsConnection = createWsConnection({
 	onConnected: () => {
 		_update(s => ({ ...s, wsConnected: true, error: null }));
 
+		// Reload session via HTTP — sole authority for session state.
+		// This replaces the old WS load_session → history flow.
 		if (_state.sessionId) {
-			internal.expectedSessionId = _state.sessionId;
-			internal.waitingForHistory = [];
-			wsConn.send({ type: 'load_session', session_id: _state.sessionId });
+			const sessionId = _state.sessionId;
+			sessionPoller.loadSession(sessionId).then(pollData => {
+				if (pollData && pollData.isStreaming) {
+					sessionPoller.startStreaming(sessionId);
+				}
+			});
 		}
 	},
 	onDisconnected: (code, _reason, wasClean) => {
@@ -365,22 +368,17 @@ const wsConn: WsConnection = createWsConnection({
 
 		_update(s => ({ ...s, wsConnected: false }));
 
+		// If streaming was in progress, ensure poller keeps running.
+		// The poller works over HTTP — doesn't need WS — so it will
+		// continue delivering updates through Docker/Cloudflare disruptions.
 		if (wasStreaming && sessionId) {
 			sessionPoller.startStreaming(sessionId);
-			internal.streamingOnDisconnect = sessionId;
 		}
 
 		if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
 
 		if (code === 4001) {
 			import('$app/navigation').then(({ goto }) => goto('/login'));
-		} else if (wasClean) {
-			// User-initiated disconnect (newChat, destroy, session switch, etc.)
-			// No action needed — intentionalDisconnect already reset by ws-connection
-		} else {
-			// Unexpected close — ws-connection handles reconnect scheduling.
-			// We only need to surface an error if max attempts were reached.
-			// (ws-connection logs the error; we check isConnected later)
 		}
 	},
 	isStreaming: () => {
@@ -411,7 +409,6 @@ const switcher = createSessionSwitcher({
 	update: _update,
 	getState: () => _state,
 	wsSend: (data) => wsConn.send(data),
-	wsIsConnected: () => wsConn.isConnected(),
 	internal,
 	sessionEphemeralCache,
 	messageCache,
@@ -422,18 +419,6 @@ const switcher = createSessionSwitcher({
 
 // Alias for internal use (message handlers, queued messages, etc.)
 const persistSession = switcher.persistSession;
-
-// ─── Internal helpers ────────────────────────────────────────────────────────
-
-function startPolling(sessionId: string) {
-	sessionPoller.startStreaming(sessionId);
-}
-
-function stopPolling() {
-	if (_state.sessionId) {
-		sessionPoller.stop(_state.sessionId);
-	}
-}
 
 function processNextQueuedMessage() {
 	if (_state.queuedMessages.length === 0) return;
@@ -522,30 +507,12 @@ function processNextQueuedMessage() {
 	persistSession();
 }
 
-function processWaitingEvents() {
-	if (internal.waitingForHistory && internal.waitingForHistory.length > 0) {
-		const queued = internal.waitingForHistory;
-		internal.waitingForHistory = null;
-		for (const queuedData of queued) {
-			// Re-route through notifier for poller triggers
-			if (_state.sessionId) {
-				sessionNotifier.handleMessage(_state.sessionId, queuedData);
-			}
-		}
-	} else {
-		internal.waitingForHistory = null;
-	}
-}
-
 // ─── WebSocket helpers (delegated to wsConn) ─────────────────────────────────
 
 function disconnect() {
 	if (_state.sessionId) sessionPoller.stop(_state.sessionId);
 
-	internal.waitingForHistory = null;
-	internal.expectedSessionId = null;
-	internal.pendingTools = new Set();
-	internal.streamingOnDisconnect = null;
+	internal.pendingTools.clear();
 	internal.interruptPending = false;
 	internal.awaitingNewSession = false;
 
@@ -564,37 +531,23 @@ function setupPollCallback() {
 	sessionPoller.onPollApplied((sessionId, data) => {
 		if (sessionId !== _state.sessionId) return;
 
-		// Forward if streaming OR poller still has data
-		if (!_state.isStreaming && !data.isStreaming && !sessionPoller.isPolling(sessionId)) return;
-
-		// Detect streaming→ended transition from the server's authoritative state.
-		// This is critical for Docker/proxy deployments where the WS 'done' event
-		// may be lost — without this, _state.isStreaming stays true forever because
-		// only WS event handlers (done, stopped, error) previously cleared it.
-		const streamingEndedViaPoller = _state.isStreaming && !data.isStreaming;
-
-		// Skip if nothing actually changed — messages, todos, AND usage all identical.
-		// Only checking messages reference isn't enough because preserveMessageIds
-		// can return the same array when content matches, which would silently
-		// drop todos and usage updates on the final poll.
+		// Build usage delta
 		const usageDelta = usageStoreUpdate(data.usage);
 		const usageHasUpdate = 'totalTokensIn' in usageDelta;
 		const todosHaveUpdate = data.todos.length > 0;
-		if (_state.messages === data.messages && !todosHaveUpdate && !usageHasUpdate && !streamingEndedViaPoller) return;
+		const streamingChanged = _state.isStreaming !== data.isStreaming;
 
+		// Skip if nothing actually changed
+		if (_state.messages === data.messages && !todosHaveUpdate && !usageHasUpdate && !streamingChanged) return;
+
+		// Single authoritative update — poller is the sole writer of session state.
 		_update(s => ({
 			...s,
 			messages: data.messages,
-			// Sync isStreaming from server. The server's live_session_store is
-			// the source of truth. If it says streaming ended, the UI must reflect
-			// that even if the WS 'done' event was never received. The WS 'done'
-			// handler (handleDone) is idempotent — it still processes metadata
-			// correctly if isStreaming was already cleared here.
 			isStreaming: data.isStreaming,
-			// Keep streamStartTime when poller detects streaming ended — handleDone
-			// needs it to calculate duration for the completion notification.
-			// handleDone will clear it when (if) it fires.
 			todos: todosHaveUpdate ? data.todos : s.todos,
+			// Clear streamStartTime when streaming ends
+			streamStartTime: data.isStreaming ? s.streamStartTime : null,
 			...usageDelta,
 		}));
 	});
@@ -613,20 +566,7 @@ function setupOnStreamEnd() {
 
 		// If a new query started, this callback is stale — skip it
 		if (_state.isStreaming && _state.sessionId === sessionId && sessionPoller.isPolling(sessionId)) {
-			console.debug(`[ActiveSession] Skipping stale onStreamEnd for ${sessionId} — new streaming in progress`);
 			return;
-		}
-
-		// Safety net: ensure isStreaming is cleared for this session.
-		// The onPollApplied callback should have already done this, but if
-		// the final poll's isStreaming:false was missed (e.g., poll error),
-		// clear it here to prevent permanently stuck streaming UI.
-		if (_state.isStreaming && _state.sessionId === sessionId) {
-			_update(s => ({
-				...s,
-				isStreaming: false,
-				streamStartTime: null,
-			}));
 		}
 
 		// Refresh sessions list
@@ -638,12 +578,8 @@ function setupOnStreamEnd() {
 			messageCache.set(sessionId, finalSession.messages);
 		}
 
-		// Clean up sessionState immediately — no timer needed since
-		// we don't call _update(), so no Svelte reconciliation race
+		// Clean up sessionState
 		sessionState.removeSession(sessionId);
-
-		// Mark as handled so the safety timeout doesn't send redundant load_session
-		internal.streamEndCleanedUp = sessionId;
 	});
 }
 
@@ -655,10 +591,6 @@ const { handleMessage } = createMessageHandlers({
 	wsSend: (data) => wsConn.send(data),
 	sessionPoller,
 	sessionNotifier,
-	sessionState: {
-		getSession: (id) => sessionState.getSession(id),
-		removeSession: (id) => sessionState.removeSession(id),
-	},
 	streamingSessions,
 	backgroundPermissions,
 	gitRefreshStatus: () => git.refreshStatus(),
@@ -671,10 +603,7 @@ const { handleMessage } = createMessageHandlers({
 	internal,
 	onNewChat: () => activeSession.newChat(),
 	onPersistSession: () => persistSession(),
-	onStartPolling: (sessionId) => startPolling(sessionId),
-	onStopPolling: () => stopPolling(),
 	onProcessNextQueuedMessage: () => processNextQueuedMessage(),
-	onProcessWaitingEvents: () => processWaitingEvents(),
 	onNotifySessionComplete: (info) => notifySessionComplete(info),
 	onNotifyWaitingForResponse: (type, details) => notifyWaitingForResponse(type, details),
 	wsIsConnected: () => wsConn.isConnected(),
@@ -689,11 +618,8 @@ async function startSessionOnExistingWorktree(prompt: string) {
 	if (!_state.worktreeId) { _update(s => ({ ...s, error: 'Please select an existing worktree' })); return; }
 
 	// Add the worktree system message, then delegate to sendMessage() for
-	// the actual query. This ensures all session lifecycle flags (awaitingNewSession,
-	// expectedSessionId, etc.) are managed by a single code path — the same one
-	// used by local sessions. Previously this function duplicated the send logic
-	// but missed the lifecycle flags, causing session_created/start events to be
-	// silently rejected and polling never to start.
+	// the actual query. This ensures session lifecycle flags (awaitingNewSession)
+	// are managed by a single code path — the same one used by local sessions.
 	const branchDisplay = _state.selectedWorktreeBranch || 'existing branch';
 	_update(s => ({
 		...s,
@@ -1027,17 +953,10 @@ export const activeSession = {
 	/** Clear all messages (e.g. before reloading after rewind). */
 	clearMessages() { _update(s => ({ ...s, messages: [], todos: [] })); },
 
-	/** Reload the current session from backend (e.g. after rewind).
-	 *  @param forceJsonl - Skip live_session_store and read directly from JSONL.
-	 *                      Use after rewind to avoid stale in-memory data.
-	 */
-	reloadSession(forceJsonl = false) {
+	/** Reload the current session from backend (e.g. after rewind). */
+	async reloadSession(_forceJsonl = false) {
 		if (_state.sessionId) {
-			wsConn.send({
-				type: 'load_session',
-				session_id: _state.sessionId,
-				...(forceJsonl && { force_jsonl: true }),
-			});
+			await sessionPoller.loadSession(_state.sessionId);
 		}
 	},
 
@@ -1153,23 +1072,19 @@ export const activeSession = {
 		if (!_state.sessionId) return;
 		// After rewind completes externally (via MessageActions component),
 		// reload the session to pick up the truncated message list
-		if (wsConn.isConnected()) {
-			internal.expectedSessionId = _state.sessionId;
-			internal.waitingForHistory = [];
-			wsConn.send({ type: 'load_session', session_id: _state.sessionId });
-		}
+		await sessionPoller.loadSession(_state.sessionId);
 	},
 
 	// ── Session Takeover ────────────────────────────────────────────
 
-	takeOverSession() {
+	async takeOverSession() {
 		if (!_state.sessionId) return;
+		_update(s => ({ ...s, error: null, sessionLocked: false, sessionLockedBy: undefined }));
+		// Send takeover via WS (to acquire the lock), then load state via HTTP
 		if (wsConn.isConnected()) {
-			_update(s => ({ ...s, error: null, sessionLocked: false, sessionLockedBy: undefined }));
-			internal.expectedSessionId = _state.sessionId;
-			internal.waitingForHistory = [];
 			wsConn.send({ type: 'load_session', session_id: _state.sessionId, force: true });
 		}
+		await sessionPoller.loadSession(_state.sessionId);
 	},
 
 	// ── Getters for derived stores ──────────────────────────────────

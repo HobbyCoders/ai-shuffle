@@ -1,8 +1,11 @@
 /**
- * Session Poller - Polls /sessions/{id}/live for server-authoritative state.
+ * Session Poller — SOLE authority for session state from the server.
  *
- * This is the ONLY module that writes to session-state. Polling is primary,
- * not a fallback. WebSocket events just trigger an immediate poll via pollNow().
+ * Architecture (polling-only, no dual-authority):
+ * - This is the ONLY module that writes to session-state and activeSession.
+ * - WebSocket is notification-only: it triggers pollNow() or startStreaming().
+ * - Session loading (on switch, reconnect) uses HTTP fetch, not WS messages.
+ * - All state transitions (streaming start/end) are detected from poll responses.
  *
  * Polling rates:
  * - 300ms during streaming (real-time feel)
@@ -32,6 +35,14 @@ interface PollTimer {
 
 type StreamEndCallback = (sessionId: string, usage: SessionUsage) => void;
 type PollErrorCallback = (sessionId: string, consecutiveErrors: number, error: unknown) => void;
+
+/** Data shape returned by the onPollApplied callback */
+export interface PollAppliedData {
+	messages: ChatMessage[];
+	isStreaming: boolean;
+	usage: SessionUsage;
+	todos: TodoItem[];
+}
 
 /** Number of consecutive failures before notifying the error callback */
 const CONSECUTIVE_ERROR_THRESHOLD = 3;
@@ -64,12 +75,7 @@ class SessionPoller {
 	private _onStreamEnd: StreamEndCallback | null = null;
 
 	/** Callback after each successful poll applies state (direct path to activeSession) */
-	private _onPollApplied: ((sessionId: string, data: {
-		messages: ChatMessage[];
-		isStreaming: boolean;
-		usage: SessionUsage;
-		todos: TodoItem[];
-	}) => void) | null = null;
+	private _onPollApplied: ((sessionId: string, data: PollAppliedData) => void) | null = null;
 
 	/** Callback when consecutive poll errors exceed threshold */
 	private _onPollError: PollErrorCallback | null = null;
@@ -84,15 +90,9 @@ class SessionPoller {
 
 	/**
 	 * Register a callback invoked after each successful poll writes to sessionState.
-	 * This is the direct path from poller → activeSession, replacing the old
-	 * bridge subscription pattern that caused double-update Svelte crashes.
+	 * This is the SOLE path from server → activeSession state.
 	 */
-	onPollApplied(callback: (sessionId: string, data: {
-		messages: ChatMessage[];
-		isStreaming: boolean;
-		usage: SessionUsage;
-		todos: TodoItem[];
-	}) => void): void {
+	onPollApplied(callback: (sessionId: string, data: PollAppliedData) => void): void {
 		this._onPollApplied = callback;
 	}
 
@@ -107,41 +107,25 @@ class SessionPoller {
 
 	/**
 	 * Start polling for a session at the streaming rate.
-	 * If already polling this session, this is a no-op.
+	 * If already polling this session at streaming rate, this is a no-op.
 	 */
 	startStreaming(sessionId: string): void {
 		if (this._timers.has(sessionId)) {
-			// Already polling - maybe speed up if was idle
 			const existing = this._timers.get(sessionId)!;
 			if (existing.interval !== STREAMING_POLL_INTERVAL_MS) {
 				this.stop(sessionId);
 				// Fall through to create new timer
 			} else {
 				// Already polling at streaming rate — no-op.
-				// Critically, do NOT bump the generation here. Both the
-				// sessionNotifier and the explicit 'start' handler call
-				// startStreaming(); if we bumped generation on this no-op
-				// path, the first poll (started by the earlier call) would
-				// be discarded as stale, causing a 300ms delay before any
-				// streaming data appears in the UI.
 				return;
 			}
 		}
 
 		// Bump generation ONLY when actually starting new polling.
-		// Any in-flight or debounced polls from a previous streaming
-		// session will see a stale generation and skip their
-		// streamingJustEnded transition.
 		const nextGen = (this._streamingGeneration.get(sessionId) ?? 0) + 1;
 		this._streamingGeneration.set(sessionId, nextGen);
 
 		// Reset session state for the new streaming session.
-		// Without this, a stale lastUpdateId from a previous query causes
-		// all polls to get HTTP 304 (backend's new session starts at
-		// last_update_id=1, but frontend sends since_update_id=50+).
-		// removeSession + initSession resets lastUpdateId to 0 while
-		// preserving a clean session entry. Messages are restored by
-		// the first successful poll.
 		sessionState.removeSession(sessionId);
 		sessionState.initSession(sessionId);
 
@@ -157,11 +141,10 @@ class SessionPoller {
 
 	/**
 	 * Trigger an immediate poll for a session (called by WebSocket notifier).
-	 * Does not start a timer - call startStreaming() for ongoing polling.
+	 * Does not start a timer — call startStreaming() for ongoing polling.
 	 */
 	pollNow(sessionId: string): void {
 		// Debounce: coalesce rapid pollNow calls within 100ms
-		// This prevents stale reads when WebSocket event arrives before backend writes state
 		if (this._pendingPollNow.has(sessionId)) return;
 
 		const timer = setTimeout(() => {
@@ -182,11 +165,8 @@ class SessionPoller {
 		}
 		this._inFlight.delete(sessionId);
 		this._errorCounts.delete(sessionId);
-		// NOTE: Do NOT clear _streamingGeneration here. The generation must
-		// persist across stop/start cycles so that stale poll responses from
-		// a stopped session are still detected as stale when a new session starts.
+		// NOTE: Do NOT clear _streamingGeneration here.
 
-		// Clear any pending debounced poll
 		const pending = this._pendingPollNow.get(sessionId);
 		if (pending) {
 			clearTimeout(pending);
@@ -206,7 +186,6 @@ class SessionPoller {
 		this._errorCounts.clear();
 		this._streamingGeneration.clear();
 
-		// Clear all pending debounced polls
 		for (const timer of this._pendingPollNow.values()) {
 			clearTimeout(timer);
 		}
@@ -220,17 +199,60 @@ class SessionPoller {
 		return this._timers.has(sessionId);
 	}
 
+	/**
+	 * Load a session's state via HTTP. This replaces the old WS-based
+	 * load_session → history flow. Returns the poll data on success, or
+	 * null on failure.
+	 *
+	 * This does NOT start polling — it's a one-shot fetch that writes to
+	 * sessionState and fires onPollApplied. If the session turns out to
+	 * be streaming, the caller should call startStreaming() afterwards.
+	 */
+	async loadSession(sessionId: string): Promise<PollAppliedData | null> {
+		// Initialize session state for a fresh fetch (reset lastUpdateId to 0)
+		sessionState.removeSession(sessionId);
+		sessionState.initSession(sessionId);
+
+		try {
+			const response = await fetch(
+				`/api/v1/sessions/${sessionId}/live?since_update_id=0`,
+				{ credentials: 'include' }
+			);
+
+			if (!response.ok) {
+				console.error(`[Poller] loadSession failed: HTTP ${response.status}`);
+				return null;
+			}
+
+			const data = await response.json();
+			// Use generation 0 — loadSession is not part of a streaming cycle,
+			// so stale detection isn't needed. The generation check in
+			// _applyPollResult will pass because we're at generation 0 or matching.
+			const currentGen = this._streamingGeneration.get(sessionId) ?? 0;
+			this._applyPollResult(sessionId, data, currentGen);
+
+			const session = sessionState.getSession(sessionId);
+			if (session) {
+				return {
+					messages: session.messages,
+					isStreaming: session.isStreaming,
+					usage: session.usage,
+					todos: session.todos,
+				};
+			}
+			return null;
+		} catch (e) {
+			console.error('[Poller] loadSession error:', e);
+			return null;
+		}
+	}
+
 	// ─── Private ─────────────────────────────────────────────────────────────
 
 	private async _poll(sessionId: string): Promise<void> {
-		// Prevent overlapping requests for the same session
 		if (this._inFlight.has(sessionId)) return;
 		this._inFlight.add(sessionId);
 
-		// Capture the streaming generation BEFORE the async fetch.
-		// If startStreaming() is called while this fetch is in-flight,
-		// the generation will advance and _applyPollResult will know
-		// this response is stale (belongs to a previous streaming session).
 		const pollGeneration = this._streamingGeneration.get(sessionId) ?? 0;
 
 		try {
@@ -242,8 +264,7 @@ class SessionPoller {
 			);
 
 			if (response.status === 304) {
-				// No updates since last check - nothing to do
-				this._errorCounts.delete(sessionId); // Reset on success
+				this._errorCounts.delete(sessionId);
 				return;
 			}
 
@@ -254,7 +275,6 @@ class SessionPoller {
 
 			const data = await response.json();
 			this._applyPollResult(sessionId, data, pollGeneration);
-			// Reset error counter on successful poll
 			this._errorCounts.delete(sessionId);
 		} catch (e) {
 			this._recordError(sessionId, e);
@@ -263,9 +283,6 @@ class SessionPoller {
 		}
 	}
 
-	/**
-	 * Record a poll error and notify callback if threshold reached.
-	 */
 	private _recordError(sessionId: string, error: unknown): void {
 		const count = (this._errorCounts.get(sessionId) || 0) + 1;
 		this._errorCounts.set(sessionId, count);
@@ -283,8 +300,6 @@ class SessionPoller {
 	 * Handles two response formats:
 	 * - Full: All messages (initial_message_count = 0 or absent) — first poll
 	 * - Delta: Only streaming messages (initial_message_count > 0) — subsequent polls
-	 *   The backend skips initial history messages the frontend already has,
-	 *   dramatically reducing payload for long sessions near auto-compaction.
 	 */
 	private _applyPollResult(sessionId: string, data: Record<string, unknown>, pollGeneration: number): void {
 		const newUpdateId = data.last_update_id as number;
@@ -292,20 +307,13 @@ class SessionPoller {
 		const serverMessages = (data.messages as Array<Record<string, unknown>>) || [];
 		const initialMessageCount = (data.initial_message_count as number) || 0;
 
-		// Convert server messages to ChatMessage format
 		const rawMessages = serverMessages.map((m, i) => convertServerMessage(m, i));
 
-		// Filter out noise messages that shouldn't render in the chat UI.
+		// Filter noise messages
 		const streamingMessages = rawMessages.filter(m => {
-			// Whitespace-only assistant text: SDK emits "\n\n" before thinking blocks.
-			// Backend's end_streaming() filters these at stream end, but during streaming
-			// they leak through and cause empty "Claude [time]" headers to flash.
 			if (m.type === 'text' && m.role === 'assistant' && !m.content?.trim()) {
 				return false;
 			}
-			// SDK task-notification: async completion callbacks for background agents.
-			// These are internal SDK plumbing (already displayed via SubagentMessage);
-			// the backend JSONL parser filters them, but guard the frontend too.
 			if (m.role === 'user' && m.content && typeof m.content === 'string' && m.content.includes('<task-notification>')) {
 				return false;
 			}
@@ -318,45 +326,28 @@ class SessionPoller {
 		const wasStreaming = existing?.isStreaming ?? false;
 		const streamingJustEnded = wasStreaming && !isStreaming;
 
-		// If this is a delta response (initial_message_count > 0), merge with existing history.
-		// The backend only sent streaming messages; we prepend the history we already have.
+		// Delta merge
 		let messages: ChatMessage[];
 		if (initialMessageCount > 0 && existingMessages && existingMessages.length >= initialMessageCount) {
-			// Keep existing history messages, replace only streaming portion
 			const historyMessages = existingMessages.slice(0, initialMessageCount);
 			messages = [...historyMessages, ...streamingMessages];
 		} else if (initialMessageCount > 0 && existingMessages && existingMessages.length > 0) {
-			// Boundary mismatch (existingMessages.length < initialMessageCount).
-			// This can happen during reconnect races or if initial_message_count
-			// was advanced beyond what the frontend has seen. Preserve existing
-			// messages and append new streaming messages to avoid dropping
-			// conversation history, which would cause massive DOM recreation
-			// and risk corrupting Svelte's effect linked list.
 			messages = [...existingMessages, ...streamingMessages];
 		} else {
-			// Full response or first poll — use as-is
 			messages = streamingMessages;
 		}
 
-		// Check if a new streaming session was started since this poll began.
-		// If so, this response is STALE — its data belongs to a previous query
-		// and must NOT be written to sessionState (which would trigger the bridge
-		// to overwrite the store's optimistic user message with old data).
+		// Stale response detection
 		const currentGeneration = this._streamingGeneration.get(sessionId) ?? 0;
 		const isStaleResponse = pollGeneration < currentGeneration;
 
 		if (isStaleResponse) {
-			// Stale poll response from a previous streaming session.
-			// Do NOT write to sessionState, stop the poller, or fire onStreamEnd.
-			// The new streaming session's polls will provide fresh data.
 			console.debug(`[Poller] Discarding stale poll response for ${sessionId} (gen ${pollGeneration} < ${currentGeneration})`);
 			return;
 		}
 
-		// Extract todos from all messages (including history for TodoWrite persistence)
 		const todos = extractTodos(messages);
 
-		// Extract usage
 		const usageRaw = (data.usage as Record<string, number>) || {};
 		const usage: SessionUsage = {
 			inputTokens: usageRaw.input_tokens || 0,
@@ -369,7 +360,7 @@ class SessionPoller {
 				(usageRaw.cache_read_tokens || 0),
 		};
 
-		// Apply to store - this is the ONLY place state gets written
+		// Apply to store — ONLY place state gets written
 		sessionState.applyServerState(
 			sessionId,
 			messages,
@@ -380,9 +371,7 @@ class SessionPoller {
 			existingMessages
 		);
 
-		// Direct callback to activeSession — replaces the old bridge subscription.
-		// This is a single _update() call per poll cycle, eliminating the
-		// double-update that corrupted Svelte 5's effect linked-list.
+		// Direct callback to activeSession — sole path from server → UI
 		if (this._onPollApplied) {
 			const session = sessionState.getSession(sessionId);
 			if (session) {
@@ -397,19 +386,13 @@ class SessionPoller {
 
 		// Handle streaming state transitions
 		if (streamingJustEnded) {
-			// Streaming→not-streaming transition detected.
-			// Stop timer if still running, and always fire onStreamEnd for cleanup.
 			if (this._timers.has(sessionId)) {
 				this.stop(sessionId);
 			}
-			// onStreamEnd is cleanup-only (cache, remove session, refresh list) —
-			// it does NOT call _update(), so no setTimeout(0) deferral needed.
 			if (this._onStreamEnd) {
 				this._onStreamEnd(sessionId, usage);
 			}
 		} else if (!isStreaming && this._timers.has(sessionId)) {
-			// Non-transition case: poll returns !isStreaming but session wasn't previously
-			// marked as streaming (e.g., idle poll detecting a finished session).
 			const entry = this._timers.get(sessionId)!;
 			if (entry.interval === STREAMING_POLL_INTERVAL_MS) {
 				this.stop(sessionId);
@@ -423,9 +406,6 @@ class SessionPoller {
 
 // ─── Message conversion helpers ──────────────────────────────────────────────
 
-/**
- * Convert a server message object to a ChatMessage.
- */
 function convertServerMessage(m: Record<string, unknown>, index: number): ChatMessage {
 	const serverType = (m.type as MessageType) || 'text';
 	const serverRole = (m.role as 'user' | 'assistant' | 'system') || 'assistant';
@@ -438,22 +418,16 @@ function convertServerMessage(m: Record<string, unknown>, index: number): ChatMe
 		streaming: (m.streaming as boolean) || false,
 	};
 
-	// Tool fields
 	if (m.toolName) msg.toolName = m.toolName as string;
 	if (m.toolId) msg.toolId = m.toolId as string;
 	if (m.toolInput) msg.toolInput = m.toolInput as Record<string, unknown>;
 	if (m.toolResult !== undefined) msg.toolResult = m.toolResult as string;
 	if (m.toolStatus) msg.toolStatus = m.toolStatus as 'running' | 'complete' | 'error';
 
-	// For streaming tool_use messages, the content field contains accumulated
-	// partial JSON from input_json_delta events (via live_session_store's
-	// update_tool_input_streaming). Map it to partialToolInput so
-	// ToolUseMessage can render input fields incrementally as they stream in.
 	if (serverType === 'tool_use' && msg.streaming && msg.content) {
 		msg.partialToolInput = msg.content;
 	}
 
-	// Subagent fields
 	if (m.agentId) msg.agentId = m.agentId as string;
 	if (m.agentType) msg.agentType = m.agentType as string;
 	if (m.agentDescription) msg.agentDescription = m.agentDescription as string;
@@ -461,21 +435,14 @@ function convertServerMessage(m: Record<string, unknown>, index: number): ChatMe
 	if (m.agentStatus) msg.agentStatus = m.agentStatus as 'pending' | 'running' | 'completed' | 'error';
 	if (m.agentChildren) msg.agentChildren = m.agentChildren as SubagentChildMessage[];
 
-	// System message fields
 	if (m.systemSubtype) msg.systemSubtype = m.systemSubtype as string;
 	if (m.systemData) msg.systemData = m.systemData as Record<string, unknown>;
 
-	// Metadata
 	if (m.metadata) msg.metadata = m.metadata as Record<string, unknown>;
 
 	return msg;
 }
 
-/**
- * Extract the latest TodoWrite items from messages.
- * Scans backwards since TodoWrite always replaces the full list —
- * only the last occurrence matters.
- */
 function extractTodos(messages: ChatMessage[]): TodoItem[] {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];

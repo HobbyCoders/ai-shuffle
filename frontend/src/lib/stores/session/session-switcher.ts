@@ -1,21 +1,17 @@
 /**
  * Session Switcher — Session switching, caching, and persistence logic.
  *
- * Extracted from active-session.ts to isolate session navigation
- * (switchSession, newChat) and persistence (persistSession, loadPersistedSession)
- * from the main store factory.
- *
- * Design principle:
- * - All session-switching side effects (ephemeral save/restore, browser panel swap,
- *   WS load_session, persistence) are co-located here.
- * - The store factory injects dependencies via SessionSwitcherDeps so this module
- *   stays decoupled from the concrete store, WS connection, and caches.
+ * Architecture (polling-only):
+ * - Session loading uses HTTP via sessionPoller.loadSession() — NOT WS messages.
+ * - No more waitingForHistory, expectedSessionId, or __reject_all__ sentinels.
+ * - All session state (messages, isStreaming, etc.) comes from the poller.
  */
 
 import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
 import type { ChatMessage } from '../types';
+import type { PollAppliedData } from './session-poller';
 import { api } from '$lib/api/client';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -32,7 +28,6 @@ export interface SessionSwitcherDeps {
 
 	// WebSocket
 	wsSend: (data: Record<string, unknown>) => boolean;
-	wsIsConnected: () => boolean;
 
 	// Shared mutable state
 	internal: InternalMutableState;
@@ -50,6 +45,8 @@ export interface SessionSwitcherDeps {
 	};
 	sessionPoller: {
 		stop: (sessionId: string) => void;
+		loadSession: (sessionId: string) => Promise<PollAppliedData | null>;
+		startStreaming: (sessionId: string) => void;
 	};
 
 	// Callbacks
@@ -107,7 +104,7 @@ export async function loadSelectionFromBackend(): Promise<{ selectedProfile: str
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitcher {
-	const { update, getState, wsSend, wsIsConnected, internal, sessionEphemeralCache, messageCache, browserState, sessionPoller, onPersistTimerChanged } = deps;
+	const { update, getState, wsSend, internal, sessionEphemeralCache, messageCache, browserState, sessionPoller, onPersistTimerChanged } = deps;
 
 	let persistTimer: ReturnType<typeof setTimeout> | null = null;
 	let pendingSelection: { profile: string; project: string } | null = null;
@@ -154,8 +151,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 					credentials: 'include',
 					body: JSON.stringify({
 						key: 'selection',
-						value: { selectedProfile: pendingSelection.profile, selectedProject: pendingSelection.project }
-					})
+						value: { selectedProfile: pendingSelection.profile, selectedProject: pendingSelection.project },
+					}),
 				});
 			} catch (e) {
 				console.error('[ActiveSession] Failed to sync selection to backend:', e);
@@ -209,8 +206,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		onPersistTimerChanged(persistTimer);
 	}
 
-	/** Persist immediately, bypassing the debounce. Use for deliberate user
-	 *  actions (e.g. newChat) where a subsequent init() must see the update. */
 	function persistSessionImmediate() {
 		if (persistTimer) clearTimeout(persistTimer);
 		persistTimer = null;
@@ -233,41 +228,35 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	async function switchSession(sessionId: string, projectId?: string | null) {
 		const state = getState();
 
-		// Stop polling for the session we're leaving — prevents stale poll
-		// callbacks from writing into _state after sessionId changes.
+		// Stop polling for the session we're leaving
 		if (state.sessionId) {
 			sessionPoller.stop(state.sessionId);
 		}
 
-		// Reset cross-session internal state to prevent contamination.
-		// Without this, pendingTools from the old session extend WS health
-		// timeouts, and streamingOnDisconnect/interruptPending from the old
-		// session corrupt the new session's event handling.
+		// Reset cross-session internal state
 		internal.pendingTools.clear();
-		internal.streamEndCleanedUp = null;
-		internal.streamingOnDisconnect = null;
 		internal.interruptPending = false;
 		internal.awaitingNewSession = false;
 
-		// Save ephemeral for session we're leaving (use sentinel for new chat)
+		// Save ephemeral for session we're leaving
 		const leavingKey = state.sessionId || '__new_chat__';
 		sessionEphemeralCache.save(leavingKey, buildEphemeral(state));
 
-		// Peek at ephemeral cache to get the target session's project immediately.
-		// Priority: explicit projectId arg > ephemeral cache > keep current project.
 		const ephemeral = sessionEphemeralCache.restore(sessionId);
 		const targetProject = projectId || ephemeral?.project || state.project;
 
 		// Hydrate from IndexedDB cache for instant render
 		const cachedMessages = await messageCache.get(sessionId);
+
+		// Single update: set sessionId, cached messages, reset + restore ephemeral state.
+		// This is one _update call instead of the previous two, preventing
+		// Svelte 5 double-update issues.
 		update(s => ({
 			...s,
 			sessionId,
 			project: targetProject,
 			messages: cachedMessages && cachedMessages.length > 0 ? cachedMessages : [],
 			error: null,
-			// Reset session-specific state
-			draft: '',
 			pendingPermissions: [],
 			pendingQuestions: [],
 			isStreaming: false,
@@ -275,36 +264,36 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			worktreeError: null,
 			sessionLocked: false,
 			sessionLockedBy: undefined,
+			// Merge ephemeral state in the same update
+			draft: ephemeral?.draft || '',
+			scrollTop: ephemeral?.scrollTop || 0,
+			modelOverride: ephemeral?.modelOverride ?? s.modelOverride,
+			permissionModeOverride: ephemeral?.permissionModeOverride ?? s.permissionModeOverride,
+			executionMode: ephemeral?.executionMode ?? s.executionMode,
+			worktreeId: ephemeral?.worktreeId ?? s.worktreeId,
+			worktreeBranch: ephemeral?.worktreeBranch ?? s.worktreeBranch,
+			worktreeBaseBranch: ephemeral?.worktreeBaseBranch ?? s.worktreeBaseBranch,
+			selectedWorktreeBranch: ephemeral?.selectedWorktreeBranch ?? s.selectedWorktreeBranch,
+			worktreeMode: ephemeral?.worktreeMode ?? s.worktreeMode,
+			worktreeDeleted: ephemeral?.worktreeDeleted ?? s.worktreeDeleted,
+			queuedMessages: ephemeral?.queuedMessages ?? s.queuedMessages,
 		}));
 
-		// Switch browser panel to new session's context (saves/restores per-session).
-		// Panel stays open; only the content (URL, screenshot, etc.) swaps.
+		// Switch browser panel
 		browserState.switchSession(state.sessionId, sessionId);
 
-		// Restore remaining ephemeral state from cache (project already applied above)
-		if (ephemeral) {
-			update(s => ({
-				...s,
-				draft: ephemeral.draft,
-				scrollTop: ephemeral.scrollTop,
-				modelOverride: ephemeral.modelOverride,
-				permissionModeOverride: ephemeral.permissionModeOverride,
-				executionMode: ephemeral.executionMode,
-				worktreeId: ephemeral.worktreeId,
-				worktreeBranch: ephemeral.worktreeBranch,
-				worktreeBaseBranch: ephemeral.worktreeBaseBranch,
-				selectedWorktreeBranch: ephemeral.selectedWorktreeBranch,
-				worktreeMode: ephemeral.worktreeMode,
-				worktreeDeleted: ephemeral.worktreeDeleted,
-				queuedMessages: ephemeral.queuedMessages,
-			}));
-		}
+		// Load full session state via HTTP — sole authority for session data.
+		// This replaces the old WS load_session → history flow.
+		const pollData = await sessionPoller.loadSession(sessionId);
 
-		// Load full session from backend via WS
-		if (wsIsConnected()) {
-			internal.expectedSessionId = sessionId;
-			internal.waitingForHistory = [];
-			wsSend({ type: 'load_session', session_id: sessionId });
+		if (pollData) {
+			// If session is streaming, start the poller for ongoing updates
+			if (pollData.isStreaming) {
+				sessionPoller.startStreaming(sessionId);
+				// Request pending permissions/questions via WS
+				wsSend({ type: 'get_pending_permissions' });
+				wsSend({ type: 'get_pending_questions' });
+			}
 		}
 
 		persistSession();
@@ -313,9 +302,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	function newChat() {
 		const state = getState();
 
-		// Stop polling for the session we're leaving — prevents stale poll
-		// callbacks from writing into _state after sessionId changes.
-		// (switchSession does this; newChat must too.)
+		// Stop polling for the session we're leaving
 		if (state.sessionId) {
 			sessionPoller.stop(state.sessionId);
 		}
@@ -329,7 +316,18 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			wsSend({ type: 'close_session' });
 		}
 
-		// Reset session-specific state, restore profile/project to user defaults
+		// Reset all internal state
+		internal.pendingTools.clear();
+		internal.interruptPending = false;
+		internal.awaitingNewSession = false;
+
+		// Save current browser state
+		browserState.switchSession(state.sessionId, null);
+
+		// Restore new chat draft if one was saved earlier
+		const newChatEphemeral = sessionEphemeralCache.restore('__new_chat__');
+
+		// Single update: reset everything (including draft from ephemeral cache)
 		update(s => ({
 			...s,
 			sessionId: null,
@@ -353,7 +351,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			pendingQuestions: [],
 			todos: [],
 			queuedMessages: [],
-			draft: '',
+			draft: newChatEphemeral?.draft || '',
 			scrollTop: 0,
 			streamStartTime: null,
 			executionMode: 'local' as const,
@@ -370,37 +368,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			sessionLockedBy: undefined,
 		}));
 
-		// Reset ALL cross-session internal state (like switchSession does).
-		internal.pendingTools.clear();
-		// Sentinel value — rejects any in-flight history response from the
-		// old session. Without this, a delayed history response (from a
-		// load_session sent before newChat) would pass the null guard in
-		// handleHistory and overwrite the blank new chat state with the
-		// old session's messages. Any subsequent switchSession/onConnected
-		// will override this sentinel with the real session ID.
-		internal.expectedSessionId = '__reject_all__';
-		internal.waitingForHistory = null;
-		internal.streamEndCleanedUp = null;
-		internal.streamingOnDisconnect = null;
-		internal.interruptPending = false;
-		internal.awaitingNewSession = false;
-
-		// Save current browser state and show empty for the new chat
-		browserState.switchSession(state.sessionId, null);
-
-		// Restore new chat draft if one was saved earlier
-		const newChatEphemeral = sessionEphemeralCache.restore('__new_chat__');
-		if (newChatEphemeral?.draft) {
-			update(s => ({ ...s, draft: newChatEphemeral.draft }));
-		}
-
-		// Persist immediately (not debounced) — this is a deliberate user action
-		// and init() may re-run on WS reconnect, reading the persisted state.
-		// If the persist is still debounced, init() would restore the old session.
+		// Persist immediately (not debounced)
 		persistSessionImmediate();
 	}
-
-	// ── Return public API ───────────────────────────────────────────────
 
 	return {
 		switchSession,
