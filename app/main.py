@@ -407,6 +407,14 @@ if static_dir.exists():
     async def serve_favicon():
         return FileResponse(static_dir / "favicon.svg")
 
+    @app.get("/sw.js")
+    async def serve_service_worker():
+        return FileResponse(static_dir / "sw.js", media_type="application/javascript")
+
+    @app.get("/manifest.json")
+    async def serve_manifest():
+        return FileResponse(static_dir / "manifest.json", media_type="application/json")
+
 
 if __name__ == "__main__":
     import uvicorn

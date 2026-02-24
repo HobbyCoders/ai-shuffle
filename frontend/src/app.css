@@ -1,5 +1,4 @@
-/* Playfair Display for welcome page display text */
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&display=swap');
+/* Playfair Display - self-hosted via fontsource (avoids CSP issues with Google Fonts) */
 
 @tailwind base;
 @tailwind components;

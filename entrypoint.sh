@@ -52,6 +52,36 @@ mkdir -p /home/appuser/.config/claude /home/appuser/.claude /home/appuser/.confi
 chown -R appuser:appuser /home/appuser/.config /home/appuser/.claude
 
 # =============================================================================
+# Claude Code Config Persistence
+# =============================================================================
+# Claude CLI expects ~/.claude.json at the home directory root, but only
+# ~/.claude/ is volume-mounted. Without a symlink, the config is lost on
+# every container restart. Fix: store the real file inside the volume and
+# symlink to it.
+CLAUDE_JSON_REAL="/home/appuser/.claude/.claude.json"
+CLAUDE_JSON_LINK="/home/appuser/.claude.json"
+
+if [ ! -L "$CLAUDE_JSON_LINK" ]; then
+    # Not a symlink — migrate or restore the file into the volume
+    if [ -f "$CLAUDE_JSON_LINK" ]; then
+        # Plain file exists outside the volume — move it in
+        mv "$CLAUDE_JSON_LINK" "$CLAUDE_JSON_REAL"
+        echo "Migrated .claude.json into persistent volume"
+    elif [ ! -f "$CLAUDE_JSON_REAL" ]; then
+        # No file anywhere — try to restore from the most recent backup
+        LATEST_BACKUP=$(ls -t /home/appuser/.claude/backups/.claude.json.backup.* 2>/dev/null | head -1)
+        if [ -n "$LATEST_BACKUP" ]; then
+            cp "$LATEST_BACKUP" "$CLAUDE_JSON_REAL"
+            echo "Restored .claude.json from backup: $LATEST_BACKUP"
+        fi
+    fi
+    # Create the symlink (even if the target doesn't exist yet — CLI will create it)
+    ln -sf "$CLAUDE_JSON_REAL" "$CLAUDE_JSON_LINK"
+    chown -h appuser:appuser "$CLAUDE_JSON_LINK"
+    echo "Symlinked $CLAUDE_JSON_LINK -> $CLAUDE_JSON_REAL"
+fi
+
+# =============================================================================
 # Claude Code Credentials Management
 # =============================================================================
 # The volume mount for Claude auth is at /home/appuser/.claude
