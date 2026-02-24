@@ -97,9 +97,11 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		height: 40px;
+		flex-wrap: wrap;
+		min-height: 40px;
 		flex-shrink: 0;
-		padding: 0 12px;
+		padding: 4px 12px;
+		row-gap: 2px;
 		background: var(--background);
 		border-bottom: 1px solid var(--border);
 	}
@@ -109,14 +111,17 @@
 		align-items: center;
 		gap: 8px;
 		min-width: 0;
-		flex: 1;
+		flex: 1 1 auto;
+		min-height: 32px;
 	}
 
 	.header-right {
 		display: flex;
 		align-items: center;
+		justify-content: center;
 		gap: 8px;
-		flex-shrink: 0;
+		flex: 1 0 auto;
+		min-height: 32px;
 	}
 
 	/* Sidebar toggle button */
@@ -254,36 +259,18 @@
 		50% { opacity: 0.6; }
 	}
 
-	/* Desktop centering — raised to 1024px so foldable/tablet touch devices
-	   (640–1023px) use the simpler space-between flexbox instead of absolute
-	   positioning, which causes header-left / header-right overlap on those screens. */
+	/* Desktop layout — flex-based centering that respects right elements.
+	   The title is centered via text-align within its flex item, and the
+	   right elements wrap to a second row when the header is too narrow
+	   (e.g., sidebar open on a medium-width screen). */
 	@media (min-width: 1024px) {
-		.page-header {
-			position: relative;
-		}
-
 		.header-left {
-			position: absolute;
-			left: 0;
-			right: 0;
 			justify-content: center;
-			pointer-events: none;
-		}
-
-		.header-left > :global(*) {
-			pointer-events: auto;
-		}
-
-		/* Keep sidebar toggle at the left edge when visible */
-		.sidebar-toggle {
-			position: absolute;
-			left: 12px;
 		}
 
 		.header-right {
-			position: relative;
-			z-index: 1;
-			margin-left: auto;
+			flex-wrap: wrap;
+			justify-content: center;
 		}
 	}
 
