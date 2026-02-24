@@ -856,7 +856,8 @@ def _get_hook_tool_names(hooks: Optional[Dict[str, list]]) -> list:
 
 def _build_extra_args(
     base_extra_args: Dict[str, str],
-    hooks: Optional[Dict[str, list]]
+    hooks: Optional[Dict[str, list]],
+    deployment_mode: Optional["DeploymentMode"] = None,
 ) -> Dict[str, str]:
     """
     Build extra_args dict, adding --allowed-tools for any hooked tools.
@@ -868,11 +869,19 @@ def _build_extra_args(
     Args:
         base_extra_args: Base extra args from profile config
         hooks: Dict of hook configurations (e.g., {"PreToolUse": [HookMatcher(...)]})
+        deployment_mode: Current deployment mode (LOCAL or DOCKER)
 
     Returns:
         Dict of extra args to pass to CLI
     """
     extra_args = dict(base_extra_args) if base_extra_args else {}
+
+    # In Docker mode, enable CLI debug output to stderr for diagnosing
+    # initialization hangs and other subprocess issues
+    if deployment_mode and deployment_mode != DeploymentMode.LOCAL:
+        if "debug-to-stderr" not in extra_args:
+            extra_args["debug-to-stderr"] = None
+            logger.debug("Added --debug-to-stderr for Docker CLI diagnostics")
 
     # Get tool names from hooks
     hook_tools = _get_hook_tool_names(hooks)
@@ -1335,7 +1344,7 @@ def build_options_from_profile(
         # Environment and arguments - inject AI tool credentials if enabled
         # Pass api_user_id for policy-based credential resolution
         env=full_env,
-        extra_args=_build_extra_args(config.get("extra_args") or {}, hooks),
+        extra_args=_build_extra_args(config.get("extra_args") or {}, hooks, detect_deployment_mode()),
 
         # Buffer settings - Default to 50MB to handle large file reads (images, PDFs)
         # The SDK's default is 1MB which causes "JSON message exceeded maximum buffer size" errors

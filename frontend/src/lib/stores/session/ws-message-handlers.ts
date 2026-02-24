@@ -400,11 +400,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 			case 'error': {
 				internal.interruptPending = false;
-				// Error is a terminal event — stop polling and show error.
-				// The poller will also detect isStreaming:false on its next poll.
+				// Error is a terminal event — stop polling, reset streaming, show error.
+				// Must reset isStreaming so the user can send another message.
 				const errState = getState();
 				if (errState.sessionId) sessionPoller.stop(errState.sessionId);
-				update(s => ({ ...s, error: data.message as string }));
+				update(s => ({ ...s, error: data.message as string, isStreaming: false, streamStartTime: null }));
 				const errorSessionId = errState.sessionId;
 				if (errorSessionId) {
 					streamingSessions.update(map => {
