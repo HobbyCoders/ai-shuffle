@@ -2,7 +2,7 @@
 // Version: 2.0.0
 // Auto-update enabled - clients reload automatically on new version
 
-const CACHE_VERSION = 4;
+const CACHE_VERSION = 5;
 const CACHE_NAME = `ai-shuffle-v${CACHE_VERSION}`;
 const OFFLINE_URL = '/offline.html';
 
@@ -36,13 +36,20 @@ const CACHE_STRATEGIES = {
   }
 };
 
-// Install event - cache static assets
+// Install event - cache static assets individually (not addAll which is atomic
+// and fails entirely if any single asset is blocked, e.g. by Cloudflare Access)
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then((cache) => {
         console.log('[SW] Caching static assets');
-        return cache.addAll(STATIC_ASSETS);
+        return Promise.allSettled(
+          STATIC_ASSETS.map((asset) =>
+            cache.add(asset).catch((err) => {
+              console.warn(`[SW] Failed to cache ${asset}:`, err.message);
+            })
+          )
+        );
       })
       .then(() => self.skipWaiting())
   );
