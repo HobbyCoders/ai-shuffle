@@ -667,6 +667,7 @@ async function init() {
 
 	const skipRestore = _skipNextSessionRestore;
 	_skipNextSessionRestore = false;
+	console.debug(`[ActiveSession] init(): skipRestore=${skipRestore}, currentSessionId=${_state.sessionId}, messages=${_state.messages.length}`);
 
 	try {
 		const backendSelection = await switcher.loadSelectionFromBackend();
@@ -676,6 +677,7 @@ async function init() {
 		if (skipRestore) {
 			// newChat() was called before this init — keep the cleared state,
 			// just apply default profile/project if not already set.
+			console.debug('[ActiveSession] init(): skipRestore=true, keeping cleared state');
 			_update(s => ({
 				...s,
 				profile: s.profile || defaultProfile,
@@ -683,6 +685,7 @@ async function init() {
 			}));
 		} else {
 			const persisted = await switcher.loadPersistedSession();
+			console.debug(`[ActiveSession] init(): persisted sessionId=${persisted?.sessionId ?? 'null'}`);
 
 			if (persisted) {
 				_update(s => ({
@@ -705,6 +708,7 @@ async function init() {
 
 				if (persisted.sessionId) {
 					const cached = await messageCache.get(persisted.sessionId);
+					console.debug(`[ActiveSession] init(): cached messages for ${persisted.sessionId}: ${cached?.length ?? 0}`);
 					if (cached && cached.length > 0) {
 						_update(s => ({ ...s, messages: cached }));
 					}

@@ -33,6 +33,7 @@
 		const isEmpty = isEmptyState;
 		const wasEmpty = untrack(() => previousIsEmpty);
 		if (wasEmpty === isEmpty) return;
+		console.debug(`[ChatView] isEmptyState changed: ${wasEmpty} → ${isEmpty}, sessionId=${$activeSession.sessionId}, msgs=${$activeSession.messages.length}`);
 		previousIsEmpty = isEmpty;
 
 		if (wasEmpty && !isEmpty) {

@@ -2,9 +2,8 @@
 // Version: 2.0.0
 // Auto-update enabled - clients reload automatically on new version
 
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 const CACHE_NAME = `ai-shuffle-v${CACHE_VERSION}`;
-const API_CACHE_NAME = `ai-shuffle-api-v${CACHE_VERSION}`;
 const OFFLINE_URL = '/offline.html';
 
 // Static assets to cache on install (minimal - let network-first handle the rest)
@@ -34,40 +33,6 @@ const CACHE_STRATEGIES = {
     } catch (error) {
       return null;
     }
-  },
-
-  // Network first, then cache for API calls
-  networkFirst: async (request, cacheName = CACHE_NAME) => {
-    try {
-      const networkResponse = await fetch(request);
-      if (networkResponse.ok) {
-        const cache = await caches.open(cacheName);
-        cache.put(request, networkResponse.clone());
-      }
-      return networkResponse;
-    } catch (error) {
-      const cache = await caches.open(cacheName);
-      const cachedResponse = await cache.match(request);
-      if (cachedResponse) {
-        return cachedResponse;
-      }
-      return null;
-    }
-  },
-
-  // Stale while revalidate - return cached, fetch new in background
-  staleWhileRevalidate: async (request, cacheName = CACHE_NAME) => {
-    const cache = await caches.open(cacheName);
-    const cachedResponse = await cache.match(request);
-
-    const fetchPromise = fetch(request).then(networkResponse => {
-      if (networkResponse.ok) {
-        cache.put(request, networkResponse.clone());
-      }
-      return networkResponse;
-    }).catch(() => null);
-
-    return cachedResponse || fetchPromise;
   }
 };
 
@@ -138,23 +103,10 @@ self.addEventListener('fetch', (event) => {
 });
 
 async function handleRequest(request, url) {
-  // API requests - network first with cache fallback for GET
+  // API requests - always network-only, never cache.
+  // Session/streaming data changes constantly and stale cached responses
+  // cause bugs (e.g., old messages appearing after "New Session" click).
   if (url.pathname.startsWith('/api/')) {
-    // For session list and chat history, cache for offline reading
-    if (url.pathname.includes('/sessions') || url.pathname.includes('/messages')) {
-      const response = await CACHE_STRATEGIES.networkFirst(request, API_CACHE_NAME);
-      if (response) {
-        return response;
-      }
-      return new Response(
-        JSON.stringify({ error: 'offline', message: 'You are offline' }),
-        {
-          status: 503,
-          headers: { 'Content-Type': 'application/json' }
-        }
-      );
-    }
-    // Other API calls - network only
     try {
       return await fetch(request);
     } catch (error) {

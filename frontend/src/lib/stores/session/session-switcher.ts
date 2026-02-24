@@ -39,6 +39,7 @@ export interface SessionSwitcherDeps {
 	};
 	messageCache: {
 		get: (sessionId: string) => Promise<ChatMessage[] | null>;
+		delete: (sessionId: string) => Promise<void>;
 	};
 	browserState: {
 		switchSession: (fromSessionId: string | null, toSessionId: string | null) => void;
@@ -301,19 +302,29 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	function newChat() {
 		const state = getState();
+		const leavingSessionId = state.sessionId;
+		console.debug(`[SessionSwitcher] newChat(): leaving sessionId=${leavingSessionId}, messages=${state.messages.length}`);
 
 		// Stop polling for the session we're leaving
-		if (state.sessionId) {
-			sessionPoller.stop(state.sessionId);
+		if (leavingSessionId) {
+			sessionPoller.stop(leavingSessionId);
 		}
 
 		// Save ephemeral for the session we're leaving
-		const leavingKey = state.sessionId || '__new_chat__';
+		const leavingKey = leavingSessionId || '__new_chat__';
 		sessionEphemeralCache.save(leavingKey, buildEphemeral(state));
 
 		// Tell backend to release session lock
-		if (state.sessionId) {
+		if (leavingSessionId) {
 			wsSend({ type: 'close_session' });
+		}
+
+		// Clear stale cached messages for the old session from IndexedDB.
+		// Without this, a component lifecycle edge case (e.g., init() re-running
+		// after a WS reconnect/remount) could hydrate from the cache and show
+		// old messages in the "new chat" view.
+		if (leavingSessionId) {
+			messageCache.delete(leavingSessionId).catch(() => {});
 		}
 
 		// Reset all internal state
@@ -367,6 +378,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			sessionLocked: false,
 			sessionLockedBy: undefined,
 		}));
+
+		const afterState = getState();
+		console.debug(`[SessionSwitcher] newChat() done: sessionId=${afterState.sessionId}, messages=${afterState.messages.length}`);
 
 		// Persist immediately (not debounced)
 		persistSessionImmediate();
