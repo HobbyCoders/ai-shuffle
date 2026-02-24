@@ -79,6 +79,9 @@ WORKDIR /app/frontend
 RUN npm ci
 
 # ── Layer 7: Frontend build (changes when frontend source changes) ──
+# CACHEBUST arg invalidates Docker layer cache for this step and all below.
+# Usage: docker compose build --build-arg CACHEBUST=$(date +%s)
+ARG CACHEBUST=0
 COPY frontend/ ./
 RUN npm run build
 
