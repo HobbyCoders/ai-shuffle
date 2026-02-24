@@ -2949,6 +2949,14 @@ async def stream_to_websocket(
             logger.error(f"[WS] Failed to connect for session {session_id}: {e}")
             logger.error(f"[WS] Exception type: {type(e).__name__}")
             logger.error(f"[WS] Full traceback:\n{traceback.format_exc()}")
+            # Check if the CLI subprocess is still alive
+            if hasattr(client, '_transport') and hasattr(client._transport, '_process') and client._transport._process:
+                proc = client._transport._process
+                exit_code = proc.returncode
+                if exit_code is not None:
+                    logger.error(f"[WS] CLI process exited with code {exit_code} during initialization")
+                else:
+                    logger.error("[WS] CLI process is still running (hung during initialization)")
             if cli_stderr_lines:
                 stderr_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
                 logger.error(f"[WS] CLI stderr: {stderr_msg}")

@@ -26,6 +26,8 @@ services:
       - PGID=${PGID:-100}
       # Auto-update Claude Code and GitHub CLI on container start (default: true)
       - AUTO_UPDATE=${AUTO_UPDATE:-true}
+      # SDK initialize timeout in ms (default: 60000, increase if CLI startup is slow)
+      - CLAUDE_CODE_STREAM_CLOSE_TIMEOUT=${CLAUDE_CODE_STREAM_CLOSE_TIMEOUT:-120000}
 
     # Load environment from .env file (optional)
     env_file:

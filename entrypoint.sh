@@ -75,10 +75,33 @@ if [ ! -L "$CLAUDE_JSON_LINK" ]; then
             echo "Restored .claude.json from backup: $LATEST_BACKUP"
         fi
     fi
-    # Create the symlink (even if the target doesn't exist yet — CLI will create it)
+    # Ensure the target file exists (a dangling symlink causes the CLI
+    # subprocess to hang in --input-format stream-json mode because it
+    # can't read hasCompletedOnboarding and enters an interactive flow)
+    if [ ! -f "$CLAUDE_JSON_REAL" ]; then
+        echo '{"hasCompletedOnboarding":true}' > "$CLAUDE_JSON_REAL"
+        chown appuser:appuser "$CLAUDE_JSON_REAL"
+        echo "Created default .claude.json in persistent volume"
+    fi
     ln -sf "$CLAUDE_JSON_REAL" "$CLAUDE_JSON_LINK"
     chown -h appuser:appuser "$CLAUDE_JSON_LINK"
     echo "Symlinked $CLAUDE_JSON_LINK -> $CLAUDE_JSON_REAL"
+fi
+
+# Also ensure hasCompletedOnboarding is set in the existing .claude.json
+# (covers case where file exists from a previous version without this flag)
+if [ -f "$CLAUDE_JSON_REAL" ]; then
+    if ! grep -q '"hasCompletedOnboarding"' "$CLAUDE_JSON_REAL" 2>/dev/null; then
+        python3 -c "
+import json
+with open('$CLAUDE_JSON_REAL', 'r') as f:
+    data = json.load(f)
+data['hasCompletedOnboarding'] = True
+with open('$CLAUDE_JSON_REAL', 'w') as f:
+    json.dump(data, f, indent=2)
+print('Added hasCompletedOnboarding to .claude.json')
+" 2>/dev/null || echo "Could not update .claude.json"
+    fi
 fi
 
 # =============================================================================
