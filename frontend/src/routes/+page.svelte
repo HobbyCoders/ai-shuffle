@@ -136,7 +136,12 @@
 
 		// Sync layout.activeView with the restored session from activeSession.init().
 		// These two stores persist independently (localStorage vs backend API) and can
-		// diverge. The backend-persisted session is authoritative.
+		// diverge. Generally the backend-persisted session is authoritative, EXCEPT
+		// when the layout explicitly says "new chat" (sessionId: null). The layout
+		// uses synchronous localStorage, while the backend uses an async PUT that
+		// may not complete before a page reload. When the user clicks "New Chat",
+		// the layout immediately persists null, but the backend may still have the
+		// old session. In that case, the layout's explicit "new chat" intent wins.
 		const restoredSessionId = $activeSession?.sessionId ?? null;
 		const currentViewSessionId = $activeView?.type === 'chat' ? ($activeView.sessionId ?? null) : null;
 
@@ -147,6 +152,11 @@
 			} else {
 				handleNewSession();
 			}
+		} else if ($activeView.type === 'chat' && currentViewSessionId === null && restoredSessionId) {
+			// Layout says "new chat" but backend has a session — the user explicitly
+			// clicked New Chat (layout persists synchronously) but the async backend
+			// persist may not have completed. Respect the layout's explicit intent.
+			activeSession.newChat();
 		} else if ($activeView.type === 'chat' && currentViewSessionId !== restoredSessionId) {
 			// Layout view and active session disagree — backend is authoritative
 			layout.openChat(restoredSessionId);

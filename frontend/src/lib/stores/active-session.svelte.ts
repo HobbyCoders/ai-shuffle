@@ -567,6 +567,12 @@ function setupPollCallback() {
 		// Forward if streaming OR poller still has data
 		if (!_state.isStreaming && !data.isStreaming && !sessionPoller.isPolling(sessionId)) return;
 
+		// Detect streaming→ended transition from the server's authoritative state.
+		// This is critical for Docker/proxy deployments where the WS 'done' event
+		// may be lost — without this, _state.isStreaming stays true forever because
+		// only WS event handlers (done, stopped, error) previously cleared it.
+		const streamingEndedViaPoller = _state.isStreaming && !data.isStreaming;
+
 		// Skip if nothing actually changed — messages, todos, AND usage all identical.
 		// Only checking messages reference isn't enough because preserveMessageIds
 		// can return the same array when content matches, which would silently
@@ -574,11 +580,20 @@ function setupPollCallback() {
 		const usageDelta = usageStoreUpdate(data.usage);
 		const usageHasUpdate = 'totalTokensIn' in usageDelta;
 		const todosHaveUpdate = data.todos.length > 0;
-		if (_state.messages === data.messages && !todosHaveUpdate && !usageHasUpdate) return;
+		if (_state.messages === data.messages && !todosHaveUpdate && !usageHasUpdate && !streamingEndedViaPoller) return;
 
 		_update(s => ({
 			...s,
 			messages: data.messages,
+			// Sync isStreaming from server. The server's live_session_store is
+			// the source of truth. If it says streaming ended, the UI must reflect
+			// that even if the WS 'done' event was never received. The WS 'done'
+			// handler (handleDone) is idempotent — it still processes metadata
+			// correctly if isStreaming was already cleared here.
+			isStreaming: data.isStreaming,
+			// Keep streamStartTime when poller detects streaming ended — handleDone
+			// needs it to calculate duration for the completion notification.
+			// handleDone will clear it when (if) it fires.
 			todos: todosHaveUpdate ? data.todos : s.todos,
 			...usageDelta,
 		}));
@@ -586,9 +601,10 @@ function setupPollCallback() {
 }
 
 // ─── onStreamEnd callback ────────────────────────────────────────────────────
-// Cleanup-only: caches messages, removes session from sessionState, refreshes
-// sidebar. Does NOT call _update() — the poll callback already wrote final
-// messages, and handleDone already set isStreaming: false.
+// Caches messages, removes session from sessionState, refreshes sidebar,
+// and ensures isStreaming is cleared. The poll callback (onPollApplied) should
+// have already synced isStreaming from the server, but this is a safety net
+// for cases where the WS 'done' event was lost.
 
 function setupOnStreamEnd() {
 	sessionPoller.onStreamEnd((sessionId, _usage) => {
@@ -599,6 +615,18 @@ function setupOnStreamEnd() {
 		if (_state.isStreaming && _state.sessionId === sessionId && sessionPoller.isPolling(sessionId)) {
 			console.debug(`[ActiveSession] Skipping stale onStreamEnd for ${sessionId} — new streaming in progress`);
 			return;
+		}
+
+		// Safety net: ensure isStreaming is cleared for this session.
+		// The onPollApplied callback should have already done this, but if
+		// the final poll's isStreaming:false was missed (e.g., poll error),
+		// clear it here to prevent permanently stuck streaming UI.
+		if (_state.isStreaming && _state.sessionId === sessionId) {
+			_update(s => ({
+				...s,
+				isStreaming: false,
+				streamStartTime: null,
+			}));
 		}
 
 		// Refresh sessions list

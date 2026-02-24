@@ -22,6 +22,7 @@ function createMockInternal(): InternalMutableState {
 		streamEndCleanedUp: null,
 		streamingOnDisconnect: null,
 		interruptPending: false,
+		awaitingNewSession: false,
 	};
 }
 
