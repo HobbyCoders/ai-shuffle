@@ -1,22 +1,15 @@
 /**
- * Image Editing Tool - Unified Provider Interface
+ * Image Editing Tool - fal.ai Provider
  *
- * Edit existing images using AI from multiple providers:
- * - Google Gemini (Nano Banana): gemini-2.5-flash-image, gemini-3-pro-image-preview
- * - OpenAI GPT Image: gpt-image-1 (GPT-4o native image editing)
+ * Edit existing images using AI via fal.ai:
+ * - Flux Kontext Pro: fal-ai/flux-pro/kontext (targeted edits, scene transforms)
+ * - Nano Banana Pro Edit: fal-ai/nano-banana-pro (Google-based editing via fal.ai)
  *
- * The provider and model are selected based on environment variables or explicit input.
  * Images are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
- *   IMAGE_PROVIDER - Provider ID (e.g., "google-gemini", "openai-gpt-image")
- *   IMAGE_API_KEY - API key for the selected provider
- *   IMAGE_MODEL - Model to use (e.g., "gemini-2.5-flash-image", "gpt-image-1")
- *
- *   Legacy (backwards compatible):
- *   GEMINI_API_KEY - Google AI API key (used if IMAGE_API_KEY not set for Gemini)
- *   OPENAI_API_KEY - OpenAI API key (used if IMAGE_API_KEY not set for GPT Image)
- *   GEMINI_MODEL - Gemini model (used if IMAGE_MODEL not set)
+ *   FAL_KEY - fal.ai API key
+ *   IMAGE_MODEL - Model to use (e.g., "fal-ai/flux-pro/kontext", "fal-ai/nano-banana-pro")
  *
  * Usage:
  *   import { editImage } from '/opt/ai-tools/dist/image-generation/editImage.js';
@@ -58,16 +51,14 @@ export interface EditImageInput {
 
   /**
    * Override the default image provider.
-   * Available: "google-gemini", "openai-gpt-image"
-   * If not specified, uses IMAGE_PROVIDER env var or defaults to "google-gemini"
+   * Currently only "fal-ai" is supported.
    */
   provider?: string;
 
   /**
-   * Override the default model for the selected provider.
-   * Google Gemini: "gemini-2.5-flash-image", "gemini-3-pro-image-preview"
-   * OpenAI: "gpt-image-1"
-   * If not specified, uses IMAGE_MODEL/GEMINI_MODEL env var or provider default
+   * Override the default model.
+   * fal.ai: "fal-ai/flux-pro/kontext", "fal-ai/nano-banana-pro"
+   * If not specified, uses IMAGE_MODEL env var or defaults to "fal-ai/flux-pro/kontext"
    */
   model?: string;
 
@@ -141,7 +132,7 @@ export interface EditImageResponse {
   /** All edited images when number_of_images > 1 */
   images?: EditedImage[];
 
-  /** Provider that was used for editing (e.g., "google-gemini", "openai-gpt-image") */
+  /** Provider that was used for editing (e.g., "fal-ai") */
   provider_used?: string;
 
   /** Model that was used for editing */
@@ -152,79 +143,41 @@ export interface EditImageResponse {
 }
 
 /**
- * Determine the provider ID to use based on input and environment
+ * Determine the provider ID — always fal.ai
  */
-function getProviderId(inputProvider?: string): string {
-  // Explicit input takes priority
-  if (inputProvider) {
-    return inputProvider;
-  }
-
-  // Check environment variables
-  if (process.env.IMAGE_PROVIDER) {
-    return process.env.IMAGE_PROVIDER;
-  }
-
-  // Default to Google Gemini
-  return 'google-gemini';
+function getProviderId(_inputProvider?: string): string {
+  return 'fal-ai';
 }
 
 /**
- * Get API key for the specified provider
+ * Get API key from FAL_KEY environment variable
  */
-function getApiKey(providerId: string): string {
-  // Check provider-specific env var first
-  if (process.env.IMAGE_API_KEY) {
-    return process.env.IMAGE_API_KEY;
-  }
-
-  // Legacy fallbacks based on provider
-  if (providerId === 'google-gemini' || providerId === 'google-imagen') {
-    return process.env.GEMINI_API_KEY || '';
-  }
-
-  if (providerId === 'openai-gpt-image') {
-    return process.env.OPENAI_API_KEY || '';
-  }
-
-  return '';
+function getApiKey(_providerId: string): string {
+  return process.env.FAL_KEY || '';
 }
 
 /**
- * Get model ID for the specified provider
+ * Get model ID for the provider
  */
 function getModelId(providerId: string, inputModel?: string): string {
-  // Explicit input takes priority
   if (inputModel) {
     return inputModel;
   }
 
-  // Check environment variables
   if (process.env.IMAGE_MODEL) {
     return process.env.IMAGE_MODEL;
   }
 
-  // Legacy fallbacks
-  if (providerId === 'google-gemini' && process.env.GEMINI_MODEL) {
-    return process.env.GEMINI_MODEL;
-  }
-
-  // Provider defaults
+  // Provider defaults from registry
   const provider = registry.getImageProvider(providerId);
   if (provider && provider.models.length > 0) {
+    // Find first model with image-edit capability
+    const editModel = provider.models.find(m => m.capabilities.includes('image-edit'));
+    if (editModel) return editModel.id;
     return provider.models[0].id;
   }
 
-  // Ultimate fallback
-  if (providerId === 'google-gemini') {
-    return 'gemini-2.5-flash-image';
-  }
-
-  if (providerId === 'openai-gpt-image') {
-    return 'gpt-image-1';
-  }
-
-  return '';
+  return 'fal-ai/flux-pro/kontext';
 }
 
 /**
@@ -254,8 +207,8 @@ function toResponse(
 /**
  * Edit an existing image using AI.
  *
- * Uses the configured provider (Google Gemini, OpenAI GPT Image, etc.) or allows
- * explicit override via the provider/model parameters.
+ * Uses fal.ai as the image editing provider. Supports Flux Kontext and
+ * Nano Banana Pro edit models.
  *
  * The edited image is saved to disk and a URL is returned for display in the chat UI.
  * This avoids context window limitations with large base64 strings.
@@ -271,12 +224,11 @@ function toResponse(
  *   image_path: '/path/to/living-room.png'
  * });
  *
- * // Edit using specific provider
+ * // Edit using specific model
  * const result = await editImage({
  *   prompt: 'Make it black and white',
  *   image_path: '/path/to/image.png',
- *   provider: 'openai-gpt-image',
- *   model: 'gpt-image-1'
+ *   model: 'fal-ai/nano-banana-pro'
  * });
  *
  * if (result.success) {
@@ -313,7 +265,7 @@ export async function editImage(input: EditImageInput): Promise<EditImageRespons
   if (!apiKey) {
     return {
       success: false,
-      error: `No API key configured for ${provider.name}. Set IMAGE_API_KEY or provider-specific key.`
+      error: `No API key configured for ${provider.name}. Set FAL_KEY environment variable.`
     };
   }
 

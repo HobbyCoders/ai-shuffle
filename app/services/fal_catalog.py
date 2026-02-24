@@ -1,0 +1,354 @@
+"""
+fal.ai Model Catalog Service
+
+Fetches, caches, and serves the full fal.ai model catalog (~600+ models).
+Uses the fal.ai platform API to discover models dynamically, so new models
+are available without code changes.
+
+Catalog is persisted to SQLite for instant availability on startup,
+and refreshed in the background periodically (default: every hour).
+"""
+
+import json
+import logging
+import time
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+
+import httpx
+
+from app.db.base import get_db
+
+logger = logging.getLogger(__name__)
+
+# Map fal.ai categories to our internal tool types
+CATEGORY_TO_TOOL_TYPE = {
+    "text-to-image": "image_generation",
+    "image-to-image": "image_editing",
+    "text-to-video": "video_generation",
+    "image-to-video": "image_to_video",
+    "video-to-video": "video_generation",
+    "text-to-3d": "text_to_3d",
+    "image-to-3d": "image_to_3d",
+    "3d-to-3d": "text_to_3d",
+    "text-to-speech": "tts",
+    "audio-to-audio": "audio",
+    "audio-to-video": "video_generation",
+    "training": None,  # Skip training-only models
+    "text-to-json": None,
+    "unknown": None,
+}
+
+# Categories that produce specific output types (for generic executor)
+CATEGORY_TO_OUTPUT_TYPE = {
+    "text-to-image": "image",
+    "image-to-image": "image",
+    "text-to-video": "video",
+    "image-to-video": "video",
+    "video-to-video": "video",
+    "audio-to-video": "video",
+    "text-to-3d": "3d",
+    "image-to-3d": "3d",
+    "3d-to-3d": "3d",
+    "text-to-speech": "audio",
+    "audio-to-audio": "audio",
+}
+
+FAL_CATALOG_API = "https://api.fal.ai/v1/models"
+DEFAULT_CACHE_TTL = 3600  # 1 hour
+
+
+@dataclass
+class CatalogModel:
+    """A single model from the fal.ai catalog."""
+    endpoint_id: str
+    display_name: str
+    category: str
+    description: str
+    status: str = "active"
+    thumbnail_url: Optional[str] = None
+    tags: list[str] = field(default_factory=list)
+    group_key: Optional[str] = None
+    group_label: Optional[str] = None
+    updated_at: Optional[str] = None
+    tool_type: Optional[str] = None
+    output_type: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_api_response(cls, data: dict) -> "CatalogModel":
+        """Parse a single model from the fal.ai API response."""
+        metadata = data.get("metadata", {})
+        category = metadata.get("category", "unknown")
+        group = metadata.get("group", {})
+
+        return cls(
+            endpoint_id=data.get("endpoint_id", ""),
+            display_name=metadata.get("display_name", data.get("endpoint_id", "")),
+            category=category,
+            description=metadata.get("description", ""),
+            status=metadata.get("status", "active"),
+            thumbnail_url=metadata.get("thumbnail_url"),
+            tags=metadata.get("tags", []),
+            group_key=group.get("key") if group else None,
+            group_label=group.get("label") if group else None,
+            updated_at=metadata.get("updated_at"),
+            tool_type=CATEGORY_TO_TOOL_TYPE.get(category),
+            output_type=CATEGORY_TO_OUTPUT_TYPE.get(category),
+        )
+
+    @classmethod
+    def from_db_row(cls, row: dict) -> "CatalogModel":
+        """Parse from a SQLite row."""
+        tags = []
+        if row.get("tags_json"):
+            try:
+                tags = json.loads(row["tags_json"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        return cls(
+            endpoint_id=row["endpoint_id"],
+            display_name=row["display_name"],
+            category=row["category"],
+            description=row.get("description", ""),
+            status=row.get("status", "active"),
+            thumbnail_url=row.get("thumbnail_url"),
+            tags=tags,
+            group_key=row.get("group_key"),
+            group_label=row.get("group_label"),
+            updated_at=row.get("updated_at"),
+            tool_type=row.get("tool_type"),
+            output_type=row.get("output_type"),
+        )
+
+
+class FalCatalogService:
+    """
+    Service that manages the fal.ai model catalog.
+
+    - Fetches all models from fal.ai's platform API
+    - Caches in memory with configurable TTL
+    - Persists to SQLite for instant startup
+    - Provides search, filter, and lookup methods
+    """
+
+    def __init__(self, cache_ttl: int = DEFAULT_CACHE_TTL):
+        self._cache: list[CatalogModel] = []
+        self._cache_ttl = cache_ttl
+        self._last_refresh: float = 0
+        self._refreshing = False
+
+    @property
+    def is_stale(self) -> bool:
+        return time.time() - self._last_refresh > self._cache_ttl
+
+    @property
+    def model_count(self) -> int:
+        return len(self._cache)
+
+    def load_from_db(self) -> int:
+        """Load catalog from SQLite on startup. Returns count of models loaded."""
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM fal_model_catalog WHERE status = 'active' ORDER BY display_name"
+                )
+                rows = cursor.fetchall()
+                self._cache = [CatalogModel.from_db_row(dict(row)) for row in rows]
+            if self._cache:
+                self._last_refresh = time.time()
+                logger.info(f"Loaded {len(self._cache)} models from catalog cache")
+            return len(self._cache)
+        except Exception as e:
+            logger.debug(f"No catalog cache in DB (expected on first run): {e}")
+            return 0
+
+    async def refresh(self, api_key: Optional[str] = None) -> int:
+        """
+        Fetch the full model catalog from fal.ai API.
+
+        Paginates through all results, filters to inference models only,
+        and persists to both memory and SQLite.
+
+        Returns the number of models fetched.
+        """
+        if self._refreshing:
+            logger.debug("Catalog refresh already in progress, skipping")
+            return len(self._cache)
+
+        self._refreshing = True
+        try:
+            models = await self._fetch_all_models(api_key)
+            if not models:
+                logger.warning("fal.ai catalog API returned no models, keeping existing cache")
+                return len(self._cache)
+
+            self._cache = models
+            self._last_refresh = time.time()
+            self._persist_to_db(models)
+
+            logger.info(f"Refreshed fal.ai catalog: {len(models)} models across {len(self.get_categories())} categories")
+            return len(models)
+        except Exception as e:
+            logger.error(f"Failed to refresh fal.ai catalog: {e}")
+            # Keep existing cache on failure
+            return len(self._cache)
+        finally:
+            self._refreshing = False
+
+    async def _fetch_all_models(self, api_key: Optional[str] = None) -> list[CatalogModel]:
+        """Paginate through the fal.ai catalog API and return all inference models."""
+        all_models: list[CatalogModel] = []
+        cursor: Optional[str] = None
+        page = 0
+
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Key {api_key}"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while True:
+                page += 1
+                params: dict = {
+                    "status": "active",
+                    "limit": "100",
+                }
+                if cursor:
+                    params["cursor"] = cursor
+
+                response = await client.get(
+                    FAL_CATALOG_API,
+                    params=params,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                for model_data in data.get("models", []):
+                    model = CatalogModel.from_api_response(model_data)
+
+                    # Skip training-only and unknown/unclassified models
+                    if model.tool_type is None:
+                        continue
+
+                    # Skip deprecated models
+                    if model.status != "active":
+                        continue
+
+                    all_models.append(model)
+
+                # Check for more pages
+                has_more = data.get("has_more", False)
+                next_cursor = data.get("next_cursor")
+
+                if not has_more or not next_cursor:
+                    break
+
+                cursor = next_cursor
+
+                # Safety: prevent infinite loops
+                if page > 20:
+                    logger.warning("Catalog fetch hit 20 pages, stopping pagination")
+                    break
+
+        return all_models
+
+    def _persist_to_db(self, models: list[CatalogModel]) -> None:
+        """Persist the catalog to SQLite, replacing all existing entries."""
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM fal_model_catalog")
+                for model in models:
+                    cursor.execute(
+                        """INSERT INTO fal_model_catalog
+                           (endpoint_id, display_name, category, description, status,
+                            thumbnail_url, tags_json, group_key, group_label,
+                            tool_type, output_type, updated_at, fetched_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                        (
+                            model.endpoint_id,
+                            model.display_name,
+                            model.category,
+                            model.description,
+                            model.status,
+                            model.thumbnail_url,
+                            json.dumps(model.tags),
+                            model.group_key,
+                            model.group_label,
+                            model.tool_type,
+                            model.output_type,
+                            model.updated_at,
+                        ),
+                    )
+        except Exception as e:
+            logger.error(f"Failed to persist catalog to DB: {e}")
+
+    # =========================================================================
+    # Query Methods
+    # =========================================================================
+
+    def get_all(self) -> list[CatalogModel]:
+        """Get all cached models."""
+        return self._cache
+
+    def get_model(self, endpoint_id: str) -> Optional[CatalogModel]:
+        """Get a specific model by endpoint ID."""
+        for model in self._cache:
+            if model.endpoint_id == endpoint_id:
+                return model
+        return None
+
+    def search(
+        self,
+        q: Optional[str] = None,
+        category: Optional[str] = None,
+        tool_type: Optional[str] = None,
+        output_type: Optional[str] = None,
+    ) -> list[CatalogModel]:
+        """Search and filter models."""
+        results = self._cache
+
+        if category:
+            results = [m for m in results if m.category == category]
+
+        if tool_type:
+            results = [m for m in results if m.tool_type == tool_type]
+
+        if output_type:
+            results = [m for m in results if m.output_type == output_type]
+
+        if q:
+            q_lower = q.lower()
+            results = [
+                m for m in results
+                if q_lower in m.display_name.lower()
+                or q_lower in m.description.lower()
+                or q_lower in m.endpoint_id.lower()
+                or any(q_lower in tag.lower() for tag in m.tags)
+            ]
+
+        return results
+
+    def get_categories(self) -> list[dict]:
+        """Get all categories with model counts."""
+        category_counts: dict[str, int] = {}
+        for model in self._cache:
+            category_counts[model.category] = category_counts.get(model.category, 0) + 1
+
+        return [
+            {"category": cat, "count": count, "tool_type": CATEGORY_TO_TOOL_TYPE.get(cat)}
+            for cat, count in sorted(category_counts.items(), key=lambda x: -x[1])
+        ]
+
+    def get_models_for_tool(self, tool_type: str) -> list[CatalogModel]:
+        """Get all models that map to a specific tool type."""
+        return [m for m in self._cache if m.tool_type == tool_type]
+
+
+# Singleton instance
+catalog_service = FalCatalogService()

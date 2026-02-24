@@ -21,7 +21,8 @@ from app.db.base import get_db, column_exists, table_exists, column_is_not_null,
 # v32: Add mobile device tables (mobile_devices, pending_actions, trusted_actions)
 # v33: Add file_path to notes for physical markdown files
 # v34: Add connectors tables (connectors, connector_event_log, connector_sessions)
-SCHEMA_VERSION = 34
+# v35: Add fal_model_catalog table for dynamic model discovery
+SCHEMA_VERSION = 35
 
 
 def _run_column_migrations(cursor: sqlite3.Cursor):
@@ -916,9 +917,7 @@ def _create_schema(cursor: sqlite3.Cursor):
 
     # Initialize default credential policies if not exist
     default_policies = [
-        ('openai_api_key', 'optional', 'OpenAI API key for AI tools (TTS, STT, GPT Image, Sora)'),
-        ('gemini_api_key', 'optional', 'Google Gemini API key for Nano Banana, Imagen, Veo'),
-        ('meshy_api_key', 'optional', 'Meshy API key for 3D model generation'),
+        ('fal_api_key', 'optional', 'fal.ai API key for all AI tools (image, video, 3D, audio)'),
         ('github_pat', 'user_provided', 'GitHub Personal Access Token for repository access'),
     ]
     for policy_id, policy, description in default_policies:
@@ -1143,3 +1142,29 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_automation_approvals_status ON automation_approvals(status, created_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_automations_enabled ON automations(is_enabled)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_automations_trigger ON automations(trigger_type)")
+
+    # ========================================================================
+    # fal.ai Model Catalog — dynamic model discovery cache
+    # ========================================================================
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS fal_model_catalog (
+            endpoint_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            status TEXT DEFAULT 'active',
+            thumbnail_url TEXT,
+            tags_json TEXT DEFAULT '[]',
+            group_key TEXT,
+            group_label TEXT,
+            tool_type TEXT,
+            output_type TEXT,
+            updated_at TEXT,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_category ON fal_model_catalog(category)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_tool_type ON fal_model_catalog(tool_type)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_output_type ON fal_model_catalog(output_type)")

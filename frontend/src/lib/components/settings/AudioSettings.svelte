@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * AudioSettings - TTS model/voice/speed/format config, STT model selection
+	 * AudioSettings - TTS model/voice/speed config, STT model selection (fal.ai only)
 	 */
 	import '../deck/cards/card-design-system.css';
 	import { slide } from 'svelte/transition';
@@ -10,7 +10,6 @@
 	import {
 		ALL_TTS_MODELS,
 		ALL_STT_MODELS,
-		PROVIDER_DISPLAY_NAMES,
 		type TTSVoice
 	} from '$lib/types/ai-models';
 
@@ -20,11 +19,10 @@
 	let currentTtsModel = $state('');
 	let selectedTtsModel = $state('');
 	let savingTtsModel = $state(false);
-	let selectedTtsVoice = $state('alloy');
-	let currentTtsVoice = $state('alloy');
+	let selectedTtsVoice = $state('af_heart');
+	let currentTtsVoice = $state('af_heart');
 	let ttsSpeed = $state(1.0);
-	let ttsOutputFormat = $state('mp3');
-	let ttsInstructions = $state('');
+	let ttsOutputFormat = $state('wav');
 	let savingTtsSettings = $state(false);
 
 	// STT state
@@ -47,19 +45,17 @@
 				tts_voice: string | null;
 				tts_speed: number | null;
 				tts_output_format: string | null;
-				tts_instructions: string | null;
 				stt_model: string | null;
 			}>('/settings/integrations');
 
-			currentTtsModel = settings.tts_model || 'gpt-4o-mini-tts';
+			currentTtsModel = settings.tts_model || 'fal-ai/kokoro/american-english';
 			selectedTtsModel = currentTtsModel;
-			currentSttModel = settings.stt_model || 'whisper-1';
+			currentSttModel = settings.stt_model || 'fal-ai/whisper';
 			selectedSttModel = currentSttModel;
-			selectedTtsVoice = settings.tts_voice || 'alloy';
+			selectedTtsVoice = settings.tts_voice || 'af_heart';
 			currentTtsVoice = selectedTtsVoice;
 			ttsSpeed = settings.tts_speed || 1.0;
-			ttsOutputFormat = settings.tts_output_format || 'mp3';
-			ttsInstructions = settings.tts_instructions || '';
+			ttsOutputFormat = settings.tts_output_format || 'wav';
 		} catch (e) {
 			console.error('Failed to load audio settings:', e);
 		}
@@ -70,19 +66,9 @@
 		return model?.voices || [];
 	}
 
-	function isCurrentModelSteerable(): boolean {
+	function getAvailableFormats(): string[] {
 		const model = ALL_TTS_MODELS.find(m => m.id === currentTtsModel);
-		return model?.capabilities?.steerability ?? false;
-	}
-
-	function groupModelsByProvider<T extends { provider: string }>(models: T[]): Record<string, T[]> {
-		const groups: Record<string, T[]> = {};
-		for (const model of models) {
-			const name = PROVIDER_DISPLAY_NAMES[model.provider] || model.provider;
-			if (!groups[name]) groups[name] = [];
-			groups[name].push(model);
-		}
-		return groups;
+		return model?.outputFormats || ['wav'];
 	}
 
 	async function updateTtsModel() {
@@ -137,8 +123,7 @@
 				model: selectedTtsModel,
 				voice: selectedTtsVoice,
 				speed: ttsSpeed,
-				output_format: ttsOutputFormat,
-				instructions: ttsInstructions
+				output_format: ttsOutputFormat
 			});
 			currentTtsModel = selectedTtsModel;
 			currentTtsVoice = selectedTtsVoice;
@@ -171,12 +156,8 @@
 					disabled={savingTtsModel}
 					class="input select"
 				>
-					{#each Object.entries(groupModelsByProvider(ALL_TTS_MODELS)) as [provider, models] (provider)}
-						<optgroup label={provider}>
-							{#each models as model (model.id)}
-								<option value={model.id}>{model.displayName}</option>
-							{/each}
-						</optgroup>
+					{#each ALL_TTS_MODELS as model (model.id)}
+						<option value={model.id}>{model.displayName} — {model.description}</option>
 					{/each}
 				</select>
 			</div>
@@ -188,48 +169,24 @@
 					{#each getAvailableVoices() as voice (voice.id)}
 						<option value={voice.id}>{voice.name} {voice.gender ? `(${voice.gender})` : ''}</option>
 					{/each}
-					{#if getAvailableVoices().length === 0}
-						<option value="alloy">Alloy</option>
-						<option value="echo">Echo</option>
-						<option value="fable">Fable</option>
-						<option value="onyx">Onyx</option>
-						<option value="nova">Nova</option>
-						<option value="shimmer">Shimmer</option>
-					{/if}
 				</select>
 			</div>
 
 			<!-- TTS Speed -->
 			<div class="setting-row">
 				<label class="setting-label" for="audio-tts-speed">Speed ({ttsSpeed.toFixed(1)}x)</label>
-				<input id="audio-tts-speed" type="range" min="0.25" max="4.0" step="0.1" bind:value={ttsSpeed} class="slider" />
+				<input id="audio-tts-speed" type="range" min="0.5" max="2.0" step="0.1" bind:value={ttsSpeed} class="slider" />
 			</div>
 
 			<!-- TTS Format -->
 			<div class="setting-row">
 				<label class="setting-label" for="audio-tts-format">Output Format</label>
 				<select id="audio-tts-format" bind:value={ttsOutputFormat} class="input select compact">
-					<option value="mp3">MP3</option>
-					<option value="wav">WAV</option>
-					<option value="opus">Opus</option>
-					<option value="aac">AAC</option>
-					<option value="flac">FLAC</option>
+					{#each getAvailableFormats() as fmt (fmt)}
+						<option value={fmt}>{fmt.toUpperCase()}</option>
+					{/each}
 				</select>
 			</div>
-
-			<!-- Voice Instructions (if steerable) -->
-			{#if isCurrentModelSteerable()}
-				<div class="setting-row vertical">
-					<label class="setting-label" for="audio-tts-instructions">Voice Instructions <span class="badge primary">Steerable</span></label>
-					<textarea
-						id="audio-tts-instructions"
-						bind:value={ttsInstructions}
-						placeholder="e.g., Speak in a warm, friendly tone..."
-						class="input textarea"
-						rows="2"
-					></textarea>
-				</div>
-			{/if}
 
 			<button
 				onclick={saveTtsSettings}
@@ -251,12 +208,8 @@
 					disabled={savingSttModel}
 					class="input select"
 				>
-					{#each Object.entries(groupModelsByProvider(ALL_STT_MODELS)) as [provider, models] (provider)}
-						<optgroup label={provider}>
-							{#each models as model (model.id)}
-								<option value={model.id}>{model.displayName}</option>
-							{/each}
-						</optgroup>
+					{#each ALL_STT_MODELS as model (model.id)}
+						<option value={model.id}>{model.displayName} — {model.description}</option>
 					{/each}
 				</select>
 			</div>
@@ -332,15 +285,11 @@
 		padding: 8px 0;
 	}
 
-	.setting-row.vertical {
-		flex-direction: column;
-		align-items: stretch;
-	}
-
 	.setting-label {
 		font-size: 0.875rem;
 		font-weight: 500;
 		color: var(--foreground);
+		white-space: nowrap;
 	}
 
 	.input {
@@ -359,16 +308,9 @@
 		box-shadow: 0 0 0 2px var(--primary-20);
 	}
 
-	.input::placeholder { color: var(--muted-foreground); }
-
 	.input.compact {
 		padding: 6px 10px;
 		font-size: 0.8125rem;
-	}
-
-	.input.textarea {
-		resize: vertical;
-		min-height: 60px;
 	}
 
 	.slider {
@@ -422,23 +364,6 @@
 	}
 
 	.btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
-
-	.badge {
-		display: inline-flex;
-		align-items: center;
-		padding: 2px 8px;
-		font-size: 0.6875rem;
-		font-weight: 600;
-		border-radius: 9999px;
-		text-transform: uppercase;
-		letter-spacing: 0.025em;
-	}
-
-	.badge.primary {
-		background: color-mix(in oklch, var(--primary) 15%, transparent);
-		color: var(--primary);
-		border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
-	}
 
 	.divider {
 		border: none;

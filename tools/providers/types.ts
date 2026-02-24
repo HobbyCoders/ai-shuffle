@@ -27,11 +27,8 @@ export interface ProviderCredentials {
  * Used for basic format validation before making API calls
  */
 export const API_KEY_PATTERNS: Record<string, { prefix?: string; minLength: number; description: string }> = {
-  openai: { prefix: 'sk-', minLength: 20, description: 'OpenAI keys start with sk-' },
-  google: { minLength: 30, description: 'Google API keys are typically 39 characters' },
-  gemini: { minLength: 30, description: 'Gemini API keys are typically 39 characters' },
-  meshy: { minLength: 20, description: 'Meshy API keys are alphanumeric strings' },
   fal: { minLength: 10, description: 'fal.ai API keys are alphanumeric strings' },
+  'fal-ai': { minLength: 10, description: 'fal.ai API keys are alphanumeric strings' },
 };
 
 /**
@@ -426,31 +423,17 @@ export interface ProviderConfig {
  * Environment variables used by tools
  */
 export interface ToolEnvironment {
-  // Image generation
-  IMAGE_PROVIDER?: string;
-  IMAGE_API_KEY?: string;
-  IMAGE_MODEL?: string;
-  // Video generation
-  VIDEO_PROVIDER?: string;
-  VIDEO_API_KEY?: string;
-  VIDEO_MODEL?: string;
-  // Audio generation
-  AUDIO_PROVIDER?: string;
-  AUDIO_API_KEY?: string;
-  AUDIO_MODEL?: string;
-  // 3D model generation
-  MODEL3D_PROVIDER?: string;
-  MODEL3D_API_KEY?: string;
-  MODEL3D_MODEL?: string;
-  MESHY_API_KEY?: string;
-  // fal.ai (single key covers image, video, 3D)
+  // fal.ai (single key covers all modalities)
   FAL_KEY?: string;
-  // Legacy support (backwards compatible)
-  GEMINI_API_KEY?: string;
-  GEMINI_MODEL?: string;
-  VEO_MODEL?: string;
-  // OpenAI
-  OPENAI_API_KEY?: string;
+  // Default model selections
+  IMAGE_PROVIDER?: string;
+  IMAGE_MODEL?: string;
+  VIDEO_PROVIDER?: string;
+  VIDEO_MODEL?: string;
+  MODEL3D_PROVIDER?: string;
+  MODEL3D_MODEL?: string;
+  TTS_MODEL?: string;
+  STT_MODEL?: string;
   // Output directories
   GENERATED_IMAGES_DIR?: string;
   GENERATED_VIDEOS_DIR?: string;

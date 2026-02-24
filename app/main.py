@@ -21,7 +21,7 @@ from app.core.auth import auth_service
 from app.core import encryption
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, meshy, notes, hooks, generation, project_agents, project_plugins, mcp, mobile, internal, workspace_files, connectors, automations, browser, browser_ws, api_users, documentation
+from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, notes, hooks, generation, project_agents, project_plugins, mcp, mobile, internal, workspace_files, connectors, automations, browser, browser_ws, api_users, documentation, catalog
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -170,6 +170,11 @@ async def lifespan(app: FastAPI):
     # Start consolidated git tracker (watcher + hooks + cache)
     from app.core.git_tracker import git_tracker
     git_tracker.start(port=settings.port)
+
+    # Load fal.ai model catalog from DB cache (instant startup)
+    # Background refresh happens on first API request if cache is stale
+    from app.services.fal_catalog import catalog_service
+    catalog_service.load_from_db()
 
     # Browser tools are now served in-process via SDK MCP server
     # (browser_sdk_tools.py), no startup registration needed.
@@ -342,7 +347,6 @@ app.include_router(github.router)
 app.include_router(git.router)
 app.include_router(studio.router)
 app.include_router(plugins.router)
-app.include_router(meshy.router)
 app.include_router(notes.router)
 app.include_router(hooks.router)
 app.include_router(generation.router)
@@ -355,6 +359,7 @@ app.include_router(workspace_files.router)
 app.include_router(browser.router)
 app.include_router(browser_ws.router)
 app.include_router(documentation.router)
+app.include_router(catalog.router)
 
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"

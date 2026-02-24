@@ -1,12 +1,12 @@
 /**
- * Reference-Based Image Generation Tool - Nano Banana (Google Gemini)
+ * Reference-Based Image Generation Tool - fal.ai Provider
  *
  * Generate images while maintaining character/style consistency using reference images.
- * Use up to 14 reference images (6 objects, 5 humans) to guide generation.
+ * Uses Flux Kontext Pro via fal.ai for reference-based generation.
  *
  * Environment Variables:
- *   GEMINI_API_KEY - Google AI API key (injected by AI Hub at runtime)
- *   GEMINI_MODEL - Model to use (optional, defaults to gemini-2.0-flash-exp)
+ *   FAL_KEY - fal.ai API key
+ *   IMAGE_MODEL - Model to use (optional, defaults to fal-ai/flux-pro/kontext)
  *
  * Usage:
  *   import { generateWithReference } from '/opt/ai-tools/dist/image-generation/generateWithReference.js';
@@ -17,51 +17,8 @@
  *   });
  */
 
-import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
-import { join, extname } from 'path';
-
-/**
- * Get the directory for storing generated images.
- */
-function getGeneratedImagesDir(): string {
-  if (process.env.GENERATED_IMAGES_DIR) {
-    return process.env.GENERATED_IMAGES_DIR;
-  }
-  return join(process.cwd(), 'generated-images');
-}
-
-/**
- * Get MIME type from file extension
- */
-function getMimeType(filePath: string): string {
-  const ext = extname(filePath).toLowerCase();
-  const mimeTypes: Record<string, string> = {
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif',
-    '.webp': 'image/webp',
-  };
-  return mimeTypes[ext] || 'image/png';
-}
-
-/**
- * Load image and convert to base64
- */
-function loadImageAsBase64(imagePath: string): { base64: string; mimeType: string } | { error: string } {
-  try {
-    if (!existsSync(imagePath)) {
-      return { error: `Image file not found: ${imagePath}` };
-    }
-    const imageBuffer = readFileSync(imagePath);
-    return {
-      base64: imageBuffer.toString('base64'),
-      mimeType: getMimeType(imagePath)
-    };
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : 'Failed to read image' };
-  }
-}
+import { registry } from '../providers/registry.js';
+import { ImageResult, ProviderCredentials } from '../providers/types.js';
 
 export interface ReferenceImage {
   /**
@@ -139,11 +96,15 @@ export interface GenerateWithReferenceResponse {
   filename?: string;
   mime_type?: string;
   images?: GeneratedImage[];
+  provider_used?: string;
+  model_used?: string;
   error?: string;
 }
 
 /**
  * Generate an image using reference images for consistency.
+ *
+ * Uses fal.ai's Flux Kontext Pro for reference-based generation.
  *
  * This is useful for:
  * - Maintaining character consistency across multiple generations
@@ -180,16 +141,29 @@ export interface GenerateWithReferenceResponse {
  */
 export async function generateWithReference(input: GenerateWithReferenceInput): Promise<GenerateWithReferenceResponse> {
   // Get API key from environment
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.FAL_KEY;
   if (!apiKey) {
     return {
       success: false,
-      error: 'GEMINI_API_KEY environment variable not set. Image generation is not configured.'
+      error: 'FAL_KEY environment variable not set. Image generation is not configured.'
     };
   }
 
-  // Get model from environment or use default
-  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp';
+  // Get provider from registry
+  const provider = registry.getImageProvider('fal-ai');
+  if (!provider) {
+    return {
+      success: false,
+      error: 'fal-ai image provider not found in registry.'
+    };
+  }
+
+  if (!provider.generateWithReference) {
+    return {
+      success: false,
+      error: 'fal-ai image provider does not support reference-based generation.'
+    };
+  }
 
   // Validate input
   if (!input.prompt || input.prompt.trim().length === 0) {
@@ -220,186 +194,47 @@ export async function generateWithReference(input: GenerateWithReferenceInput): 
     };
   }
 
-  const prompt = input.prompt.trim();
-  const numberOfImages = input.number_of_images || 1;
+  // Get model
+  const modelId = process.env.IMAGE_MODEL || 'fal-ai/flux-pro/kontext';
+
+  // Normalize reference images to the unified format
+  const referenceImages = input.reference_images.map(ref => {
+    if (typeof ref === 'string') {
+      return { path: ref };
+    }
+    return ref;
+  });
+
+  // Build credentials
+  const credentials: ProviderCredentials = { apiKey };
 
   try {
-    // Build parts array with prompt and reference images
-    const parts: any[] = [{ text: prompt }];
-
-    // Load and add each reference image
-    for (const ref of input.reference_images) {
-      const imagePath = typeof ref === 'string' ? ref : ref.path;
-      const label = typeof ref === 'string' ? undefined : ref.label;
-
-      const imageResult = loadImageAsBase64(imagePath);
-      if ('error' in imageResult) {
-        return {
-          success: false,
-          error: imageResult.error
-        };
-      }
-
-      // Add label as text part if provided
-      if (label) {
-        parts.push({ text: `[Reference: ${label}]` });
-      }
-
-      // Add the image
-      parts.push({
-        inline_data: {
-          mime_type: imageResult.mimeType,
-          data: imageResult.base64
-        }
-      });
-    }
-
-    // Build generation config
-    const generationConfig: any = {
-      responseModalities: ['TEXT', 'IMAGE']
-    };
-
-    const imageConfig: any = {};
-
-    if (input.aspect_ratio) {
-      imageConfig.aspectRatio = input.aspect_ratio;
-    }
-
-    if (input.image_size) {
-      imageConfig.imageSize = input.image_size;
-    }
-
-    if (input.person_generation) {
-      imageConfig.personGeneration = input.person_generation;
-    }
-
-    if (numberOfImages > 1) {
-      imageConfig.numberOfImages = numberOfImages;
-    }
-
-    if (Object.keys(imageConfig).length > 0) {
-      generationConfig.imageConfig = imageConfig;
-    }
-
-    // Call Gemini API
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    const result: ImageResult = await provider.generateWithReference(
       {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          contents: [{ parts }],
-          generationConfig
-        }),
-      }
+        prompt: input.prompt.trim(),
+        reference_images: referenceImages,
+        aspect_ratio: input.aspect_ratio,
+        image_size: input.image_size,
+        number_of_images: input.number_of_images,
+        person_generation: input.person_generation
+      },
+      credentials,
+      modelId
     );
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      const errorMsg = (errorData as any)?.error?.message || `HTTP ${response.status}`;
-
-      if (response.status === 400) {
-        const errorStr = JSON.stringify(errorData);
-        if (errorStr.includes('SAFETY') || errorStr.toLowerCase().includes('blocked')) {
-          return {
-            success: false,
-            error: 'Image generation was blocked by safety filters. Please try a different prompt or reference images.'
-          };
-        }
-      }
-
-      if (response.status === 401 || response.status === 403) {
-        return {
-          success: false,
-          error: 'API key is invalid or expired.'
-        };
-      }
-
-      if (response.status === 429) {
-        return {
-          success: false,
-          error: 'Rate limit exceeded. Please wait a moment and try again.'
-        };
-      }
-
-      return {
-        success: false,
-        error: `API error: ${errorMsg}`
-      };
+    if (!result.success) {
+      return { success: false, error: result.error };
     }
 
-    const result = await response.json() as any;
-
-    // Extract images from response
-    const candidates = result.candidates || [];
-    if (!candidates.length) {
-      return {
-        success: false,
-        error: 'No image was generated. The model may have refused the request.'
-      };
-    }
-
-    const responseParts = candidates[0]?.content?.parts || [];
-    const generatedImages: GeneratedImage[] = [];
-
-    // Get the output directory
-    const outputDir = getGeneratedImagesDir();
-
-    if (!existsSync(outputDir)) {
-      mkdirSync(outputDir, { recursive: true });
-    }
-
-    // Process all image parts
-    for (const part of responseParts) {
-      if (part.inlineData) {
-        const base64Data = part.inlineData.data;
-        const mimeType = part.inlineData.mimeType || 'image/png';
-        const ext = mimeType === 'image/jpeg' ? 'jpg' : 'png';
-
-        const timestamp = Date.now();
-        const randomSuffix = Math.random().toString(36).substring(2, 8);
-        const filename = `ref-${timestamp}-${randomSuffix}.${ext}`;
-
-        const filePath = join(outputDir, filename);
-        const buffer = Buffer.from(base64Data, 'base64');
-        writeFileSync(filePath, buffer);
-
-        const encodedPath = encodeURIComponent(filePath);
-        generatedImages.push({
-          image_url: `/api/generated-images/by-path?path=${encodedPath}`,
-          file_path: filePath,
-          filename: filename,
-          mime_type: mimeType
-        });
-      }
-    }
-
-    if (generatedImages.length === 0) {
-      for (const part of responseParts) {
-        if (part.text) {
-          return {
-            success: false,
-            error: `Model response: ${part.text.substring(0, 500)}`
-          };
-        }
-      }
-
-      return {
-        success: false,
-        error: 'No image was generated. Please try a different prompt.'
-      };
-    }
-
-    const firstImage = generatedImages[0];
     return {
       success: true,
-      image_url: firstImage.image_url,
-      file_path: firstImage.file_path,
-      filename: firstImage.filename,
-      mime_type: firstImage.mime_type,
-      ...(generatedImages.length > 1 && { images: generatedImages })
+      image_url: result.image_url,
+      file_path: result.file_path,
+      filename: result.filename,
+      mime_type: result.mime_type,
+      ...(result.images && { images: result.images as GeneratedImage[] }),
+      provider_used: 'fal-ai',
+      model_used: modelId
     };
 
   } catch (error) {

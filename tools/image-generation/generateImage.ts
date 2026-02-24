@@ -1,42 +1,13 @@
 /**
- * Image Generation Tool - Unified Provider Interface
+ * Image Generation Tool — fal.ai Provider
  *
- * Generate images using AI from multiple providers:
- * - Google Gemini (Nano Banana): gemini-2.5-flash-image, gemini-3-pro-image-preview
- * - OpenAI GPT Image: gpt-image-1 (GPT-4o native image generation)
+ * Generate images using fal.ai models:
+ * - Flux Pro 1.1 Ultra, FLUX.2 Flex, Flux Dev, Flux Schnell
+ * - Flux Kontext Pro (editing + reference images)
+ * - Recraft V4, Nano Banana Pro, Qwen Image
  *
- * The provider and model are selected based on environment variables or explicit input.
+ * All models accessed through a single fal.ai API key (FAL_KEY env var).
  * Images are saved to disk and a URL is returned for display.
- *
- * Environment Variables:
- *   IMAGE_PROVIDER - Provider ID (e.g., "google-gemini", "openai-gpt-image")
- *   IMAGE_API_KEY - API key for the selected provider
- *   IMAGE_MODEL - Model to use (e.g., "gemini-2.5-flash-image", "gpt-image-1")
- *
- *   Legacy (backwards compatible):
- *   GEMINI_API_KEY - Google AI API key (used if IMAGE_API_KEY not set for Gemini)
- *   OPENAI_API_KEY - OpenAI API key (used if IMAGE_API_KEY not set for GPT Image)
- *   GEMINI_MODEL - Gemini model (used if IMAGE_MODEL not set)
- *
- * Usage:
- *   import { generateImage } from '/opt/ai-tools/dist/image-generation/generateImage.js';
- *
- *   // Use default provider from settings
- *   const result = await generateImage({
- *     prompt: 'A futuristic city at sunset, cyberpunk style'
- *   });
- *
- *   // Or explicitly specify provider/model
- *   const result = await generateImage({
- *     prompt: 'A futuristic city at sunset',
- *     provider: 'google-gemini',
- *     model: 'gemini-3-pro-image-preview'
- *   });
- *
- *   if (result.success) {
- *     // result.image_url contains the URL to access the image
- *     // result.file_path contains the local file path
- *   }
  */
 
 import { registry } from '../providers/registry.js';
@@ -55,15 +26,16 @@ export interface GenerateImageInput {
 
   /**
    * Override the default image provider.
-   * Available: "google-gemini"
-   * If not specified, uses IMAGE_PROVIDER env var or defaults to "google-gemini"
+   * Always "fal-ai" in the current architecture.
    */
   provider?: string;
 
   /**
-   * Override the default model for the selected provider.
-   * Google Gemini: "gemini-2.5-flash-image", "gemini-3-pro-image-preview"
-   * If not specified, uses IMAGE_MODEL/GEMINI_MODEL env var or provider default
+   * Override the default model.
+   * Available: "fal-ai/flux-pro/v1.1-ultra", "fal-ai/flux-2-flex", "fal-ai/flux/dev",
+   *   "fal-ai/flux/schnell", "fal-ai/flux-pro/kontext", "fal-ai/recraft/v4/text-to-image",
+   *   "fal-ai/nano-banana-pro", "fal-ai/qwen-image"
+   * If not specified, uses IMAGE_MODEL env var or provider default
    */
   model?: string;
 
@@ -147,65 +119,29 @@ export interface GenerateImageResponse {
 }
 
 /**
- * Determine the provider ID to use based on input and environment
+ * Get the provider ID — always fal-ai
  */
-function getProviderId(inputProvider?: string): string {
-  // Explicit input takes priority
-  if (inputProvider) {
-    return inputProvider;
-  }
-
-  // Check environment variables
-  if (process.env.IMAGE_PROVIDER) {
-    return process.env.IMAGE_PROVIDER;
-  }
-
-  // Default to Google Gemini
-  return 'google-gemini';
+function getProviderId(_inputProvider?: string): string {
+  return 'fal-ai';
 }
 
 /**
- * Get API key for the specified provider
+ * Get fal.ai API key from environment
  */
-function getApiKey(providerId: string): string {
-  // Check provider-specific env var first
-  if (process.env.IMAGE_API_KEY) {
-    return process.env.IMAGE_API_KEY;
-  }
-
-  // Legacy fallbacks based on provider
-  if (providerId === 'google-gemini' || providerId === 'google-imagen') {
-    return process.env.GEMINI_API_KEY || '';
-  }
-
-  if (providerId === 'openai-gpt-image') {
-    return process.env.OPENAI_API_KEY || '';
-  }
-
-  if (providerId === 'fal-ai') {
-    return process.env.FAL_KEY || '';
-  }
-
-  return '';
+function getApiKey(_providerId: string): string {
+  return process.env.FAL_KEY || '';
 }
 
 /**
- * Get model ID for the specified provider
+ * Get model ID from input or environment
  */
 function getModelId(providerId: string, inputModel?: string): string {
-  // Explicit input takes priority
   if (inputModel) {
     return inputModel;
   }
 
-  // Check environment variables
   if (process.env.IMAGE_MODEL) {
     return process.env.IMAGE_MODEL;
-  }
-
-  // Legacy fallbacks
-  if (providerId === 'google-gemini' && process.env.GEMINI_MODEL) {
-    return process.env.GEMINI_MODEL;
   }
 
   // Provider defaults
@@ -214,16 +150,7 @@ function getModelId(providerId: string, inputModel?: string): string {
     return provider.models[0].id;
   }
 
-  // Ultimate fallback
-  if (providerId === 'google-gemini') {
-    return 'gemini-2.5-flash-image';
-  }
-
-  if (providerId === 'openai-gpt-image') {
-    return 'gpt-image-1';
-  }
-
-  return '';
+  return 'fal-ai/flux-pro/v1.1-ultra';
 }
 
 /**
@@ -242,8 +169,8 @@ function toResponse(
   // Determine which providers can edit this image
   const supportsEdit = capabilities.includes('image-edit');
   const editWith = supportsEdit
-    ? providerId  // Same provider can edit
-    : 'google-gemini or openai-gpt-image';  // Suggest providers that support editing
+    ? providerId
+    : 'fal-ai (use fal-ai/flux-pro/kontext or fal-ai/nano-banana-pro/edit)';
 
   return {
     success: true,
@@ -321,23 +248,20 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
   const modelId = getModelId(providerId, input.model);
   const modelInfo = provider.models.find(m => m.id === modelId);
 
-  if (!modelInfo) {
-    const availableModels = provider.models.map(m => m.id);
-    return {
-      success: false,
-      error: `Model '${modelId}' not found for ${provider.name}. Available models: ${availableModels.join(', ')}`
-    };
-  }
-
   // Build credentials
   const credentials: ProviderCredentials = { apiKey };
 
-  // Delegate to provider
+  // Apply env var defaults when caller doesn't specify
+  const aspect_ratio = input.aspect_ratio || (process.env.IMAGE_ASPECT_RATIO as any) || undefined;
+  const image_size = input.image_size || (process.env.IMAGE_RESOLUTION as any) || undefined;
+
+  // Delegate to provider — works even with models not in the hardcoded list
+  // since fal.subscribe() accepts any valid endpoint_id
   const result = await provider.generate(
     {
       prompt: input.prompt,
-      aspect_ratio: input.aspect_ratio,
-      image_size: input.image_size,
+      aspect_ratio,
+      image_size,
       number_of_images: input.number_of_images,
       person_generation: input.person_generation
     },
@@ -345,8 +269,10 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
     modelId
   );
 
-  // Get capabilities from the model info
-  const capabilities = modelInfo.capabilities.map(c => c.toString());
+  // Get capabilities from the model info (use defaults for dynamic models)
+  const capabilities = modelInfo
+    ? modelInfo.capabilities.map(c => c.toString())
+    : ['text-to-image'];
 
   return toResponse(result, providerId, modelId, capabilities);
 }

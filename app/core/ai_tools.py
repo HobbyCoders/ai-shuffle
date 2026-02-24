@@ -1,6 +1,7 @@
 """
 AI Tools Registry - Single source of truth for all AI tool definitions.
 
+All AI tools are powered by fal.ai through a single API key.
 Add new AI tools here and they will automatically be available in:
 - Settings API (available tools endpoint)
 - Profile configuration (AIToolsConfig model)
@@ -16,8 +17,8 @@ from pydantic import create_model
 # Each tool specifies:
 #   - name: Display name
 #   - description: What the tool does
-#   - category: Grouping (image, video, 3d, etc.)
-#   - providers: List of providers that can handle this tool
+#   - category: Grouping (image, video, 3d, audio)
+#   - providers: Always ["fal-ai"] — single provider architecture
 
 AI_TOOLS: Dict[str, Dict[str, Any]] = {
     # Image tools
@@ -25,19 +26,19 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
         "name": "Image Generation",
         "description": "Generate AI images from text prompts (supports 1K-4K, multiple images)",
         "category": "image",
-        "providers": ["google-gemini", "google-imagen", "openai-gpt-image", "fal-ai"]
+        "providers": ["fal-ai"]
     },
     "image_editing": {
         "name": "Image Editing",
         "description": "Edit existing images - add, remove, or modify elements",
         "category": "image",
-        "providers": ["google-gemini", "openai-gpt-image"]
+        "providers": ["fal-ai"]
     },
     "image_reference": {
         "name": "Reference-Based Generation",
         "description": "Generate images with character/style consistency using reference images",
         "category": "image",
-        "providers": ["google-gemini"]
+        "providers": ["fal-ai"]
     },
 
     # Video tools
@@ -45,37 +46,19 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
         "name": "Video Generation",
         "description": "Generate AI videos from text prompts (4-12 sec)",
         "category": "video",
-        "providers": ["google-veo", "openai-sora", "fal-ai"]
-    },
-    "video_with_audio": {
-        "name": "Video with Audio",
-        "description": "Generate video with native audio (dialogue, effects, music) using Veo 3",
-        "category": "video",
-        "providers": ["google-veo"]
+        "providers": ["fal-ai"]
     },
     "image_to_video": {
         "name": "Image to Video",
         "description": "Animate a still image into a video",
         "category": "video",
-        "providers": ["google-veo", "openai-sora", "fal-ai"]
+        "providers": ["fal-ai"]
     },
     "video_extend": {
-        "name": "Video Extension",
-        "description": "Extend existing Veo videos by ~7 seconds",
+        "name": "Extend Video",
+        "description": "Extend an existing video's duration with AI-generated continuation",
         "category": "video",
-        "providers": ["google-veo"]
-    },
-    "video_bridge": {
-        "name": "Frame Bridging",
-        "description": "Generate smooth transitions between two images",
-        "category": "video",
-        "providers": ["google-veo"]
-    },
-    "video_understanding": {
-        "name": "Video Understanding",
-        "description": "Analyze videos up to 2 hours and answer questions about content",
-        "category": "video",
-        "providers": ["google-gemini-video"]
+        "providers": ["fal-ai"]
     },
 
     # 3D Model tools
@@ -83,56 +66,27 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
         "name": "Text to 3D",
         "description": "Generate 3D models from text descriptions",
         "category": "3d",
-        "providers": ["meshy", "fal-ai"]
+        "providers": ["fal-ai"]
     },
     "image_to_3d": {
         "name": "Image to 3D",
         "description": "Generate 3D models from reference images",
         "category": "3d",
-        "providers": ["meshy", "fal-ai"]
+        "providers": ["fal-ai"]
     },
-    "retexture_3d": {
-        "name": "3D Retexturing",
-        "description": "Apply new textures to existing 3D models",
-        "category": "3d",
-        "providers": ["meshy"]
+
+    # Audio tools
+    "tts": {
+        "name": "Text to Speech",
+        "description": "Convert text to natural-sounding speech",
+        "category": "audio",
+        "providers": ["fal-ai"]
     },
-    "rig_3d": {
-        "name": "3D Rigging",
-        "description": "Add animation skeleton to 3D models",
-        "category": "3d",
-        "providers": ["meshy"]
-    },
-    "animate_3d": {
-        "name": "3D Animation",
-        "description": "Animate rigged 3D models with preset animations",
-        "category": "3d",
-        "providers": ["meshy"]
-    },
-    # AI Collaboration tools (multi-model workflows)
-    "ai_collaborate": {
-        "name": "AI Collaboration",
-        "description": "Collaborate with other AI models for specialized tasks (review, plan, summarize)",
-        "category": "collaboration",
-        "providers": ["openai", "google"]
-    },
-    "ai_memory": {
-        "name": "AI Memory",
-        "description": "Long-term memory using Gemini's 1M context - store and recall information across sessions",
-        "category": "collaboration",
-        "providers": ["google"]
-    },
-    "ai_review": {
-        "name": "AI Review",
-        "description": "Get second opinions on code, plans, or content from another AI model",
-        "category": "collaboration",
-        "providers": ["openai", "google"]
-    },
-    "ai_reason": {
-        "name": "AI Reasoning",
-        "description": "Complex logical reasoning using OpenAI o3-mini or Gemini 3 Pro models",
-        "category": "collaboration",
-        "providers": ["openai", "google"]
+    "stt": {
+        "name": "Speech to Text",
+        "description": "Transcribe audio to text with speaker identification",
+        "category": "audio",
+        "providers": ["fal-ai"]
     },
 }
 
@@ -141,18 +95,7 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
 # ============================================================================
 
 PROVIDER_KEY_MAP: Dict[str, str] = {
-    "google-gemini": "image_api_key",
-    "google-imagen": "image_api_key",
-    "openai-gpt-image": "openai_api_key",
-    "google-veo": "image_api_key",
-    "openai-sora": "openai_api_key",
-    "google-gemini-video": "image_api_key",
-    "meshy": "meshy_api_key",
-    # fal.ai (single key covers image, video, 3D)
     "fal-ai": "fal_api_key",
-    # Collaboration providers
-    "openai": "openai_api_key",
-    "google": "image_api_key",
 }
 
 # ============================================================================

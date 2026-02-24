@@ -39,11 +39,11 @@ def _create_image_tools(worker: NodeWorker) -> list:
     """Create image generation/editing tool functions."""
     tools = []
 
-    @tool("generateImage", "Generate an image from a text prompt using AI", {
+    @tool("generateImage", "Generate an image from a text prompt using AI (fal.ai models: Flux Pro Ultra, Flux Dev, Flux Schnell, Recraft V4)", {
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the image to generate"},
-            "provider": {"type": "string", "description": "Provider to use (e.g., google-gemini, google-imagen, openai-gpt-image)"}
+            "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/flux-pro/v1.1-ultra, fal-ai/flux/dev, fal-ai/flux/schnell, fal-ai/recraft-v4)"}
         },
         "required": ["prompt"]
     })
@@ -53,12 +53,12 @@ def _create_image_tools(worker: NodeWorker) -> list:
 
     tools.append(generate_image)
 
-    @tool("editImage", "Edit an existing image using AI - add, remove, or modify elements", {
+    @tool("editImage", "Edit an existing image using AI - add, remove, or modify elements (fal.ai models: Nano Banana Pro Edit, Flux Kontext)", {
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the edit to make"},
             "image_path": {"type": "string", "description": "Path to the image to edit"},
-            "provider": {"type": "string", "description": "Provider to use (gemini or openai only)"}
+            "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/nano-banana/pro-edit, fal-ai/flux-kontext)"}
         },
         "required": ["prompt", "image_path"]
     })
@@ -68,7 +68,7 @@ def _create_image_tools(worker: NodeWorker) -> list:
 
     tools.append(edit_image)
 
-    @tool("generateWithReference", "Generate an image using reference images for character/style consistency", {
+    @tool("generateWithReference", "Generate an image using reference images for character/style consistency (fal.ai: Flux Kontext)", {
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the image to generate"},
@@ -93,14 +93,14 @@ def _create_video_tools(worker: NodeWorker) -> list:
     """Create video generation/analysis tool functions."""
     tools = []
 
-    @tool("generateVideo", "Generate a video from a text prompt using AI", {
+    @tool("generateVideo", "Generate a video from a text prompt using AI (fal.ai models: Kling O3, Veo 3.1, Sora 2)", {
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the video to generate"},
             "duration": {"type": "integer", "description": "Duration in seconds (4, 6, or 8)"},
             "aspect_ratio": {"type": "string", "description": "Aspect ratio (e.g., 16:9, 9:16)"},
-            "provider": {"type": "string", "description": "Provider to use (e.g., google-veo, openai-sora)"},
-            "model": {"type": "string", "description": "Model to use (e.g., veo-3-generate-preview for audio)"}
+            "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/kling-video/v2.1/master, fal-ai/veo3, fal-ai/sora-v2)"},
+            "model": {"type": "string", "description": "Model variant to use"}
         },
         "required": ["prompt"]
     })
@@ -110,12 +110,12 @@ def _create_video_tools(worker: NodeWorker) -> list:
 
     tools.append(generate_video)
 
-    @tool("imageToVideo", "Animate a still image into a video", {
+    @tool("imageToVideo", "Animate a still image into a video (fal.ai models: Kling O3, Veo 3.1, Sora 2)", {
         "type": "object",
         "properties": {
             "image_path": {"type": "string", "description": "Path to the image to animate"},
             "prompt": {"type": "string", "description": "Text description of the desired animation"},
-            "provider": {"type": "string", "description": "Provider to use (e.g., google-veo, openai-sora)"}
+            "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/kling-video/v2.1/master, fal-ai/veo3, fal-ai/sora-v2)"}
         },
         "required": ["image_path", "prompt"]
     })
@@ -125,48 +125,20 @@ def _create_video_tools(worker: NodeWorker) -> list:
 
     tools.append(image_to_video)
 
-    @tool("extendVideo", "Extend an existing Veo video by ~7 seconds", {
+    @tool("extendVideo", "Extend an existing video's duration by generating AI continuation frames (fal.ai: Kling extend endpoints)", {
         "type": "object",
         "properties": {
-            "video_uri": {"type": "string", "description": "Source video URI from a previous result's source_video_uri field"},
-            "prompt": {"type": "string", "description": "Text description for the extension"}
+            "video_path": {"type": "string", "description": "Path to the video file to extend"},
+            "prompt": {"type": "string", "description": "Optional text description of what should happen next in the video"},
+            "model": {"type": "string", "description": "fal.ai model ID for extension (e.g., fal-ai/kling-video/o3/standard/extend)"}
         },
-        "required": ["video_uri", "prompt"]
+        "required": ["video_path"]
     })
     async def extend_video(args: dict) -> dict:
         result = await worker.call("extendVideo", args)
         return _tool_result(result)
 
     tools.append(extend_video)
-
-    @tool("bridgeFrames", "Generate a smooth video transition between two images (Veo only)", {
-        "type": "object",
-        "properties": {
-            "start_image": {"type": "string", "description": "Path to the starting frame image"},
-            "end_image": {"type": "string", "description": "Path to the ending frame image"},
-            "prompt": {"type": "string", "description": "Text description of the desired transition"}
-        },
-        "required": ["start_image", "end_image", "prompt"]
-    })
-    async def bridge_frames(args: dict) -> dict:
-        result = await worker.call("bridgeFrames", args)
-        return _tool_result(result)
-
-    tools.append(bridge_frames)
-
-    @tool("analyzeVideo", "Analyze and understand video content - scenes, transcript, and answer questions", {
-        "type": "object",
-        "properties": {
-            "video_path": {"type": "string", "description": "Path to the video file to analyze"},
-            "prompt": {"type": "string", "description": "Question or analysis prompt about the video"}
-        },
-        "required": ["video_path", "prompt"]
-    })
-    async def analyze_video(args: dict) -> dict:
-        result = await worker.call("analyzeVideo", args)
-        return _tool_result(result)
-
-    tools.append(analyze_video)
 
     return tools
 
@@ -175,13 +147,12 @@ def _create_3d_tools(worker: NodeWorker) -> list:
     """Create 3D model generation tool functions."""
     tools = []
 
-    @tool("textTo3D", "Generate a 3D model from a text description (async, 2-5 min)", {
+    @tool("textTo3D", "Generate a 3D model from a text description (fal.ai models: Meshy v6, Hunyuan-3D)", {
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the 3D model to generate"},
             "art_style": {"type": "string", "description": "Art style (e.g., realistic, sculpture)"},
-            "model": {"type": "string", "description": "Model to use (latest, meshy-5, or fal-ai model IDs like fal-ai/hunyuan-3d/v2/turbo)"},
-            "provider": {"type": "string", "description": "Provider to use: 'meshy' (default) or 'fal-ai'"},
+            "model": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/meshy/text-to-3d, fal-ai/hunyuan-3d/v2/turbo)"},
             "topology": {"type": "string", "description": "Mesh topology type"},
             "target_polycount": {"type": "integer", "description": "Target polygon count"},
             "wait_for_completion": {"type": "boolean", "description": "Wait for completion (true) or return task ID immediately"}
@@ -194,13 +165,12 @@ def _create_3d_tools(worker: NodeWorker) -> list:
 
     tools.append(text_to_3d)
 
-    @tool("imageTo3D", "Generate a 3D model from a reference image (async, 2-5 min)", {
+    @tool("imageTo3D", "Generate a 3D model from a reference image (fal.ai models: Meshy v6, Hunyuan-3D)", {
         "type": "object",
         "properties": {
             "image_path": {"type": "string", "description": "Path to the reference image"},
             "prompt": {"type": "string", "description": "Optional text description to guide generation"},
-            "model": {"type": "string", "description": "Model to use (latest, meshy-5, or fal-ai model IDs like fal-ai/hunyuan-3d/v2/turbo)"},
-            "provider": {"type": "string", "description": "Provider to use: 'meshy' (default) or 'fal-ai'"},
+            "model": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/meshy/image-to-3d, fal-ai/hunyuan-3d/v2/turbo)"},
             "topology": {"type": "string", "description": "Mesh topology type"},
             "enable_pbr": {"type": "boolean", "description": "Enable PBR materials"},
             "wait_for_completion": {"type": "boolean", "description": "Wait for completion (true) or return task ID immediately"}
@@ -213,63 +183,40 @@ def _create_3d_tools(worker: NodeWorker) -> list:
 
     tools.append(image_to_3d)
 
-    @tool("retexture3D", "Apply new textures to an existing 3D model", {
+    return tools
+
+
+def _create_generic_tools(worker: NodeWorker) -> list:
+    """Create the generic fal.ai model executor tool."""
+    tools = []
+
+    @tool("runFalModel", "Run ANY fal.ai model by endpoint ID. Supports 600+ models including Imagen 4, Seedance, Wan 2.2, Stable Diffusion, and more. Use this when the specific tools (generateImage, generateVideo, etc.) don't support the model you need. Browse available models at fal.ai/explore/models", {
         "type": "object",
         "properties": {
-            "model_path_or_task_id": {"type": "string", "description": "Path to the 3D model file or a Meshy task ID"},
-            "style_prompt": {"type": "string", "description": "Text description of the desired texture style"},
-            "style_image": {"type": "string", "description": "Optional path to a style reference image"},
-            "enable_pbr": {"type": "boolean", "description": "Enable PBR materials"}
+            "endpoint_id": {
+                "type": "string",
+                "description": "fal.ai endpoint ID (e.g., fal-ai/imagen4/preview, fal-ai/seedance-2.0, fal-ai/wan-2.2/text-to-video, fal-ai/stable-diffusion-v35-large)"
+            },
+            "input": {
+                "type": "object",
+                "description": "Input parameters for the model. Most models accept 'prompt' (string). Check the model's API docs for specific parameters.",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Text prompt (required for most models)"}
+                }
+            },
+            "output_type": {
+                "type": "string",
+                "enum": ["image", "video", "3d", "audio"],
+                "description": "Expected output type for proper file handling. Auto-detected from endpoint_id if not specified."
+            }
         },
-        "required": ["model_path_or_task_id", "style_prompt"]
+        "required": ["endpoint_id", "input"]
     })
-    async def retexture_3d(args: dict) -> dict:
-        result = await worker.call("retexture3D", args)
+    async def run_fal_model(args: dict) -> dict:
+        result = await worker.call("runFalModel", args)
         return _tool_result(result)
 
-    tools.append(retexture_3d)
-
-    @tool("rig3D", "Add an animation skeleton to a 3D model for animation", {
-        "type": "object",
-        "properties": {
-            "model_path_or_task_id": {"type": "string", "description": "Path to the 3D model file or a Meshy task ID"},
-            "height_meters": {"type": "number", "description": "Height of the model in meters for scale reference"}
-        },
-        "required": ["model_path_or_task_id"]
-    })
-    async def rig_3d(args: dict) -> dict:
-        result = await worker.call("rig3D", args)
-        return _tool_result(result)
-
-    tools.append(rig_3d)
-
-    @tool("animate3D", "Animate a rigged 3D model with preset animations", {
-        "type": "object",
-        "properties": {
-            "rig_task_id": {"type": "string", "description": "Task ID from a rig3D result"},
-            "action_id": {"type": "string", "description": "Animation action (walk_forward, run, jump, idle, wave, dance_hip_hop, etc)"},
-            "fps": {"type": "integer", "description": "Frames per second for the animation"}
-        },
-        "required": ["rig_task_id", "action_id"]
-    })
-    async def animate_3d(args: dict) -> dict:
-        result = await worker.call("animate3D", args)
-        return _tool_result(result)
-
-    tools.append(animate_3d)
-
-    @tool("getTask3D", "Check the status of an async 3D generation task", {
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string", "description": "The task ID to check status for"}
-        },
-        "required": ["task_id"]
-    })
-    async def get_task_3d(args: dict) -> dict:
-        result = await worker.call("getTask3D", args)
-        return _tool_result(result)
-
-    tools.append(get_task_3d)
+    tools.append(run_fal_model)
 
     return tools
 
@@ -284,20 +231,20 @@ TOOL_CONFIG_MAP = {
     # Image tools
     "generateImage": {"config_key": "image_generation"},
     "editImage": {"config_key": "image_editing"},
-    "generateWithReference": {"config_key": "image_reference", "requires_gemini": True},
+    "generateWithReference": {"config_key": "image_reference"},
     # Video tools
     "generateVideo": {"config_keys": ["video_generation", "video_with_audio"]},
     "imageToVideo": {"config_key": "image_to_video"},
-    "extendVideo": {"config_key": "video_extend", "requires_gemini": True},
-    "bridgeFrames": {"config_key": "video_bridge", "requires_gemini": True},
-    "analyzeVideo": {"config_key": "video_understanding", "requires_gemini": True},
+    "extendVideo": {"config_key": "video_extend"},
     # 3D tools
     "textTo3D": {"config_key": "text_to_3d"},
     "imageTo3D": {"config_key": "image_to_3d"},
-    "retexture3D": {"config_key": "retexture_3d"},
-    "rig3D": {"config_key": "rig_3d"},
-    "animate3D": {"config_key": "animate_3d"},
-    "getTask3D": {"config_keys_any_3d": True},  # Always available when any 3D tool is enabled
+    # Generic tool — enabled when ANY other tool is enabled
+    "runFalModel": {"config_keys": [
+        "image_generation", "image_editing", "image_reference",
+        "video_generation", "video_with_audio", "image_to_video", "video_extend",
+        "text_to_3d", "image_to_3d",
+    ]},
 }
 
 
@@ -306,13 +253,6 @@ def _is_tool_enabled(tool_name: str, ai_tools_config: dict) -> bool:
     mapping = TOOL_CONFIG_MAP.get(tool_name)
     if not mapping:
         return False
-
-    # Special case: getTask3D is enabled when any 3D tool is enabled
-    if mapping.get("config_keys_any_3d"):
-        return any(
-            ai_tools_config.get(key, False)
-            for key in ["text_to_3d", "image_to_3d", "retexture_3d", "rig_3d", "animate_3d"]
-        )
 
     # Check multiple config keys (OR logic - any enabled = tool enabled)
     if "config_keys" in mapping:
@@ -380,17 +320,14 @@ def create_ai_tools_server(
                 ai_tools_config.get("image_reference", False)
     any_video = ai_tools_config.get("video_generation", False) or \
                 ai_tools_config.get("image_to_video", False) or \
-                ai_tools_config.get("video_extend", False) or \
-                ai_tools_config.get("video_bridge", False) or \
-                ai_tools_config.get("video_with_audio", False) or \
-                ai_tools_config.get("video_understanding", False)
+                ai_tools_config.get("video_with_audio", False)
     any_3d = ai_tools_config.get("text_to_3d", False) or \
-             ai_tools_config.get("image_to_3d", False) or \
-             ai_tools_config.get("retexture_3d", False) or \
-             ai_tools_config.get("rig_3d", False) or \
-             ai_tools_config.get("animate_3d", False)
+             ai_tools_config.get("image_to_3d", False)
 
-    if not any_image and not any_video and not any_3d:
+    # Generic tool is enabled when any other tool is enabled
+    any_generic = any_image or any_video or any_3d
+
+    if not any_generic:
         return None
 
     # Normalize tools_dir path (remove trailing separators)
@@ -408,6 +345,7 @@ def create_ai_tools_server(
     all_image_tools = _create_image_tools(worker)
     all_video_tools = _create_video_tools(worker)
     all_3d_tools = _create_3d_tools(worker)
+    all_generic_tools = _create_generic_tools(worker)
 
     # Filter to only enabled tools
     enabled_tools = []
@@ -421,6 +359,10 @@ def create_ai_tools_server(
             enabled_tools.append(t)
 
     for t in all_3d_tools:
+        if _is_tool_enabled(t.name, ai_tools_config):
+            enabled_tools.append(t)
+
+    for t in all_generic_tools:
         if _is_tool_enabled(t.name, ai_tools_config):
             enabled_tools.append(t)
 

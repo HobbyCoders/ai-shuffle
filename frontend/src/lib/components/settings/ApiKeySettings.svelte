@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * ApiKeySettings - OpenAI, Meshy, and Gemini API key management
+	 * ApiKeySettings - Single fal.ai API key management
 	 */
 	import '../deck/cards/card-design-system.css';
 	import { slide } from 'svelte/transition';
@@ -8,28 +8,16 @@
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { onMount } from 'svelte';
 
-	let expanded = $state(false);
+	let expanded = $state(true);
 
-	// OpenAI
-	let openaiApiKey = $state('');
-	let openaiApiKeyMasked = $state('');
-	let savingOpenaiKey = $state(false);
-	let openaiKeySuccess = $state('');
-	let openaiKeyError = $state('');
-
-	// Meshy
-	let meshyApiKey = $state('');
-	let meshyApiKeyMasked = $state('');
-	let savingMeshyKey = $state(false);
-	let meshyKeySuccess = $state('');
-	let meshyKeyError = $state('');
-
-	// Gemini
-	let geminiApiKey = $state('');
-	let geminiApiKeyMasked = $state('');
-	let savingGeminiKey = $state(false);
-	let geminiKeySuccess = $state('');
-	let geminiKeyError = $state('');
+	// fal.ai
+	let falApiKey = $state('');
+	let falApiKeyMasked = $state('');
+	let falApiKeySet = $state(false);
+	let savingFalKey = $state(false);
+	let removingFalKey = $state(false);
+	let falKeySuccess = $state('');
+	let falKeyError = $state('');
 
 	onMount(() => {
 		loadIntegrationSettings();
@@ -38,172 +26,114 @@
 	async function loadIntegrationSettings() {
 		try {
 			const settings = await api.get<{
-				openai_api_key_set: boolean;
-				openai_api_key_masked: string;
-				meshy_api_key_set: boolean;
-				meshy_api_key_masked: string;
-				image_api_key_set: boolean;
-				image_api_key_masked: string;
+				fal_api_key_set: boolean;
+				fal_api_key_masked: string;
 			}>('/settings/integrations');
 
-			openaiApiKeyMasked = settings.openai_api_key_masked;
-			meshyApiKeyMasked = settings.meshy_api_key_masked || '';
-			geminiApiKeyMasked = settings.image_api_key_masked || '';
+			falApiKeySet = settings.fal_api_key_set ?? false;
+			falApiKeyMasked = settings.fal_api_key_masked || '';
 		} catch (e) {
 			console.error('Failed to load integration settings:', e);
 		}
 	}
 
-	async function saveOpenaiApiKey() {
-		if (!openaiApiKey.trim()) {
-			openaiKeyError = 'Please enter an API key';
+	async function saveFalApiKey() {
+		if (!falApiKey.trim()) {
+			falKeyError = 'Please enter an API key';
 			return;
 		}
-		savingOpenaiKey = true;
-		openaiKeyError = '';
-		openaiKeySuccess = '';
+		savingFalKey = true;
+		falKeyError = '';
+		falKeySuccess = '';
 		try {
-			const result = await api.post<{success: boolean, masked_key: string}>('/settings/integrations/openai', {
-				api_key: openaiApiKey
+			const result = await api.post<{success: boolean, masked_key: string, valid: boolean}>('/settings/integrations/fal-ai', {
+				api_key: falApiKey
 			});
-			openaiApiKeyMasked = result.masked_key;
-			openaiApiKey = '';
-			openaiKeySuccess = 'Saved';
-			setTimeout(() => openaiKeySuccess = '', 3000);
+			falApiKeyMasked = result.masked_key;
+			falApiKeySet = true;
+			falApiKey = '';
+			falKeySuccess = result.valid ? 'Key saved & verified ✓' : 'Key saved (could not verify)';
+			setTimeout(() => falKeySuccess = '', 4000);
 		} catch (e: unknown) {
-			openaiKeyError = getErrorMessage(e, 'Failed to save');
+			falKeyError = getErrorMessage(e, 'Failed to save');
 		} finally {
-			savingOpenaiKey = false;
+			savingFalKey = false;
 		}
 	}
 
-	async function saveMeshyKey() {
-		if (!meshyApiKey.trim()) return;
-		savingMeshyKey = true;
-		meshyKeyError = '';
-		meshyKeySuccess = '';
+	async function removeFalApiKey() {
+		removingFalKey = true;
+		falKeyError = '';
+		falKeySuccess = '';
 		try {
-			await api.post('/meshy/config/api-key', { api_key: meshyApiKey });
-			meshyKeySuccess = 'Saved';
-			meshyApiKey = '';
-			await loadIntegrationSettings();
-			setTimeout(() => meshyKeySuccess = '', 3000);
+			await api.delete('/settings/integrations/fal-ai');
+			falApiKeySet = false;
+			falApiKeyMasked = '';
+			falKeySuccess = 'Key removed';
+			setTimeout(() => falKeySuccess = '', 3000);
 		} catch (e: unknown) {
-			meshyKeyError = getErrorMessage(e, 'Failed to save');
+			falKeyError = getErrorMessage(e, 'Failed to remove');
+		} finally {
+			removingFalKey = false;
 		}
-		savingMeshyKey = false;
-	}
-
-	async function saveGeminiApiKey() {
-		if (!geminiApiKey.trim()) return;
-		savingGeminiKey = true;
-		geminiKeyError = '';
-		geminiKeySuccess = '';
-		try {
-			const result = await api.post<{success: boolean, masked_key: string}>('/settings/integrations/gemini', {
-				api_key: geminiApiKey
-			});
-			geminiApiKeyMasked = result.masked_key;
-			geminiKeySuccess = 'Saved';
-			geminiApiKey = '';
-			await loadIntegrationSettings();
-			setTimeout(() => geminiKeySuccess = '', 3000);
-		} catch (e: unknown) {
-			geminiKeyError = getErrorMessage(e, 'Failed to save');
-		}
-		savingGeminiKey = false;
 	}
 </script>
 
 <section class="section">
 	<button class="section-header" onclick={() => expanded = !expanded}>
-		<h3>API Keys</h3>
-		<svg class="chevron" class:expanded viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-			<polyline points="6 9 12 15 18 9"/>
-		</svg>
+		<h3>fal.ai API Key</h3>
+		<div class="header-right">
+			{#if falApiKeySet}
+				<span class="status-badge connected">Connected</span>
+			{:else}
+				<span class="status-badge disconnected">Not Set</span>
+			{/if}
+			<svg class="chevron" class:expanded viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+				<polyline points="6 9 12 15 18 9"/>
+			</svg>
+		</div>
 	</button>
 	{#if expanded}
 		<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
-			<!-- OpenAI -->
+			<p class="description">
+				One API key powers all AI tools — image, video, 3D, and audio generation.
+			</p>
+
 			<div class="api-key-row">
-				<div class="api-key-info">
-					<span class="api-key-name">OpenAI</span>
-					{#if openaiApiKeyMasked}
-						<code class="masked-key">{openaiApiKeyMasked}</code>
-					{/if}
-				</div>
+				{#if falApiKeyMasked}
+					<div class="api-key-info">
+						<code class="masked-key">{falApiKeyMasked}</code>
+					</div>
+				{/if}
 				<div class="api-key-input">
 					<input
 						type="password"
-						bind:value={openaiApiKey}
-						placeholder={openaiApiKeyMasked ? 'Enter new key...' : 'sk-...'}
-						class="input compact"
+						bind:value={falApiKey}
+						placeholder={falApiKeySet ? 'Enter new key to replace...' : 'Enter your fal.ai API key'}
+						class="input"
+						onkeydown={(e) => e.key === 'Enter' && saveFalApiKey()}
 					/>
 					<button
-						onclick={saveOpenaiApiKey}
-						disabled={savingOpenaiKey || !openaiApiKey.trim()}
+						onclick={saveFalApiKey}
+						disabled={savingFalKey || !falApiKey.trim()}
 						class="btn primary compact"
 					>
-						{savingOpenaiKey ? '...' : 'Save'}
+						{savingFalKey ? '...' : 'Save'}
 					</button>
+					{#if falApiKeySet}
+						<button
+							onclick={removeFalApiKey}
+							disabled={removingFalKey}
+							class="btn destructive compact"
+						>
+							{removingFalKey ? '...' : 'Remove'}
+						</button>
+					{/if}
 				</div>
-				{#if openaiKeySuccess}<span class="inline-success">{openaiKeySuccess}</span>{/if}
-				{#if openaiKeyError}<span class="inline-error">{openaiKeyError}</span>{/if}
 			</div>
 
-			<!-- Meshy -->
-			<div class="api-key-row">
-				<div class="api-key-info">
-					<span class="api-key-name">Meshy (3D)</span>
-					{#if meshyApiKeyMasked}
-						<code class="masked-key">{meshyApiKeyMasked}</code>
-					{/if}
-				</div>
-				<div class="api-key-input">
-					<input
-						type="password"
-						bind:value={meshyApiKey}
-						placeholder={meshyApiKeyMasked ? 'Enter new key...' : 'API key'}
-						class="input compact"
-					/>
-					<button
-						onclick={saveMeshyKey}
-						disabled={savingMeshyKey || !meshyApiKey.trim()}
-						class="btn primary compact"
-					>
-						{savingMeshyKey ? '...' : 'Save'}
-					</button>
-				</div>
-				{#if meshyKeySuccess}<span class="inline-success">{meshyKeySuccess}</span>{/if}
-				{#if meshyKeyError}<span class="inline-error">{meshyKeyError}</span>{/if}
-			</div>
-
-			<!-- Google Gemini -->
-			<div class="api-key-row">
-				<div class="api-key-info">
-					<span class="api-key-name">Google Gemini</span>
-					{#if geminiApiKeyMasked}
-						<code class="masked-key">{geminiApiKeyMasked}</code>
-					{/if}
-				</div>
-				<div class="api-key-input">
-					<input
-						type="password"
-						bind:value={geminiApiKey}
-						placeholder={geminiApiKeyMasked ? 'Enter new key...' : 'AIza...'}
-						class="input compact"
-					/>
-					<button
-						onclick={saveGeminiApiKey}
-						disabled={savingGeminiKey || !geminiApiKey.trim()}
-						class="btn primary compact"
-					>
-						{savingGeminiKey ? '...' : 'Save'}
-					</button>
-				</div>
-				{#if geminiKeySuccess}<span class="inline-success">{geminiKeySuccess}</span>{/if}
-				{#if geminiKeyError}<span class="inline-error">{geminiKeyError}</span>{/if}
-			</div>
+			{#if falKeySuccess}<div class="success-msg">{falKeySuccess}</div>{/if}
+			{#if falKeyError}<div class="error-msg">{falKeyError}</div>{/if}
 		</div>
 	{/if}
 </section>
@@ -238,15 +168,10 @@
 		color: var(--foreground);
 	}
 
-	@media (min-width: 640px) {
-		.section-header {
-			justify-content: center;
-			position: relative;
-		}
-		.section-header .chevron {
-			position: absolute;
-			right: 16px;
-		}
+	.header-right {
+		display: flex;
+		align-items: center;
+		gap: 8px;
 	}
 
 	.chevron {
@@ -265,24 +190,23 @@
 		gap: 12px;
 	}
 
+	.description {
+		margin: 0;
+		font-size: 0.8125rem;
+		color: var(--muted-foreground);
+		line-height: 1.5;
+	}
+
 	.api-key-row {
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
-		padding: 12px;
-		background: var(--muted);
-		border-radius: var(--radius);
 	}
 
 	.api-key-info {
 		display: flex;
 		align-items: center;
 		gap: 12px;
-	}
-
-	.api-key-name {
-		font-weight: 500;
-		font-size: 0.875rem;
 	}
 
 	.masked-key {
@@ -318,11 +242,6 @@
 
 	.input::placeholder { color: var(--muted-foreground); }
 
-	.input.compact {
-		padding: 6px 10px;
-		font-size: 0.8125rem;
-	}
-
 	.btn {
 		display: inline-flex;
 		align-items: center;
@@ -347,20 +266,48 @@
 
 	.btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
 
+	.btn.destructive {
+		background: var(--destructive);
+		color: var(--destructive-foreground, #fff);
+	}
+
+	.btn.destructive:hover:not(:disabled) { filter: brightness(1.1); }
+
 	.btn.compact {
 		padding: 6px 12px;
 		font-size: 0.8125rem;
 	}
 
-	.inline-success {
-		font-size: 0.75rem;
-		color: var(--success);
-		margin-left: 8px;
+	.status-badge {
+		display: inline-flex;
+		align-items: center;
+		padding: 2px 8px;
+		font-size: 0.6875rem;
+		font-weight: 600;
+		border-radius: 9999px;
+		text-transform: uppercase;
+		letter-spacing: 0.025em;
 	}
 
-	.inline-error {
-		font-size: 0.75rem;
+	.status-badge.connected {
+		background: color-mix(in oklch, var(--success, #22c55e) 15%, transparent);
+		color: var(--success, #22c55e);
+		border: 1px solid color-mix(in oklch, var(--success, #22c55e) 30%, transparent);
+	}
+
+	.status-badge.disconnected {
+		background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
+		color: var(--muted-foreground);
+		border: 1px solid color-mix(in oklch, var(--muted-foreground) 30%, transparent);
+	}
+
+	.success-msg {
+		font-size: 0.8125rem;
+		color: var(--success);
+	}
+
+	.error-msg {
+		font-size: 0.8125rem;
 		color: var(--destructive);
-		margin-left: 8px;
 	}
 </style>

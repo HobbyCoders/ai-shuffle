@@ -1,5 +1,5 @@
 /**
- * Shared utilities for video generation tools
+ * Shared types and utilities for video generation tools
  */
 
 import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
@@ -36,7 +36,6 @@ export function imageToBase64(imagePath: string): { base64: string; mimeType: st
     const imageBuffer = readFileSync(imagePath);
     const base64 = imageBuffer.toString('base64');
 
-    // Determine MIME type from extension
     const ext = imagePath.toLowerCase().split('.').pop();
     const mimeTypes: Record<string, string> = {
       'jpg': 'image/jpeg',
@@ -63,7 +62,7 @@ export interface VideoResponse {
   filename?: string;
   mime_type?: string;
   duration_seconds?: number;
-  /** The source video URI from Veo - use this with extendVideo to extend the video */
+  /** The source video URI for extending the video */
   source_video_uri?: string;
   error?: string;
 }
@@ -71,9 +70,9 @@ export interface VideoResponse {
 /**
  * Save video buffer to disk and return response
  * @param videoBuffer - The video data to save
- * @param prefix - Filename prefix (e.g., 'video', 'i2v', 'extended', 'bridge')
+ * @param prefix - Filename prefix (e.g., 'video', 'i2v', 'extended')
  * @param duration - Video duration in seconds
- * @param sourceVideoUri - Optional: The Veo video URI for use with extendVideo
+ * @param sourceVideoUri - Optional: The video URI for use with extendVideo
  */
 export function saveVideo(videoBuffer: Buffer, prefix: string, duration: number, sourceVideoUri?: string): VideoResponse {
   const timestamp = Date.now();
@@ -99,120 +98,4 @@ export function saveVideo(videoBuffer: Buffer, prefix: string, duration: number,
     duration_seconds: duration,
     ...(sourceVideoUri && { source_video_uri: sourceVideoUri })
   };
-}
-
-/**
- * Handle common API errors
- */
-export function handleApiError(response: Response, errorData: any): VideoResponse {
-  const errorMsg = errorData?.error?.message || `HTTP ${response.status}`;
-
-  if (response.status === 400) {
-    const errorStr = JSON.stringify(errorData);
-    if (errorStr.includes('SAFETY') || errorStr.toLowerCase().includes('blocked')) {
-      return {
-        success: false,
-        error: 'Video generation was blocked by safety filters. Please try a different prompt.'
-      };
-    }
-  }
-
-  if (response.status === 401 || response.status === 403) {
-    return {
-      success: false,
-      error: 'API key is invalid or expired.'
-    };
-  }
-
-  if (response.status === 429) {
-    return {
-      success: false,
-      error: 'Rate limit exceeded. Please wait a moment and try again.'
-    };
-  }
-
-  return {
-    success: false,
-    error: `API error: ${errorMsg}`
-  };
-}
-
-/**
- * Poll for video generation completion
- */
-export async function pollForCompletion(
-  operationName: string,
-  apiKey: string,
-  maxPollTime: number = 6 * 60 * 1000,
-  pollInterval: number = 5000
-): Promise<{ success: true; videoUri: string } | { success: false; error: string }> {
-  const startTime = Date.now();
-
-  while (Date.now() - startTime < maxPollTime) {
-    await sleep(pollInterval);
-
-    const pollResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/${operationName}?key=${apiKey}`,
-      {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
-      }
-    );
-
-    if (!pollResponse.ok) {
-      const errorData = await pollResponse.json().catch(() => ({}));
-      const errorMsg = (errorData as any)?.error?.message || `HTTP ${pollResponse.status}`;
-      return { success: false, error: `Polling error: ${errorMsg}` };
-    }
-
-    const pollResult = await pollResponse.json() as any;
-
-    if (pollResult.done) {
-      if (pollResult.error) {
-        return {
-          success: false,
-          error: `Video generation failed: ${pollResult.error.message || 'Unknown error'}`
-        };
-      }
-
-      // Handle both response structures: direct generatedSamples or nested under generateVideoResponse
-      const generatedSamples = pollResult.response?.generateVideoResponse?.generatedSamples
-        || pollResult.response?.generatedSamples
-        || [];
-      if (generatedSamples.length === 0) {
-        return {
-          success: false,
-          error: 'No video was generated. The model may have refused the request.'
-        };
-      }
-
-      const videoUri = generatedSamples[0]?.video?.uri;
-      if (!videoUri) {
-        return { success: false, error: 'Video URI not found in response.' };
-      }
-
-      return { success: true, videoUri };
-    }
-  }
-
-  return { success: false, error: 'Video generation timed out. Please try again.' };
-}
-
-/**
- * Download video from URI
- */
-export async function downloadVideo(videoUri: string, apiKey?: string): Promise<Buffer | { error: string }> {
-  // If the URI is from Google's API, we need to append the API key
-  let downloadUrl = videoUri;
-  if (apiKey && videoUri.includes('generativelanguage.googleapis.com')) {
-    downloadUrl = videoUri.includes('?')
-      ? `${videoUri}&key=${apiKey}`
-      : `${videoUri}?key=${apiKey}`;
-  }
-
-  const videoResponse = await fetch(downloadUrl);
-  if (!videoResponse.ok) {
-    return { error: `Failed to download video: HTTP ${videoResponse.status}` };
-  }
-  return Buffer.from(await videoResponse.arrayBuffer());
 }

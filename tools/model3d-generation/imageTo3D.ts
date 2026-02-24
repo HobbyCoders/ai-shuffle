@@ -1,14 +1,12 @@
 /**
- * Image to 3D Tool - Meshy AI
+ * Image to 3D Tool - fal.ai Provider
  *
- * Convert an image to a 3D model using Meshy AI.
- * The API key is provided via environment variable.
+ * Convert an image to a 3D model using fal.ai.
  * Models are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
- *   MESHY_API_KEY - Meshy AI API key (injected by AI Hub at runtime)
- *   MODEL3D_API_KEY - Alternative API key (used if MESHY_API_KEY not set)
- *   MODEL3D_MODEL - Model to use (optional, defaults to meshy-6)
+ *   FAL_KEY - fal.ai API key
+ *   MODEL3D_MODEL - Model to use (optional, defaults to fal-ai/hunyuan-3d/v2/turbo)
  *   GENERATED_MODELS_DIR - Output directory (optional, defaults to ./generated-models)
  *
  * Usage:
@@ -26,16 +24,7 @@
  *   }
  */
 
-import {
-  Model3DResponse,
-  MESHY_API_BASE,
-  getMeshyApiKey,
-  getMeshyHeaders,
-  handleApiError,
-  imageToDataUri,
-  pollForCompletion,
-  saveModelFromResponse
-} from './shared.js';
+import { Model3DResponse } from './shared.js';
 import { registry } from '../providers/registry.js';
 
 export interface ImageTo3DInput {
@@ -57,18 +46,9 @@ export interface ImageTo3DInput {
 
   /**
    * AI model to use for generation.
-   * - "latest": Meshy 6 Preview, best quality (20 credits, 10 during promo)
-   * - "meshy-5": Balanced quality and speed (5 credits)
-   * - "meshy-4": Fast generation (5 credits)
-   * @default "latest"
+   * If not specified, uses MODEL3D_MODEL env var or defaults to fal-ai/hunyuan-3d/v2/turbo.
    */
   model?: string;
-
-  /**
-   * Override the default 3D provider.
-   * Available: "meshy" (default), "fal-ai"
-   */
-  provider?: string;
 
   /**
    * Whether to generate textures for the model.
@@ -120,7 +100,7 @@ export interface ImageTo3DInput {
 export type ImageTo3DResponse = Model3DResponse;
 
 /**
- * Convert an image to a 3D model using Meshy AI.
+ * Convert an image to a 3D model using fal.ai.
  *
  * The model is saved to disk and a URL is returned for display.
  * 3D generation is asynchronous by default - use wait_for_completion: true
@@ -131,7 +111,6 @@ export type ImageTo3DResponse = Model3DResponse;
  *
  * @example
  * ```typescript
- * // Convert a character image to 3D
  * const result = await imageTo3D({
  *   image_path: '/workspace/character.png',
  *   prompt: 'A cartoon character with big eyes',
@@ -150,44 +129,19 @@ export type ImageTo3DResponse = Model3DResponse;
  * ```
  */
 export async function imageTo3D(input: ImageTo3DInput): Promise<ImageTo3DResponse> {
-  // Route to fal.ai provider if specified
-  if (input.provider === 'fal-ai') {
-    const provider = registry.getModel3DProvider('fal-ai');
-    if (!provider || !provider.imageTo3D) {
-      return { success: false, error: "fal-ai 3D provider (imageTo3D) not found." };
-    }
-    const falKey = process.env.FAL_KEY || '';
-    if (!falKey) {
-      return { success: false, error: 'FAL_KEY environment variable not set.' };
-    }
-    const falModel = input.model || provider.models.find(m => m.capabilities.includes('image-to-3d'))?.id || 'fal-ai/hunyuan-3d/v2/turbo';
-    const result = await provider.imageTo3D(
-      { prompt: input.prompt || '', image_path: input.image_path, topology: input.topology, target_polycount: input.target_polycount },
-      { apiKey: falKey },
-      falModel
-    );
+  // Get API key from environment
+  const falKey = process.env.FAL_KEY || '';
+  if (!falKey) {
     return {
-      success: result.success,
-      task_id: result.task_id,
-      model_url: result.model_urls?.glb,
-      model_urls: result.model_urls,
-      file_path: result.file_path,
-      filename: result.filename,
-      status: result.status,
-      progress: result.progress,
-      thumbnail_url: result.thumbnail_url,
-      error: result.error,
+      success: false,
+      error: 'FAL_KEY environment variable not set. 3D generation is not configured.'
     };
   }
 
-  // Default: Meshy direct path
-  // Get API key from environment
-  const apiKey = getMeshyApiKey();
-  if (!apiKey) {
-    return {
-      success: false,
-      error: 'MESHY_API_KEY environment variable not set. 3D generation is not configured.'
-    };
+  // Get provider from registry
+  const provider = registry.getModel3DProvider('fal-ai');
+  if (!provider || !provider.imageTo3D) {
+    return { success: false, error: 'fal-ai 3D provider (imageTo3D) not found in registry.' };
   }
 
   // Validate input
@@ -205,7 +159,6 @@ export async function imageTo3D(input: ImageTo3DInput): Promise<ImageTo3DRespons
     };
   }
 
-  // Validate target_polycount if provided
   if (input.target_polycount !== undefined) {
     if (input.target_polycount < 100 || input.target_polycount > 300000) {
       return {
@@ -215,93 +168,38 @@ export async function imageTo3D(input: ImageTo3DInput): Promise<ImageTo3DRespons
     }
   }
 
-  // Read and encode the image
-  const imageResult = imageToDataUri(input.image_path);
-  if ('error' in imageResult) {
-    return {
-      success: false,
-      error: imageResult.error
-    };
+  // Determine model - find first image-to-3d capable model
+  let falModel = input.model || process.env.MODEL3D_MODEL || '';
+  if (!falModel) {
+    const i2mModel = provider.models.find(m => m.capabilities.includes('image-to-3d'));
+    falModel = i2mModel?.id || 'fal-ai/hunyuan-3d/v2/turbo';
   }
 
-  // Get model from environment or use default
-  // Valid models: meshy-4, meshy-5, latest (Meshy 6 Preview)
-  const envModel = process.env.MODEL3D_MODEL;
-  // Map meshy-6 to latest for backwards compatibility
-  const normalizedEnvModel = envModel === 'meshy-6' ? 'latest' : envModel;
-  const model = input.model || normalizedEnvModel || 'latest';
-
   try {
-    // Build request body
-    const requestBody: Record<string, any> = {
-      image_url: imageResult.dataUri,
-      ai_model: model,  // Valid: meshy-4, meshy-5, latest
-      should_texture: input.should_texture !== false  // Default true
+    const result = await provider.imageTo3D(
+      {
+        prompt: input.prompt || '',
+        image_path: input.image_path,
+        topology: input.topology,
+        target_polycount: input.target_polycount
+      },
+      { apiKey: falKey },
+      falModel
+    );
+
+    // Map Model3DResult to Model3DResponse
+    return {
+      success: result.success,
+      task_id: result.task_id,
+      model_url: result.model_urls?.glb,
+      model_urls: result.model_urls,
+      file_path: result.file_path,
+      filename: result.filename,
+      status: result.status,
+      progress: result.progress,
+      thumbnail_url: result.thumbnail_url,
+      error: result.error,
     };
-
-    // Add optional parameters
-    if (input.prompt) {
-      requestBody.texture_prompt = input.prompt.trim();
-    }
-
-    if (input.enable_pbr !== undefined) {
-      requestBody.enable_pbr = input.enable_pbr;
-    }
-
-    if (input.symmetry_mode) {
-      requestBody.symmetry_mode = input.symmetry_mode;
-    }
-
-    if (input.topology) {
-      requestBody.topology = input.topology;
-    }
-
-    if (input.target_polycount !== undefined) {
-      requestBody.target_polycount = input.target_polycount;
-    }
-
-    // Start the 3D generation
-    const response = await fetch(`${MESHY_API_BASE}/openapi/v1/image-to-3d`, {
-      method: 'POST',
-      headers: getMeshyHeaders(apiKey),
-      body: JSON.stringify(requestBody)
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      return handleApiError(response, errorData);
-    }
-
-    const result = await response.json() as any;
-    const taskId = result.result;
-
-    if (!taskId) {
-      return {
-        success: false,
-        error: 'Failed to start 3D generation: no task ID returned.'
-      };
-    }
-
-    // If not waiting for completion, return the task ID immediately
-    if (!input.wait_for_completion) {
-      return {
-        success: false,  // Not yet complete
-        task_id: taskId,
-        status: 'PENDING',
-        progress: 0
-      };
-    }
-
-    // Poll for completion
-    console.log(`[imageTo3D] Task ${taskId} started, waiting for completion...`);
-    const pollResult = await pollForCompletion(taskId, 'image-to-3d', apiKey);
-
-    if (!pollResult.success) {
-      return pollResult;
-    }
-
-    // Download and save the model
-    return await saveModelFromResponse(pollResult, 'i2m');
 
   } catch (error) {
     console.error('[imageTo3D] Error:', error);

@@ -1,14 +1,12 @@
 /**
  * Video Generation Tools
  *
- * AI-powered video generation using Veo (Google).
- * Configure your API key in Settings > Integrations before use.
+ * AI-powered video generation via fal.ai (Kling, Veo 3.1, Sora 2).
+ * Configure your FAL_KEY in Settings > Integrations before use.
  *
  * Available functions:
  * - generateVideo: Generate a video from a text prompt
  * - imageToVideo: Animate a still image into a video
- * - extendVideo: Extend an existing Veo video by ~7 seconds
- * - bridgeFrames: Generate a smooth transition between two images
  *
  * @example
  * ```typescript
@@ -37,9 +35,3 @@ export { generateVideo, type GenerateVideoInput, type GenerateVideoResponse } fr
 
 // Image-to-video
 export { imageToVideo, type ImageToVideoInput, type ImageToVideoResponse } from './imageToVideo.js';
-
-// Video extension
-export { extendVideo, type ExtendVideoInput, type ExtendVideoResponse } from './extendVideo.js';
-
-// Frame bridging
-export { bridgeFrames, type BridgeFramesInput, type BridgeFramesResponse } from './bridgeFrames.js';

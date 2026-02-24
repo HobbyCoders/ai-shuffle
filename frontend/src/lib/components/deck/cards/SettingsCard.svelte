@@ -30,13 +30,13 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	import {
 		ALL_IMAGE_MODELS,
 		ALL_VIDEO_MODELS,
+		ALL_3D_MODELS,
 		ALL_TTS_MODELS,
 		ALL_STT_MODELS,
-		PROVIDER_DISPLAY_NAMES,
-		type ImageModel as AIImageModel,
-		type VideoModel as AIVideoModel,
-		type TTSModel,
-		type STTModel,
+		TEXT_TO_VIDEO_MODELS,
+		IMAGE_TO_VIDEO_MODELS,
+		getImageModel,
+		getVideoModel,
 		type TTSVoice
 	} from '$lib/types/ai-models';
 
@@ -96,46 +96,47 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	let claudeCompletingLogin = $state(false);
 	let githubUser: string | null = $state(null);
 
-	// API Keys state
-	let openaiApiKey = $state('');
-	let openaiApiKeyMasked = $state('');
-	let savingOpenaiKey = $state(false);
-	let openaiKeySuccess = $state('');
-	let openaiKeyError = $state('');
-
-	let meshyApiKey = $state('');
-	let meshyApiKeyMasked = $state('');
-	let savingMeshyKey = $state(false);
-	let meshyKeySuccess = $state('');
-	let meshyKeyError = $state('');
-
-	let geminiApiKey = $state('');
-	let geminiApiKeyMasked = $state('');
-	let savingGeminiKey = $state(false);
-	let geminiKeySuccess = $state('');
-	let geminiKeyError = $state('');
+	// fal.ai API Key state
+	let falApiKey = $state('');
+	let falApiKeyMasked = $state('');
+	let falApiKeySet = $state(false);
+	let savingFalKey = $state(false);
+	let removingFalKey = $state(false);
+	let falKeySuccess = $state('');
+	let falKeyError = $state('');
 
 	// Model selection state
 	let imageModel = $state('');
-	let selectedImageModel = $state('');
+	let selectedImageModel = $state('fal-ai/flux-pro/v1.1-ultra');
 	let updatingImageModel = $state(false);
 	let imageConfigSuccess = $state('');
 	let imageConfigError = $state('');
 
 	let videoModel = $state('');
-	let selectedVideoModel = $state('');
+	let selectedVideoModel = $state('fal-ai/kling-video/o3/pro/text-to-video');
 	let savingVideoModel = $state(false);
 	let videoConfigSuccess = $state('');
 	let videoConfigError = $state('');
 
+	// Per-model settings state
+	let imageAspectRatio = $state('');
+	let imageResolution = $state('');
+	let videoAspectRatio = $state('');
+	let videoDuration = $state<number | null>(null);
+	let videoResolution = $state('');
+	let savingModelSettings = $state(false);
+
+	// Derived: current model metadata for dynamic settings panels
+	let currentImageModelData = $derived(getImageModel(selectedImageModel));
+	let currentVideoModelData = $derived(getVideoModel(selectedVideoModel));
+
 	let currentTtsModel = $state('');
 	let selectedTtsModel = $state('');
 	let savingTtsModel = $state(false);
-	let selectedTtsVoice = $state('alloy');
-	let currentTtsVoice = $state('alloy');
+	let selectedTtsVoice = $state('af_heart');
+	let currentTtsVoice = $state('af_heart');
 	let ttsSpeed = $state(1.0);
-	let ttsOutputFormat = $state('mp3');
-	let ttsInstructions = $state('');
+	let ttsOutputFormat = $state('wav');
 	let savingTtsSettings = $state(false);
 
 	let currentSttModel = $state('');
@@ -144,8 +145,8 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	let audioConfigSuccess = $state('');
 	let audioConfigError = $state('');
 
-	let selected3DModel = $state('meshy-6');
-	let current3DModel = $state('meshy-6');
+	let selected3DModel = $state('fal-ai/meshy/text-to-3d');
+	let current3DModel = $state('fal-ai/meshy/text-to-3d');
 	let saving3DModel = $state(false);
 	let model3DSuccess = $state('');
 	let model3DError = $state('');
@@ -242,41 +243,46 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	async function loadIntegrationSettings() {
 		try {
 			const settings = await api.get<{
-				openai_api_key_set: boolean;
-				openai_api_key_masked: string;
+				fal_api_key_set: boolean;
+				fal_api_key_masked: string;
 				image_model: string | null;
 				video_model: string | null;
 				tts_model: string | null;
 				tts_voice: string | null;
 				tts_speed: number | null;
 				tts_output_format: string | null;
-				tts_instructions: string | null;
 				stt_model: string | null;
-				meshy_api_key_set: boolean;
-				meshy_api_key_masked: string;
 				model_3d_model: string | null;
-				image_api_key_set: boolean;
-				image_api_key_masked: string;
+				image_aspect_ratio: string | null;
+				image_resolution: string | null;
+				video_aspect_ratio: string | null;
+				video_duration: number | null;
+				video_resolution: string | null;
+				stt_language: string | null;
 			}>('/settings/integrations');
 
-			openaiApiKeyMasked = settings.openai_api_key_masked;
-			imageModel = settings.image_model || '';
-			selectedImageModel = settings.image_model || '';
-			videoModel = settings.video_model || '';
-			selectedVideoModel = settings.video_model || '';
-			currentTtsModel = settings.tts_model || 'gpt-4o-mini-tts';
+			falApiKeySet = settings.fal_api_key_set ?? false;
+			falApiKeyMasked = settings.fal_api_key_masked || '';
+			imageModel = settings.image_model || 'fal-ai/flux-pro/v1.1-ultra';
+			selectedImageModel = imageModel;
+			videoModel = settings.video_model || 'fal-ai/kling-video/o3/pro/text-to-video';
+			selectedVideoModel = videoModel;
+			currentTtsModel = settings.tts_model || 'fal-ai/kokoro/american-english';
 			selectedTtsModel = currentTtsModel;
-			currentSttModel = settings.stt_model || 'whisper-1';
+			currentSttModel = settings.stt_model || 'fal-ai/whisper';
 			selectedSttModel = currentSttModel;
-			selectedTtsVoice = settings.tts_voice || 'alloy';
+			selectedTtsVoice = settings.tts_voice || 'af_heart';
 			currentTtsVoice = selectedTtsVoice;
 			ttsSpeed = settings.tts_speed || 1.0;
-			ttsOutputFormat = settings.tts_output_format || 'mp3';
-			ttsInstructions = settings.tts_instructions || '';
-			meshyApiKeyMasked = settings.meshy_api_key_masked || '';
-			selected3DModel = settings.model_3d_model || 'meshy-6';
+			ttsOutputFormat = settings.tts_output_format || 'wav';
+			selected3DModel = settings.model_3d_model || 'fal-ai/meshy/text-to-3d';
 			current3DModel = selected3DModel;
-			geminiApiKeyMasked = settings.image_api_key_masked || '';
+			// Per-model settings
+			imageAspectRatio = settings.image_aspect_ratio || '';
+			imageResolution = settings.image_resolution || '';
+			videoAspectRatio = settings.video_aspect_ratio || '';
+			videoDuration = settings.video_duration ?? null;
+			videoResolution = settings.video_resolution || '';
 		} catch (e) {
 			console.error('Failed to load integration settings:', e);
 		}
@@ -352,64 +358,45 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	let securityInstructionsChanged = $derived(securityInstructions !== originalSecurityInstructions);
 
 	// API Key save functions
-	async function saveOpenaiApiKey() {
-		if (!openaiApiKey.trim()) {
-			openaiKeyError = 'Please enter an API key';
+	async function saveFalApiKey() {
+		if (!falApiKey.trim()) {
+			falKeyError = 'Please enter an API key';
 			return;
 		}
-		savingOpenaiKey = true;
-		openaiKeyError = '';
-		openaiKeySuccess = '';
+		savingFalKey = true;
+		falKeyError = '';
+		falKeySuccess = '';
 		try {
-			const result = await api.post<{success: boolean, masked_key: string}>('/settings/integrations/openai', {
-				api_key: openaiApiKey
+			const result = await api.post<{success: boolean, masked_key: string, valid: boolean}>('/settings/integrations/fal-ai', {
+				api_key: falApiKey
 			});
-			openaiApiKeyMasked = result.masked_key;
-			openaiApiKey = '';
-			openaiKeySuccess = 'Saved';
-			setTimeout(() => openaiKeySuccess = '', 3000);
+			falApiKeyMasked = result.masked_key;
+			falApiKeySet = true;
+			falApiKey = '';
+			falKeySuccess = result.valid ? 'Key saved & verified' : 'Key saved (could not verify)';
+			setTimeout(() => falKeySuccess = '', 4000);
 		} catch (e: any) {
-			openaiKeyError = e.detail || 'Failed to save';
+			falKeyError = e.detail || 'Failed to save';
 		} finally {
-			savingOpenaiKey = false;
+			savingFalKey = false;
 		}
 	}
 
-	async function saveMeshyKey() {
-		if (!meshyApiKey.trim()) return;
-		savingMeshyKey = true;
-		meshyKeyError = '';
-		meshyKeySuccess = '';
+	async function removeFalApiKey() {
+		removingFalKey = true;
+		falKeyError = '';
+		falKeySuccess = '';
 		try {
-			await api.post('/meshy/config/api-key', { api_key: meshyApiKey });
-			meshyKeySuccess = 'Saved';
-			meshyApiKey = '';
-			await loadIntegrationSettings();
-			setTimeout(() => meshyKeySuccess = '', 3000);
+			await api.delete('/settings/integrations/fal-ai');
+			falApiKeySet = false;
+			falApiKeyMasked = '';
+			falKeySuccess = 'Key removed';
+			setTimeout(() => falKeySuccess = '', 3000);
 		} catch (e: any) {
-			meshyKeyError = e.detail || 'Failed to save';
+			falKeyError = e.detail || 'Failed to remove';
+		} finally {
+			removingFalKey = false;
 		}
-		savingMeshyKey = false;
-	}
-
-	async function saveGeminiApiKey() {
-		if (!geminiApiKey.trim()) return;
-		savingGeminiKey = true;
-		geminiKeyError = '';
-		geminiKeySuccess = '';
-		try {
-			const result = await api.post<{success: boolean, masked_key: string}>('/settings/integrations/gemini', {
-				api_key: geminiApiKey
-			});
-			geminiApiKeyMasked = result.masked_key;
-			geminiKeySuccess = 'Saved';
-			geminiApiKey = '';
-			await loadIntegrationSettings();
-			setTimeout(() => geminiKeySuccess = '', 3000);
-		} catch (e: any) {
-			geminiKeyError = e.detail || 'Failed to save';
-		}
-		savingGeminiKey = false;
 	}
 
 	// Model update functions
@@ -448,6 +435,42 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 			videoConfigError = e.detail || 'Failed to update';
 		} finally {
 			savingVideoModel = false;
+		}
+	}
+
+	async function saveImageSettings(aspect_ratio?: string, resolution?: string) {
+		savingModelSettings = true;
+		try {
+			await api.patch('/settings/integrations/image/settings', {
+				...(aspect_ratio !== undefined && { aspect_ratio }),
+				...(resolution !== undefined && { resolution })
+			});
+			if (aspect_ratio !== undefined) imageAspectRatio = aspect_ratio;
+			if (resolution !== undefined) imageResolution = resolution;
+		} catch (e: any) {
+			imageConfigError = e.detail || 'Failed to save settings';
+			setTimeout(() => imageConfigError = '', 3000);
+		} finally {
+			savingModelSettings = false;
+		}
+	}
+
+	async function saveVideoSettings(aspect_ratio?: string, duration?: number, resolution?: string) {
+		savingModelSettings = true;
+		try {
+			await api.patch('/settings/integrations/video/settings', {
+				...(aspect_ratio !== undefined && { aspect_ratio }),
+				...(duration !== undefined && { duration }),
+				...(resolution !== undefined && { resolution })
+			});
+			if (aspect_ratio !== undefined) videoAspectRatio = aspect_ratio;
+			if (duration !== undefined) videoDuration = duration;
+			if (resolution !== undefined) videoResolution = resolution;
+		} catch (e: any) {
+			videoConfigError = e.detail || 'Failed to save settings';
+			setTimeout(() => videoConfigError = '', 3000);
+		} finally {
+			savingModelSettings = false;
 		}
 	}
 
@@ -503,8 +526,7 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 				model: selectedTtsModel,
 				voice: selectedTtsVoice,
 				speed: ttsSpeed,
-				output_format: ttsOutputFormat,
-				instructions: ttsInstructions
+				output_format: ttsOutputFormat
 			});
 			currentTtsModel = selectedTtsModel;
 			currentTtsVoice = selectedTtsVoice;
@@ -523,7 +545,9 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 		model3DError = '';
 		model3DSuccess = '';
 		try {
-			await api.put('/meshy/config/settings', { model: selected3DModel });
+			await api.patch<{success: boolean}>('/settings/integrations/3d/model', {
+				model: selected3DModel
+			});
 			current3DModel = selected3DModel;
 			model3DSuccess = 'Updated';
 			setTimeout(() => model3DSuccess = '', 3000);
@@ -655,19 +679,9 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 		return model?.voices || [];
 	}
 
-	function isCurrentModelSteerable(): boolean {
+	function getAvailableFormats(): string[] {
 		const model = ALL_TTS_MODELS.find(m => m.id === currentTtsModel);
-		return model?.capabilities?.steerability ?? false;
-	}
-
-	function groupModelsByProvider<T extends { provider: string }>(models: T[]): Record<string, T[]> {
-		const groups: Record<string, T[]> = {};
-		for (const model of models) {
-			const name = PROVIDER_DISPLAY_NAMES[model.provider] || model.provider;
-			if (!groups[name]) groups[name] = [];
-			groups[name].push(model);
-		}
-		return groups;
+		return model?.outputFormats || ['wav'];
 	}
 </script>
 
@@ -1252,95 +1266,48 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 				<!-- AI TAB -->
 				{#if activeTab === 'ai'}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
-						<!-- API Keys Section -->
+						<!-- fal.ai API Key Section -->
 						<section class="section">
 							<button class="section-header" onclick={() => toggleSection('api-keys')}>
-								<h3>API Keys</h3>
+								<h3>API Key</h3>
 								<svg class="chevron" class:expanded={expandedSections.has('api-keys')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 									<polyline points="6 9 12 15 18 9"/>
 								</svg>
 							</button>
 							{#if expandedSections.has('api-keys')}
 								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
-									<!-- OpenAI -->
-									<div class="api-key-row">
-										<div class="api-key-info">
-											<span class="api-key-name">OpenAI</span>
-											{#if openaiApiKeyMasked}
-												<code class="masked-key">{openaiApiKeyMasked}</code>
+									<div class="section-compact">
+										<div class="section-header-compact" style="display: flex; align-items: center; justify-content: space-between;">
+											<h4>fal.ai API Key</h4>
+											{#if falApiKeySet}
+												<span class="badge success">Connected</span>
+											{:else}
+												<span class="badge muted">Not Set</span>
 											{/if}
 										</div>
-										<div class="api-key-input">
+										<p class="description-text">One API key powers all AI tools — image, video, 3D, and audio.</p>
+										{#if falApiKeyMasked}
+											<code class="masked-key">{falApiKeyMasked}</code>
+										{/if}
+										<div class="key-input-row">
 											<input
 												type="password"
-												bind:value={openaiApiKey}
-												placeholder={openaiApiKeyMasked ? 'Enter new key...' : 'sk-...'}
+												bind:value={falApiKey}
+												placeholder={falApiKeySet ? 'Enter new key to replace...' : 'Enter your fal.ai API key'}
 												class="input compact"
+												onkeydown={(e) => e.key === 'Enter' && saveFalApiKey()}
 											/>
-											<button
-												onclick={saveOpenaiApiKey}
-												disabled={savingOpenaiKey || !openaiApiKey.trim()}
-												class="btn primary compact"
-											>
-												{savingOpenaiKey ? '...' : 'Save'}
+											<button onclick={saveFalApiKey} disabled={savingFalKey || !falApiKey.trim()} class="btn primary compact">
+												{savingFalKey ? '...' : 'Save'}
 											</button>
-										</div>
-										{#if openaiKeySuccess}<span class="inline-success">{openaiKeySuccess}</span>{/if}
-										{#if openaiKeyError}<span class="inline-error">{openaiKeyError}</span>{/if}
-									</div>
-
-									<!-- Meshy -->
-									<div class="api-key-row">
-										<div class="api-key-info">
-											<span class="api-key-name">Meshy (3D)</span>
-											{#if meshyApiKeyMasked}
-												<code class="masked-key">{meshyApiKeyMasked}</code>
+											{#if falApiKeySet}
+												<button onclick={removeFalApiKey} disabled={removingFalKey} class="btn destructive compact">
+													{removingFalKey ? '...' : 'Remove'}
+												</button>
 											{/if}
 										</div>
-										<div class="api-key-input">
-											<input
-												type="password"
-												bind:value={meshyApiKey}
-												placeholder={meshyApiKeyMasked ? 'Enter new key...' : 'API key'}
-												class="input compact"
-											/>
-											<button
-												onclick={saveMeshyKey}
-												disabled={savingMeshyKey || !meshyApiKey.trim()}
-												class="btn primary compact"
-											>
-												{savingMeshyKey ? '...' : 'Save'}
-											</button>
-										</div>
-										{#if meshyKeySuccess}<span class="inline-success">{meshyKeySuccess}</span>{/if}
-										{#if meshyKeyError}<span class="inline-error">{meshyKeyError}</span>{/if}
-									</div>
-
-									<!-- Google Gemini -->
-									<div class="api-key-row">
-										<div class="api-key-info">
-											<span class="api-key-name">Google Gemini</span>
-											{#if geminiApiKeyMasked}
-												<code class="masked-key">{geminiApiKeyMasked}</code>
-											{/if}
-										</div>
-										<div class="api-key-input">
-											<input
-												type="password"
-												bind:value={geminiApiKey}
-												placeholder={geminiApiKeyMasked ? 'Enter new key...' : 'AIza...'}
-												class="input compact"
-											/>
-											<button
-												onclick={saveGeminiApiKey}
-												disabled={savingGeminiKey || !geminiApiKey.trim()}
-												class="btn primary compact"
-											>
-												{savingGeminiKey ? '...' : 'Save'}
-											</button>
-										</div>
-										{#if geminiKeySuccess}<span class="inline-success">{geminiKeySuccess}</span>{/if}
-										{#if geminiKeyError}<span class="inline-error">{geminiKeyError}</span>{/if}
+										{#if falKeySuccess}<span class="inline-success">{falKeySuccess}</span>{/if}
+										{#if falKeyError}<span class="inline-error">{falKeyError}</span>{/if}
 									</div>
 								</div>
 							{/if}
@@ -1363,14 +1330,8 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 											disabled={updatingImageModel}
 											class="input select"
 										>
-											{#each Object.entries(groupModelsByProvider(ALL_IMAGE_MODELS)) as [provider, models]}
-												<optgroup label={provider}>
-													{#each models as model}
-														<option value={model.id}>
-															{model.displayName} — ${model.pricePerImage.toFixed(2)}/img
-														</option>
-													{/each}
-												</optgroup>
+											{#each ALL_IMAGE_MODELS as model (model.id)}
+												<option value={model.id}>{model.displayName} — ${model.pricePerImage.toFixed(3)}/img</option>
 											{/each}
 										</select>
 										{#if updatingImageModel}
@@ -1379,6 +1340,57 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 									</div>
 									{#if imageConfigSuccess}<div class="success-msg">{imageConfigSuccess}</div>{/if}
 									{#if imageConfigError}<div class="error-msg">{imageConfigError}</div>{/if}
+
+									<!-- Per-model image settings -->
+									{#if currentImageModelData}
+										<div class="model-settings-panel">
+											{#if currentImageModelData.capabilities.editing || currentImageModelData.capabilities.referenceImages || currentImageModelData.capabilities.textRendering !== 'none'}
+												<div class="cap-badges">
+													{#if currentImageModelData.capabilities.editing}
+														<span class="cap-badge">Editing</span>
+													{/if}
+													{#if currentImageModelData.capabilities.referenceImages}
+														<span class="cap-badge">Ref Images ({currentImageModelData.capabilities.maxReferenceImages})</span>
+													{/if}
+													{#if currentImageModelData.capabilities.textRendering !== 'none'}
+														<span class="cap-badge">Text: {currentImageModelData.capabilities.textRendering}</span>
+													{/if}
+												</div>
+											{/if}
+
+											{#if currentImageModelData.aspectRatios.length > 0}
+												<div class="setting-group">
+													<label class="setting-group-label">Aspect Ratio</label>
+													<div class="pill-group">
+														{#each currentImageModelData.aspectRatios as ar (ar)}
+															<button
+																class="pill"
+																class:active={imageAspectRatio === ar}
+																onclick={() => saveImageSettings(ar, undefined)}
+																disabled={savingModelSettings}
+															>{ar}</button>
+														{/each}
+													</div>
+												</div>
+											{/if}
+
+											{#if currentImageModelData.resolutions.length > 0}
+												<div class="setting-group">
+													<label class="setting-group-label">Resolution</label>
+													<div class="pill-group">
+														{#each currentImageModelData.resolutions as res (res)}
+															<button
+																class="pill"
+																class:active={imageResolution === res}
+																onclick={() => saveImageSettings(undefined, res)}
+																disabled={savingModelSettings}
+															>{res}</button>
+														{/each}
+													</div>
+												</div>
+											{/if}
+										</div>
+									{/if}
 								</div>
 							{/if}
 						</section>
@@ -1400,15 +1412,16 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 											disabled={savingVideoModel}
 											class="input select"
 										>
-											{#each Object.entries(groupModelsByProvider(ALL_VIDEO_MODELS)) as [provider, models]}
-												<optgroup label={provider}>
-													{#each models as model}
-														<option value={model.id}>
-															{model.displayName} — ${model.pricePerSecond.toFixed(2)}/sec, max {model.maxDuration}s
-														</option>
-													{/each}
-												</optgroup>
-											{/each}
+											<optgroup label="Text-to-Video">
+												{#each TEXT_TO_VIDEO_MODELS as model (model.id)}
+													<option value={model.id}>{model.displayName} — ${model.pricePerSecond.toFixed(2)}/sec</option>
+												{/each}
+											</optgroup>
+											<optgroup label="Image-to-Video">
+												{#each IMAGE_TO_VIDEO_MODELS as model (model.id)}
+													<option value={model.id}>{model.displayName} — ${model.pricePerSecond.toFixed(2)}/sec</option>
+												{/each}
+											</optgroup>
 										</select>
 										{#if savingVideoModel}
 											<span class="loading-indicator">Updating...</span>
@@ -1416,6 +1429,65 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 									</div>
 									{#if videoConfigSuccess}<div class="success-msg">{videoConfigSuccess}</div>{/if}
 									{#if videoConfigError}<div class="error-msg">{videoConfigError}</div>{/if}
+
+									<!-- Per-model video settings -->
+									{#if currentVideoModelData}
+										<div class="model-settings-panel">
+											{#if currentVideoModelData.capabilities.nativeAudio}
+												<div class="cap-badges">
+													<span class="cap-badge audio">Native Audio</span>
+												</div>
+											{/if}
+
+											{#if currentVideoModelData.aspectRatios.length > 0}
+												<div class="setting-group">
+													<label class="setting-group-label">Aspect Ratio</label>
+													<div class="pill-group">
+														{#each currentVideoModelData.aspectRatios as ar (ar)}
+															<button
+																class="pill"
+																class:active={videoAspectRatio === ar}
+																onclick={() => saveVideoSettings(ar, undefined, undefined)}
+																disabled={savingModelSettings}
+															>{ar}</button>
+														{/each}
+													</div>
+												</div>
+											{/if}
+
+											{#if currentVideoModelData.durations.length > 0}
+												<div class="setting-group">
+													<label class="setting-group-label">Duration</label>
+													<div class="pill-group">
+														{#each currentVideoModelData.durations as dur (dur)}
+															<button
+																class="pill"
+																class:active={videoDuration === dur}
+																onclick={() => saveVideoSettings(undefined, dur, undefined)}
+																disabled={savingModelSettings}
+															>{dur}s</button>
+														{/each}
+													</div>
+												</div>
+											{/if}
+
+											{#if currentVideoModelData.resolutions.length > 0}
+												<div class="setting-group">
+													<label class="setting-group-label">Resolution</label>
+													<div class="pill-group">
+														{#each currentVideoModelData.resolutions as res (res)}
+															<button
+																class="pill"
+																class:active={videoResolution === res}
+																onclick={() => saveVideoSettings(undefined, undefined, res)}
+																disabled={savingModelSettings}
+															>{res}</button>
+														{/each}
+													</div>
+												</div>
+											{/if}
+										</div>
+									{/if}
 								</div>
 							{/if}
 						</section>
@@ -1440,12 +1512,8 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 											disabled={savingTtsModel}
 											class="input select"
 										>
-											{#each Object.entries(groupModelsByProvider(ALL_TTS_MODELS)) as [provider, models]}
-												<optgroup label={provider}>
-													{#each models as model}
-														<option value={model.id}>{model.displayName}</option>
-													{/each}
-												</optgroup>
+											{#each ALL_TTS_MODELS as model (model.id)}
+												<option value={model.id}>{model.displayName}</option>
 											{/each}
 										</select>
 									</div>
@@ -1457,14 +1525,6 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 											{#each getAvailableVoices() as voice}
 												<option value={voice.id}>{voice.name} {voice.gender ? `(${voice.gender})` : ''}</option>
 											{/each}
-											{#if getAvailableVoices().length === 0}
-												<option value="alloy">Alloy</option>
-												<option value="echo">Echo</option>
-												<option value="fable">Fable</option>
-												<option value="onyx">Onyx</option>
-												<option value="nova">Nova</option>
-												<option value="shimmer">Shimmer</option>
-											{/if}
 										</select>
 									</div>
 
@@ -1478,27 +1538,11 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 									<div class="setting-row">
 										<label class="setting-label" for="settings-tts-format">Output Format</label>
 										<select id="settings-tts-format" bind:value={ttsOutputFormat} class="input select compact">
-											<option value="mp3">MP3</option>
-											<option value="wav">WAV</option>
-											<option value="opus">Opus</option>
-											<option value="aac">AAC</option>
-											<option value="flac">FLAC</option>
+											{#each getAvailableFormats() as fmt (fmt)}
+												<option value={fmt}>{fmt.toUpperCase()}</option>
+											{/each}
 										</select>
 									</div>
-
-									<!-- Voice Instructions (if steerable) -->
-									{#if isCurrentModelSteerable()}
-										<div class="setting-row vertical">
-											<label class="setting-label" for="settings-tts-instructions">Voice Instructions <span class="badge primary">Steerable</span></label>
-											<textarea
-												id="settings-tts-instructions"
-												bind:value={ttsInstructions}
-												placeholder="e.g., Speak in a warm, friendly tone..."
-												class="input textarea"
-												rows="2"
-											></textarea>
-										</div>
-									{/if}
 
 									<button
 										onclick={saveTtsSettings}
@@ -1520,12 +1564,8 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 											disabled={savingSttModel}
 											class="input select"
 										>
-											{#each Object.entries(groupModelsByProvider(ALL_STT_MODELS)) as [provider, models]}
-												<optgroup label={provider}>
-													{#each models as model}
-														<option value={model.id}>{model.displayName}</option>
-													{/each}
-												</optgroup>
+											{#each ALL_STT_MODELS as model (model.id)}
+												<option value={model.id}>{model.displayName} — {model.description}</option>
 											{/each}
 										</select>
 									</div>
@@ -1553,9 +1593,9 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 											disabled={saving3DModel}
 											class="input select"
 										>
-											<option value="meshy-6">Meshy 6 (Latest) — Best Quality</option>
-											<option value="meshy-5">Meshy 5 — Balanced</option>
-											<option value="meshy-4">Meshy 4 — Fast</option>
+											{#each ALL_3D_MODELS as model (model.id)}
+												<option value={model.id}>{model.displayName} — ${model.pricePerModel.toFixed(2)}/model</option>
+											{/each}
 										</select>
 										{#if saving3DModel}
 											<span class="loading-indicator">Updating...</span>
@@ -1974,6 +2014,13 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 		color: var(--destructive-foreground);
 	}
 
+	.btn.destructive {
+		background: var(--destructive);
+		color: var(--destructive-foreground, #fff);
+	}
+
+	.btn.destructive:hover:not(:disabled) { filter: brightness(1.1); }
+
 	.btn.compact {
 		padding: 6px 12px;
 		font-size: 0.8125rem;
@@ -2100,9 +2147,9 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	}
 
 	.badge.muted {
-		background: var(--muted);
+		background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
 		color: var(--muted-foreground);
-		border: 1px solid var(--border);
+		border: 1px solid color-mix(in oklch, var(--muted-foreground) 30%, transparent);
 	}
 
 	.badge.primary {
@@ -2325,6 +2372,36 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 		flex: 1;
 	}
 
+	/* fal.ai API Key */
+	.section-compact {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.section-header-compact h4 {
+		margin: 0;
+		font-size: 0.9375rem;
+		font-weight: 600;
+		color: var(--foreground);
+	}
+
+	.description-text {
+		margin: 0;
+		font-size: 0.8125rem;
+		color: var(--muted-foreground);
+		line-height: 1.5;
+	}
+
+	.key-input-row {
+		display: flex;
+		gap: 6px;
+	}
+
+	.key-input-row .input {
+		flex: 1;
+	}
+
 	/* Model Selectors */
 	.model-selector {
 		display: flex;
@@ -2517,6 +2594,87 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 		font-family: var(--font-mono);
 		font-size: 0.75rem;
 		word-break: break-all;
+	}
+
+	/* Per-model settings */
+	.model-settings-panel {
+		margin-top: 10px;
+		padding: 10px 12px;
+		background: var(--muted);
+		border-radius: var(--radius);
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+
+	.setting-group {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.setting-group-label {
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: var(--muted-foreground);
+		text-transform: uppercase;
+		letter-spacing: 0.03em;
+	}
+
+	.pill-group {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+
+	.pill {
+		padding: 4px 10px;
+		font-size: 0.8125rem;
+		border-radius: 999px;
+		border: 1px solid var(--border);
+		background: transparent;
+		color: var(--foreground);
+		cursor: pointer;
+		transition: all 0.15s ease;
+		line-height: 1.4;
+	}
+
+	.pill:hover:not(:disabled) {
+		border-color: var(--primary);
+		background: color-mix(in oklch, var(--primary) 8%, transparent);
+	}
+
+	.pill.active {
+		background: var(--primary);
+		color: var(--primary-foreground);
+		border-color: var(--primary);
+	}
+
+	.pill:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.cap-badges {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+
+	.cap-badge {
+		display: inline-flex;
+		align-items: center;
+		padding: 2px 8px;
+		font-size: 0.6875rem;
+		font-weight: 500;
+		border-radius: 999px;
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		color: var(--primary);
+	}
+
+	.cap-badge.audio {
+		background: color-mix(in oklch, var(--success) 12%, transparent);
+		color: var(--success);
 	}
 
 	/* Utility */

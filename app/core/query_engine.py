@@ -765,9 +765,7 @@ def _resolve_api_credential(
     """
     # Map credential types to admin settings
     admin_setting_map = {
-        "openai_api_key": "openai_api_key",
-        "gemini_api_key": "image_api_key",
-        "meshy_api_key": "meshy_api_key",
+        "fal_api_key": "fal_api_key",
         "github_pat": None  # No admin fallback for GitHub
     }
 
@@ -937,89 +935,71 @@ def _build_env_with_ai_tools(
 
     # Check if any AI tools are enabled
     any_image_tools = ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False) or ai_tools_config.get("image_reference", False)
-    any_video_tools = ai_tools_config.get("video_generation", False) or ai_tools_config.get("image_to_video", False) or ai_tools_config.get("video_extend", False) or ai_tools_config.get("video_bridge", False) or ai_tools_config.get("video_with_audio", False) or ai_tools_config.get("video_understanding", False)
-    any_3d_tools = ai_tools_config.get("text_to_3d", False) or ai_tools_config.get("image_to_3d", False) or ai_tools_config.get("retexture_3d", False) or ai_tools_config.get("rig_3d", False) or ai_tools_config.get("animate_3d", False)
+    any_video_tools = ai_tools_config.get("video_generation", False) or ai_tools_config.get("image_to_video", False) or ai_tools_config.get("video_extend", False)
+    any_3d_tools = ai_tools_config.get("text_to_3d", False) or ai_tools_config.get("image_to_3d", False)
+    any_audio_tools = ai_tools_config.get("tts", False) or ai_tools_config.get("stt", False)
 
-    if not any_image_tools and not any_video_tools and not any_3d_tools:
+    if not any_image_tools and not any_video_tools and not any_3d_tools and not any_audio_tools:
         return env
 
-    # Resolve API keys based on user/policy
-    # If api_user_id is provided, use policy-based resolution (user key → admin fallback)
-    # Otherwise, use admin keys directly (local/admin sessions)
+    # Resolve fal.ai API key (single provider architecture)
     if api_user_id:
-        gemini_api_key = _resolve_api_credential("gemini_api_key", api_user_id)
-        openai_api_key = _resolve_api_credential("openai_api_key", api_user_id)
-        meshy_api_key = _resolve_api_credential("meshy_api_key", api_user_id)
         fal_api_key = _resolve_api_credential("fal_api_key", api_user_id)
-        logger.debug(f"Resolved credentials for API user {api_user_id}")
+        logger.debug(f"Resolved fal.ai credential for API user {api_user_id}")
     else:
-        # Admin/local session - use admin keys directly
-        gemini_api_key = _get_decrypted_api_key("image_api_key")
-        openai_api_key = _get_decrypted_api_key("openai_api_key")
-        meshy_api_key = _get_decrypted_api_key("meshy_api_key")
         fal_api_key = _get_decrypted_api_key("fal_api_key")
-
-    # Inject ALL available API keys so Claude can dynamically choose providers
-    # This is the key change - instead of only injecting the default provider's key,
-    # we inject all keys so any provider can be used per-request
-
-    if gemini_api_key:
-        env["GEMINI_API_KEY"] = gemini_api_key
-        env["IMAGE_API_KEY"] = gemini_api_key  # For backwards compatibility
-        env["VIDEO_API_KEY"] = gemini_api_key  # Veo uses same key
-        logger.debug("Injected GEMINI_API_KEY for Google AI tools (Nano Banana, Imagen, Veo)")
-
-    if openai_api_key:
-        env["OPENAI_API_KEY"] = openai_api_key
-        logger.debug("Injected OPENAI_API_KEY for OpenAI tools (GPT Image, Sora)")
-
-    if meshy_api_key:
-        env["MESHY_API_KEY"] = meshy_api_key
-        env["MODEL3D_API_KEY"] = meshy_api_key  # Alternative name
-        logger.debug("Injected MESHY_API_KEY for 3D model tools (Meshy)")
 
     if fal_api_key:
         env["FAL_KEY"] = fal_api_key
-        logger.debug("Injected FAL_KEY for fal.ai tools (Flux, Kling, Hunyuan-3D)")
+        logger.debug("Injected FAL_KEY for fal.ai tools")
 
-    # Set default provider/model from settings (Claude can override these per-request)
+    # Set default provider/model from settings
     if any_image_tools:
-        image_provider = database.get_system_setting("image_provider")
         image_model = database.get_system_setting("image_model")
-
-        if image_provider:
-            env["IMAGE_PROVIDER"] = image_provider
-            logger.debug(f"Set default IMAGE_PROVIDER={image_provider}")
-
+        env["IMAGE_PROVIDER"] = "fal-ai"
         if image_model:
             env["IMAGE_MODEL"] = image_model
-            env["GEMINI_MODEL"] = image_model  # Legacy compatibility
             logger.debug(f"Set default IMAGE_MODEL={image_model}")
+        image_aspect_ratio = database.get_system_setting("image_aspect_ratio")
+        image_resolution = database.get_system_setting("image_resolution")
+        if image_aspect_ratio:
+            env["IMAGE_ASPECT_RATIO"] = image_aspect_ratio
+        if image_resolution:
+            env["IMAGE_RESOLUTION"] = image_resolution
 
     if any_video_tools:
-        video_provider = database.get_system_setting("video_provider")
         video_model = database.get_system_setting("video_model")
-
-        if video_provider:
-            env["VIDEO_PROVIDER"] = video_provider
-            logger.debug(f"Set default VIDEO_PROVIDER={video_provider}")
-
+        env["VIDEO_PROVIDER"] = "fal-ai"
         if video_model:
             env["VIDEO_MODEL"] = video_model
-            env["VEO_MODEL"] = video_model  # Legacy compatibility
             logger.debug(f"Set default VIDEO_MODEL={video_model}")
+        video_aspect_ratio = database.get_system_setting("video_aspect_ratio")
+        video_duration = database.get_system_setting("video_duration")
+        video_resolution = database.get_system_setting("video_resolution")
+        if video_aspect_ratio:
+            env["VIDEO_ASPECT_RATIO"] = video_aspect_ratio
+        if video_duration:
+            env["VIDEO_DURATION"] = video_duration
+        if video_resolution:
+            env["VIDEO_RESOLUTION"] = video_resolution
 
     if any_3d_tools:
-        model3d_provider = database.get_system_setting("model3d_provider")
         model3d_model = database.get_system_setting("model3d_model")
-
-        if model3d_provider:
-            env["MODEL3D_PROVIDER"] = model3d_provider
-            logger.debug(f"Set default MODEL3D_PROVIDER={model3d_provider}")
-
+        env["MODEL3D_PROVIDER"] = "fal-ai"
         if model3d_model:
             env["MODEL3D_MODEL"] = model3d_model
             logger.debug(f"Set default MODEL3D_MODEL={model3d_model}")
+
+    if any_audio_tools:
+        tts_model = database.get_system_setting("tts_model")
+        stt_model = database.get_system_setting("stt_model")
+        if tts_model:
+            env["TTS_MODEL"] = tts_model
+        if stt_model:
+            env["STT_MODEL"] = stt_model
+        stt_language = database.get_system_setting("stt_language")
+        if stt_language:
+            env["STT_LANGUAGE"] = stt_language
 
     return env
 

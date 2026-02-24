@@ -26,14 +26,9 @@ import { generateWithReference } from './image-generation/generateWithReference.
 import { generateVideo } from './video-generation/generateVideo.js';
 import { imageToVideo } from './video-generation/imageToVideo.js';
 import { extendVideo } from './video-generation/extendVideo.js';
-import { bridgeFrames } from './video-generation/bridgeFrames.js';
-import { analyzeVideo } from './video-analysis/analyzeVideo.js';
 import { textTo3D } from './model3d-generation/textTo3D.js';
 import { imageTo3D } from './model3d-generation/imageTo3D.js';
-import { retexture3D } from './model3d-generation/retexture3D.js';
-import { rig3D } from './model3d-generation/rig3D.js';
-import { animate3D } from './model3d-generation/animate3D.js';
-import { getTask3D } from './model3d-generation/getTask3D.js';
+import { executeFalModel } from './providers/fal-generic.js';
 
 // Tool dispatch table
 const tools: Record<string, (args: any) => Promise<any>> = {
@@ -43,14 +38,9 @@ const tools: Record<string, (args: any) => Promise<any>> = {
   generateVideo,
   imageToVideo,
   extendVideo,
-  bridgeFrames,
-  analyzeVideo,
   textTo3D,
   imageTo3D,
-  retexture3D,
-  rig3D,
-  animate3D,
-  getTask3D,
+  runFalModel: executeFalModel,
 };
 
 // Redirect console.log to stderr so stdout is reserved for protocol messages.

@@ -1,33 +1,18 @@
 /**
- * Video Generation Tool - Unified Provider Interface
+ * Video Generation Tool - fal.ai Provider
  *
- * Generate videos using AI from multiple providers (Google Veo, OpenAI Sora, etc.)
- * The provider and model are selected based on environment variables or explicit input.
+ * Generate videos using AI via fal.ai (Kling O3, Veo 3.1, Sora 2, etc.)
  * Videos are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
- *   VIDEO_PROVIDER - Provider ID (e.g., "google-veo", "openai-sora")
- *   VIDEO_API_KEY - API key for the selected provider
- *   VIDEO_MODEL - Model to use (e.g., "veo-3.1-fast-generate-preview", "sora-2")
- *
- *   Legacy (backwards compatible):
- *   GEMINI_API_KEY - Google AI API key (used if VIDEO_API_KEY not set)
- *   VEO_MODEL - Veo model (used if VIDEO_MODEL not set for Google provider)
- *   OPENAI_API_KEY - OpenAI API key (used for Sora if VIDEO_API_KEY not set)
+ *   FAL_KEY - fal.ai API key
+ *   VIDEO_MODEL - Model to use (e.g., "fal-ai/kling-video/v2.1/master/text-to-video")
  *
  * Usage:
  *   import { generateVideo } from '/opt/ai-tools/dist/video-generation/generateVideo.js';
  *
- *   // Use default provider from settings
  *   const result = await generateVideo({
  *     prompt: 'A cat playing with a ball of yarn'
- *   });
- *
- *   // Or explicitly specify provider/model
- *   const result = await generateVideo({
- *     prompt: 'A cat playing with a ball of yarn',
- *     provider: 'openai-sora',
- *     model: 'sora-2-pro'
  *   });
  *
  *   if (result.success) {
@@ -55,16 +40,14 @@ export interface GenerateVideoInput {
 
   /**
    * Override the default video provider.
-   * Available: "google-veo", "openai-sora"
-   * If not specified, uses VIDEO_PROVIDER env var or defaults to "google-veo"
+   * Currently only "fal-ai" is supported.
    */
   provider?: string;
 
   /**
-   * Override the default model for the selected provider.
-   * Google Veo: "veo-3.1-fast-generate-preview", "veo-3.1-generate-preview"
-   * OpenAI Sora: "sora-2", "sora-2-pro"
-   * If not specified, uses VIDEO_MODEL/VEO_MODEL env var or provider default
+   * Override the default model.
+   * fal.ai models include Kling, Veo, Sora variants.
+   * If not specified, uses VIDEO_MODEL env var or first registered fal.ai model.
    */
   model?: string;
 
@@ -111,85 +94,35 @@ export interface GenerateVideoInput {
 export type GenerateVideoResponse = VideoResult;
 
 /**
- * Determine the provider ID to use based on input and environment
+ * Determine the provider ID — always fal.ai
  */
-function getProviderId(inputProvider?: string): string {
-  // Explicit input takes priority
-  if (inputProvider) {
-    return inputProvider;
-  }
-
-  // Check environment variables
-  if (process.env.VIDEO_PROVIDER) {
-    return process.env.VIDEO_PROVIDER;
-  }
-
-  // Legacy: If OPENAI_API_KEY is set but not GEMINI_API_KEY, default to Sora
-  if (process.env.OPENAI_API_KEY && !process.env.GEMINI_API_KEY) {
-    return 'openai-sora';
-  }
-
-  // Default to Google Veo
-  return 'google-veo';
+function getProviderId(_inputProvider?: string): string {
+  return 'fal-ai';
 }
 
 /**
- * Get API key for the specified provider
+ * Get API key from FAL_KEY environment variable
  */
-function getApiKey(providerId: string): string {
-  // Check provider-specific env var first
-  if (process.env.VIDEO_API_KEY) {
-    return process.env.VIDEO_API_KEY;
-  }
-
-  // Legacy fallbacks based on provider
-  if (providerId === 'google-veo') {
-    return process.env.GEMINI_API_KEY || '';
-  }
-
-  if (providerId === 'openai-sora') {
-    return process.env.OPENAI_API_KEY || '';
-  }
-
-  if (providerId === 'fal-ai') {
-    return process.env.FAL_KEY || '';
-  }
-
-  return '';
+function getApiKey(_providerId: string): string {
+  return process.env.FAL_KEY || '';
 }
 
 /**
- * Get model ID for the specified provider
+ * Get model ID for the provider
  */
 function getModelId(providerId: string, inputModel?: string): string {
-  // Explicit input takes priority
   if (inputModel) {
     return inputModel;
   }
 
-  // Check environment variables
   if (process.env.VIDEO_MODEL) {
     return process.env.VIDEO_MODEL;
   }
 
-  // Legacy fallbacks
-  if (providerId === 'google-veo' && process.env.VEO_MODEL) {
-    return process.env.VEO_MODEL;
-  }
-
-  // Provider defaults
+  // Provider defaults from registry
   const provider = registry.getVideoProvider(providerId);
   if (provider && provider.models.length > 0) {
     return provider.models[0].id;
-  }
-
-  // Ultimate fallbacks
-  if (providerId === 'google-veo') {
-    return 'veo-3.1-fast-generate-preview';
-  }
-
-  if (providerId === 'openai-sora') {
-    return 'sora-2';
   }
 
   return '';
@@ -198,8 +131,8 @@ function getModelId(providerId: string, inputModel?: string): string {
 /**
  * Generate a video from a text prompt.
  *
- * Uses the configured provider (Google Veo, OpenAI Sora, etc.) or allows
- * explicit override via the provider/model parameters.
+ * Uses fal.ai as the video generation provider. Supports Kling, Veo, and
+ * Sora models through a single API key.
  *
  * The video is saved to disk and a URL is returned for display in the chat UI.
  * Video generation is asynchronous - this function polls until complete.
@@ -216,11 +149,10 @@ function getModelId(providerId: string, inputModel?: string): string {
  *   aspect_ratio: '16:9'
  * });
  *
- * // Use specific provider
+ * // Use specific model
  * const result = await generateVideo({
  *   prompt: 'A butterfly landing on a flower',
- *   provider: 'openai-sora',
- *   model: 'sora-2-pro'
+ *   model: 'fal-ai/kling-video/v2.1/master/text-to-video'
  * });
  *
  * if (result.success) {
@@ -249,7 +181,7 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
   if (!apiKey) {
     return {
       success: false,
-      error: `No API key configured for ${provider.name}. Set VIDEO_API_KEY or provider-specific key.`
+      error: `No API key configured for ${provider.name}. Set FAL_KEY environment variable.`
     };
   }
 
@@ -257,24 +189,22 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
   const modelId = getModelId(providerId, input.model);
   const modelInfo = provider.models.find(m => m.id === modelId);
 
-  if (!modelInfo) {
-    const availableModels = provider.models.map(m => m.id);
-    return {
-      success: false,
-      error: `Model '${modelId}' not found for ${provider.name}. Available models: ${availableModels.join(', ')}`
-    };
-  }
-
   // Build credentials
   const credentials: ProviderCredentials = { apiKey };
 
-  // Delegate to provider
+  // Apply env var defaults when caller doesn't specify
+  const aspect_ratio = input.aspect_ratio || (process.env.VIDEO_ASPECT_RATIO as any) || undefined;
+  const duration = input.duration || (process.env.VIDEO_DURATION ? parseInt(process.env.VIDEO_DURATION) : undefined);
+  const resolution = input.resolution || (process.env.VIDEO_RESOLUTION as any) || undefined;
+
+  // Delegate to provider — works even with models not in the hardcoded list
+  // since fal.subscribe() accepts any valid endpoint_id
   const result = await provider.generate(
     {
       prompt: input.prompt,
-      aspect_ratio: input.aspect_ratio,
-      duration: input.duration,
-      resolution: input.resolution,
+      aspect_ratio,
+      duration,
+      resolution,
       negative_prompt: input.negative_prompt,
       seed: input.seed,
       person_generation: input.person_generation
@@ -285,7 +215,9 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
 
   // Add provider metadata to the result
   if (result.success) {
-    const capabilities = modelInfo.capabilities.map(c => c.toString());
+    const capabilities = modelInfo
+      ? modelInfo.capabilities.map(c => c.toString())
+      : ['text-to-video'];
     const supportsExtend = capabilities.includes('video-extend');
 
     result.provider_metadata = {
@@ -294,7 +226,7 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
       model_used: modelId,
       capabilities: capabilities,
       can_extend: supportsExtend,
-      extend_with: supportsExtend ? providerId : 'google-veo (Veo only supports extend)'
+      extend_with: supportsExtend ? providerId : undefined
     };
   }
 

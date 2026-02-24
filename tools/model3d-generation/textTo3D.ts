@@ -1,27 +1,19 @@
 /**
- * Text to 3D Tool - Meshy AI
+ * Text to 3D Tool - fal.ai Provider
  *
- * Generate a 3D model from a text prompt using Meshy AI.
- * The API key is provided via environment variable.
+ * Generate a 3D model from a text prompt using fal.ai.
  * Models are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
- *   MESHY_API_KEY - Meshy AI API key (injected by AI Hub at runtime)
- *   MODEL3D_API_KEY - Alternative API key (used if MESHY_API_KEY not set)
- *   MODEL3D_MODEL - Model to use (optional, defaults to meshy-6)
+ *   FAL_KEY - fal.ai API key
+ *   MODEL3D_MODEL - Model to use (optional, defaults to fal-ai/meshy/v6/text-to-3d)
  *   GENERATED_MODELS_DIR - Output directory (optional, defaults to ./generated-models)
  *
  * Usage:
  *   import { textTo3D } from '/opt/ai-tools/dist/model3d-generation/textTo3D.js';
  *
- *   // Quick async mode (returns task_id immediately)
  *   const result = await textTo3D({
- *     prompt: 'A medieval castle with stone walls and towers'
- *   });
- *
- *   // Sync mode (waits for completion)
- *   const result = await textTo3D({
- *     prompt: 'A wooden treasure chest',
+ *     prompt: 'A medieval castle with stone walls and towers',
  *     wait_for_completion: true
  *   });
  *
@@ -31,16 +23,7 @@
  *   }
  */
 
-import {
-  Model3DResponse,
-  MESHY_API_BASE,
-  getMeshyApiKey,
-  getMeshyHeaders,
-  handleApiError,
-  parseTaskResponse,
-  pollForCompletion,
-  saveModelFromResponse
-} from './shared.js';
+import { Model3DResponse } from './shared.js';
 import { registry } from '../providers/registry.js';
 
 export interface TextTo3DInput {
@@ -64,19 +47,9 @@ export interface TextTo3DInput {
 
   /**
    * AI model to use for generation.
-   * - "latest": Meshy 6 Preview, best quality (20 credits, 10 during promo)
-   * - "meshy-5": Balanced quality and speed (5 credits)
-   * - "meshy-4": Fast generation (5 credits)
-   * @default "latest"
+   * If not specified, uses MODEL3D_MODEL env var or defaults to fal-ai/meshy/v6/text-to-3d.
    */
   model?: string;
-
-  /**
-   * Override the default 3D provider.
-   * Available: "meshy" (default), "fal-ai"
-   * If not specified, uses Meshy directly.
-   */
-  provider?: string;
 
   /**
    * Mesh topology type.
@@ -130,7 +103,7 @@ export interface TextTo3DInput {
 export type TextTo3DResponse = Model3DResponse;
 
 /**
- * Generate a 3D model from a text prompt using Meshy AI.
+ * Generate a 3D model from a text prompt using fal.ai.
  *
  * The model is saved to disk and a URL is returned for display.
  * 3D generation is asynchronous by default - use wait_for_completion: true
@@ -141,21 +114,9 @@ export type TextTo3DResponse = Model3DResponse;
  *
  * @example
  * ```typescript
- * // Async mode - returns immediately with task_id
- * const result = await textTo3D({
- *   prompt: 'A wooden pirate ship with cannons',
- *   art_style: 'realistic'
- * });
- *
- * if (!result.success && result.task_id) {
- *   console.log('Task started:', result.task_id);
- *   // Check later with getTask3D({ task_id: result.task_id, task_type: 'text-to-3d' })
- * }
- *
  * // Sync mode - waits for completion
  * const result = await textTo3D({
  *   prompt: 'A medieval sword with ornate handle',
- *   model: 'meshy-6',
  *   topology: 'quad',
  *   target_polycount: 50000,
  *   wait_for_completion: true
@@ -168,45 +129,19 @@ export type TextTo3DResponse = Model3DResponse;
  * ```
  */
 export async function textTo3D(input: TextTo3DInput): Promise<TextTo3DResponse> {
-  // Route to fal.ai provider if specified
-  if (input.provider === 'fal-ai') {
-    const provider = registry.getModel3DProvider('fal-ai');
-    if (!provider) {
-      return { success: false, error: "fal-ai 3D provider not found." };
-    }
-    const falKey = process.env.FAL_KEY || '';
-    if (!falKey) {
-      return { success: false, error: 'FAL_KEY environment variable not set.' };
-    }
-    const falModel = input.model || provider.models[0]?.id || 'fal-ai/hunyuan-3d/v2/turbo';
-    const result = await provider.textTo3D(
-      { prompt: input.prompt, art_style: input.art_style, topology: input.topology, target_polycount: input.target_polycount },
-      { apiKey: falKey },
-      falModel
-    );
-    // Map Model3DResult → Model3DResponse
+  // Get API key from environment
+  const falKey = process.env.FAL_KEY || '';
+  if (!falKey) {
     return {
-      success: result.success,
-      task_id: result.task_id,
-      model_url: result.model_urls?.glb,
-      model_urls: result.model_urls,
-      file_path: result.file_path,
-      filename: result.filename,
-      status: result.status,
-      progress: result.progress,
-      thumbnail_url: result.thumbnail_url,
-      error: result.error,
+      success: false,
+      error: 'FAL_KEY environment variable not set. 3D generation is not configured.'
     };
   }
 
-  // Default: Meshy direct path
-  // Get API key from environment
-  const apiKey = getMeshyApiKey();
-  if (!apiKey) {
-    return {
-      success: false,
-      error: 'MESHY_API_KEY environment variable not set. 3D generation is not configured.'
-    };
+  // Get provider from registry
+  const provider = registry.getModel3DProvider('fal-ai');
+  if (!provider) {
+    return { success: false, error: 'fal-ai 3D provider not found in registry.' };
   }
 
   // Validate input
@@ -224,7 +159,6 @@ export async function textTo3D(input: TextTo3DInput): Promise<TextTo3DResponse> 
     };
   }
 
-  // Validate target_polycount if provided
   if (input.target_polycount !== undefined) {
     if (input.target_polycount < 100 || input.target_polycount > 300000) {
       return {
@@ -234,88 +168,34 @@ export async function textTo3D(input: TextTo3DInput): Promise<TextTo3DResponse> 
     }
   }
 
-  // Get model from environment or use default
-  // Valid models: meshy-4, meshy-5, latest (Meshy 6 Preview)
-  const envModel = process.env.MODEL3D_MODEL;
-  // Map meshy-6 to latest for backwards compatibility
-  const normalizedEnvModel = envModel === 'meshy-6' ? 'latest' : envModel;
-  const model = input.model || normalizedEnvModel || 'latest';
+  // Determine model
+  const falModel = input.model || process.env.MODEL3D_MODEL || provider.models[0]?.id || 'fal-ai/meshy/v6/text-to-3d';
 
   try {
-    // Build request body
-    const requestBody: Record<string, any> = {
-      mode: 'preview',  // Always start with preview mode
-      prompt: input.prompt.trim(),
-      ai_model: model  // Valid: meshy-4, meshy-5, latest
+    const result = await provider.textTo3D(
+      {
+        prompt: input.prompt.trim(),
+        art_style: input.art_style,
+        topology: input.topology,
+        target_polycount: input.target_polycount
+      },
+      { apiKey: falKey },
+      falModel
+    );
+
+    // Map Model3DResult to Model3DResponse
+    return {
+      success: result.success,
+      task_id: result.task_id,
+      model_url: result.model_urls?.glb,
+      model_urls: result.model_urls,
+      file_path: result.file_path,
+      filename: result.filename,
+      status: result.status,
+      progress: result.progress,
+      thumbnail_url: result.thumbnail_url,
+      error: result.error,
     };
-
-    // Add optional parameters
-    if (input.art_style) {
-      requestBody.art_style = input.art_style;
-    }
-
-    if (input.topology) {
-      requestBody.topology = input.topology;
-    }
-
-    if (input.target_polycount !== undefined) {
-      requestBody.target_polycount = input.target_polycount;
-    }
-
-    if (input.symmetry_mode) {
-      requestBody.symmetry_mode = input.symmetry_mode;
-    }
-
-    if (input.should_remesh !== undefined) {
-      requestBody.should_remesh = input.should_remesh;
-    }
-
-    if (input.pose_mode !== undefined) {
-      requestBody.pose_mode = input.pose_mode;
-    }
-
-    // Start the 3D generation
-    const response = await fetch(`${MESHY_API_BASE}/openapi/v2/text-to-3d`, {
-      method: 'POST',
-      headers: getMeshyHeaders(apiKey),
-      body: JSON.stringify(requestBody)
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      return handleApiError(response, errorData);
-    }
-
-    const result = await response.json() as any;
-    const taskId = result.result;
-
-    if (!taskId) {
-      return {
-        success: false,
-        error: 'Failed to start 3D generation: no task ID returned.'
-      };
-    }
-
-    // If not waiting for completion, return the task ID immediately
-    if (!input.wait_for_completion) {
-      return {
-        success: false,  // Not yet complete
-        task_id: taskId,
-        status: 'PENDING',
-        progress: 0
-      };
-    }
-
-    // Poll for completion
-    console.log(`[textTo3D] Task ${taskId} started, waiting for completion...`);
-    const pollResult = await pollForCompletion(taskId, 'text-to-3d', apiKey);
-
-    if (!pollResult.success) {
-      return pollResult;
-    }
-
-    // Download and save the model
-    return await saveModelFromResponse(pollResult, 't2m');
 
   } catch (error) {
     console.error('[textTo3D] Error:', error);

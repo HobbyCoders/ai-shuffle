@@ -1,12 +1,12 @@
 /**
- * Image-to-Video Tool - Veo (Google)
+ * Image-to-Video Tool - fal.ai Provider
  *
- * Animate a still image into a video using AI. The API key is provided via environment variable.
+ * Animate a still image into a video using AI via fal.ai.
  * Videos are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
- *   GEMINI_API_KEY - Google AI API key (injected by AI Hub at runtime)
- *   VEO_MODEL - Model to use (optional, defaults to veo-3.1-fast-generate-preview)
+ *   FAL_KEY - fal.ai API key
+ *   VIDEO_MODEL - Model to use (optional, defaults to first i2v-capable fal.ai model)
  *
  * Usage:
  *   import { imageToVideo } from '/opt/ai-tools/dist/video-generation/imageToVideo.js';
@@ -22,14 +22,11 @@
  *   }
  */
 
-import {
-  VideoResponse,
-  imageToBase64,
-  handleApiError,
-  pollForCompletion,
-  downloadVideo,
-  saveVideo
-} from './shared.js';
+import { registry } from '../providers/registry.js';
+import { VideoResult, ProviderCredentials } from '../providers/types.js';
+
+// Re-export VideoResponse for backwards compatibility
+export { VideoResponse } from './shared.js';
 
 export interface ImageToVideoInput {
   /**
@@ -65,7 +62,6 @@ export interface ImageToVideoInput {
 
   /**
    * Resolution of the generated video.
-   * Note: 1080p is only available for 8-second videos.
    * @default "720p"
    */
   resolution?: '720p' | '1080p';
@@ -87,12 +83,18 @@ export interface ImageToVideoInput {
    * @default "allow_adult"
    */
   person_generation?: 'allow_all' | 'allow_adult';
+
+  /**
+   * Override the default model for image-to-video.
+   * If not specified, uses VIDEO_MODEL env var or first i2v-capable fal.ai model.
+   */
+  model?: string;
 }
 
-export type ImageToVideoResponse = VideoResponse;
+export type ImageToVideoResponse = VideoResult;
 
 /**
- * Convert a still image into an animated video using Google Veo.
+ * Convert a still image into an animated video using fal.ai.
  *
  * The video is saved to disk and a URL is returned for display in the chat UI.
  * Video generation is asynchronous - this function polls until complete.
@@ -119,16 +121,29 @@ export type ImageToVideoResponse = VideoResponse;
  */
 export async function imageToVideo(input: ImageToVideoInput): Promise<ImageToVideoResponse> {
   // Get API key from environment
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.FAL_KEY;
   if (!apiKey) {
     return {
       success: false,
-      error: 'GEMINI_API_KEY environment variable not set. Video generation is not configured.'
+      error: 'FAL_KEY environment variable not set. Video generation is not configured.'
     };
   }
 
-  // Get model from environment or use default
-  const model = process.env.VEO_MODEL || 'veo-3.1-fast-generate-preview';
+  // Get provider from registry
+  const provider = registry.getVideoProvider('fal-ai');
+  if (!provider) {
+    return {
+      success: false,
+      error: 'fal-ai video provider not found in registry.'
+    };
+  }
+
+  if (!provider.imageToVideo) {
+    return {
+      success: false,
+      error: 'fal-ai video provider does not support image-to-video.'
+    };
+  }
 
   // Validate input
   if (!input.image_path) {
@@ -152,86 +167,54 @@ export async function imageToVideo(input: ImageToVideoInput): Promise<ImageToVid
     };
   }
 
-  // Validate resolution/duration combination
-  if (input.resolution === '1080p' && input.duration && input.duration !== 8) {
+  // Get model - find first i2v-capable model
+  let modelId = input.model || process.env.VIDEO_MODEL || '';
+  if (!modelId) {
+    const i2vModel = provider.models.find(m => m.capabilities.includes('image-to-video'));
+    modelId = i2vModel?.id || provider.models[0]?.id || '';
+  }
+
+  if (!modelId) {
     return {
       success: false,
-      error: '1080p resolution is only available for 8-second videos.'
+      error: 'No image-to-video model found for fal-ai provider.'
     };
   }
 
-  // Read and encode the image
-  const imageResult = imageToBase64(input.image_path);
-  if ('error' in imageResult) {
-    return {
-      success: false,
-      error: imageResult.error
-    };
-  }
+  // Build credentials
+  const credentials: ProviderCredentials = { apiKey };
 
-  const prompt = input.prompt.trim();
-  const aspectRatio = input.aspect_ratio || '16:9';
-  const duration = input.duration || 8;
-  const resolution = input.resolution || '720p';
+  // Apply env var defaults when caller doesn't specify
+  const aspect_ratio = input.aspect_ratio || (process.env.VIDEO_ASPECT_RATIO as any) || undefined;
+  const duration = input.duration || (process.env.VIDEO_DURATION ? parseInt(process.env.VIDEO_DURATION) : undefined);
+  const resolution = input.resolution || (process.env.VIDEO_RESOLUTION as any) || undefined;
 
   try {
-    // Start the video generation (long-running operation)
-    const startResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:predictLongRunning?key=${apiKey}`,
+    const result = await provider.imageToVideo(
       {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          instances: [{
-            prompt: prompt,
-            image: {
-              bytesBase64Encoded: imageResult.base64,
-              mimeType: imageResult.mimeType
-            }
-          }],
-          parameters: {
-            aspectRatio: aspectRatio,
-            durationSeconds: duration,
-            resolution: resolution,
-            ...(input.negative_prompt && { negativePrompt: input.negative_prompt }),
-            ...(input.seed !== undefined && { seed: input.seed }),
-            ...(input.person_generation && { personGeneration: input.person_generation })
-          }
-        }),
-      }
+        prompt: input.prompt.trim(),
+        image_path: input.image_path,
+        aspect_ratio,
+        duration,
+        resolution,
+        negative_prompt: input.negative_prompt,
+        seed: input.seed,
+        person_generation: input.person_generation
+      },
+      credentials,
+      modelId
     );
 
-    if (!startResponse.ok) {
-      const errorData = await startResponse.json().catch(() => ({}));
-      return handleApiError(startResponse, errorData);
-    }
-
-    const startResult = await startResponse.json() as any;
-    const operationName = startResult.name;
-
-    if (!operationName) {
-      return {
-        success: false,
-        error: 'Failed to start video generation: no operation name returned.'
+    // Add provider metadata
+    if (result.success) {
+      result.provider_metadata = {
+        ...result.provider_metadata,
+        provider_used: 'fal-ai',
+        model_used: modelId
       };
     }
 
-    // Poll for completion
-    const pollResult = await pollForCompletion(operationName, apiKey);
-    if (!pollResult.success) {
-      return { success: false, error: pollResult.error };
-    }
-
-    // Download the video (pass apiKey for authenticated download)
-    const videoBuffer = await downloadVideo(pollResult.videoUri, apiKey);
-    if ('error' in videoBuffer) {
-      return { success: false, error: videoBuffer.error };
-    }
-
-    // Save and return (include source_video_uri for use with extendVideo)
-    return saveVideo(videoBuffer, 'i2v', duration, pollResult.videoUri);
+    return result;
 
   } catch (error) {
     return {
