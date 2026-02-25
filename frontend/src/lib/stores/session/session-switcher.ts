@@ -300,6 +300,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			return;
 		}
 
+		// Register with SyncEngine to receive broadcast events from other devices.
+		// Session state is loaded via HTTP, but real-time sync (streaming from
+		// other devices) requires WS registration.
+		wsSend({ type: 'watch_session', session_id: sessionId });
+
 		if (pollData) {
 			// If session is streaming, start the poller for ongoing updates
 			if (pollData.isStreaming) {

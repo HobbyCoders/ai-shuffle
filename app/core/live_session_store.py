@@ -194,7 +194,7 @@ class LiveSession:
             "is_streaming": self.is_streaming,
             "last_update_id": self.last_update_id,
             "messages": [m.to_dict() for m in messages],
-            "initial_message_count": self.initial_message_count,
+            "initial_message_count": self.initial_message_count if delta_only else 0,
             "active_block_type": self.active_block_type,
             "usage": {
                 "input_tokens": self.input_tokens,

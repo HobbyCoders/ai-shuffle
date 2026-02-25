@@ -356,6 +356,8 @@ const wsConn: WsConnection = createWsConnection({
 		// This replaces the old WS load_session → history flow.
 		if (_state.sessionId) {
 			const sessionId = _state.sessionId;
+			// Register with SyncEngine to receive broadcast events from other devices
+			wsConn.send({ type: 'watch_session', session_id: sessionId });
 			sessionPoller.loadSession(sessionId).then(pollData => {
 				console.debug(`[ActiveSession] onConnected loadSession result: streaming=${pollData?.isStreaming}, msgs=${pollData?.messages?.length ?? 0}`);
 				if (pollData && pollData.isStreaming) {

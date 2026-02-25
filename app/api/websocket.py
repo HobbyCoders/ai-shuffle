@@ -998,6 +998,38 @@ async def chat_websocket(
                             else:
                                 await send_json({"type": "session_not_found", "session_id": session_id})
 
+                    elif msg_type == "watch_session":
+                        # Register this device to receive sync broadcasts for a session.
+                        session_id = data.get("session_id")
+                        logger.debug(f"[watch_session] device={device_id} session_id={session_id}")
+                        if session_id:
+                            # Check if this device_id is already registered from a different
+                            # WebSocket (e.g., another browser tab sharing localStorage device_id,
+                            # or the same device reconnecting after a page refresh).
+                            if sync_engine.is_device_watching_session(device_id, session_id):
+                                existing_conn = sync_engine._connections.get(session_id, {}).get(device_id)
+                                if existing_conn and existing_conn.websocket is not websocket:
+                                    # Check if the old WS is still alive. If it's dead/closing,
+                                    # this is a reconnection (e.g., page refresh) — let the new
+                                    # WS take over. If it's alive, this is likely a duplicate tab
+                                    # sharing the same device_id — skip to avoid a reconnect loop.
+                                    old_ws_alive = existing_conn.websocket.client_state == WebSocketState.CONNECTED
+                                    if old_ws_alive:
+                                        logger.debug(f"Device {device_id} already watching session {session_id} from another live WS, skipping")
+                                        current_session_id = session_id
+                                        continue
+                                    else:
+                                        logger.debug(f"Device {device_id} reconnecting (old WS state={existing_conn.websocket.client_state}), replacing")
+                                # Same WebSocket re-watching — proceed normally
+
+                            # Unregister from old session if switching
+                            if current_session_id and current_session_id != session_id:
+                                await sync_engine.unregister_device(device_id, current_session_id)
+
+                            await sync_engine.register_device(device_id, session_id, websocket)
+                            current_session_id = session_id
+                            logger.debug(f"Device {device_id} watching session {session_id}")
+
                     elif msg_type == "close_session":
                         # Close/unload the current session
                         old_session_id = current_session_id

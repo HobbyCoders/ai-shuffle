@@ -65,6 +65,18 @@ class SessionNotifier {
 
 		// Any streaming data event means state has changed on the server
 		if (isUpdateEvent(msgType) || isUpdateEvent(eventType)) {
+			// Resilient fallback: if we get a streaming update event but the
+			// poller isn't in streaming mode, start it. This handles cases
+			// where the stream_start event was lost (e.g., WS reconnect,
+			// timing issue, or message dropped on mobile).
+			if (
+				(eventType === 'stream_chunk' || msgType === 'chunk' || msgType === 'stream_delta') &&
+				!sessionPoller.isPolling(sessionId)
+			) {
+				console.debug(`[Notifier] Got streaming data but not polling — starting streaming for ${sessionId}`);
+				sessionPoller.startStreaming(sessionId);
+				return;
+			}
 			sessionPoller.pollNow(sessionId);
 		}
 

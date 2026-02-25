@@ -123,10 +123,23 @@ class SessionPoller {
 		}
 
 		// Bump generation ONLY when actually starting new polling.
+		// Any in-flight polls from the old generation will be discarded
+		// in _applyPollResult via stale-response detection.
 		const nextGen = (this._streamingGeneration.get(sessionId) ?? 0) + 1;
 		this._streamingGeneration.set(sessionId, nextGen);
 
 		console.debug(`[Poller] startStreaming(${sessionId}): gen=${nextGen}, starting poll`);
+
+		// Clear pending pollNow timers and in-flight flag so our fresh
+		// since_update_id=0 poll can proceed immediately. Without this,
+		// a pollNow() from a message_added event can block startStreaming's
+		// initial poll — the _inFlight guard in _poll() would skip it.
+		const pendingTimer = this._pendingPollNow.get(sessionId);
+		if (pendingTimer) {
+			clearTimeout(pendingTimer);
+			this._pendingPollNow.delete(sessionId);
+		}
+		this._inFlight.delete(sessionId);
 
 		// Reset session state for the new streaming session.
 		sessionState.removeSession(sessionId);
