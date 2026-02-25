@@ -371,12 +371,13 @@ async def upload_file(
         if worktree_full.exists():
             base_project_path = worktree["worktree_path"]
 
-    # Build target directory path
+    # Build target directory path using Path joining (avoid mixed slashes on Windows)
+    base = Path(base_project_path)
     if path:
-        target_dir = validate_project_path(f"{base_project_path}/{path}")
+        target_dir = validate_project_path(str(base / path), allow_create=True)
     else:
         # Default to uploads subdirectory to keep project root clean
-        target_dir = validate_project_path(f"{base_project_path}/uploads")
+        target_dir = validate_project_path(str(base / "uploads"), allow_create=True)
 
     # Ensure directory exists
     target_dir.mkdir(parents=True, exist_ok=True)

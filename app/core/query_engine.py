@@ -1503,8 +1503,22 @@ async def execute_query(
     metadata = {}
     sdk_session_id = None
 
+    # Wrap string prompt as async iterable to force SDK to use stream_input() path.
+    # The SDK's string-prompt path calls end_input() immediately after writing,
+    # closing stdin before the CLI finishes processing. If the CLI sends a control
+    # request (e.g., mcp_tool_request for SDK MCP servers), the response write fails
+    # with "ProcessTransport is not ready for writing". The stream_input() path
+    # properly waits for the result before closing stdin.
+    async def _prompt_stream():
+        yield {
+            "type": "user",
+            "session_id": "",
+            "message": {"role": "user", "content": prompt},
+            "parent_tool_use_id": None,
+        }
+
     try:
-        async for message in query(prompt=prompt, options=options):
+        async for message in query(prompt=_prompt_stream(), options=options):
             if isinstance(message, SystemMessage):
                 # session_id comes in warmup message data after first query
                 if message.subtype == "init" and "session_id" in message.data:
@@ -1555,7 +1569,12 @@ async def execute_query(
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
 
-    except Exception as e:
+    except (Exception, BaseExceptionGroup) as e:
+        # Unwrap ExceptionGroup from SDK's anyio.TaskGroup (Python 3.11+)
+        if isinstance(e, BaseExceptionGroup) and e.exceptions:
+            actual = e.exceptions[0]
+            logger.error(f"Query execution error (unwrapped from ExceptionGroup): {actual}", exc_info=actual)
+            raise actual from e
         logger.error(f"Query execution error: {e}")
         raise
 
@@ -1953,11 +1972,17 @@ async def stream_query(
         logger.debug(f"Query interrupted for session {session_id}")
         yield {"type": "interrupted", "message": "Query was interrupted"}
 
-    except Exception as e:
-        logger.error(f"Stream query error for session {session_id}: {e}")
+    except (Exception, BaseExceptionGroup) as e:
+        # Unwrap ExceptionGroup from SDK's anyio.TaskGroup (Python 3.11+)
+        actual = e
+        if isinstance(e, BaseExceptionGroup) and e.exceptions:
+            actual = e.exceptions[0]
+            logger.error(f"Stream query error (unwrapped from ExceptionGroup) for session {session_id}: {actual}", exc_info=actual)
+        else:
+            logger.error(f"Stream query error for session {session_id}: {e}")
         # Mark client as disconnected on error
         state.is_connected = False
-        yield {"type": "error", "message": str(e)}
+        yield {"type": "error", "message": str(actual)}
 
     finally:
         # Mark as not streaming — keep in pool for reuse

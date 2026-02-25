@@ -429,14 +429,26 @@ class AutomationManager:
                 failure_count=automation.get("failure_count", 0) + 1,
             )
 
-        except Exception as e:
+        except (Exception, BaseExceptionGroup) as e:
+            # Unwrap ExceptionGroup from SDK's anyio.TaskGroup (Python 3.11+)
+            # to get the actual error message instead of the generic
+            # "unhandled errors in a TaskGroup (N sub-exceptions)"
+            actual = e
+            if isinstance(e, BaseExceptionGroup):
+                actual = e.exceptions[0] if e.exceptions else e
+                logger.error(
+                    "Automation %s: unwrapped ExceptionGroup with %d sub-exception(s)",
+                    automation_id, len(e.exceptions), exc_info=e,
+                )
+
             duration_ms = int((time.time() - start_time) * 1000)
+            error_msg = str(actual)
             database.update_automation_run(
-                run_id, status="failed", error=str(e),
+                run_id, status="failed", error=error_msg,
                 duration_ms=duration_ms, completed_at=datetime.utcnow().isoformat()
             )
             database.update_automation(
-                automation_id, status="error", last_error=str(e),
+                automation_id, status="error", last_error=error_msg,
                 failure_count=automation.get("failure_count", 0) + 1,
             )
             raise
