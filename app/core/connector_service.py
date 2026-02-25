@@ -538,6 +538,9 @@ def get_connector_type_info() -> List[Dict]:
             cls = get_connector_class(type_info["type"])
             type_info["capabilities"] = asdict(cls.CAPABILITIES)
             type_info["max_message_length"] = cls.MAX_MESSAGE_LENGTH
+            type_info["triggers"] = [asdict(t) for t in cls.TRIGGERS]
+            type_info["actions"] = [asdict(a) for a in cls.ACTIONS]
+            type_info["tools"] = [asdict(t) for t in cls.TOOLS]
         except (ValueError, AttributeError) as e:
             logger.warning("Failed to enrich capabilities for connector type '%s': %s", type_info["type"], e)
 

@@ -10,14 +10,18 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.core.connectors.base import (
+    ActionDef,
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
     IncomingMessage,
+    IncomingMessageCallback,
     OutgoingMessage,
     PermissionPrompt,
-    IncomingMessageCallback,
     PermissionResponseCallback,
+    TriggerCallback,
+    TriggerDef,
+    ToolDef,
     chunk_text,
 )
 
@@ -47,6 +51,81 @@ class HomeAssistantConnector(BaseConnector):
     MAX_MESSAGE_LENGTH = 4000
     CAPABILITIES = ConnectorCapabilities(is_messaging=False)
 
+    TRIGGERS = [
+        TriggerDef(
+            id="state_changed",
+            name="State Changed",
+            description="Fires when an entity's state changes",
+            payload_schema={
+                "type": "object",
+                "properties": {
+                    "entity_id": {"type": "string"},
+                    "old_state": {"type": "string"},
+                    "new_state": {"type": "string"},
+                    "attributes": {"type": "object"},
+                },
+            },
+        ),
+    ]
+
+    ACTIONS = [
+        ActionDef(
+            id="call_service",
+            name="Call Service",
+            description="Call a Home Assistant service",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "domain": {"type": "string"},
+                    "service": {"type": "string"},
+                    "entity_id": {"type": "string"},
+                    "data": {"type": "object"},
+                },
+                "required": ["domain", "service"],
+            },
+        ),
+        ActionDef(
+            id="toggle_entity",
+            name="Toggle Entity",
+            description="Toggle an entity on/off",
+            input_schema={
+                "type": "object",
+                "properties": {"entity_id": {"type": "string"}},
+                "required": ["entity_id"],
+            },
+        ),
+        ActionDef(
+            id="get_states",
+            name="Get States",
+            description="Get states of all entities",
+        ),
+    ]
+
+    TOOLS = [
+        ToolDef(
+            id="homeassistant_control",
+            name="Home Assistant Control",
+            description=(
+                "Control Home Assistant smart home devices — call services, "
+                "toggle entities, and get current states"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "enum": ["call_service", "toggle", "get_states"],
+                    },
+                    "entity_id": {"type": "string"},
+                    "domain": {"type": "string"},
+                    "service": {"type": "string"},
+                    "data": {"type": "object"},
+                },
+                "required": ["command"],
+            },
+        ),
+    ]
+
     def __init__(
         self,
         connector_id: str,
@@ -54,10 +133,12 @@ class HomeAssistantConnector(BaseConnector):
         config: Dict[str, Any],
         on_incoming_message: IncomingMessageCallback,
         on_permission_response: PermissionResponseCallback,
+        on_trigger: Optional[TriggerCallback] = None,
     ):
         super().__init__(
             connector_id, connector_type, config,
             on_incoming_message, on_permission_response,
+            on_trigger=on_trigger,
         )
         self._http_client: Optional[httpx.AsyncClient] = None
         self._poll_task: Optional[asyncio.Task] = None
@@ -288,6 +369,12 @@ class HomeAssistantConnector(BaseConnector):
                                     },
                                 )
                                 await self._on_incoming_message(msg)
+                                await self.emit_trigger("state_changed", {
+                                    "entity_id": eid,
+                                    "old_state": old_state,
+                                    "new_state": new_state,
+                                    "attributes": entity.get("attributes", {}),
+                                })
 
                             self._entity_states[eid] = new_state
 
@@ -670,6 +757,86 @@ class HomeAssistantConnector(BaseConnector):
                 "Failed to send HomeAssistant notification: %s", exc
             )
             return False
+
+    # ------------------------------------------------------------------
+    # Actions & Tools
+    # ------------------------------------------------------------------
+
+    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a Home Assistant action by ID."""
+        if self._http_client is None:
+            return {"success": False, "error": "Not connected"}
+
+        if action_id == "call_service":
+            domain = params.get("domain")
+            service = params.get("service")
+            if not domain or not service:
+                return {"success": False, "error": "domain and service are required"}
+            payload: Dict[str, Any] = {}
+            if "entity_id" in params:
+                payload["entity_id"] = params["entity_id"]
+            if "data" in params and isinstance(params["data"], dict):
+                payload.update(params["data"])
+            resp = await self._api_post(f"/api/services/{domain}/{service}", data=payload)
+            if 200 <= resp.status_code < 300:
+                return {"success": True, "domain": domain, "service": service}
+            return {"success": False, "error": f"HA returned {resp.status_code}: {resp.text[:200]}"}
+
+        if action_id == "toggle_entity":
+            entity_id = params.get("entity_id")
+            if not entity_id:
+                return {"success": False, "error": "entity_id is required"}
+            resp = await self._api_post(
+                "/api/services/homeassistant/toggle",
+                data={"entity_id": entity_id},
+            )
+            if 200 <= resp.status_code < 300:
+                return {"success": True, "entity_id": entity_id, "action": "toggled"}
+            return {"success": False, "error": f"HA returned {resp.status_code}: {resp.text[:200]}"}
+
+        if action_id == "get_states":
+            resp = await self._api_get("/api/states")
+            if resp.status_code != 200:
+                return {"success": False, "error": f"HA returned {resp.status_code}"}
+            entities = []
+            for entity in resp.json():
+                eid = entity.get("entity_id", "")
+                if self._matches_filter(eid):
+                    entities.append({
+                        "entity_id": eid,
+                        "state": entity.get("state", ""),
+                        "friendly_name": entity.get("attributes", {}).get("friendly_name", eid),
+                    })
+            return {"success": True, "entities": entities}
+
+        return {"success": False, "error": f"Unknown action: {action_id}"}
+
+    async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a Home Assistant tool call by routing to the appropriate action."""
+        if tool_id != "homeassistant_control":
+            return {"success": False, "error": f"Unknown tool: {tool_id}"}
+
+        command = params.get("command")
+        if not command:
+            return {"success": False, "error": "command is required"}
+
+        if command == "call_service":
+            return await self.execute_action("call_service", {
+                "domain": params.get("domain"),
+                "service": params.get("service"),
+                "entity_id": params.get("entity_id"),
+                "data": params.get("data"),
+            })
+
+        if command == "toggle":
+            return await self.execute_action("toggle_entity", {
+                "entity_id": params.get("entity_id"),
+            })
+
+        if command == "get_states":
+            return await self.execute_action("get_states", {})
+
+        return {"success": False, "error": f"Unknown command: {command}"}
 
     # ------------------------------------------------------------------
     # Test

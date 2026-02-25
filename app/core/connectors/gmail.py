@@ -8,14 +8,18 @@ from email.mime.text import MIMEText
 from typing import Any, Dict, List, Optional, Set
 
 from app.core.connectors.base import (
+    ActionDef,
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
     IncomingMessage,
+    IncomingMessageCallback,
     OutgoingMessage,
     PermissionPrompt,
-    IncomingMessageCallback,
     PermissionResponseCallback,
+    TriggerCallback,
+    TriggerDef,
+    ToolDef,
     chunk_text,
 )
 
@@ -56,6 +60,58 @@ class GmailConnector(BaseConnector):
         read_receipts=True, file_upload=True, is_messaging=False,
     )
 
+    TRIGGERS = [
+        TriggerDef(
+            id="email_received",
+            name="Email Received",
+            description="Fires when a new email is received",
+            payload_schema={
+                "type": "object",
+                "properties": {
+                    "from": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "snippet": {"type": "string"},
+                    "message_id": {"type": "string"},
+                    "labels": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        ),
+    ]
+
+    ACTIONS = [
+        ActionDef(
+            id="send_email",
+            name="Send Email",
+            description="Send an email",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"},
+                },
+                "required": ["to", "subject", "body"],
+            },
+        ),
+    ]
+
+    TOOLS = [
+        ToolDef(
+            id="gmail_send",
+            name="Gmail Send",
+            description="Send an email via Gmail",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"},
+                },
+                "required": ["to", "subject", "body"],
+            },
+        ),
+    ]
+
     def __init__(
         self,
         connector_id: str,
@@ -63,10 +119,12 @@ class GmailConnector(BaseConnector):
         config: Dict[str, Any],
         on_incoming_message: IncomingMessageCallback,
         on_permission_response: PermissionResponseCallback,
+        on_trigger: Optional[TriggerCallback] = None,
     ):
         super().__init__(
             connector_id, connector_type, config,
             on_incoming_message, on_permission_response,
+            on_trigger=on_trigger,
         )
         self._service: Optional[Any] = None
         self._poll_task: Optional[asyncio.Task] = None
@@ -370,6 +428,14 @@ class GmailConnector(BaseConnector):
         )
         await self._on_incoming_message(msg)
 
+        await self.emit_trigger("email_received", {
+            "from": from_header,
+            "subject": subject,
+            "snippet": msg_data.get("snippet", ""),
+            "message_id": msg_id,
+            "labels": msg_data.get("labelIds", []),
+        })
+
     # ------------------------------------------------------------------
     # Outgoing
     # ------------------------------------------------------------------
@@ -576,6 +642,53 @@ class GmailConnector(BaseConnector):
                 "GmailConnector: failed to mark message %s as read: %s",
                 platform_message_id, exc,
             )
+
+    # ------------------------------------------------------------------
+    # Actions & Tools
+    # ------------------------------------------------------------------
+
+    def _send_email_message(self, to: str, subject: str, body: str) -> Dict[str, Any]:
+        """Build and send an email via the Gmail API.  Returns the API response."""
+        mime_msg = MIMEText(body)
+        mime_msg["To"] = to
+        mime_msg["From"] = self._email_address
+        mime_msg["Subject"] = subject
+
+        raw = base64.urlsafe_b64encode(mime_msg.as_bytes()).decode("ascii")
+        return self._service.users().messages().send(
+            userId="me", body={"raw": raw}
+        ).execute()
+
+    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a Gmail action by ID."""
+        if self._service is None:
+            return {"success": False, "error": "Not connected"}
+
+        if action_id == "send_email":
+            to = params.get("to")
+            subject = params.get("subject")
+            body = params.get("body")
+            if not to or not subject or body is None:
+                return {"success": False, "error": "to, subject, and body are required"}
+            try:
+                result = self._send_email_message(to, subject, body)
+                return {
+                    "success": True,
+                    "message_id": result.get("id", ""),
+                    "thread_id": result.get("threadId", ""),
+                }
+            except Exception as exc:
+                logger.exception("GmailConnector %s send_email failed", self.connector_id)
+                return {"success": False, "error": str(exc)}
+
+        return {"success": False, "error": f"Unknown action: {action_id}"}
+
+    async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a Gmail tool call by routing to the appropriate action."""
+        if tool_id != "gmail_send":
+            return {"success": False, "error": f"Unknown tool: {tool_id}"}
+
+        return await self.execute_action("send_email", params)
 
     # ------------------------------------------------------------------
     # Test

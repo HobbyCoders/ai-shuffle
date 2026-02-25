@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.core.connectors.base import (
+    ActionDef,
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
@@ -18,6 +19,8 @@ from app.core.connectors.base import (
     PermissionPrompt,
     IncomingMessageCallback,
     PermissionResponseCallback,
+    ToolDef,
+    TriggerDef,
     chunk_text,
 )
 
@@ -54,6 +57,55 @@ class BlueBubblesConnector(BaseConnector):
     MAX_MESSAGE_LENGTH = 4000
     CAPABILITIES = ConnectorCapabilities()
 
+    TRIGGERS = [
+        TriggerDef(
+            id="message_received",
+            name="Message Received",
+            description="Fires when a new message is received",
+            payload_schema={
+                "type": "object",
+                "properties": {
+                    "platform_chat_id": {"type": "string"},
+                    "platform_user_id": {"type": "string"},
+                    "platform_user_name": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+            },
+        ),
+    ]
+
+    ACTIONS = [
+        ActionDef(
+            id="send_message",
+            name="Send Message",
+            description="Send a message to a chat",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "platform_chat_id": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "required": ["platform_chat_id", "text"],
+            },
+        ),
+    ]
+
+    TOOLS = [
+        ToolDef(
+            id="bluebubbles_send",
+            name="Send a message via BlueBubbles",
+            description="Send a message via BlueBubbles",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "platform_chat_id": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "required": ["platform_chat_id", "text"],
+            },
+        ),
+    ]
+
     def __init__(
         self,
         connector_id: str,
@@ -61,10 +113,12 @@ class BlueBubblesConnector(BaseConnector):
         config: Dict[str, Any],
         on_incoming_message: IncomingMessageCallback,
         on_permission_response: PermissionResponseCallback,
+        **kwargs,
     ):
         super().__init__(
             connector_id, connector_type, config,
             on_incoming_message, on_permission_response,
+            **kwargs,
         )
         self._permission_sessions: Dict[str, str] = {}  # request_id -> session_id
         self._server_info: Optional[Dict[str, Any]] = None
@@ -441,6 +495,38 @@ class BlueBubblesConnector(BaseConnector):
                 del self._permission_sessions[request_id]
                 return True
         return False
+
+    # ------------------------------------------------------------------
+    # Actions & Tools
+    # ------------------------------------------------------------------
+
+    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a named action."""
+        if action_id == "send_message":
+            message = OutgoingMessage(
+                platform_chat_id=params["platform_chat_id"],
+                text=params["text"],
+            )
+            success = await self.send_message(message)
+            if success:
+                return {"success": True, "message": "Message sent"}
+            return {"success": False, "error": "Failed to send message"}
+
+        return {"success": False, "error": f"Unknown action: {action_id}"}
+
+    async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a named tool call."""
+        if tool_id == "bluebubbles_send":
+            message = OutgoingMessage(
+                platform_chat_id=params["platform_chat_id"],
+                text=params["text"],
+            )
+            success = await self.send_message(message)
+            if success:
+                return {"success": True, "message": "Message sent"}
+            return {"success": False, "error": "Failed to send message"}
+
+        return {"success": False, "error": f"Unknown tool: {tool_id}"}
 
     # ------------------------------------------------------------------
     # Test

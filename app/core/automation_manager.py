@@ -115,6 +115,10 @@ class AutomationManager:
         except (KeyError, LookupError):
             pass
 
+        # Event-driven trigger types don't need APScheduler jobs
+        if trigger_type in ("connector_event", "connector_trigger", "webhook"):
+            return
+
         if trigger_type == "cron":
             from apscheduler.triggers.cron import CronTrigger
             expression = trigger_config.get("expression", "")
@@ -197,6 +201,25 @@ class AutomationManager:
 
             trigger_data = {"trigger": "connector_event", "event_type": event_type, "event": data}
             self._create_tracked_task(self._execute(auto["id"], trigger_data), name=f"auto-event-{auto['id']}")
+
+    async def handle_connector_trigger(self, connector_id: str, trigger_id: str, data: Dict[str, Any]) -> None:
+        """Fire automations that match a specific connector trigger."""
+        automations = database.get_automations_for_event(
+            trigger_type="connector_trigger",
+            event_type=trigger_id,
+            connector_id=connector_id,
+        )
+        for auto in automations:
+            trigger_data = {
+                "trigger": "connector_trigger",
+                "connector_id": connector_id,
+                "trigger_id": trigger_id,
+                "data": data,
+            }
+            self._create_tracked_task(
+                self._execute(auto["id"], trigger_data),
+                name=f"auto-trigger-{auto['id']}"
+            )
 
     async def trigger_webhook(
         self, automation_id: str, payload: Dict[str, Any], signature: Optional[str] = None
@@ -293,7 +316,7 @@ class AutomationManager:
                 return
 
             # Render prompt
-            rendered_prompt = render_prompt(automation["prompt"], trigger_data)
+            rendered_prompt = render_prompt(automation.get("prompt") or "", trigger_data)
 
             # Create run record
             database.create_automation_run(
@@ -356,7 +379,26 @@ class AutomationManager:
     ) -> None:
         """Execute a single automation run (after approval if needed)."""
         automation_id = automation["id"]
+        action_steps = automation.get("action_steps") or []
         start_time = time.time()
+
+        # If there's no prompt AND no action_steps, skip execution
+        has_prompt = bool(rendered_prompt and rendered_prompt.strip())
+        has_action_steps = bool(action_steps)
+        if not has_prompt and not has_action_steps:
+            logger.info(f"Automation {automation_id} has no prompt and no action_steps — skipping")
+            database.update_automation_run(
+                run_id, status="completed",
+                started_at=datetime.utcnow().isoformat(),
+                completed_at=datetime.utcnow().isoformat(),
+            )
+            database.update_automation(
+                automation_id, status="idle",
+                last_run_at=datetime.utcnow().isoformat(),
+                run_count=automation.get("run_count", 0) + 1,
+                last_error=None,
+            )
+            return
 
         database.update_automation_run(
             run_id, status="running", started_at=datetime.utcnow().isoformat()
@@ -364,32 +406,47 @@ class AutomationManager:
         database.update_automation(automation_id, status="running")
 
         try:
-            from app.core.query_engine import execute_query
+            response_text = ""
+            cost = 0.0
+            tokens_in = 0
+            tokens_out = 0
+            session_id = None
 
-            result = await asyncio.wait_for(
-                execute_query(
-                    prompt=rendered_prompt,
-                    profile_id=automation["profile_id"],
-                    project_id=automation.get("project_id"),
-                    overrides={"max_turns": automation.get("max_turns", 1)},
-                ),
-                timeout=automation.get("timeout_seconds", 300),
-            )
+            # Execute prompt if present
+            if has_prompt:
+                from app.core.query_engine import execute_query
+
+                result = await asyncio.wait_for(
+                    execute_query(
+                        prompt=rendered_prompt,
+                        profile_id=automation["profile_id"],
+                        project_id=automation.get("project_id"),
+                        overrides={"max_turns": automation.get("max_turns", 1)},
+                    ),
+                    timeout=automation.get("timeout_seconds", 300),
+                )
+
+                response_text = result.get("response", "")
+                cost = result.get("total_cost_usd", 0)
+                tokens_in = result.get("input_tokens", 0)
+                tokens_out = result.get("output_tokens", 0)
+                session_id = result.get("session_id")
+
+                # Check per-run cost limit
+                max_per_run = automation.get("max_cost_per_run")
+                if max_per_run is not None and cost > max_per_run:
+                    logger.warning(
+                        f"Automation {automation_id} run {run_id} exceeded per-run cost "
+                        f"(${cost:.4f} > ${max_per_run:.4f})"
+                    )
+
+            # Execute action steps
+            if has_action_steps:
+                await self._execute_action_steps(
+                    automation_id, run_id, action_steps, trigger_data, response_text
+                )
 
             duration_ms = int((time.time() - start_time) * 1000)
-            response_text = result.get("response", "")
-            cost = result.get("total_cost_usd", 0)
-            tokens_in = result.get("input_tokens", 0)
-            tokens_out = result.get("output_tokens", 0)
-            session_id = result.get("session_id")
-
-            # Check per-run cost limit
-            max_per_run = automation.get("max_cost_per_run")
-            if max_per_run is not None and cost > max_per_run:
-                logger.warning(
-                    f"Automation {automation_id} run {run_id} exceeded per-run cost "
-                    f"(${cost:.4f} > ${max_per_run:.4f})"
-                )
 
             # Update run record
             database.update_automation_run(
@@ -454,6 +511,66 @@ class AutomationManager:
             raise
 
     # ------------------------------------------------------------------
+    # Action step execution
+    # ------------------------------------------------------------------
+
+    async def _execute_action_steps(
+        self,
+        automation_id: str,
+        run_id: str,
+        action_steps: List[Dict[str, Any]],
+        trigger_data: Dict[str, Any],
+        response_text: str,
+    ) -> None:
+        """Execute action steps for an automation run."""
+        from app.core.automation_service import render_action_params
+        from app.core.connectors.manager import connector_manager
+
+        for i, step in enumerate(action_steps):
+            step_type = step.get("type")
+            if step_type != "connector_action":
+                logger.warning(
+                    f"Automation {automation_id} run {run_id}: "
+                    f"unknown action step type '{step_type}' at index {i} — skipping"
+                )
+                continue
+
+            connector_id = step.get("connector_id")
+            action_id = step.get("action_id")
+            raw_params = step.get("params", {})
+
+            if not connector_id or not action_id:
+                logger.warning(
+                    f"Automation {automation_id} run {run_id}: "
+                    f"action step {i} missing connector_id or action_id — skipping"
+                )
+                continue
+
+            try:
+                instance = await connector_manager.get_running_connector(connector_id)
+                if not instance:
+                    logger.error(
+                        f"Automation {automation_id} run {run_id}: "
+                        f"connector {connector_id} is not running for action step {i}"
+                    )
+                    continue
+
+                # Render template variables in params
+                rendered_params = render_action_params(raw_params, trigger_data, response_text)
+
+                result = await instance.execute_action(action_id, rendered_params)
+                logger.info(
+                    f"Automation {automation_id} run {run_id}: "
+                    f"action step {i} ({connector_id}/{action_id}) completed: {result}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Automation {automation_id} run {run_id}: "
+                    f"action step {i} ({connector_id}/{action_id}) failed: {e}",
+                    exc_info=True,
+                )
+
+    # ------------------------------------------------------------------
     # Approval execution
     # ------------------------------------------------------------------
 
@@ -479,7 +596,7 @@ class AutomationManager:
                 await self._execute_run(
                     automation,
                     run["id"],
-                    run.get("prompt_rendered", automation["prompt"]),
+                    run.get("prompt_rendered") or automation.get("prompt") or "",
                     run.get("trigger_data", {}),
                 )
             finally:

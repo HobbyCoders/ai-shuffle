@@ -44,6 +44,21 @@ def render_prompt(template: str, trigger_data: Optional[Dict[str, Any]] = None) 
     return re.sub(r"\{\{(.+?)\}\}", _resolve, template)
 
 
+def render_action_params(params: Dict[str, Any], trigger_data: Dict, response: str = "") -> Dict[str, Any]:
+    """Render template variables in action step parameters.
+
+    Supports ``{{trigger.data.xxx}}`` and ``{{response}}`` templates.
+    Non-string values are passed through unchanged.
+    """
+    rendered = {}
+    for key, value in params.items():
+        if isinstance(value, str):
+            rendered[key] = render_prompt(value, {**trigger_data, "response": response})
+        else:
+            rendered[key] = value
+    return rendered
+
+
 # ---------------------------------------------------------------------------
 # Budget checking
 # ---------------------------------------------------------------------------
@@ -113,8 +128,8 @@ async def create_automation(
     name: str,
     trigger_type: str,
     trigger_config: Dict[str, Any],
-    prompt: str,
     profile_id: str,
+    prompt: Optional[str] = None,
     project_id: Optional[str] = None,
     description: Optional[str] = None,
     output_config: Optional[Dict[str, Any]] = None,
@@ -125,6 +140,7 @@ async def create_automation(
     max_cost_total: Optional[float] = None,
     max_runs_per_day: Optional[int] = None,
     requires_approval: bool = False,
+    action_steps: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict:
     """Create a new automation.
 
@@ -178,6 +194,7 @@ async def create_automation(
         max_cost_total=max_cost_total,
         max_runs_per_day=max_runs_per_day,
         requires_approval=requires_approval,
+        action_steps=action_steps,
     )
 
     if not automation:
@@ -260,7 +277,7 @@ async def test_automation(automation_id: str) -> Dict:
         return {"prompt_rendered": "", "budget_ok": False, "message": "Automation not found"}
 
     # Render prompt with empty trigger data to show what it looks like
-    rendered = render_prompt(automation["prompt"], {"event": {}, "payload": {}})
+    rendered = render_prompt(automation.get("prompt") or "", {"event": {}, "payload": {}})
 
     # Check budget
     ok, reason = check_budget(automation)

@@ -99,6 +99,55 @@ class ConnectorCapabilities:
     is_messaging: bool = True
 
 
+# ---------------------------------------------------------------------------
+# Connector variant definitions — Triggers, Actions, Tools
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TriggerDef:
+    """A trigger event this connector can emit.
+
+    Triggers fire when something happens on the platform (e.g. a track
+    changes on Spotify, a message arrives on Telegram).  They are used
+    as automation triggers.
+    """
+    id: str                                                        # e.g. "track_changed"
+    name: str                                                      # e.g. "Track Changed"
+    description: str                                               # Human-readable description
+    payload_schema: Dict[str, Any] = field(default_factory=dict)   # JSON Schema of trigger payload
+
+
+@dataclass
+class ActionDef:
+    """An action this connector can perform.
+
+    Actions are concrete operations invoked by automations or the API
+    (e.g. play a track on Spotify, send a message on Telegram).
+    """
+    id: str                                                        # e.g. "play_track"
+    name: str                                                      # e.g. "Play Track"
+    description: str                                               # Human-readable description
+    input_schema: Dict[str, Any] = field(default_factory=dict)     # JSON Schema of action params
+
+
+@dataclass
+class ToolDef:
+    """An AI-callable tool this connector provides.
+
+    Tools are registered as MCP tools for AI models, letting the AI
+    directly invoke connector capabilities during a conversation.
+    """
+    id: str                                                        # e.g. "spotify_playback"
+    name: str                                                      # e.g. "Spotify Playback"
+    description: str                                               # Description shown to AI
+    input_schema: Dict[str, Any] = field(default_factory=dict)     # JSON Schema for AI tool input
+
+
+# Type alias for trigger emission callback
+TriggerCallback = Callable[[str, str, Dict[str, Any]], Coroutine[Any, Any, None]]
+# Signature: (connector_id, trigger_id, payload) -> None
+
+
 class BaseConnector(ABC):
     """
     Abstract base class for all connectors.
@@ -110,6 +159,11 @@ class BaseConnector(ABC):
     MAX_MESSAGE_LENGTH: Optional[int] = None
     CAPABILITIES = ConnectorCapabilities()
 
+    # Override in subclasses to declare available triggers, actions, and tools
+    TRIGGERS: List[TriggerDef] = []
+    ACTIONS: List[ActionDef] = []
+    TOOLS: List[ToolDef] = []
+
     def __init__(
         self,
         connector_id: str,
@@ -117,12 +171,14 @@ class BaseConnector(ABC):
         config: Dict[str, Any],
         on_incoming_message: IncomingMessageCallback,
         on_permission_response: PermissionResponseCallback,
+        on_trigger: Optional[TriggerCallback] = None,
     ):
         self.connector_id = connector_id
         self.connector_type = connector_type
         self.config = config
         self._on_incoming_message = on_incoming_message
         self._on_permission_response = on_permission_response
+        self._on_trigger = on_trigger
         self._status = ConnectorStatus.DISCONNECTED
         self._status_message: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
@@ -187,3 +243,26 @@ class BaseConnector(ABC):
             return {"success": False, "message": "Connection failed"}
         except Exception as e:
             return {"success": False, "message": str(e)}
+
+    # ------------------------------------------------------------------
+    # Variant methods — override in subclasses that have actions/tools
+    # ------------------------------------------------------------------
+
+    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a named action.  Override in subclasses that declare ACTIONS."""
+        raise NotImplementedError(f"Action '{action_id}' not implemented by {self.connector_type}")
+
+    async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a named tool call.  Override in subclasses that declare TOOLS."""
+        raise NotImplementedError(f"Tool '{tool_id}' not implemented by {self.connector_type}")
+
+    async def emit_trigger(self, trigger_id: str, payload: Dict[str, Any]) -> None:
+        """Emit a trigger event.  Called by connector logic when an event occurs."""
+        if self._on_trigger:
+            try:
+                await self._on_trigger(self.connector_id, trigger_id, payload)
+            except Exception as e:
+                logger.error(
+                    "Failed to emit trigger '%s' from connector %s: %s",
+                    trigger_id, self.connector_id, e,
+                )

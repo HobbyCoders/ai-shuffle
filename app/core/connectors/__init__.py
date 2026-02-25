@@ -11,6 +11,9 @@ from app.core.connectors.base import (  # noqa: F401
     IncomingMessage,
     OutgoingMessage,
     PermissionPrompt,
+    TriggerDef,
+    ActionDef,
+    ToolDef,
     chunk_text,
 )
 from app.core.connectors.registry import (  # noqa: F401

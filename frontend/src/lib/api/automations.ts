@@ -8,18 +8,26 @@ import { api } from './client';
 // Types
 // ============================================================================
 
-export type TriggerType = 'cron' | 'interval' | 'connector_event' | 'webhook';
+export type TriggerType = 'cron' | 'interval' | 'connector_event' | 'connector_trigger' | 'webhook';
 export type OutputType = 'connector' | 'webhook' | 'session' | 'none';
+
+export interface ActionStep {
+	type: 'connector_action';
+	connector_id: string;
+	action_id: string;
+	params: Record<string, any>;
+}
 
 export interface AutomationCreate {
 	name: string;
 	description?: string;
 	trigger_type: TriggerType;
 	trigger_config: Record<string, any>;
-	prompt: string;
+	prompt?: string;
 	profile_id: string;
 	project_id?: string;
 	output_config?: Record<string, any>;
+	action_steps?: ActionStep[];
 	max_turns?: number;
 	timeout_seconds?: number;
 	max_cost_per_run?: number | null;
@@ -44,6 +52,7 @@ export interface AutomationUpdate {
 	max_cost_per_day?: number | null;
 	max_cost_total?: number | null;
 	max_runs_per_day?: number | null;
+	action_steps?: ActionStep[];
 	requires_approval?: boolean;
 	is_enabled?: boolean;
 }
@@ -54,10 +63,11 @@ export interface Automation {
 	description: string | null;
 	trigger_type: TriggerType;
 	trigger_config: Record<string, any>;
-	prompt: string;
+	prompt: string | null;
 	profile_id: string;
 	project_id: string | null;
 	output_config: Record<string, any>;
+	action_steps: ActionStep[] | null;
 	max_turns: number;
 	timeout_seconds: number;
 	max_cost_per_run: number | null;

@@ -49,6 +49,7 @@
 	let expandedLogs: Set<string> = $state(new Set());
 	let connectorLogs: Map<string, ConnectorEventLog[]> = $state(new Map());
 	let loadingLogs: Set<string> = $state(new Set());
+	let showVariantsSection = $state(false);
 
 	// Form state
 	let formName = $state('');
@@ -481,6 +482,7 @@
 										</div>
 									</div>
 								{:else}
+									{@const typeInfo = connectorTypes.find(t => t.type === connector.type)}
 									<!-- Main Row -->
 									<div class="flex items-start justify-between gap-4">
 										<div class="flex-1 min-w-0">
@@ -513,6 +515,27 @@
 													</span>
 												{/each}
 											</div>
+
+											<!-- Variant Badges (Triggers, Actions, Tools) -->
+											{#if typeInfo && (typeInfo.triggers?.length || typeInfo.actions?.length || typeInfo.tools?.length)}
+												<div class="connector-variant-badges">
+													{#if typeInfo.triggers?.length}
+														<span class="variant-badge variant-badge--info" title="Triggers: {typeInfo.triggers.map(t => t.name).join(', ')}">
+															&#9889; {typeInfo.triggers.length} trigger{typeInfo.triggers.length !== 1 ? 's' : ''}
+														</span>
+													{/if}
+													{#if typeInfo.actions?.length}
+														<span class="variant-badge variant-badge--success" title="Actions: {typeInfo.actions.map(a => a.name).join(', ')}">
+															&#9654; {typeInfo.actions.length} action{typeInfo.actions.length !== 1 ? 's' : ''}
+														</span>
+													{/if}
+													{#if typeInfo.tools?.length}
+														<span class="variant-badge variant-badge--warning" title="AI Tools: {typeInfo.tools.map(t => t.name).join(', ')}">
+															&#128295; {typeInfo.tools.length} tool{typeInfo.tools.length !== 1 ? 's' : ''}
+														</span>
+													{/if}
+												</div>
+											{/if}
 
 											<!-- Meta info -->
 											<div
@@ -788,6 +811,13 @@
 						<div class="connector-type-info">
 							<span class="connector-type-name">{type.name}</span>
 							<span class="connector-type-desc">{type.description}</span>
+							{#if type.triggers?.length || type.actions?.length || type.tools?.length}
+								<div class="connector-type-variants">
+									{#if type.triggers?.length}<span class="mini-badge">&#9889;{type.triggers.length}</span>{/if}
+									{#if type.actions?.length}<span class="mini-badge">&#9654;{type.actions.length}</span>{/if}
+									{#if type.tools?.length}<span class="mini-badge">&#128295;{type.tools.length}</span>{/if}
+								</div>
+							{/if}
 						</div>
 						<div class="connector-type-action">
 							<span class="text-xs text-primary font-medium">Set Up</span>
@@ -967,6 +997,58 @@
 							{/each}
 						</div>
 					</div>
+
+					<!-- Connector Capabilities (Triggers, Actions, Tools) -->
+					{#if selectedType && (selectedType.triggers?.length || selectedType.actions?.length || selectedType.tools?.length)}
+						<div class="capabilities-section">
+							<button class="capabilities-toggle" onclick={() => showVariantsSection = !showVariantsSection}>
+								{#if showVariantsSection}
+									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+								{:else}
+									<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" /></svg>
+								{/if}
+								Capabilities ({(selectedType.triggers?.length || 0) + (selectedType.actions?.length || 0) + (selectedType.tools?.length || 0)})
+							</button>
+
+							{#if showVariantsSection}
+								<div transition:slide={{ duration: 150 }} style="margin-top: 8px;">
+									{#if selectedType.triggers?.length}
+										<div class="variant-section">
+											<span class="variant-section-title">&#9889; Triggers</span>
+											{#each selectedType.triggers as trigger}
+												<div class="variant-item">
+													<span class="variant-item-name">{trigger.name}</span>
+													<span class="variant-item-desc">{trigger.description}</span>
+												</div>
+											{/each}
+										</div>
+									{/if}
+									{#if selectedType.actions?.length}
+										<div class="variant-section">
+											<span class="variant-section-title">&#9654; Actions</span>
+											{#each selectedType.actions as action}
+												<div class="variant-item">
+													<span class="variant-item-name">{action.name}</span>
+													<span class="variant-item-desc">{action.description}</span>
+												</div>
+											{/each}
+										</div>
+									{/if}
+									{#if selectedType.tools?.length}
+										<div class="variant-section">
+											<span class="variant-section-title">&#128295; AI Tools</span>
+											{#each selectedType.tools as tool}
+												<div class="variant-item">
+													<span class="variant-item-name">{tool.name}</span>
+													<span class="variant-item-desc">{tool.description}</span>
+												</div>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							{/if}
+						</div>
+					{/if}
 
 					<!-- Actions -->
 					<div class="flex items-center gap-2 pt-2">
@@ -1415,5 +1497,129 @@
 	.log-dir-in {
 		background: var(--muted);
 		color: var(--muted-foreground);
+	}
+
+	/* ========================================
+	   Variant Badges (Triggers, Actions, Tools)
+	   ======================================== */
+	.connector-variant-badges {
+		display: flex;
+		gap: 6px;
+		flex-wrap: wrap;
+		margin-top: 4px;
+	}
+
+	.variant-badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		padding: 1px 6px;
+		font-size: 0.6875rem;
+		font-weight: 500;
+		border-radius: 4px;
+		letter-spacing: 0.01em;
+	}
+
+	.variant-badge--info {
+		background: color-mix(in oklch, var(--primary) 15%, transparent);
+		color: var(--primary);
+		border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
+	}
+
+	.variant-badge--success {
+		background: color-mix(in oklch, var(--success) 15%, transparent);
+		color: var(--success);
+		border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
+	}
+
+	.variant-badge--warning {
+		background: color-mix(in oklch, var(--warning) 15%, transparent);
+		color: var(--warning);
+		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
+	}
+
+	/* ========================================
+	   Capabilities Section (Edit/Setup View)
+	   ======================================== */
+	.capabilities-section {
+		border-top: 1px solid var(--border);
+		padding-top: 12px;
+	}
+
+	.capabilities-toggle {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 6px 0;
+		background: none;
+		border: none;
+		color: var(--muted-foreground);
+		font-size: 0.8125rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition: color 150ms ease;
+	}
+
+	.capabilities-toggle:hover {
+		color: var(--foreground);
+	}
+
+	.variant-section {
+		margin-bottom: 12px;
+	}
+
+	.variant-section:last-child {
+		margin-bottom: 0;
+	}
+
+	.variant-section-title {
+		font-size: 12px;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		opacity: 0.8;
+		display: block;
+		margin-bottom: 6px;
+	}
+
+	.variant-item {
+		padding: 6px 10px;
+		background: color-mix(in oklch, var(--foreground) 3%, transparent);
+		border-radius: 6px;
+		margin-bottom: 4px;
+	}
+
+	.variant-item:last-child {
+		margin-bottom: 0;
+	}
+
+	.variant-item-name {
+		font-size: 12px;
+		font-weight: 500;
+		display: block;
+		color: var(--foreground);
+	}
+
+	.variant-item-desc {
+		font-size: 11px;
+		opacity: 0.6;
+		display: block;
+		margin-top: 2px;
+	}
+
+	/* ========================================
+	   Mini Badges (Type Selection Grid)
+	   ======================================== */
+	.connector-type-variants {
+		display: flex;
+		gap: 4px;
+		margin-top: 4px;
+	}
+
+	.mini-badge {
+		font-size: 10px;
+		padding: 1px 4px;
+		background: color-mix(in oklch, var(--foreground) 6%, transparent);
+		border-radius: 4px;
+		opacity: 0.7;
 	}
 </style>

@@ -7,14 +7,18 @@ import time
 from typing import Any, Dict, Optional
 
 from app.core.connectors.base import (
+    ActionDef,
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
     IncomingMessage,
+    IncomingMessageCallback,
     OutgoingMessage,
     PermissionPrompt,
-    IncomingMessageCallback,
     PermissionResponseCallback,
+    ToolDef,
+    TriggerCallback,
+    TriggerDef,
     chunk_text,
 )
 
@@ -43,6 +47,154 @@ class SpotifyConnector(BaseConnector):
     MAX_MESSAGE_LENGTH = 4000
     CAPABILITIES = ConnectorCapabilities(is_messaging=False)
 
+    TRIGGERS = [
+        TriggerDef(
+            id="track_changed",
+            name="Track Changed",
+            description="Fires when the currently playing track changes",
+            payload_schema={
+                "type": "object",
+                "properties": {
+                    "track_name": {"type": "string"},
+                    "artist": {"type": "string"},
+                    "album": {"type": "string"},
+                    "track_id": {"type": "string"},
+                    "track_uri": {"type": "string"},
+                },
+            },
+        ),
+        TriggerDef(
+            id="playback_started",
+            name="Playback Started",
+            description="Fires when playback starts or resumes",
+            payload_schema={
+                "type": "object",
+                "properties": {
+                    "track_name": {"type": "string"},
+                    "artist": {"type": "string"},
+                    "album": {"type": "string"},
+                },
+            },
+        ),
+        TriggerDef(
+            id="playback_paused",
+            name="Playback Paused",
+            description="Fires when playback is paused",
+            payload_schema={"type": "object", "properties": {}},
+        ),
+    ]
+
+    ACTIONS = [
+        ActionDef(id="play", name="Play", description="Resume playback"),
+        ActionDef(id="pause", name="Pause", description="Pause playback"),
+        ActionDef(
+            id="play_track",
+            name="Play Track",
+            description="Play a track by search query or Spotify URI",
+            input_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        ),
+        ActionDef(id="skip_next", name="Skip Next", description="Skip to next track"),
+        ActionDef(
+            id="skip_previous",
+            name="Skip Previous",
+            description="Skip to previous track",
+        ),
+        ActionDef(
+            id="set_volume",
+            name="Set Volume",
+            description="Set playback volume",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "volume_percent": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100,
+                    },
+                },
+                "required": ["volume_percent"],
+            },
+        ),
+        ActionDef(
+            id="get_now_playing",
+            name="Get Now Playing",
+            description="Get currently playing track info",
+        ),
+        ActionDef(
+            id="search_tracks",
+            name="Search Tracks",
+            description="Search for tracks",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                },
+                "required": ["query"],
+            },
+        ),
+    ]
+
+    TOOLS = [
+        ToolDef(
+            id="spotify_playback",
+            name="Spotify Playback",
+            description=(
+                "Control Spotify playback — play, pause, skip, set volume, "
+                "and get current track info"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "enum": [
+                            "play",
+                            "pause",
+                            "skip_next",
+                            "skip_previous",
+                            "get_now_playing",
+                            "set_volume",
+                        ],
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Track name or Spotify URI (used with 'play' command)",
+                    },
+                    "volume_percent": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100,
+                        "description": "Volume level (requires 'set_volume' as command value)",
+                    },
+                },
+                "required": ["command"],
+            },
+        ),
+        ToolDef(
+            id="spotify_search",
+            name="Spotify Search",
+            description="Search Spotify for tracks, artists, or albums",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "default": 5,
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+    ]
+
     def __init__(
         self,
         connector_id: str,
@@ -50,16 +202,19 @@ class SpotifyConnector(BaseConnector):
         config: Dict[str, Any],
         on_incoming_message: IncomingMessageCallback,
         on_permission_response: PermissionResponseCallback,
+        on_trigger: Optional[TriggerCallback] = None,
     ):
         super().__init__(
             connector_id, connector_type, config,
             on_incoming_message, on_permission_response,
+            on_trigger=on_trigger,
         )
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0
         self._http_client: Optional[Any] = None
         self._poll_task: Optional[asyncio.Task] = None
         self._last_track_id: Optional[str] = None
+        self._was_playing: Optional[bool] = None
 
     # ------------------------------------------------------------------
     # Token management
@@ -199,7 +354,28 @@ class SpotifyConnector(BaseConnector):
                     consecutive_failures = 0
                     if response.status_code == 200:
                         data = response.json()
+                        is_playing = data.get("is_playing", False)
                         item = data.get("item")
+
+                        # Detect playback state transitions
+                        if self._was_playing is not None:
+                            if is_playing and not self._was_playing:
+                                trigger_payload = {}
+                                if item:
+                                    trigger_payload = {
+                                        "track_name": item.get("name", "Unknown"),
+                                        "artist": ", ".join(
+                                            a["name"] for a in item.get("artists", [])
+                                        ),
+                                        "album": item.get("album", {}).get(
+                                            "name", "Unknown Album"
+                                        ),
+                                    }
+                                await self.emit_trigger("playback_started", trigger_payload)
+                            elif not is_playing and self._was_playing:
+                                await self.emit_trigger("playback_paused", {})
+                        self._was_playing = is_playing
+
                         if item:
                             track_id = item.get("id")
                             if track_id and track_id != self._last_track_id:
@@ -211,6 +387,15 @@ class SpotifyConnector(BaseConnector):
                                 album = item.get("album", {}).get(
                                     "name", "Unknown Album"
                                 )
+
+                                await self.emit_trigger("track_changed", {
+                                    "track_name": track_name,
+                                    "artist": artists,
+                                    "album": album,
+                                    "track_id": track_id,
+                                    "track_uri": item.get("uri", ""),
+                                })
+
                                 text = (
                                     f"Now playing: {track_name} by "
                                     f"{artists} ({album})"
@@ -462,6 +647,187 @@ class SpotifyConnector(BaseConnector):
                 "Failed to send Spotify notification: %s", exc,
             )
             return False
+
+    # ------------------------------------------------------------------
+    # Actions and Tools
+    # ------------------------------------------------------------------
+
+    async def _get_now_playing_info(self) -> Dict[str, Any]:
+        """Fetch the currently playing track and return structured data."""
+        resp = await self._api_get("/me/player/currently-playing")
+        if resp.status_code == 204 or not resp.content:
+            return {"success": True, "playing": False, "message": "Nothing is currently playing"}
+
+        data = resp.json()
+        item = data.get("item")
+        if not item:
+            return {"success": True, "playing": False, "message": "Nothing is currently playing"}
+
+        track_name = item.get("name", "Unknown")
+        artists = ", ".join(a["name"] for a in item.get("artists", []))
+        album = item.get("album", {}).get("name", "Unknown Album")
+        progress_ms = data.get("progress_ms", 0)
+        duration_ms = item.get("duration_ms", 0)
+
+        return {
+            "success": True,
+            "playing": True,
+            "track_name": track_name,
+            "artist": artists,
+            "album": album,
+            "track_id": item.get("id", ""),
+            "track_uri": item.get("uri", ""),
+            "progress_ms": progress_ms,
+            "duration_ms": duration_ms,
+        }
+
+    async def _search_tracks_api(self, query: str, limit: int = 5) -> Dict[str, Any]:
+        """Search Spotify for tracks and return structured results."""
+        resp = await self._api_get(f"/search?q={query}&type=track&limit={limit}")
+        items = resp.json().get("tracks", {}).get("items", [])
+        if not items:
+            return {"success": True, "results": [], "message": f"No results found for: {query}"}
+
+        results = []
+        for t in items:
+            artists = ", ".join(a["name"] for a in t.get("artists", []))
+            results.append({
+                "track_name": t.get("name", ""),
+                "artist": artists,
+                "album": t.get("album", {}).get("name", ""),
+                "track_id": t.get("id", ""),
+                "track_uri": t.get("uri", ""),
+            })
+
+        return {"success": True, "results": results}
+
+    async def _play_track_by_query(self, query: str) -> Dict[str, Any]:
+        """Search for a track and start playback."""
+        # If it looks like a Spotify URI, play it directly
+        if query.startswith("spotify:track:"):
+            await self._api_put("/me/player/play", json={"uris": [query]})
+            return {"success": True, "message": f"Playing URI: {query}"}
+
+        search_resp = await self._api_get(f"/search?q={query}&type=track&limit=1")
+        tracks = search_resp.json().get("tracks", {}).get("items", [])
+        if not tracks:
+            return {"success": False, "error": f"No tracks found for: {query}"}
+
+        track = tracks[0]
+        track_uri = track["uri"]
+        track_name = track.get("name", "Unknown")
+        artists = ", ".join(a["name"] for a in track.get("artists", []))
+        await self._api_put("/me/player/play", json={"uris": [track_uri]})
+
+        return {
+            "success": True,
+            "message": f"Playing: {track_name} by {artists}",
+            "track_name": track_name,
+            "artist": artists,
+            "track_uri": track_uri,
+        }
+
+    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a named Spotify action."""
+        try:
+            if action_id == "play":
+                await self._api_put("/me/player/play")
+                return {"success": True, "message": "Playback resumed"}
+
+            if action_id == "pause":
+                await self._api_put("/me/player/pause")
+                return {"success": True, "message": "Playback paused"}
+
+            if action_id == "play_track":
+                query = params.get("query", "")
+                if not query:
+                    return {"success": False, "error": "Missing required parameter: query"}
+                return await self._play_track_by_query(query)
+
+            if action_id == "skip_next":
+                await self._api_post("/me/player/next")
+                return {"success": True, "message": "Skipped to next track"}
+
+            if action_id == "skip_previous":
+                await self._api_post("/me/player/previous")
+                return {"success": True, "message": "Skipped to previous track"}
+
+            if action_id == "set_volume":
+                volume = params.get("volume_percent")
+                if volume is None:
+                    return {"success": False, "error": "Missing required parameter: volume_percent"}
+                volume_percent = max(0, min(100, int(volume)))
+                await self._api_put(f"/me/player/volume?volume_percent={volume_percent}")
+                return {"success": True, "message": f"Volume set to {volume_percent}%"}
+
+            if action_id == "get_now_playing":
+                return await self._get_now_playing_info()
+
+            if action_id == "search_tracks":
+                query = params.get("query", "")
+                if not query:
+                    return {"success": False, "error": "Missing required parameter: query"}
+                limit = params.get("limit", 5)
+                return await self._search_tracks_api(query, limit=int(limit))
+
+            return {"success": False, "error": f"Unknown action: {action_id}"}
+
+        except Exception as exc:
+            logger.exception("SpotifyConnector execute_action '%s' failed: %s", action_id, exc)
+            return {"success": False, "error": str(exc)}
+
+    async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a named Spotify tool call."""
+        try:
+            if tool_id == "spotify_playback":
+                command = params.get("command", "")
+                if not command:
+                    return {"success": False, "error": "Missing required parameter: command"}
+
+                if command == "play":
+                    query = params.get("query")
+                    if query:
+                        return await self._play_track_by_query(query)
+                    await self._api_put("/me/player/play")
+                    return {"success": True, "message": "Playback resumed"}
+
+                if command == "pause":
+                    await self._api_put("/me/player/pause")
+                    return {"success": True, "message": "Playback paused"}
+
+                if command == "skip_next":
+                    await self._api_post("/me/player/next")
+                    return {"success": True, "message": "Skipped to next track"}
+
+                if command == "skip_previous":
+                    await self._api_post("/me/player/previous")
+                    return {"success": True, "message": "Skipped to previous track"}
+
+                if command == "get_now_playing":
+                    return await self._get_now_playing_info()
+
+                if command == "set_volume":
+                    volume = params.get("volume_percent")
+                    if volume is None:
+                        return {"success": False, "error": "Missing volume_percent for set_volume command"}
+                    volume_percent = max(0, min(100, int(volume)))
+                    await self._api_put(f"/me/player/volume?volume_percent={volume_percent}")
+                    return {"success": True, "message": f"Volume set to {volume_percent}%"}
+
+                return {"success": False, "error": f"Unknown playback command: {command}"}
+
+            if tool_id == "spotify_search":
+                query = params.get("query", "")
+                if not query:
+                    return {"success": False, "error": "Missing required parameter: query"}
+                limit = params.get("limit", 5)
+                return await self._search_tracks_api(query, limit=int(limit))
+
+            return {"success": False, "error": f"Unknown tool: {tool_id}"}
+
+        except Exception as exc:
+            logger.exception("SpotifyConnector execute_tool '%s' failed: %s", tool_id, exc)
+            return {"success": False, "error": str(exc)}
 
     # ------------------------------------------------------------------
     # Test

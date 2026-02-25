@@ -53,6 +53,27 @@ export interface ConnectorTestResponse {
 	error?: string;
 }
 
+export interface ConnectorTriggerInfo {
+	id: string;
+	name: string;
+	description: string;
+	payload_schema: Record<string, any>;
+}
+
+export interface ConnectorActionInfo {
+	id: string;
+	name: string;
+	description: string;
+	input_schema: Record<string, any>;
+}
+
+export interface ConnectorToolInfo {
+	id: string;
+	name: string;
+	description: string;
+	input_schema: Record<string, any>;
+}
+
 export interface ConnectorTypeInfo {
 	type: string;
 	name: string;
@@ -65,6 +86,9 @@ export interface ConnectorTypeInfo {
 		placeholder?: string;
 		description?: string;
 	}>;
+	triggers: ConnectorTriggerInfo[];
+	actions: ConnectorActionInfo[];
+	tools: ConnectorToolInfo[];
 }
 
 export interface ConnectorEventLog {
@@ -171,4 +195,40 @@ export async function getConnectorLogs(id: string): Promise<ConnectorEventLog[]>
  */
 export async function getConnectorStatus(id: string): Promise<any> {
 	return api.get<any>(`/connectors/${id}/status`);
+}
+
+// ============================================================================
+// Variant API Functions (Triggers, Actions, Tools)
+// ============================================================================
+
+/**
+ * Get available triggers for a connector
+ */
+export async function getConnectorTriggers(id: string): Promise<ConnectorTriggerInfo[]> {
+	return api.get<ConnectorTriggerInfo[]>(`/connectors/${id}/triggers`);
+}
+
+/**
+ * Get available actions for a connector
+ */
+export async function getConnectorActions(id: string): Promise<ConnectorActionInfo[]> {
+	return api.get<ConnectorActionInfo[]>(`/connectors/${id}/actions`);
+}
+
+/**
+ * Get available tools for a connector
+ */
+export async function getConnectorTools(id: string): Promise<ConnectorToolInfo[]> {
+	return api.get<ConnectorToolInfo[]>(`/connectors/${id}/tools`);
+}
+
+/**
+ * Execute a connector action directly
+ */
+export async function executeConnectorAction(
+	id: string,
+	actionId: string,
+	params: Record<string, any> = {}
+): Promise<any> {
+	return api.post<any>(`/connectors/${id}/actions/${actionId}/execute`, params);
 }

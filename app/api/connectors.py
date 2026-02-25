@@ -213,6 +213,135 @@ async def get_connector_logs(connector_id: str, token: str = Depends(require_adm
     return database.get_connector_event_log(connector_id)
 
 
+# ---- Triggers, Actions & Tools ----
+
+@router.get("/{connector_id}/triggers")
+async def get_connector_triggers(connector_id: str, token: str = Depends(require_admin)):
+    """Get available triggers for a connector."""
+    from dataclasses import asdict
+    from app.core.connectors.registry import get_connector_class
+
+    connector = database.get_connector(connector_id)
+    if not connector:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
+
+    try:
+        cls = get_connector_class(connector["type"])
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown connector type: {connector['type']}",
+        )
+
+    return [asdict(t) for t in cls.TRIGGERS]
+
+
+@router.get("/{connector_id}/actions")
+async def get_connector_actions(connector_id: str, token: str = Depends(require_admin)):
+    """Get available actions for a connector."""
+    from dataclasses import asdict
+    from app.core.connectors.registry import get_connector_class
+
+    connector = database.get_connector(connector_id)
+    if not connector:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
+
+    try:
+        cls = get_connector_class(connector["type"])
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown connector type: {connector['type']}",
+        )
+
+    return [asdict(a) for a in cls.ACTIONS]
+
+
+@router.get("/{connector_id}/tools")
+async def get_connector_tools(connector_id: str, token: str = Depends(require_admin)):
+    """Get available tools for a connector."""
+    from dataclasses import asdict
+    from app.core.connectors.registry import get_connector_class
+
+    connector = database.get_connector(connector_id)
+    if not connector:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
+
+    try:
+        cls = get_connector_class(connector["type"])
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown connector type: {connector['type']}",
+        )
+
+    return [asdict(t) for t in cls.TOOLS]
+
+
+@router.post("/{connector_id}/actions/{action_id}/execute")
+async def execute_connector_action(
+    connector_id: str,
+    action_id: str,
+    request: Request,
+    token: str = Depends(require_admin),
+):
+    """Execute a connector action directly."""
+    from app.core.connectors.manager import connector_manager
+    from app.core.connectors.registry import get_connector_class
+
+    connector = database.get_connector(connector_id)
+    if not connector:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Connector not found: {connector_id}")
+
+    # Validate that this action_id exists on the connector class
+    try:
+        cls = get_connector_class(connector["type"])
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown connector type: {connector['type']}",
+        )
+
+    valid_action_ids = [a.id for a in cls.ACTIONS]
+    if action_id not in valid_action_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown action '{action_id}' for connector type '{connector['type']}'. "
+                   f"Valid actions: {valid_action_ids}",
+        )
+
+    # Get the running connector instance
+    instance = await connector_manager.get_running_connector(connector_id)
+    if not instance:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Connector '{connector_id}' is not running. Activate it first.",
+        )
+
+    # Parse request body as JSON params
+    try:
+        params = await request.json()
+    except Exception:
+        params = {}
+
+    # Execute the action
+    try:
+        result = await instance.execute_action(action_id, params)
+    except NotImplementedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.exception(f"Error executing action '{action_id}' on connector '{connector_id}'")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Action execution failed: {e}",
+        )
+
+    return {"status": "ok", "action_id": action_id, "result": result}
+
+
 # ---- WhatsApp Webhook ----
 
 @router.get("/whatsapp/webhook")

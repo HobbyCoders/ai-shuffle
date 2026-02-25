@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from app.core.connectors.base import (
+    ActionDef,
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
@@ -16,6 +17,8 @@ from app.core.connectors.base import (
     PermissionPrompt,
     IncomingMessageCallback,
     PermissionResponseCallback,
+    ToolDef,
+    TriggerDef,
     chunk_text,
 )
 
@@ -50,6 +53,55 @@ class MSTeamsConnector(BaseConnector):
         buttons=True, rich_text=True,
     )
 
+    TRIGGERS = [
+        TriggerDef(
+            id="message_received",
+            name="Message Received",
+            description="Fires when a new message is received",
+            payload_schema={
+                "type": "object",
+                "properties": {
+                    "platform_chat_id": {"type": "string"},
+                    "platform_user_id": {"type": "string"},
+                    "platform_user_name": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+            },
+        ),
+    ]
+
+    ACTIONS = [
+        ActionDef(
+            id="send_message",
+            name="Send Message",
+            description="Send a message to a chat",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "platform_chat_id": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "required": ["platform_chat_id", "text"],
+            },
+        ),
+    ]
+
+    TOOLS = [
+        ToolDef(
+            id="msteams_send",
+            name="Send a message via Microsoft Teams",
+            description="Send a message via Microsoft Teams",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "platform_chat_id": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "required": ["platform_chat_id", "text"],
+            },
+        ),
+    ]
+
     def __init__(
         self,
         connector_id: str,
@@ -57,10 +109,12 @@ class MSTeamsConnector(BaseConnector):
         config: Dict[str, Any],
         on_incoming_message: IncomingMessageCallback,
         on_permission_response: PermissionResponseCallback,
+        **kwargs,
     ):
         super().__init__(
             connector_id, connector_type, config,
             on_incoming_message, on_permission_response,
+            **kwargs,
         )
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0
@@ -413,6 +467,38 @@ class MSTeamsConnector(BaseConnector):
 
         session_id = self._permission_sessions.get(request_id, "")
         await self._on_permission_response(request_id, session_id, approved)
+
+    # ------------------------------------------------------------------
+    # Actions & Tools
+    # ------------------------------------------------------------------
+
+    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a named action."""
+        if action_id == "send_message":
+            message = OutgoingMessage(
+                platform_chat_id=params["platform_chat_id"],
+                text=params["text"],
+            )
+            success = await self.send_message(message)
+            if success:
+                return {"success": True, "message": "Message sent"}
+            return {"success": False, "error": "Failed to send message"}
+
+        return {"success": False, "error": f"Unknown action: {action_id}"}
+
+    async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a named tool call."""
+        if tool_id == "msteams_send":
+            message = OutgoingMessage(
+                platform_chat_id=params["platform_chat_id"],
+                text=params["text"],
+            )
+            success = await self.send_message(message)
+            if success:
+                return {"success": True, "message": "Message sent"}
+            return {"success": False, "error": "Failed to send message"}
+
+        return {"success": False, "error": f"Unknown tool: {tool_id}"}
 
     # ------------------------------------------------------------------
     # Test

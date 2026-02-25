@@ -1287,6 +1287,30 @@ class ConnectorEventLog(BaseModel):
     created_at: datetime
 
 
+class ConnectorTriggerInfo(BaseModel):
+    """Trigger definition from a connector type."""
+    id: str
+    name: str
+    description: str
+    payload_schema: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ConnectorActionInfo(BaseModel):
+    """Action definition from a connector type."""
+    id: str
+    name: str
+    description: str
+    input_schema: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ConnectorToolInfo(BaseModel):
+    """AI tool definition from a connector type."""
+    id: str
+    name: str
+    description: str
+    input_schema: Dict[str, Any] = Field(default_factory=dict)
+
+
 # ============================================================================
 # Automation Models
 # ============================================================================
@@ -1296,6 +1320,7 @@ class AutomationTriggerType(str, Enum):
     INTERVAL = "interval"
     CONNECTOR_EVENT = "connector_event"
     WEBHOOK = "webhook"
+    CONNECTOR_TRIGGER = "connector_trigger"
 
 
 class AutomationOutputType(str, Enum):
@@ -1314,7 +1339,8 @@ class AutomationCreate(BaseModel):
     description: Optional[str] = None
     trigger_type: AutomationTriggerType
     trigger_config: Dict[str, Any] = Field(default_factory=dict)
-    prompt: str = Field(..., min_length=1)
+    prompt: Optional[str] = Field(default=None)
+    action_steps: Optional[List[Dict[str, Any]]] = None
     profile_id: str
     project_id: Optional[str] = None
     output_config: Dict[str, Any] = Field(default_factory=lambda: {"type": "session"})
@@ -1334,6 +1360,7 @@ class AutomationUpdate(BaseModel):
     trigger_type: Optional[AutomationTriggerType] = None
     trigger_config: Optional[Dict[str, Any]] = None
     prompt: Optional[str] = None
+    action_steps: Optional[List[Dict[str, Any]]] = None
     profile_id: Optional[str] = None
     project_id: Optional[str] = None
     output_config: Optional[Dict[str, Any]] = None
@@ -1354,7 +1381,8 @@ class Automation(BaseModel):
     description: Optional[str] = None
     trigger_type: str
     trigger_config: Dict[str, Any] = Field(default_factory=dict)
-    prompt: str
+    prompt: Optional[str] = None
+    action_steps: Optional[List[Dict[str, Any]]] = None
     profile_id: str
     project_id: Optional[str] = None
     output_config: Dict[str, Any] = Field(default_factory=lambda: {"type": "session"})

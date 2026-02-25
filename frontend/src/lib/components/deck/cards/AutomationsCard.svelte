@@ -18,7 +18,8 @@
 		AutomationApproval,
 		AutomationTestResult,
 		TriggerType,
-		OutputType
+		OutputType,
+		ActionStep
 	} from '$lib/api/automations';
 	import {
 		getAutomations,
@@ -38,8 +39,8 @@
 	import { api } from '$lib/api/client';
 	import type { Profile } from '$lib/api/client';
 	import type { Project } from '$lib/stores/types';
-	import { getConnectors } from '$lib/api/connectors';
-	import type { Connector } from '$lib/api/connectors';
+	import { getConnectors, getConnectorTypes } from '$lib/api/connectors';
+	import type { Connector, ConnectorTypeInfo } from '$lib/api/connectors';
 	import { timezonePreference } from '$lib/stores/timezonePreference';
 	import { slide, fade } from 'svelte/transition';
 	import {
@@ -83,6 +84,7 @@
 	let profiles: Profile[] = $state([]);
 	let projects: Project[] = $state([]);
 	let connectors: Connector[] = $state([]);
+	let connectorTypes: ConnectorTypeInfo[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 
@@ -119,6 +121,8 @@
 	let formTimeoutSeconds = $state('300');
 	let formRequiresApproval = $state(false);
 	let showBudgetSection = $state(false);
+	// Action steps form state
+	let formActionSteps: ActionStep[] = $state([]);
 
 	// Cron builder state
 	let cronMode: 'preset' | 'custom' = $state('preset');
@@ -148,6 +152,36 @@
 	const runningCount = $derived(automations.filter((a) => a.status === 'running').length);
 	const approvalCount = $derived(pendingApprovals.length);
 
+	// Get connectors that have triggers defined
+	const connectorsWithTriggers = $derived(
+		connectors.filter(c => {
+			const typeInfo = connectorTypes.find(t => t.type === c.type);
+			return typeInfo && typeInfo.triggers && typeInfo.triggers.length > 0;
+		})
+	);
+
+	// Get connectors that have actions defined
+	const connectorsWithActions = $derived(
+		connectors.filter(c => {
+			const typeInfo = connectorTypes.find(t => t.type === c.type);
+			return typeInfo && typeInfo.actions && typeInfo.actions.length > 0;
+		})
+	);
+
+	function getTriggersForConnector(connectorId: string) {
+		const connector = connectors.find(c => c.id === connectorId);
+		if (!connector) return [];
+		const typeInfo = connectorTypes.find(t => t.type === connector.type);
+		return typeInfo?.triggers || [];
+	}
+
+	function getActionsForConnector(connectorId: string) {
+		const connector = connectors.find(c => c.id === connectorId);
+		if (!connector) return [];
+		const typeInfo = connectorTypes.find(t => t.type === connector.type);
+		return typeInfo?.actions || [];
+	}
+
 	// ── Load data ───────────────────────────────────────────────────────
 	onMount(() => {
 		loadData();
@@ -157,18 +191,20 @@
 		loading = true;
 		error = '';
 		try {
-			const [automationsData, approvalsData, profilesData, projectsData, connectorsData] = await Promise.all([
+			const [automationsData, approvalsData, profilesData, projectsData, connectorsData, connectorTypesData] = await Promise.all([
 				getAutomations(),
 				getPendingApprovals(),
 				api.get<Profile[]>('/profiles'),
 				api.get<Project[]>('/projects'),
-				getConnectors().catch(() => [] as Connector[])
+				getConnectors().catch(() => [] as Connector[]),
+				getConnectorTypes().catch(() => [] as ConnectorTypeInfo[])
 			]);
 			automations = automationsData;
 			pendingApprovals = approvalsData;
 			profiles = profilesData;
 			projects = projectsData;
 			connectors = connectorsData;
+			connectorTypes = connectorTypesData;
 		} catch (e: any) {
 			error = e.detail || e.message || 'Failed to load automations';
 		} finally {
@@ -195,6 +231,7 @@
 		formTimeoutSeconds = '300';
 		formRequiresApproval = false;
 		showBudgetSection = false;
+		formActionSteps = [];
 		formError = '';
 		testResult = null;
 		// Reset cron builder
@@ -227,11 +264,12 @@
 		if (automation.trigger_type === 'cron' && automation.trigger_config.expression) {
 			syncCronFieldsFromExpression(automation.trigger_config.expression);
 		}
-		formPrompt = automation.prompt;
+		formPrompt = automation.prompt || '';
 		formProfileId = automation.profile_id;
 		formProjectId = automation.project_id || '';
 		formOutputType = (automation.output_config?.type as OutputType) || 'session';
 		formOutputConfig = { ...automation.output_config };
+		formActionSteps = automation.action_steps ? automation.action_steps.map(s => ({ ...s })) : [];
 		formMaxCostPerRun = automation.max_cost_per_run != null ? String(automation.max_cost_per_run) : '';
 		formMaxCostPerDay = automation.max_cost_per_day != null ? String(automation.max_cost_per_day) : '';
 		formMaxCostTotal = automation.max_cost_total != null ? String(automation.max_cost_total) : '';
@@ -274,6 +312,8 @@
 			outputConfig.url = formOutputConfig.url || '';
 		}
 
+		const validActionSteps = formActionSteps.filter(s => s.connector_id && s.action_id);
+
 		return {
 			name: formName.trim(),
 			description: formDescription.trim() || undefined,
@@ -281,10 +321,11 @@
 			trigger_config: formTriggerType === 'cron'
 				? { ...formTriggerConfig, timezone: timezonePreference.resolveTimezone() }
 				: { ...formTriggerConfig },
-			prompt: formPrompt,
+			prompt: formPrompt.trim() || undefined,
 			profile_id: formProfileId,
 			project_id: formProjectId || undefined,
 			output_config: outputConfig,
+			action_steps: validActionSteps.length > 0 ? validActionSteps : undefined,
 			max_turns: parseInt(formMaxTurns) || 1,
 			timeout_seconds: parseInt(formTimeoutSeconds) || 300,
 			max_cost_per_run: formMaxCostPerRun ? parseFloat(formMaxCostPerRun) : null,
@@ -300,8 +341,9 @@
 			formError = 'Name is required';
 			return;
 		}
-		if (!formPrompt.trim()) {
-			formError = 'Prompt is required';
+		const hasActionSteps = formActionSteps.some(s => s.connector_id && s.action_id);
+		if (!formPrompt.trim() && !hasActionSteps) {
+			formError = 'Either a prompt or at least one action step is required';
 			return;
 		}
 		if (!formProfileId) {
@@ -440,6 +482,8 @@
 				return 'Interval';
 			case 'connector_event':
 				return 'Event';
+			case 'connector_trigger':
+				return 'Connector';
 			case 'webhook':
 				return 'Webhook';
 		}
@@ -801,6 +845,14 @@
 					</button>
 					<button
 						class="auto-trigger-btn"
+						class:active={formTriggerType === 'connector_trigger'}
+						onclick={() => { formTriggerType = 'connector_trigger'; formTriggerConfig = {}; }}
+					>
+						<Zap size={14} />
+						Connector Trigger
+					</button>
+					<button
+						class="auto-trigger-btn"
 						class:active={formTriggerType === 'webhook'}
 						onclick={() => { formTriggerType = 'webhook'; formTriggerConfig = {}; }}
 					>
@@ -987,6 +1039,39 @@
 						<option value="permission.requested">Permission requested</option>
 						<option value="input.needed">Input needed</option>
 					</select>
+				{:else if formTriggerType === 'connector_trigger'}
+					<label class="card-form-label" for="auto-ct-connector">Connector</label>
+					<select
+						id="auto-ct-connector"
+						class="card-form-input"
+						bind:value={formTriggerConfig.connector_id}
+						onchange={() => { formTriggerConfig = { ...formTriggerConfig, trigger_id: '' }; }}
+					>
+						<option value="">Select a connector...</option>
+						{#each connectorsWithTriggers as c}
+							<option value={c.id}>{c.name} ({c.type})</option>
+						{/each}
+					</select>
+
+					{#if formTriggerConfig.connector_id}
+						<label class="card-form-label" for="auto-ct-trigger" style="margin-top: 12px">Trigger</label>
+						<select
+							id="auto-ct-trigger"
+							class="card-form-input"
+							bind:value={formTriggerConfig.trigger_id}
+						>
+							<option value="">Select a trigger...</option>
+							{#each getTriggersForConnector(formTriggerConfig.connector_id) as trigger}
+								<option value={trigger.id}>{trigger.name}</option>
+							{/each}
+						</select>
+						{#if formTriggerConfig.trigger_id}
+							{@const triggerDef = getTriggersForConnector(formTriggerConfig.connector_id).find(t => t.id === formTriggerConfig.trigger_id)}
+							{#if triggerDef}
+								<p class="card-form-hint" style="margin-top: 6px">{triggerDef.description}</p>
+							{/if}
+						{/if}
+					{/if}
 				{:else if formTriggerType === 'webhook'}
 					{#if currentView === 'edit' && selectedAutomation}
 						<label class="card-form-label" for="auto-webhook-url">Webhook URL</label>
@@ -1015,7 +1100,9 @@
 
 			<!-- Prompt -->
 			<div class="card-form-section">
-				<label class="card-form-label" for="auto-prompt">Prompt <span class="required">*</span></label>
+				<label class="card-form-label" for="auto-prompt">
+					Prompt {#if formActionSteps.length === 0}<span class="required">*</span>{/if}
+				</label>
 				<textarea
 					id="auto-prompt"
 					class="card-form-input card-form-textarea"
@@ -1023,7 +1110,89 @@
 					bind:value={formPrompt}
 					placeholder="Enter the prompt template for this automation..."
 				></textarea>
-				<p class="card-form-hint">The main instruction sent to the AI agent when this automation runs</p>
+				<p class="card-form-hint">
+					{#if formActionSteps.length > 0}
+						Optional when action steps are configured. The AI agent prompt runs before action steps.
+					{:else}
+						The main instruction sent to the AI agent when this automation runs
+					{/if}
+				</p>
+			</div>
+
+			<!-- Action Steps -->
+			<div class="card-form-section">
+				<div style="display: flex; align-items: center; justify-content: space-between;">
+					<span class="card-form-label">Action Steps</span>
+					<button
+						class="card-action-btn"
+						onclick={() => { formActionSteps = [...formActionSteps, { type: 'connector_action', connector_id: '', action_id: '', params: {} }]; }}
+					>
+						<Plus size={12} />
+						Add Step
+					</button>
+				</div>
+				<p class="card-form-hint">Actions to execute when this automation runs. Can be used with or without a prompt.</p>
+
+				{#each formActionSteps as step, i}
+					<div class="action-step-card" transition:slide={{ duration: 150 }}>
+						<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+							<span class="card-form-label" style="margin: 0;">Step {i + 1}</span>
+							<button
+								class="card-action-btn card-action-btn--destructive"
+								onclick={() => { formActionSteps = formActionSteps.filter((_, idx) => idx !== i); }}
+							>
+								<X size={12} />
+							</button>
+						</div>
+						<select
+							class="card-form-input"
+							bind:value={step.connector_id}
+							onchange={() => { step.action_id = ''; step.params = {}; formActionSteps = [...formActionSteps]; }}
+						>
+							<option value="">Select connector...</option>
+							{#each connectorsWithActions as c}
+								<option value={c.id}>{c.name} ({c.type})</option>
+							{/each}
+						</select>
+						{#if step.connector_id}
+							<select
+								class="card-form-input"
+								style="margin-top: 8px"
+								bind:value={step.action_id}
+								onchange={() => { step.params = {}; formActionSteps = [...formActionSteps]; }}
+							>
+								<option value="">Select action...</option>
+								{#each getActionsForConnector(step.connector_id) as action}
+									<option value={action.id}>{action.name}</option>
+								{/each}
+							</select>
+						{/if}
+						{#if step.action_id}
+							{@const actionDef = getActionsForConnector(step.connector_id).find(a => a.id === step.action_id)}
+							{#if actionDef}
+								<p class="card-form-hint" style="margin-top: 4px">{actionDef.description}</p>
+								{#if actionDef.input_schema?.properties}
+									<div style="margin-top: 8px;">
+										{#each Object.entries(actionDef.input_schema.properties) as [key, schemaDef]}
+											{@const schemaObj = schemaDef as Record<string, any>}
+											<label class="card-form-label" for="step-{i}-{key}" style="font-size: 11px;">{key}</label>
+											<input
+												id="step-{i}-{key}"
+												type="text"
+												class="card-form-input"
+												style="font-size: 12px;"
+												value={step.params[key] || ''}
+												oninput={(e) => { step.params[key] = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}
+												placeholder={schemaObj.description || key}
+											/>
+										{/each}
+									</div>
+									<p class="card-form-hint" style="margin-top: 4px;">Use {'{{trigger.data.field}}'} or {'{{response}}'} for template variables</p>
+								{/if}
+							{/if}
+						{/if}
+					</div>
+				{/each}
 			</div>
 
 			<!-- Profile selector -->
@@ -1248,6 +1417,19 @@
 						<span class="auto-stat-value">{detailStats.failed_runs}</span>
 						<span class="auto-stat-label">Failures</span>
 					</div>
+				</div>
+			{/if}
+
+			<!-- Action Steps -->
+			{#if selectedAutomation.action_steps?.length}
+				<div class="card-form-section" style="padding: 12px 16px; border-bottom: 1px solid var(--border-subtle, var(--border));">
+					<span class="card-form-label">Action Steps</span>
+					{#each selectedAutomation.action_steps as step, i}
+						<div class="auto-detail-row">
+							<span class="auto-detail-label">Step {i + 1}</span>
+							<span class="auto-detail-value">{step.action_id} on {step.connector_id}</span>
+						</div>
+					{/each}
 				</div>
 			{/if}
 
@@ -1904,6 +2086,36 @@
 
 	.cron-raw-details summary {
 		font-size: var(--text-sm, 0.75rem);
+	}
+
+	/* Action step cards */
+	.action-step-card {
+		background: var(--card-surface-elevated, rgba(255, 255, 255, 0.03));
+		border: 1px solid var(--card-border, rgba(255, 255, 255, 0.08));
+		border-radius: 8px;
+		padding: 12px;
+		margin-top: 8px;
+	}
+
+	/* Detail view rows */
+	.auto-detail-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 4px 0;
+		font-size: var(--text-sm, 0.75rem);
+	}
+
+	.auto-detail-label {
+		color: var(--text-secondary, var(--muted-foreground));
+		font-weight: 500;
+		min-width: 60px;
+	}
+
+	.auto-detail-value {
+		color: var(--text-primary, var(--foreground));
+		font-family: var(--card-font-mono, monospace);
+		font-size: var(--text-xs, 0.6875rem);
 	}
 
 	/* Budget section */

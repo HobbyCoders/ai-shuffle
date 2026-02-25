@@ -22,7 +22,8 @@ from app.db.base import get_db, column_exists, table_exists, column_is_not_null,
 # v33: Add file_path to notes for physical markdown files
 # v34: Add connectors tables (connectors, connector_event_log, connector_sessions)
 # v35: Add fal_model_catalog table for dynamic model discovery
-SCHEMA_VERSION = 35
+# v36: Add action_steps column to automations for multi-step connector actions
+SCHEMA_VERSION = 36
 
 
 def _run_column_migrations(cursor: sqlite3.Cursor):
@@ -193,6 +194,11 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
                     logger.info(f"Backfilled worktree_branch/worktree_path for {backfilled} sessions")
             except sqlite3.OperationalError:
                 pass  # worktrees table may not exist yet
+
+    # Add action_steps column to automations for multi-step connector actions (v36)
+    if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "action_steps"):
+        cursor.execute("ALTER TABLE automations ADD COLUMN action_steps TEXT DEFAULT NULL")
+        migrations_applied.append("automations.action_steps")
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -1090,6 +1096,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             run_count INTEGER DEFAULT 0,
             failure_count INTEGER DEFAULT 0,
             requires_approval BOOLEAN DEFAULT FALSE,
+            action_steps TEXT DEFAULT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE RESTRICT,

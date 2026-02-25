@@ -40,6 +40,7 @@ class AutomationRow(TypedDict):
     run_count: int
     failure_count: int
     requires_approval: bool
+    action_steps: Optional[List[Dict[str, Any]]]
     created_at: str
     updated_at: str
 
@@ -103,6 +104,9 @@ def _parse_automation_row(row: Optional[Dict[str, Any]]) -> Optional[AutomationR
     for field in ("trigger_config", "output_config"):
         if row.get(field) and isinstance(row[field], str):
             row[field] = json.loads(row[field])
+    # Deserialize action_steps from JSON string
+    if row.get("action_steps") and isinstance(row["action_steps"], str):
+        row["action_steps"] = json.loads(row["action_steps"])
     return row
 
 
@@ -120,8 +124,8 @@ def create_automation(
     name: str,
     trigger_type: str,
     trigger_config: Dict[str, Any],
-    prompt: str,
     profile_id: str,
+    prompt: Optional[str] = None,
     project_id: Optional[str] = None,
     description: Optional[str] = None,
     output_config: Optional[Dict[str, Any]] = None,
@@ -132,6 +136,7 @@ def create_automation(
     max_cost_total: Optional[float] = None,
     max_runs_per_day: Optional[int] = None,
     requires_approval: bool = False,
+    action_steps: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[AutomationRow]:
     """Create a new automation."""
     now = datetime.utcnow().isoformat()
@@ -144,13 +149,14 @@ def create_automation(
                (id, name, description, trigger_type, trigger_config, prompt,
                 profile_id, project_id, output_config, max_turns, timeout_seconds,
                 max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
-                requires_approval, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                requires_approval, action_steps, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (automation_id, name, description, trigger_type,
-             json.dumps(trigger_config), prompt, profile_id, project_id,
+             json.dumps(trigger_config), prompt or "", profile_id, project_id,
              json.dumps(output_config), max_turns, timeout_seconds,
              max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
-             requires_approval, now, now)
+             requires_approval, json.dumps(action_steps) if action_steps else None,
+             now, now)
         )
     return get_automation(automation_id)
 
@@ -182,7 +188,7 @@ def get_enabled_automations() -> List[AutomationRow]:
 
 
 def get_automations_for_event(trigger_type: str, event_type: str, connector_id: Optional[str] = None) -> List[AutomationRow]:
-    """Get enabled automations matching a connector event trigger."""
+    """Get enabled automations matching a connector event or connector trigger."""
     automations = get_enabled_automations()
     results = []
     for a in automations:
@@ -191,6 +197,12 @@ def get_automations_for_event(trigger_type: str, event_type: str, connector_id: 
         tc = a.get("trigger_config", {})
         if trigger_type == "connector_event":
             if tc.get("event_type") != event_type:
+                continue
+            if connector_id and tc.get("connector_id") and tc["connector_id"] != connector_id:
+                continue
+        elif trigger_type == "connector_trigger":
+            # Match on trigger_id and optionally connector_id
+            if tc.get("trigger_id") != event_type:
                 continue
             if connector_id and tc.get("connector_id") and tc["connector_id"] != connector_id:
                 continue
@@ -220,6 +232,10 @@ def update_automation(automation_id: str, **kwargs) -> Optional[AutomationRow]:
         if key in kwargs:
             updates.append(f"{key} = ?")
             values.append(json.dumps(kwargs[key]))
+
+    if "action_steps" in kwargs:
+        updates.append("action_steps = ?")
+        values.append(json.dumps(kwargs["action_steps"]) if kwargs["action_steps"] is not None else None)
 
     if "trigger_type" in kwargs:
         updates.append("trigger_type = ?")

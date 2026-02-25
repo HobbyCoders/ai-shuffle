@@ -83,6 +83,7 @@ class ConnectorManager:
             config=config,
             on_incoming_message=self.handle_incoming_message,
             on_permission_response=self.handle_permission_response,
+            on_trigger=self._handle_trigger,
         )
 
         # Attempt to connect
@@ -126,6 +127,33 @@ class ConnectorManager:
         """Stop then start a connector."""
         await self.stop_connector(connector_id)
         return await self.start_connector(connector_id)
+
+    # ------------------------------------------------------------------
+    # Trigger dispatch (connector variant triggers → automations)
+    # ------------------------------------------------------------------
+
+    async def _handle_trigger(
+        self, connector_id: str, trigger_id: str, payload: Dict[str, Any]
+    ) -> None:
+        """Callback invoked by connectors when they emit a trigger event.
+
+        Routes the trigger to the automation manager which will fire any
+        automations configured with ``trigger_type="connector_trigger"``
+        matching this connector and trigger ID.
+        """
+        logger.debug(
+            "Connector %s emitted trigger '%s'", connector_id, trigger_id
+        )
+        try:
+            from app.core.automation_manager import automation_manager
+            await automation_manager.handle_connector_trigger(
+                connector_id, trigger_id, payload
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to dispatch connector trigger %s/%s to automations: %s",
+                connector_id, trigger_id, e,
+            )
 
     # ------------------------------------------------------------------
     # Event dispatch

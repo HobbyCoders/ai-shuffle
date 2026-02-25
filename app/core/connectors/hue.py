@@ -8,14 +8,18 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.core.connectors.base import (
+    ActionDef,
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
     IncomingMessage,
+    IncomingMessageCallback,
     OutgoingMessage,
     PermissionPrompt,
-    IncomingMessageCallback,
     PermissionResponseCallback,
+    TriggerCallback,
+    TriggerDef,
+    ToolDef,
     chunk_text,
 )
 
@@ -46,6 +50,95 @@ class HueConnector(BaseConnector):
     MAX_MESSAGE_LENGTH = 4000
     CAPABILITIES = ConnectorCapabilities(is_messaging=False)
 
+    TRIGGERS = [
+        TriggerDef(
+            id="light_state_changed",
+            name="Light State Changed",
+            description="Fires when a light's state changes",
+            payload_schema={
+                "type": "object",
+                "properties": {
+                    "light_id": {"type": "string"},
+                    "light_name": {"type": "string"},
+                    "on": {"type": "boolean"},
+                    "brightness": {"type": "integer"},
+                    "hue": {"type": "integer"},
+                    "saturation": {"type": "integer"},
+                },
+            },
+        ),
+    ]
+
+    ACTIONS = [
+        ActionDef(
+            id="set_light",
+            name="Set Light",
+            description="Set a light's state",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "light_id": {"type": "string"},
+                    "on": {"type": "boolean"},
+                    "brightness": {"type": "integer", "minimum": 0, "maximum": 254},
+                    "hue": {"type": "integer", "minimum": 0, "maximum": 65535},
+                    "saturation": {"type": "integer", "minimum": 0, "maximum": 254},
+                },
+                "required": ["light_id"],
+            },
+        ),
+        ActionDef(
+            id="turn_on",
+            name="Turn On",
+            description="Turn a light on",
+            input_schema={
+                "type": "object",
+                "properties": {"light_id": {"type": "string"}},
+                "required": ["light_id"],
+            },
+        ),
+        ActionDef(
+            id="turn_off",
+            name="Turn Off",
+            description="Turn a light off",
+            input_schema={
+                "type": "object",
+                "properties": {"light_id": {"type": "string"}},
+                "required": ["light_id"],
+            },
+        ),
+        ActionDef(
+            id="list_lights",
+            name="List Lights",
+            description="List all available lights",
+        ),
+    ]
+
+    TOOLS = [
+        ToolDef(
+            id="hue_control",
+            name="Hue Control",
+            description=(
+                "Control Philips Hue smart lights — turn on/off, set brightness, "
+                "color, and list available lights"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "enum": ["set_light", "turn_on", "turn_off", "list_lights"],
+                    },
+                    "light_id": {"type": "string"},
+                    "on": {"type": "boolean"},
+                    "brightness": {"type": "integer", "minimum": 0, "maximum": 254},
+                    "hue": {"type": "integer", "minimum": 0, "maximum": 65535},
+                    "saturation": {"type": "integer", "minimum": 0, "maximum": 254},
+                },
+                "required": ["command"],
+            },
+        ),
+    ]
+
     def __init__(
         self,
         connector_id: str,
@@ -53,10 +146,12 @@ class HueConnector(BaseConnector):
         config: Dict[str, Any],
         on_incoming_message: IncomingMessageCallback,
         on_permission_response: PermissionResponseCallback,
+        on_trigger: Optional[TriggerCallback] = None,
     ):
         super().__init__(
             connector_id, connector_type, config,
             on_incoming_message, on_permission_response,
+            on_trigger=on_trigger,
         )
         self._http_client: Optional[httpx.AsyncClient] = None
         self._poll_task: Optional[asyncio.Task] = None
@@ -250,6 +345,14 @@ class HueConnector(BaseConnector):
                                 diffs = self._describe_state_diff(name, previous_state, current_state)
                                 if diffs:
                                     changes.extend(diffs)
+                                    await self.emit_trigger("light_state_changed", {
+                                        "light_id": lid,
+                                        "light_name": name,
+                                        "on": current_state.get("on", False),
+                                        "brightness": current_state.get("bri", 0),
+                                        "hue": current_state.get("hue", 0),
+                                        "saturation": current_state.get("sat", 0),
+                                    })
 
                             # Store new states
                             self._light_states = {
@@ -689,6 +792,87 @@ class HueConnector(BaseConnector):
 
         await self._emit_reply(text)
         return True
+
+    # ------------------------------------------------------------------
+    # Actions & Tools
+    # ------------------------------------------------------------------
+
+    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a Hue action by ID."""
+        if self._http_client is None:
+            return {"success": False, "error": "Not connected"}
+
+        if action_id == "set_light":
+            light_id = params.get("light_id")
+            if not light_id:
+                return {"success": False, "error": "light_id is required"}
+            state: Dict[str, Any] = {}
+            if "on" in params:
+                state["on"] = params["on"]
+            if "brightness" in params:
+                state["bri"] = params["brightness"]
+            if "hue" in params:
+                state["hue"] = params["hue"]
+            if "saturation" in params:
+                state["sat"] = params["saturation"]
+            if not state:
+                return {"success": False, "error": "No state parameters provided"}
+            response = await self._api_put(f"/lights/{light_id}/state", state)
+            if response.status_code != 200:
+                return {"success": False, "error": f"Bridge returned {response.status_code}"}
+            return {"success": True, "light_id": light_id, "state": state}
+
+        if action_id == "turn_on":
+            light_id = params.get("light_id")
+            if not light_id:
+                return {"success": False, "error": "light_id is required"}
+            response = await self._api_put(f"/lights/{light_id}/state", {"on": True})
+            if response.status_code != 200:
+                return {"success": False, "error": f"Bridge returned {response.status_code}"}
+            return {"success": True, "light_id": light_id, "on": True}
+
+        if action_id == "turn_off":
+            light_id = params.get("light_id")
+            if not light_id:
+                return {"success": False, "error": "light_id is required"}
+            response = await self._api_put(f"/lights/{light_id}/state", {"on": False})
+            if response.status_code != 200:
+                return {"success": False, "error": f"Bridge returned {response.status_code}"}
+            return {"success": True, "light_id": light_id, "on": False}
+
+        if action_id == "list_lights":
+            response = await self._api_get("/lights")
+            if response.status_code != 200:
+                return {"success": False, "error": f"Bridge returned {response.status_code}"}
+            lights_data = response.json()
+            if isinstance(lights_data, list):
+                return {"success": False, "error": "Bridge returned an error response"}
+            lights = []
+            for lid, info in lights_data.items():
+                state = info.get("state", {})
+                lights.append({
+                    "id": lid,
+                    "name": info.get("name", f"Light {lid}"),
+                    "on": state.get("on", False),
+                    "brightness": state.get("bri", 0),
+                    "reachable": state.get("reachable", False),
+                })
+            return {"success": True, "lights": lights}
+
+        return {"success": False, "error": f"Unknown action: {action_id}"}
+
+    async def execute_tool(self, tool_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a Hue tool call by routing to the appropriate action."""
+        if tool_id != "hue_control":
+            return {"success": False, "error": f"Unknown tool: {tool_id}"}
+
+        command = params.get("command")
+        if not command:
+            return {"success": False, "error": "command is required"}
+
+        # Route the tool command to the corresponding action
+        action_params = {k: v for k, v in params.items() if k != "command"}
+        return await self.execute_action(command, action_params)
 
     # ------------------------------------------------------------------
     # Test

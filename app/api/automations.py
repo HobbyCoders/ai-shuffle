@@ -55,6 +55,7 @@ async def create_automation_endpoint(
             max_cost_total=data.max_cost_total,
             max_runs_per_day=data.max_runs_per_day,
             requires_approval=data.requires_approval,
+            action_steps=data.action_steps,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

@@ -11,14 +11,16 @@ from typing import Any, Dict, Optional
 import httpx
 
 from app.core.connectors.base import (
+    ActionDef,
     BaseConnector,
     ConnectorCapabilities,
     ConnectorStatus,
     IncomingMessage,
+    IncomingMessageCallback,
     OutgoingMessage,
     PermissionPrompt,
-    IncomingMessageCallback,
     PermissionResponseCallback,
+    TriggerDef,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,42 @@ class WebhookConnector(BaseConnector):
     """
 
     CAPABILITIES = ConnectorCapabilities(is_messaging=False)
+
+    TRIGGERS = [
+        TriggerDef(
+            id="webhook_received",
+            name="Webhook Received",
+            description="Fires when an inbound webhook request is received",
+            payload_schema={
+                "type": "object",
+                "properties": {
+                    "method": {"type": "string"},
+                    "headers": {"type": "object"},
+                    "body": {"type": "object"},
+                    "path": {"type": "string"},
+                },
+            },
+        ),
+    ]
+
+    ACTIONS = [
+        ActionDef(
+            id="send_webhook",
+            name="Send Webhook",
+            description="Send an outbound HTTP request",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+                    "headers": {"type": "object"},
+                    "body": {"type": "object"},
+                },
+            },
+        ),
+    ]
+
+    TOOLS = []
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -189,6 +227,13 @@ class WebhookConnector(BaseConnector):
         )
         await self._on_incoming_message(message)
 
+        await self.emit_trigger("webhook_received", {
+            "method": payload.get("method", "POST"),
+            "headers": payload.get("headers", {}),
+            "body": payload,
+            "path": self.config.get("inbound_path", "webhook"),
+        })
+
     # ------------------------------------------------------------------
     # Outgoing (only send_notification is meaningful)
     # ------------------------------------------------------------------
@@ -296,6 +341,54 @@ class WebhookConnector(BaseConnector):
             MAX_RETRIES, self.connector_id, url, last_error,
         )
         return False
+
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
+
+    async def execute_action(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a Webhook action by ID."""
+        if action_id != "send_webhook":
+            return {"success": False, "error": f"Unknown action: {action_id}"}
+
+        url = params.get("url") or self.config.get("url")
+        if not url:
+            return {"success": False, "error": "No URL provided and no default URL configured"}
+
+        method = (params.get("method") or "POST").upper()
+        headers = params.get("headers") or {}
+        body = params.get("body")
+
+        headers.setdefault("Content-Type", "application/json")
+        headers.setdefault("User-Agent", "AI-Hub-Webhook/1.0")
+
+        secret = self.config.get("secret")
+        if secret and body is not None:
+            payload_json = json.dumps(body)
+            signature = _generate_signature(payload_json, secret)
+            headers["X-Webhook-Signature"] = f"sha256={signature}"
+
+        try:
+            async with httpx.AsyncClient(timeout=WEBHOOK_TIMEOUT) as client:
+                response = await client.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    json=body,
+                )
+
+            if 200 <= response.status_code < 300:
+                return {
+                    "success": True,
+                    "status_code": response.status_code,
+                    "body": response.text[:500],
+                }
+            return {
+                "success": False,
+                "error": f"HTTP {response.status_code}: {response.text[:200]}",
+            }
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
     # ------------------------------------------------------------------
     # Test
