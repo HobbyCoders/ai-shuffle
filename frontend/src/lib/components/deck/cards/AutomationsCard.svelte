@@ -40,6 +40,7 @@
 	import type { Project } from '$lib/stores/types';
 	import { getConnectors } from '$lib/api/connectors';
 	import type { Connector } from '$lib/api/connectors';
+	import { timezonePreference } from '$lib/stores/timezonePreference';
 	import { slide, fade } from 'svelte/transition';
 	import {
 		Search,
@@ -119,6 +120,15 @@
 	let formRequiresApproval = $state(false);
 	let showBudgetSection = $state(false);
 
+	// Cron builder state
+	let cronMode: 'preset' | 'custom' = $state('preset');
+	let cronPreset = $state('0 9 * * *');
+	let cronMinute = $state('0');
+	let cronHour = $state('9');
+	let cronDayOfMonth = $state('*');
+	let cronMonth = $state('*');
+	let cronDayOfWeek = $state('*');
+
 	// Test result
 	let testResult: AutomationTestResult | null = $state(null);
 
@@ -171,7 +181,7 @@
 		formName = '';
 		formDescription = '';
 		formTriggerType = 'cron';
-		formTriggerConfig = {};
+		formTriggerConfig = { expression: '0 9 * * *' };
 		formPrompt = '';
 		formProfileId = profiles.length > 0 ? profiles[0].id : '';
 		formProjectId = '';
@@ -187,6 +197,14 @@
 		showBudgetSection = false;
 		formError = '';
 		testResult = null;
+		// Reset cron builder
+		cronMode = 'preset';
+		cronPreset = '0 9 * * *';
+		cronMinute = '0';
+		cronHour = '9';
+		cronDayOfMonth = '*';
+		cronMonth = '*';
+		cronDayOfWeek = '*';
 	}
 
 	function backToList() {
@@ -206,6 +224,9 @@
 		formDescription = automation.description || '';
 		formTriggerType = automation.trigger_type;
 		formTriggerConfig = { ...automation.trigger_config };
+		if (automation.trigger_type === 'cron' && automation.trigger_config.expression) {
+			syncCronFieldsFromExpression(automation.trigger_config.expression);
+		}
 		formPrompt = automation.prompt;
 		formProfileId = automation.profile_id;
 		formProjectId = automation.project_id || '';
@@ -257,7 +278,9 @@
 			name: formName.trim(),
 			description: formDescription.trim() || undefined,
 			trigger_type: formTriggerType,
-			trigger_config: { ...formTriggerConfig },
+			trigger_config: formTriggerType === 'cron'
+				? { ...formTriggerConfig, timezone: timezonePreference.resolveTimezone() }
+				: { ...formTriggerConfig },
 			prompt: formPrompt,
 			profile_id: formProfileId,
 			project_id: formProjectId || undefined,
@@ -450,6 +473,117 @@
 	function successRate(total: number, successful: number): string {
 		if (total === 0) return 'N/A';
 		return `${Math.round((successful / total) * 100)}%`;
+	}
+
+	// ── Cron builder helpers ────────────────────────────────────────────
+	const CRON_PRESETS: Record<string, string> = {
+		'0 * * * *': 'Every hour',
+		'0 9 * * *': 'Every day at 9 AM',
+		'0 9 * * 1-5': 'Every weekday at 9 AM',
+		'0 9 * * 1': 'Every Monday at 9 AM',
+		'0 0 1 * *': 'Every month on the 1st',
+		'*/15 * * * *': 'Every 15 minutes',
+		'*/30 * * * *': 'Every 30 minutes'
+	};
+
+	function parseCronExpression(expr: string): { minute: string; hour: string; dayOfMonth: string; month: string; dayOfWeek: string } | null {
+		if (!expr) return null;
+		const parts = expr.trim().split(/\s+/);
+		if (parts.length !== 5) return null;
+		return { minute: parts[0], hour: parts[1], dayOfMonth: parts[2], month: parts[3], dayOfWeek: parts[4] };
+	}
+
+	function buildCronFromFields(): string {
+		return `${cronMinute} ${cronHour} ${cronDayOfMonth} ${cronMonth} ${cronDayOfWeek}`;
+	}
+
+	function syncCronFieldsFromExpression(expr: string) {
+		const parsed = parseCronExpression(expr);
+		if (parsed) {
+			cronMinute = parsed.minute;
+			cronHour = parsed.hour;
+			cronDayOfMonth = parsed.dayOfMonth;
+			cronMonth = parsed.month;
+			cronDayOfWeek = parsed.dayOfWeek;
+		}
+		if (expr && CRON_PRESETS[expr.trim()]) {
+			cronMode = 'preset';
+			cronPreset = expr.trim();
+		} else {
+			cronMode = 'custom';
+		}
+	}
+
+	function applyCronPreset(preset: string) {
+		cronPreset = preset;
+		formTriggerConfig = { ...formTriggerConfig, expression: preset };
+		const parsed = parseCronExpression(preset);
+		if (parsed) {
+			cronMinute = parsed.minute;
+			cronHour = parsed.hour;
+			cronDayOfMonth = parsed.dayOfMonth;
+			cronMonth = parsed.month;
+			cronDayOfWeek = parsed.dayOfWeek;
+		}
+	}
+
+	function applyCronFields() {
+		const expr = buildCronFromFields();
+		formTriggerConfig = { ...formTriggerConfig, expression: expr };
+	}
+
+	function describeCron(expr: string): string {
+		if (!expr) return '';
+		const parts = expr.trim().split(/\s+/);
+		if (parts.length !== 5) return 'Invalid expression';
+		const [min, hour, dom, month, dow] = parts;
+
+		if (expr.trim() === '* * * * *') return 'Every minute';
+		if (CRON_PRESETS[expr.trim()]) return CRON_PRESETS[expr.trim()];
+
+		let desc = '';
+		if (min !== '*' && hour !== '*') {
+			const h = parseInt(hour);
+			const m = parseInt(min);
+			const ampm = h >= 12 ? 'PM' : 'AM';
+			const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+			desc = `At ${h12}:${String(m).padStart(2, '0')} ${ampm}`;
+		} else if (min === '0' && hour === '*') {
+			desc = 'Every hour';
+		} else if (min.startsWith('*/')) {
+			desc = `Every ${min.slice(2)} minutes`;
+		} else {
+			desc = `At minute ${min}`;
+		}
+
+		if (dow === '1-5') {
+			desc += ', weekdays';
+		} else if (dow === '0,6') {
+			desc += ', weekends';
+		} else if (dow !== '*') {
+			const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+			const idx = parseInt(dow);
+			desc += `, on ${isNaN(idx) ? dow : (dayNames[idx] || dow)}`;
+		}
+
+		if (dom !== '*') {
+			desc += `, on day ${dom}`;
+		}
+
+		if (month !== '*') {
+			const monthNames = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+			const idx = parseInt(month);
+			desc += ` of ${isNaN(idx) ? month : (monthNames[idx] || month)}`;
+		}
+
+		return desc;
+	}
+
+	function formatHour(h: number): string {
+		if (h === 0) return '12 AM';
+		if (h < 12) return `${h} AM`;
+		if (h === 12) return '12 PM';
+		return `${h - 12} PM`;
 	}
 </script>
 
@@ -644,7 +778,7 @@
 					<button
 						class="auto-trigger-btn"
 						class:active={formTriggerType === 'cron'}
-						onclick={() => { formTriggerType = 'cron'; formTriggerConfig = {}; }}
+						onclick={() => { formTriggerType = 'cron'; formTriggerConfig = { expression: cronPreset }; }}
 					>
 						<Clock size={14} />
 						Cron
@@ -679,23 +813,137 @@
 			<!-- Trigger config -->
 			<div class="card-form-section" transition:slide={{ duration: 150 }}>
 				{#if formTriggerType === 'cron'}
-					<label class="card-form-label" for="auto-cron-expr">Cron Expression</label>
-					<input
-						id="auto-cron-expr"
-						type="text"
-						class="card-form-input card-form-input--mono"
-						bind:value={formTriggerConfig.expression}
-						placeholder="0 9 * * *"
-					/>
-					<p class="card-form-hint">Standard cron expression (minute hour day month weekday)</p>
-					<label class="card-form-label" for="auto-cron-tz" style="margin-top: 12px">Timezone</label>
-					<input
-						id="auto-cron-tz"
-						type="text"
-						class="card-form-input"
-						bind:value={formTriggerConfig.timezone}
-						placeholder="UTC"
-					/>
+					<span class="card-form-label">Schedule</span>
+					<!-- Preset/Custom toggle -->
+					<div class="cron-mode-selector">
+						<button
+							class="auto-trigger-btn"
+							class:active={cronMode === 'preset'}
+							onclick={() => cronMode = 'preset'}
+						>
+							Preset
+						</button>
+						<button
+							class="auto-trigger-btn"
+							class:active={cronMode === 'custom'}
+							onclick={() => cronMode = 'custom'}
+						>
+							Custom
+						</button>
+					</div>
+
+					{#if cronMode === 'preset'}
+						<select
+							class="card-form-input"
+							value={cronPreset}
+							onchange={(e) => applyCronPreset(e.currentTarget.value)}
+						>
+							<option value="*/15 * * * *">Every 15 minutes</option>
+							<option value="*/30 * * * *">Every 30 minutes</option>
+							<option value="0 * * * *">Every hour</option>
+							<option value="0 9 * * *">Every day at 9 AM</option>
+							<option value="0 9 * * 1-5">Every weekday at 9 AM</option>
+							<option value="0 9 * * 1">Every Monday at 9 AM</option>
+							<option value="0 0 1 * *">Every month on the 1st</option>
+						</select>
+					{:else}
+						<div class="cron-builder-grid">
+							<div class="cron-field">
+								<label class="card-form-label" for="cron-minute">Minute</label>
+								<select id="cron-minute" class="card-form-input" bind:value={cronMinute} onchange={() => applyCronFields()}>
+									<option value="*">Every minute</option>
+									<option value="*/5">Every 5 min</option>
+									<option value="*/10">Every 10 min</option>
+									<option value="*/15">Every 15 min</option>
+									<option value="*/30">Every 30 min</option>
+									<option value="0">:00</option>
+									<option value="15">:15</option>
+									<option value="30">:30</option>
+									<option value="45">:45</option>
+								</select>
+							</div>
+							<div class="cron-field">
+								<label class="card-form-label" for="cron-hour">Hour</label>
+								<select id="cron-hour" class="card-form-input" bind:value={cronHour} onchange={() => applyCronFields()}>
+									<option value="*">Every hour</option>
+									{#each Array.from({length: 24}, (_, i) => i) as h}
+										<option value={String(h)}>{formatHour(h)}</option>
+									{/each}
+								</select>
+							</div>
+							<div class="cron-field">
+								<label class="card-form-label" for="cron-dom">Day of Month</label>
+								<select id="cron-dom" class="card-form-input" bind:value={cronDayOfMonth} onchange={() => applyCronFields()}>
+									<option value="*">Every day</option>
+									{#each Array.from({length: 31}, (_, i) => i + 1) as d}
+										<option value={String(d)}>{d}</option>
+									{/each}
+								</select>
+							</div>
+							<div class="cron-field">
+								<label class="card-form-label" for="cron-month">Month</label>
+								<select id="cron-month" class="card-form-input" bind:value={cronMonth} onchange={() => applyCronFields()}>
+									<option value="*">Every month</option>
+									<option value="1">January</option>
+									<option value="2">February</option>
+									<option value="3">March</option>
+									<option value="4">April</option>
+									<option value="5">May</option>
+									<option value="6">June</option>
+									<option value="7">July</option>
+									<option value="8">August</option>
+									<option value="9">September</option>
+									<option value="10">October</option>
+									<option value="11">November</option>
+									<option value="12">December</option>
+								</select>
+							</div>
+							<div class="cron-field" style="grid-column: 1 / -1">
+								<label class="card-form-label" for="cron-dow">Day of Week</label>
+								<select id="cron-dow" class="card-form-input" bind:value={cronDayOfWeek} onchange={() => applyCronFields()}>
+									<option value="*">Every day</option>
+									<option value="1-5">Weekdays (Mon–Fri)</option>
+									<option value="0,6">Weekends</option>
+									<option value="1">Monday</option>
+									<option value="2">Tuesday</option>
+									<option value="3">Wednesday</option>
+									<option value="4">Thursday</option>
+									<option value="5">Friday</option>
+									<option value="6">Saturday</option>
+									<option value="0">Sunday</option>
+								</select>
+							</div>
+						</div>
+					{/if}
+
+					<!-- Summary bar -->
+					{#if formTriggerConfig.expression}
+						<div class="cron-summary">
+							<span class="cron-summary-text">{describeCron(formTriggerConfig.expression)}</span>
+							<code class="cron-summary-expr">{formTriggerConfig.expression}</code>
+						</div>
+					{/if}
+
+					<!-- Raw expression escape hatch -->
+					<details class="cron-raw-details">
+						<summary class="card-form-hint" style="cursor: pointer; user-select: none;">Edit raw expression</summary>
+						<input
+							type="text"
+							class="card-form-input card-form-input--mono"
+							style="margin-top: 6px"
+							value={formTriggerConfig.expression || ''}
+							oninput={(e) => {
+								formTriggerConfig = { ...formTriggerConfig, expression: e.currentTarget.value };
+								syncCronFieldsFromExpression(e.currentTarget.value);
+							}}
+							placeholder="0 9 * * *"
+						/>
+					</details>
+
+					<!-- Timezone hint -->
+					<p class="card-form-hint" style="margin-top: 8px">
+						Uses your settings timezone ({timezonePreference.resolveTimezone()})
+					</p>
 				{:else if formTriggerType === 'interval'}
 					<label class="card-form-label" for="auto-interval-secs">Interval (seconds)</label>
 					<input
@@ -708,22 +956,37 @@
 					/>
 					<p class="card-form-hint">Minimum 60 seconds</p>
 				{:else if formTriggerType === 'connector_event'}
-					<label class="card-form-label" for="auto-connector-id">Connector ID</label>
-					<input
+					<label class="card-form-label" for="auto-connector-id">Connector</label>
+					<select
 						id="auto-connector-id"
-						type="text"
 						class="card-form-input"
 						bind:value={formTriggerConfig.connector_id}
-						placeholder="connector-uuid"
-					/>
+					>
+						<option value="">Select a connector...</option>
+						{#each connectors.filter(c => c.is_active || c.status === 'connected') as c}
+							<option value={c.id}>{c.name} ({c.type})</option>
+						{/each}
+						{#if connectors.filter(c => !c.is_active && c.status !== 'connected').length > 0}
+							<optgroup label="Inactive">
+								{#each connectors.filter(c => !c.is_active && c.status !== 'connected') as c}
+									<option value={c.id}>{c.name} ({c.type}) - inactive</option>
+								{/each}
+							</optgroup>
+						{/if}
+					</select>
 					<label class="card-form-label" for="auto-event-type" style="margin-top: 12px">Event Type</label>
-					<input
+					<select
 						id="auto-event-type"
-						type="text"
 						class="card-form-input"
 						bind:value={formTriggerConfig.event_type}
-						placeholder="message.received"
-					/>
+					>
+						<option value="">Select an event...</option>
+						<option value="session.complete">Session complete</option>
+						<option value="session.error">Session error</option>
+						<option value="session.started">Session started</option>
+						<option value="permission.requested">Permission requested</option>
+						<option value="input.needed">Input needed</option>
+					</select>
 				{:else if formTriggerType === 'webhook'}
 					{#if currentView === 'edit' && selectedAutomation}
 						<label class="card-form-label" for="auto-webhook-url">Webhook URL</label>
@@ -1589,6 +1852,60 @@
 		box-shadow: var(--selection-shadow-subtle, var(--selection-shadow));
 	}
 
+	/* ═══════════════════ Cron Builder ═══════════════════ */
+	.cron-mode-selector {
+		display: flex;
+		gap: 6px;
+		margin-bottom: 10px;
+	}
+
+	.cron-builder-grid {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 10px;
+	}
+
+	.cron-field {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.cron-summary {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		margin-top: 10px;
+		padding: 8px 12px;
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle, var(--border));
+		border-radius: var(--radius-sm, calc(var(--radius, 0.75rem) * 0.5));
+		font-size: var(--text-sm, 0.75rem);
+	}
+
+	.cron-summary-text {
+		color: var(--text-primary, var(--foreground));
+		font-weight: 500;
+	}
+
+	.cron-summary-expr {
+		font-family: var(--card-font-mono, monospace);
+		color: var(--text-secondary, var(--muted-foreground));
+		font-size: var(--text-xs, 0.6875rem);
+		padding: 2px 6px;
+		background: var(--muted);
+		border-radius: 4px;
+		flex-shrink: 0;
+	}
+
+	.cron-raw-details {
+		margin-top: 8px;
+	}
+
+	.cron-raw-details summary {
+		font-size: var(--text-sm, 0.75rem);
+	}
+
 	/* Budget section */
 	.auto-expand-btn {
 		display: flex;
@@ -1989,6 +2306,16 @@
 
 		.auto-budget-grid {
 			grid-template-columns: 1fr;
+		}
+
+		.cron-builder-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.cron-summary {
+			flex-direction: column;
+			align-items: flex-start;
+			gap: 4px;
 		}
 
 		.auto-stats-row {
