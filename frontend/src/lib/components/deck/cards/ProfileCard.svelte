@@ -164,6 +164,7 @@
 	// Tool selection mode
 	let toolSelectionMode = $state<'all' | 'none' | 'allow' | 'disallow'>('all');
 	let aiToolSelectionMode = $state<'all' | 'custom'>('custom');
+	let customModelMode = $state(false);
 
 	// Collapsible tool source sections
 	let expandedSections = $state<Record<string, boolean>>({
@@ -310,6 +311,7 @@
 		};
 		toolSelectionMode = 'all';
 		aiToolSelectionMode = 'custom';
+		customModelMode = false;
 		activeTab = 'general';
 	}
 
@@ -351,6 +353,9 @@
 		} else {
 			toolSelectionMode = 'all';
 		}
+
+		const presetModels = ['haiku', 'sonnet', 'opus'];
+		customModelMode = !presetModels.includes(config.model || 'sonnet');
 
 		profileForm = {
 			id: profile.id,
@@ -738,6 +743,9 @@
 			spAppend = agent.system_prompt_append || '';
 		}
 
+		const presetModelsAgent = ['haiku', 'sonnet', 'opus'];
+		customModelMode = !presetModelsAgent.includes(agent.model || 'sonnet');
+
 		profileForm = {
 			id: '', // User must provide unique ID for new profile
 			name: agent.name,
@@ -927,13 +935,13 @@
 						<div class="pf-field-grid">
 							<div class="pf-field">
 								<label class="pf-label">Model</label>
-								<select class="pf-select" value={['haiku','sonnet','opus'].includes(profileForm.model) ? profileForm.model : '__custom__'} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; profileForm.model = v === '__custom__' ? '' : v; }}>
+								<select class="pf-select" value={customModelMode ? '__custom__' : profileForm.model} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v === '__custom__') { customModelMode = true; profileForm.model = ''; } else { customModelMode = false; profileForm.model = v; } }}>
 									<option value="haiku">Haiku</option>
 									<option value="sonnet">Sonnet</option>
 									<option value="opus">Opus</option>
 									<option value="__custom__">Custom...</option>
 								</select>
-								{#if !['haiku','sonnet','opus'].includes(profileForm.model)}
+								{#if customModelMode}
 									<input type="text" bind:value={profileForm.model} class="pf-input pf-input--mono" placeholder="e.g. claude-opus-4-6" style="margin-top: 6px;" />
 								{/if}
 							</div>

@@ -1,10 +1,12 @@
 <script lang="ts">
 	/**
 	 * ContextUsageBar - Shows context window usage as a progress bar with percentage.
-	 * Reads directly from stores.
+	 * Resolves the effective model (override → profile → default) to determine whether
+	 * the context window is 200k (standard) or 1M (extended).
 	 */
 	import { activeSession } from '$lib/stores/active-session';
-	import { AUTO_COMPACTION_BASE, CONTEXT_MAX } from '$lib/constants/chat';
+	import { profiles } from '$lib/stores/app-data';
+	import { AUTO_COMPACTION_BASE, getContextMaxForModel } from '$lib/constants/chat';
 	import { sessionStateManager } from '$lib/stores/session/session-state.svelte';
 
 	function formatTokenCount(count: number): string {
@@ -16,6 +18,15 @@
 		}
 		return count.toString();
 	}
+
+	// Resolve effective model: override → profile config → default
+	const effectiveModel = $derived.by(() => {
+		if ($activeSession.modelOverride) return $activeSession.modelOverride;
+		const profile = $profiles.find(p => p.id === $activeSession.profile);
+		return profile?.config?.model || 'sonnet';
+	});
+
+	const contextMax = $derived(getContextMaxForModel(effectiveModel));
 
 	// Context usage: prefer real-time session state (updated by poller during streaming),
 	// fall back to tab store values for idle/resumed sessions.
@@ -33,13 +44,13 @@
 			: ($activeSession.contextUsed ?? 0)
 	);
 	const contextUsed = $derived(baseContextUsed + AUTO_COMPACTION_BASE);
-	const contextPercent = $derived(Math.min((contextUsed / CONTEXT_MAX) * 100, 100));
+	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
 	// Context color - always themed (no usage-based color changes)
 	const contextColor = $derived('');
 </script>
 
-<div class="usage-indicator {contextColor}" title="{formatTokenCount(contextUsed)} / {formatTokenCount(CONTEXT_MAX)} tokens">
+<div class="usage-indicator {contextColor}" title="{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)} tokens">
 	<div class="usage-bar">
 		<div class="usage-fill" style="width: {Math.min(contextPercent, 100)}%"></div>
 	</div>

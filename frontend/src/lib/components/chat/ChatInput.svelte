@@ -14,7 +14,7 @@
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
-	import { AUTO_COMPACTION_BASE, CONTEXT_MAX } from '$lib/constants/chat';
+	import { AUTO_COMPACTION_BASE, getContextMaxForModel } from '$lib/constants/chat';
 	import { sessionStateManager } from '$lib/stores/session/session-state.svelte';
 	import TiptapEditor from './TiptapEditor.svelte';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery } from './tiptap/serialization';
@@ -47,6 +47,15 @@
 	}
 
 
+	// Resolve effective model: override → profile config → default
+	const effectiveModel = $derived.by(() => {
+		if ($activeSession.modelOverride) return $activeSession.modelOverride;
+		const profile = $profiles.find(p => p.id === $activeSession.profile);
+		return profile?.config?.model || 'sonnet';
+	});
+
+	const contextMax = $derived(getContextMaxForModel(effectiveModel));
+
 	// Context usage: prefer real-time session state (updated by poller during streaming),
 	// fall back to tab store values for idle/resumed sessions.
 	// Session state is the source of truth during streaming; tab store only updates at stream end.
@@ -64,7 +73,7 @@
 			: ($activeSession.contextUsed ?? 0)
 	);
 	const contextUsed = $derived(baseContextUsed + AUTO_COMPACTION_BASE);
-	const contextPercent = $derived(Math.min((contextUsed / CONTEXT_MAX) * 100, 100));
+	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
 
 	// Input state - use draft for persistence across session switches
@@ -1010,7 +1019,7 @@
 				<div class="controls-dock">
 					<!-- Left: Usage Indicator -->
 					<div class="controls-left">
-						<div class="usage-indicator {contextColor}" title="{formatTokenCount(contextUsed)} / {formatTokenCount(CONTEXT_MAX)} tokens">
+						<div class="usage-indicator {contextColor}" title="{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)} tokens">
 							<div class="usage-bar">
 								<div class="usage-fill" style="width: {Math.min(contextPercent, 100)}%"></div>
 							</div>
