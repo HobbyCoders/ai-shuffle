@@ -37,11 +37,17 @@
 		previousIsEmpty = isEmpty;
 
 		if (wasEmpty && !isEmpty) {
+			// Empty → active transition: animate the reveal
 			transitioningFromEmpty = true;
 			const timer = setTimeout(() => {
 				transitioningFromEmpty = false;
 			}, 450);
 			return () => clearTimeout(timer);
+		} else {
+			// Active → empty transition: clear the animation class immediately.
+			// Without this, the class gets stuck if the effect cleanup (clearTimeout)
+			// runs before the timeout fires, leaving transitioningFromEmpty=true.
+			transitioningFromEmpty = false;
 		}
 	});
 

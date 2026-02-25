@@ -2,7 +2,7 @@
 // Version: 2.0.0
 // Auto-update enabled - clients reload automatically on new version
 
-const CACHE_VERSION = 5;
+const CACHE_VERSION = 6;
 const CACHE_NAME = `ai-shuffle-v${CACHE_VERSION}`;
 const OFFLINE_URL = '/offline.html';
 

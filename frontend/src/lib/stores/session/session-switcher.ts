@@ -230,6 +230,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	async function switchSession(sessionId: string, projectId?: string | null) {
 		const generation = ++_switchGeneration;
 		const state = getState();
+		console.debug(`[SessionSwitcher] switchSession(${sessionId}): gen=${generation}, leaving=${state.sessionId}, msgs=${state.messages.length}`);
 
 		// Stop polling for the session we're leaving
 		if (state.sessionId) {
