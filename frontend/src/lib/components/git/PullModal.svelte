@@ -9,6 +9,7 @@
 	import {
 		ArrowDownToLine, ArrowUpFromLine, GitBranch, GitMerge, X, AlertTriangle, Package
 	} from 'lucide-svelte';
+	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 
 	type PullStrategy = 'merge' | 'rebase';
 
@@ -36,15 +37,19 @@
 	const commitWord = $derived(commitsBehind === 1 ? 'commit' : 'commits');
 	const canPull = $derived(!hasChanges || autoStash);
 
-	// Reset state when modal opens
+	// Load saved preferences when modal opens
 	$effect(() => {
 		if (open) {
-			strategy = 'rebase';
-			autoStash = false;
+			const prefs = gitActionPreferences.current;
+			strategy = prefs.pullStrategy;
+			autoStash = prefs.autoStash;
 		}
 	});
 
 	function handlePull() {
+		// Save user's selections for next time
+		gitActionPreferences.setPullStrategy(strategy);
+		gitActionPreferences.setAutoStash(autoStash);
 		onClose();
 		onPull(strategy, autoStash && hasChanges);
 	}

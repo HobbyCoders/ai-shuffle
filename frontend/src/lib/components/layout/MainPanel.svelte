@@ -16,6 +16,7 @@
 	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming';
 	import { createPullRequest, getPullRequests, mergePullRequest } from '$lib/api/github';
 	import { generateCommitMessage, generatePRDescription, deleteWorktree } from '$lib/api/git';
+	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import ChatView from './ChatView.svelte';
 	import PageHeader from './PageHeader.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
@@ -564,6 +565,43 @@
 		}
 	}
 
+	// Derived state for quick-action guards
+	const isOnDefaultBranch = $derived(
+		($gitStatus?.current_branch ?? null) === ($githubRepoInfo?.default_branch ?? 'main')
+	);
+
+	// =========================================================================
+	// Quick-action handlers (use saved preferences, bypass modals)
+	// =========================================================================
+
+	/** Quick commit: uses saved preferences, empty message triggers AI generation */
+	function handleQuickCommit() {
+		const prefs = gitActionPreferences.current;
+		let action = prefs.nextStep;
+		// Guard: can't push/pr when behind upstream
+		if (needsPull) action = 'commit';
+		// Guard: can't create PR from default branch
+		else if (action === 'pr' && isOnDefaultBranch) action = 'push';
+		handleStartCommit(action, '', prefs.includeUnstaged);
+	}
+
+	/** Quick create PR: empty title/body triggers AI generation */
+	function handleQuickCreatePR() {
+		handleCreatePR('', '');
+	}
+
+	/** Quick pull: uses saved strategy and autoStash */
+	function handleQuickPull() {
+		const prefs = gitActionPreferences.current;
+		handlePull(prefs.pullStrategy, prefs.autoStash && pullHasChanges);
+	}
+
+	/** Quick finish: uses saved mergeMethod and cleanup */
+	function handleQuickFinish() {
+		const prefs = gitActionPreferences.current;
+		handleFinish(prefs.mergeMethod, prefs.cleanupAfterMerge);
+	}
+
 	async function handlePull(strategy: 'merge' | 'rebase', autoStash: boolean = false) {
 		progressAction = 'pull';
 		progressMode = 'pull';
@@ -621,13 +659,17 @@
 							isGitRepo={$gitStatus?.is_git_repo !== false}
 							worktreeBranch={activeWorktreeBranch}
 							openPR={branchPR}
-							onClickCommit={() => { showCommitModalMode = 'commit'; showCommitModal = true; }}
-							onClickCreatePR={() => { showCommitModalMode = 'pr-only'; showCommitModal = true; }}
-							onClickFinish={() => showFinishModal = true}
+							onClickCommit={handleQuickCommit}
+							onClickCreatePR={handleQuickCreatePR}
+							onClickFinish={handleQuickFinish}
 							onClickNewBranch={() => showCreateBranchModal = true}
 							onClickPush={() => handlePush(false)}
-							onClickPull={() => showPullModal = true}
+							onClickPull={handleQuickPull}
 							onClickInitRepo={() => showInitRepoModal = true}
+							onOpenCommitModal={() => { showCommitModalMode = 'commit'; showCommitModal = true; }}
+							onOpenCreatePRModal={() => { showCommitModalMode = 'pr-only'; showCommitModal = true; }}
+							onOpenFinishModal={() => showFinishModal = true}
+							onOpenPullModal={() => showPullModal = true}
 						/>
 					{/if}
 				{/snippet}

@@ -9,6 +9,7 @@
 		CheckCircle2, GitBranch, GitMerge, X,
 		ToggleLeft, ToggleRight
 	} from 'lucide-svelte';
+	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 
 	type MergeMethod = 'squash' | 'merge' | 'rebase';
 
@@ -34,15 +35,19 @@
 		pr ? (pr.title.length > 35 ? pr.title.slice(0, 32) + '...' : pr.title) : ''
 	);
 
-	// Reset state when modal opens
+	// Load saved preferences when modal opens
 	$effect(() => {
 		if (open) {
-			mergeMethod = 'squash';
-			cleanupAfterMerge = true;
+			const prefs = gitActionPreferences.current;
+			mergeMethod = prefs.mergeMethod;
+			cleanupAfterMerge = prefs.cleanupAfterMerge;
 		}
 	});
 
 	function handleMerge() {
+		// Save user's selections for next time
+		gitActionPreferences.setMergeMethod(mergeMethod);
+		gitActionPreferences.setCleanupAfterMerge(cleanupAfterMerge);
 		onClose();
 		onFinish(mergeMethod, cleanupAfterMerge);
 	}

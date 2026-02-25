@@ -11,6 +11,7 @@
 	import { chatPreferences } from '$lib/stores/chatPreferences';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
 	import { files } from '$lib/stores/files';
+	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { onDestroy } from 'svelte';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 	import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
@@ -70,7 +71,8 @@
 					chatPreferences.load(),
 					hotkeyPreferences.syncFromServer(),
 					theme.syncFromServer(),
-					files.syncFromServer()
+					files.syncFromServer(),
+					gitActionPreferences.syncFromServer()
 				]);
 			}
 

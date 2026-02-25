@@ -16,6 +16,7 @@
 		CircleDot, ArrowUp, Github
 	} from 'lucide-svelte';
 	import { diffStats, gitStatus } from '$lib/stores/git';
+	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 
 	type CommitAction = 'commit' | 'push' | 'pr';
 	type ModalMode = 'commit' | 'pr-only';
@@ -53,14 +54,15 @@
 			: currentBranch
 	);
 
-	// Reset state when modal opens
+	// Load saved preferences when modal opens
 	$effect(() => {
 		if (open) {
 			commitMessage = '';
 			prTitle = '';
 			prBody = '';
-			includeUnstaged = true;
-			nextStep = needsPull ? 'commit' : 'push';
+			const prefs = gitActionPreferences.current;
+			includeUnstaged = prefs.includeUnstaged;
+			nextStep = needsPull ? 'commit' : prefs.nextStep;
 		}
 	});
 
@@ -69,6 +71,11 @@
 			onClose();
 			onCreatePR?.(prTitle.trim(), prBody.trim());
 		} else {
+			// Save user's selections for next time
+			gitActionPreferences.setIncludeUnstaged(includeUnstaged);
+			if (!needsPull) {
+				gitActionPreferences.setNextStep(nextStep);
+			}
 			const message = commitMessage.trim();
 			onClose();
 			onStartCommit(nextStep, message, includeUnstaged);

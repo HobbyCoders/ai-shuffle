@@ -2,7 +2,9 @@
 	/**
 	 * GitHeaderActions - Git controls for the PageHeader
 	 *
-	 * Branch selector dropdown (checkout branches), commit button, and diff stats.
+	 * Branch selector dropdown (checkout branches), split action buttons, and diff stats.
+	 * Split buttons: main area performs quick action with saved settings,
+	 * chevron opens the modal for customization.
 	 * Branch selector is locked during streaming.
 	 */
 	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2 } from 'lucide-svelte';
@@ -18,16 +20,22 @@
 		worktreeBranch?: string | null;
 		/** When set, shows the "Finish" button instead of Commit/Create PR */
 		openPR?: { number: number; title: string; url: string } | null;
+		/** Quick actions (use saved settings, no modal) */
 		onClickCommit: () => void;
 		onClickCreatePR: () => void;
 		onClickFinish: () => void;
-		onClickNewBranch: () => void;
 		onClickPush: () => void;
 		onClickPull: () => void;
+		onClickNewBranch: () => void;
 		onClickInitRepo?: () => void;
+		/** Open modal for customization */
+		onOpenCommitModal: () => void;
+		onOpenCreatePRModal: () => void;
+		onOpenFinishModal: () => void;
+		onOpenPullModal: () => void;
 	}
 
-	let { projectId, isStreaming = false, isGitRepo = true, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo }: Props = $props();
+	let { projectId, isStreaming = false, isGitRepo = true, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onOpenCommitModal, onOpenCreatePRModal, onOpenFinishModal, onOpenPullModal }: Props = $props();
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
@@ -179,21 +187,32 @@
 
 	<!-- Pull button (when behind upstream, including diverged state) -->
 	{#if needsPull}
-		<button
-			class="git-btn pull-btn"
-			class:diverged={isDiverged}
-			onclick={onClickPull}
-			disabled={isStreaming}
-			title={isStreaming
-				? 'Cannot pull during streaming'
-				: isDiverged
-					? `Branch diverged — ${commitsAheadUpstream} ahead, ${commitsBehindUpstream} behind upstream. Pull to sync.`
-					: `${commitsBehindUpstream} commit${commitsBehindUpstream === 1 ? '' : 's'} behind upstream — pull latest`}
-		>
-			<ArrowDownToLine size={14} strokeWidth={1.5} />
-			<span class="btn-label">{isDiverged ? 'Sync' : 'Pull'}</span>
-			<span class="count-badge">{commitsBehindUpstream}</span>
-		</button>
+		<div class="split-btn-group">
+			<button
+				class="git-btn split-main pull-btn"
+				class:diverged={isDiverged}
+				onclick={onClickPull}
+				disabled={isStreaming}
+				title={isStreaming
+					? 'Cannot pull during streaming'
+					: isDiverged
+						? `Quick sync — ${commitsAheadUpstream} ahead, ${commitsBehindUpstream} behind upstream`
+						: `Quick pull ${commitsBehindUpstream} commit${commitsBehindUpstream === 1 ? '' : 's'} with saved settings`}
+			>
+				<ArrowDownToLine size={14} strokeWidth={1.5} />
+				<span class="btn-label">{isDiverged ? 'Sync' : 'Pull'}</span>
+				<span class="count-badge">{commitsBehindUpstream}</span>
+			</button>
+			<button
+				class="git-btn split-chevron pull-btn"
+				class:diverged={isDiverged}
+				onclick={onOpenPullModal}
+				disabled={isStreaming}
+				title="Pull options..."
+			>
+				<ChevronDown size={11} strokeWidth={1.5} />
+			</button>
+		</div>
 	{/if}
 
 	<!-- Push button (when commits ahead of upstream, not behind) -->
@@ -214,37 +233,65 @@
 
 	<!-- Commit / Create PR / Finish button -->
 	{#if hasChanges}
-		<button
-			class="git-btn"
-			onclick={onClickCommit}
-			disabled={isStreaming}
-			title={isStreaming ? 'Cannot commit during streaming' : 'Commit changes'}
-		>
-			<GitCommitHorizontal size={14} strokeWidth={1.5} />
-			<span class="btn-label">Commit</span>
-			<ChevronDown size={11} strokeWidth={1.5} />
-		</button>
+		<div class="split-btn-group">
+			<button
+				class="git-btn split-main"
+				onclick={onClickCommit}
+				disabled={isStreaming}
+				title={isStreaming ? 'Cannot commit during streaming' : 'Quick commit with saved settings'}
+			>
+				<GitCommitHorizontal size={14} strokeWidth={1.5} />
+				<span class="btn-label">Commit</span>
+			</button>
+			<button
+				class="git-btn split-chevron"
+				onclick={onOpenCommitModal}
+				disabled={isStreaming}
+				title="Commit options..."
+			>
+				<ChevronDown size={11} strokeWidth={1.5} />
+			</button>
+		</div>
 	{:else if openPR}
-		<button
-			class="git-btn"
-			onclick={onClickFinish}
-			disabled={isStreaming}
-			title={isStreaming ? 'Cannot finish during streaming' : `PR #${openPR.number}: ${openPR.title} — Merge and finish`}
-		>
-			<CheckCircle2 size={14} strokeWidth={1.5} />
-			<span class="btn-label">Finish</span>
-		</button>
+		<div class="split-btn-group">
+			<button
+				class="git-btn split-main"
+				onclick={onClickFinish}
+				disabled={isStreaming}
+				title={isStreaming ? 'Cannot finish during streaming' : `Quick merge PR #${openPR.number} with saved settings`}
+			>
+				<CheckCircle2 size={14} strokeWidth={1.5} />
+				<span class="btn-label">Finish</span>
+			</button>
+			<button
+				class="git-btn split-chevron"
+				onclick={onOpenFinishModal}
+				disabled={isStreaming}
+				title="Merge options..."
+			>
+				<ChevronDown size={11} strokeWidth={1.5} />
+			</button>
+		</div>
 	{:else if canCreatePR}
-		<button
-			class="git-btn"
-			onclick={onClickCreatePR}
-			disabled={isStreaming}
-			title={isStreaming ? 'Cannot create PR during streaming' : `${commitsAhead} commit${commitsAhead === 1 ? '' : 's'} ahead — create a pull request`}
-		>
-			<GitPullRequest size={14} strokeWidth={1.5} />
-			<span class="btn-label">Create PR</span>
-			<ChevronDown size={11} strokeWidth={1.5} />
-		</button>
+		<div class="split-btn-group">
+			<button
+				class="git-btn split-main"
+				onclick={onClickCreatePR}
+				disabled={isStreaming}
+				title={isStreaming ? 'Cannot create PR during streaming' : `Quick create PR (${commitsAhead} commit${commitsAhead === 1 ? '' : 's'} ahead)`}
+			>
+				<GitPullRequest size={14} strokeWidth={1.5} />
+				<span class="btn-label">Create PR</span>
+			</button>
+			<button
+				class="git-btn split-chevron"
+				onclick={onOpenCreatePRModal}
+				disabled={isStreaming}
+				title="PR options..."
+			>
+				<ChevronDown size={11} strokeWidth={1.5} />
+			</button>
+		</div>
 	{:else}
 		<button
 			class="git-btn"
@@ -325,6 +372,30 @@
 
 	.git-btn :global(svg) {
 		flex-shrink: 0;
+	}
+
+	/* Split button group */
+	.split-btn-group {
+		display: flex;
+		align-items: center;
+	}
+
+	.split-btn-group .split-main {
+		border-top-right-radius: 0;
+		border-bottom-right-radius: 0;
+		border-right: none;
+	}
+
+	.split-btn-group .split-chevron {
+		border-top-left-radius: 0;
+		border-bottom-left-radius: 0;
+		padding: 0 5px;
+		gap: 0;
+		border-left: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
+	}
+
+	.split-btn-group .split-chevron:hover:not(:disabled) {
+		background: color-mix(in oklch, var(--hover-overlay) 80%, transparent);
 	}
 
 	.init-btn {
@@ -515,6 +586,12 @@
 			height: 36px;
 			padding: 0 12px;
 			font-size: 0.75rem;
+		}
+
+		.split-btn-group .split-chevron {
+			padding: 0 8px;
+			min-width: 36px;
+			justify-content: center;
 		}
 
 		.branch-name {
