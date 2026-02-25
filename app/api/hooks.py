@@ -17,20 +17,9 @@ from app.core.models import (
 )
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
+from app.api.common import check_project_access
 
 router = APIRouter(prefix="/api/v1/hooks", tags=["Hooks"])
-
-
-def _validate_project_access(request: Request, project_id: str) -> None:
-    """Validate that the requester has access to the project"""
-    api_user = get_api_user_from_request(request)
-    if api_user and api_user.get("project_id"):
-        # API user restricted to specific project
-        if api_user["project_id"] != project_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied: You can only access hooks for your assigned project"
-            )
 
 
 def _validate_hook_data(hook_data: HookCreate | HookUpdate, is_create: bool = False) -> None:
@@ -70,7 +59,7 @@ async def get_project_hooks(
     token: str = Depends(require_auth)
 ):
     """Get all hooks for a project"""
-    _validate_project_access(request, project_id)
+    check_project_access(request, project_id)
 
     # Verify project exists
     project = database.get_project(project_id)
@@ -91,7 +80,7 @@ async def create_project_hook(
     token: str = Depends(require_auth)
 ):
     """Create a new hook for a project"""
-    _validate_project_access(request, project_id)
+    check_project_access(request, project_id)
 
     # Verify project exists
     project = database.get_project(project_id)
@@ -134,7 +123,7 @@ async def get_hook(
             detail=f"Hook not found: {hook_id}"
         )
 
-    _validate_project_access(request, hook["project_id"])
+    check_project_access(request, hook["project_id"])
     return hook
 
 
@@ -153,7 +142,7 @@ async def update_hook(
             detail=f"Hook not found: {hook_id}"
         )
 
-    _validate_project_access(request, existing["project_id"])
+    check_project_access(request, existing["project_id"])
     _validate_hook_data(hook_data)
 
     hook = database.update_hook(
@@ -185,7 +174,7 @@ async def delete_hook(
             detail=f"Hook not found: {hook_id}"
         )
 
-    _validate_project_access(request, existing["project_id"])
+    check_project_access(request, existing["project_id"])
 
     if not database.delete_hook(hook_id):
         raise HTTPException(
@@ -208,7 +197,7 @@ async def test_hook(
             detail=f"Hook not found: {hook_id}"
         )
 
-    _validate_project_access(request, hook["project_id"])
+    check_project_access(request, hook["project_id"])
 
     # Import hook executor and run test
     from app.core.hook_executor import test_hook as execute_test_hook

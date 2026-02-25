@@ -30,6 +30,5 @@ export * from './hooks';
 
 // =============================================================================
 // Stores with overlapping exports - import directly from module if needed:
-// - ./device (deviceId also in active-session)
 // - ./github (githubAuthenticated also in auth)
 // =============================================================================

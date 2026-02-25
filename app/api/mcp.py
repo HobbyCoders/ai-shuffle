@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.core.project_utils import get_project_working_dir_as_path
+from app.api.common import validate_project_access, get_project_path_from_dict
 from app.core.mcp_service import (
     get_mcp_service,
     McpScope,
@@ -142,37 +143,6 @@ def _request_to_config(
         enabled=True,
         description=request.description,
     )
-
-
-def _validate_project_access(request: Request, project_id: str) -> dict:
-    """
-    Validate that the requester has access to the project.
-
-    Returns the project dict if valid.
-    """
-    api_user = get_api_user_from_request(request)
-    if api_user and api_user.get("project_id"):
-        # API user restricted to specific project
-        if api_user["project_id"] != project_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this project"
-            )
-
-    # Get project from database
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
-
-    return project
-
-
-def _get_project_path(project: dict) -> Path:
-    """Get the resolved filesystem path for a project"""
-    return get_project_working_dir_as_path(project)
 
 
 def _parse_scope(scope_str: str) -> McpScope:
@@ -382,8 +352,8 @@ async def list_project_mcp_servers(
 ):
     """List all MCP servers for a project (all scopes)"""
     try:
-        project = _validate_project_access(http_request, project_id)
-        project_path = _get_project_path(project)
+        project = validate_project_access(http_request, project_id)
+        project_path = get_project_path_from_dict(project)
 
         service = get_mcp_service(project_path)
         all_servers = service.get_all_servers()
@@ -420,8 +390,8 @@ async def add_project_mcp_server(
 ):
     """Add an MCP server to a project (LOCAL, PROJECT, or INSTALLED scope) - Admin only"""
     try:
-        project = _validate_project_access(http_request, project_id)
-        project_path = _get_project_path(project)
+        project = validate_project_access(http_request, project_id)
+        project_path = get_project_path_from_dict(project)
 
         if request.scope == "user":
             raise HTTPException(
@@ -476,8 +446,8 @@ async def update_project_mcp_server(
 ):
     """Update a project-scoped MCP server - Admin only"""
     try:
-        project = _validate_project_access(http_request, project_id)
-        project_path = _get_project_path(project)
+        project = validate_project_access(http_request, project_id)
+        project_path = get_project_path_from_dict(project)
 
         if scope == "user":
             raise HTTPException(
@@ -573,8 +543,8 @@ async def remove_project_mcp_server(
     - local/project: removes from .claude/.mcp.json or .mcp.json
     """
     try:
-        project = _validate_project_access(http_request, project_id)
-        project_path = _get_project_path(project)
+        project = validate_project_access(http_request, project_id)
+        project_path = get_project_path_from_dict(project)
 
         service = get_mcp_service(project_path)
 
@@ -618,8 +588,8 @@ async def toggle_project_mcp_server(
     This is the per-project disable mechanism that Claude Code uses.
     """
     try:
-        project = _validate_project_access(http_request, project_id)
-        project_path = _get_project_path(project)
+        project = validate_project_access(http_request, project_id)
+        project_path = get_project_path_from_dict(project)
 
         service = get_mcp_service(project_path)
         service.set_project_server_enabled(server_name, request.enabled)

@@ -26,6 +26,7 @@ from app.core.worktree_manager import worktree_manager
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
+from app.api.common import check_project_access
 
 logger = logging.getLogger(__name__)
 
@@ -358,17 +359,6 @@ async def _notify_git(
         )
     except Exception as e:
         logger.warning(f"Failed to broadcast git update for {project_id}: {e}")
-
-
-def check_project_access(request: Request, project_id: str) -> None:
-    """Check if the user has access to the project. Raises HTTPException if not."""
-    api_user = get_api_user_from_request(request)
-    if api_user and api_user.get("project_id"):
-        if api_user["project_id"] != project_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this project"
-            )
 
 
 def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[dict]:

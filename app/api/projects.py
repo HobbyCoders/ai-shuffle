@@ -18,6 +18,7 @@ from app.core.project_utils import get_project_working_dir, get_project_working_
 from app.core.platform import is_local_mode
 from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
+from app.api.common import check_project_access, format_file_size
 
 logger = logging.getLogger(__name__)
 
@@ -104,17 +105,6 @@ def validate_project_path(path: str, allow_create: bool = False) -> Path:
         )
 
     return full_path
-
-
-def check_project_access(request: Request, project_id: str) -> None:
-    """Check if the user has access to the project. Raises HTTPException if not."""
-    api_user = get_api_user_from_request(request)
-    if api_user and api_user.get("project_id"):
-        if api_user["project_id"] != project_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this project"
-            )
 
 
 @router.get("", response_model=List[Project])
@@ -251,18 +241,6 @@ def get_file_extension(name: str) -> str:
     """Get lowercase file extension without the dot"""
     ext = Path(name).suffix.lower()
     return ext[1:] if ext else ""
-
-
-def format_file_size(size_bytes: int) -> str:
-    """Format file size in human-readable format."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    elif size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-    else:
-        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
 
 
 @router.get("/{project_id}/files")

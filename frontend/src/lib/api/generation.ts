@@ -3,7 +3,7 @@
  */
 
 import { api } from './client-core';
-import type { AgentExport } from './agents';
+import type { AgentExport } from './client';
 
 // ============================================================================
 // Types

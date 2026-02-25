@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
+from app.api.common import validate_project_access, get_project_path_from_dict
 from app.core.project_agent_service import (
     get_project_agent_service,
     ProjectAgent,
@@ -69,38 +70,6 @@ class ProjectAgentRename(BaseModel):
 # Helper Functions
 # ============================================================================
 
-def _validate_project_access(request: Request, project_id: str) -> dict:
-    """
-    Validate that the requester has access to the project.
-
-    Returns the project dict if valid.
-    """
-    api_user = get_api_user_from_request(request)
-    if api_user and api_user.get("project_id"):
-        # API user restricted to specific project
-        if api_user["project_id"] != project_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied: You can only access agents for your assigned project"
-            )
-
-    # Verify project exists
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
-
-    return project
-
-
-def _get_project_path(project: dict) -> Path:
-    """Get the full path to the project directory"""
-    from app.core.project_utils import get_project_working_dir_as_path
-    return get_project_working_dir_as_path(project)
-
-
 def _agent_to_response(agent: ProjectAgent) -> ProjectAgentResponse:
     """Convert ProjectAgent to response model"""
     return ProjectAgentResponse(
@@ -144,8 +113,8 @@ async def list_project_agents(
 
     Returns agent metadata without full prompt content.
     """
-    project = _validate_project_access(request, project_id)
-    project_path = _get_project_path(project)
+    project = validate_project_access(request, project_id)
+    project_path = get_project_path_from_dict(project)
 
     service = get_project_agent_service(project_path)
     agents = service.get_agents()
@@ -163,8 +132,8 @@ async def get_project_agent(
     """
     Get detailed information about a specific agent including full prompt.
     """
-    project = _validate_project_access(request, project_id)
-    project_path = _get_project_path(project)
+    project = validate_project_access(request, project_id)
+    project_path = get_project_path_from_dict(project)
 
     service = get_project_agent_service(project_path)
     agent = service.get_agent(agent_name)
@@ -190,8 +159,8 @@ async def create_project_agent(
 
     Creates a .md file with YAML frontmatter for metadata.
     """
-    project = _validate_project_access(request, project_id)
-    project_path = _get_project_path(project)
+    project = validate_project_access(request, project_id)
+    project_path = get_project_path_from_dict(project)
 
     service = get_project_agent_service(project_path)
 
@@ -225,8 +194,8 @@ async def update_project_agent(
     Only provided fields will be updated; others are preserved.
     Uses model_fields_set to distinguish between "not provided" and "set to null".
     """
-    project = _validate_project_access(request, project_id)
-    project_path = _get_project_path(project)
+    project = validate_project_access(request, project_id)
+    project_path = get_project_path_from_dict(project)
 
     service = get_project_agent_service(project_path)
 
@@ -259,8 +228,8 @@ async def rename_project_agent(
     """
     Rename an agent (changes the .md filename).
     """
-    project = _validate_project_access(request, project_id)
-    project_path = _get_project_path(project)
+    project = validate_project_access(request, project_id)
+    project_path = get_project_path_from_dict(project)
 
     service = get_project_agent_service(project_path)
 
@@ -284,8 +253,8 @@ async def delete_project_agent(
     """
     Delete an agent (removes the .md file).
     """
-    project = _validate_project_access(request, project_id)
-    project_path = _get_project_path(project)
+    project = validate_project_access(request, project_id)
+    project_path = get_project_path_from_dict(project)
 
     service = get_project_agent_service(project_path)
 

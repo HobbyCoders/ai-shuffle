@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.core.project_utils import get_project_working_dir_as_path
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
+from app.api.common import check_project_access
 
 logger = logging.getLogger(__name__)
 
@@ -77,17 +78,6 @@ class GitHubStatusResponse(BaseModel):
 # =============================================================================
 # Helper Functions
 # =============================================================================
-
-def check_project_access(request: Request, project_id: str) -> None:
-    """Check if the user has access to the project. Raises HTTPException if not."""
-    api_user = get_api_user_from_request(request)
-    if api_user and api_user.get("project_id"):
-        if api_user["project_id"] != project_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this project"
-            )
-
 
 def get_project_path(project_id: str) -> str:
     """Get the filesystem path for a project."""

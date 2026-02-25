@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
+from app.api.common import validate_project_access, get_project_path_from_dict
 from app.core.plugin_service import (
     get_plugin_service,
     PluginService,
@@ -91,41 +92,9 @@ class PluginHookResponse(BaseModel):
 # Helper Functions
 # ============================================================================
 
-def _validate_project_access(request: Request, project_id: str) -> dict:
-    """
-    Validate that the requester has access to the project.
-
-    Returns the project dict if valid.
-    """
-    api_user = get_api_user_from_request(request)
-    if api_user and api_user.get("project_id"):
-        # API user restricted to specific project
-        if api_user["project_id"] != project_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied: You can only access plugins for your assigned project"
-            )
-
-    # Verify project exists
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
-
-    return project
-
-
-def _get_project_path(project: dict) -> Path:
-    """Get the full path to the project directory"""
-    from app.core.project_utils import get_project_working_dir_as_path
-    return get_project_working_dir_as_path(project)
-
-
 def _get_project_plugin_service(project: dict) -> PluginService:
     """Get a PluginService instance configured for the project"""
-    project_path = _get_project_path(project)
+    project_path = get_project_path_from_dict(project)
     return get_plugin_service(project_dir=project_path)
 
 
@@ -185,7 +154,7 @@ async def list_project_plugins(
 
     Returns plugins from both LOCAL (.claude/plugins/) and PROJECT (plugins/) scopes.
     """
-    project = _validate_project_access(request, project_id)
+    project = validate_project_access(request, project_id)
     service = _get_project_plugin_service(project)
 
     plugins = service.get_project_installed_plugins()
@@ -204,7 +173,7 @@ async def list_available_plugins(
 
     Optionally filter by marketplace ID.
     """
-    project = _validate_project_access(request, project_id)
+    project = validate_project_access(request, project_id)
     service = _get_project_plugin_service(project)
 
     # Get available plugins from global service (marketplaces are global)
@@ -232,7 +201,7 @@ async def install_project_plugin(
     The plugin is copied from the marketplace to the project directory.
     Use scope "local" for .claude/plugins/ (gitignored) or "project" for plugins/ (committed).
     """
-    project = _validate_project_access(request, project_id)
+    project = validate_project_access(request, project_id)
     service = _get_project_plugin_service(project)
 
     # Map scope string to enum
@@ -268,7 +237,7 @@ async def uninstall_project_plugin(
 
     Removes the plugin directory from the project.
     """
-    project = _validate_project_access(request, project_id)
+    project = validate_project_access(request, project_id)
     service = _get_project_plugin_service(project)
 
     try:
@@ -290,7 +259,7 @@ async def enable_project_plugin(
     """
     Enable a plugin in the project.
     """
-    project = _validate_project_access(request, project_id)
+    project = validate_project_access(request, project_id)
     service = _get_project_plugin_service(project)
 
     # Verify plugin exists
@@ -316,7 +285,7 @@ async def disable_project_plugin(
     """
     Disable a plugin in the project.
     """
-    project = _validate_project_access(request, project_id)
+    project = validate_project_access(request, project_id)
     service = _get_project_plugin_service(project)
 
     # Verify plugin exists
@@ -343,7 +312,7 @@ async def get_project_plugin_hooks(
 
     Returns hooks from plugins installed in both LOCAL and PROJECT scopes.
     """
-    project = _validate_project_access(request, project_id)
+    project = validate_project_access(request, project_id)
     logger.debug(f"[get_project_plugin_hooks] Project: {project.get('name')}, path: {project.get('path')}")
 
     service = _get_project_plugin_service(project)

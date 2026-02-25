@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, status, Query
 from fastapi.responses import FileResponse
 
 from app.core.config import settings
+from app.api.common import is_path_safe
 
 router = APIRouter(prefix="/api/generated-images", tags=["generated-images"])
 
@@ -29,22 +30,6 @@ MEDIA_TYPES = {
     '.gif': 'image/gif',
     '.webp': 'image/webp'
 }
-
-
-def is_path_safe(file_path: Path, base_path: Path) -> bool:
-    """
-    Check if a file path is safely within the base path.
-    Prevents path traversal attacks.
-    """
-    try:
-        # Resolve both paths to absolute paths
-        resolved_file = file_path.resolve()
-        resolved_base = base_path.resolve()
-
-        # Check if the file is within the base directory
-        return resolved_file.is_relative_to(resolved_base)
-    except (ValueError, RuntimeError):
-        return False
 
 
 @router.get("/by-path")
