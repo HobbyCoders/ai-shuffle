@@ -118,6 +118,12 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	let videoConfigSuccess = $state('');
 	let videoConfigError = $state('');
 
+	let i2vModel = $state('');
+	let selectedI2vModel = $state('fal-ai/kling-video/o3/pro/image-to-video');
+	let savingI2vModel = $state(false);
+	let i2vConfigSuccess = $state('');
+	let i2vConfigError = $state('');
+
 	// Per-model settings state
 	let imageAspectRatio = $state('');
 	let imageResolution = $state('');
@@ -129,6 +135,7 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	// Derived: current model metadata for dynamic settings panels
 	let currentImageModelData = $derived(getImageModel(selectedImageModel));
 	let currentVideoModelData = $derived(getVideoModel(selectedVideoModel));
+	let currentI2vModelData = $derived(getVideoModel(selectedI2vModel));
 
 	let currentTtsModel = $state('');
 	let selectedTtsModel = $state('');
@@ -137,7 +144,7 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	let currentTtsVoice = $state('af_heart');
 	let ttsSpeed = $state(1.0);
 	let ttsOutputFormat = $state('wav');
-	let savingTtsSettings = $state(false);
+	let speedDebounceTimer: ReturnType<typeof setTimeout> | null = $state(null);
 
 	let currentSttModel = $state('');
 	let selectedSttModel = $state('');
@@ -247,6 +254,7 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 				fal_api_key_masked: string;
 				image_model: string | null;
 				video_model: string | null;
+				i2v_model: string | null;
 				tts_model: string | null;
 				tts_voice: string | null;
 				tts_speed: number | null;
@@ -267,6 +275,8 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 			selectedImageModel = imageModel;
 			videoModel = settings.video_model || 'fal-ai/kling-video/o3/pro/text-to-video';
 			selectedVideoModel = videoModel;
+			i2vModel = settings.i2v_model || 'fal-ai/kling-video/o3/pro/image-to-video';
+			selectedI2vModel = i2vModel;
 			currentTtsModel = settings.tts_model || 'fal-ai/kokoro/american-english';
 			selectedTtsModel = currentTtsModel;
 			currentSttModel = settings.stt_model || 'fal-ai/whisper';
@@ -438,6 +448,25 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 		}
 	}
 
+	async function updateI2vModel() {
+		if (!selectedI2vModel || selectedI2vModel === i2vModel) return;
+		savingI2vModel = true;
+		i2vConfigError = '';
+		i2vConfigSuccess = '';
+		try {
+			await api.patch<{success: boolean, model: string}>('/settings/integrations/video/i2v-model', {
+				model: selectedI2vModel
+			});
+			i2vModel = selectedI2vModel;
+			i2vConfigSuccess = 'Updated';
+			setTimeout(() => i2vConfigSuccess = '', 3000);
+		} catch (e: any) {
+			i2vConfigError = e.detail || 'Failed to update';
+		} finally {
+			savingI2vModel = false;
+		}
+	}
+
 	async function saveImageSettings(aspect_ratio?: string, resolution?: string) {
 		savingModelSettings = true;
 		try {
@@ -488,6 +517,7 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 			if (model && model.voices.length > 0) {
 				selectedTtsVoice = model.voices[0].id;
 				currentTtsVoice = model.voices[0].id;
+				await api.patch('/settings/integrations/tts', { voice: selectedTtsVoice });
 			}
 			audioConfigSuccess = 'Updated';
 			setTimeout(() => audioConfigSuccess = '', 3000);
@@ -495,6 +525,37 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 			audioConfigError = e.detail || 'Failed to update';
 		} finally {
 			savingTtsModel = false;
+		}
+	}
+
+	async function updateTtsVoice() {
+		if (selectedTtsVoice === currentTtsVoice) return;
+		try {
+			await api.patch('/settings/integrations/tts', { voice: selectedTtsVoice });
+			currentTtsVoice = selectedTtsVoice;
+		} catch (e: any) {
+			audioConfigError = e.detail || 'Failed to save voice';
+		}
+	}
+
+	function onTtsSpeedChange() {
+		if (speedDebounceTimer) clearTimeout(speedDebounceTimer);
+		speedDebounceTimer = setTimeout(() => saveTtsSpeed(), 300);
+	}
+
+	async function saveTtsSpeed() {
+		try {
+			await api.patch('/settings/integrations/tts', { speed: ttsSpeed });
+		} catch (e: any) {
+			audioConfigError = e.detail || 'Failed to save speed';
+		}
+	}
+
+	async function updateTtsFormat() {
+		try {
+			await api.patch('/settings/integrations/tts', { output_format: ttsOutputFormat });
+		} catch (e: any) {
+			audioConfigError = e.detail || 'Failed to save format';
 		}
 	}
 
@@ -517,26 +578,13 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 		}
 	}
 
-	async function saveTtsSettings() {
-		savingTtsSettings = true;
-		audioConfigError = '';
-		audioConfigSuccess = '';
-		try {
-			await api.patch<{success: boolean}>('/settings/integrations/tts', {
-				model: selectedTtsModel,
-				voice: selectedTtsVoice,
-				speed: ttsSpeed,
-				output_format: ttsOutputFormat
-			});
-			currentTtsModel = selectedTtsModel;
-			currentTtsVoice = selectedTtsVoice;
-			audioConfigSuccess = 'TTS settings saved';
-			setTimeout(() => audioConfigSuccess = '', 3000);
-		} catch (e: any) {
-			audioConfigError = e.detail || 'Failed to save';
-		} finally {
-			savingTtsSettings = false;
-		}
+	function formatTtsCost(model: typeof ALL_TTS_MODELS[0]): string {
+		const costPer1k = model.pricePerMillion / 1000;
+		return `$${costPer1k.toFixed(2)}/1K chars`;
+	}
+
+	function formatSttCost(model: typeof ALL_STT_MODELS[0]): string {
+		return `$${model.pricePerMinute.toFixed(3)}/min`;
 	}
 
 	async function save3DModel() {
@@ -1395,10 +1443,10 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 							{/if}
 						</section>
 
-						<!-- Video Models Section -->
+						<!-- Text-to-Video Section -->
 						<section class="section">
 							<button class="section-header" onclick={() => toggleSection('video-models')}>
-								<h3>Video Generation</h3>
+								<h3>Text-to-Video</h3>
 								<svg class="chevron" class:expanded={expandedSections.has('video-models')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 									<polyline points="6 9 12 15 18 9"/>
 								</svg>
@@ -1412,16 +1460,9 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 											disabled={savingVideoModel}
 											class="input select"
 										>
-											<optgroup label="Text-to-Video">
-												{#each TEXT_TO_VIDEO_MODELS as model (model.id)}
-													<option value={model.id}>{model.displayName} — ${model.pricePerSecond.toFixed(2)}/sec</option>
-												{/each}
-											</optgroup>
-											<optgroup label="Image-to-Video">
-												{#each IMAGE_TO_VIDEO_MODELS as model (model.id)}
-													<option value={model.id}>{model.displayName} — ${model.pricePerSecond.toFixed(2)}/sec</option>
-												{/each}
-											</optgroup>
+											{#each TEXT_TO_VIDEO_MODELS as model (model.id)}
+												<option value={model.id}>{model.displayName} — ${model.pricePerSecond.toFixed(3)}/sec</option>
+											{/each}
 										</select>
 										{#if savingVideoModel}
 											<span class="loading-indicator">Updating...</span>
@@ -1492,6 +1533,47 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 							{/if}
 						</section>
 
+						<!-- Image-to-Video Section -->
+						<section class="section">
+							<button class="section-header" onclick={() => toggleSection('i2v-models')}>
+								<h3>Image-to-Video</h3>
+								<svg class="chevron" class:expanded={expandedSections.has('i2v-models')} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+									<polyline points="6 9 12 15 18 9"/>
+								</svg>
+							</button>
+							{#if expandedSections.has('i2v-models')}
+								<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+									<div class="model-selector">
+										<select
+											bind:value={selectedI2vModel}
+											onchange={updateI2vModel}
+											disabled={savingI2vModel}
+											class="input select"
+										>
+											{#each IMAGE_TO_VIDEO_MODELS as model (model.id)}
+												<option value={model.id}>{model.displayName} — ${model.pricePerSecond.toFixed(3)}/sec</option>
+											{/each}
+										</select>
+										{#if savingI2vModel}
+											<span class="loading-indicator">Updating...</span>
+										{/if}
+									</div>
+									{#if i2vConfigSuccess}<div class="success-msg">{i2vConfigSuccess}</div>{/if}
+									{#if i2vConfigError}<div class="error-msg">{i2vConfigError}</div>{/if}
+
+									{#if currentI2vModelData}
+										<div class="model-settings-panel">
+											{#if currentI2vModelData.capabilities.nativeAudio}
+												<div class="cap-badges">
+													<span class="cap-badge audio">Native Audio</span>
+												</div>
+											{/if}
+										</div>
+									{/if}
+								</div>
+							{/if}
+						</section>
+
 						<!-- Audio Section -->
 						<section class="section">
 							<button class="section-header" onclick={() => toggleSection('audio-models')}>
@@ -1513,7 +1595,7 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 											class="input select"
 										>
 											{#each ALL_TTS_MODELS as model (model.id)}
-												<option value={model.id}>{model.displayName}</option>
+												<option value={model.id}>{model.displayName} — {formatTtsCost(model)}</option>
 											{/each}
 										</select>
 									</div>
@@ -1521,7 +1603,12 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 									<!-- TTS Voice -->
 									<div class="setting-row">
 										<label class="setting-label" for="settings-tts-voice">Voice</label>
-										<select id="settings-tts-voice" bind:value={selectedTtsVoice} class="input select">
+										<select
+											id="settings-tts-voice"
+											bind:value={selectedTtsVoice}
+											onchange={updateTtsVoice}
+											class="input select"
+										>
 											{#each getAvailableVoices() as voice}
 												<option value={voice.id}>{voice.name} {voice.gender ? `(${voice.gender})` : ''}</option>
 											{/each}
@@ -1531,26 +1618,32 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 									<!-- TTS Speed -->
 									<div class="setting-row">
 										<label class="setting-label" for="settings-tts-speed">Speed ({ttsSpeed.toFixed(1)}x)</label>
-										<input id="settings-tts-speed" type="range" min="0.25" max="4.0" step="0.1" bind:value={ttsSpeed} class="slider" />
+										<input
+											id="settings-tts-speed"
+											type="range"
+											min="0.25"
+											max="4.0"
+											step="0.1"
+											bind:value={ttsSpeed}
+											oninput={onTtsSpeedChange}
+											class="slider"
+										/>
 									</div>
 
 									<!-- TTS Format -->
 									<div class="setting-row">
 										<label class="setting-label" for="settings-tts-format">Output Format</label>
-										<select id="settings-tts-format" bind:value={ttsOutputFormat} class="input select compact">
+										<select
+											id="settings-tts-format"
+											bind:value={ttsOutputFormat}
+											onchange={updateTtsFormat}
+											class="input select compact"
+										>
 											{#each getAvailableFormats() as fmt (fmt)}
 												<option value={fmt}>{fmt.toUpperCase()}</option>
 											{/each}
 										</select>
 									</div>
-
-									<button
-										onclick={saveTtsSettings}
-										disabled={savingTtsSettings}
-										class="btn primary"
-									>
-										{savingTtsSettings ? 'Saving...' : 'Save TTS Settings'}
-									</button>
 
 									<hr class="divider" />
 
@@ -1565,7 +1658,7 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 											class="input select"
 										>
 											{#each ALL_STT_MODELS as model (model.id)}
-												<option value={model.id}>{model.displayName} — {model.description}</option>
+												<option value={model.id}>{model.displayName} — {formatSttCost(model)}</option>
 											{/each}
 										</select>
 									</div>

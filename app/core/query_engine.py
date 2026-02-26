@@ -988,10 +988,14 @@ def _build_env_with_ai_tools(
 
     if any_video_tools:
         video_model = database.get_system_setting("video_model")
+        i2v_model = database.get_system_setting("i2v_model")
         env["VIDEO_PROVIDER"] = "fal-ai"
         if video_model:
             env["VIDEO_MODEL"] = video_model
             logger.debug(f"Set default VIDEO_MODEL={video_model}")
+        if i2v_model:
+            env["I2V_MODEL"] = i2v_model
+            logger.debug(f"Set default I2V_MODEL={i2v_model}")
         video_aspect_ratio = database.get_system_setting("video_aspect_ratio")
         video_duration = database.get_system_setting("video_duration")
         video_resolution = database.get_system_setting("video_resolution")

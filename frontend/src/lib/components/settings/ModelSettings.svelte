@@ -26,6 +26,7 @@
 	// Current model selections
 	let imageModel = $state('');
 	let videoModel = $state('');
+	let i2vModel = $state('');
 	let model3D = $state('');
 
 	// Per-model settings
@@ -44,15 +45,18 @@
 	let browserExpanded = $state(false);
 	let imageExpanded = $state(false);
 	let videoExpanded = $state(false);
+	let i2vExpanded = $state(false);
 	let model3DExpanded = $state(false);
 
 	// Derived: current model metadata
 	let currentImageModel = $derived<ImageModel | undefined>(getImageModel(imageModel));
 	let currentVideoModel = $derived<VideoModel | undefined>(getVideoModel(videoModel));
+	let currentI2vModel = $derived<VideoModel | undefined>(getVideoModel(i2vModel));
 
 	let selectedModels = $derived<Record<string, string>>({
 		image_generation: imageModel,
 		video_generation: videoModel,
+		image_to_video: i2vModel,
 		text_to_3d: model3D,
 	});
 
@@ -65,6 +69,7 @@
 			const settings = await api.get<{
 				image_model: string | null;
 				video_model: string | null;
+				i2v_model: string | null;
 				model3d_model: string | null;
 				image_aspect_ratio: string | null;
 				image_resolution: string | null;
@@ -75,6 +80,7 @@
 
 			imageModel = settings.image_model || 'fal-ai/flux-pro/v1.1-ultra';
 			videoModel = settings.video_model || 'fal-ai/kling-video/o3/pro/text-to-video';
+			i2vModel = settings.i2v_model || 'fal-ai/kling-video/o3/pro/image-to-video';
 			model3D = settings.model3d_model || 'fal-ai/meshy/text-to-3d';
 			imageAspectRatio = settings.image_aspect_ratio || '';
 			imageResolution = settings.image_resolution || '';
@@ -156,6 +162,23 @@
 		}
 	}
 
+	async function updateI2vModel(e: Event) {
+		const select = e.target as HTMLSelectElement;
+		const modelId = select.value;
+		if (!modelId || modelId === i2vModel) return;
+		saving = true;
+		errorMsg = '';
+		try {
+			await api.patch<{success: boolean}>('/settings/integrations/video/i2v-model', { model: modelId });
+			i2vModel = modelId;
+			showSuccess('Updated');
+		} catch (e: unknown) {
+			errorMsg = getErrorMessage(e, 'Failed to update');
+		} finally {
+			saving = false;
+		}
+	}
+
 	async function setVideoAspectRatio(ratio: string) {
 		if (ratio === videoAspectRatio) return;
 		videoAspectRatio = ratio;
@@ -211,8 +234,10 @@
 		let endpoint = '';
 		if (toolType === 'image_generation' || toolType === 'image_editing') {
 			endpoint = '/settings/integrations/image/model';
-		} else if (toolType === 'video_generation' || toolType === 'image_to_video') {
+		} else if (toolType === 'video_generation') {
 			endpoint = '/settings/integrations/video/model';
+		} else if (toolType === 'image_to_video') {
+			endpoint = '/settings/integrations/video/i2v-model';
 		} else if (toolType === 'text_to_3d' || toolType === 'image_to_3d') {
 			endpoint = '/settings/integrations/3d/model';
 		} else {
@@ -224,8 +249,10 @@
 			await api.patch<{ success: boolean }>(endpoint, { model: model.endpoint_id });
 			if (toolType === 'image_generation' || toolType === 'image_editing') {
 				imageModel = model.endpoint_id;
-			} else if (toolType === 'video_generation' || toolType === 'image_to_video') {
+			} else if (toolType === 'video_generation') {
 				videoModel = model.endpoint_id;
+			} else if (toolType === 'image_to_video') {
+				i2vModel = model.endpoint_id;
 			} else if (toolType === 'text_to_3d' || toolType === 'image_to_3d') {
 				model3D = model.endpoint_id;
 			}
@@ -250,8 +277,12 @@
 			<span class="default-value">{imageModel || 'Not set'}</span>
 		</div>
 		<div class="default-item">
-			<span class="default-label">Video</span>
+			<span class="default-label">Text-to-Video</span>
 			<span class="default-value">{videoModel || 'Not set'}</span>
+		</div>
+		<div class="default-item">
+			<span class="default-label">Image-to-Video</span>
+			<span class="default-value">{i2vModel || 'Not set'}</span>
 		</div>
 		<div class="default-item">
 			<span class="default-label">3D</span>
@@ -357,10 +388,10 @@
 	{/if}
 </section>
 
-<!-- Quick Select: Video + Settings -->
+<!-- Quick Select: Text-to-Video + Settings -->
 <section class="section">
 	<button class="section-header" onclick={() => videoExpanded = !videoExpanded}>
-		<h3>Video</h3>
+		<h3>Text-to-Video</h3>
 		<svg class="chevron" class:expanded={videoExpanded} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 			<polyline points="6 9 12 15 18 9"/>
 		</svg>
@@ -374,25 +405,14 @@
 					disabled={saving}
 					class="input select"
 				>
-					<optgroup label="Text-to-Video">
-						{#each TEXT_TO_VIDEO_MODELS as model (model.id)}
-							<option value={model.id}>
-								{model.displayName} — ${model.pricePerSecond.toFixed(2)}/sec
-							</option>
-						{/each}
-					</optgroup>
-					<optgroup label="Image-to-Video">
-						{#each IMAGE_TO_VIDEO_MODELS as model (model.id)}
-							<option value={model.id}>
-								{model.displayName} — ${model.pricePerSecond.toFixed(2)}/sec
-							</option>
-						{/each}
-					</optgroup>
+					{#each TEXT_TO_VIDEO_MODELS as model (model.id)}
+						<option value={model.id}>
+							{model.displayName} — ${model.pricePerSecond.toFixed(3)}/sec
+						</option>
+					{/each}
 				</select>
 			</div>
 			{#if currentVideoModel}
-				<p class="model-description">{currentVideoModel.description}</p>
-
 				<!-- Per-model settings -->
 				<div class="settings-panel">
 					<!-- Native Audio badge -->
@@ -445,6 +465,43 @@
 									>{res}</button>
 								{/each}
 							</div>
+						</div>
+					{/if}
+				</div>
+			{/if}
+		</div>
+	{/if}
+</section>
+
+<!-- Quick Select: Image-to-Video -->
+<section class="section">
+	<button class="section-header" onclick={() => i2vExpanded = !i2vExpanded}>
+		<h3>Image-to-Video</h3>
+		<svg class="chevron" class:expanded={i2vExpanded} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+			<polyline points="6 9 12 15 18 9"/>
+		</svg>
+	</button>
+	{#if i2vExpanded}
+		<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+			<div class="model-selector">
+				<select
+					value={i2vModel}
+					onchange={updateI2vModel}
+					disabled={saving}
+					class="input select"
+				>
+					{#each IMAGE_TO_VIDEO_MODELS as model (model.id)}
+						<option value={model.id}>
+							{model.displayName} — ${model.pricePerSecond.toFixed(3)}/sec
+						</option>
+					{/each}
+				</select>
+			</div>
+			{#if currentI2vModel}
+				<div class="settings-panel">
+					{#if currentI2vModel.capabilities.nativeAudio}
+						<div class="capabilities" style="margin-bottom: 4px;">
+							<span class="cap-badge cap-green">Native Audio</span>
 						</div>
 					{/if}
 				</div>
@@ -560,7 +617,7 @@
 
 	.defaults-grid {
 		display: grid;
-		grid-template-columns: repeat(3, 1fr);
+		grid-template-columns: repeat(4, 1fr);
 		gap: 12px;
 	}
 
@@ -721,7 +778,7 @@
 
 	@media (max-width: 640px) {
 		.defaults-grid {
-			grid-template-columns: 1fr;
+			grid-template-columns: repeat(2, 1fr);
 			gap: 8px;
 		}
 	}

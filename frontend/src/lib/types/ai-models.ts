@@ -589,6 +589,20 @@ export const FAL_VIDEO_MODELS: VideoModel[] = [
 		resolutions: ['720p', '1080p'],
 		pricePerSecond: 0.035
 	},
+	// NVIDIA Cosmos Predict 2.5 (text-to-video)
+	{
+		id: 'fal-ai/cosmos-predict-2.5/distilled/text-to-video',
+		name: 'cosmos-predict-2-5',
+		displayName: 'Cosmos Predict 2.5',
+		provider: 'fal-ai',
+		description: 'NVIDIA Cosmos 2B distilled — fast world-model video generation',
+		capabilities: { generation: true, imageToVideo: false, nativeAudio: false },
+		durations: [6],
+		maxDuration: 6,
+		aspectRatios: ['16:9'],
+		resolutions: ['720p'],
+		pricePerSecond: 0.014
+	},
 	// Image-to-Video models
 	{
 		id: 'fal-ai/kling-video/o3/pro/image-to-video',
@@ -758,6 +772,20 @@ export const FAL_VIDEO_MODELS: VideoModel[] = [
 		aspectRatios: ['16:9', '9:16', '1:1'],
 		resolutions: ['720p', '1080p'],
 		pricePerSecond: 0.035
+	},
+	// NVIDIA Cosmos Predict 2.5 (image-to-video)
+	{
+		id: 'fal-ai/cosmos-predict-2.5/image-to-video',
+		name: 'cosmos-predict-2-5-i2v',
+		displayName: 'Cosmos Predict 2.5 (I2V)',
+		provider: 'fal-ai',
+		description: 'NVIDIA Cosmos 2B — world-model image-to-video generation',
+		capabilities: { generation: false, imageToVideo: true, nativeAudio: false },
+		durations: [6],
+		maxDuration: 6,
+		aspectRatios: ['16:9'],
+		resolutions: ['720p'],
+		pricePerSecond: 0.034
 	}
 ];
 
@@ -1132,6 +1160,24 @@ export const FAL_STT_MODELS: STTModel[] = [
 		languages: ['99 languages'],
 		maxFileSizeMB: 100,
 		pricePerMinute: 0.008
+	},
+	{
+		id: 'fal-ai/speech-to-text',
+		name: 'fal-speech-to-text',
+		displayName: 'fal Speech-to-Text',
+		provider: 'fal-ai',
+		description: 'fal.ai native real-time STT with streaming and punctuation',
+		capabilities: {
+			realtime: true,
+			diarization: false,
+			translation: false,
+			timestamps: true,
+			punctuation: true
+		},
+		inputFormats: ['mp3', 'wav', 'webm', 'ogg', 'flac', 'm4a'],
+		languages: ['multi-language'],
+		maxFileSizeMB: 100,
+		pricePerMinute: 0.048
 	}
 ];
 

@@ -106,10 +106,12 @@ class IntegrationSettingsResponse(BaseModel):
     # Model selections (all fal.ai model IDs)
     image_model: Optional[str] = None
     video_model: Optional[str] = None
+    i2v_model: Optional[str] = None
     model3d_model: Optional[str] = None
     tts_model: Optional[str] = None
     tts_voice: Optional[str] = None
     tts_speed: Optional[float] = None
+    tts_output_format: Optional[str] = None
     stt_model: Optional[str] = None
     # Per-model generation settings
     image_aspect_ratio: Optional[str] = None
@@ -141,11 +143,13 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     fal_key = get_decrypted_api_key("fal_api_key")
     image_model = database.get_system_setting("image_model")
     video_model = database.get_system_setting("video_model")
+    i2v_model = database.get_system_setting("i2v_model")
     model3d_model = database.get_system_setting("model3d_model")
     tts_model = database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
     tts_voice = database.get_system_setting("tts_voice") or "af_heart"
     tts_speed_str = database.get_system_setting("tts_speed")
     tts_speed = float(tts_speed_str) if tts_speed_str else 1.0
+    tts_output_format = database.get_system_setting("tts_output_format") or "wav"
     stt_model = database.get_system_setting("stt_model") or "fal-ai/whisper"
     # Per-model generation settings
     image_aspect_ratio = database.get_system_setting("image_aspect_ratio")
@@ -161,10 +165,12 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         fal_api_key_masked=mask_api_key(fal_key) if fal_key else "",
         image_model=image_model,
         video_model=video_model,
+        i2v_model=i2v_model,
         model3d_model=model3d_model,
         tts_model=tts_model,
         tts_voice=tts_voice,
         tts_speed=tts_speed,
+        tts_output_format=tts_output_format,
         stt_model=stt_model,
         image_aspect_ratio=image_aspect_ratio,
         image_resolution=image_resolution,
@@ -346,6 +352,12 @@ STT_MODELS = {
         "price_display": "~$0.008/min",
         "supports_diarization": True
     },
+    "fal-ai/speech-to-text": {
+        "name": "fal Speech-to-Text",
+        "description": "fal.ai native real-time STT with streaming and punctuation",
+        "price_display": "~$0.048/min",
+        "supports_diarization": False
+    },
 }
 
 
@@ -355,10 +367,11 @@ class AudioModelUpdateRequest(BaseModel):
 
 
 class TTSSettingsRequest(BaseModel):
-    """Request to update TTS settings (model, voice, speed)"""
+    """Request to update TTS settings (model, voice, speed, output_format)"""
     model: Optional[str] = None
     voice: Optional[str] = None
     speed: Optional[float] = None
+    output_format: Optional[str] = None
 
 
 @router.get("/integrations/audio/models")
@@ -450,6 +463,11 @@ async def update_tts_settings(
                 detail="Speed must be between 0.1 and 5.0"
             )
         database.set_system_setting("tts_speed", str(request.speed))
+
+    if request.output_format:
+        fmt = request.output_format.strip().lower()
+        if fmt in ("wav", "mp3", "ogg", "flac"):
+            database.set_system_setting("tts_output_format", fmt)
 
     return {"success": True}
 
@@ -902,6 +920,20 @@ async def update_video_model(
         raise HTTPException(status_code=400, detail="Model cannot be empty")
 
     database.set_system_setting("video_model", model)
+    return {"success": True, "model": model}
+
+
+@router.patch("/integrations/video/i2v-model")
+async def update_i2v_model(
+    request: ModelUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """Update the image-to-video model (admin only). Accepts any fal.ai model ID."""
+    model = request.model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Model cannot be empty")
+
+    database.set_system_setting("i2v_model", model)
     return {"success": True, "model": model}
 
 

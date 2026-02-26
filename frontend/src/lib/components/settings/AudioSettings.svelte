@@ -1,6 +1,8 @@
 <script lang="ts">
 	/**
 	 * AudioSettings - TTS model/voice/speed config, STT model selection (fal.ai only)
+	 *
+	 * All settings auto-save on change (no save button).
 	 */
 	import '../deck/cards/card-design-system.css';
 	import { slide } from 'svelte/transition';
@@ -23,7 +25,6 @@
 	let currentTtsVoice = $state('af_heart');
 	let ttsSpeed = $state(1.0);
 	let ttsOutputFormat = $state('wav');
-	let savingTtsSettings = $state(false);
 
 	// STT state
 	let currentSttModel = $state('');
@@ -34,9 +35,17 @@
 	let audioConfigSuccess = $state('');
 	let audioConfigError = $state('');
 
+	// Debounce timer for speed slider
+	let speedDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
 	onMount(() => {
 		loadAudioSettings();
 	});
+
+	function showSuccess(msg: string) {
+		audioConfigSuccess = msg;
+		setTimeout(() => audioConfigSuccess = '', 2000);
+	}
 
 	async function loadAudioSettings() {
 		try {
@@ -71,11 +80,19 @@
 		return model?.outputFormats || ['wav'];
 	}
 
+	function formatTtsCost(model: typeof ALL_TTS_MODELS[0]): string {
+		const costPer1k = model.pricePerMillion / 1000;
+		return `$${costPer1k.toFixed(2)}/1K chars`;
+	}
+
+	function formatSttCost(model: typeof ALL_STT_MODELS[0]): string {
+		return `$${model.pricePerMinute.toFixed(3)}/min`;
+	}
+
 	async function updateTtsModel() {
 		if (!selectedTtsModel || selectedTtsModel === currentTtsModel) return;
 		savingTtsModel = true;
 		audioConfigError = '';
-		audioConfigSuccess = '';
 		try {
 			await api.patch<{success: boolean}>('/settings/integrations/audio/tts', {
 				model: selectedTtsModel
@@ -85,9 +102,10 @@
 			if (model && model.voices.length > 0) {
 				selectedTtsVoice = model.voices[0].id;
 				currentTtsVoice = model.voices[0].id;
+				// Auto-save the new default voice
+				await api.patch('/settings/integrations/tts', { voice: selectedTtsVoice });
 			}
-			audioConfigSuccess = 'Updated';
-			setTimeout(() => audioConfigSuccess = '', 3000);
+			showSuccess('Updated');
 		} catch (e: unknown) {
 			audioConfigError = getErrorMessage(e, 'Failed to update');
 		} finally {
@@ -95,44 +113,51 @@
 		}
 	}
 
+	async function updateTtsVoice() {
+		if (selectedTtsVoice === currentTtsVoice) return;
+		try {
+			await api.patch('/settings/integrations/tts', { voice: selectedTtsVoice });
+			currentTtsVoice = selectedTtsVoice;
+		} catch (e: unknown) {
+			audioConfigError = getErrorMessage(e, 'Failed to save voice');
+		}
+	}
+
+	function onSpeedChange() {
+		if (speedDebounceTimer) clearTimeout(speedDebounceTimer);
+		speedDebounceTimer = setTimeout(() => saveTtsSpeed(), 300);
+	}
+
+	async function saveTtsSpeed() {
+		try {
+			await api.patch('/settings/integrations/tts', { speed: ttsSpeed });
+		} catch (e: unknown) {
+			audioConfigError = getErrorMessage(e, 'Failed to save speed');
+		}
+	}
+
+	async function updateTtsFormat() {
+		try {
+			await api.patch('/settings/integrations/tts', { output_format: ttsOutputFormat });
+		} catch (e: unknown) {
+			audioConfigError = getErrorMessage(e, 'Failed to save format');
+		}
+	}
+
 	async function updateSttModel() {
 		if (!selectedSttModel || selectedSttModel === currentSttModel) return;
 		savingSttModel = true;
 		audioConfigError = '';
-		audioConfigSuccess = '';
 		try {
 			await api.patch<{success: boolean}>('/settings/integrations/audio/stt', {
 				model: selectedSttModel
 			});
 			currentSttModel = selectedSttModel;
-			audioConfigSuccess = 'Updated';
-			setTimeout(() => audioConfigSuccess = '', 3000);
+			showSuccess('Updated');
 		} catch (e: unknown) {
 			audioConfigError = getErrorMessage(e, 'Failed to update');
 		} finally {
 			savingSttModel = false;
-		}
-	}
-
-	async function saveTtsSettings() {
-		savingTtsSettings = true;
-		audioConfigError = '';
-		audioConfigSuccess = '';
-		try {
-			await api.patch<{success: boolean}>('/settings/integrations/tts', {
-				model: selectedTtsModel,
-				voice: selectedTtsVoice,
-				speed: ttsSpeed,
-				output_format: ttsOutputFormat
-			});
-			currentTtsModel = selectedTtsModel;
-			currentTtsVoice = selectedTtsVoice;
-			audioConfigSuccess = 'TTS settings saved';
-			setTimeout(() => audioConfigSuccess = '', 3000);
-		} catch (e: unknown) {
-			audioConfigError = getErrorMessage(e, 'Failed to save');
-		} finally {
-			savingTtsSettings = false;
 		}
 	}
 </script>
@@ -157,7 +182,7 @@
 					class="input select"
 				>
 					{#each ALL_TTS_MODELS as model (model.id)}
-						<option value={model.id}>{model.displayName} — {model.description}</option>
+						<option value={model.id}>{model.displayName} — {formatTtsCost(model)}</option>
 					{/each}
 				</select>
 			</div>
@@ -165,7 +190,12 @@
 			<!-- TTS Voice -->
 			<div class="setting-row">
 				<label class="setting-label" for="audio-tts-voice">Voice</label>
-				<select id="audio-tts-voice" bind:value={selectedTtsVoice} class="input select">
+				<select
+					id="audio-tts-voice"
+					bind:value={selectedTtsVoice}
+					onchange={updateTtsVoice}
+					class="input select"
+				>
 					{#each getAvailableVoices() as voice (voice.id)}
 						<option value={voice.id}>{voice.name} {voice.gender ? `(${voice.gender})` : ''}</option>
 					{/each}
@@ -175,26 +205,32 @@
 			<!-- TTS Speed -->
 			<div class="setting-row">
 				<label class="setting-label" for="audio-tts-speed">Speed ({ttsSpeed.toFixed(1)}x)</label>
-				<input id="audio-tts-speed" type="range" min="0.5" max="2.0" step="0.1" bind:value={ttsSpeed} class="slider" />
+				<input
+					id="audio-tts-speed"
+					type="range"
+					min="0.5"
+					max="2.0"
+					step="0.1"
+					bind:value={ttsSpeed}
+					oninput={onSpeedChange}
+					class="slider"
+				/>
 			</div>
 
 			<!-- TTS Format -->
 			<div class="setting-row">
 				<label class="setting-label" for="audio-tts-format">Output Format</label>
-				<select id="audio-tts-format" bind:value={ttsOutputFormat} class="input select compact">
+				<select
+					id="audio-tts-format"
+					bind:value={ttsOutputFormat}
+					onchange={updateTtsFormat}
+					class="input select compact"
+				>
 					{#each getAvailableFormats() as fmt (fmt)}
 						<option value={fmt}>{fmt.toUpperCase()}</option>
 					{/each}
 				</select>
 			</div>
-
-			<button
-				onclick={saveTtsSettings}
-				disabled={savingTtsSettings}
-				class="btn primary"
-			>
-				{savingTtsSettings ? 'Saving...' : 'Save TTS Settings'}
-			</button>
 
 			<hr class="divider" />
 
@@ -209,7 +245,7 @@
 					class="input select"
 				>
 					{#each ALL_STT_MODELS as model (model.id)}
-						<option value={model.id}>{model.displayName} — {model.description}</option>
+						<option value={model.id}>{model.displayName} — {formatSttCost(model)}</option>
 					{/each}
 				</select>
 			</div>
@@ -340,30 +376,6 @@
 		cursor: pointer;
 		border: none;
 	}
-
-	.btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		gap: 6px;
-		padding: 8px 16px;
-		border: none;
-		border-radius: calc(var(--radius) - 2px);
-		font-size: 0.875rem;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-
-	.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-	.btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-
-	.btn.primary {
-		background: var(--primary);
-		color: var(--primary-foreground);
-	}
-
-	.btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
 
 	.divider {
 		border: none;
