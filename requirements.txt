@@ -12,7 +12,6 @@ claude-agent-sdk>=0.1.30
 # Mobile support dependencies
 firebase-admin>=6.4.0  # FCM push notifications
 apscheduler>=3.10.4  # Proactive scheduling
-watchdog>=4.0.0  # Git filesystem watcher for real-time state updates
 # Web browser automation
 playwright>=1.49.0  # Headless browser for AI agent web browsing
 # Connector dependencies (messaging platform integrations)

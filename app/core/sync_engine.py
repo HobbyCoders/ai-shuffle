@@ -724,34 +724,6 @@ class SyncEngine:
             }
         )
 
-    async def broadcast_git_state_changed(
-        self,
-        user_id: str,
-        project_id: str,
-        worktree_id: Optional[str],
-        changes: Dict[str, Any]
-    ):
-        """Broadcast git state changes detected by the file watcher.
-
-        Pushes updated status/diff_stats/branches to all user devices so
-        the frontend can update without polling.
-
-        Args:
-            user_id: User who owns the project
-            project_id: The project whose git state changed
-            worktree_id: Optional worktree ID (None for main project)
-            changes: Dict with updated state, e.g. {"status": {...}, "diff_stats": {...}}
-        """
-        await self._broadcast_user_message(
-            user_id=user_id,
-            message={
-                "type": "git_state_changed",
-                "project_id": project_id,
-                "worktree_id": worktree_id,
-                "changes": changes,
-            }
-        )
-
     def get_user_streaming_sessions(self, user_id: str) -> List[Dict[str, Any]]:
         """Get all currently streaming sessions for a user with their project/worktree IDs.
 

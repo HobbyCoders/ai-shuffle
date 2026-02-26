@@ -21,7 +21,6 @@ from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.core.git_service import git_service
-from app.core.git_tracker import git_tracker
 from app.core.worktree_manager import worktree_manager
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.db import database
@@ -118,12 +117,15 @@ class FetchResponse(BaseModel):
     """Response for fetch endpoint"""
     success: bool
     message: str
+    status: Optional[dict] = None
 
 
 class OperationResponse(BaseModel):
     """Generic operation response"""
     success: bool
     message: str
+    status: Optional[dict] = None
+    diff_stats: Optional[dict] = None
 
 
 class DiffStatsResponse(BaseModel):
@@ -144,6 +146,8 @@ class CommitResponse(BaseModel):
     success: bool
     message: str
     commit_sha: Optional[str] = None
+    status: Optional[dict] = None
+    diff_stats: Optional[dict] = None
 
 
 class PushRequest(BaseModel):
@@ -167,6 +171,8 @@ class PullResponse(BaseModel):
     message: str
     conflicts: List[str] = []
     has_conflicts: bool = False
+    status: Optional[dict] = None
+    diff_stats: Optional[dict] = None
 
 
 class InitRepoRequest(BaseModel):
@@ -336,31 +342,6 @@ def get_working_dir(project_id: str, worktree_id: Optional[str] = None) -> str:
     return get_project_path(project_id)
 
 
-async def _notify_git(
-    request: Request,
-    project_id: str,
-    categories: set,
-    worktree_id: Optional[str] = None,
-    working_dir: Optional[str] = None,
-) -> None:
-    """Notify the git tracker that state has changed and broadcast via WebSocket.
-
-    Called by mutation endpoints after git operations complete.
-    """
-    api_user = get_api_user_from_request(request)
-    user_id = api_user["id"] if api_user else "admin"
-    try:
-        await git_tracker.notify(
-            project_id=project_id,
-            categories=categories,
-            worktree_id=worktree_id,
-            user_id=user_id,
-            working_dir=working_dir,
-        )
-    except Exception as e:
-        logger.warning(f"Failed to broadcast git update for {project_id}: {e}")
-
-
 def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[dict]:
     """
     Ensure a git_repositories record exists for this project if it's a git repo.
@@ -427,22 +408,8 @@ async def get_git_status(
     check_project_access(request, project_id)
     working_dir = get_working_dir(project_id, worktree_id)
 
-    # Get git status (cached internally by git_tracker)
-    status_data = await git_tracker.get_status(project_id, working_dir, worktree_id)
-
-    # Lazy-start tracking for this project
-    if status_data.get("is_git_repo"):
-        api_user = get_api_user_from_request(request)
-        user_id = api_user["id"] if api_user else "admin"
-        try:
-            await git_tracker.track(
-                project_id=project_id,
-                working_dir=working_dir,
-                user_id=user_id,
-                worktree_id=worktree_id,
-            )
-        except Exception as e:
-            logger.debug(f"Failed to start git tracker for {project_id}: {e}")
+    # Get git status directly from git CLI
+    status_data = await asyncio.to_thread(git_service.get_status, working_dir)
 
     # Convert staged files to proper format
     staged_files = [
@@ -578,14 +545,6 @@ async def init_repository(
             github_repo_name=github_full_name,
         )
 
-    # Step 5: Invalidate cache and broadcast
-    git_tracker.invalidate_project(project_id)
-    await _notify_git(
-        request, project_id,
-        {"status", "branches", "diff_stats"},
-        working_dir=working_dir,
-    )
-
     message = "Git repository initialized"
     if body.create_initial_commit:
         message += " with initial commit"
@@ -650,14 +609,6 @@ async def clone_repository(
             default_branch=current_branch or "main",
         )
 
-    # Invalidate cache and broadcast
-    git_tracker.invalidate_project(project_id)
-    await _notify_git(
-        request, project_id,
-        {"status", "branches", "diff_stats"},
-        working_dir=working_dir,
-    )
-
     return CloneRepoResponse(
         success=True,
         message=f"Repository cloned from {body.clone_url}",
@@ -690,8 +641,10 @@ async def list_branches(
             detail="Project is not a git repository"
         )
 
-    # Get branches (cached internally by git_tracker)
-    branch_data = await git_tracker.get_branches(project_id, working_dir, worktree_id, include_remote)
+    # Get branches directly from git CLI
+    branches_list = await asyncio.to_thread(git_service.list_branches, working_dir, include_remote=include_remote)
+    current_branch = await asyncio.to_thread(git_service.get_current_branch, working_dir)
+    branch_data = {"branches": branches_list, "current_branch": current_branch}
 
     # Enrich with worktree associations from database
     repo = database.get_git_repository_by_project(project_id)
@@ -766,10 +719,6 @@ async def create_branch(
             detail=f"Failed to create branch '{body.name}'. Branch may already exist or start point is invalid."
         )
 
-    # Broadcast — new branch affects branch list
-    git_tracker.invalidate_project(project_id)
-    await _notify_git(request, project_id, {"branches"}, working_dir=working_dir)
-
     return OperationResponse(
         success=True,
         message=f"Created branch '{body.name}'"
@@ -818,10 +767,6 @@ async def delete_branch(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to delete branch '{branch_name}'. It may not exist or is not fully merged (use force=true)."
         )
-
-    # Broadcast — deleted branch affects branch list
-    git_tracker.invalidate_project(project_id)
-    await _notify_git(request, project_id, {"branches"}, working_dir=working_dir)
 
     return OperationResponse(
         success=True,
@@ -878,14 +823,7 @@ async def checkout_branch(
             detail=f"Failed to checkout '{body.ref}'. It may not exist."
         )
 
-    # Broadcast — checkout affects status, branches, and diff stats
-    git_tracker.invalidate_project(project_id)
-    await _notify_git(
-        request, project_id, {"status", "branches", "diff_stats"},
-        working_dir=working_dir,
-    )
-
-    # Also broadcast branch_changed for backwards compatibility with other handlers
+    # Broadcast branch_changed for cross-device sync
     api_user = get_api_user_from_request(request)
     user_id = api_user["id"] if api_user else "admin"
     try:
@@ -1003,16 +941,13 @@ async def fetch_from_remote(
             detail=f"Failed to fetch from remote '{remote}'. Check network connection and authentication."
         )
 
-    # Broadcast — fetch updates remote refs and ahead/behind counts
-    git_tracker.invalidate_project(project_id)
-    await _notify_git(
-        request, project_id, {"status", "branches"},
-        worktree_id=worktree_id, working_dir=working_dir,
-    )
+    # Fetch inline git state for instant frontend update
+    inline_status = await asyncio.to_thread(git_service.get_status, working_dir)
 
     return FetchResponse(
         success=True,
-        message=f"Fetched from '{remote}'"
+        message=f"Fetched from '{remote}'",
+        status=inline_status,
     )
 
 
@@ -1045,8 +980,8 @@ async def get_diff_stats(
             detail="Project is not a git repository"
         )
 
-    # Get diff stats (cached internally by git_tracker)
-    stats = await git_tracker.get_diff_stats(project_id, working_dir, worktree_id, include_unstaged)
+    # Get diff stats directly from git CLI
+    stats = await asyncio.to_thread(git_service.get_diff_stats, working_dir, include_unstaged=include_unstaged)
 
     return DiffStatsResponse(
         additions=stats.get("additions", 0),
@@ -1104,16 +1039,16 @@ async def create_commit(
             detail="Failed to create commit. There may be no changes to commit."
         )
 
-    # Broadcast — commit affects status, diff stats, and branches
-    await _notify_git(
-        request, project_id, {"status", "diff_stats", "branches"},
-        worktree_id=worktree_id, working_dir=working_dir,
-    )
+    # Fetch inline git state for instant frontend update
+    inline_status = await asyncio.to_thread(git_service.get_status, working_dir)
+    inline_diff = await asyncio.to_thread(git_service.get_diff_stats, working_dir)
 
     return CommitResponse(
         success=True,
         message=f"Created commit {commit_sha}" if commit_sha else "Created commit",
-        commit_sha=commit_sha
+        commit_sha=commit_sha,
+        status=inline_status,
+        diff_stats=inline_diff,
     )
 
 
@@ -1164,15 +1099,13 @@ async def push_commits(
             detail=error_msg or "Failed to push commits"
         )
 
-    # Broadcast — push affects ahead/behind counts
-    await _notify_git(
-        request, project_id, {"status", "branches"},
-        worktree_id=worktree_id, working_dir=working_dir,
-    )
+    # Fetch inline git state for instant frontend update
+    inline_status = await asyncio.to_thread(git_service.get_status, working_dir)
 
     return OperationResponse(
         success=True,
-        message=f"Pushed to {body.remote}/{branch}"
+        message=f"Pushed to {body.remote}/{branch}",
+        status=inline_status,
     )
 
 
@@ -1224,13 +1157,6 @@ async def pull_from_remote(
         auto_stash=body.auto_stash,
     )
 
-    # Broadcast — pull affects status, branches, and diff stats
-    git_tracker.invalidate_project(project_id)
-    await _notify_git(
-        request, project_id, {"status", "branches", "diff_stats"},
-        worktree_id=worktree_id, working_dir=working_dir,
-    )
-
     if not success:
         return PullResponse(
             success=False,
@@ -1239,9 +1165,15 @@ async def pull_from_remote(
             has_conflicts=len(conflicts) > 0
         )
 
+    # Fetch inline git state for instant frontend update
+    inline_status = await asyncio.to_thread(git_service.get_status, working_dir)
+    inline_diff = await asyncio.to_thread(git_service.get_diff_stats, working_dir)
+
     return PullResponse(
         success=True,
-        message=f"Pulled from {body.remote} using {body.strategy}"
+        message=f"Pulled from {body.remote} using {body.strategy}",
+        status=inline_status,
+        diff_stats=inline_diff,
     )
 
 

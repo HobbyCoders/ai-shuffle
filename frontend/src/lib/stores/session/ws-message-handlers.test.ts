@@ -46,7 +46,6 @@ function createMockDeps(overrides?: Partial<MessageHandlerDeps>): MessageHandler
 		gitRefreshDiffStats: vi.fn(),
 		gitGetProjectId: vi.fn(() => null),
 		gitGetLoading: vi.fn(() => false),
-		gitApplyServerUpdate: vi.fn(),
 		appLoadSessions: vi.fn(),
 		appLoadApiUserSessions: vi.fn(),
 		internal: createMockInternal(),

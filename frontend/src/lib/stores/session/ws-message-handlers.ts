@@ -66,8 +66,6 @@ export interface MessageHandlerDeps {
 	gitRefreshDiffStats: () => void;
 	gitGetProjectId: () => string | null;
 	gitGetLoading: () => boolean;
-	gitApplyServerUpdate: (projectId: string, worktreeId: string | null, changes: Record<string, unknown>) => void;
-
 	// Callbacks for app-level side effects
 	appLoadSessions: () => void;
 	appLoadApiUserSessions: () => void;
@@ -106,7 +104,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		update, getState, wsSend,
 		sessionPoller, sessionNotifier,
 		streamingSessions, backgroundPermissions,
-		gitRefreshStatus, gitRefreshDiffStats, gitGetProjectId, gitGetLoading, gitApplyServerUpdate,
+		gitRefreshStatus, gitRefreshDiffStats, gitGetProjectId, gitGetLoading,
 		appLoadSessions, appLoadApiUserSessions,
 		internal,
 		onNewChat, onPersistSession,
@@ -273,16 +271,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			if (gitProjectId === projectId && !gitGetLoading()) {
 				gitRefreshStatus();
 				gitRefreshDiffStats();
-			}
-			return;
-		}
-
-		if (msgType === 'git_state_changed') {
-			const projectId = data.project_id as string;
-			const worktreeId = (data.worktree_id as string) || null;
-			const changes = data.changes as Record<string, unknown>;
-			if (projectId && changes) {
-				gitApplyServerUpdate(projectId, worktreeId, changes);
 			}
 			return;
 		}

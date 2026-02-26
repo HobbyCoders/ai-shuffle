@@ -278,6 +278,10 @@ async def handle_tool_result(
         "tool_name": tool_name,
         "is_error": event.get("is_error", False),
     }
+    # Flag tool results that likely modify the working tree so the frontend
+    # can trigger an immediate git status poll (adaptive polling).
+    if tool_name in {"Edit", "Write", "Bash", "NotebookEdit", "MultiEdit", "computer"}:
+        chunk_data["git_hint"] = True
     await sync_engine.broadcast_stream_chunk(
         session_id=ectx.session_id,
         message_id=ectx.message_id,

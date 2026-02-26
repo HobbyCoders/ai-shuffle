@@ -196,44 +196,57 @@
 	});
 
 	// =========================================================================
-	// Event-driven git state updates (three-layer system)
+	// Adaptive git polling (replaces event-driven three-layer system)
 	// =========================================================================
-	// Git state updates arrive via three mechanisms, all pushing through WebSocket:
-	// 1. Git hooks (post-commit, post-checkout, post-merge, post-rewrite) — instant,
-	//    bypasses debounce, handles external CLI/IDE git operations.
-	// 2. Watchdog file watcher — detects staging, file edits, and other .git/ changes
-	//    with 500ms debounce.
-	// 3. Programmatic broadcast — API mutation endpoints (commit, push, checkout, etc.)
-	//    immediately recompute and broadcast state after operations complete.
-	// A 60-second safety-net fallback poll catches any missed events
-	// (e.g. working-tree edits made outside the app, which don't touch .git/).
-	// Timer is paused entirely when the tab is hidden to avoid wasting CPU.
+	// Frontend-driven polling scoped to the active tab only:
+	// - 2s interval while the agent is actively streaming (or recently hinted)
+	// - 5s interval after 30s of inactivity
+	// - Paused entirely when the browser tab is hidden
+	// - Accelerated by `git_hint` flags piggybacked on tool_result WS chunks
 
-	const GIT_FALLBACK_INTERVAL_MS = 60_000;
-	let _gitFallbackTimer: ReturnType<typeof setInterval> | null = null;
-	let _gitFallbackProject: string | null = null;
+	import { sessionNotifier } from '$lib/stores/session/session-notifier';
 
-	/**
-	 * Refresh diff stats via API (used for fallback poll and after streaming).
-	 */
-	async function refreshDiffStats(projectId: string) {
+	const GIT_POLL_ACTIVE_MS = 2_000;
+	const GIT_POLL_IDLE_MS = 5_000;
+	const GIT_IDLE_THRESHOLD_MS = 30_000;
+
+	let _gitPollTimer: ReturnType<typeof setTimeout> | null = null;
+	let _gitPollProject: string | null = null;
+	let _gitLastActivity = 0; // timestamp of last git_hint or streaming event
+
+	function gitPollNow() {
+		git.refreshStatus();
 		git.refreshDiffStats();
 	}
 
-	function startGitFallback(project: string) {
-		stopGitFallback();
-		_gitFallbackProject = project;
-		_gitFallbackTimer = setInterval(() => {
-			refreshDiffStats(project);
-		}, GIT_FALLBACK_INTERVAL_MS);
+	function gitPollInterval(): number {
+		return (Date.now() - _gitLastActivity < GIT_IDLE_THRESHOLD_MS)
+			? GIT_POLL_ACTIVE_MS
+			: GIT_POLL_IDLE_MS;
 	}
 
-	function stopGitFallback() {
-		if (_gitFallbackTimer) {
-			clearInterval(_gitFallbackTimer);
-			_gitFallbackTimer = null;
+	function scheduleGitPoll() {
+		if (_gitPollTimer) clearTimeout(_gitPollTimer);
+		if (!_gitPollProject || document.hidden) return;
+		_gitPollTimer = setTimeout(() => {
+			gitPollNow();
+			scheduleGitPoll();
+		}, gitPollInterval());
+	}
+
+	function startGitPoll(project: string) {
+		stopGitPoll();
+		_gitPollProject = project;
+		_gitLastActivity = Date.now();
+		scheduleGitPoll();
+	}
+
+	function stopGitPoll() {
+		if (_gitPollTimer) {
+			clearTimeout(_gitPollTimer);
+			_gitPollTimer = null;
 		}
-		_gitFallbackProject = null;
+		_gitPollProject = null;
 	}
 
 	/**
@@ -254,21 +267,17 @@
 		}
 	}
 
-	// Pause/resume git fallback poll when tab visibility changes.
-	// No point spawning git subprocesses if the user isn't looking.
+	// Pause/resume git poll when tab visibility changes.
 	function handleVisibilityChange() {
 		if (document.hidden) {
-			stopGitFallback();
-		} else if (_gitFallbackProject === null && activeProject && $githubAuthenticated) {
-			// Tab became visible again — restart
-			startGitFallback(activeProject);
-			// Do one immediate refresh on return
-			refreshDiffStats(activeProject);
+			stopGitPoll();
+		} else if (_gitPollProject === null && activeProject && $githubAuthenticated) {
+			startGitPoll(activeProject);
+			gitPollNow(); // Immediate refresh on return
 		}
 	}
 
-	// Safety-net fallback poll: refreshes diff stats every 60s when tab is visible.
-	// Real-time updates come via WebSocket from git hooks, file watcher, and API broadcasts.
+	// Main effect: start/stop adaptive poll when project/auth changes.
 	$effect(() => {
 		const project = activeProject;
 		const worktreeId = activeWorktreeId; // Track worktree changes for tab switches
@@ -278,18 +287,34 @@
 		// Clear stale PR state immediately when any dependency changes.
 		branchPR = null;
 
-		stopGitFallback();
+		stopGitPoll();
 
 		if (project && authenticated && !document.hidden) {
-			startGitFallback(project);
+			startGitPoll(project);
 		}
 
 		document.addEventListener('visibilitychange', handleVisibilityChange);
 
 		return () => {
-			stopGitFallback();
+			stopGitPoll();
 			document.removeEventListener('visibilitychange', handleVisibilityChange);
 		};
+	});
+
+	// Listen for git_hint on stream_chunk events to accelerate polling.
+	$effect(() => {
+		const unsub = sessionNotifier.onEvent((event) => {
+			if (event.event_type === 'stream_chunk' || event.type === 'stream_chunk') {
+				// git_hint is nested inside the data payload of the stream_chunk
+				const data = (event as Record<string, unknown>).data as Record<string, unknown> | undefined;
+				if (data?.git_hint === true) {
+					_gitLastActivity = Date.now();
+					gitPollNow();
+					scheduleGitPoll(); // Reset timer to active interval
+				}
+			}
+		});
+		return unsub;
 	});
 
 	// PR detection: runs when the branch changes (event-driven via WebSocket state updates).
@@ -318,10 +343,8 @@
 			_wasStreaming = true;
 		} else if (_wasStreaming) {
 			_wasStreaming = false;
-			const project = activeProject;
-			if (project) {
-				git.refreshStatus();
-				untrack(() => refreshDiffStats(project));
+			if (activeProject) {
+				untrack(() => gitPollNow());
 			}
 		}
 	});
@@ -475,7 +498,7 @@
 		if (currentBranch && branchPR.head_branch !== currentBranch) {
 			progressError = `PR #${branchPR.number} is for branch "${branchPR.head_branch}" but current branch is "${currentBranch}"`;
 			showFinishModal = false;
-			untrack(() => refreshDiffStats(projectId));
+			untrack(() => git.refreshDiffStats());
 			return;
 		}
 

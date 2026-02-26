@@ -610,7 +610,6 @@ const { handleMessage } = createMessageHandlers({
 	gitRefreshDiffStats: () => git.refreshDiffStats(),
 	gitGetProjectId: () => git.current.projectId,
 	gitGetLoading: () => git.current.loading,
-	gitApplyServerUpdate: (projectId, worktreeId, changes) => git.applyServerUpdate(projectId, worktreeId, changes),
 	appLoadSessions: () => appData.loadSessions(),
 	appLoadApiUserSessions: () => appData.loadApiUserSessions(),
 	internal,

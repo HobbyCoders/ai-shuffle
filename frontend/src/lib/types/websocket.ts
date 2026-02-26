@@ -517,14 +517,6 @@ export interface WsServerUserBranchChanged {
 	branch_name: string;
 }
 
-/** Git state changed (push from file watcher). */
-export interface WsServerGitStateChanged {
-	type: 'git_state_changed';
-	project_id: string;
-	worktree_id?: string | null;
-	changes: Record<string, unknown>;
-}
-
 // =============================================================================
 // Server -> Client Sync Events (SyncEngine broadcasts, have event_type field)
 // =============================================================================
@@ -706,8 +698,7 @@ export type ServerMessage =
 	| WsServerUserSessionCreated
 	| WsServerUserStreamingChanged
 	| WsServerUserStreamingSessions
-	| WsServerUserBranchChanged
-	| WsServerGitStateChanged;
+	| WsServerUserBranchChanged;
 
 // =============================================================================
 // Type Guards

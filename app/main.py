@@ -167,10 +167,6 @@ async def lifespan(app: FastAPI):
     from app.core.automation_manager import automation_manager
     await automation_manager.start()
 
-    # Start consolidated git tracker (watcher + hooks + cache)
-    from app.core.git_tracker import git_tracker
-    git_tracker.start(port=settings.port)
-
     # Load fal.ai model catalog from DB cache (instant startup)
     # Background refresh happens on first API request if cache is stale
     from app.services.fal_catalog import catalog_service
@@ -190,9 +186,6 @@ async def lifespan(app: FastAPI):
 
     # Shutdown connectors
     await connector_manager.shutdown_all()
-
-    # Shutdown git tracker (uninstalls hooks + stops watchers)
-    await git_tracker.shutdown()
 
     # Shutdown SDK session pool (disconnect all live subprocesses)
     try:
