@@ -1333,12 +1333,21 @@ class AutomationOutputType(str, Enum):
 VALID_AUTOMATION_TRIGGER_TYPES = [t.value for t in AutomationTriggerType]
 
 
+class TriggerItem(BaseModel):
+    """A single trigger within an automation's triggers array."""
+    type: AutomationTriggerType
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
 class AutomationCreate(BaseModel):
     """Automation creation request"""
     name: str = Field(..., min_length=1, max_length=100)
     description: Optional[str] = None
-    trigger_type: AutomationTriggerType
+    # Legacy single-trigger fields (still accepted for backward compat)
+    trigger_type: Optional[AutomationTriggerType] = None
     trigger_config: Dict[str, Any] = Field(default_factory=dict)
+    # Multi-trigger support
+    triggers: Optional[List[TriggerItem]] = None
     prompt: Optional[str] = Field(default=None)
     action_steps: Optional[List[Dict[str, Any]]] = None
     profile_id: str
@@ -1359,6 +1368,7 @@ class AutomationUpdate(BaseModel):
     description: Optional[str] = None
     trigger_type: Optional[AutomationTriggerType] = None
     trigger_config: Optional[Dict[str, Any]] = None
+    triggers: Optional[List[TriggerItem]] = None
     prompt: Optional[str] = None
     action_steps: Optional[List[Dict[str, Any]]] = None
     profile_id: Optional[str] = None
@@ -1381,6 +1391,7 @@ class Automation(BaseModel):
     description: Optional[str] = None
     trigger_type: str
     trigger_config: Dict[str, Any] = Field(default_factory=dict)
+    triggers: Optional[List[Dict[str, Any]]] = None
     prompt: Optional[str] = None
     action_steps: Optional[List[Dict[str, Any]]] = None
     profile_id: str

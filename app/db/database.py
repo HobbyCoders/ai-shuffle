@@ -6126,6 +6126,15 @@ def _parse_automation_row(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, A
     for field in ("trigger_config", "output_config"):
         if row.get(field) and isinstance(row[field], str):
             row[field] = json.loads(row[field])
+    # Deserialize action_steps from JSON string
+    if row.get("action_steps") and isinstance(row["action_steps"], str):
+        row["action_steps"] = json.loads(row["action_steps"])
+    # Deserialize triggers from JSON string
+    if row.get("triggers") and isinstance(row["triggers"], str):
+        row["triggers"] = json.loads(row["triggers"])
+    # Backward compatibility: synthesize triggers from trigger_type/trigger_config if missing
+    if not row.get("triggers"):
+        row["triggers"] = [{"type": row.get("trigger_type", "cron"), "config": row.get("trigger_config", {})}]
     return row
 
 
@@ -6155,11 +6164,16 @@ def create_automation(
     max_cost_total: Optional[float] = None,
     max_runs_per_day: Optional[int] = None,
     requires_approval: bool = False,
+    action_steps: Optional[List[Dict[str, Any]]] = None,
+    triggers: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Create a new automation."""
     now = datetime.utcnow().isoformat()
     if output_config is None:
         output_config = {"type": "session"}
+    # Build triggers array if not provided
+    if not triggers:
+        triggers = [{"type": trigger_type, "config": trigger_config}]
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -6167,13 +6181,15 @@ def create_automation(
                (id, name, description, trigger_type, trigger_config, prompt,
                 profile_id, project_id, output_config, max_turns, timeout_seconds,
                 max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
-                requires_approval, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                requires_approval, action_steps, triggers, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (automation_id, name, description, trigger_type,
              json.dumps(trigger_config), prompt, profile_id, project_id,
              json.dumps(output_config), max_turns, timeout_seconds,
              max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
-             requires_approval, now, now)
+             requires_approval, json.dumps(action_steps) if action_steps else None,
+             json.dumps(triggers),
+             now, now)
         )
     return get_automation(automation_id)
 
@@ -6205,19 +6221,33 @@ def get_enabled_automations() -> List[Dict[str, Any]]:
 
 
 def get_automations_for_event(trigger_type: str, event_type: str, connector_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Get enabled automations matching a connector event trigger."""
+    """Get enabled automations matching a connector event or connector trigger.
+
+    Searches the triggers array for any matching trigger.
+    """
     automations = get_enabled_automations()
     results = []
     for a in automations:
-        if a.get("trigger_type") != trigger_type:
-            continue
-        tc = a.get("trigger_config", {})
-        if trigger_type == "connector_event":
-            if tc.get("event_type") != event_type:
+        triggers = a.get("triggers") or []
+        matched = False
+        for trig in triggers:
+            if trig.get("type") != trigger_type:
                 continue
-            if connector_id and tc.get("connector_id") and tc["connector_id"] != connector_id:
-                continue
-        results.append(a)
+            tc = trig.get("config", {})
+            if trigger_type == "connector_event":
+                if tc.get("event_type") != event_type:
+                    continue
+                if connector_id and tc.get("connector_id") and tc["connector_id"] != connector_id:
+                    continue
+            elif trigger_type == "connector_trigger":
+                if tc.get("trigger_id") != event_type:
+                    continue
+                if connector_id and tc.get("connector_id") and tc["connector_id"] != connector_id:
+                    continue
+            matched = True
+            break
+        if matched:
+            results.append(a)
     return results
 
 
@@ -6243,6 +6273,14 @@ def update_automation(automation_id: str, **kwargs) -> Optional[Dict[str, Any]]:
         if key in kwargs:
             updates.append(f"{key} = ?")
             values.append(json.dumps(kwargs[key]))
+
+    if "action_steps" in kwargs:
+        updates.append("action_steps = ?")
+        values.append(json.dumps(kwargs["action_steps"]) if kwargs["action_steps"] is not None else None)
+
+    if "triggers" in kwargs:
+        updates.append("triggers = ?")
+        values.append(json.dumps(kwargs["triggers"]) if kwargs["triggers"] is not None else None)
 
     if "trigger_type" in kwargs:
         updates.append("trigger_type = ?")

@@ -67,8 +67,9 @@ class AutomationManager:
         automations = database.get_enabled_automations()
         scheduled = 0
         for auto in automations:
-            trigger_type = auto.get("trigger_type")
-            if trigger_type in ("cron", "interval"):
+            triggers = auto.get("triggers") or []
+            has_scheduled = any(t.get("type") in ("cron", "interval") for t in triggers)
+            if has_scheduled:
                 try:
                     await self.schedule_automation(auto["id"])
                     scheduled += 1
@@ -97,8 +98,19 @@ class AutomationManager:
     # Scheduling
     # ------------------------------------------------------------------
 
+    def _remove_automation_jobs(self, automation_id: str) -> None:
+        """Remove all APScheduler jobs for an automation."""
+        if not self._scheduler:
+            return
+        for job in self._scheduler.get_jobs():
+            if job.id == automation_id or job.id.startswith(f"{automation_id}__"):
+                try:
+                    self._scheduler.remove_job(job.id)
+                except (KeyError, LookupError):
+                    pass
+
     async def schedule_automation(self, automation_id: str) -> None:
-        """Add or update an APScheduler job for a cron/interval automation."""
+        """Add or update APScheduler jobs for all cron/interval triggers in the automation."""
         if not self._scheduler:
             return
 
@@ -106,70 +118,64 @@ class AutomationManager:
         if not automation:
             return
 
-        trigger_type = automation["trigger_type"]
-        trigger_config = automation.get("trigger_config", {})
+        # Remove all existing jobs for this automation
+        self._remove_automation_jobs(automation_id)
 
-        # Remove existing job if any
-        try:
-            self._scheduler.remove_job(automation_id)
-        except (KeyError, LookupError):
-            pass
+        triggers = automation.get("triggers") or []
+        for i, trig in enumerate(triggers):
+            t_type = trig.get("type")
+            t_config = trig.get("config", {})
+            job_id = f"{automation_id}__trigger_{i}"
 
-        # Event-driven trigger types don't need APScheduler jobs
-        if trigger_type in ("connector_event", "connector_trigger", "webhook"):
-            return
+            # Event-driven trigger types don't need APScheduler jobs
+            if t_type in ("connector_event", "connector_trigger", "webhook"):
+                continue
 
-        if trigger_type == "cron":
-            from apscheduler.triggers.cron import CronTrigger
-            expression = trigger_config.get("expression", "")
-            timezone = trigger_config.get("timezone", "UTC")
-            try:
-                # Parse 5-field cron: minute hour day_of_month month day_of_week
-                parts = expression.strip().split()
-                if len(parts) != 5:
-                    logger.error(f"Invalid cron expression for {automation_id}: {expression}")
-                    return
-                trigger = CronTrigger(
-                    minute=parts[0], hour=parts[1],
-                    day=parts[2], month=parts[3],
-                    day_of_week=parts[4], timezone=timezone,
-                )
-                self._scheduler.add_job(
-                    self._on_schedule_trigger,
-                    trigger,
-                    id=automation_id,
-                    args=[automation_id],
-                    replace_existing=True,
-                )
-                logger.info(f"Scheduled cron automation {automation_id}: {expression} ({timezone})")
-            except Exception as e:
-                logger.error(f"Failed to create cron trigger for {automation_id}: {e}")
+            if t_type == "cron":
+                from apscheduler.triggers.cron import CronTrigger
+                expression = t_config.get("expression", "")
+                timezone = t_config.get("timezone", "UTC")
+                try:
+                    parts = expression.strip().split()
+                    if len(parts) != 5:
+                        logger.error(f"Invalid cron expression for {automation_id} trigger {i}: {expression}")
+                        continue
+                    trigger = CronTrigger(
+                        minute=parts[0], hour=parts[1],
+                        day=parts[2], month=parts[3],
+                        day_of_week=parts[4], timezone=timezone,
+                    )
+                    self._scheduler.add_job(
+                        self._on_schedule_trigger,
+                        trigger,
+                        id=job_id,
+                        args=[automation_id],
+                        replace_existing=True,
+                    )
+                    logger.info(f"Scheduled cron trigger {i} for {automation_id}: {expression} ({timezone})")
+                except Exception as e:
+                    logger.error(f"Failed to create cron trigger {i} for {automation_id}: {e}")
 
-        elif trigger_type == "interval":
-            from apscheduler.triggers.interval import IntervalTrigger
-            interval_seconds = trigger_config.get("seconds", 3600)
-            try:
-                trigger = IntervalTrigger(seconds=interval_seconds)
-                self._scheduler.add_job(
-                    self._on_schedule_trigger,
-                    trigger,
-                    id=automation_id,
-                    args=[automation_id],
-                    replace_existing=True,
-                )
-                logger.info(f"Scheduled interval automation {automation_id}: every {interval_seconds}s")
-            except Exception as e:
-                logger.error(f"Failed to create interval trigger for {automation_id}: {e}")
+            elif t_type == "interval":
+                from apscheduler.triggers.interval import IntervalTrigger
+                interval_seconds = t_config.get("seconds", 3600)
+                try:
+                    trigger = IntervalTrigger(seconds=interval_seconds)
+                    self._scheduler.add_job(
+                        self._on_schedule_trigger,
+                        trigger,
+                        id=job_id,
+                        args=[automation_id],
+                        replace_existing=True,
+                    )
+                    logger.info(f"Scheduled interval trigger {i} for {automation_id}: every {interval_seconds}s")
+                except Exception as e:
+                    logger.error(f"Failed to create interval trigger {i} for {automation_id}: {e}")
 
     async def unschedule_automation(self, automation_id: str) -> None:
-        """Remove an APScheduler job."""
-        if not self._scheduler:
-            return
-        try:
-            self._scheduler.remove_job(automation_id)
-            logger.info(f"Unscheduled automation {automation_id}")
-        except (KeyError, LookupError):
-            pass
+        """Remove all APScheduler jobs for an automation."""
+        self._remove_automation_jobs(automation_id)
+        logger.info(f"Unscheduled automation {automation_id}")
 
     # ------------------------------------------------------------------
     # Trigger handlers
@@ -234,11 +240,19 @@ class AutomationManager:
             return None
         if not automation.get("is_enabled"):
             return None
-        if automation.get("trigger_type") != "webhook":
+
+        # Find webhook trigger in triggers array
+        triggers = automation.get("triggers") or []
+        webhook_trigger = None
+        for trig in triggers:
+            if trig.get("type") == "webhook":
+                webhook_trigger = trig
+                break
+        if not webhook_trigger:
             return None
 
         # Verify HMAC signature
-        trigger_config = automation.get("trigger_config", {})
+        trigger_config = webhook_trigger.get("config", {})
         webhook_secret = trigger_config.get("secret")
         if webhook_secret:
             from app.core.automation_service import decrypt_webhook_secret
@@ -522,52 +536,137 @@ class AutomationManager:
         trigger_data: Dict[str, Any],
         response_text: str,
     ) -> None:
-        """Execute action steps for an automation run."""
-        from app.core.automation_service import render_action_params
-        from app.core.connectors.manager import connector_manager
+        """Execute action steps for an automation run.
+
+        Supports multiple action step types:
+        - connector_action: Execute a connector action
+        - send_prompt: Run an AI prompt
+        - webhook_call: POST/GET to a URL
+        - delay: Wait for a specified time
+        """
+        from app.core.automation_service import render_action_params, render_prompt
 
         for i, step in enumerate(action_steps):
             step_type = step.get("type")
-            if step_type != "connector_action":
-                logger.warning(
-                    f"Automation {automation_id} run {run_id}: "
-                    f"unknown action step type '{step_type}' at index {i} — skipping"
-                )
-                continue
 
-            connector_id = step.get("connector_id")
-            action_id = step.get("action_id")
-            raw_params = step.get("params", {})
+            if step_type == "connector_action":
+                from app.core.connectors.manager import connector_manager
 
-            if not connector_id or not action_id:
-                logger.warning(
-                    f"Automation {automation_id} run {run_id}: "
-                    f"action step {i} missing connector_id or action_id — skipping"
-                )
-                continue
+                connector_id = step.get("connector_id")
+                action_id = step.get("action_id")
+                raw_params = step.get("params", {})
 
-            try:
-                instance = await connector_manager.get_running_connector(connector_id)
-                if not instance:
-                    logger.error(
+                if not connector_id or not action_id:
+                    logger.warning(
                         f"Automation {automation_id} run {run_id}: "
-                        f"connector {connector_id} is not running for action step {i}"
+                        f"action step {i} missing connector_id or action_id — skipping"
                     )
                     continue
 
-                # Render template variables in params
-                rendered_params = render_action_params(raw_params, trigger_data, response_text)
+                try:
+                    instance = await connector_manager.get_running_connector(connector_id)
+                    if not instance:
+                        logger.error(
+                            f"Automation {automation_id} run {run_id}: "
+                            f"connector {connector_id} is not running for action step {i}"
+                        )
+                        continue
 
-                result = await instance.execute_action(action_id, rendered_params)
+                    rendered_params = render_action_params(raw_params, trigger_data, response_text)
+                    result = await instance.execute_action(action_id, rendered_params)
+                    logger.info(
+                        f"Automation {automation_id} run {run_id}: "
+                        f"action step {i} ({connector_id}/{action_id}) completed: {result}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Automation {automation_id} run {run_id}: "
+                        f"action step {i} ({connector_id}/{action_id}) failed: {e}",
+                        exc_info=True,
+                    )
+
+            elif step_type == "send_prompt":
+                prompt_text = step.get("prompt", "")
+                if not prompt_text.strip():
+                    logger.warning(
+                        f"Automation {automation_id} run {run_id}: "
+                        f"send_prompt step {i} has empty prompt — skipping"
+                    )
+                    continue
+                try:
+                    rendered = render_prompt(prompt_text, {**trigger_data, "response": response_text})
+                    from app.core.query_engine import execute_query
+
+                    automation = database.get_automation(automation_id)
+                    profile_id = step.get("profile_id") or (automation.get("profile_id") if automation else None)
+                    max_turns = step.get("max_turns", 1)
+
+                    result = await execute_query(
+                        prompt=rendered,
+                        profile_id=profile_id,
+                        overrides={"max_turns": max_turns},
+                    )
+                    # Update response_text for subsequent steps
+                    response_text = result.get("response", response_text)
+                    logger.info(
+                        f"Automation {automation_id} run {run_id}: "
+                        f"send_prompt step {i} completed"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Automation {automation_id} run {run_id}: "
+                        f"send_prompt step {i} failed: {e}",
+                        exc_info=True,
+                    )
+
+            elif step_type == "webhook_call":
+                url = step.get("url", "")
+                if not url:
+                    logger.warning(
+                        f"Automation {automation_id} run {run_id}: "
+                        f"webhook_call step {i} has no URL — skipping"
+                    )
+                    continue
+                try:
+                    method = (step.get("method") or "POST").upper()
+                    headers = step.get("headers") or {}
+                    body_template = step.get("body", "")
+                    rendered_body = render_prompt(body_template, {**trigger_data, "response": response_text}) if body_template else ""
+
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        resp = await client.request(
+                            method, url,
+                            content=rendered_body if rendered_body else None,
+                            headers=headers,
+                        )
+                        resp.raise_for_status()
+                    logger.info(
+                        f"Automation {automation_id} run {run_id}: "
+                        f"webhook_call step {i} completed ({method} {url} → {resp.status_code})"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Automation {automation_id} run {run_id}: "
+                        f"webhook_call step {i} ({url}) failed: {e}",
+                        exc_info=True,
+                    )
+
+            elif step_type == "delay":
+                delay_seconds = step.get("seconds", 0)
+                if delay_seconds <= 0:
+                    continue
+                # Cap delay at 5 minutes for safety
+                delay_seconds = min(delay_seconds, 300)
                 logger.info(
                     f"Automation {automation_id} run {run_id}: "
-                    f"action step {i} ({connector_id}/{action_id}) completed: {result}"
+                    f"delay step {i} — waiting {delay_seconds}s"
                 )
-            except Exception as e:
-                logger.error(
+                await asyncio.sleep(delay_seconds)
+
+            else:
+                logger.warning(
                     f"Automation {automation_id} run {run_id}: "
-                    f"action step {i} ({connector_id}/{action_id}) failed: {e}",
-                    exc_info=True,
+                    f"unknown action step type '{step_type}' at index {i} — skipping"
                 )
 
     # ------------------------------------------------------------------

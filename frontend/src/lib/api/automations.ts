@@ -10,19 +10,38 @@ import { api } from './client';
 
 export type TriggerType = 'cron' | 'interval' | 'connector_event' | 'connector_trigger' | 'webhook';
 export type OutputType = 'connector' | 'webhook' | 'session' | 'none';
+export type ActionStepType = 'connector_action' | 'send_prompt' | 'webhook_call' | 'delay';
+
+export interface TriggerItem {
+	type: TriggerType;
+	config: Record<string, any>;
+}
 
 export interface ActionStep {
-	type: 'connector_action';
-	connector_id: string;
-	action_id: string;
-	params: Record<string, any>;
+	type: ActionStepType;
+	// connector_action fields
+	connector_id?: string;
+	action_id?: string;
+	params?: Record<string, any>;
+	// send_prompt fields
+	prompt?: string;
+	profile_id?: string;
+	max_turns?: number;
+	// webhook_call fields
+	url?: string;
+	method?: string;
+	headers?: Record<string, string>;
+	body?: string;
+	// delay fields
+	seconds?: number;
 }
 
 export interface AutomationCreate {
 	name: string;
 	description?: string;
-	trigger_type: TriggerType;
-	trigger_config: Record<string, any>;
+	trigger_type?: TriggerType;
+	trigger_config?: Record<string, any>;
+	triggers?: TriggerItem[];
 	prompt?: string;
 	profile_id: string;
 	project_id?: string;
@@ -42,6 +61,7 @@ export interface AutomationUpdate {
 	description?: string;
 	trigger_type?: TriggerType;
 	trigger_config?: Record<string, any>;
+	triggers?: TriggerItem[];
 	prompt?: string;
 	profile_id?: string;
 	project_id?: string;
@@ -63,6 +83,7 @@ export interface Automation {
 	description: string | null;
 	trigger_type: TriggerType;
 	trigger_config: Record<string, any>;
+	triggers: TriggerItem[] | null;
 	prompt: string | null;
 	profile_id: string;
 	project_id: string | null;

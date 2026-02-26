@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request, status
 from app.core.models import (
     Automation, AutomationCreate, AutomationUpdate,
     AutomationRun, AutomationApproval, AutomationStats,
-    AutomationTestResult, VALID_AUTOMATION_TRIGGER_TYPES,
+    AutomationTestResult, VALID_AUTOMATION_TRIGGER_TYPES, TriggerItem,
 )
 from app.api.auth import require_admin
 from app.db import database
@@ -38,11 +38,26 @@ async def create_automation_endpoint(
 ):
     """Create a new automation."""
     from app.core.automation_service import create_automation
+    # Convert triggers from Pydantic models to dicts
+    triggers_list = None
+    if data.triggers:
+        triggers_list = [{"type": t.type.value, "config": t.config} for t in data.triggers]
+    # Determine primary trigger_type/trigger_config
+    if triggers_list:
+        primary_type = triggers_list[0]["type"]
+        primary_config = triggers_list[0]["config"]
+    elif data.trigger_type:
+        primary_type = data.trigger_type.value
+        primary_config = data.trigger_config
+        triggers_list = [{"type": primary_type, "config": primary_config}]
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one trigger is required")
     try:
         return await create_automation(
             name=data.name,
-            trigger_type=data.trigger_type.value,
-            trigger_config=data.trigger_config,
+            trigger_type=primary_type,
+            trigger_config=primary_config,
+            triggers=triggers_list,
             prompt=data.prompt,
             profile_id=data.profile_id,
             project_id=data.project_id,
@@ -128,6 +143,16 @@ async def update_automation_endpoint(
     # Convert enum to string value
     if "trigger_type" in kwargs and kwargs["trigger_type"] is not None:
         kwargs["trigger_type"] = kwargs["trigger_type"].value if hasattr(kwargs["trigger_type"], "value") else kwargs["trigger_type"]
+    # Convert triggers from Pydantic models to dicts
+    if "triggers" in kwargs and kwargs["triggers"] is not None:
+        kwargs["triggers"] = [
+            {"type": t["type"].value if hasattr(t["type"], "value") else t["type"], "config": t.get("config", {})}
+            for t in kwargs["triggers"]
+        ]
+        # Also update trigger_type/trigger_config from first trigger for backward compat
+        if kwargs["triggers"]:
+            kwargs["trigger_type"] = kwargs["triggers"][0]["type"]
+            kwargs["trigger_config"] = kwargs["triggers"][0]["config"]
     try:
         result = await update_automation(automation_id, **kwargs)
     except ValueError as e:
@@ -157,8 +182,10 @@ async def enable_automation(automation_id: str, token: str = Depends(require_adm
     database.update_automation(automation_id, is_enabled=True)
 
     from app.core.automation_manager import automation_manager
-    trigger_type = automation.get("trigger_type")
-    if trigger_type in ("cron", "interval"):
+    # Check if any trigger in the array needs scheduling
+    triggers = automation.get("triggers") or []
+    has_scheduled = any(t.get("type") in ("cron", "interval") for t in triggers)
+    if has_scheduled:
         await automation_manager.schedule_automation(automation_id)
 
     return database.get_automation(automation_id)
@@ -194,13 +221,17 @@ async def trigger_automation(
 
     from app.core.automation_manager import automation_manager
 
-    if automation.get("trigger_type") == "webhook":
-        # Webhook trigger
+    # Check if any trigger is a webhook type
+    triggers = automation.get("triggers") or []
+    has_webhook = any(t.get("type") == "webhook" for t in triggers)
+    signature = request.headers.get("X-Webhook-Signature")
+
+    if has_webhook and signature:
+        # Webhook trigger with signature
         try:
             payload = await request.json()
         except Exception:
             payload = {}
-        signature = request.headers.get("X-Webhook-Signature")
         result = await automation_manager.trigger_webhook(automation_id, payload, signature)
         if not result:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Webhook validation failed")

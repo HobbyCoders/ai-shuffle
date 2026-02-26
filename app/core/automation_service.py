@@ -141,14 +141,34 @@ async def create_automation(
     max_runs_per_day: Optional[int] = None,
     requires_approval: bool = False,
     action_steps: Optional[List[Dict[str, Any]]] = None,
+    triggers: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict:
     """Create a new automation.
 
     Returns the automation dict.
     """
-    # Validate trigger type
-    if trigger_type not in VALID_AUTOMATION_TRIGGER_TYPES:
-        raise ValueError(f"Invalid trigger type: {trigger_type}")
+    # Normalize triggers array
+    if not triggers:
+        triggers = [{"type": trigger_type, "config": trigger_config}]
+
+    # Validate each trigger
+    for i, trig in enumerate(triggers):
+        t_type = trig.get("type")
+        if t_type not in VALID_AUTOMATION_TRIGGER_TYPES:
+            raise ValueError(f"Invalid trigger type at index {i}: {t_type}")
+        t_config = trig.get("config", {})
+        if t_type == "interval":
+            interval_seconds = t_config.get("seconds", 0)
+            if interval_seconds < 60:
+                raise ValueError(f"Interval trigger at index {i} must be at least 60 seconds")
+        if t_type == "webhook":
+            if not t_config.get("secret"):
+                t_config["secret"] = secrets.token_urlsafe(32)
+            trig["config"] = encrypt_webhook_secret(t_config)
+
+    # Set primary trigger from first in array
+    trigger_type = triggers[0]["type"]
+    trigger_config = triggers[0]["config"]
 
     # Validate profile exists
     profile = database.get_profile(profile_id)
@@ -161,27 +181,15 @@ async def create_automation(
         if not project:
             raise ValueError(f"Project not found: {project_id}")
 
-    # Validate interval minimum
-    if trigger_type == "interval":
-        interval_seconds = trigger_config.get("seconds", 0)
-        if interval_seconds < 60:
-            raise ValueError("Interval must be at least 60 seconds")
-
     # Generate automation ID
     automation_id = f"auto-{secrets.token_hex(4)}"
-
-    # Encrypt webhook secret if applicable
-    if trigger_type == "webhook":
-        # Auto-generate a secret if not provided
-        if not trigger_config.get("secret"):
-            trigger_config["secret"] = secrets.token_urlsafe(32)
-        trigger_config = encrypt_webhook_secret(trigger_config)
 
     automation = database.create_automation(
         automation_id=automation_id,
         name=name,
         trigger_type=trigger_type,
         trigger_config=trigger_config,
+        triggers=triggers,
         prompt=prompt,
         profile_id=profile_id,
         project_id=project_id,
@@ -224,8 +232,23 @@ async def update_automation(automation_id: str, **kwargs) -> Optional[Dict]:
         if not project:
             raise ValueError(f"Project not found: {kwargs['project_id']}")
 
-    # Encrypt webhook secret if trigger config is being updated
+    # Handle triggers array — validate and encrypt webhook secrets
     trigger_changed = False
+    if "triggers" in kwargs and kwargs["triggers"] is not None:
+        for i, trig in enumerate(kwargs["triggers"]):
+            t_type = trig.get("type")
+            if t_type and t_type not in VALID_AUTOMATION_TRIGGER_TYPES:
+                raise ValueError(f"Invalid trigger type at index {i}: {t_type}")
+            t_config = trig.get("config", {})
+            if t_type == "interval" and t_config.get("seconds", 0) < 60:
+                raise ValueError(f"Interval trigger at index {i} must be at least 60 seconds")
+            if t_type == "webhook":
+                if not t_config.get("secret"):
+                    t_config["secret"] = secrets.token_urlsafe(32)
+                trig["config"] = encrypt_webhook_secret(t_config)
+        trigger_changed = True
+
+    # Encrypt webhook secret if trigger config is being updated (legacy path)
     if "trigger_config" in kwargs and kwargs["trigger_config"] is not None:
         trigger_type = kwargs.get("trigger_type", existing["trigger_type"])
         if trigger_type == "webhook":

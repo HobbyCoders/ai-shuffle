@@ -23,7 +23,8 @@ from app.db.base import get_db, column_exists, table_exists, column_is_not_null,
 # v34: Add connectors tables (connectors, connector_event_log, connector_sessions)
 # v35: Add fal_model_catalog table for dynamic model discovery
 # v36: Add action_steps column to automations for multi-step connector actions
-SCHEMA_VERSION = 36
+# v37: Add triggers JSON column for multi-trigger support
+SCHEMA_VERSION = 37
 
 
 def _run_column_migrations(cursor: sqlite3.Cursor):
@@ -199,6 +200,29 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
     if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "action_steps"):
         cursor.execute("ALTER TABLE automations ADD COLUMN action_steps TEXT DEFAULT NULL")
         migrations_applied.append("automations.action_steps")
+
+    # Add triggers JSON column for multi-trigger support (v37)
+    if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "triggers"):
+        cursor.execute("ALTER TABLE automations ADD COLUMN triggers TEXT DEFAULT NULL")
+        migrations_applied.append("automations.triggers")
+        # Backfill: convert existing trigger_type/trigger_config into triggers array
+        import json as _json
+        cursor.execute("SELECT id, trigger_type, trigger_config FROM automations")
+        rows = cursor.fetchall()
+        for row in rows:
+            auto_id = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            t_type = row[1] if isinstance(row, (list, tuple)) else row["trigger_type"]
+            t_config = row[2] if isinstance(row, (list, tuple)) else row["trigger_config"]
+            if t_config and isinstance(t_config, str):
+                try:
+                    t_config_parsed = _json.loads(t_config)
+                except (ValueError, TypeError):
+                    t_config_parsed = {}
+            else:
+                t_config_parsed = t_config if isinstance(t_config, dict) else {}
+            triggers_arr = _json.dumps([{"type": t_type, "config": t_config_parsed}])
+            cursor.execute("UPDATE automations SET triggers = ? WHERE id = ?", (triggers_arr, auto_id))
+        migrations_applied.append("automations.triggers_backfill")
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -1097,6 +1121,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             failure_count INTEGER DEFAULT 0,
             requires_approval BOOLEAN DEFAULT FALSE,
             action_steps TEXT DEFAULT NULL,
+            triggers TEXT DEFAULT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE RESTRICT,

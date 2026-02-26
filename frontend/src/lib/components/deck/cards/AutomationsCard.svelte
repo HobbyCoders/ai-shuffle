@@ -19,7 +19,9 @@
 		AutomationTestResult,
 		TriggerType,
 		OutputType,
-		ActionStep
+		ActionStep,
+		ActionStepType,
+		TriggerItem
 	} from '$lib/api/automations';
 	import {
 		getAutomations,
@@ -106,8 +108,8 @@
 	let formError = $state('');
 	let formName = $state('');
 	let formDescription = $state('');
-	let formTriggerType: TriggerType = $state('cron');
-	let formTriggerConfig: Record<string, any> = $state({});
+	// Multi-trigger support
+	let formTriggers: TriggerItem[] = $state([{ type: 'cron', config: { expression: '0 9 * * *' } }]);
 	let formPrompt = $state('');
 	let formProfileId = $state('');
 	let formProjectId = $state('');
@@ -121,10 +123,10 @@
 	let formTimeoutSeconds = $state('300');
 	let formRequiresApproval = $state(false);
 	let showBudgetSection = $state(false);
-	// Action steps form state
+	// Action steps form state (expanded types)
 	let formActionSteps: ActionStep[] = $state([]);
 
-	// Cron builder state
+	// Cron builder state (scoped to active trigger being edited)
 	let cronMode: 'preset' | 'custom' = $state('preset');
 	let cronPreset = $state('0 9 * * *');
 	let cronMinute = $state('0');
@@ -132,6 +134,67 @@
 	let cronDayOfMonth = $state('*');
 	let cronMonth = $state('*');
 	let cronDayOfWeek = $state('*');
+
+	// Trigger/action helpers
+	function addTrigger() {
+		formTriggers = [...formTriggers, { type: 'cron', config: { expression: '0 9 * * *' } }];
+	}
+
+	function removeTrigger(index: number) {
+		if (formTriggers.length <= 1) return;
+		formTriggers = formTriggers.filter((_, i) => i !== index);
+	}
+
+	function updateTriggerType(index: number, type: TriggerType) {
+		const defaultConfig: Record<TriggerType, Record<string, any>> = {
+			cron: { expression: '0 9 * * *' },
+			interval: { seconds: 3600 },
+			connector_event: {},
+			connector_trigger: {},
+			webhook: {}
+		};
+		formTriggers[index] = { type, config: defaultConfig[type] };
+		formTriggers = [...formTriggers];
+	}
+
+	function updateTriggerConfig(index: number, config: Record<string, any>) {
+		formTriggers[index] = { ...formTriggers[index], config };
+		formTriggers = [...formTriggers];
+	}
+
+	function addActionStep(type: ActionStepType = 'connector_action') {
+		const defaults: Record<ActionStepType, ActionStep> = {
+			connector_action: { type: 'connector_action', connector_id: '', action_id: '', params: {} },
+			send_prompt: { type: 'send_prompt', prompt: '' },
+			webhook_call: { type: 'webhook_call', url: '', method: 'POST', body: '' },
+			delay: { type: 'delay', seconds: 5 }
+		};
+		formActionSteps = [...formActionSteps, defaults[type]];
+	}
+
+	function removeActionStep(index: number) {
+		formActionSteps = formActionSteps.filter((_, i) => i !== index);
+	}
+
+	function changeActionStepType(index: number, newType: ActionStepType) {
+		const defaults: Record<ActionStepType, ActionStep> = {
+			connector_action: { type: 'connector_action', connector_id: '', action_id: '', params: {} },
+			send_prompt: { type: 'send_prompt', prompt: '' },
+			webhook_call: { type: 'webhook_call', url: '', method: 'POST', body: '' },
+			delay: { type: 'delay', seconds: 5 }
+		};
+		formActionSteps[index] = defaults[newType];
+		formActionSteps = [...formActionSteps];
+	}
+
+	function actionStepTypeLabel(type: ActionStepType): string {
+		switch (type) {
+			case 'connector_action': return 'Connector Action';
+			case 'send_prompt': return 'AI Prompt';
+			case 'webhook_call': return 'Webhook Call';
+			case 'delay': return 'Delay';
+		}
+	}
 
 	// Test result
 	let testResult: AutomationTestResult | null = $state(null);
@@ -144,6 +207,7 @@
 			(a) =>
 				a.name.toLowerCase().includes(q) ||
 				a.trigger_type.toLowerCase().includes(q) ||
+				(a.triggers || []).some(t => t.type.toLowerCase().includes(q)) ||
 				a.description?.toLowerCase().includes(q)
 		);
 	});
@@ -216,8 +280,7 @@
 	function resetForm() {
 		formName = '';
 		formDescription = '';
-		formTriggerType = 'cron';
-		formTriggerConfig = { expression: '0 9 * * *' };
+		formTriggers = [{ type: 'cron', config: { expression: '0 9 * * *' } }];
 		formPrompt = '';
 		formProfileId = profiles.length > 0 ? profiles[0].id : '';
 		formProjectId = '';
@@ -259,10 +322,16 @@
 		selectedAutomation = automation;
 		formName = automation.name;
 		formDescription = automation.description || '';
-		formTriggerType = automation.trigger_type;
-		formTriggerConfig = { ...automation.trigger_config };
-		if (automation.trigger_type === 'cron' && automation.trigger_config.expression) {
-			syncCronFieldsFromExpression(automation.trigger_config.expression);
+		// Load triggers array, falling back to single trigger for backward compat
+		if (automation.triggers && automation.triggers.length > 0) {
+			formTriggers = automation.triggers.map(t => ({ type: t.type, config: { ...t.config } }));
+		} else {
+			formTriggers = [{ type: automation.trigger_type, config: { ...automation.trigger_config } }];
+		}
+		// Sync cron builder for the first cron trigger
+		const firstCron = formTriggers.find(t => t.type === 'cron');
+		if (firstCron?.config.expression) {
+			syncCronFieldsFromExpression(firstCron.config.expression);
 		}
 		formPrompt = automation.prompt || '';
 		formProfileId = automation.profile_id;
@@ -312,15 +381,30 @@
 			outputConfig.url = formOutputConfig.url || '';
 		}
 
-		const validActionSteps = formActionSteps.filter(s => s.connector_id && s.action_id);
+		// Filter valid action steps based on type
+		const validActionSteps = formActionSteps.filter(s => {
+			if (s.type === 'connector_action') return s.connector_id && s.action_id;
+			if (s.type === 'send_prompt') return s.prompt?.trim();
+			if (s.type === 'webhook_call') return s.url?.trim();
+			if (s.type === 'delay') return (s.seconds ?? 0) > 0;
+			return false;
+		});
+
+		// Process triggers — add timezone to cron triggers
+		const processedTriggers = formTriggers.map(t => {
+			if (t.type === 'cron') {
+				return { type: t.type, config: { ...t.config, timezone: timezonePreference.resolveTimezone() } };
+			}
+			return { ...t };
+		});
 
 		return {
 			name: formName.trim(),
 			description: formDescription.trim() || undefined,
-			trigger_type: formTriggerType,
-			trigger_config: formTriggerType === 'cron'
-				? { ...formTriggerConfig, timezone: timezonePreference.resolveTimezone() }
-				: { ...formTriggerConfig },
+			triggers: processedTriggers,
+			// Set trigger_type/trigger_config from first trigger for backward compat
+			trigger_type: processedTriggers[0]?.type,
+			trigger_config: processedTriggers[0]?.config || {},
 			prompt: formPrompt.trim() || undefined,
 			profile_id: formProfileId,
 			project_id: formProjectId || undefined,
@@ -341,7 +425,17 @@
 			formError = 'Name is required';
 			return;
 		}
-		const hasActionSteps = formActionSteps.some(s => s.connector_id && s.action_id);
+		if (formTriggers.length === 0) {
+			formError = 'At least one trigger is required';
+			return;
+		}
+		const hasActionSteps = formActionSteps.some(s => {
+			if (s.type === 'connector_action') return s.connector_id && s.action_id;
+			if (s.type === 'send_prompt') return s.prompt?.trim();
+			if (s.type === 'webhook_call') return s.url?.trim();
+			if (s.type === 'delay') return (s.seconds ?? 0) > 0;
+			return false;
+		});
 		if (!formPrompt.trim() && !hasActionSteps) {
 			formError = 'Either a prompt or at least one action step is required';
 			return;
@@ -560,7 +654,6 @@
 
 	function applyCronPreset(preset: string) {
 		cronPreset = preset;
-		formTriggerConfig = { ...formTriggerConfig, expression: preset };
 		const parsed = parseCronExpression(preset);
 		if (parsed) {
 			cronMinute = parsed.minute;
@@ -569,11 +662,6 @@
 			cronMonth = parsed.month;
 			cronDayOfWeek = parsed.dayOfWeek;
 		}
-	}
-
-	function applyCronFields() {
-		const expr = buildCronFromFields();
-		formTriggerConfig = { ...formTriggerConfig, expression: expr };
 	}
 
 	function describeCron(expr: string): string {
@@ -710,7 +798,12 @@
 						<div class="auto-item-info">
 							<div class="auto-item-header">
 								<span class="auto-item-name">{automation.name}</span>
-								<span class="card-badge card-badge--muted">{triggerTypeLabel(automation.trigger_type)}</span>
+								{#each (automation.triggers || [{ type: automation.trigger_type }]).slice(0, 3) as trig}
+									<span class="card-badge card-badge--muted">{triggerTypeLabel(trig.type)}</span>
+								{/each}
+								{#if (automation.triggers || []).length > 3}
+									<span class="card-badge card-badge--muted">+{(automation.triggers || []).length - 3}</span>
+								{/if}
 								{#if !automation.is_enabled}
 									<span class="card-badge card-badge--warning">Disabled</span>
 								{/if}
@@ -815,287 +908,235 @@
 				></textarea>
 			</div>
 
-			<!-- Trigger type selector -->
+			<!-- Triggers (multi-trigger cards) -->
 			<div class="card-form-section">
-				<span class="card-form-label">Trigger Type <span class="required">*</span></span>
-				<div class="auto-trigger-selector">
-					<button
-						class="auto-trigger-btn"
-						class:active={formTriggerType === 'cron'}
-						onclick={() => { formTriggerType = 'cron'; formTriggerConfig = { expression: cronPreset }; }}
-					>
-						<Clock size={14} />
-						Cron
-					</button>
-					<button
-						class="auto-trigger-btn"
-						class:active={formTriggerType === 'interval'}
-						onclick={() => { formTriggerType = 'interval'; formTriggerConfig = {}; }}
-					>
-						<Timer size={14} />
-						Interval
-					</button>
-					<button
-						class="auto-trigger-btn"
-						class:active={formTriggerType === 'connector_event'}
-						onclick={() => { formTriggerType = 'connector_event'; formTriggerConfig = {}; }}
-					>
-						<Radio size={14} />
-						Event
-					</button>
-					<button
-						class="auto-trigger-btn"
-						class:active={formTriggerType === 'connector_trigger'}
-						onclick={() => { formTriggerType = 'connector_trigger'; formTriggerConfig = {}; }}
-					>
-						<Zap size={14} />
-						Connector Trigger
-					</button>
-					<button
-						class="auto-trigger-btn"
-						class:active={formTriggerType === 'webhook'}
-						onclick={() => { formTriggerType = 'webhook'; formTriggerConfig = {}; }}
-					>
-						<Webhook size={14} />
-						Webhook
+				<div style="display: flex; align-items: center; justify-content: space-between;">
+					<span class="card-form-label">Triggers <span class="required">*</span></span>
+					<button class="card-action-btn" onclick={addTrigger}>
+						<Plus size={12} />
+						Add Trigger
 					</button>
 				</div>
-			</div>
+				<p class="card-form-hint">Any trigger firing will run this automation. At least one required.</p>
 
-			<!-- Trigger config -->
-			<div class="card-form-section" transition:slide={{ duration: 150 }}>
-				{#if formTriggerType === 'cron'}
-					<span class="card-form-label">Schedule</span>
-					<!-- Preset/Custom toggle -->
-					<div class="cron-mode-selector">
-						<button
-							class="auto-trigger-btn"
-							class:active={cronMode === 'preset'}
-							onclick={() => cronMode = 'preset'}
-						>
-							Preset
-						</button>
-						<button
-							class="auto-trigger-btn"
-							class:active={cronMode === 'custom'}
-							onclick={() => cronMode = 'custom'}
-						>
-							Custom
-						</button>
-					</div>
-
-					{#if cronMode === 'preset'}
-						<select
-							class="card-form-input"
-							value={cronPreset}
-							onchange={(e) => applyCronPreset(e.currentTarget.value)}
-						>
-							<option value="*/15 * * * *">Every 15 minutes</option>
-							<option value="*/30 * * * *">Every 30 minutes</option>
-							<option value="0 * * * *">Every hour</option>
-							<option value="0 9 * * *">Every day at 9 AM</option>
-							<option value="0 9 * * 1-5">Every weekday at 9 AM</option>
-							<option value="0 9 * * 1">Every Monday at 9 AM</option>
-							<option value="0 0 1 * *">Every month on the 1st</option>
-						</select>
-					{:else}
-						<div class="cron-builder-grid">
-							<div class="cron-field">
-								<label class="card-form-label" for="cron-minute">Minute</label>
-								<select id="cron-minute" class="card-form-input" bind:value={cronMinute} onchange={() => applyCronFields()}>
-									<option value="*">Every minute</option>
-									<option value="*/5">Every 5 min</option>
-									<option value="*/10">Every 10 min</option>
-									<option value="*/15">Every 15 min</option>
-									<option value="*/30">Every 30 min</option>
-									<option value="0">:00</option>
-									<option value="15">:15</option>
-									<option value="30">:30</option>
-									<option value="45">:45</option>
-								</select>
-							</div>
-							<div class="cron-field">
-								<label class="card-form-label" for="cron-hour">Hour</label>
-								<select id="cron-hour" class="card-form-input" bind:value={cronHour} onchange={() => applyCronFields()}>
-									<option value="*">Every hour</option>
-									{#each Array.from({length: 24}, (_, i) => i) as h}
-										<option value={String(h)}>{formatHour(h)}</option>
-									{/each}
-								</select>
-							</div>
-							<div class="cron-field">
-								<label class="card-form-label" for="cron-dom">Day of Month</label>
-								<select id="cron-dom" class="card-form-input" bind:value={cronDayOfMonth} onchange={() => applyCronFields()}>
-									<option value="*">Every day</option>
-									{#each Array.from({length: 31}, (_, i) => i + 1) as d}
-										<option value={String(d)}>{d}</option>
-									{/each}
-								</select>
-							</div>
-							<div class="cron-field">
-								<label class="card-form-label" for="cron-month">Month</label>
-								<select id="cron-month" class="card-form-input" bind:value={cronMonth} onchange={() => applyCronFields()}>
-									<option value="*">Every month</option>
-									<option value="1">January</option>
-									<option value="2">February</option>
-									<option value="3">March</option>
-									<option value="4">April</option>
-									<option value="5">May</option>
-									<option value="6">June</option>
-									<option value="7">July</option>
-									<option value="8">August</option>
-									<option value="9">September</option>
-									<option value="10">October</option>
-									<option value="11">November</option>
-									<option value="12">December</option>
-								</select>
-							</div>
-							<div class="cron-field" style="grid-column: 1 / -1">
-								<label class="card-form-label" for="cron-dow">Day of Week</label>
-								<select id="cron-dow" class="card-form-input" bind:value={cronDayOfWeek} onchange={() => applyCronFields()}>
-									<option value="*">Every day</option>
-									<option value="1-5">Weekdays (Mon–Fri)</option>
-									<option value="0,6">Weekends</option>
-									<option value="1">Monday</option>
-									<option value="2">Tuesday</option>
-									<option value="3">Wednesday</option>
-									<option value="4">Thursday</option>
-									<option value="5">Friday</option>
-									<option value="6">Saturday</option>
-									<option value="0">Sunday</option>
-								</select>
-							</div>
-						</div>
-					{/if}
-
-					<!-- Summary bar -->
-					{#if formTriggerConfig.expression}
-						<div class="cron-summary">
-							<span class="cron-summary-text">{describeCron(formTriggerConfig.expression)}</span>
-							<code class="cron-summary-expr">{formTriggerConfig.expression}</code>
-						</div>
-					{/if}
-
-					<!-- Raw expression escape hatch -->
-					<details class="cron-raw-details">
-						<summary class="card-form-hint" style="cursor: pointer; user-select: none;">Edit raw expression</summary>
-						<input
-							type="text"
-							class="card-form-input card-form-input--mono"
-							style="margin-top: 6px"
-							value={formTriggerConfig.expression || ''}
-							oninput={(e) => {
-								formTriggerConfig = { ...formTriggerConfig, expression: e.currentTarget.value };
-								syncCronFieldsFromExpression(e.currentTarget.value);
-							}}
-							placeholder="0 9 * * *"
-						/>
-					</details>
-
-					<!-- Timezone hint -->
-					<p class="card-form-hint" style="margin-top: 8px">
-						Uses your settings timezone ({timezonePreference.resolveTimezone()})
-					</p>
-				{:else if formTriggerType === 'interval'}
-					<label class="card-form-label" for="auto-interval-secs">Interval (seconds)</label>
-					<input
-						id="auto-interval-secs"
-						type="number"
-						class="card-form-input"
-						min="60"
-						bind:value={formTriggerConfig.seconds}
-						placeholder="3600"
-					/>
-					<p class="card-form-hint">Minimum 60 seconds</p>
-				{:else if formTriggerType === 'connector_event'}
-					<label class="card-form-label" for="auto-connector-id">Connector</label>
-					<select
-						id="auto-connector-id"
-						class="card-form-input"
-						bind:value={formTriggerConfig.connector_id}
-					>
-						<option value="">Select a connector...</option>
-						{#each connectors.filter(c => c.is_active || c.status === 'connected') as c}
-							<option value={c.id}>{c.name} ({c.type})</option>
-						{/each}
-						{#if connectors.filter(c => !c.is_active && c.status !== 'connected').length > 0}
-							<optgroup label="Inactive">
-								{#each connectors.filter(c => !c.is_active && c.status !== 'connected') as c}
-									<option value={c.id}>{c.name} ({c.type}) - inactive</option>
-								{/each}
-							</optgroup>
-						{/if}
-					</select>
-					<label class="card-form-label" for="auto-event-type" style="margin-top: 12px">Event Type</label>
-					<select
-						id="auto-event-type"
-						class="card-form-input"
-						bind:value={formTriggerConfig.event_type}
-					>
-						<option value="">Select an event...</option>
-						<option value="session.complete">Session complete</option>
-						<option value="session.error">Session error</option>
-						<option value="session.started">Session started</option>
-						<option value="permission.requested">Permission requested</option>
-						<option value="input.needed">Input needed</option>
-					</select>
-				{:else if formTriggerType === 'connector_trigger'}
-					<label class="card-form-label" for="auto-ct-connector">Connector</label>
-					<select
-						id="auto-ct-connector"
-						class="card-form-input"
-						bind:value={formTriggerConfig.connector_id}
-						onchange={() => { formTriggerConfig = { ...formTriggerConfig, trigger_id: '' }; }}
-					>
-						<option value="">Select a connector...</option>
-						{#each connectorsWithTriggers as c}
-							<option value={c.id}>{c.name} ({c.type})</option>
-						{/each}
-					</select>
-
-					{#if formTriggerConfig.connector_id}
-						<label class="card-form-label" for="auto-ct-trigger" style="margin-top: 12px">Trigger</label>
-						<select
-							id="auto-ct-trigger"
-							class="card-form-input"
-							bind:value={formTriggerConfig.trigger_id}
-						>
-							<option value="">Select a trigger...</option>
-							{#each getTriggersForConnector(formTriggerConfig.connector_id) as trigger}
-								<option value={trigger.id}>{trigger.name}</option>
-							{/each}
-						</select>
-						{#if formTriggerConfig.trigger_id}
-							{@const triggerDef = getTriggersForConnector(formTriggerConfig.connector_id).find(t => t.id === formTriggerConfig.trigger_id)}
-							{#if triggerDef}
-								<p class="card-form-hint" style="margin-top: 6px">{triggerDef.description}</p>
+				{#each formTriggers as trigger, trigIdx}
+					<div class="trigger-card" transition:slide={{ duration: 150 }}>
+						<div class="trigger-card-header">
+							<span class="card-form-label" style="margin: 0;">
+								{triggerTypeLabel(trigger.type)}
+							</span>
+							{#if formTriggers.length > 1}
+								<button
+									class="card-action-btn card-action-btn--destructive"
+									onclick={() => removeTrigger(trigIdx)}
+								>
+									<X size={12} />
+								</button>
 							{/if}
+						</div>
+
+						<!-- Type selector within card -->
+						<div class="auto-trigger-selector">
+							<button class="auto-trigger-btn" class:active={trigger.type === 'cron'}
+								onclick={() => updateTriggerType(trigIdx, 'cron')}>
+								<Clock size={14} /> Cron
+							</button>
+							<button class="auto-trigger-btn" class:active={trigger.type === 'interval'}
+								onclick={() => updateTriggerType(trigIdx, 'interval')}>
+								<Timer size={14} /> Interval
+							</button>
+							<button class="auto-trigger-btn" class:active={trigger.type === 'connector_event'}
+								onclick={() => updateTriggerType(trigIdx, 'connector_event')}>
+								<Radio size={14} /> Event
+							</button>
+							<button class="auto-trigger-btn" class:active={trigger.type === 'connector_trigger'}
+								onclick={() => updateTriggerType(trigIdx, 'connector_trigger')}>
+								<Zap size={14} /> Connector
+							</button>
+							<button class="auto-trigger-btn" class:active={trigger.type === 'webhook'}
+								onclick={() => updateTriggerType(trigIdx, 'webhook')}>
+								<Webhook size={14} /> Webhook
+							</button>
+						</div>
+
+						<!-- Type-specific config -->
+						{#if trigger.type === 'cron'}
+							<div style="margin-top: 8px;">
+								<div class="cron-mode-selector">
+									<button class="auto-trigger-btn" class:active={cronMode === 'preset'}
+										onclick={() => cronMode = 'preset'}>Preset</button>
+									<button class="auto-trigger-btn" class:active={cronMode === 'custom'}
+										onclick={() => cronMode = 'custom'}>Custom</button>
+								</div>
+								{#if cronMode === 'preset'}
+									<select class="card-form-input"
+										value={trigger.config.expression || '0 9 * * *'}
+										onchange={(e) => {
+											const val = e.currentTarget.value;
+											updateTriggerConfig(trigIdx, { ...trigger.config, expression: val });
+											syncCronFieldsFromExpression(val);
+										}}>
+										<option value="*/15 * * * *">Every 15 minutes</option>
+										<option value="*/30 * * * *">Every 30 minutes</option>
+										<option value="0 * * * *">Every hour</option>
+										<option value="0 9 * * *">Every day at 9 AM</option>
+										<option value="0 9 * * 1-5">Every weekday at 9 AM</option>
+										<option value="0 9 * * 1">Every Monday at 9 AM</option>
+										<option value="0 0 1 * *">Every month on the 1st</option>
+									</select>
+								{:else}
+									<div class="cron-builder-grid">
+										<div class="cron-field">
+											<label class="card-form-label">Minute</label>
+											<select class="card-form-input" bind:value={cronMinute}
+												onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
+												<option value="*">Every minute</option>
+												<option value="*/5">Every 5 min</option>
+												<option value="*/10">Every 10 min</option>
+												<option value="*/15">Every 15 min</option>
+												<option value="*/30">Every 30 min</option>
+												<option value="0">:00</option>
+												<option value="15">:15</option>
+												<option value="30">:30</option>
+												<option value="45">:45</option>
+											</select>
+										</div>
+										<div class="cron-field">
+											<label class="card-form-label">Hour</label>
+											<select class="card-form-input" bind:value={cronHour}
+												onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
+												<option value="*">Every hour</option>
+												{#each Array.from({length: 24}, (_, i) => i) as h}
+													<option value={String(h)}>{formatHour(h)}</option>
+												{/each}
+											</select>
+										</div>
+										<div class="cron-field">
+											<label class="card-form-label">Day</label>
+											<select class="card-form-input" bind:value={cronDayOfMonth}
+												onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
+												<option value="*">Every day</option>
+												{#each Array.from({length: 31}, (_, i) => i + 1) as d}
+													<option value={String(d)}>{d}</option>
+												{/each}
+											</select>
+										</div>
+										<div class="cron-field">
+											<label class="card-form-label">Month</label>
+											<select class="card-form-input" bind:value={cronMonth}
+												onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
+												<option value="*">Every month</option>
+												{#each ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'] as m, mi}
+													<option value={String(mi+1)}>{m}</option>
+												{/each}
+											</select>
+										</div>
+										<div class="cron-field" style="grid-column: 1 / -1">
+											<label class="card-form-label">Day of Week</label>
+											<select class="card-form-input" bind:value={cronDayOfWeek}
+												onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
+												<option value="*">Every day</option>
+												<option value="1-5">Weekdays (Mon–Fri)</option>
+												<option value="0,6">Weekends</option>
+												<option value="1">Monday</option>
+												<option value="2">Tuesday</option>
+												<option value="3">Wednesday</option>
+												<option value="4">Thursday</option>
+												<option value="5">Friday</option>
+												<option value="6">Saturday</option>
+												<option value="0">Sunday</option>
+											</select>
+										</div>
+									</div>
+								{/if}
+								{#if trigger.config.expression}
+									<div class="cron-summary">
+										<span class="cron-summary-text">{describeCron(trigger.config.expression)}</span>
+										<code class="cron-summary-expr">{trigger.config.expression}</code>
+									</div>
+								{/if}
+								<details class="cron-raw-details">
+									<summary class="card-form-hint" style="cursor: pointer; user-select: none;">Edit raw expression</summary>
+									<input type="text" class="card-form-input card-form-input--mono" style="margin-top: 6px"
+										value={trigger.config.expression || ''}
+										oninput={(e) => { updateTriggerConfig(trigIdx, { ...trigger.config, expression: e.currentTarget.value }); syncCronFieldsFromExpression(e.currentTarget.value); }}
+										placeholder="0 9 * * *" />
+								</details>
+								<p class="card-form-hint" style="margin-top: 8px">Timezone: {timezonePreference.resolveTimezone()}</p>
+							</div>
+						{:else if trigger.type === 'interval'}
+							<div style="margin-top: 8px;">
+								<label class="card-form-label">Interval (seconds)</label>
+								<input type="number" class="card-form-input" min="60"
+									value={trigger.config.seconds || ''}
+									oninput={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, seconds: parseInt(e.currentTarget.value) || 0 })}
+									placeholder="3600" />
+								<p class="card-form-hint">Minimum 60 seconds</p>
+							</div>
+						{:else if trigger.type === 'connector_event'}
+							<div style="margin-top: 8px;">
+								<label class="card-form-label">Connector</label>
+								<select class="card-form-input"
+									value={trigger.config.connector_id || ''}
+									onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, connector_id: e.currentTarget.value })}>
+									<option value="">Select a connector...</option>
+									{#each connectors.filter(c => c.is_active || c.status === 'connected') as c}
+										<option value={c.id}>{c.name} ({c.type})</option>
+									{/each}
+								</select>
+								<label class="card-form-label" style="margin-top: 12px">Event Type</label>
+								<select class="card-form-input"
+									value={trigger.config.event_type || ''}
+									onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, event_type: e.currentTarget.value })}>
+									<option value="">Select an event...</option>
+									<option value="session.complete">Session complete</option>
+									<option value="session.error">Session error</option>
+									<option value="session.started">Session started</option>
+									<option value="permission.requested">Permission requested</option>
+									<option value="input.needed">Input needed</option>
+								</select>
+							</div>
+						{:else if trigger.type === 'connector_trigger'}
+							<div style="margin-top: 8px;">
+								<label class="card-form-label">Connector</label>
+								<select class="card-form-input"
+									value={trigger.config.connector_id || ''}
+									onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, connector_id: e.currentTarget.value, trigger_id: '' })}>
+									<option value="">Select a connector...</option>
+									{#each connectorsWithTriggers as c}
+										<option value={c.id}>{c.name} ({c.type})</option>
+									{/each}
+								</select>
+								{#if trigger.config.connector_id}
+									<label class="card-form-label" style="margin-top: 12px">Trigger</label>
+									<select class="card-form-input"
+										value={trigger.config.trigger_id || ''}
+										onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, trigger_id: e.currentTarget.value })}>
+										<option value="">Select a trigger...</option>
+										{#each getTriggersForConnector(trigger.config.connector_id) as trig}
+											<option value={trig.id}>{trig.name}</option>
+										{/each}
+									</select>
+								{/if}
+							</div>
+						{:else if trigger.type === 'webhook'}
+							<div style="margin-top: 8px;">
+								{#if currentView === 'edit' && selectedAutomation}
+									<label class="card-form-label">Webhook URL</label>
+									<input type="text" class="card-form-input card-form-input--mono"
+										value={trigger.config.webhook_url || 'Generated after creation'} readonly />
+									{#if trigger.config.secret}
+										<label class="card-form-label" style="margin-top: 12px">Secret</label>
+										<input type="text" class="card-form-input card-form-input--mono"
+											value={trigger.config.secret} readonly />
+									{/if}
+								{:else}
+									<p class="card-form-hint">Webhook URL and secret will be generated after creation.</p>
+								{/if}
+							</div>
 						{/if}
-					{/if}
-				{:else if formTriggerType === 'webhook'}
-					{#if currentView === 'edit' && selectedAutomation}
-						<label class="card-form-label" for="auto-webhook-url">Webhook URL</label>
-						<input
-							id="auto-webhook-url"
-							type="text"
-							class="card-form-input card-form-input--mono"
-							value={formTriggerConfig.webhook_url || 'Generated after creation'}
-							readonly
-						/>
-						{#if formTriggerConfig.secret}
-							<label class="card-form-label" for="auto-webhook-secret" style="margin-top: 12px">Secret</label>
-							<input
-								id="auto-webhook-secret"
-								type="text"
-								class="card-form-input card-form-input--mono"
-								value={formTriggerConfig.secret}
-								readonly
-							/>
-						{/if}
-					{:else}
-						<p class="card-form-hint">Webhook URL and secret will be generated after creation.</p>
-					{/if}
-				{/if}
+					</div>
+				{/each}
 			</div>
 
 			<!-- Prompt -->
@@ -1119,16 +1160,13 @@
 				</p>
 			</div>
 
-			<!-- Action Steps -->
+			<!-- Action Steps (expanded types) -->
 			<div class="card-form-section">
 				<div style="display: flex; align-items: center; justify-content: space-between;">
-					<span class="card-form-label">Action Steps</span>
-					<button
-						class="card-action-btn"
-						onclick={() => { formActionSteps = [...formActionSteps, { type: 'connector_action', connector_id: '', action_id: '', params: {} }]; }}
-					>
+					<span class="card-form-label">Actions</span>
+					<button class="card-action-btn" onclick={() => addActionStep()}>
 						<Plus size={12} />
-						Add Step
+						Add Action
 					</button>
 				</div>
 				<p class="card-form-hint">Actions to execute when this automation runs. Can be used with or without a prompt.</p>
@@ -1136,60 +1174,116 @@
 				{#each formActionSteps as step, i}
 					<div class="action-step-card" transition:slide={{ duration: 150 }}>
 						<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-							<span class="card-form-label" style="margin: 0;">Step {i + 1}</span>
-							<button
-								class="card-action-btn card-action-btn--destructive"
-								onclick={() => { formActionSteps = formActionSteps.filter((_, idx) => idx !== i); }}
-							>
+							<span class="card-form-label" style="margin: 0;">Step {i + 1}: {actionStepTypeLabel(step.type)}</span>
+							<button class="card-action-btn card-action-btn--destructive"
+								onclick={() => removeActionStep(i)}>
 								<X size={12} />
 							</button>
 						</div>
-						<select
-							class="card-form-input"
-							bind:value={step.connector_id}
-							onchange={() => { step.action_id = ''; step.params = {}; formActionSteps = [...formActionSteps]; }}
-						>
-							<option value="">Select connector...</option>
-							{#each connectorsWithActions as c}
-								<option value={c.id}>{c.name} ({c.type})</option>
-							{/each}
+
+						<!-- Action type selector -->
+						<select class="card-form-input"
+							value={step.type}
+							onchange={(e) => changeActionStepType(i, e.currentTarget.value as ActionStepType)}>
+							<option value="connector_action">Connector Action</option>
+							<option value="send_prompt">AI Prompt</option>
+							<option value="webhook_call">Webhook Call</option>
+							<option value="delay">Delay</option>
 						</select>
-						{#if step.connector_id}
-							<select
-								class="card-form-input"
-								style="margin-top: 8px"
-								bind:value={step.action_id}
-								onchange={() => { step.params = {}; formActionSteps = [...formActionSteps]; }}
-							>
-								<option value="">Select action...</option>
-								{#each getActionsForConnector(step.connector_id) as action}
-									<option value={action.id}>{action.name}</option>
+
+						<!-- Type-specific config -->
+						{#if step.type === 'connector_action'}
+							<select class="card-form-input" style="margin-top: 8px"
+								value={step.connector_id || ''}
+								onchange={(e) => { step.connector_id = e.currentTarget.value; step.action_id = ''; step.params = {}; formActionSteps = [...formActionSteps]; }}>
+								<option value="">Select connector...</option>
+								{#each connectorsWithActions as c}
+									<option value={c.id}>{c.name} ({c.type})</option>
 								{/each}
 							</select>
-						{/if}
-						{#if step.action_id}
-							{@const actionDef = getActionsForConnector(step.connector_id).find(a => a.id === step.action_id)}
-							{#if actionDef}
-								<p class="card-form-hint" style="margin-top: 4px">{actionDef.description}</p>
-								{#if actionDef.input_schema?.properties}
-									<div style="margin-top: 8px;">
-										{#each Object.entries(actionDef.input_schema.properties) as [key, schemaDef]}
-											{@const schemaObj = schemaDef as Record<string, any>}
-											<label class="card-form-label" for="step-{i}-{key}" style="font-size: 11px;">{key}</label>
-											<input
-												id="step-{i}-{key}"
-												type="text"
-												class="card-form-input"
-												style="font-size: 12px;"
-												value={step.params[key] || ''}
-												oninput={(e) => { step.params[key] = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}
-												placeholder={schemaObj.description || key}
-											/>
-										{/each}
-									</div>
-									<p class="card-form-hint" style="margin-top: 4px;">Use {'{{trigger.data.field}}'} or {'{{response}}'} for template variables</p>
+							{#if step.connector_id}
+								<select class="card-form-input" style="margin-top: 8px"
+									value={step.action_id || ''}
+									onchange={(e) => { step.action_id = e.currentTarget.value; step.params = {}; formActionSteps = [...formActionSteps]; }}>
+									<option value="">Select action...</option>
+									{#each getActionsForConnector(step.connector_id) as action}
+										<option value={action.id}>{action.name}</option>
+									{/each}
+								</select>
+							{/if}
+							{#if step.action_id}
+								{@const actionDef = getActionsForConnector(step.connector_id || '').find(a => a.id === step.action_id)}
+								{#if actionDef}
+									<p class="card-form-hint" style="margin-top: 4px">{actionDef.description}</p>
+									{#if actionDef.input_schema?.properties}
+										<div style="margin-top: 8px;">
+											{#each Object.entries(actionDef.input_schema.properties) as [key, schemaDef]}
+												{@const schemaObj = schemaDef as Record<string, any>}
+												<label class="card-form-label" style="font-size: 11px;">{key}</label>
+												<input type="text" class="card-form-input" style="font-size: 12px;"
+													value={(step.params || {})[key] || ''}
+													oninput={(e) => { if (!step.params) step.params = {}; step.params[key] = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}
+													placeholder={schemaObj.description || key} />
+											{/each}
+										</div>
+										<p class="card-form-hint" style="margin-top: 4px;">Use {'{{trigger.data.field}}'} or {'{{response}}'} for template variables</p>
+									{/if}
 								{/if}
 							{/if}
+						{:else if step.type === 'send_prompt'}
+							<textarea class="card-form-input card-form-textarea" style="margin-top: 8px; min-height: 80px"
+								placeholder="Enter prompt to send to AI agent..."
+								value={step.prompt || ''}
+								oninput={(e) => { step.prompt = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}></textarea>
+							<div style="display: flex; gap: 8px; margin-top: 8px;">
+								<div style="flex: 1;">
+									<label class="card-form-label" style="font-size: 11px;">Profile (optional)</label>
+									<select class="card-form-input" style="font-size: 12px;"
+										value={step.profile_id || ''}
+										onchange={(e) => { step.profile_id = e.currentTarget.value || undefined; formActionSteps = [...formActionSteps]; }}>
+										<option value="">Default (automation profile)</option>
+										{#each profiles as profile}
+											<option value={profile.id}>{profile.name}</option>
+										{/each}
+									</select>
+								</div>
+								<div style="width: 80px;">
+									<label class="card-form-label" style="font-size: 11px;">Max turns</label>
+									<input type="number" class="card-form-input" style="font-size: 12px;"
+										min="1" max="25"
+										value={step.max_turns ?? 1}
+										oninput={(e) => { step.max_turns = parseInt(e.currentTarget.value) || 1; formActionSteps = [...formActionSteps]; }} />
+								</div>
+							</div>
+							<p class="card-form-hint" style="margin-top: 4px;">Use {'{{response}}'} to reference previous AI output</p>
+						{:else if step.type === 'webhook_call'}
+							<input type="url" class="card-form-input" style="margin-top: 8px"
+								placeholder="https://example.com/webhook"
+								value={step.url || ''}
+								oninput={(e) => { step.url = e.currentTarget.value; formActionSteps = [...formActionSteps]; }} />
+							<select class="card-form-input" style="margin-top: 8px"
+								value={step.method || 'POST'}
+								onchange={(e) => { step.method = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}>
+								<option value="POST">POST</option>
+								<option value="GET">GET</option>
+								<option value="PUT">PUT</option>
+								<option value="PATCH">PATCH</option>
+								<option value="DELETE">DELETE</option>
+							</select>
+							<textarea class="card-form-input card-form-textarea" style="margin-top: 8px; min-height: 60px"
+								placeholder="Request body (supports template variables)..."
+								value={step.body || ''}
+								oninput={(e) => { step.body = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}></textarea>
+							<p class="card-form-hint" style="margin-top: 4px;">Use {'{{response}}'} or {'{{trigger.data.field}}'} for template variables</p>
+						{:else if step.type === 'delay'}
+							<div style="margin-top: 8px;">
+								<label class="card-form-label" style="font-size: 11px;">Seconds to wait</label>
+								<input type="number" class="card-form-input" min="1" max="300"
+									placeholder="5"
+									value={step.seconds ?? 5}
+									oninput={(e) => { step.seconds = parseInt(e.currentTarget.value) || 0; formActionSteps = [...formActionSteps]; }} />
+								<p class="card-form-hint">Maximum 300 seconds (5 minutes)</p>
+							</div>
 						{/if}
 					</div>
 				{/each}
@@ -1379,7 +1473,9 @@
 							style="background: {getStatusColor(selectedAutomation.status)}"
 						></span>
 						<h3 class="auto-detail-name">{selectedAutomation.name}</h3>
-						<span class="card-badge card-badge--muted">{triggerTypeLabel(selectedAutomation.trigger_type)}</span>
+						{#each (selectedAutomation.triggers || [{ type: selectedAutomation.trigger_type }]) as trig}
+							<span class="card-badge card-badge--muted">{triggerTypeLabel(trig.type)}</span>
+						{/each}
 					</div>
 					{#if selectedAutomation.description}
 						<p class="auto-detail-desc">{selectedAutomation.description}</p>
@@ -2086,6 +2182,22 @@
 
 	.cron-raw-details summary {
 		font-size: var(--text-sm, 0.75rem);
+	}
+
+	/* Trigger cards */
+	.trigger-card {
+		background: var(--card-surface-elevated, rgba(255, 255, 255, 0.03));
+		border: 1px solid var(--card-border, rgba(255, 255, 255, 0.08));
+		border-radius: 8px;
+		padding: 12px;
+		margin-top: 8px;
+	}
+
+	.trigger-card-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 8px;
 	}
 
 	/* Action step cards */
