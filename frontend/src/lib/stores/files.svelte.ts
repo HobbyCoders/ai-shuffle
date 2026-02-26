@@ -141,8 +141,9 @@ function flushPendingFilesSave() {
 	pendingPrefs = null;
 }
 
-// Register beforeunload + visibilitychange handlers
-if (browser) {
+// Register beforeunload + visibilitychange handlers (guarded against HMR duplicate registration)
+if (browser && !(window as any).__files_listeners) {
+	(window as any).__files_listeners = true;
 	window.addEventListener('beforeunload', flushPendingFilesSave);
 	document.addEventListener('visibilitychange', () => {
 		if (document.visibilityState === 'hidden') {

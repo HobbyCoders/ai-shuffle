@@ -74,7 +74,7 @@ auth              → authentication state, admin status
 | `AutomationManager` | `app/core/automation_manager.py` | APScheduler integration, budget enforcement |
 | `HookExecutor` | `app/core/hook_executor.py` | Bash and webhook hook execution |
 | `MCPService` | `app/core/mcp_service.py` | MCP server configuration and tool discovery |
-| `AuthService` | `app/core/auth.py` | Admin auth, API keys, 2FA |
+| `AuthService` | `app/core/auth.py` | Admin auth, API keys |
 | `EncryptionService` | `app/core/encryption.py` | Password-based encryption for secrets |
 
 ### Request Flow

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { advancedSearch, type AdvancedSearchResult, type Profile, api } from '$lib/api/client';
+	import { sanitizeHtml } from '$lib/utils/sanitize';
 
 	interface Props {
 		visible: boolean;
@@ -457,7 +458,7 @@
 													{match.role === 'title' ? 'Title:' : match.role === 'user' ? 'User:' : 'Assistant:'}
 												</span>
 												<!-- Render snippet with markdown bold as actual bold -->
-												{@html match.snippet.replace(/\*\*(.*?)\*\*/g, '<mark class="bg-yellow-500/30 text-foreground px-0.5 rounded">$1</mark>')}
+												{@html sanitizeHtml(match.snippet.replace(/\*\*(.*?)\*\*/g, '<mark class="bg-yellow-500/30 text-foreground px-0.5 rounded">$1</mark>'))}
 											</div>
 										{/each}
 										{#if result.matches.length > 3}

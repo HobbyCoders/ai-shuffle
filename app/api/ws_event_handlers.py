@@ -302,16 +302,34 @@ async def handle_system(
     # never starts polling and the streaming bridge skips the response.
     await _maybe_broadcast_first_start("system", ectx, state)
 
+    # Route task_progress to its parent subagent instead of creating a
+    # standalone system message.  The SDK emits these periodically with
+    # usage stats (tokens, tool count, duration) for running Task agents.
+    subtype = event.get("subtype")
+    data = event.get("data") or {}
+    if subtype == "task_progress":
+        tool_use_id = data.get("tool_use_id")
+        if tool_use_id:
+            updated = await live_session_store.update_subagent_progress(
+                session_id=ectx.session_id,
+                tool_use_id=tool_use_id,
+                usage=data.get("usage"),
+            )
+            if updated:
+                # The live session store already bumped the update_id,
+                # so the next frontend poll will pick up the change.
+                return
+
     await live_session_store.add_system_message(
         session_id=ectx.session_id,
         content="",
-        subtype=event.get("subtype"),
-        data=event.get("data"),
+        subtype=subtype,
+        data=data,
     )
     chunk_data = {
         "content": "",
-        "subtype": event.get("subtype"),
-        "data": event.get("data"),
+        "subtype": subtype,
+        "data": data,
     }
     await sync_engine.broadcast_stream_chunk(
         session_id=ectx.session_id,

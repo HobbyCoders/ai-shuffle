@@ -38,23 +38,6 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
     """
     migrations_applied = []
 
-    # Admin 2FA columns
-    admin_2fa_cols = [
-        "totp_secret", "totp_enabled", "recovery_codes", "totp_verified_at"
-    ]
-    if table_exists(cursor, "admin"):
-        for col in admin_2fa_cols:
-            if not column_exists(cursor, "admin", col):
-                if col == "totp_enabled":
-                    col_type, default = "BOOLEAN", " DEFAULT FALSE"
-                elif col == "totp_verified_at":
-                    col_type, default = "TIMESTAMP", ""
-                else:
-                    col_type, default = "TEXT", ""
-                sql = f"ALTER TABLE admin ADD COLUMN {col} {col_type}{default}"
-                cursor.execute(sql)
-                migrations_applied.append(f"admin.{col}")
-
     # Session messages profile tracking (v30)
     if table_exists(cursor, "session_messages"):
         if not column_exists(cursor, "session_messages", "profile_id"):
@@ -640,34 +623,6 @@ def _create_schema(cursor: sqlite3.Cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
-    # Pending 2FA sessions (for login flow)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS pending_2fa_sessions (
-            token TEXT PRIMARY KEY,
-            username TEXT NOT NULL,
-            expires_at TIMESTAMP NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Add 2FA columns to admin table (migration for existing DBs)
-    try:
-        cursor.execute("ALTER TABLE admin ADD COLUMN totp_secret TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE admin ADD COLUMN totp_enabled BOOLEAN DEFAULT FALSE")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE admin ADD COLUMN recovery_codes TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE admin ADD COLUMN totp_verified_at TIMESTAMP")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
 
     # Add profile_id column to session_messages (migration for per-query profile tracking)
     try:

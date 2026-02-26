@@ -70,15 +70,23 @@ async def dispatch_webhook(
     }
 
     # Dispatch to each webhook asynchronously
+    def _on_delivery_done(t: asyncio.Task) -> None:
+        """Log unhandled exceptions from background webhook delivery tasks."""
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc:
+            logger.error(f"Webhook delivery task failed with unhandled exception: {exc}")
+
     tasks = []
     for webhook in webhooks:
         task = asyncio.create_task(
             _deliver_webhook(webhook, payload, retry)
         )
+        task.add_done_callback(_on_delivery_done)
         tasks.append(task)
 
     # Don't wait for delivery - let it happen in background
-    # But log any errors
     if tasks:
         logger.debug(f"Dispatching event '{event_type}' to {len(tasks)} webhook(s)")
 

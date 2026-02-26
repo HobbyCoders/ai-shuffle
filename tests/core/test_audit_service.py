@@ -21,13 +21,6 @@ from app.core.audit_service import (
     log_login_success,
     log_login_failure,
     log_logout,
-    log_2fa_setup_started,
-    log_2fa_enabled,
-    log_2fa_disabled,
-    log_2fa_verification_success,
-    log_2fa_verification_failure,
-    log_recovery_code_used,
-    log_recovery_codes_regenerated,
     log_password_changed,
     log_password_change_failed,
     log_api_key_created,
@@ -93,16 +86,6 @@ class TestAuditEventType:
         assert AuditEventType.LOGIN_FAILURE == "login_failure"
         assert AuditEventType.LOGOUT == "logout"
         assert AuditEventType.SESSION_EXPIRED == "session_expired"
-
-    def test_2fa_events(self):
-        """Should define 2FA event types."""
-        assert AuditEventType.TOTP_SETUP_STARTED == "2fa_setup_started"
-        assert AuditEventType.TOTP_ENABLED == "2fa_enabled"
-        assert AuditEventType.TOTP_DISABLED == "2fa_disabled"
-        assert AuditEventType.TOTP_VERIFICATION_SUCCESS == "2fa_verification_success"
-        assert AuditEventType.TOTP_VERIFICATION_FAILURE == "2fa_verification_failure"
-        assert AuditEventType.RECOVERY_CODE_USED == "recovery_code_used"
-        assert AuditEventType.RECOVERY_CODES_REGENERATED == "recovery_codes_regenerated"
 
     def test_account_events(self):
         """Should define account event types."""
@@ -361,10 +344,10 @@ class TestLogLoginSuccess:
 
     def test_log_login_success_with_custom_method(self, mock_request, mock_db_create_audit_log):
         """Should log login with custom method."""
-        log_login_success(mock_request, "user-123", method="totp")
+        log_login_success(mock_request, "user-123", method="api_key")
 
         call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["details"]["method"] == "totp"
+        assert call_kwargs["details"]["method"] == "api_key"
 
     def test_log_login_success_with_user_type(self, mock_request, mock_db_create_audit_log):
         """Should log login with custom user type."""
@@ -419,107 +402,6 @@ class TestLogLogout:
 
         call_kwargs = mock_db_create_audit_log.call_args[1]
         assert call_kwargs["user_type"] == "api_user"
-
-
-class TestLog2faSetupStarted:
-    """Test log_2fa_setup_started function."""
-
-    def test_log_2fa_setup_started(self, mock_request, mock_db_create_audit_log):
-        """Should log 2FA setup initiation."""
-        log_2fa_setup_started(mock_request, "user-123")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.TOTP_SETUP_STARTED
-        assert call_kwargs["user_id"] == "user-123"
-
-
-class TestLog2faEnabled:
-    """Test log_2fa_enabled function."""
-
-    def test_log_2fa_enabled(self, mock_request, mock_db_create_audit_log):
-        """Should log 2FA being enabled."""
-        log_2fa_enabled(mock_request, "user-123")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.TOTP_ENABLED
-        assert call_kwargs["user_id"] == "user-123"
-
-
-class TestLog2faDisabled:
-    """Test log_2fa_disabled function."""
-
-    def test_log_2fa_disabled(self, mock_request, mock_db_create_audit_log):
-        """Should log 2FA being disabled."""
-        log_2fa_disabled(mock_request, "user-123")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.TOTP_DISABLED
-        assert call_kwargs["user_id"] == "user-123"
-
-
-class TestLog2faVerificationSuccess:
-    """Test log_2fa_verification_success function."""
-
-    def test_log_2fa_verification_success_default_method(self, mock_request, mock_db_create_audit_log):
-        """Should log successful 2FA verification with default method."""
-        log_2fa_verification_success(mock_request, "user-123")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.TOTP_VERIFICATION_SUCCESS
-        assert call_kwargs["user_id"] == "user-123"
-        assert call_kwargs["details"]["method"] == "totp"
-
-    def test_log_2fa_verification_success_custom_method(self, mock_request, mock_db_create_audit_log):
-        """Should log successful 2FA verification with custom method."""
-        log_2fa_verification_success(mock_request, "user-123", method="recovery_code")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["details"]["method"] == "recovery_code"
-
-
-class TestLog2faVerificationFailure:
-    """Test log_2fa_verification_failure function."""
-
-    def test_log_2fa_verification_failure_default_method(self, mock_request, mock_db_create_audit_log):
-        """Should log failed 2FA verification with default method."""
-        log_2fa_verification_failure(mock_request, "user-123")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.TOTP_VERIFICATION_FAILURE
-        assert call_kwargs["user_id"] == "user-123"
-        assert call_kwargs["details"]["method"] == "totp"
-
-    def test_log_2fa_verification_failure_custom_method(self, mock_request, mock_db_create_audit_log):
-        """Should log failed 2FA verification with custom method."""
-        log_2fa_verification_failure(mock_request, "user-123", method="recovery_code")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["details"]["method"] == "recovery_code"
-
-
-class TestLogRecoveryCodeUsed:
-    """Test log_recovery_code_used function."""
-
-    def test_log_recovery_code_used(self, mock_request, mock_db_create_audit_log):
-        """Should log recovery code usage."""
-        log_recovery_code_used(mock_request, "user-123", remaining_codes=7)
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.RECOVERY_CODE_USED
-        assert call_kwargs["user_id"] == "user-123"
-        assert call_kwargs["details"]["remaining_codes"] == 7
-
-
-class TestLogRecoveryCodesRegenerated:
-    """Test log_recovery_codes_regenerated function."""
-
-    def test_log_recovery_codes_regenerated(self, mock_request, mock_db_create_audit_log):
-        """Should log recovery codes regeneration."""
-        log_recovery_codes_regenerated(mock_request, "user-123")
-
-        call_kwargs = mock_db_create_audit_log.call_args[1]
-        assert call_kwargs["event_type"] == AuditEventType.RECOVERY_CODES_REGENERATED
-        assert call_kwargs["user_id"] == "user-123"
 
 
 class TestLogPasswordChanged:

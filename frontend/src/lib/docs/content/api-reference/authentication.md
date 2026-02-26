@@ -1,12 +1,12 @@
 <!--
 title: Authentication
-description: Auth endpoints for admin login, 2FA, Claude CLI, and GitHub
+description: Auth endpoints for admin login, Claude CLI, and GitHub
 order: 1
 -->
 
 # Authentication API
 
-Endpoints for admin authentication, two-factor authentication, Claude CLI integration, and GitHub authentication.
+Endpoints for admin authentication, Claude CLI integration, and GitHub authentication.
 
 ## Admin Setup & Login
 
@@ -26,9 +26,9 @@ curl -X POST http://localhost:8000/api/v1/auth/setup \
 **Response:**
 ```json
 {
-  "token": "session_token_here",
-  "requires_2fa": false,
-  "user": { "username": "admin" }
+  "status": "ok",
+  "message": "Admin account created",
+  "username": "admin"
 }
 ```
 
@@ -48,24 +48,10 @@ curl -X POST http://localhost:8000/api/v1/auth/login \
 **Response:**
 ```json
 {
-  "token": "session_token_here",
-  "requires_2fa": true
+  "status": "ok",
+  "message": "Logged in",
+  "is_admin": true
 }
-```
-
-If `requires_2fa` is true, you must call `/auth/verify-2fa` next.
-
-### POST /api/v1/auth/verify-2fa
-
-Complete login with TOTP code.
-
-```bash
-curl -X POST http://localhost:8000/api/v1/auth/verify-2fa \
-  -H "Content-Type: application/json" \
-  -d '{
-    "token": "session_token_from_login",
-    "code": "123456"
-  }'
 ```
 
 ### POST /api/v1/auth/logout
@@ -90,8 +76,7 @@ curl http://localhost:8000/api/v1/auth/status
 {
   "authenticated": true,
   "is_admin": true,
-  "setup_complete": true,
-  "has_2fa": false
+  "setup_required": false
 }
 ```
 

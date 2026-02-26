@@ -266,7 +266,8 @@ def create_session(
     fork_point_message_index: Optional[int] = None,
     worktree_id: Optional[str] = None,
     worktree_branch: Optional[str] = None,
-    worktree_path: Optional[str] = None
+    worktree_path: Optional[str] = None,
+    _conn=None
 ) -> SessionRow:
     """Create a new session
 
@@ -281,15 +282,24 @@ def create_session(
         worktree_id: Optional worktree to link this session to
         worktree_branch: Optional branch name (persisted for display after worktree deletion)
         worktree_path: Optional worktree path (persisted for display after worktree deletion)
+        _conn: Optional existing DB connection for transaction grouping
     """
     now = datetime.utcnow().isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
+    if _conn is not None:
+        cursor = _conn.cursor()
         cursor.execute(
             """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, now, now)
         )
+    else:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, now, now)
+            )
     return get_session(session_id)
 
 
@@ -530,7 +540,8 @@ def add_session_message(
     tool_name: Optional[str] = None,
     tool_input: Optional[Dict[str, Any]] = None,
     metadata: Optional[Dict[str, Any]] = None,
-    profile_id: Optional[str] = None
+    profile_id: Optional[str] = None,
+    _conn=None
 ) -> SessionMessageRow:
     """Add a message to a session
 
@@ -542,30 +553,38 @@ def add_session_message(
         tool_input: Optional tool input for tool_use messages
         metadata: Optional metadata dict
         profile_id: Optional profile ID that created this message (for per-query tracking)
+        _conn: Optional existing DB connection for transaction grouping
     """
     now = datetime.utcnow().isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """INSERT INTO session_messages (session_id, role, content, tool_name, tool_input, metadata, profile_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, role, content, tool_name,
-             json.dumps(tool_input) if tool_input else None,
-             json.dumps(metadata) if metadata else None,
-             profile_id,
-             now)
-        )
-        msg = {
-            "id": cursor.lastrowid,
-            "session_id": session_id,
-            "role": role,
-            "content": content,
-            "tool_name": tool_name,
-            "tool_input": tool_input,
-            "metadata": metadata,
-            "profile_id": profile_id,
-            "created_at": now
-        }
+    params = (session_id, role, content, tool_name,
+              json.dumps(tool_input) if tool_input else None,
+              json.dumps(metadata) if metadata else None,
+              profile_id,
+              now)
+    sql = """INSERT INTO session_messages (session_id, role, content, tool_name, tool_input, metadata, profile_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
+
+    if _conn is not None:
+        cursor = _conn.cursor()
+        cursor.execute(sql, params)
+        lastrowid = cursor.lastrowid
+    else:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            lastrowid = cursor.lastrowid
+
+    msg = {
+        "id": lastrowid,
+        "session_id": session_id,
+        "role": role,
+        "content": content,
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "metadata": metadata,
+        "profile_id": profile_id,
+        "created_at": now
+    }
 
     # Update in-memory profile map cache (avoids DB re-read on next load)
     if role == "user" and profile_id and content:

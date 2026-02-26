@@ -151,6 +151,10 @@ def create_test_schema(cursor: sqlite3.Cursor):
             api_user_id TEXT,
             sdk_session_id TEXT,
             worktree_id TEXT,
+            worktree_branch TEXT,
+            worktree_path TEXT,
+            parent_session_id TEXT,
+            fork_point_message_index INTEGER,
             title TEXT,
             status TEXT DEFAULT 'active',
             is_favorite BOOLEAN DEFAULT FALSE,
@@ -177,18 +181,6 @@ def create_test_schema(cursor: sqlite3.Cursor):
             last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             ip_address TEXT,
             user_agent TEXT
-        )
-    """)
-
-    # Two-factor auth
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS two_factor_auth (
-            id INTEGER PRIMARY KEY DEFAULT 1,
-            secret TEXT NOT NULL,
-            enabled INTEGER DEFAULT 0,
-            backup_codes TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            CHECK (id = 1)
         )
     """)
 
@@ -746,18 +738,22 @@ def mock_db(test_db: sqlite3.Connection):
 
     with patch("app.db.database.get_connection", mock_get_connection):
         with patch("app.db.database.get_db", mock_get_db):
-            # Seed a "default" profile so tests can reference it
-            from app.db import database
-            try:
-                database.create_profile(
-                    profile_id="default",
-                    name="Default Profile",
-                    description=None,
-                    config={"model": "claude-sonnet-4-20250514"},
-                )
-            except Exception:
-                pass  # May already exist
-            yield test_db
+            with patch("app.db.base.get_connection", mock_get_connection):
+                with patch("app.db.base.get_db", mock_get_db):
+                    with patch("app.db.sessions.get_db", mock_get_db):
+                        with patch("app.db.auth.get_db", mock_get_db):
+                            # Seed a "default" profile so tests can reference it
+                            from app.db import database
+                            try:
+                                database.create_profile(
+                                    profile_id="default",
+                                    name="Default Profile",
+                                    description=None,
+                                    config={"model": "claude-sonnet-4-20250514"},
+                                )
+                            except Exception:
+                                pass  # May already exist
+                            yield test_db
 
 
 # =============================================================================

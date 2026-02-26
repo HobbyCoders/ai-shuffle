@@ -173,11 +173,17 @@ class ChatWebSocketHandler:
 
                     # Check if this was the last device for this session
                     # If so, and no active query is running, cleanup the session resources
-                    from app.api.websocket import _active_chat_sessions
+                    from app.api.websocket import _active_chat_sessions, _active_sessions_lock
 
                     remaining_devices = sync_engine.get_device_count(self.current_session_id)
-                    active_task = _active_chat_sessions.get(self.current_session_id)
-                    is_task_done = active_task is None or active_task.done()
+
+                    async with _active_sessions_lock:
+                        active_task = _active_chat_sessions.get(self.current_session_id)
+                        is_task_done = active_task is None or active_task.done()
+
+                        if remaining_devices == 0 and is_task_done:
+                            # Remove from active chat sessions tracking
+                            _active_chat_sessions.pop(self.current_session_id, None)
 
                     if remaining_devices == 0 and is_task_done:
                         # No more devices watching and no active query
@@ -187,9 +193,6 @@ class ChatWebSocketHandler:
                         if live_session_store.has_session(self.current_session_id) and live_session_store.is_streaming(self.current_session_id):
                             await live_session_store.cleanup_session(self.current_session_id)
                             logger.debug(f"Cleaned up stuck streaming session {self.current_session_id}")
-
-                        # Remove from active chat sessions tracking
-                        _active_chat_sessions.pop(self.current_session_id, None)
 
                         # Clear streaming state in sync engine (no need to broadcast - no devices left)
                         sync_engine.clear_streaming_state(self.current_session_id)
@@ -227,7 +230,7 @@ class ChatWebSocketHandler:
 
     async def handle_query(self, data: dict) -> None:
         """Handle 'query' message type."""
-        from app.api.websocket import _active_chat_sessions
+        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
 
         prompt = data.get("prompt", "").strip()
         session_id = data.get("session_id")
@@ -239,6 +242,18 @@ class ChatWebSocketHandler:
         if not prompt:
             await self.send_json({"type": "error", "message": "Empty prompt"})
             return
+
+        # Validate project-level authorization for API users
+        # API users are scoped to a specific project — prevent cross-project access
+        if self.api_user_id and project_id:
+            api_user = database.get_api_user(self.api_user_id)
+            if api_user and api_user.get("project_id") and api_user["project_id"] != project_id:
+                logger.warning(
+                    f"Authorization denied: API user {self.api_user_id} attempted to access "
+                    f"project {project_id} but is scoped to project {api_user['project_id']}"
+                )
+                await self.send_json({"type": "error", "message": "Not authorized for this project"})
+                return
 
         # Create or get session
         if not session_id:
@@ -265,6 +280,7 @@ class ChatWebSocketHandler:
 
             # Create new session, optionally linked to a worktree
             session_id = str(uuid.uuid4())
+            is_new_session = True
             # Generate title from the user's first message
             title = prompt[:100].strip()
             if len(prompt) > 100:
@@ -272,16 +288,29 @@ class ChatWebSocketHandler:
             # Get worktree info for persistent storage on session
             wt_branch = worktree.get("branch_name") if worktree_id and worktree else None
             wt_path = worktree.get("worktree_path") if worktree_id and worktree else None
-            database.create_session(
-                session_id=session_id,
-                profile_id=profile_id,
-                project_id=project_id,
-                api_user_id=self.api_user_id,
-                title=title,
-                worktree_id=worktree_id,  # Link to worktree if provided
-                worktree_branch=wt_branch,
-                worktree_path=wt_path
-            )
+
+            # Create session + first user message atomically so neither is orphaned
+            from app.db.base import transaction
+            with transaction() as txn:
+                database.create_session(
+                    session_id=session_id,
+                    profile_id=profile_id,
+                    project_id=project_id,
+                    api_user_id=self.api_user_id,
+                    title=title,
+                    worktree_id=worktree_id,
+                    worktree_branch=wt_branch,
+                    worktree_path=wt_path,
+                    _conn=txn
+                )
+                database.add_session_message(
+                    session_id=session_id,
+                    role="user",
+                    content=prompt,
+                    profile_id=profile_id,
+                    _conn=txn
+                )
+
             # Immediately notify frontend of new session_id so it persists on refresh
             await self.send_json({
                 "type": "session_created",
@@ -295,6 +324,8 @@ class ChatWebSocketHandler:
                 session_id=session_id,
                 source_device_id=self.device_id
             )
+        else:
+            is_new_session = False
 
         # Register device with session if switching sessions
         if session_id != self.current_session_id:
@@ -306,13 +337,14 @@ class ChatWebSocketHandler:
             await sync_engine.register_device(self.device_id, session_id, self.websocket)
             self.current_session_id = session_id
 
-        # Store user message with profile_id for per-query tracking
-        database.add_session_message(
-            session_id=session_id,
-            role="user",
-            content=prompt,
-            profile_id=profile_id
-        )
+        # Store user message for existing sessions (new sessions already stored atomically above)
+        if not is_new_session:
+            database.add_session_message(
+                session_id=session_id,
+                role="user",
+                content=prompt,
+                profile_id=profile_id
+            )
 
         # Broadcast user message to other devices
         await sync_engine.broadcast_message_added(
@@ -326,10 +358,12 @@ class ChatWebSocketHandler:
         )
 
         # Cancel any existing query for this session
-        if session_id in _active_chat_sessions:
-            _active_chat_sessions[session_id].cancel()
+        async with _active_sessions_lock:
+            existing_task = _active_chat_sessions.get(session_id)
+        if existing_task:
+            existing_task.cancel()
             try:
-                await _active_chat_sessions[session_id]
+                await existing_task
             except asyncio.CancelledError:
                 pass
 
@@ -339,7 +373,8 @@ class ChatWebSocketHandler:
         self.query_task = asyncio.create_task(
             self.run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id)
         )
-        _active_chat_sessions[session_id] = self.query_task
+        async with _active_sessions_lock:
+            _active_chat_sessions[session_id] = self.query_task
 
     # ------------------------------------------------------------------
     # handle_stop
@@ -347,7 +382,7 @@ class ChatWebSocketHandler:
 
     async def handle_stop(self, data: dict) -> None:
         """Handle 'stop' message type."""
-        from app.api.websocket import _active_chat_sessions
+        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
 
         session_id = data.get("session_id") or self.current_session_id
         if session_id:
@@ -360,9 +395,9 @@ class ChatWebSocketHandler:
             logger.debug(f"Interrupt session {session_id}: {interrupted}")
 
             # Safety timeout: force-cancel if SDK doesn't stop within 10s
-            if session_id in _active_chat_sessions:
-                task = _active_chat_sessions[session_id]
-                if not task.done():
+            async with _active_sessions_lock:
+                task = _active_chat_sessions.get(session_id)
+            if task and not task.done():
                     async def _safety_cancel(t, sid, timeout=10.0):
                         try:
                             await asyncio.sleep(timeout)
@@ -380,7 +415,7 @@ class ChatWebSocketHandler:
 
     async def handle_interrupt_and_query(self, data: dict) -> None:
         """Handle 'interrupt_and_query' message type."""
-        from app.api.websocket import _active_chat_sessions
+        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
 
         session_id = data.get("session_id") or self.current_session_id
         prompt = data.get("prompt", "").strip()
@@ -408,14 +443,14 @@ class ChatWebSocketHandler:
         # the subprocess to flush JSONL writes before the new query reads it.
         # Without sufficient time, the new subprocess reads incomplete JSONL
         # and loses conversation context.
-        if session_id in _active_chat_sessions:
-            task = _active_chat_sessions[session_id]
-            if not task.done():
-                task.cancel()
-                try:
-                    await asyncio.wait_for(task, timeout=8.0)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
+        async with _active_sessions_lock:
+            task = _active_chat_sessions.get(session_id)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=8.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
 
         # Step 3: Store user message with profile_id for per-query tracking
         database.add_session_message(
@@ -440,7 +475,8 @@ class ChatWebSocketHandler:
         self.query_task = asyncio.create_task(
             self.run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id)
         )
-        _active_chat_sessions[session_id] = self.query_task
+        async with _active_sessions_lock:
+            _active_chat_sessions[session_id] = self.query_task
         logger.debug(f"Started new query after interrupt for session {session_id}")
 
     # ------------------------------------------------------------------

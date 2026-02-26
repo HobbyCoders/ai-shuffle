@@ -3,7 +3,7 @@ Comprehensive unit tests for app/db/database.py.
 
 Tests cover:
 - Database connection and context management
-- Admin operations (CRUD, 2FA)
+- Admin operations (CRUD)
 - Profile operations (CRUD, builtin flags)
 - Project operations (CRUD)
 - Session operations (CRUD, favorites, forks, tags)
@@ -64,10 +64,6 @@ def _create_test_schema(cursor: sqlite3.Cursor):
             id INTEGER PRIMARY KEY DEFAULT 1,
             username TEXT NOT NULL,
             password_hash TEXT NOT NULL,
-            totp_secret TEXT,
-            totp_enabled BOOLEAN DEFAULT FALSE,
-            totp_verified_at TIMESTAMP,
-            recovery_codes TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             CHECK (id = 1)
         )
@@ -159,6 +155,8 @@ def _create_test_schema(cursor: sqlite3.Cursor):
             api_user_id TEXT,
             sdk_session_id TEXT,
             worktree_id TEXT,
+            worktree_branch TEXT,
+            worktree_path TEXT,
             parent_session_id TEXT,
             fork_point_message_index INTEGER,
             title TEXT,
@@ -433,16 +431,6 @@ def _create_test_schema(cursor: sqlite3.Cursor):
         )
     """)
 
-    # Pending 2FA sessions
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS pending_2fa_sessions (
-            token TEXT PRIMARY KEY,
-            username TEXT NOT NULL,
-            expires_at TIMESTAMP NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
     # Rate limits
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS rate_limits (
@@ -693,49 +681,6 @@ class TestAdminOperations:
         admin = db.get_admin()
         assert admin["password_hash"] == "new_hash"
 
-    def test_update_admin_totp_enable(self, mock_db):
-        """update_admin_totp should enable 2FA."""
-        db.create_admin("admin", "hash")
-        result = db.update_admin_totp("secret123", True, recovery_codes="codes")
-
-        assert result is True
-        admin = db.get_admin()
-        assert admin["totp_secret"] == "secret123"
-        assert admin["totp_enabled"] == 1
-        assert admin["recovery_codes"] == "codes"
-
-    def test_update_admin_totp_disable(self, mock_db):
-        """update_admin_totp should disable 2FA."""
-        db.create_admin("admin", "hash")
-        db.update_admin_totp("secret123", True, recovery_codes="codes")
-        db.update_admin_totp(None, False)
-
-        admin = db.get_admin()
-        assert admin["totp_secret"] is None
-        assert admin["totp_enabled"] == 0
-
-    def test_get_admin_2fa_status_disabled(self, mock_db):
-        """get_admin_2fa_status should return disabled status."""
-        db.create_admin("admin", "hash")
-        status = db.get_admin_2fa_status()
-
-        assert status["enabled"] is False
-
-    def test_get_admin_2fa_status_enabled(self, mock_db):
-        """get_admin_2fa_status should return enabled status."""
-        db.create_admin("admin", "hash")
-        db.update_admin_totp("secret", True, recovery_codes="codes")
-        status = db.get_admin_2fa_status()
-
-        assert status["enabled"] is True
-        assert status["has_recovery_codes"] is True
-
-    def test_update_admin_recovery_codes(self, mock_db):
-        """update_admin_recovery_codes should update codes."""
-        db.create_admin("admin", "hash")
-        result = db.update_admin_recovery_codes("new_codes")
-
-        assert result is True
 
 
 # =============================================================================

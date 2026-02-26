@@ -466,6 +466,7 @@ function convertServerMessage(m: Record<string, unknown>, index: number): ChatMe
 	if (m.agentPrompt) msg.agentPrompt = m.agentPrompt as string;
 	if (m.agentStatus) msg.agentStatus = m.agentStatus as 'pending' | 'running' | 'completed' | 'error';
 	if (m.agentChildren) msg.agentChildren = m.agentChildren as SubagentChildMessage[];
+	if (m.agentUsage) msg.agentUsage = m.agentUsage as ChatMessage['agentUsage'];
 
 	if (m.systemSubtype) msg.systemSubtype = m.systemSubtype as string;
 	if (m.systemData) msg.systemData = m.systemData as Record<string, unknown>;

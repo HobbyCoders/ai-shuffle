@@ -49,6 +49,38 @@ def get_db():
         conn.close()
 
 
+@contextmanager
+def transaction():
+    """Context manager for multi-step atomic database transactions.
+
+    Groups multiple database operations into a single transaction.
+    Unlike get_db() which auto-commits on exit, this yields a connection
+    that callers pass to domain functions (via `_conn` parameter) so all
+    operations share one commit/rollback boundary.
+
+    Usage::
+
+        from app.db.base import transaction
+
+        with transaction() as conn:
+            sessions.create_session(session_id, ..., _conn=conn)
+            sessions.add_session_message(session_id, ..., _conn=conn)
+            # Both committed atomically, or both rolled back on error
+
+    Domain functions that accept ``_conn`` should use it instead of opening
+    their own ``get_db()`` connection when provided.
+    """
+    conn = get_connection()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
     """Check if a column exists in a table using PRAGMA table_info."""
     cursor.execute(f"PRAGMA table_info({table})")

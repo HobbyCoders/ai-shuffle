@@ -110,23 +110,6 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
     """
     migrations_applied = []
 
-    # Admin 2FA columns
-    admin_2fa_cols = [
-        "totp_secret", "totp_enabled", "recovery_codes", "totp_verified_at"
-    ]
-    if table_exists(cursor, "admin"):
-        for col in admin_2fa_cols:
-            if not column_exists(cursor, "admin", col):
-                if col == "totp_enabled":
-                    col_type, default = "BOOLEAN", " DEFAULT FALSE"
-                elif col == "totp_verified_at":
-                    col_type, default = "TIMESTAMP", ""
-                else:
-                    col_type, default = "TEXT", ""
-                sql = f"ALTER TABLE admin ADD COLUMN {col} {col_type}{default}"
-                cursor.execute(sql)
-                migrations_applied.append(f"admin.{col}")
-
     # Session messages profile tracking (v30)
     if table_exists(cursor, "session_messages"):
         if not column_exists(cursor, "session_messages", "profile_id"):
@@ -684,34 +667,6 @@ def _create_schema(cursor: sqlite3.Cursor):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
-    # Pending 2FA sessions (for login flow)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS pending_2fa_sessions (
-            token TEXT PRIMARY KEY,
-            username TEXT NOT NULL,
-            expires_at TIMESTAMP NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Add 2FA columns to admin table (migration for existing DBs)
-    try:
-        cursor.execute("ALTER TABLE admin ADD COLUMN totp_secret TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE admin ADD COLUMN totp_enabled BOOLEAN DEFAULT FALSE")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE admin ADD COLUMN recovery_codes TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE admin ADD COLUMN totp_verified_at TIMESTAMP")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
 
     # Add profile_id column to session_messages (migration for per-query profile tracking)
     try:
@@ -1275,45 +1230,6 @@ def update_admin_password(password_hash: str) -> bool:
         return cursor.rowcount > 0
 
 
-def update_admin_totp(totp_secret: Optional[str], totp_enabled: bool, recovery_codes: Optional[str] = None) -> bool:
-    """Update admin 2FA settings"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        if totp_enabled:
-            cursor.execute(
-                """UPDATE admin SET totp_secret = ?, totp_enabled = ?, recovery_codes = ?,
-                   totp_verified_at = ? WHERE id = 1""",
-                (totp_secret, totp_enabled, recovery_codes, datetime.utcnow().isoformat())
-            )
-        else:
-            cursor.execute(
-                "UPDATE admin SET totp_secret = NULL, totp_enabled = FALSE, recovery_codes = NULL, totp_verified_at = NULL WHERE id = 1",
-                ()
-            )
-        return cursor.rowcount > 0
-
-
-def get_admin_2fa_status() -> Dict[str, Any]:
-    """Get admin 2FA status (without revealing secret)"""
-    admin = get_admin()
-    if not admin:
-        return {"enabled": False, "has_recovery_codes": False}
-    return {
-        "enabled": bool(admin.get("totp_enabled")),
-        "has_recovery_codes": bool(admin.get("recovery_codes")),
-        "verified_at": admin.get("totp_verified_at")
-    }
-
-
-def update_admin_recovery_codes(recovery_codes: str) -> bool:
-    """Update admin recovery codes"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE admin SET recovery_codes = ? WHERE id = 1",
-            (recovery_codes,)
-        )
-        return cursor.rowcount > 0
 
 
 # ============================================================================
@@ -1397,37 +1313,6 @@ def get_audit_log_count(user_id: Optional[str] = None, event_type: Optional[str]
         return row["count"]
 
 
-# ============================================================================
-# Pending 2FA Session Operations
-# ============================================================================
-
-def create_pending_2fa_session(token: str, username: str, expires_at: datetime) -> Dict[str, Any]:
-    """Create a pending 2FA session token"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO pending_2fa_sessions (token, username, expires_at) VALUES (?, ?, ?)",
-            (token, username, expires_at.isoformat())
-        )
-        return {"token": token, "username": username, "expires_at": expires_at}
-
-
-def get_pending_2fa_session(token: str) -> Optional[Dict[str, Any]]:
-    """Get a pending 2FA session by token"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM pending_2fa_sessions WHERE token = ? AND expires_at > ?",
-            (token, datetime.utcnow().isoformat())
-        )
-        return row_to_dict(cursor.fetchone())
-
-
-def delete_pending_2fa_session(token: str):
-    """Delete a pending 2FA session"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM pending_2fa_sessions WHERE token = ?", (token,))
 
 
 # ============================================================================
@@ -1974,7 +1859,8 @@ def create_session(
     fork_point_message_index: Optional[int] = None,
     worktree_id: Optional[str] = None,
     worktree_branch: Optional[str] = None,
-    worktree_path: Optional[str] = None
+    worktree_path: Optional[str] = None,
+    _conn=None
 ) -> Dict[str, Any]:
     """Create a new session
 
@@ -1989,15 +1875,19 @@ def create_session(
         worktree_id: Optional worktree to link this session to
         worktree_branch: Optional branch name (persisted for display after worktree deletion)
         worktree_path: Optional worktree path (persisted for display after worktree deletion)
+        _conn: Optional existing DB connection for transaction grouping
     """
     now = datetime.utcnow().isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, now, now)
-        )
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, now, now)
+    sql = """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    if _conn is not None:
+        cursor = _conn.cursor()
+        cursor.execute(sql, params)
+    else:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
     return get_session(session_id)
 
 
@@ -2192,7 +2082,8 @@ def add_session_message(
     tool_name: Optional[str] = None,
     tool_input: Optional[Dict[str, Any]] = None,
     metadata: Optional[Dict[str, Any]] = None,
-    profile_id: Optional[str] = None
+    profile_id: Optional[str] = None,
+    _conn=None
 ) -> Dict[str, Any]:
     """Add a message to a session
 
@@ -2204,30 +2095,38 @@ def add_session_message(
         tool_input: Optional tool input for tool_use messages
         metadata: Optional metadata dict
         profile_id: Optional profile ID that created this message (for per-query tracking)
+        _conn: Optional existing DB connection for transaction grouping
     """
     now = datetime.utcnow().isoformat()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """INSERT INTO session_messages (session_id, role, content, tool_name, tool_input, metadata, profile_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, role, content, tool_name,
-             json.dumps(tool_input) if tool_input else None,
-             json.dumps(metadata) if metadata else None,
-             profile_id,
-             now)
-        )
-        msg = {
-            "id": cursor.lastrowid,
-            "session_id": session_id,
-            "role": role,
-            "content": content,
-            "tool_name": tool_name,
-            "tool_input": tool_input,
-            "metadata": metadata,
-            "profile_id": profile_id,
-            "created_at": now
-        }
+    params = (session_id, role, content, tool_name,
+              json.dumps(tool_input) if tool_input else None,
+              json.dumps(metadata) if metadata else None,
+              profile_id,
+              now)
+    sql = """INSERT INTO session_messages (session_id, role, content, tool_name, tool_input, metadata, profile_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
+
+    if _conn is not None:
+        cursor = _conn.cursor()
+        cursor.execute(sql, params)
+        lastrowid = cursor.lastrowid
+    else:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            lastrowid = cursor.lastrowid
+
+    msg = {
+        "id": lastrowid,
+        "session_id": session_id,
+        "role": role,
+        "content": content,
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "metadata": metadata,
+        "profile_id": profile_id,
+        "created_at": now
+    }
 
     # Update in-memory profile map cache (avoids DB re-read on next load)
     if role == "user" and profile_id and content:

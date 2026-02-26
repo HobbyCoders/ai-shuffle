@@ -1,7 +1,7 @@
 """
 Auth domain database operations.
 
-Handles: Admin, Audit Log, Pending 2FA, Auth Sessions,
+Handles: Admin, Audit Log, Auth Sessions,
 Login Attempts, Account Lockouts, and API Key Sessions.
 """
 
@@ -27,17 +27,6 @@ class AdminRow(TypedDict):
     username: str
     password_hash: str
     created_at: str
-    totp_secret: Optional[str]
-    totp_enabled: bool
-    recovery_codes: Optional[str]
-    totp_verified_at: Optional[str]
-
-
-class Admin2FAStatus(TypedDict):
-    """Admin 2FA status (without revealing secret)."""
-    enabled: bool
-    has_recovery_codes: bool
-    verified_at: Optional[str]
 
 
 class AdminCreateResult(TypedDict):
@@ -55,14 +44,6 @@ class AuditLogRow(TypedDict):
     ip_address: Optional[str]
     user_agent: Optional[str]
     details: Optional[Dict[str, Any]]
-    created_at: str
-
-
-class Pending2FASessionRow(TypedDict):
-    """Full pending 2FA session row from SELECT * FROM pending_2fa_sessions."""
-    token: str
-    username: str
-    expires_at: str
     created_at: str
 
 
@@ -134,47 +115,6 @@ def update_admin_password(password_hash: str) -> bool:
         cursor.execute(
             "UPDATE admin SET password_hash = ? WHERE id = 1",
             (password_hash,)
-        )
-        return cursor.rowcount > 0
-
-
-def update_admin_totp(totp_secret: Optional[str], totp_enabled: bool, recovery_codes: Optional[str] = None) -> bool:
-    """Update admin 2FA settings"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        if totp_enabled:
-            cursor.execute(
-                """UPDATE admin SET totp_secret = ?, totp_enabled = ?, recovery_codes = ?,
-                   totp_verified_at = ? WHERE id = 1""",
-                (totp_secret, totp_enabled, recovery_codes, datetime.utcnow().isoformat())
-            )
-        else:
-            cursor.execute(
-                "UPDATE admin SET totp_secret = NULL, totp_enabled = FALSE, recovery_codes = NULL, totp_verified_at = NULL WHERE id = 1",
-                ()
-            )
-        return cursor.rowcount > 0
-
-
-def get_admin_2fa_status() -> Admin2FAStatus:
-    """Get admin 2FA status (without revealing secret)"""
-    admin = get_admin()
-    if not admin:
-        return {"enabled": False, "has_recovery_codes": False}
-    return {
-        "enabled": bool(admin.get("totp_enabled")),
-        "has_recovery_codes": bool(admin.get("recovery_codes")),
-        "verified_at": admin.get("totp_verified_at")
-    }
-
-
-def update_admin_recovery_codes(recovery_codes: str) -> bool:
-    """Update admin recovery codes"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE admin SET recovery_codes = ? WHERE id = 1",
-            (recovery_codes,)
         )
         return cursor.rowcount > 0
 
@@ -258,39 +198,6 @@ def get_audit_log_count(user_id: Optional[str] = None, event_type: Optional[str]
         cursor.execute(query, params)
         row = cursor.fetchone()
         return row["count"]
-
-
-# ============================================================================
-# Pending 2FA Session Operations
-# ============================================================================
-
-def create_pending_2fa_session(token: str, username: str, expires_at: datetime) -> Pending2FASessionRow:
-    """Create a pending 2FA session token"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO pending_2fa_sessions (token, username, expires_at) VALUES (?, ?, ?)",
-            (token, username, expires_at.isoformat())
-        )
-        return {"token": token, "username": username, "expires_at": expires_at}
-
-
-def get_pending_2fa_session(token: str) -> Optional[Pending2FASessionRow]:
-    """Get a pending 2FA session by token"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM pending_2fa_sessions WHERE token = ? AND expires_at > ?",
-            (token, datetime.utcnow().isoformat())
-        )
-        return row_to_dict(cursor.fetchone())
-
-
-def delete_pending_2fa_session(token: str):
-    """Delete a pending 2FA session"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM pending_2fa_sessions WHERE token = ?", (token,))
 
 
 # ============================================================================

@@ -141,7 +141,9 @@ function flushPendingGroupsSave() {
 }
 
 // Register beforeunload handler to flush pending saves when browser closes
-if (browser) {
+// (guarded against HMR duplicate registration)
+if (browser && !(window as any).__groups_listeners) {
+	(window as any).__groups_listeners = true;
 	window.addEventListener('beforeunload', flushPendingGroupsSave);
 	// Also handle visibility change (tab switch, minimize) - more reliable on mobile
 	document.addEventListener('visibilitychange', () => {

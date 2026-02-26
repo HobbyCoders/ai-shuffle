@@ -1794,8 +1794,12 @@ async def stream_query(
         client = ClaudeSDKClient(options=options)
 
         try:
-            await client.connect()
+            # Timeout prevents hanging if MCP servers are unreachable
+            await asyncio.wait_for(client.connect(), timeout=60.0)
             logger.debug(f"Connected to Claude SDK for session {session_id}")
+        except asyncio.TimeoutError:
+            logger.error(f"Timed out connecting to Claude SDK for session {session_id} (60s)")
+            yield {"type": "error", "message": "Connection timed out — an MCP server may be unreachable"}
         except Exception as e:
             import traceback
             logger.error(f"Failed to connect to Claude SDK for session {session_id}: {e}")
@@ -2016,75 +2020,90 @@ async def stream_query(
             source_device_id=device_id
         )
 
-    # Update session in database
-    if sdk_session_id:
-        database.update_session(
-            session_id=session_id,
-            sdk_session_id=sdk_session_id,
-            cost_increment=metadata.get("total_cost_usd", 0),
-            tokens_in_increment=metadata.get("tokens_in", 0),
-            tokens_out_increment=metadata.get("tokens_out", 0),
-            turn_increment=metadata.get("num_turns", 0)
-        )
-        logger.debug(f"Updated session {session_id}, sdk_session_id={sdk_session_id}")
-
-    # Store tool messages (tool_use and tool_result)
-    for tool_msg in tool_messages:
-        if tool_msg["type"] == "tool_use":
-            database.add_session_message(
+    # Persist session data to database — wrapped in try/except so a single
+    # DB failure doesn't lose all subsequent writes (session update, tool
+    # messages, assistant response, and usage log are independent operations).
+    try:
+        # Update session in database
+        if sdk_session_id:
+            database.update_session(
                 session_id=session_id,
-                role="tool_use",
-                content=f"Using tool: {tool_msg['name']}",
-                tool_name=tool_msg["name"],
-                tool_input=tool_msg.get("input"),
-                metadata={"tool_id": tool_msg.get("tool_id")},
+                sdk_session_id=sdk_session_id,
+                cost_increment=metadata.get("total_cost_usd", 0),
+                tokens_in_increment=metadata.get("tokens_in", 0),
+                tokens_out_increment=metadata.get("tokens_out", 0),
+                turn_increment=metadata.get("num_turns", 0)
+            )
+            logger.debug(f"Updated session {session_id}, sdk_session_id={sdk_session_id}")
+    except Exception as e:
+        logger.error(f"Failed to update session {session_id} in database: {e}")
+
+    try:
+        # Store tool messages (tool_use and tool_result)
+        for tool_msg in tool_messages:
+            if tool_msg.get("type") == "tool_use":
+                database.add_session_message(
+                    session_id=session_id,
+                    role="tool_use",
+                    content=f"Using tool: {tool_msg.get('name', 'unknown')}",
+                    tool_name=tool_msg.get("name", "unknown"),
+                    tool_input=tool_msg.get("input"),
+                    metadata={"tool_id": tool_msg.get("tool_id")},
+                    profile_id=profile_id
+                )
+            elif tool_msg.get("type") == "tool_result":
+                database.add_session_message(
+                    session_id=session_id,
+                    role="tool_result",
+                    content=tool_msg.get("output", ""),
+                    tool_name=tool_msg.get("name", "unknown"),
+                    metadata={"tool_id": tool_msg.get("tool_id")},
+                    profile_id=profile_id
+                )
+    except Exception as e:
+        logger.error(f"Failed to store tool messages for session {session_id}: {e}")
+
+    try:
+        # Store assistant response
+        full_response = "\n".join(response_text)
+        if full_response or interrupted or tool_messages:
+            assistant_msg = database.add_session_message(
+                session_id=session_id,
+                role="assistant",
+                content=full_response + ("\n[Interrupted]" if interrupted else ""),
+                metadata=metadata,
                 profile_id=profile_id
             )
-        elif tool_msg["type"] == "tool_result":
-            database.add_session_message(
+
+            # Log stream end for polling fallback
+            database.add_sync_log(
                 session_id=session_id,
-                role="tool_result",
-                content=tool_msg.get("output", ""),
-                tool_name=tool_msg["name"],
-                metadata={"tool_id": tool_msg.get("tool_id")},
-                profile_id=profile_id
+                event_type="stream_end",
+                entity_type="message",
+                entity_id=str(assistant_msg["id"]),
+                data={
+                    "message": assistant_msg,
+                    "metadata": metadata,
+                    "interrupted": interrupted
+                }
             )
+    except Exception as e:
+        logger.error(f"Failed to store assistant response for session {session_id}: {e}")
 
-    # Store assistant response
-    full_response = "\n".join(response_text)
-    if full_response or interrupted or tool_messages:
-        assistant_msg = database.add_session_message(
-            session_id=session_id,
-            role="assistant",
-            content=full_response + ("\n[Interrupted]" if interrupted else ""),
-            metadata=metadata,
-            profile_id=profile_id
-        )
-
-        # Log stream end for polling fallback
-        database.add_sync_log(
-            session_id=session_id,
-            event_type="stream_end",
-            entity_type="message",
-            entity_id=str(assistant_msg["id"]),
-            data={
-                "message": assistant_msg,
-                "metadata": metadata,
-                "interrupted": interrupted
-            }
-        )
-
-    # Log usage
-    if metadata:
-        database.log_usage(
-            session_id=session_id,
-            profile_id=profile_id,
-            model=metadata.get("model"),
-            tokens_in=metadata.get("tokens_in", 0),
-            tokens_out=metadata.get("tokens_out", 0),
-            cost_usd=metadata.get("total_cost_usd", 0),
-            duration_ms=metadata.get("duration_ms", 0)
-        )
+    try:
+        # Log usage
+        if metadata:
+            database.log_usage(
+                session_id=session_id,
+                profile_id=profile_id,
+                model=metadata.get("model"),
+                tokens_in=metadata.get("tokens_in", 0),
+                tokens_out=metadata.get("tokens_out", 0),
+                cost_usd=metadata.get("total_cost_usd", 0),
+                duration_ms=metadata.get("duration_ms", 0)
+            )
+    except Exception as e:
+        logger.error(f"Failed to log usage for session {session_id}: {e}")
 
     # Yield done event (unless already yielded error/interrupted)
     if not interrupted:
@@ -2198,8 +2217,11 @@ async def _run_background_query(
         client = ClaudeSDKClient(options=options)
 
         try:
-            await client.connect()
+            await asyncio.wait_for(client.connect(), timeout=60.0)
             logger.debug(f"[Background] Connected to Claude SDK for session {session_id}")
+        except asyncio.TimeoutError:
+            logger.error(f"[Background] Timed out connecting to Claude SDK for session {session_id} (60s)")
+            raise RuntimeError("Connection timed out — an MCP server may be unreachable")
         except Exception as e:
             error_msg = str(e)
             if cli_stderr_lines:
@@ -2990,7 +3012,7 @@ async def stream_to_websocket(
         logger.debug("[WS] ClaudeSDKClient created, attempting connect...")
 
         try:
-            await client.connect()
+            await asyncio.wait_for(client.connect(), timeout=60.0)
             logger.debug(f"[WS] Connected to Claude SDK for session {session_id}")
         except Exception as e:
             import traceback

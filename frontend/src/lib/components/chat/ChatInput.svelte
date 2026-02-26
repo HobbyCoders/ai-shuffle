@@ -103,15 +103,19 @@
 	}
 
 	// Save draft to store when input changes (debounced)
+	// Captures session ID to prevent writing stale drafts to the wrong session after switch
 	$effect(() => {
 		// Track inputValue for reactivity (triggers on any text change)
 		const _trigger = inputValue;
+		const capturedSessionId = $activeSession.sessionId;
 
 		// Debounce draft saves to avoid excessive updates
 		if (draftSaveTimeout) {
 			clearTimeout(draftSaveTimeout);
 		}
 		draftSaveTimeout = setTimeout(() => {
+			// Guard: only save if we're still on the same session
+			if (get(activeSession).sessionId !== capturedSessionId) return;
 			const draftValue = getDraftJSON();
 			if (draftValue !== $activeSession.draft) {
 				activeSession.setDraft(draftValue);

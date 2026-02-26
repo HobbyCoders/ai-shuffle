@@ -761,57 +761,6 @@ class ClarificationAnswersModel(BaseModel):
     answers: Dict[str, str] = Field(..., description="Map of question_id -> user's answer")
 
 
-# ============================================================================
-# Security / 2FA Models
-# ============================================================================
-
-class TwoFactorSetupResponse(BaseModel):
-    """Response when starting 2FA setup"""
-    secret: str  # Base32 secret for manual entry
-    qr_code: str  # Base64-encoded QR code image
-    uri: str  # otpauth:// URI
-
-
-class TwoFactorVerifyRequest(BaseModel):
-    """Request to verify and enable 2FA"""
-    code: str = Field(..., min_length=6, max_length=6, pattern=r'^\d{6}$')
-
-
-class TwoFactorDisableRequest(BaseModel):
-    """Request to disable 2FA"""
-    code: str = Field(..., min_length=6, max_length=6, pattern=r'^\d{6}$')
-    password: str  # Require password confirmation
-
-
-class TwoFactorStatusResponse(BaseModel):
-    """Current 2FA status"""
-    enabled: bool
-    has_recovery_codes: bool
-    recovery_codes_count: int = 0
-    verified_at: Optional[str] = None
-
-
-class RecoveryCodesResponse(BaseModel):
-    """Response containing new recovery codes"""
-    codes: List[str]
-    count: int
-
-
-class TwoFactorLoginRequest(BaseModel):
-    """Request to verify 2FA during login"""
-    code: str  # 6-digit TOTP code or recovery code
-    use_recovery_code: bool = False
-
-
-class LoginResponseWith2FA(BaseModel):
-    """Login response that may require 2FA"""
-    status: str  # "ok" or "2fa_required"
-    message: str
-    requires_2fa: bool = False
-    is_admin: bool = False
-    pending_2fa_token: Optional[str] = None  # Temporary token for 2FA verification
-
-
 class AuditLogEntry(BaseModel):
     """A single audit log entry"""
     id: str

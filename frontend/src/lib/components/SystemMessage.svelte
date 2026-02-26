@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { ChatMessage } from '$lib/stores/types';
 	import { marked } from 'marked';
+	import { sanitizeHtml } from '$lib/utils/sanitize';
 
 	// Configure marked for system message rendering
 	marked.setOptions({
@@ -232,6 +233,17 @@
 				};
 			}
 
+			case 'task_progress': {
+				// Task/subagent progress updates - hide as they're internal SDK metrics
+				return {
+					title: 'Task Progress',
+					content: (data.description as string) || message.content || '',
+					badge: 'task_progress',
+					badgeColor: 'gray',
+					hidden: true
+				};
+			}
+
 			case 'stop_hook_summary': {
 				// Stop hook completion summary
 				const hookCount = data.hookCount as number || 0;
@@ -378,7 +390,7 @@
 	<div class="px-4 py-3 bg-card">
 		{#if isMarkdownContent(message.systemSubtype)}
 			<div class="prose prose-sm prose-invert max-w-none system-message-content">
-				{@html renderMarkdown(formatted.content)}
+				{@html sanitizeHtml(renderMarkdown(formatted.content))}
 			</div>
 		{:else}
 			<pre class="text-xs text-muted-foreground overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatted.content}</pre>

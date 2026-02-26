@@ -42,7 +42,7 @@ Toggle extended thinking and permission modes per-session without changing your 
 Image generation (Gemini, Imagen, GPT-Image), video generation (Veo, Sora), 3D models (Meshy).
 
 ### Self-Host Security
-2FA, rate limiting, session management — designed to be exposed to the internet safely.
+Rate limiting, session management, audit logging — designed to be exposed to the internet safely.
 
 ---
 

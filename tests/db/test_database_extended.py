@@ -257,53 +257,6 @@ class TestWorktreeExtended:
 
 
 # =============================================================================
-# Pending 2FA Session Tests
-# =============================================================================
-
-
-class TestPending2FASessions:
-    """Test pending 2FA session operations."""
-
-    def test_create_pending_2fa_session(self, mock_db):
-        """create_pending_2fa_session should create a pending session."""
-        expires = datetime.utcnow() + timedelta(minutes=10)
-
-        result = db.create_pending_2fa_session("token123", "admin", expires)
-
-        assert result["token"] == "token123"
-        assert result["username"] == "admin"
-
-    def test_get_pending_2fa_session(self, mock_db):
-        """get_pending_2fa_session should return valid session."""
-        expires = datetime.utcnow() + timedelta(minutes=10)
-        db.create_pending_2fa_session("token123", "admin", expires)
-
-        result = db.get_pending_2fa_session("token123")
-
-        assert result is not None
-        assert result["username"] == "admin"
-
-    def test_get_pending_2fa_session_expired(self, mock_db):
-        """get_pending_2fa_session should not return expired session."""
-        expires = datetime.utcnow() - timedelta(minutes=10)
-        db.create_pending_2fa_session("token123", "admin", expires)
-
-        result = db.get_pending_2fa_session("token123")
-
-        assert result is None
-
-    def test_delete_pending_2fa_session(self, mock_db):
-        """delete_pending_2fa_session should remove session."""
-        expires = datetime.utcnow() + timedelta(minutes=10)
-        db.create_pending_2fa_session("token123", "admin", expires)
-
-        db.delete_pending_2fa_session("token123")
-        result = db.get_pending_2fa_session("token123")
-
-        assert result is None
-
-
-# =============================================================================
 # Template Extended Tests
 # =============================================================================
 
@@ -417,23 +370,6 @@ class TestWebhookExtended:
 # =============================================================================
 # Cleanup Extended Tests
 # =============================================================================
-
-
-class TestCleanupExtended:
-    """Test extended cleanup operations."""
-
-    def test_cleanup_expired_pending_2fa_sessions(self, mock_db):
-        """Expired pending 2FA sessions should be cleaned up."""
-        # Create expired session manually
-        mock_db.execute("""
-            INSERT INTO pending_2fa_sessions (token, username, expires_at, created_at)
-            VALUES ('expired-token', 'admin', '2020-01-01T00:00:00', '2020-01-01T00:00:00')
-        """)
-        mock_db.commit()
-
-        # The expired session should not be returned
-        result = db.get_pending_2fa_session("expired-token")
-        assert result is None
 
 
 # =============================================================================

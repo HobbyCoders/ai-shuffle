@@ -168,8 +168,9 @@ function flushPendingSave(): void {
 	pendingState = null;
 }
 
-// Register beforeunload handler
-if (browser) {
+// Register beforeunload handler (guarded against HMR duplicate registration)
+if (browser && !(window as any).__chatPrefs_listeners) {
+	(window as any).__chatPrefs_listeners = true;
 	window.addEventListener('beforeunload', flushPendingSave);
 	document.addEventListener('visibilitychange', () => {
 		if (document.visibilityState === 'hidden') {

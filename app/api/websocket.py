@@ -36,6 +36,7 @@ router = APIRouter(prefix="/api/v1", tags=["WebSocket"])
 
 # Track active chat sessions for interruption
 _active_chat_sessions: dict[str, asyncio.Task] = {}
+_active_sessions_lock = asyncio.Lock()
 
 
 async def _delayed_session_cleanup(session_id: str, delay_seconds: int = 30) -> None:

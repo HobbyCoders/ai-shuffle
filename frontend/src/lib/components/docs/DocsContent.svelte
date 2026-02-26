@@ -8,6 +8,7 @@
 	 * - Existing .prose CSS styling
 	 */
 	import { marked } from 'marked';
+	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import type { DocSection } from '$lib/docs/types';
 
 	interface Props {
@@ -76,7 +77,7 @@
 </script>
 
 <div class="docs-content prose" bind:this={contentEl}>
-	{@html renderedHtml}
+	{@html sanitizeHtml(renderedHtml)}
 </div>
 
 <style>

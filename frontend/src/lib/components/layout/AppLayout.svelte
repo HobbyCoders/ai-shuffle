@@ -50,10 +50,18 @@
 		}
 	}
 
-	// Resize handling
+	// Resize handling — use AbortController to prevent listener accumulation
+	// on rapid/multi-touch interactions
+	let resizeAbort: AbortController | null = null;
+
 	function startResize(e: PointerEvent) {
 		if ($sidebarOverlay || $sidebarCollapsed) return;
 		e.preventDefault();
+
+		// Clean up any previous resize listeners (prevents accumulation)
+		resizeAbort?.abort();
+		resizeAbort = new AbortController();
+
 		isResizing = true;
 
 		const onPointerMove = (ev: PointerEvent) => {
@@ -63,12 +71,12 @@
 
 		const onPointerUp = () => {
 			isResizing = false;
-			document.removeEventListener('pointermove', onPointerMove);
-			document.removeEventListener('pointerup', onPointerUp);
+			resizeAbort?.abort();
+			resizeAbort = null;
 		};
 
-		document.addEventListener('pointermove', onPointerMove);
-		document.addEventListener('pointerup', onPointerUp);
+		document.addEventListener('pointermove', onPointerMove, { signal: resizeAbort.signal });
+		document.addEventListener('pointerup', onPointerUp, { signal: resizeAbort.signal });
 	}
 
 	onMount(() => {

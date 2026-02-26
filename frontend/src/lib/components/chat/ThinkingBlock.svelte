@@ -8,6 +8,7 @@
 	import { marked } from 'marked';
 	import { onMount, tick } from 'svelte';
 	import { get } from 'svelte/store';
+	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import StreamingIndicator from './StreamingIndicator.svelte';
 	import { chatPreferences, type ChatPreferences, DEFAULT_PREFERENCES } from '$lib/stores/chatPreferences';
 
@@ -135,7 +136,7 @@
 		return _cache.html;
 	}
 
-	const renderedHtml = $derived(renderMarkdownMemoized(content));
+	const renderedHtml = $derived(sanitizeHtml(renderMarkdownMemoized(content)));
 
 	// Derived: should show summary when collapsed
 	const showSummary = $derived(!isExpanded && prefs.showThinkingSummary && content);

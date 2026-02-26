@@ -156,48 +156,53 @@ export const pwa = {
 
 		checkInstallState();
 
-		window.addEventListener('online', () => {
-			_update((s) => ({ ...s, isOnline: true }));
-			_notifySubscribers();
-			pwa.checkForUpdates();
-		});
+		// Guard against HMR duplicate listener registration
+		if (!(window as any).__pwa_listeners) {
+			(window as any).__pwa_listeners = true;
 
-		window.addEventListener('offline', () => {
-			_update((s) => ({ ...s, isOnline: false }));
-			_notifySubscribers();
-		});
-
-		document.addEventListener('visibilitychange', () => {
-			if (document.visibilityState === 'visible') {
+			window.addEventListener('online', () => {
+				_update((s) => ({ ...s, isOnline: true }));
+				_notifySubscribers();
 				pwa.checkForUpdates();
-			}
-		});
+			});
 
-		window.addEventListener('focus', () => {
-			pwa.checkForUpdates();
-		});
+			window.addEventListener('offline', () => {
+				_update((s) => ({ ...s, isOnline: false }));
+				_notifySubscribers();
+			});
 
-		window.addEventListener('beforeinstallprompt', (e) => {
-			e.preventDefault();
-			if (wasRecentlyDismissed()) return;
+			document.addEventListener('visibilitychange', () => {
+				if (document.visibilityState === 'visible') {
+					pwa.checkForUpdates();
+				}
+			});
 
-			_update((s) => ({
-				...s,
-				isInstallable: true,
-				installPromptEvent: e as BeforeInstallPromptEvent
-			}));
-			_notifySubscribers();
-		});
+			window.addEventListener('focus', () => {
+				pwa.checkForUpdates();
+			});
 
-		window.addEventListener('appinstalled', () => {
-			_update((s) => ({
-				...s,
-				isInstalled: true,
-				isInstallable: false,
-				installPromptEvent: null
-			}));
-			_notifySubscribers();
-		});
+			window.addEventListener('beforeinstallprompt', (e) => {
+				e.preventDefault();
+				if (wasRecentlyDismissed()) return;
+
+				_update((s) => ({
+					...s,
+					isInstallable: true,
+					installPromptEvent: e as BeforeInstallPromptEvent
+				}));
+				_notifySubscribers();
+			});
+
+			window.addEventListener('appinstalled', () => {
+				_update((s) => ({
+					...s,
+					isInstalled: true,
+					isInstallable: false,
+					installPromptEvent: null
+				}));
+				_notifySubscribers();
+			});
+		}
 
 		registerServiceWorker();
 	},

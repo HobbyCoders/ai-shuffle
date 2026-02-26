@@ -87,7 +87,7 @@ For production deployments, consider:
 - Running behind a reverse proxy (nginx, Caddy) for HTTPS
 - Setting specific CORS origins instead of `*`
 - Using a process manager (systemd, PM2) for auto-restart
-- Setting up two-factor authentication (available in Settings)
+- Reviewing security settings (rate limiting, audit logging)
 
 ## Updating
 

@@ -4,6 +4,7 @@
 	 */
 	import { marked } from 'marked';
 	import { onDestroy } from 'svelte';
+	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import StreamingIndicator from './StreamingIndicator.svelte';
 	import MessageActions from './MessageActions.svelte';
 
@@ -101,7 +102,7 @@
 	// Mutating reactive `let` vars inside `$derived` corrupts the effect linked list.
 	const _cache = { content: '', html: '', wasStreaming: false, stablePrefixContent: '', stablePrefixHtml: '' };
 
-	const renderedHtml = $derived(renderMarkdownMemoized(content, streaming));
+	const renderedHtml = $derived(sanitizeHtml(renderMarkdownMemoized(content, streaming)));
 
 	function renderMarkdownMemoized(text: string, isStreaming: boolean): string {
 		// Fast path: content and streaming flag unchanged

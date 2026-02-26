@@ -111,7 +111,7 @@ See the [WebSocket documentation](/docs/api-reference/websocket) for protocol de
 
 | Category | Prefix | Description |
 |----------|--------|-------------|
-| [Authentication](/docs/api-reference/authentication) | `/auth` | Login, setup, 2FA, Claude CLI, GitHub |
+| [Authentication](/docs/api-reference/authentication) | `/auth` | Login, setup, Claude CLI, GitHub |
 | [Sessions](/docs/api-reference/sessions) | `/sessions` | Chat session CRUD, search, export |
 | [Query & Execution](/docs/api-reference/query-execution) | `/query`, `/conversation` | One-shot queries, conversations, streaming |
 | [WebSocket](/docs/api-reference/websocket) | `/ws` | Real-time chat and CLI bridge |

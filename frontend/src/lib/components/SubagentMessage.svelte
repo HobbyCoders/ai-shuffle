@@ -3,6 +3,7 @@
 	 * SubagentMessage - Display for subagent work (matching tool message group style)
 	 */
 	import type { ChatMessage } from '$lib/stores/types';
+	import { sanitizeHtml } from '$lib/utils/sanitize';
 
 	interface Props {
 		message: ChatMessage;
@@ -43,6 +44,30 @@
 			default:
 				return { label: agentType || 'Agent', color: 'bg-primary/20 text-primary' };
 		}
+	}
+
+	// Format usage stats from task_progress updates
+	function formatUsage(usage?: ChatMessage['agentUsage']): string | null {
+		if (!usage) return null;
+		const parts: string[] = [];
+		if (usage.tool_uses) parts.push(`${usage.tool_uses} tools`);
+		if (usage.total_tokens) {
+			const k = usage.total_tokens >= 1000
+				? `${(usage.total_tokens / 1000).toFixed(0)}k`
+				: String(usage.total_tokens);
+			parts.push(`${k} tokens`);
+		}
+		if (usage.duration_ms && usage.duration_ms > 1000) {
+			const secs = Math.round(usage.duration_ms / 1000);
+			if (secs >= 60) {
+				const mins = Math.floor(secs / 60);
+				const rem = secs % 60;
+				parts.push(rem > 0 ? `${mins}m ${rem}s` : `${mins}m`);
+			} else {
+				parts.push(`${secs}s`);
+			}
+		}
+		return parts.length > 0 ? parts.join(' · ') : null;
 	}
 
 	function formatToolInput(input: Record<string, unknown> | undefined): string {
@@ -148,6 +173,17 @@
 			</span>
 		{/if}
 
+		<!-- Usage stats from task_progress (tokens, duration) -->
+		{#if message.agentUsage}
+			{@const usageText = formatUsage(message.agentUsage)}
+			{#if usageText}
+				<span class="text-muted-foreground flex-shrink-0">•</span>
+				<span class="text-xs text-muted-foreground flex-shrink-0">
+					{usageText}
+				</span>
+			{/if}
+		{/if}
+
 		<!-- Chevron -->
 		<svg class="w-4 h-4 text-muted-foreground ml-auto transition-transform group-open:rotate-180 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
@@ -205,7 +241,7 @@
 										<div class="p-2 bg-muted/50 rounded">
 											<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Result</div>
 											{#if toolResultHasImage(child.toolResult)}
-												{@html renderToolResult(child.toolResult)}
+												{@html sanitizeHtml(renderToolResult(child.toolResult))}
 											{:else}
 												<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{truncateContent(child.toolResult)}</pre>
 											{/if}
@@ -233,7 +269,7 @@
 								{#if child.content}
 									{#if toolResultHasImage(child.content)}
 										<div class="mt-2 p-2 bg-muted/50 rounded">
-											{@html renderToolResult(child.content)}
+											{@html sanitizeHtml(renderToolResult(child.content))}
 										</div>
 									{:else}
 										<pre class="mt-2 p-2 bg-muted/50 rounded text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{truncateContent(child.content)}</pre>
@@ -274,7 +310,7 @@
 				<div class="px-4 py-3 border-t border-border/50">
 					<div class="text-xs text-muted-foreground mb-1 font-medium">Result</div>
 					{#if toolResultHasImage(message.content)}
-						{@html renderToolResult(message.content)}
+						{@html sanitizeHtml(renderToolResult(message.content))}
 					{:else}
 						<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{message.content}</pre>
 					{/if}

@@ -273,8 +273,20 @@ async def execute_hooks_for_event(
                 "data": event_data,
             }
 
-            # Execute hook asynchronously (fire and forget)
-            asyncio.create_task(execute_hook(hook, full_event_data))
+            # Execute hook asynchronously with result logging
+            async def _execute_and_log(h: Dict[str, Any], data: Dict[str, Any]) -> None:
+                result = await execute_hook(h, data)
+                if not result.get("success"):
+                    logger.warning(
+                        f"Hook {h.get('id')} ({h.get('name', 'unnamed')}) failed for event {event}: "
+                        f"{result.get('error', 'unknown error')}"
+                    )
+
+            task = asyncio.create_task(_execute_and_log(hook, full_event_data))
+            task.add_done_callback(
+                lambda t: logger.error(f"Hook task crashed: {t.exception()}")
+                if not t.cancelled() and t.exception() else None
+            )
 
     except Exception as e:
         logger.exception(f"Error executing hooks for event {event} in project {project_id}: {e}")

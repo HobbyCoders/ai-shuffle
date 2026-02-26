@@ -326,7 +326,7 @@ docs(readme): update installation instructions
 
 refactor(api): extract authentication into middleware
 
-test(auth): add tests for 2FA verification
+test(auth): add tests for login rate limiting
 
 chore(deps): update svelte to v5.2.0
 ```

@@ -83,7 +83,9 @@ function flushPendingSave(): void {
 	pendingState = null;
 }
 
-if (browser) {
+// Guard against HMR duplicate registration
+if (browser && !(window as any).__tzPrefs_listeners) {
+	(window as any).__tzPrefs_listeners = true;
 	window.addEventListener('beforeunload', flushPendingSave);
 	document.addEventListener('visibilitychange', () => {
 		if (document.visibilityState === 'hidden') flushPendingSave();

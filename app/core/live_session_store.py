@@ -93,6 +93,7 @@ class LiveMessage:
     agent_prompt: Optional[str] = None
     agent_status: Optional[str] = None  # 'pending', 'running', 'completed', 'error'
     agent_children: Optional[List[SubagentChild]] = None
+    agent_usage: Optional[Dict[str, Any]] = None  # {total_tokens, tool_uses, duration_ms}
 
     # For system messages
     system_subtype: Optional[str] = None
@@ -136,6 +137,8 @@ class LiveMessage:
             result["agentStatus"] = self.agent_status
         if self.agent_children is not None:
             result["agentChildren"] = [c.to_dict() for c in self.agent_children]
+        if self.agent_usage:
+            result["agentUsage"] = self.agent_usage
 
         # System message fields
         if self.system_subtype:
@@ -799,6 +802,30 @@ class LiveSessionStore:
                     # Empty text messages cause UI flickering (showing "Claude [time]" header
                     # with no content). The next text chunk will create a message if needed.
                     return
+
+    async def update_subagent_progress(
+        self,
+        session_id: str,
+        tool_use_id: str,
+        usage: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Update a subagent's progress info (usage stats).
+
+        Matches the subagent by its parent tool_use_id. Returns True if found.
+        """
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return False
+
+            for msg in session.messages:
+                if msg.type == "subagent" and msg.tool_id == tool_use_id:
+                    if usage:
+                        msg.agent_usage = usage
+                    self._increment_update_id(session)
+                    return True
+
+            return False
 
     async def update_usage(
         self,

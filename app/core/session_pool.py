@@ -105,8 +105,19 @@ async def graceful_disconnect(client: ClaudeSDKClient, session_id: str) -> None:
             except asyncio.TimeoutError:
                 logger.warning(
                     f"[Pool] Subprocess for session {session_id} didn't exit in "
-                    f"{_SUBPROCESS_EXIT_GRACE_SECONDS}s, forcing disconnect"
+                    f"{_SUBPROCESS_EXIT_GRACE_SECONDS}s, force-killing"
                 )
+                # Force kill the subprocess to prevent zombie processes
+                try:
+                    process.terminate()
+                    # Give it 2s to respond to SIGTERM, then SIGKILL
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        process.kill()
+                        logger.warning(f"[Pool] Sent SIGKILL to subprocess for session {session_id}")
+                except Exception as kill_err:
+                    logger.error(f"[Pool] Failed to kill subprocess for session {session_id}: {kill_err}")
     except Exception as e:
         # Don't let introspection errors prevent disconnect
         logger.debug(f"[Pool] Could not wait for subprocess for session {session_id}: {e}")

@@ -304,7 +304,7 @@ class SpotifyConnector(BaseConnector):
         try:
             self._status = ConnectorStatus.CONNECTING
 
-            self._http_client = httpx.AsyncClient()
+            self._http_client = httpx.AsyncClient(timeout=30.0)
             await self._refresh_access_token()
 
             self._poll_task = asyncio.create_task(self._poll_playback())
@@ -839,7 +839,7 @@ class SpotifyConnector(BaseConnector):
             return {"success": False, "message": "httpx is not installed"}
 
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 # Temporarily use this client for token refresh
                 original_client = self._http_client
                 self._http_client = client

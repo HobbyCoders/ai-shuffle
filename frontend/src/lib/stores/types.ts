@@ -65,6 +65,7 @@ export interface ChatMessage {
 	agentPrompt?: string; // The initial prompt sent to the subagent
 	agentStatus?: 'pending' | 'running' | 'completed' | 'error'; // Current status
 	agentChildren?: SubagentChildMessage[]; // Nested messages from subagent execution
+	agentUsage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number }; // Task progress stats
 	// Command-specific fields (for slash commands like /commit, /ralph-loop)
 	commandId?: string; // Internal command identifier (e.g., 'commit-commands:commit')
 	commandName?: string; // Display name with slash (e.g., '/commit')

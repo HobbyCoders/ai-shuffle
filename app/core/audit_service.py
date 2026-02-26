@@ -21,15 +21,6 @@ class AuditEventType:
     LOGOUT = "logout"
     SESSION_EXPIRED = "session_expired"
 
-    # 2FA events
-    TOTP_SETUP_STARTED = "2fa_setup_started"
-    TOTP_ENABLED = "2fa_enabled"
-    TOTP_DISABLED = "2fa_disabled"
-    TOTP_VERIFICATION_SUCCESS = "2fa_verification_success"
-    TOTP_VERIFICATION_FAILURE = "2fa_verification_failure"
-    RECOVERY_CODE_USED = "recovery_code_used"
-    RECOVERY_CODES_REGENERATED = "recovery_codes_regenerated"
-
     # Account events
     PASSWORD_CHANGED = "password_changed"
     PASSWORD_CHANGE_FAILED = "password_change_failed"
@@ -169,72 +160,6 @@ def log_logout(request: Request, user_id: str, user_type: str = "admin") -> Dict
         request=request,
         user_id=user_id,
         user_type=user_type
-    )
-
-
-def log_2fa_setup_started(request: Request, user_id: str) -> Dict[str, Any]:
-    """Log 2FA setup initiation."""
-    return log_event(
-        event_type=AuditEventType.TOTP_SETUP_STARTED,
-        request=request,
-        user_id=user_id
-    )
-
-
-def log_2fa_enabled(request: Request, user_id: str) -> Dict[str, Any]:
-    """Log 2FA being enabled."""
-    return log_event(
-        event_type=AuditEventType.TOTP_ENABLED,
-        request=request,
-        user_id=user_id
-    )
-
-
-def log_2fa_disabled(request: Request, user_id: str) -> Dict[str, Any]:
-    """Log 2FA being disabled."""
-    return log_event(
-        event_type=AuditEventType.TOTP_DISABLED,
-        request=request,
-        user_id=user_id
-    )
-
-
-def log_2fa_verification_success(request: Request, user_id: str, method: str = "totp") -> Dict[str, Any]:
-    """Log successful 2FA verification."""
-    return log_event(
-        event_type=AuditEventType.TOTP_VERIFICATION_SUCCESS,
-        request=request,
-        user_id=user_id,
-        details={"method": method}
-    )
-
-
-def log_2fa_verification_failure(request: Request, user_id: str, method: str = "totp") -> Dict[str, Any]:
-    """Log failed 2FA verification attempt."""
-    return log_event(
-        event_type=AuditEventType.TOTP_VERIFICATION_FAILURE,
-        request=request,
-        user_id=user_id,
-        details={"method": method}
-    )
-
-
-def log_recovery_code_used(request: Request, user_id: str, remaining_codes: int) -> Dict[str, Any]:
-    """Log recovery code usage."""
-    return log_event(
-        event_type=AuditEventType.RECOVERY_CODE_USED,
-        request=request,
-        user_id=user_id,
-        details={"remaining_codes": remaining_codes}
-    )
-
-
-def log_recovery_codes_regenerated(request: Request, user_id: str) -> Dict[str, Any]:
-    """Log recovery codes regeneration."""
-    return log_event(
-        event_type=AuditEventType.RECOVERY_CODES_REGENERATED,
-        request=request,
-        user_id=user_id
     )
 
 

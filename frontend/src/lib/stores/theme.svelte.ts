@@ -106,8 +106,9 @@ function flushPendingThemeSave() {
 	pendingThemeState = null;
 }
 
-// Register beforeunload handler
-if (browser) {
+// Register beforeunload handler (guarded against HMR duplicate registration)
+if (browser && !(window as any).__theme_listeners) {
+	(window as any).__theme_listeners = true;
 	window.addEventListener('beforeunload', flushPendingThemeSave);
 	document.addEventListener('visibilitychange', () => {
 		if (document.visibilityState === 'hidden') {
@@ -293,8 +294,9 @@ if (browser) {
 	applyPresetStyles(preset ?? null, initialResolved);
 }
 
-// Listen for system theme changes
-if (browser) {
+// Listen for system theme changes (guarded against HMR duplicate registration)
+if (browser && !(window as any).__theme_media_listener) {
+	(window as any).__theme_media_listener = true;
 	const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
 	mediaQuery.addEventListener('change', () => {
 		if (_state.preference === 'system') {
