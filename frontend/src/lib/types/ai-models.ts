@@ -319,6 +319,26 @@ export const FAL_IMAGE_MODELS: ImageModel[] = [
 		pricePerImage: 0.04
 	},
 	{
+		id: 'fal-ai/nano-banana-2',
+		name: 'nano-banana-2',
+		displayName: 'Nano Banana 2',
+		provider: 'fal-ai',
+		description: 'Google Gemini 3.1 Flash — reasoning-guided generation, 4x faster, excellent text rendering',
+		capabilities: {
+			generation: true,
+			editing: true,
+			inpainting: false,
+			referenceImages: true,
+			variations: false,
+			textRendering: 'excellent',
+			maxReferenceImages: 14
+		},
+		aspectRatios: ['1:1', '21:9', '16:9', '3:2', '4:3', '5:4', '4:5', '3:4', '2:3', '9:16'],
+		resolutions: ['1K', '2K', '4K'],
+		maxOutputSize: '4096x4096',
+		pricePerImage: 0.08
+	},
+	{
 		id: 'fal-ai/qwen-image',
 		name: 'qwen-image',
 		displayName: 'Qwen Image',
@@ -1191,9 +1211,17 @@ export const ALL_3D_MODELS: Model3DModel[] = [...FAL_3D_MODELS];
 export const ALL_TTS_MODELS: TTSModel[] = [...FAL_TTS_MODELS];
 export const ALL_STT_MODELS: STTModel[] = [...FAL_STT_MODELS];
 
-// Convenience subsets
+// Convenience subsets — Image
+export const TEXT_TO_IMAGE_MODELS = FAL_IMAGE_MODELS.filter(m => m.capabilities.generation);
+export const IMAGE_EDITING_MODELS = FAL_IMAGE_MODELS.filter(m => m.capabilities.editing);
+
+// Convenience subsets — Video
 export const TEXT_TO_VIDEO_MODELS = FAL_VIDEO_MODELS.filter(m => m.capabilities.generation);
 export const IMAGE_TO_VIDEO_MODELS = FAL_VIDEO_MODELS.filter(m => m.capabilities.imageToVideo);
+
+// Convenience subsets — 3D
+export const TEXT_TO_3D_MODELS = FAL_3D_MODELS.filter(m => m.capabilities.textTo3D);
+export const IMAGE_TO_3D_MODELS = FAL_3D_MODELS.filter(m => m.capabilities.imageTo3D);
 
 // ============================================================================
 // Style Presets (provider-agnostic)

@@ -4,7 +4,7 @@
  * Generate images using fal.ai models:
  * - Flux Pro 1.1 Ultra, FLUX.2 Flex, Flux Dev, Flux Schnell
  * - Flux Kontext Pro (editing + reference images)
- * - Recraft V4, Nano Banana Pro, Qwen Image
+ * - Recraft V4, Nano Banana 2, Nano Banana Pro, Qwen Image
  *
  * All models accessed through a single fal.ai API key (FAL_KEY env var).
  * Images are saved to disk and a URL is returned for display.
@@ -34,7 +34,7 @@ export interface GenerateImageInput {
    * Override the default model.
    * Available: "fal-ai/flux-pro/v1.1-ultra", "fal-ai/flux-2-flex", "fal-ai/flux/dev",
    *   "fal-ai/flux/schnell", "fal-ai/flux-pro/kontext", "fal-ai/recraft/v4/text-to-image",
-   *   "fal-ai/nano-banana-pro", "fal-ai/qwen-image"
+   *   "fal-ai/nano-banana-2", "fal-ai/nano-banana-pro", "fal-ai/qwen-image"
    * If not specified, uses IMAGE_MODEL env var or provider default
    */
   model?: string;
@@ -170,7 +170,7 @@ function toResponse(
   const supportsEdit = capabilities.includes('image-edit');
   const editWith = supportsEdit
     ? providerId
-    : 'fal-ai (use fal-ai/flux-pro/kontext or fal-ai/nano-banana-pro/edit)';
+    : 'fal-ai (use fal-ai/flux-pro/kontext, fal-ai/nano-banana-2/edit, or fal-ai/nano-banana-pro/edit)';
 
   return {
     success: true,

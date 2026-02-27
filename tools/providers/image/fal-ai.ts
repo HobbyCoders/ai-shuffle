@@ -138,6 +138,13 @@ export const falImageProvider: ImageProvider = {
       capabilities: ['text-to-image', 'image-edit'],
       pricing: { unit: 'image', price: 0.04 }
     },
+    {
+      id: 'fal-ai/nano-banana-2',
+      name: 'Nano Banana 2 (Google)',
+      description: 'Gemini 3.1 Flash — reasoning-guided, 4x faster, excellent text rendering',
+      capabilities: ['text-to-image', 'image-edit'],
+      pricing: { unit: 'image', price: 0.08 }
+    },
     // Qwen
     {
       id: 'fal-ai/qwen-image',
@@ -234,12 +241,14 @@ export const falImageProvider: ImageProvider = {
     try {
       fal.config({ credentials: credentials.apiKey });
 
-      // Use Nano Banana Pro edit or Flux Kontext for editing
+      // Route to the correct edit endpoint based on the selected model
       const editModel = model.includes('kontext')
         ? model
-        : model.includes('nano-banana')
-          ? 'fal-ai/nano-banana-pro/edit'
-          : 'fal-ai/flux-pro/kontext'; // Default to Kontext for editing
+        : model === 'fal-ai/nano-banana-2' || model === 'fal-ai/nano-banana-2/edit'
+          ? 'fal-ai/nano-banana-2/edit'
+          : model.includes('nano-banana')
+            ? 'fal-ai/nano-banana-pro/edit'
+            : 'fal-ai/flux-pro/kontext'; // Default to Kontext for editing
 
       const falInput: Record<string, any> = {
         prompt: (input.prompt || '').trim(),

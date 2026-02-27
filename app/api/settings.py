@@ -105,9 +105,11 @@ class IntegrationSettingsResponse(BaseModel):
     fal_api_key_masked: str
     # Model selections (all fal.ai model IDs)
     image_model: Optional[str] = None
+    image_edit_model: Optional[str] = None
     video_model: Optional[str] = None
     i2v_model: Optional[str] = None
     model3d_model: Optional[str] = None
+    image_to_3d_model: Optional[str] = None
     tts_model: Optional[str] = None
     tts_voice: Optional[str] = None
     tts_speed: Optional[float] = None
@@ -142,9 +144,11 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     """
     fal_key = get_decrypted_api_key("fal_api_key")
     image_model = database.get_system_setting("image_model")
+    image_edit_model = database.get_system_setting("image_edit_model")
     video_model = database.get_system_setting("video_model")
     i2v_model = database.get_system_setting("i2v_model")
     model3d_model = database.get_system_setting("model3d_model")
+    image_to_3d_model = database.get_system_setting("image_to_3d_model")
     tts_model = database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
     tts_voice = database.get_system_setting("tts_voice") or "af_heart"
     tts_speed_str = database.get_system_setting("tts_speed")
@@ -164,9 +168,11 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         fal_api_key_set=bool(fal_key),
         fal_api_key_masked=mask_api_key(fal_key) if fal_key else "",
         image_model=image_model,
+        image_edit_model=image_edit_model,
         video_model=video_model,
         i2v_model=i2v_model,
         model3d_model=model3d_model,
+        image_to_3d_model=image_to_3d_model,
         tts_model=tts_model,
         tts_voice=tts_voice,
         tts_speed=tts_speed,
@@ -909,6 +915,20 @@ async def update_image_model(
     return {"success": True, "model": model}
 
 
+@router.patch("/integrations/image/edit-model")
+async def update_image_edit_model(
+    request: ModelUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """Update the image editing model (admin only). Accepts any fal.ai model ID."""
+    model = request.model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Model cannot be empty")
+
+    database.set_system_setting("image_edit_model", model)
+    return {"success": True, "model": model}
+
+
 @router.patch("/integrations/video/model")
 async def update_video_model(
     request: ModelUpdateRequest,
@@ -948,6 +968,20 @@ async def update_3d_model(
         raise HTTPException(status_code=400, detail="Model cannot be empty")
 
     database.set_system_setting("model3d_model", model)
+    return {"success": True, "model": model}
+
+
+@router.patch("/integrations/3d/i2-3d-model")
+async def update_image_to_3d_model(
+    request: ModelUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """Update the image-to-3D model (admin only). Accepts any fal.ai model ID."""
+    model = request.model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Model cannot be empty")
+
+    database.set_system_setting("image_to_3d_model", model)
     return {"success": True, "model": model}
 
 

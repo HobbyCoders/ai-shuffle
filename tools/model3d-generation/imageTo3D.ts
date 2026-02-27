@@ -168,8 +168,8 @@ export async function imageTo3D(input: ImageTo3DInput): Promise<ImageTo3DRespons
     }
   }
 
-  // Determine model - find first image-to-3d capable model
-  let falModel = input.model || process.env.MODEL3D_MODEL || '';
+  // Determine model - prefer IMAGE_TO_3D_MODEL, fall back to MODEL3D_MODEL
+  let falModel = input.model || process.env.IMAGE_TO_3D_MODEL || process.env.MODEL3D_MODEL || '';
   if (!falModel) {
     const i2mModel = provider.models.find(m => m.capabilities.includes('image-to-3d'));
     falModel = i2mModel?.id || 'fal-ai/hunyuan-3d/v2/turbo';

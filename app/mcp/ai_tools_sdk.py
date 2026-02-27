@@ -39,11 +39,11 @@ def _create_image_tools(worker: NodeWorker) -> list:
     """Create image generation/editing tool functions."""
     tools = []
 
-    @tool("generateImage", "Generate an image from a text prompt using AI (fal.ai models: Flux Pro Ultra, Flux Dev, Flux Schnell, Recraft V4)", {
+    @tool("generateImage", "Generate an image from a text prompt using AI (fal.ai models: Flux Pro Ultra, Flux Dev, Flux Schnell, Nano Banana 2, Recraft V4)", {
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the image to generate"},
-            "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/flux-pro/v1.1-ultra, fal-ai/flux/dev, fal-ai/flux/schnell, fal-ai/recraft-v4)"}
+            "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/flux-pro/v1.1-ultra, fal-ai/flux/dev, fal-ai/flux/schnell, fal-ai/nano-banana-2, fal-ai/recraft-v4)"}
         },
         "required": ["prompt"]
     })
@@ -53,12 +53,12 @@ def _create_image_tools(worker: NodeWorker) -> list:
 
     tools.append(generate_image)
 
-    @tool("editImage", "Edit an existing image using AI - add, remove, or modify elements (fal.ai models: Nano Banana Pro Edit, Flux Kontext)", {
+    @tool("editImage", "Edit an existing image using AI - add, remove, or modify elements (fal.ai models: Nano Banana 2 Edit, Flux Kontext, Nano Banana Pro Edit)", {
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the edit to make"},
             "image_path": {"type": "string", "description": "Path to the image to edit"},
-            "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/nano-banana/pro-edit, fal-ai/flux-kontext)"}
+            "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/nano-banana-2, fal-ai/flux-pro/kontext, fal-ai/nano-banana-pro)"}
         },
         "required": ["prompt", "image_path"]
     })

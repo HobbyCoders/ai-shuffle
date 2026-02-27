@@ -3,13 +3,15 @@
  *
  * Edit existing images using AI via fal.ai:
  * - Flux Kontext Pro: fal-ai/flux-pro/kontext (targeted edits, scene transforms)
- * - Nano Banana Pro Edit: fal-ai/nano-banana-pro (Google-based editing via fal.ai)
+ * - Nano Banana 2 Edit: fal-ai/nano-banana-2/edit (Gemini 3.1 Flash, fast editing)
+ * - Nano Banana Pro Edit: fal-ai/nano-banana-pro/edit (Google-based editing via fal.ai)
  *
  * Images are saved to disk and a URL is returned for display.
  *
  * Environment Variables:
  *   FAL_KEY - fal.ai API key
- *   IMAGE_MODEL - Model to use (e.g., "fal-ai/flux-pro/kontext", "fal-ai/nano-banana-pro")
+ *   IMAGE_EDIT_MODEL - Dedicated edit model (e.g., "fal-ai/nano-banana-2/edit", "fal-ai/flux-pro/kontext")
+ *   IMAGE_MODEL - Fallback model (e.g., "fal-ai/flux-pro/kontext", "fal-ai/nano-banana-pro")
  *
  * Usage:
  *   import { editImage } from '/opt/ai-tools/dist/image-generation/editImage.js';
@@ -57,8 +59,8 @@ export interface EditImageInput {
 
   /**
    * Override the default model.
-   * fal.ai: "fal-ai/flux-pro/kontext", "fal-ai/nano-banana-pro"
-   * If not specified, uses IMAGE_MODEL env var or defaults to "fal-ai/flux-pro/kontext"
+   * fal.ai: "fal-ai/flux-pro/kontext", "fal-ai/nano-banana-2/edit", "fal-ai/nano-banana-pro"
+   * If not specified, uses IMAGE_EDIT_MODEL or IMAGE_MODEL env var, or defaults to "fal-ai/flux-pro/kontext"
    */
   model?: string;
 
@@ -157,13 +159,20 @@ function getApiKey(_providerId: string): string {
 }
 
 /**
- * Get model ID for the provider
+ * Get model ID for the provider.
+ * Prefers IMAGE_EDIT_MODEL (dedicated edit model) over IMAGE_MODEL (generation model).
  */
 function getModelId(providerId: string, inputModel?: string): string {
   if (inputModel) {
     return inputModel;
   }
 
+  // Prefer the dedicated image edit model setting
+  if (process.env.IMAGE_EDIT_MODEL) {
+    return process.env.IMAGE_EDIT_MODEL;
+  }
+
+  // Fall back to the general image model if it supports editing
   if (process.env.IMAGE_MODEL) {
     return process.env.IMAGE_MODEL;
   }

@@ -975,10 +975,14 @@ def _build_env_with_ai_tools(
     # Set default provider/model from settings
     if any_image_tools:
         image_model = database.get_system_setting("image_model")
+        image_edit_model = database.get_system_setting("image_edit_model")
         env["IMAGE_PROVIDER"] = "fal-ai"
         if image_model:
             env["IMAGE_MODEL"] = image_model
             logger.debug(f"Set default IMAGE_MODEL={image_model}")
+        if image_edit_model:
+            env["IMAGE_EDIT_MODEL"] = image_edit_model
+            logger.debug(f"Set default IMAGE_EDIT_MODEL={image_edit_model}")
         image_aspect_ratio = database.get_system_setting("image_aspect_ratio")
         image_resolution = database.get_system_setting("image_resolution")
         if image_aspect_ratio:
@@ -1008,10 +1012,14 @@ def _build_env_with_ai_tools(
 
     if any_3d_tools:
         model3d_model = database.get_system_setting("model3d_model")
+        image_to_3d_model = database.get_system_setting("image_to_3d_model")
         env["MODEL3D_PROVIDER"] = "fal-ai"
         if model3d_model:
             env["MODEL3D_MODEL"] = model3d_model
             logger.debug(f"Set default MODEL3D_MODEL={model3d_model}")
+        if image_to_3d_model:
+            env["IMAGE_TO_3D_MODEL"] = image_to_3d_model
+            logger.debug(f"Set default IMAGE_TO_3D_MODEL={image_to_3d_model}")
 
     if any_audio_tools:
         tts_model = database.get_system_setting("tts_model")

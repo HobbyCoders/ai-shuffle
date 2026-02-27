@@ -13,21 +13,25 @@
 	import { onMount } from 'svelte';
 	import ModelBrowser from './ModelBrowser.svelte';
 	import {
-		ALL_IMAGE_MODELS,
-		ALL_VIDEO_MODELS,
-		ALL_3D_MODELS,
+		TEXT_TO_IMAGE_MODELS,
+		IMAGE_EDITING_MODELS,
+		TEXT_TO_3D_MODELS,
+		IMAGE_TO_3D_MODELS,
 		TEXT_TO_VIDEO_MODELS,
 		IMAGE_TO_VIDEO_MODELS,
 		getImageModel,
 		getVideoModel,
+		get3DModel,
 	} from '$lib/types/ai-models';
-	import type { CatalogModel, ImageModel, VideoModel } from '$lib/types/ai-models';
+	import type { CatalogModel, ImageModel, VideoModel, Model3DModel } from '$lib/types/ai-models';
 
 	// Current model selections
 	let imageModel = $state('');
+	let imageEditModel = $state('');
 	let videoModel = $state('');
 	let i2vModel = $state('');
 	let model3D = $state('');
+	let imageTo3DModel = $state('');
 
 	// Per-model settings
 	let imageAspectRatio = $state('');
@@ -44,20 +48,27 @@
 	// Section expansion state
 	let browserExpanded = $state(false);
 	let imageExpanded = $state(false);
+	let imageEditExpanded = $state(false);
 	let videoExpanded = $state(false);
 	let i2vExpanded = $state(false);
 	let model3DExpanded = $state(false);
+	let imageTo3DExpanded = $state(false);
 
 	// Derived: current model metadata
 	let currentImageModel = $derived<ImageModel | undefined>(getImageModel(imageModel));
+	let currentImageEditModel = $derived<ImageModel | undefined>(getImageModel(imageEditModel));
 	let currentVideoModel = $derived<VideoModel | undefined>(getVideoModel(videoModel));
 	let currentI2vModel = $derived<VideoModel | undefined>(getVideoModel(i2vModel));
+	let current3DModel = $derived<Model3DModel | undefined>(get3DModel(model3D));
+	let currentImageTo3DModel = $derived<Model3DModel | undefined>(get3DModel(imageTo3DModel));
 
 	let selectedModels = $derived<Record<string, string>>({
 		image_generation: imageModel,
+		image_editing: imageEditModel,
 		video_generation: videoModel,
 		image_to_video: i2vModel,
 		text_to_3d: model3D,
+		image_to_3d: imageTo3DModel,
 	});
 
 	onMount(() => {
@@ -68,9 +79,11 @@
 		try {
 			const settings = await api.get<{
 				image_model: string | null;
+				image_edit_model: string | null;
 				video_model: string | null;
 				i2v_model: string | null;
 				model3d_model: string | null;
+				image_to_3d_model: string | null;
 				image_aspect_ratio: string | null;
 				image_resolution: string | null;
 				video_aspect_ratio: string | null;
@@ -79,9 +92,11 @@
 			}>('/settings/integrations');
 
 			imageModel = settings.image_model || 'fal-ai/flux-pro/v1.1-ultra';
+			imageEditModel = settings.image_edit_model || 'fal-ai/flux-pro/kontext';
 			videoModel = settings.video_model || 'fal-ai/kling-video/o3/pro/text-to-video';
 			i2vModel = settings.i2v_model || 'fal-ai/kling-video/o3/pro/image-to-video';
 			model3D = settings.model3d_model || 'fal-ai/meshy/text-to-3d';
+			imageTo3DModel = settings.image_to_3d_model || 'fal-ai/hunyuan-3d/v2/turbo';
 			imageAspectRatio = settings.image_aspect_ratio || '';
 			imageResolution = settings.image_resolution || '';
 			videoAspectRatio = settings.video_aspect_ratio || '';
@@ -136,6 +151,24 @@
 			await api.patch('/settings/integrations/image/settings', { resolution: res });
 		} catch (e: unknown) {
 			errorMsg = getErrorMessage(e, 'Failed to save');
+		}
+	}
+
+	// ---- Image Editing settings ----
+	async function updateImageEditModel(e: Event) {
+		const select = e.target as HTMLSelectElement;
+		const modelId = select.value;
+		if (!modelId || modelId === imageEditModel) return;
+		saving = true;
+		errorMsg = '';
+		try {
+			await api.patch<{success: boolean}>('/settings/integrations/image/edit-model', { model: modelId });
+			imageEditModel = modelId;
+			showSuccess('Updated');
+		} catch (e: unknown) {
+			errorMsg = getErrorMessage(e, 'Failed to update');
+		} finally {
+			saving = false;
 		}
 	}
 
@@ -209,7 +242,7 @@
 		}
 	}
 
-	// ---- 3D + Browser ----
+	// ---- 3D settings ----
 	async function update3DModel(e: Event) {
 		const select = e.target as HTMLSelectElement;
 		const modelId = select.value;
@@ -227,19 +260,41 @@
 		}
 	}
 
+	async function updateImageTo3DModel(e: Event) {
+		const select = e.target as HTMLSelectElement;
+		const modelId = select.value;
+		if (!modelId || modelId === imageTo3DModel) return;
+		saving = true;
+		errorMsg = '';
+		try {
+			await api.patch<{success: boolean}>('/settings/integrations/3d/i2-3d-model', { model: modelId });
+			imageTo3DModel = modelId;
+			showSuccess('Updated');
+		} catch (e: unknown) {
+			errorMsg = getErrorMessage(e, 'Failed to update');
+		} finally {
+			saving = false;
+		}
+	}
+
+	// ---- Catalog browser ----
 	async function setDefaultModel(model: CatalogModel, toolType: string) {
 		saving = true;
 		errorMsg = '';
 		successMsg = '';
 		let endpoint = '';
-		if (toolType === 'image_generation' || toolType === 'image_editing') {
+		if (toolType === 'image_generation') {
 			endpoint = '/settings/integrations/image/model';
+		} else if (toolType === 'image_editing') {
+			endpoint = '/settings/integrations/image/edit-model';
 		} else if (toolType === 'video_generation') {
 			endpoint = '/settings/integrations/video/model';
 		} else if (toolType === 'image_to_video') {
 			endpoint = '/settings/integrations/video/i2v-model';
-		} else if (toolType === 'text_to_3d' || toolType === 'image_to_3d') {
+		} else if (toolType === 'text_to_3d') {
 			endpoint = '/settings/integrations/3d/model';
+		} else if (toolType === 'image_to_3d') {
+			endpoint = '/settings/integrations/3d/i2-3d-model';
 		} else {
 			errorMsg = `No settings endpoint for tool type: ${toolType}`;
 			saving = false;
@@ -247,14 +302,18 @@
 		}
 		try {
 			await api.patch<{ success: boolean }>(endpoint, { model: model.endpoint_id });
-			if (toolType === 'image_generation' || toolType === 'image_editing') {
+			if (toolType === 'image_generation') {
 				imageModel = model.endpoint_id;
+			} else if (toolType === 'image_editing') {
+				imageEditModel = model.endpoint_id;
 			} else if (toolType === 'video_generation') {
 				videoModel = model.endpoint_id;
 			} else if (toolType === 'image_to_video') {
 				i2vModel = model.endpoint_id;
-			} else if (toolType === 'text_to_3d' || toolType === 'image_to_3d') {
+			} else if (toolType === 'text_to_3d') {
 				model3D = model.endpoint_id;
+			} else if (toolType === 'image_to_3d') {
+				imageTo3DModel = model.endpoint_id;
 			}
 			showSuccess(`Default set: ${model.display_name}`);
 		} catch (e) {
@@ -273,8 +332,12 @@
 <section class="section defaults-summary">
 	<div class="defaults-grid">
 		<div class="default-item">
-			<span class="default-label">Image</span>
+			<span class="default-label">Image Gen</span>
 			<span class="default-value">{imageModel || 'Not set'}</span>
+		</div>
+		<div class="default-item">
+			<span class="default-label">Image Edit</span>
+			<span class="default-value">{imageEditModel || 'Not set'}</span>
 		</div>
 		<div class="default-item">
 			<span class="default-label">Text-to-Video</span>
@@ -285,8 +348,12 @@
 			<span class="default-value">{i2vModel || 'Not set'}</span>
 		</div>
 		<div class="default-item">
-			<span class="default-label">3D</span>
+			<span class="default-label">Text→3D</span>
 			<span class="default-value">{model3D || 'Not set'}</span>
+		</div>
+		<div class="default-item">
+			<span class="default-label">Image→3D</span>
+			<span class="default-value">{imageTo3DModel || 'Not set'}</span>
 		</div>
 	</div>
 </section>
@@ -311,10 +378,10 @@
 	{/if}
 </section>
 
-<!-- Quick Select: Image + Settings -->
+<!-- Quick Select: Image Generation -->
 <section class="section">
 	<button class="section-header" onclick={() => imageExpanded = !imageExpanded}>
-		<h3>Image</h3>
+		<h3>Image Generation</h3>
 		<svg class="chevron" class:expanded={imageExpanded} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 			<polyline points="6 9 12 15 18 9"/>
 		</svg>
@@ -328,7 +395,7 @@
 					disabled={saving}
 					class="input select"
 				>
-					{#each ALL_IMAGE_MODELS as model (model.id)}
+					{#each TEXT_TO_IMAGE_MODELS as model (model.id)}
 						<option value={model.id}>
 							{model.displayName} — ${model.pricePerImage.toFixed(3)}/img
 						</option>
@@ -372,14 +439,54 @@
 
 					<!-- Capabilities -->
 					<div class="capabilities">
-						{#if currentImageModel.capabilities.editing}
-							<span class="cap-badge cap-green">Editing</span>
-						{/if}
 						{#if currentImageModel.capabilities.referenceImages}
 							<span class="cap-badge cap-blue">Ref Images (max {currentImageModel.capabilities.maxReferenceImages})</span>
 						{/if}
 						{#if currentImageModel.capabilities.textRendering !== 'none'}
 							<span class="cap-badge cap-purple">Text: {currentImageModel.capabilities.textRendering}</span>
+						{/if}
+					</div>
+				</div>
+			{/if}
+		</div>
+	{/if}
+</section>
+
+<!-- Quick Select: Image Editing -->
+<section class="section">
+	<button class="section-header" onclick={() => imageEditExpanded = !imageEditExpanded}>
+		<h3>Image Editing</h3>
+		<svg class="chevron" class:expanded={imageEditExpanded} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+			<polyline points="6 9 12 15 18 9"/>
+		</svg>
+	</button>
+	{#if imageEditExpanded}
+		<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+			<div class="model-selector">
+				<select
+					value={imageEditModel}
+					onchange={updateImageEditModel}
+					disabled={saving}
+					class="input select"
+				>
+					{#each IMAGE_EDITING_MODELS as model (model.id)}
+						<option value={model.id}>
+							{model.displayName} — ${model.pricePerImage.toFixed(3)}/img
+						</option>
+					{/each}
+				</select>
+			</div>
+			{#if currentImageEditModel}
+				<p class="model-description">{currentImageEditModel.description}</p>
+
+				<!-- Capabilities -->
+				<div class="settings-panel">
+					<div class="capabilities">
+						{#if currentImageEditModel.capabilities.referenceImages}
+							<span class="cap-badge cap-blue">Ref Images (max {currentImageEditModel.capabilities.maxReferenceImages})</span>
+						{/if}
+						{#if currentImageEditModel.capabilities.textRendering !== 'none'}
+							<span class="cap-badge cap-purple">Text: {currentImageEditModel.capabilities.textRendering}</span>
 						{/if}
 					</div>
 				</div>
@@ -510,10 +617,10 @@
 	{/if}
 </section>
 
-<!-- Quick Select: 3D -->
+<!-- Quick Select: Text to 3D -->
 <section class="section">
 	<button class="section-header" onclick={() => model3DExpanded = !model3DExpanded}>
-		<h3>3D</h3>
+		<h3>Text to 3D</h3>
 		<svg class="chevron" class:expanded={model3DExpanded} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 			<polyline points="6 9 12 15 18 9"/>
 		</svg>
@@ -527,18 +634,62 @@
 					disabled={saving}
 					class="input select"
 				>
-					{#each ALL_3D_MODELS as model (model.id)}
+					{#each TEXT_TO_3D_MODELS as model (model.id)}
 						<option value={model.id}>
 							{model.displayName} — ${model.pricePerModel.toFixed(2)}/model
 						</option>
 					{/each}
 				</select>
 			</div>
-			{#if model3D}
-				{@const model = ALL_3D_MODELS.find(m => m.id === model3D)}
-				{#if model}
-					<p class="model-description">{model.description}</p>
-				{/if}
+			{#if current3DModel}
+				<p class="model-description">{current3DModel.description}</p>
+				<div class="settings-panel">
+					<div class="capabilities">
+						{#if current3DModel.capabilities.pbr}
+							<span class="cap-badge cap-green">PBR Materials</span>
+						{/if}
+						<span class="cap-badge cap-blue">Formats: {current3DModel.outputFormats.join(', ')}</span>
+					</div>
+				</div>
+			{/if}
+		</div>
+	{/if}
+</section>
+
+<!-- Quick Select: Image to 3D -->
+<section class="section">
+	<button class="section-header" onclick={() => imageTo3DExpanded = !imageTo3DExpanded}>
+		<h3>Image to 3D</h3>
+		<svg class="chevron" class:expanded={imageTo3DExpanded} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+			<polyline points="6 9 12 15 18 9"/>
+		</svg>
+	</button>
+	{#if imageTo3DExpanded}
+		<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+			<div class="model-selector">
+				<select
+					value={imageTo3DModel}
+					onchange={updateImageTo3DModel}
+					disabled={saving}
+					class="input select"
+				>
+					{#each IMAGE_TO_3D_MODELS as model (model.id)}
+						<option value={model.id}>
+							{model.displayName} — ${model.pricePerModel.toFixed(2)}/model
+						</option>
+					{/each}
+				</select>
+			</div>
+			{#if currentImageTo3DModel}
+				<p class="model-description">{currentImageTo3DModel.description}</p>
+				<div class="settings-panel">
+					<div class="capabilities">
+						{#if currentImageTo3DModel.capabilities.pbr}
+							<span class="cap-badge cap-green">PBR Materials</span>
+						{/if}
+						<span class="cap-badge cap-blue">Formats: {currentImageTo3DModel.outputFormats.join(', ')}</span>
+					</div>
+				</div>
 			{/if}
 		</div>
 	{/if}
@@ -617,7 +768,7 @@
 
 	.defaults-grid {
 		display: grid;
-		grid-template-columns: repeat(4, 1fr);
+		grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
 		gap: 12px;
 	}
 
@@ -776,7 +927,14 @@
 		border-radius: var(--radius);
 	}
 
-	@media (max-width: 640px) {
+	@media (max-width: 768px) {
+		.defaults-grid {
+			grid-template-columns: repeat(3, 1fr);
+			gap: 8px;
+		}
+	}
+
+	@media (max-width: 480px) {
 		.defaults-grid {
 			grid-template-columns: repeat(2, 1fr);
 			gap: 8px;
