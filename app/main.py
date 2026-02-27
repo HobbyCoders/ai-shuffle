@@ -40,12 +40,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
 
         # Content Security Policy
-        # Note: 'unsafe-inline' for style-src is required by SvelteKit's runtime
-        # style injection and many component libraries. script-src uses 'strict-dynamic'
-        # with 'unsafe-inline' as a fallback for browsers that don't support nonces.
+        # Note: 'unsafe-inline' is required for both script-src (SvelteKit's
+        # bootstrap inline script in index.html) and style-src (SvelteKit's
+        # runtime style injection and component libraries).
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob: https:; "
             "media-src 'self' blob:; "
