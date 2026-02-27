@@ -229,7 +229,7 @@ class TestLifespan:
              patch("app.main.settings") as mock_settings, \
              patch("app.main.auth_service") as mock_auth:
 
-            mock_settings.version = "4.0.0"
+            mock_settings.version = "0.8.2"
             mock_settings.port = 8000
             mock_settings.effective_workspace_dir = MagicMock()
             mock_settings.effective_workspace_dir.mkdir = MagicMock()
@@ -260,7 +260,7 @@ class TestLifespan:
              patch("app.main.settings") as mock_settings, \
              patch("app.main.auth_service") as mock_auth:
 
-            mock_settings.version = "4.0.0"
+            mock_settings.version = "0.8.2"
             mock_settings.port = 8000
             mock_settings.effective_workspace_dir = MagicMock()
             mock_settings.effective_workspace_dir.mkdir = MagicMock()
@@ -289,7 +289,7 @@ class TestLifespan:
              patch("app.main.settings") as mock_settings, \
              patch("app.main.auth_service") as mock_auth:
 
-            mock_settings.version = "4.0.0"
+            mock_settings.version = "0.8.2"
             mock_settings.port = 8000
             mock_settings.effective_workspace_dir = MagicMock()
             mock_settings.effective_workspace_dir.mkdir = MagicMock()
@@ -411,12 +411,12 @@ class TestHealthCheckEndpointStructure:
             mock_auth.is_setup_required.return_value = False
             mock_auth.is_claude_authenticated.return_value = True
             mock_settings.service_name = "ai-shuffle"
-            mock_settings.version = "4.0.0"
+            mock_settings.version = "0.8.2"
 
             result = await health_check()
             assert result["status"] == "healthy"
             assert result["service"] == "ai-shuffle"
-            assert result["version"] == "4.0.0"
+            assert result["version"] == "0.8.2"
 
     @pytest.mark.asyncio
     async def test_api_health_check_function_exists(self):

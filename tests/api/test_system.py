@@ -170,7 +170,7 @@ class TestHealthCheckFunction:
             mock_auth.is_setup_required.return_value = False
             mock_auth.is_claude_authenticated.return_value = True
             mock_settings.service_name = "ai-shuffle"
-            mock_settings.version = "4.0.0"
+            mock_settings.version = "0.8.2"
 
             # Create a mock request
             mock_request = MagicMock()
@@ -180,7 +180,7 @@ class TestHealthCheckFunction:
 
             assert result["status"] == "healthy"
             assert result["service"] == "ai-shuffle"
-            assert result["version"] == "4.0.0"
+            assert result["version"] == "0.8.2"
 
     @pytest.mark.asyncio
     async def test_health_check_shows_setup_required(self):
@@ -192,7 +192,7 @@ class TestHealthCheckFunction:
             mock_auth.is_setup_required.return_value = True
             mock_auth.is_claude_authenticated.return_value = False
             mock_settings.service_name = "ai-shuffle"
-            mock_settings.version = "4.0.0"
+            mock_settings.version = "0.8.2"
 
             mock_request = MagicMock()
             mock_request.state.is_admin = False
@@ -217,7 +217,7 @@ class TestVersionFunction:
 
         with patch("app.api.system.settings") as mock_settings, \
              patch("app.api.system.subprocess.run") as mock_run:
-            mock_settings.version = "4.0.0"
+            mock_settings.version = "0.8.2"
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout="Claude 1.2.3\n"
@@ -225,7 +225,7 @@ class TestVersionFunction:
 
             result = await get_version()
 
-            assert result["api_version"] == "4.0.0"
+            assert result["api_version"] == "0.8.2"
             assert result["claude_version"] == "Claude 1.2.3"
 
     @pytest.mark.asyncio
@@ -235,12 +235,12 @@ class TestVersionFunction:
 
         with patch("app.api.system.settings") as mock_settings, \
              patch("app.api.system.subprocess.run") as mock_run:
-            mock_settings.version = "4.0.0"
+            mock_settings.version = "0.8.2"
             mock_run.return_value = MagicMock(returncode=1, stdout="")
 
             result = await get_version()
 
-            assert result["api_version"] == "4.0.0"
+            assert result["api_version"] == "0.8.2"
             assert result["claude_version"] is None
 
     @pytest.mark.asyncio
@@ -250,12 +250,12 @@ class TestVersionFunction:
 
         with patch("app.api.system.settings") as mock_settings, \
              patch("app.api.system.subprocess.run") as mock_run:
-            mock_settings.version = "4.0.0"
+            mock_settings.version = "0.8.2"
             mock_run.side_effect = Exception("Command not found")
 
             result = await get_version()
 
-            assert result["api_version"] == "4.0.0"
+            assert result["api_version"] == "0.8.2"
             assert result["claude_version"] is None
 
 

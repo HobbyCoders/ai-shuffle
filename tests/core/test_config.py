@@ -41,7 +41,7 @@ class TestSettingsDefaults:
                 settings = Settings()
 
                 assert settings.service_name == "ai-shuffle"
-                assert settings.version == "4.0.0"
+                assert settings.version == "0.8.2"
 
     def test_default_session_settings(self):
         """Default session settings should be set correctly."""

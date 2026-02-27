@@ -1,48 +1,78 @@
 # AI Shuffle
 
-> **A web UI for Claude Code** — Run locally or self-host for remote access.
+> A self-hosted web UI for Claude Code — run locally on your desktop or deploy via Docker for remote access from any device.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.8.2-green.svg)](https://github.com/HobbyCoders/ai-shuffle/releases)
 
 ---
 
-## What Is It?
+## What Is AI Shuffle?
 
-AI Shuffle wraps Claude Code in a browser-based interface. Same AI coding assistant, but with a proper GUI instead of terminal-only interaction.
+AI Shuffle puts Claude Code in a browser. Instead of a terminal, you get a full GUI with persistent sessions, multi-tab workflows, voice input, AI-powered media generation, and a plugin system — all accessible from your phone, laptop, or any device with a browser.
 
-**Run it two ways:**
-- **Local** — Replace Claude Code CLI on your desktop (`localhost:8000`)
-- **Self-hosted** — Docker on your server/NAS for access from anywhere
+**Two ways to run it:**
 
----
-
-## Why Use This Over Claude Code CLI?
-
-| | Claude Code CLI | AI Shuffle |
-|---|---|---|
-| **Interface** | Terminal | Browser UI |
-| **Sessions** | One at a time | Multi-tab, persistent history |
-| **History** | `.jsonl` files | Searchable, tagged, exportable |
-| **Remote access** | Needs SSH | Just a URL |
-| **Mobile** | Not practical | Fully responsive |
-| **Customization** | Edit config files | Visual profile builder |
+- **Local mode** — Replace the Claude Code CLI on your desktop (`localhost:8000`)
+- **Docker** — Self-host on a server or NAS for access from anywhere
 
 ---
 
-## Key Features
+## Feature Overview
 
-### Custom Profiles
-Build specialized AI agents with custom system prompts, tool permissions, and auto-accept patterns. Create a code reviewer that only reads, or an autonomous PR bot that commits and pushes.
+### Chat Interface
+Real-time streaming with WebSocket, rich text input (TipTap editor), `@file` autocomplete, drag-and-drop file upload, inline thinking blocks, tool use visualization, voice input (STT), and a permission queue that surfaces Claude's approval requests as interactive prompts.
 
-### Multi-Session Workflow
-Work on multiple problems in tabs. Fork sessions, rewind to any point, search history.
+### Profiles
+Create specialized AI configurations with custom system prompts, model selection (Haiku / Sonnet / Opus), thinking modes, permission modes, tool allowlists, and per-profile subagent and plugin controls. Generate profiles from natural language descriptions.
 
-### Thinking Mode & Permission Overrides
-Toggle extended thinking and permission modes per-session without changing your profile.
+### Sessions
+Multi-tab persistent sessions with full history. Fork conversations at any point, rewind to prior states, tag, favorite, search, group, and import/export. Token usage and cost tracking per session.
 
-### Built-in Creative Tools
-Image generation (Gemini, Imagen, GPT-Image), video generation (Veo, Sora), 3D models (Meshy).
+### 14 Connectors
+Bridge Claude to external platforms — each connector supports triggers, actions, and tools:
 
-### Self-Host Security
-Rate limiting, session management, audit logging — designed to be exposed to the internet safely.
+| Messaging | Smart Home & Services |
+|---|---|
+| Telegram, Discord, WhatsApp, Slack, Signal, MS Teams, LINE, iMessage, BlueBubbles | Home Assistant, Philips Hue, Spotify, Gmail, Webhook |
+
+Connectors relay permission requests as interactive approve/deny buttons on their platforms.
+
+### Automations
+Run AI workflows without manual intervention. Trigger via cron, interval, webhook, connector events, or connector triggers. Supports prompt templates with variable substitution, budget controls (cost/run/day caps), human-in-the-loop approval, and output routing to sessions, connectors, or webhooks.
+
+### Hooks
+Execute custom code at lifecycle events: `PreToolUse`, `PostToolUse`, `Stop`, `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreCompact`, `SubagentStop`, `Notification`. Run bash commands or fire webhooks with HMAC signing. Filter by tool name.
+
+### Subagents
+Specialized AI agents Claude can invoke mid-conversation. Create custom subagents with model selection and tool restrictions. Autocomplete via `/agent-name` in chat.
+
+### MCP Servers (Model Context Protocol)
+Manage stdio, SSE, and HTTP MCP servers across four scopes (user, local, project, installed). Built-in browser automation MCP server included.
+
+### Projects & Git
+Full project management with file browser, git status/diff, branch management, commit (with AI-generated messages), push, pull request creation, GitHub CI status, and worktree support.
+
+### AI Media Tools (fal.ai)
+Image generation & editing, video generation & extension, image-to-video, text/image-to-3D, text-to-speech, and speech-to-text — powered by 600+ fal.ai models. Configurable per profile.
+
+### Plugins
+Extend AI Shuffle with external packages from git-based marketplaces. Plugins contribute hooks, commands, agents, skills, and MCP servers. Enable globally or per profile.
+
+### Notes
+Global markdown notes with tags, pinning, and search. Each note backed by a physical file on disk.
+
+### Built-in Documentation
+Full documentation rendered in-app covering getting started, all features, connectors, and API reference.
+
+### Mobile & PWA
+Fully responsive layout with a mobile-optimized sidebar, 44px touch targets, PWA install support, offline detection, and push notifications.
+
+### Security
+BCrypt password hashing, session tokens (secure HTTP-only cookies), API key authentication (`aih_` prefix, SHA-256 hashed), rate limiting, audit logging, encrypted secret storage (Fernet/PBKDF2), OAuth 2.0 + PKCE for Claude authentication, and GitHub device flow.
+
+### Analytics
+Usage dashboard with token counts, cost breakdowns by model/profile/project, daily trends, and top sessions by cost.
 
 ---
 
@@ -51,43 +81,100 @@ Rate limiting, session management, audit logging — designed to be exposed to t
 ### Local (Desktop)
 
 ```bash
-# Download release from GitHub Releases, or clone:
+# Clone or download a release package
 git clone https://github.com/HobbyCoders/ai-shuffle.git
 cd ai-shuffle
 
-# Setup
-python -m venv venv && source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-cd frontend && npm install && cd ..
+# First-time setup (creates venv, installs deps, builds frontend)
+python run_local.py --setup
 
-# Configure
-cp .env.example .env
-# Set LOCAL_MODE=true in .env
-
-# Run
+# Start the server
 python run_local.py
+# Windows: run_local.bat
+# macOS/Linux: ./run_local.sh
 ```
 
 Open `http://localhost:8000`. Uses your existing `claude login` credentials.
 
-### Docker (Self-Hosted)
+**Options:** `--port 3000` · `--no-browser` · `--check` (verify prerequisites)
+
+### Docker
 
 ```bash
-# Using pre-built image
 docker pull ghcr.io/hobbycoders/ai-shuffle:latest
-docker-compose up -d
 
-# Authenticate
+# Or use docker-compose
+docker compose up -d
+
+# First-time: authenticate Claude
 docker exec -it ai-shuffle claude login
 ```
+
+**Key environment variables:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `ADMIN_PASSWORD` | — | Headless encryption key init |
+| `PUID` / `PGID` | `1000` | Runtime user/group for file permissions |
+| `AUTO_UPDATE` | `true` | Auto-update Claude CLI on startup |
+| `LOCAL_MODE` | `false` | Use local filesystem paths |
+| `COMMAND_TIMEOUT` | `300` | Subprocess timeout (seconds) |
+
+---
+
+## Prerequisites
+
+- **Python 3.10+**
+- **Node.js 18+** (for Claude CLI installation only — not needed to run the app)
+- **Claude CLI** — `npm install -g @anthropic-ai/claude-code`
+- **Claude auth** — `claude login`
 
 ---
 
 ## Tech Stack
 
-- **Frontend:** SvelteKit, Svelte 5, Tailwind CSS
-- **Backend:** FastAPI, WebSockets, SQLite
-- **AI:** Claude Agent SDK
+| Layer | Technology |
+|---|---|
+| **Frontend** | SvelteKit · Svelte 5 · Tailwind CSS · TipTap |
+| **Backend** | FastAPI · WebSockets · SQLite |
+| **AI Engine** | Claude Agent SDK (Python) |
+| **Media** | fal.ai (image, video, 3D, audio) |
+| **Browser** | Playwright (bundled in Docker) |
+| **CI/CD** | GitHub Actions |
+
+---
+
+## Project Structure
+
+```
+ai-shuffle/
+├── app/               # FastAPI backend (API, WebSocket, DB, services)
+├── frontend/          # SvelteKit frontend (Svelte 5, Tailwind)
+├── tools/             # AI tool scripts (fal.ai integrations)
+├── docs/              # Technology documentation
+├── tests/             # Backend test suite
+├── .github/           # CI/CD workflows
+├── docker-compose.yml
+├── run_local.py       # Cross-platform local launcher
+├── run_local.sh       # macOS/Linux launcher
+└── run_local.bat      # Windows launcher
+```
+
+---
+
+## API
+
+AI Shuffle exposes a full REST + WebSocket API. See the [API Reference](docs/content/api-reference/) or browse the built-in docs at `http://your-host:8000` → Documentation.
+
+---
+
+## Contributing
+
+1. Fork the repo
+2. Create a feature branch (`git checkout -b feature/my-feature`)
+3. Make your changes
+4. Run tests (`cd frontend && npm test` · `cd .. && python -m pytest`)
+5. Submit a pull request
 
 ---
 
