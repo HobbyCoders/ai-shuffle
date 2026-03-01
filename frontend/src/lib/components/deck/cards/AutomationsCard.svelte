@@ -68,7 +68,12 @@
 		Shield,
 		Zap,
 		Activity,
-		CalendarClock
+		CalendarClock,
+		Settings,
+		FileText,
+		DollarSign,
+		GripVertical,
+		type IconNode
 	} from 'lucide-svelte';
 	import './card-design-system.css';
 
@@ -125,6 +130,67 @@
 	let showBudgetSection = $state(false);
 	// Action steps form state (expanded types)
 	let formActionSteps: ActionStep[] = $state([]);
+
+	// ── Section collapse state ──────────────────────────────────────────
+	let collapsedSections: Set<string> = $state(new Set(['budget']));
+	let expandedTriggers: Set<number> = $state(new Set([0]));
+	let expandedActions: Set<number> = $state(new Set());
+
+	function toggleSection(id: string) {
+		if (collapsedSections.has(id)) {
+			collapsedSections = new Set([...collapsedSections].filter(s => s !== id));
+		} else {
+			collapsedSections = new Set([...collapsedSections, id]);
+		}
+	}
+
+	function toggleTriggerExpand(idx: number) {
+		if (expandedTriggers.has(idx)) {
+			expandedTriggers = new Set([...expandedTriggers].filter(i => i !== idx));
+		} else {
+			expandedTriggers = new Set([...expandedTriggers, idx]);
+		}
+	}
+
+	function toggleActionExpand(idx: number) {
+		if (expandedActions.has(idx)) {
+			expandedActions = new Set([...expandedActions].filter(i => i !== idx));
+		} else {
+			expandedActions = new Set([...expandedActions, idx]);
+		}
+	}
+
+	function getTriggerSummary(trigger: TriggerItem): string {
+		switch (trigger.type) {
+			case 'cron': return trigger.config.expression ? describeCron(trigger.config.expression) : 'Not configured';
+			case 'interval': return trigger.config.seconds ? `Every ${trigger.config.seconds}s` : 'Not configured';
+			case 'connector_event': return trigger.config.event_type || 'Not configured';
+			case 'connector_trigger': return trigger.config.trigger_id || 'Not configured';
+			case 'webhook': return 'Webhook endpoint';
+			default: return 'Not configured';
+		}
+	}
+
+	function getActionSummary(step: ActionStep): string {
+		switch (step.type) {
+			case 'connector_action': return step.action_id ? `${step.action_id}` : 'Not configured';
+			case 'send_prompt': return step.prompt ? step.prompt.slice(0, 50) + (step.prompt.length > 50 ? '...' : '') : 'Empty prompt';
+			case 'webhook_call': return step.url || 'No URL';
+			case 'delay': return `Wait ${step.seconds ?? 5}s`;
+			default: return '';
+		}
+	}
+
+	function getTriggerIcon(type: TriggerType) {
+		switch (type) {
+			case 'cron': return Clock;
+			case 'interval': return Timer;
+			case 'connector_event': return Radio;
+			case 'connector_trigger': return Zap;
+			case 'webhook': return Webhook;
+			default: return Clock;
+		}
+	}
 
 	// Cron builder state (scoped to active trigger being edited)
 	let cronMode: 'preset' | 'custom' = $state('preset');
@@ -883,577 +949,654 @@
 			</div>
 		{/if}
 
-		<div class="auto-form-body">
-			<!-- Name -->
-			<div class="card-form-section">
-				<label class="card-form-label" for="auto-name">Name <span class="required">*</span></label>
-				<input
-					id="auto-name"
-					type="text"
-					class="card-form-input"
-					bind:value={formName}
-					placeholder="e.g. Daily report generator"
-				/>
-			</div>
+		<div class="af-form-body">
 
-			<!-- Description -->
-			<div class="card-form-section">
-				<label class="card-form-label" for="auto-description">Description</label>
-				<textarea
-					id="auto-description"
-					class="card-form-input card-form-textarea"
-					style="min-height: 60px"
-					bind:value={formDescription}
-					placeholder="Optional description..."
-				></textarea>
-			</div>
-
-			<!-- Triggers (multi-trigger cards) -->
-			<div class="card-form-section">
-				<div style="display: flex; align-items: center; justify-content: space-between;">
-					<span class="card-form-label">Triggers <span class="required">*</span></span>
-					<button class="card-action-btn" onclick={addTrigger}>
-						<Plus size={12} />
-						Add Trigger
-					</button>
-				</div>
-				<p class="card-form-hint">Any trigger firing will run this automation. At least one required.</p>
-
-				{#each formTriggers as trigger, trigIdx}
-					<div class="trigger-card" transition:slide={{ duration: 150 }}>
-						<div class="trigger-card-header">
-							<span class="card-form-label" style="margin: 0;">
-								{triggerTypeLabel(trigger.type)}
-							</span>
-							{#if formTriggers.length > 1}
-								<button
-									class="card-action-btn card-action-btn--destructive"
-									onclick={() => removeTrigger(trigIdx)}
-								>
-									<X size={12} />
-								</button>
-							{/if}
-						</div>
-
-						<!-- Type selector within card -->
-						<div class="auto-trigger-selector">
-							<button class="auto-trigger-btn" class:active={trigger.type === 'cron'}
-								onclick={() => updateTriggerType(trigIdx, 'cron')}>
-								<Clock size={14} /> Cron
-							</button>
-							<button class="auto-trigger-btn" class:active={trigger.type === 'interval'}
-								onclick={() => updateTriggerType(trigIdx, 'interval')}>
-								<Timer size={14} /> Interval
-							</button>
-							<button class="auto-trigger-btn" class:active={trigger.type === 'connector_event'}
-								onclick={() => updateTriggerType(trigIdx, 'connector_event')}>
-								<Radio size={14} /> Event
-							</button>
-							<button class="auto-trigger-btn" class:active={trigger.type === 'connector_trigger'}
-								onclick={() => updateTriggerType(trigIdx, 'connector_trigger')}>
-								<Zap size={14} /> Connector
-							</button>
-							<button class="auto-trigger-btn" class:active={trigger.type === 'webhook'}
-								onclick={() => updateTriggerType(trigIdx, 'webhook')}>
-								<Webhook size={14} /> Webhook
-							</button>
-						</div>
-
-						<!-- Type-specific config -->
-						{#if trigger.type === 'cron'}
-							<div style="margin-top: 8px;">
-								<div class="cron-mode-selector">
-									<button class="auto-trigger-btn" class:active={cronMode === 'preset'}
-										onclick={() => cronMode = 'preset'}>Preset</button>
-									<button class="auto-trigger-btn" class:active={cronMode === 'custom'}
-										onclick={() => cronMode = 'custom'}>Custom</button>
-								</div>
-								{#if cronMode === 'preset'}
-									<select class="card-form-input"
-										value={trigger.config.expression || '0 9 * * *'}
-										onchange={(e) => {
-											const val = e.currentTarget.value;
-											updateTriggerConfig(trigIdx, { ...trigger.config, expression: val });
-											syncCronFieldsFromExpression(val);
-										}}>
-										<option value="*/15 * * * *">Every 15 minutes</option>
-										<option value="*/30 * * * *">Every 30 minutes</option>
-										<option value="0 * * * *">Every hour</option>
-										<option value="0 9 * * *">Every day at 9 AM</option>
-										<option value="0 9 * * 1-5">Every weekday at 9 AM</option>
-										<option value="0 9 * * 1">Every Monday at 9 AM</option>
-										<option value="0 0 1 * *">Every month on the 1st</option>
-									</select>
-								{:else}
-									<div class="cron-builder-grid">
-										<div class="cron-field">
-											<label class="card-form-label">Minute</label>
-											<select class="card-form-input" bind:value={cronMinute}
-												onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
-												<option value="*">Every minute</option>
-												<option value="*/5">Every 5 min</option>
-												<option value="*/10">Every 10 min</option>
-												<option value="*/15">Every 15 min</option>
-												<option value="*/30">Every 30 min</option>
-												<option value="0">:00</option>
-												<option value="15">:15</option>
-												<option value="30">:30</option>
-												<option value="45">:45</option>
-											</select>
-										</div>
-										<div class="cron-field">
-											<label class="card-form-label">Hour</label>
-											<select class="card-form-input" bind:value={cronHour}
-												onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
-												<option value="*">Every hour</option>
-												{#each Array.from({length: 24}, (_, i) => i) as h}
-													<option value={String(h)}>{formatHour(h)}</option>
-												{/each}
-											</select>
-										</div>
-										<div class="cron-field">
-											<label class="card-form-label">Day</label>
-											<select class="card-form-input" bind:value={cronDayOfMonth}
-												onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
-												<option value="*">Every day</option>
-												{#each Array.from({length: 31}, (_, i) => i + 1) as d}
-													<option value={String(d)}>{d}</option>
-												{/each}
-											</select>
-										</div>
-										<div class="cron-field">
-											<label class="card-form-label">Month</label>
-											<select class="card-form-input" bind:value={cronMonth}
-												onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
-												<option value="*">Every month</option>
-												{#each ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'] as m, mi}
-													<option value={String(mi+1)}>{m}</option>
-												{/each}
-											</select>
-										</div>
-										<div class="cron-field" style="grid-column: 1 / -1">
-											<label class="card-form-label">Day of Week</label>
-											<select class="card-form-input" bind:value={cronDayOfWeek}
-												onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
-												<option value="*">Every day</option>
-												<option value="1-5">Weekdays (Mon–Fri)</option>
-												<option value="0,6">Weekends</option>
-												<option value="1">Monday</option>
-												<option value="2">Tuesday</option>
-												<option value="3">Wednesday</option>
-												<option value="4">Thursday</option>
-												<option value="5">Friday</option>
-												<option value="6">Saturday</option>
-												<option value="0">Sunday</option>
-											</select>
-										</div>
-									</div>
-								{/if}
-								{#if trigger.config.expression}
-									<div class="cron-summary">
-										<span class="cron-summary-text">{describeCron(trigger.config.expression)}</span>
-										<code class="cron-summary-expr">{trigger.config.expression}</code>
-									</div>
-								{/if}
-								<details class="cron-raw-details">
-									<summary class="card-form-hint" style="cursor: pointer; user-select: none;">Edit raw expression</summary>
-									<input type="text" class="card-form-input card-form-input--mono" style="margin-top: 6px"
-										value={trigger.config.expression || ''}
-										oninput={(e) => { updateTriggerConfig(trigIdx, { ...trigger.config, expression: e.currentTarget.value }); syncCronFieldsFromExpression(e.currentTarget.value); }}
-										placeholder="0 9 * * *" />
-								</details>
-								<p class="card-form-hint" style="margin-top: 8px">Timezone: {timezonePreference.resolveTimezone()}</p>
-							</div>
-						{:else if trigger.type === 'interval'}
-							<div style="margin-top: 8px;">
-								<label class="card-form-label">Interval (seconds)</label>
-								<input type="number" class="card-form-input" min="60"
-									value={trigger.config.seconds || ''}
-									oninput={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, seconds: parseInt(e.currentTarget.value) || 0 })}
-									placeholder="3600" />
-								<p class="card-form-hint">Minimum 60 seconds</p>
-							</div>
-						{:else if trigger.type === 'connector_event'}
-							<div style="margin-top: 8px;">
-								<label class="card-form-label">Connector</label>
-								<select class="card-form-input"
-									value={trigger.config.connector_id || ''}
-									onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, connector_id: e.currentTarget.value })}>
-									<option value="">Select a connector...</option>
-									{#each connectors.filter(c => c.is_active || c.status === 'connected') as c}
-										<option value={c.id}>{c.name} ({c.type})</option>
-									{/each}
-								</select>
-								<label class="card-form-label" style="margin-top: 12px">Event Type</label>
-								<select class="card-form-input"
-									value={trigger.config.event_type || ''}
-									onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, event_type: e.currentTarget.value })}>
-									<option value="">Select an event...</option>
-									<option value="session.complete">Session complete</option>
-									<option value="session.error">Session error</option>
-									<option value="session.started">Session started</option>
-									<option value="permission.requested">Permission requested</option>
-									<option value="input.needed">Input needed</option>
-								</select>
-							</div>
-						{:else if trigger.type === 'connector_trigger'}
-							<div style="margin-top: 8px;">
-								<label class="card-form-label">Connector</label>
-								<select class="card-form-input"
-									value={trigger.config.connector_id || ''}
-									onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, connector_id: e.currentTarget.value, trigger_id: '' })}>
-									<option value="">Select a connector...</option>
-									{#each connectorsWithTriggers as c}
-										<option value={c.id}>{c.name} ({c.type})</option>
-									{/each}
-								</select>
-								{#if trigger.config.connector_id}
-									<label class="card-form-label" style="margin-top: 12px">Trigger</label>
-									<select class="card-form-input"
-										value={trigger.config.trigger_id || ''}
-										onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, trigger_id: e.currentTarget.value })}>
-										<option value="">Select a trigger...</option>
-										{#each getTriggersForConnector(trigger.config.connector_id) as trig}
-											<option value={trig.id}>{trig.name}</option>
-										{/each}
-									</select>
-								{/if}
-							</div>
-						{:else if trigger.type === 'webhook'}
-							<div style="margin-top: 8px;">
-								{#if currentView === 'edit' && selectedAutomation}
-									<label class="card-form-label">Webhook URL</label>
-									<input type="text" class="card-form-input card-form-input--mono"
-										value={trigger.config.webhook_url || 'Generated after creation'} readonly />
-									{#if trigger.config.secret}
-										<label class="card-form-label" style="margin-top: 12px">Secret</label>
-										<input type="text" class="card-form-input card-form-input--mono"
-											value={trigger.config.secret} readonly />
-									{/if}
-								{:else}
-									<p class="card-form-hint">Webhook URL and secret will be generated after creation.</p>
-								{/if}
-							</div>
-						{/if}
+			<!-- ═══ SECTION: Basics ═══ -->
+			<div class="af-section">
+				<button class="af-section-header" onclick={() => toggleSection('basics')}>
+					<div class="af-section-title">
+						<CalendarClock size={16} />
+						<h3>Basics</h3>
 					</div>
-				{/each}
-			</div>
-
-			<!-- Prompt -->
-			<div class="card-form-section">
-				<label class="card-form-label" for="auto-prompt">
-					Prompt {#if formActionSteps.length === 0}<span class="required">*</span>{/if}
-				</label>
-				<textarea
-					id="auto-prompt"
-					class="card-form-input card-form-textarea"
-					style="min-height: 120px"
-					bind:value={formPrompt}
-					placeholder="Enter the prompt template for this automation..."
-				></textarea>
-				<p class="card-form-hint">
-					{#if formActionSteps.length > 0}
-						Optional when action steps are configured. The AI agent prompt runs before action steps.
+					{#if collapsedSections.has('basics')}
+						<ChevronRight size={14} class="af-chevron" />
 					{:else}
-						The main instruction sent to the AI agent when this automation runs
+						<ChevronDown size={14} class="af-chevron" />
 					{/if}
-				</p>
-			</div>
-
-			<!-- Action Steps (expanded types) -->
-			<div class="card-form-section">
-				<div style="display: flex; align-items: center; justify-content: space-between;">
-					<span class="card-form-label">Actions</span>
-					<button class="card-action-btn" onclick={() => addActionStep()}>
-						<Plus size={12} />
-						Add Action
-					</button>
-				</div>
-				<p class="card-form-hint">Actions to execute when this automation runs. Can be used with or without a prompt.</p>
-
-				{#each formActionSteps as step, i}
-					<div class="action-step-card" transition:slide={{ duration: 150 }}>
-						<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-							<span class="card-form-label" style="margin: 0;">Step {i + 1}: {actionStepTypeLabel(step.type)}</span>
-							<button class="card-action-btn card-action-btn--destructive"
-								onclick={() => removeActionStep(i)}>
-								<X size={12} />
-							</button>
-						</div>
-
-						<!-- Action type selector -->
-						<select class="card-form-input"
-							value={step.type}
-							onchange={(e) => changeActionStepType(i, e.currentTarget.value as ActionStepType)}>
-							<option value="connector_action">Connector Action</option>
-							<option value="send_prompt">AI Prompt</option>
-							<option value="webhook_call">Webhook Call</option>
-							<option value="delay">Delay</option>
-						</select>
-
-						<!-- Type-specific config -->
-						{#if step.type === 'connector_action'}
-							<select class="card-form-input" style="margin-top: 8px"
-								value={step.connector_id || ''}
-								onchange={(e) => { step.connector_id = e.currentTarget.value; step.action_id = ''; step.params = {}; formActionSteps = [...formActionSteps]; }}>
-								<option value="">Select connector...</option>
-								{#each connectorsWithActions as c}
-									<option value={c.id}>{c.name} ({c.type})</option>
-								{/each}
-							</select>
-							{#if step.connector_id}
-								<select class="card-form-input" style="margin-top: 8px"
-									value={step.action_id || ''}
-									onchange={(e) => { step.action_id = e.currentTarget.value; step.params = {}; formActionSteps = [...formActionSteps]; }}>
-									<option value="">Select action...</option>
-									{#each getActionsForConnector(step.connector_id) as action}
-										<option value={action.id}>{action.name}</option>
-									{/each}
-								</select>
-							{/if}
-							{#if step.action_id}
-								{@const actionDef = getActionsForConnector(step.connector_id || '').find(a => a.id === step.action_id)}
-								{#if actionDef}
-									<p class="card-form-hint" style="margin-top: 4px">{actionDef.description}</p>
-									{#if actionDef.input_schema?.properties}
-										<div style="margin-top: 8px;">
-											{#each Object.entries(actionDef.input_schema.properties) as [key, schemaDef]}
-												{@const schemaObj = schemaDef as Record<string, any>}
-												<label class="card-form-label" style="font-size: 11px;">{key}</label>
-												<input type="text" class="card-form-input" style="font-size: 12px;"
-													value={(step.params || {})[key] || ''}
-													oninput={(e) => { if (!step.params) step.params = {}; step.params[key] = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}
-													placeholder={schemaObj.description || key} />
-											{/each}
-										</div>
-										<p class="card-form-hint" style="margin-top: 4px;">Use {'{{trigger.data.field}}'} or {'{{response}}'} for template variables</p>
-									{/if}
-								{/if}
-							{/if}
-						{:else if step.type === 'send_prompt'}
-							<textarea class="card-form-input card-form-textarea" style="margin-top: 8px; min-height: 80px"
-								placeholder="Enter prompt to send to AI agent..."
-								value={step.prompt || ''}
-								oninput={(e) => { step.prompt = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}></textarea>
-							<div style="display: flex; gap: 8px; margin-top: 8px;">
-								<div style="flex: 1;">
-									<label class="card-form-label" style="font-size: 11px;">Profile (optional)</label>
-									<select class="card-form-input" style="font-size: 12px;"
-										value={step.profile_id || ''}
-										onchange={(e) => { step.profile_id = e.currentTarget.value || undefined; formActionSteps = [...formActionSteps]; }}>
-										<option value="">Default (automation profile)</option>
-										{#each profiles as profile}
-											<option value={profile.id}>{profile.name}</option>
-										{/each}
-									</select>
-								</div>
-								<div style="width: 80px;">
-									<label class="card-form-label" style="font-size: 11px;">Max turns</label>
-									<input type="number" class="card-form-input" style="font-size: 12px;"
-										min="1" max="25"
-										value={step.max_turns ?? 1}
-										oninput={(e) => { step.max_turns = parseInt(e.currentTarget.value) || 1; formActionSteps = [...formActionSteps]; }} />
-								</div>
-							</div>
-							<p class="card-form-hint" style="margin-top: 4px;">Use {'{{response}}'} to reference previous AI output</p>
-						{:else if step.type === 'webhook_call'}
-							<input type="url" class="card-form-input" style="margin-top: 8px"
-								placeholder="https://example.com/webhook"
-								value={step.url || ''}
-								oninput={(e) => { step.url = e.currentTarget.value; formActionSteps = [...formActionSteps]; }} />
-							<select class="card-form-input" style="margin-top: 8px"
-								value={step.method || 'POST'}
-								onchange={(e) => { step.method = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}>
-								<option value="POST">POST</option>
-								<option value="GET">GET</option>
-								<option value="PUT">PUT</option>
-								<option value="PATCH">PATCH</option>
-								<option value="DELETE">DELETE</option>
-							</select>
-							<textarea class="card-form-input card-form-textarea" style="margin-top: 8px; min-height: 60px"
-								placeholder="Request body (supports template variables)..."
-								value={step.body || ''}
-								oninput={(e) => { step.body = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}></textarea>
-							<p class="card-form-hint" style="margin-top: 4px;">Use {'{{response}}'} or {'{{trigger.data.field}}'} for template variables</p>
-						{:else if step.type === 'delay'}
-							<div style="margin-top: 8px;">
-								<label class="card-form-label" style="font-size: 11px;">Seconds to wait</label>
-								<input type="number" class="card-form-input" min="1" max="300"
-									placeholder="5"
-									value={step.seconds ?? 5}
-									oninput={(e) => { step.seconds = parseInt(e.currentTarget.value) || 0; formActionSteps = [...formActionSteps]; }} />
-								<p class="card-form-hint">Maximum 300 seconds (5 minutes)</p>
-							</div>
-						{/if}
-					</div>
-				{/each}
-			</div>
-
-			<!-- Profile selector -->
-			<div class="card-form-section">
-				<label class="card-form-label" for="auto-profile">Profile <span class="required">*</span></label>
-				<select id="auto-profile" class="card-form-input" bind:value={formProfileId}>
-					<option value="">Select a profile...</option>
-					{#each profiles as profile}
-						<option value={profile.id}>{profile.name}</option>
-					{/each}
-				</select>
-			</div>
-
-			<!-- Project selector -->
-			<div class="card-form-section">
-				<label class="card-form-label" for="auto-project">Project</label>
-				<select id="auto-project" class="card-form-input" bind:value={formProjectId}>
-					<option value="">None (global)</option>
-					{#each projects as project}
-						<option value={project.id}>{project.name}</option>
-					{/each}
-				</select>
-			</div>
-
-			<!-- Output type -->
-			<div class="card-form-section">
-				<span class="card-form-label">Output Type</span>
-				<div class="auto-trigger-selector">
-					<button
-						class="auto-trigger-btn"
-						class:active={formOutputType === 'session'}
-						onclick={() => { formOutputType = 'session'; formOutputConfig = {}; }}
-					>
-						Session
-					</button>
-					<button
-						class="auto-trigger-btn"
-						class:active={formOutputType === 'connector'}
-						onclick={() => { formOutputType = 'connector'; formOutputConfig = {}; }}
-					>
-						Connector
-					</button>
-					<button
-						class="auto-trigger-btn"
-						class:active={formOutputType === 'webhook'}
-						onclick={() => { formOutputType = 'webhook'; formOutputConfig = {}; }}
-					>
-						Webhook
-					</button>
-					<button
-						class="auto-trigger-btn"
-						class:active={formOutputType === 'none'}
-						onclick={() => { formOutputType = 'none'; formOutputConfig = {}; }}
-					>
-						None
-					</button>
-				</div>
-			</div>
-
-			<!-- Output config -->
-			{#if formOutputType === 'connector'}
-				<div class="card-form-section" transition:slide={{ duration: 150 }}>
-					<label class="card-form-label" for="auto-output-connector">Connector</label>
-					<select
-						id="auto-output-connector"
-						class="card-form-input"
-						bind:value={formOutputConfig.connector_id}
-					>
-						<option value="">Select a connector...</option>
-						{#each connectors.filter(c => c.is_active || c.status === 'connected') as c}
-							<option value={c.id}>{c.name} ({c.type})</option>
-						{/each}
-						{#if connectors.filter(c => !c.is_active && c.status !== 'connected').length > 0}
-							<optgroup label="Inactive">
-								{#each connectors.filter(c => !c.is_active && c.status !== 'connected') as c}
-									<option value={c.id}>{c.name} ({c.type}) - inactive</option>
-								{/each}
-							</optgroup>
-						{/if}
-					</select>
-					<label class="card-form-label" for="auto-output-chat-id" style="margin-top: 12px">Platform Chat ID</label>
-					<input
-						id="auto-output-chat-id"
-						type="text"
-						class="card-form-input"
-						bind:value={formOutputConfig.platform_chat_id}
-						placeholder="chat / channel ID / email address"
-					/>
-					<p class="card-form-help" style="margin-top: 4px; font-size: 11px; opacity: 0.6;">
-						e.g. Telegram chat ID, Discord channel ID, email address
-					</p>
-				</div>
-			{:else if formOutputType === 'webhook'}
-				<div class="card-form-section" transition:slide={{ duration: 150 }}>
-					<label class="card-form-label" for="auto-output-webhook-url">Webhook URL</label>
-					<input
-						id="auto-output-webhook-url"
-						type="text"
-						class="card-form-input"
-						bind:value={formOutputConfig.url}
-						placeholder="https://example.com/webhook"
-					/>
-				</div>
-			{/if}
-
-			<!-- Budget & Limits (expandable) -->
-			<div class="card-form-section">
-				<button class="auto-expand-btn" onclick={() => showBudgetSection = !showBudgetSection}>
-					{#if showBudgetSection}
-						<ChevronDown size={14} />
-					{:else}
-						<ChevronRight size={14} />
-					{/if}
-					Budget & Limits
 				</button>
-
-				{#if showBudgetSection}
-					<div class="auto-budget-grid" transition:slide={{ duration: 150 }}>
-						<div class="auto-budget-field">
-							<label class="card-form-label" for="auto-max-cost-run">Max cost/run ($)</label>
-							<input id="auto-max-cost-run" type="number" class="card-form-input" step="0.01" min="0" bind:value={formMaxCostPerRun} placeholder="No limit" />
-						</div>
-						<div class="auto-budget-field">
-							<label class="card-form-label" for="auto-max-cost-day">Max cost/day ($)</label>
-							<input id="auto-max-cost-day" type="number" class="card-form-input" step="0.01" min="0" bind:value={formMaxCostPerDay} placeholder="No limit" />
-						</div>
-						<div class="auto-budget-field">
-							<label class="card-form-label" for="auto-max-cost-total">Max total cost ($)</label>
-							<input id="auto-max-cost-total" type="number" class="card-form-input" step="0.01" min="0" bind:value={formMaxCostTotal} placeholder="No limit" />
-						</div>
-						<div class="auto-budget-field">
-							<label class="card-form-label" for="auto-max-runs-day">Max runs/day</label>
-							<input id="auto-max-runs-day" type="number" class="card-form-input" min="1" bind:value={formMaxRunsPerDay} placeholder="No limit" />
-						</div>
-						<div class="auto-budget-field">
-							<label class="card-form-label" for="auto-max-turns">Max turns</label>
-							<input id="auto-max-turns" type="number" class="card-form-input" min="1" bind:value={formMaxTurns} />
-						</div>
-						<div class="auto-budget-field">
-							<label class="card-form-label" for="auto-timeout">Timeout (s)</label>
-							<input id="auto-timeout" type="number" class="card-form-input" min="10" bind:value={formTimeoutSeconds} />
+				{#if !collapsedSections.has('basics')}
+					<div class="af-section-body" transition:slide={{ duration: 150 }}>
+						<div class="af-field-grid">
+							<div class="af-field">
+								<label class="af-label" for="auto-name">Name <span class="af-required">*</span></label>
+								<input
+									id="auto-name"
+									type="text"
+									class="af-input"
+									bind:value={formName}
+									placeholder="e.g. Daily report generator"
+								/>
+							</div>
+							<div class="af-field">
+								<label class="af-label" for="auto-description">Description</label>
+								<input
+									id="auto-description"
+									type="text"
+									class="af-input"
+									bind:value={formDescription}
+									placeholder="Optional description..."
+								/>
+							</div>
 						</div>
 					</div>
 				{/if}
 			</div>
 
-			<!-- Requires approval toggle -->
-			<div class="card-form-section">
-				<label class="auto-toggle-row">
-					<button
-						class="auto-toggle"
-						class:active={formRequiresApproval}
-						onclick={() => formRequiresApproval = !formRequiresApproval}
-						role="switch"
-						aria-checked={formRequiresApproval}
-						aria-label="Requires approval"
-					>
-						<span class="auto-toggle-thumb"></span>
-					</button>
-					<span class="auto-toggle-label">
-						<Shield size={14} />
-						Requires approval before running
-					</span>
-				</label>
-			</div>
-		</div>
+			<div class="af-divider"></div>
 
+			<!-- ═══ SECTION: Triggers ═══ -->
+			<div class="af-section">
+				<button class="af-section-header" onclick={() => toggleSection('triggers')}>
+					<div class="af-section-title">
+						<Zap size={16} />
+						<h3>Triggers</h3>
+						<span class="af-section-count">{formTriggers.length}</span>
+					</div>
+					{#if collapsedSections.has('triggers')}
+						<ChevronRight size={14} class="af-chevron" />
+					{:else}
+						<ChevronDown size={14} class="af-chevron" />
+					{/if}
+				</button>
+				{#if !collapsedSections.has('triggers')}
+					<div class="af-section-body" transition:slide={{ duration: 150 }}>
+						<p class="af-hint">Any trigger firing will run this automation. At least one required.</p>
+
+						{#each formTriggers as trigger, trigIdx}
+							<div class="af-item-card" transition:slide={{ duration: 150 }}>
+								<div class="af-item-header" role="button" tabindex="0" onclick={() => toggleTriggerExpand(trigIdx)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleTriggerExpand(trigIdx); }}>
+									<div class="af-item-header-left">
+										{#if expandedTriggers.has(trigIdx)}
+											<ChevronDown size={14} />
+										{:else}
+											<ChevronRight size={14} />
+										{/if}
+										<span class="af-item-type-badge">
+											<svelte:component this={getTriggerIcon(trigger.type)} size={12} />
+											{triggerTypeLabel(trigger.type)}
+										</span>
+										{#if !expandedTriggers.has(trigIdx)}
+											<span class="af-item-summary">{getTriggerSummary(trigger)}</span>
+										{/if}
+									</div>
+									<div class="af-item-header-actions">
+										{#if formTriggers.length > 1}
+											<button
+												class="card-action-btn card-action-btn--destructive"
+												onclick={(e) => { e.stopPropagation(); removeTrigger(trigIdx); }}
+											>
+												<X size={12} />
+											</button>
+										{/if}
+									</div>
+								</div>
+
+								{#if expandedTriggers.has(trigIdx)}
+									<div class="af-item-body" transition:slide={{ duration: 150 }}>
+										<!-- Type selector -->
+										<div class="auto-trigger-selector">
+											<button class="auto-trigger-btn" class:active={trigger.type === 'cron'}
+												onclick={() => updateTriggerType(trigIdx, 'cron')}>
+												<Clock size={14} /> Cron
+											</button>
+											<button class="auto-trigger-btn" class:active={trigger.type === 'interval'}
+												onclick={() => updateTriggerType(trigIdx, 'interval')}>
+												<Timer size={14} /> Interval
+											</button>
+											<button class="auto-trigger-btn" class:active={trigger.type === 'connector_event'}
+												onclick={() => updateTriggerType(trigIdx, 'connector_event')}>
+												<Radio size={14} /> Event
+											</button>
+											<button class="auto-trigger-btn" class:active={trigger.type === 'connector_trigger'}
+												onclick={() => updateTriggerType(trigIdx, 'connector_trigger')}>
+												<Zap size={14} /> Connector
+											</button>
+											<button class="auto-trigger-btn" class:active={trigger.type === 'webhook'}
+												onclick={() => updateTriggerType(trigIdx, 'webhook')}>
+												<Webhook size={14} /> Webhook
+											</button>
+										</div>
+
+										<!-- Type-specific config -->
+										{#if trigger.type === 'cron'}
+											<div class="af-trigger-config">
+												<div class="cron-mode-selector">
+													<button class="auto-trigger-btn" class:active={cronMode === 'preset'}
+														onclick={() => cronMode = 'preset'}>Preset</button>
+													<button class="auto-trigger-btn" class:active={cronMode === 'custom'}
+														onclick={() => cronMode = 'custom'}>Custom</button>
+												</div>
+												{#if cronMode === 'preset'}
+													<select class="af-input"
+														value={trigger.config.expression || '0 9 * * *'}
+														onchange={(e) => {
+															const val = e.currentTarget.value;
+															updateTriggerConfig(trigIdx, { ...trigger.config, expression: val });
+															syncCronFieldsFromExpression(val);
+														}}>
+														<option value="*/15 * * * *">Every 15 minutes</option>
+														<option value="*/30 * * * *">Every 30 minutes</option>
+														<option value="0 * * * *">Every hour</option>
+														<option value="0 9 * * *">Every day at 9 AM</option>
+														<option value="0 9 * * 1-5">Every weekday at 9 AM</option>
+														<option value="0 9 * * 1">Every Monday at 9 AM</option>
+														<option value="0 0 1 * *">Every month on the 1st</option>
+													</select>
+												{:else}
+													<div class="cron-builder-grid">
+														<div class="cron-field">
+															<label class="af-label">Minute</label>
+															<select class="af-input" bind:value={cronMinute}
+																onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
+																<option value="*">Every minute</option>
+																<option value="*/5">Every 5 min</option>
+																<option value="*/10">Every 10 min</option>
+																<option value="*/15">Every 15 min</option>
+																<option value="*/30">Every 30 min</option>
+																<option value="0">:00</option>
+																<option value="15">:15</option>
+																<option value="30">:30</option>
+																<option value="45">:45</option>
+															</select>
+														</div>
+														<div class="cron-field">
+															<label class="af-label">Hour</label>
+															<select class="af-input" bind:value={cronHour}
+																onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
+																<option value="*">Every hour</option>
+																{#each Array.from({length: 24}, (_, i) => i) as h}
+																	<option value={String(h)}>{formatHour(h)}</option>
+																{/each}
+															</select>
+														</div>
+														<div class="cron-field">
+															<label class="af-label">Day</label>
+															<select class="af-input" bind:value={cronDayOfMonth}
+																onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
+																<option value="*">Every day</option>
+																{#each Array.from({length: 31}, (_, i) => i + 1) as d}
+																	<option value={String(d)}>{d}</option>
+																{/each}
+															</select>
+														</div>
+														<div class="cron-field">
+															<label class="af-label">Month</label>
+															<select class="af-input" bind:value={cronMonth}
+																onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
+																<option value="*">Every month</option>
+																{#each ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'] as m, mi}
+																	<option value={String(mi+1)}>{m}</option>
+																{/each}
+															</select>
+														</div>
+														<div class="cron-field" style="grid-column: 1 / -1">
+															<label class="af-label">Day of Week</label>
+															<select class="af-input" bind:value={cronDayOfWeek}
+																onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
+																<option value="*">Every day</option>
+																<option value="1-5">Weekdays (Mon–Fri)</option>
+																<option value="0,6">Weekends</option>
+																<option value="1">Monday</option>
+																<option value="2">Tuesday</option>
+																<option value="3">Wednesday</option>
+																<option value="4">Thursday</option>
+																<option value="5">Friday</option>
+																<option value="6">Saturday</option>
+																<option value="0">Sunday</option>
+															</select>
+														</div>
+													</div>
+												{/if}
+												{#if trigger.config.expression}
+													<div class="cron-summary">
+														<span class="cron-summary-text">{describeCron(trigger.config.expression)}</span>
+														<code class="cron-summary-expr">{trigger.config.expression}</code>
+													</div>
+												{/if}
+												<details class="cron-raw-details">
+													<summary class="af-hint" style="cursor: pointer; user-select: none;">Edit raw expression</summary>
+													<input type="text" class="af-input af-input--mono" style="margin-top: 6px"
+														value={trigger.config.expression || ''}
+														oninput={(e) => { updateTriggerConfig(trigIdx, { ...trigger.config, expression: e.currentTarget.value }); syncCronFieldsFromExpression(e.currentTarget.value); }}
+														placeholder="0 9 * * *" />
+												</details>
+												<p class="af-hint" style="margin-top: 8px">Timezone: {timezonePreference.resolveTimezone()}</p>
+											</div>
+										{:else if trigger.type === 'interval'}
+											<div class="af-trigger-config">
+												<label class="af-label">Interval (seconds)</label>
+												<input type="number" class="af-input" min="60"
+													value={trigger.config.seconds || ''}
+													oninput={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, seconds: parseInt(e.currentTarget.value) || 0 })}
+													placeholder="3600" />
+												<p class="af-hint">Minimum 60 seconds</p>
+											</div>
+										{:else if trigger.type === 'connector_event'}
+											<div class="af-trigger-config">
+												<label class="af-label">Connector</label>
+												<select class="af-input"
+													value={trigger.config.connector_id || ''}
+													onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, connector_id: e.currentTarget.value })}>
+													<option value="">Select a connector...</option>
+													{#each connectors.filter(c => c.is_active || c.status === 'connected') as c}
+														<option value={c.id}>{c.name} ({c.type})</option>
+													{/each}
+												</select>
+												<label class="af-label" style="margin-top: 12px">Event Type</label>
+												<select class="af-input"
+													value={trigger.config.event_type || ''}
+													onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, event_type: e.currentTarget.value })}>
+													<option value="">Select an event...</option>
+													<option value="session.complete">Session complete</option>
+													<option value="session.error">Session error</option>
+													<option value="session.started">Session started</option>
+													<option value="permission.requested">Permission requested</option>
+													<option value="input.needed">Input needed</option>
+												</select>
+											</div>
+										{:else if trigger.type === 'connector_trigger'}
+											<div class="af-trigger-config">
+												<label class="af-label">Connector</label>
+												<select class="af-input"
+													value={trigger.config.connector_id || ''}
+													onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, connector_id: e.currentTarget.value, trigger_id: '' })}>
+													<option value="">Select a connector...</option>
+													{#each connectorsWithTriggers as c}
+														<option value={c.id}>{c.name} ({c.type})</option>
+													{/each}
+												</select>
+												{#if trigger.config.connector_id}
+													<label class="af-label" style="margin-top: 12px">Trigger</label>
+													<select class="af-input"
+														value={trigger.config.trigger_id || ''}
+														onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, trigger_id: e.currentTarget.value })}>
+														<option value="">Select a trigger...</option>
+														{#each getTriggersForConnector(trigger.config.connector_id) as trig}
+															<option value={trig.id}>{trig.name}</option>
+														{/each}
+													</select>
+												{/if}
+											</div>
+										{:else if trigger.type === 'webhook'}
+											<div class="af-trigger-config">
+												{#if currentView === 'edit' && selectedAutomation}
+													<label class="af-label">Webhook URL</label>
+													<input type="text" class="af-input af-input--mono"
+														value={trigger.config.webhook_url || 'Generated after creation'} readonly />
+													{#if trigger.config.secret}
+														<label class="af-label" style="margin-top: 12px">Secret</label>
+														<input type="text" class="af-input af-input--mono"
+															value={trigger.config.secret} readonly />
+													{/if}
+												{:else}
+													<p class="af-hint">Webhook URL and secret will be generated after creation.</p>
+												{/if}
+											</div>
+										{/if}
+									</div>
+								{/if}
+							</div>
+						{/each}
+
+						<button class="af-add-btn" onclick={addTrigger}>
+							<Plus size={14} />
+							Add Trigger
+						</button>
+					</div>
+				{/if}
+			</div>
+
+			<div class="af-divider"></div>
+
+			<!-- ═══ SECTION: Prompt & Actions ═══ -->
+			<div class="af-section">
+				<button class="af-section-header" onclick={() => toggleSection('prompt')}>
+					<div class="af-section-title">
+						<FileText size={16} />
+						<h3>Prompt & Actions</h3>
+						{#if formActionSteps.length > 0}
+							<span class="af-section-count">{formActionSteps.length} action{formActionSteps.length !== 1 ? 's' : ''}</span>
+						{/if}
+					</div>
+					{#if collapsedSections.has('prompt')}
+						<ChevronRight size={14} class="af-chevron" />
+					{:else}
+						<ChevronDown size={14} class="af-chevron" />
+					{/if}
+				</button>
+				{#if !collapsedSections.has('prompt')}
+					<div class="af-section-body" transition:slide={{ duration: 150 }}>
+						<div class="af-field">
+							<label class="af-label" for="auto-prompt">
+								Prompt {#if formActionSteps.length === 0}<span class="af-required">*</span>{/if}
+							</label>
+							<textarea
+								id="auto-prompt"
+								class="af-input af-textarea"
+								bind:value={formPrompt}
+								placeholder="Enter the prompt template for this automation..."
+							></textarea>
+							<p class="af-hint">
+								{#if formActionSteps.length > 0}
+									Optional when action steps are configured. Runs before action steps.
+								{:else}
+									The main instruction sent to the AI agent when this automation runs
+								{/if}
+							</p>
+						</div>
+
+						<!-- Action steps -->
+						{#if formActionSteps.length > 0}
+							<div class="af-subsection-label">Action Steps</div>
+						{/if}
+
+						{#each formActionSteps as step, i}
+							<div class="af-item-card" transition:slide={{ duration: 150 }}>
+								<div class="af-item-header" role="button" tabindex="0" onclick={() => toggleActionExpand(i)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleActionExpand(i); }}>
+									<div class="af-item-header-left">
+										{#if expandedActions.has(i)}
+											<ChevronDown size={14} />
+										{:else}
+											<ChevronRight size={14} />
+										{/if}
+										<span class="af-item-step-num">{i + 1}</span>
+										<span class="af-item-type-badge">{actionStepTypeLabel(step.type)}</span>
+										{#if !expandedActions.has(i)}
+											<span class="af-item-summary">{getActionSummary(step)}</span>
+										{/if}
+									</div>
+									<div class="af-item-header-actions">
+										<button
+											class="card-action-btn card-action-btn--destructive"
+											onclick={(e) => { e.stopPropagation(); removeActionStep(i); }}
+										>
+											<X size={12} />
+										</button>
+									</div>
+								</div>
+
+								{#if expandedActions.has(i)}
+									<div class="af-item-body" transition:slide={{ duration: 150 }}>
+										<select class="af-input"
+											value={step.type}
+											onchange={(e) => changeActionStepType(i, e.currentTarget.value as ActionStepType)}>
+											<option value="connector_action">Connector Action</option>
+											<option value="send_prompt">AI Prompt</option>
+											<option value="webhook_call">Webhook Call</option>
+											<option value="delay">Delay</option>
+										</select>
+
+										{#if step.type === 'connector_action'}
+											<select class="af-input" style="margin-top: 8px"
+												value={step.connector_id || ''}
+												onchange={(e) => { step.connector_id = e.currentTarget.value; step.action_id = ''; step.params = {}; formActionSteps = [...formActionSteps]; }}>
+												<option value="">Select connector...</option>
+												{#each connectorsWithActions as c}
+													<option value={c.id}>{c.name} ({c.type})</option>
+												{/each}
+											</select>
+											{#if step.connector_id}
+												<select class="af-input" style="margin-top: 8px"
+													value={step.action_id || ''}
+													onchange={(e) => { step.action_id = e.currentTarget.value; step.params = {}; formActionSteps = [...formActionSteps]; }}>
+													<option value="">Select action...</option>
+													{#each getActionsForConnector(step.connector_id) as action}
+														<option value={action.id}>{action.name}</option>
+													{/each}
+												</select>
+											{/if}
+											{#if step.action_id}
+												{@const actionDef = getActionsForConnector(step.connector_id || '').find(a => a.id === step.action_id)}
+												{#if actionDef}
+													<p class="af-hint" style="margin-top: 4px">{actionDef.description}</p>
+													{#if actionDef.input_schema?.properties}
+														<div style="margin-top: 8px;">
+															{#each Object.entries(actionDef.input_schema.properties) as [key, schemaDef]}
+																{@const schemaObj = schemaDef as Record<string, any>}
+																<label class="af-label" style="font-size: 11px;">{key}</label>
+																<input type="text" class="af-input" style="font-size: 12px;"
+																	value={(step.params || {})[key] || ''}
+																	oninput={(e) => { if (!step.params) step.params = {}; step.params[key] = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}
+																	placeholder={schemaObj.description || key} />
+															{/each}
+														</div>
+														<p class="af-hint" style="margin-top: 4px;">Use {'{{trigger.data.field}}'} or {'{{response}}'} for template variables</p>
+													{/if}
+												{/if}
+											{/if}
+										{:else if step.type === 'send_prompt'}
+											<textarea class="af-input af-textarea" style="margin-top: 8px; min-height: 80px"
+												placeholder="Enter prompt to send to AI agent..."
+												value={step.prompt || ''}
+												oninput={(e) => { step.prompt = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}></textarea>
+											<div class="af-field-grid" style="margin-top: 8px;">
+												<div class="af-field">
+													<label class="af-label" style="font-size: 11px;">Profile (optional)</label>
+													<select class="af-input" style="font-size: 12px;"
+														value={step.profile_id || ''}
+														onchange={(e) => { step.profile_id = e.currentTarget.value || undefined; formActionSteps = [...formActionSteps]; }}>
+														<option value="">Default (automation profile)</option>
+														{#each profiles as profile}
+															<option value={profile.id}>{profile.name}</option>
+														{/each}
+													</select>
+												</div>
+												<div class="af-field">
+													<label class="af-label" style="font-size: 11px;">Max turns</label>
+													<input type="number" class="af-input" style="font-size: 12px;"
+														min="1" max="25"
+														value={step.max_turns ?? 1}
+														oninput={(e) => { step.max_turns = parseInt(e.currentTarget.value) || 1; formActionSteps = [...formActionSteps]; }} />
+												</div>
+											</div>
+											<p class="af-hint" style="margin-top: 4px;">Use {'{{response}}'} to reference previous AI output</p>
+										{:else if step.type === 'webhook_call'}
+											<input type="url" class="af-input" style="margin-top: 8px"
+												placeholder="https://example.com/webhook"
+												value={step.url || ''}
+												oninput={(e) => { step.url = e.currentTarget.value; formActionSteps = [...formActionSteps]; }} />
+											<select class="af-input" style="margin-top: 8px"
+												value={step.method || 'POST'}
+												onchange={(e) => { step.method = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}>
+												<option value="POST">POST</option>
+												<option value="GET">GET</option>
+												<option value="PUT">PUT</option>
+												<option value="PATCH">PATCH</option>
+												<option value="DELETE">DELETE</option>
+											</select>
+											<textarea class="af-input af-textarea" style="margin-top: 8px; min-height: 60px"
+												placeholder="Request body (supports template variables)..."
+												value={step.body || ''}
+												oninput={(e) => { step.body = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}></textarea>
+											<p class="af-hint" style="margin-top: 4px;">Use {'{{response}}'} or {'{{trigger.data.field}}'} for template variables</p>
+										{:else if step.type === 'delay'}
+											<div style="margin-top: 8px;">
+												<label class="af-label" style="font-size: 11px;">Seconds to wait</label>
+												<input type="number" class="af-input" min="1" max="300"
+													placeholder="5"
+													value={step.seconds ?? 5}
+													oninput={(e) => { step.seconds = parseInt(e.currentTarget.value) || 0; formActionSteps = [...formActionSteps]; }} />
+												<p class="af-hint">Maximum 300 seconds (5 minutes)</p>
+											</div>
+										{/if}
+									</div>
+								{/if}
+							</div>
+						{/each}
+
+						<button class="af-add-btn" onclick={() => addActionStep()}>
+							<Plus size={14} />
+							Add Action Step
+						</button>
+					</div>
+				{/if}
+			</div>
+
+			<div class="af-divider"></div>
+
+			<!-- ═══ SECTION: Configuration ═══ -->
+			<div class="af-section">
+				<button class="af-section-header" onclick={() => toggleSection('config')}>
+					<div class="af-section-title">
+						<Settings size={16} />
+						<h3>Configuration</h3>
+					</div>
+					{#if collapsedSections.has('config')}
+						<ChevronRight size={14} class="af-chevron" />
+					{:else}
+						<ChevronDown size={14} class="af-chevron" />
+					{/if}
+				</button>
+				{#if !collapsedSections.has('config')}
+					<div class="af-section-body" transition:slide={{ duration: 150 }}>
+						<div class="af-field-grid">
+							<div class="af-field">
+								<label class="af-label" for="auto-profile">Profile <span class="af-required">*</span></label>
+								<select id="auto-profile" class="af-input" bind:value={formProfileId}>
+									<option value="">Select a profile...</option>
+									{#each profiles as profile}
+										<option value={profile.id}>{profile.name}</option>
+									{/each}
+								</select>
+							</div>
+							<div class="af-field">
+								<label class="af-label" for="auto-project">Project</label>
+								<select id="auto-project" class="af-input" bind:value={formProjectId}>
+									<option value="">None (global)</option>
+									{#each projects as project}
+										<option value={project.id}>{project.name}</option>
+									{/each}
+								</select>
+							</div>
+						</div>
+
+						<div class="af-field" style="margin-top: 4px;">
+							<span class="af-label">Output Type</span>
+							<div class="auto-trigger-selector">
+								<button class="auto-trigger-btn" class:active={formOutputType === 'session'}
+									onclick={() => { formOutputType = 'session'; formOutputConfig = {}; }}>Session</button>
+								<button class="auto-trigger-btn" class:active={formOutputType === 'connector'}
+									onclick={() => { formOutputType = 'connector'; formOutputConfig = {}; }}>Connector</button>
+								<button class="auto-trigger-btn" class:active={formOutputType === 'webhook'}
+									onclick={() => { formOutputType = 'webhook'; formOutputConfig = {}; }}>Webhook</button>
+								<button class="auto-trigger-btn" class:active={formOutputType === 'none'}
+									onclick={() => { formOutputType = 'none'; formOutputConfig = {}; }}>None</button>
+							</div>
+						</div>
+
+						{#if formOutputType === 'connector'}
+							<div class="af-field-grid" transition:slide={{ duration: 150 }}>
+								<div class="af-field">
+									<label class="af-label" for="auto-output-connector">Connector</label>
+									<select id="auto-output-connector" class="af-input" bind:value={formOutputConfig.connector_id}>
+										<option value="">Select a connector...</option>
+										{#each connectors.filter(c => c.is_active || c.status === 'connected') as c}
+											<option value={c.id}>{c.name} ({c.type})</option>
+										{/each}
+										{#if connectors.filter(c => !c.is_active && c.status !== 'connected').length > 0}
+											<optgroup label="Inactive">
+												{#each connectors.filter(c => !c.is_active && c.status !== 'connected') as c}
+													<option value={c.id}>{c.name} ({c.type}) - inactive</option>
+												{/each}
+											</optgroup>
+										{/if}
+									</select>
+								</div>
+								<div class="af-field">
+									<label class="af-label" for="auto-output-chat-id">Platform Chat ID</label>
+									<input id="auto-output-chat-id" type="text" class="af-input"
+										bind:value={formOutputConfig.platform_chat_id}
+										placeholder="chat / channel ID / email" />
+								</div>
+							</div>
+						{:else if formOutputType === 'webhook'}
+							<div class="af-field" transition:slide={{ duration: 150 }}>
+								<label class="af-label" for="auto-output-webhook-url">Webhook URL</label>
+								<input id="auto-output-webhook-url" type="text" class="af-input"
+									bind:value={formOutputConfig.url}
+									placeholder="https://example.com/webhook" />
+							</div>
+						{/if}
+
+						<!-- Approval toggle -->
+						<label class="af-toggle-row">
+							<button
+								class="auto-toggle"
+								class:active={formRequiresApproval}
+								onclick={() => formRequiresApproval = !formRequiresApproval}
+								role="switch"
+								aria-checked={formRequiresApproval}
+								aria-label="Requires approval"
+							>
+								<span class="auto-toggle-thumb"></span>
+							</button>
+							<span class="auto-toggle-label">
+								<Shield size={14} />
+								Requires approval before running
+							</span>
+						</label>
+					</div>
+				{/if}
+			</div>
+
+			<div class="af-divider"></div>
+
+			<!-- ═══ SECTION: Budget & Limits ═══ -->
+			<div class="af-section">
+				<button class="af-section-header" onclick={() => toggleSection('budget')}>
+					<div class="af-section-title">
+						<DollarSign size={16} />
+						<h3>Budget & Limits</h3>
+					</div>
+					{#if collapsedSections.has('budget')}
+						<ChevronRight size={14} class="af-chevron" />
+					{:else}
+						<ChevronDown size={14} class="af-chevron" />
+					{/if}
+				</button>
+				{#if !collapsedSections.has('budget')}
+					<div class="af-section-body" transition:slide={{ duration: 150 }}>
+						<div class="af-field-grid af-field-grid--3col">
+							<div class="af-field">
+								<label class="af-label" for="auto-max-cost-run">Max cost/run ($)</label>
+								<input id="auto-max-cost-run" type="number" class="af-input" step="0.01" min="0" bind:value={formMaxCostPerRun} placeholder="No limit" />
+							</div>
+							<div class="af-field">
+								<label class="af-label" for="auto-max-cost-day">Max cost/day ($)</label>
+								<input id="auto-max-cost-day" type="number" class="af-input" step="0.01" min="0" bind:value={formMaxCostPerDay} placeholder="No limit" />
+							</div>
+							<div class="af-field">
+								<label class="af-label" for="auto-max-cost-total">Max total ($)</label>
+								<input id="auto-max-cost-total" type="number" class="af-input" step="0.01" min="0" bind:value={formMaxCostTotal} placeholder="No limit" />
+							</div>
+							<div class="af-field">
+								<label class="af-label" for="auto-max-runs-day">Max runs/day</label>
+								<input id="auto-max-runs-day" type="number" class="af-input" min="1" bind:value={formMaxRunsPerDay} placeholder="No limit" />
+							</div>
+							<div class="af-field">
+								<label class="af-label" for="auto-max-turns">Max turns</label>
+								<input id="auto-max-turns" type="number" class="af-input" min="1" bind:value={formMaxTurns} />
+							</div>
+							<div class="af-field">
+								<label class="af-label" for="auto-timeout">Timeout (s)</label>
+								<input id="auto-timeout" type="number" class="af-input" min="10" bind:value={formTimeoutSeconds} />
+							</div>
+						</div>
+					</div>
+				{/if}
+			</div>
+
+		</div>
 	</div>
 {/snippet}
 
@@ -2085,13 +2228,303 @@
 		height: 100%;
 	}
 
-	.auto-form-body {
+	.af-form-body {
 		flex: 1;
 		overflow-y: auto;
-		padding: 16px;
+		padding: 24px 20px;
+		display: flex;
+		flex-direction: column;
+		gap: 0;
 	}
 
-	/* Trigger selector */
+	/* ─── Sections ─── */
+	.af-section {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.af-section-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 10px 0;
+		background: none;
+		border: none;
+		cursor: pointer;
+		color: var(--text-primary, var(--foreground));
+		transition: color 150ms;
+	}
+
+	.af-section-header:hover {
+		color: var(--primary);
+	}
+
+	.af-section-title {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.af-section-title h3 {
+		font-size: var(--text-md, 0.875rem);
+		font-weight: 600;
+		margin: 0;
+	}
+
+	.af-section-title :global(svg) {
+		color: var(--primary);
+		flex-shrink: 0;
+	}
+
+	.af-section-count {
+		font-size: var(--text-xs, 0.6875rem);
+		font-weight: 600;
+		color: var(--primary);
+		padding: 1px 8px;
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		border-radius: 6px;
+	}
+
+	.af-section-header :global(.af-chevron) {
+		color: var(--text-secondary, var(--muted-foreground));
+		flex-shrink: 0;
+	}
+
+	.af-section-body {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		padding: 4px 0 12px 0;
+	}
+
+	.af-divider {
+		height: 1px;
+		background: var(--border-subtle, var(--border));
+		width: 100%;
+	}
+
+	/* ─── Fields ─── */
+	.af-field-grid {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 16px;
+	}
+
+	.af-field-grid--3col {
+		grid-template-columns: repeat(3, 1fr);
+	}
+
+	@media (max-width: 640px) {
+		.af-field-grid {
+			grid-template-columns: 1fr;
+		}
+		.af-field-grid--3col {
+			grid-template-columns: repeat(2, 1fr);
+		}
+	}
+
+	@media (max-width: 400px) {
+		.af-field-grid--3col {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	.af-field {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.af-label {
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 500;
+		color: var(--text-secondary, var(--muted-foreground));
+	}
+
+	.af-required {
+		color: var(--destructive, #ef4444);
+	}
+
+	.af-input {
+		width: 100%;
+		padding: 10px 14px;
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle, var(--border));
+		border-radius: var(--radius-md, 10px);
+		color: var(--text-primary, var(--foreground));
+		font-size: var(--text-md, 0.875rem);
+		font-family: inherit;
+		transition: border-color 200ms, box-shadow 200ms;
+		outline: none;
+	}
+
+	.af-input:focus {
+		border-color: var(--primary);
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
+	}
+
+	.af-input::placeholder {
+		color: var(--text-tertiary, var(--muted-foreground));
+	}
+
+	.af-input--mono {
+		font-family: var(--card-font-mono, 'JetBrains Mono', monospace);
+		font-size: var(--text-sm, 0.75rem);
+	}
+
+	.af-textarea {
+		min-height: 100px;
+		resize: vertical;
+	}
+
+	.af-hint {
+		font-size: var(--text-xs, 0.6875rem);
+		color: var(--text-tertiary, var(--muted-foreground));
+		margin: 0;
+	}
+
+	.af-subsection-label {
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 600;
+		color: var(--text-secondary, var(--muted-foreground));
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		margin-top: 4px;
+	}
+
+	/* ─── Item Cards (Triggers & Actions) ─── */
+	.af-item-card {
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle, var(--border));
+		border-radius: var(--radius-md, 10px);
+		overflow: hidden;
+		transition: border-color 200ms;
+	}
+
+	.af-item-card:hover {
+		border-color: var(--border-emphasis, var(--border));
+	}
+
+	.af-item-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		width: 100%;
+		padding: 10px 14px;
+		background: none;
+		border: none;
+		cursor: pointer;
+		color: inherit;
+		text-align: left;
+		transition: background 150ms;
+	}
+
+	.af-item-header:hover {
+		background: color-mix(in oklch, var(--foreground) 3%, transparent);
+	}
+
+	.af-item-header-left {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+		flex: 1;
+	}
+
+	.af-item-header-left :global(svg) {
+		flex-shrink: 0;
+		color: var(--text-secondary, var(--muted-foreground));
+	}
+
+	.af-item-header-actions {
+		display: flex;
+		gap: 4px;
+		flex-shrink: 0;
+	}
+
+	.af-item-type-badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		padding: 2px 10px;
+		font-size: var(--text-xs, 0.6875rem);
+		font-weight: 600;
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		color: var(--primary);
+		border-radius: 6px;
+		white-space: nowrap;
+	}
+
+	.af-item-step-num {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 22px;
+		height: 22px;
+		font-size: var(--text-xs, 0.6875rem);
+		font-weight: 700;
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		color: var(--primary);
+		border-radius: 50%;
+		flex-shrink: 0;
+	}
+
+	.af-item-summary {
+		font-size: var(--text-sm, 0.75rem);
+		color: var(--text-secondary, var(--muted-foreground));
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		min-width: 0;
+	}
+
+	.af-item-body {
+		padding: 12px 14px 14px;
+		border-top: 1px solid var(--border-subtle, var(--border));
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.af-trigger-config {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	/* ─── Add Button ─── */
+	.af-add-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+		padding: 10px;
+		background: none;
+		border: 1px dashed var(--border-subtle, var(--border));
+		border-radius: var(--radius-md, 10px);
+		color: var(--text-secondary, var(--muted-foreground));
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 500;
+		cursor: pointer;
+		transition: all 200ms;
+	}
+
+	.af-add-btn:hover {
+		border-color: var(--primary);
+		color: var(--primary);
+		background: color-mix(in oklch, var(--primary) 5%, transparent);
+	}
+
+	/* ─── Toggle Row ─── */
+	.af-toggle-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		cursor: pointer;
+		margin-top: 4px;
+	}
+
+	/* Trigger selector (shared) */
 	.auto-trigger-selector {
 		display: flex;
 		gap: 6px;
@@ -2146,6 +2579,7 @@
 	.cron-field {
 		display: flex;
 		flex-direction: column;
+		gap: 4px;
 	}
 
 	.cron-summary {
@@ -2155,8 +2589,8 @@
 		gap: 8px;
 		margin-top: 10px;
 		padding: 8px 12px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle, var(--border));
+		background: color-mix(in oklch, var(--primary) 5%, transparent);
+		border: 1px solid color-mix(in oklch, var(--primary) 15%, transparent);
 		border-radius: var(--radius-sm, calc(var(--radius, 0.75rem) * 0.5));
 		font-size: var(--text-sm, 0.75rem);
 	}
@@ -2184,31 +2618,6 @@
 		font-size: var(--text-sm, 0.75rem);
 	}
 
-	/* Trigger cards */
-	.trigger-card {
-		background: var(--card-surface-elevated, rgba(255, 255, 255, 0.03));
-		border: 1px solid var(--card-border, rgba(255, 255, 255, 0.08));
-		border-radius: 8px;
-		padding: 12px;
-		margin-top: 8px;
-	}
-
-	.trigger-card-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		margin-bottom: 8px;
-	}
-
-	/* Action step cards */
-	.action-step-card {
-		background: var(--card-surface-elevated, rgba(255, 255, 255, 0.03));
-		border: 1px solid var(--card-border, rgba(255, 255, 255, 0.08));
-		border-radius: 8px;
-		padding: 12px;
-		margin-top: 8px;
-	}
-
 	/* Detail view rows */
 	.auto-detail-row {
 		display: flex;
@@ -2230,45 +2639,7 @@
 		font-size: var(--text-xs, 0.6875rem);
 	}
 
-	/* Budget section */
-	.auto-expand-btn {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 6px 0;
-		background: none;
-		border: none;
-		color: var(--text-secondary, var(--muted-foreground));
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 600;
-		cursor: pointer;
-		transition: color 150ms ease;
-	}
-
-	.auto-expand-btn:hover {
-		color: var(--text-primary, var(--foreground));
-	}
-
-	.auto-budget-grid {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 12px;
-		margin-top: 12px;
-	}
-
-	.auto-budget-field {
-		display: flex;
-		flex-direction: column;
-	}
-
 	/* Approval toggle */
-	.auto-toggle-row {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		cursor: pointer;
-	}
-
 	.auto-toggle {
 		position: relative;
 		width: 40px;
@@ -2626,10 +2997,6 @@
 			justify-content: center;
 			padding-top: 8px;
 			border-top: 1px solid var(--border-subtle, var(--border));
-		}
-
-		.auto-budget-grid {
-			grid-template-columns: 1fr;
 		}
 
 		.cron-builder-grid {
