@@ -259,18 +259,31 @@
 		50% { opacity: 0.6; }
 	}
 
-	/* Desktop layout — flex-based centering that respects right elements.
-	   The title is centered via text-align within its flex item, and the
-	   right elements wrap to a second row when the header is too narrow
-	   (e.g., sidebar open on a medium-width screen). */
+	/* Desktop layout — title is absolutely centered across the full header,
+	   with right elements (git actions, context badges) pushed to the right edge. */
 	@media (min-width: 1024px) {
+		.page-header {
+			position: relative;
+		}
+
 		.header-left {
-			justify-content: center;
+			flex: 0 0 auto;
+		}
+
+		.header-title {
+			position: absolute;
+			left: 50%;
+			transform: translateX(-50%);
+			max-width: 50%;
+			text-align: center;
+			pointer-events: none;
 		}
 
 		.header-right {
+			flex: 0 0 auto;
+			margin-left: auto;
 			flex-wrap: wrap;
-			justify-content: center;
+			justify-content: flex-end;
 		}
 	}
 
