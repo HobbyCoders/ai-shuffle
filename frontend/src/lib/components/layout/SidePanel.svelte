@@ -57,20 +57,43 @@
 	// Search state
 	let searchQuery = $state('');
 	let searchInputRef = $state<HTMLInputElement | null>(null);
-	let navExpanded = $state(true);
-	let sessionsExpanded = $state(true);
+
+	// Load persisted sidebar collapse state
+	function loadSidebarState(): Record<string, unknown> | null {
+		try {
+			const saved = localStorage.getItem('sidebar-collapse-state');
+			if (saved) return JSON.parse(saved);
+		} catch { /* ignore */ }
+		return null;
+	}
+	const _saved = loadSidebarState();
+
+	let navExpanded = $state((_saved?.navExpanded as boolean) ?? true);
+	let recentExpanded = $state((_saved?.recentExpanded as boolean) ?? true);
+	let sessionsExpanded = $state((_saved?.sessionsExpanded as boolean) ?? true);
+	let apiUsersExpanded = $state((_saved?.apiUsersExpanded as boolean) ?? true);
 
 	// Track which project groups are COLLAPSED (empty set = all expanded by default)
 	// This avoids needing a $effect to sync with project list, preventing infinite loops
-	let collapsedProjects = $state<Set<string>>(new Set());
+	let collapsedProjects = $state<Set<string>>(new Set((_saved?.collapsedProjects as string[]) ?? []));
+	let collapsedApiUsers = $state<Set<string>>(new Set((_saved?.collapsedApiUsers as string[]) ?? []));
+
+	// Persist sidebar collapse state
+	$effect(() => {
+		const state = {
+			navExpanded,
+			recentExpanded,
+			sessionsExpanded,
+			apiUsersExpanded,
+			collapsedProjects: [...collapsedProjects],
+			collapsedApiUsers: [...collapsedApiUsers]
+		};
+		localStorage.setItem('sidebar-collapse-state', JSON.stringify(state));
+	});
 
 	// Track project being deleted (for confirmation)
 	let deletingProjectId = $state<string | null>(null);
 	let deleteLoading = $state(false);
-
-	// API Users section
-	let apiUsersExpanded = $state(true);
-	let collapsedApiUsers = $state<Set<string>>(new Set());
 
 	// Group API user sessions by user name
 	interface ApiUserGroup {
@@ -151,7 +174,7 @@
 	const activeId = $derived($activeSession.sessionId);
 
 	const recentSessions = $derived(
-		sortWithFavorites($sessions).slice(0, 5)
+		sortWithFavorites($sessions).slice(0, 10)
 	);
 
 	const filteredSessions = $derived.by(() => {
@@ -375,33 +398,52 @@
 
 			<!-- Recent Sessions -->
 			{#if recentSessions.length > 0 && !searchQuery}
-				<div class="recent-section">
-					{#each recentSessions as session (session.id)}
-						<button
-							class="session-item"
-							class:active={isActiveChat(session.id)}
-							onclick={() => onOpenSession(session.id)}
-						>
-							{#if isStreaming(session.id)}
-								<div class="streaming-dot"></div>
-							{:else if needsAttention(session.id)}
-								<div class="attention-dot"></div>
+				<div class="sessions-section">
+					<button
+						class="section-header"
+						onclick={() => recentExpanded = !recentExpanded}
+						aria-expanded={recentExpanded}
+					>
+						<span class="section-title">Recent</span>
+						<div class="section-actions">
+							{#if recentExpanded}
+								<ChevronDown size={14} strokeWidth={1.5} />
+							{:else}
+								<ChevronRight size={14} strokeWidth={1.5} />
 							{/if}
-							<span class="session-title">{session.title || 'Untitled'}</span>
-							<span class="session-time">{formatRelativeTime(session.updated_at || session.created_at)}</span>
-							<span
-								class="favorite-btn"
-								class:is-favorite={session.is_favorite}
-								role="button"
-								tabindex="0"
-								onclick={(e) => handleToggleFavorite(e, session)}
-								onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleToggleFavorite(e, session); }}
-								title={session.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-							>
-								<Star size={12} strokeWidth={1.5} fill={session.is_favorite ? 'currentColor' : 'none'} />
-							</span>
-						</button>
-					{/each}
+						</div>
+					</button>
+
+					{#if recentExpanded}
+						<div class="recent-section">
+							{#each recentSessions as session (session.id)}
+								<button
+									class="session-item"
+									class:active={isActiveChat(session.id)}
+									onclick={() => onOpenSession(session.id)}
+								>
+									{#if isStreaming(session.id)}
+										<div class="streaming-dot"></div>
+									{:else if needsAttention(session.id)}
+										<div class="attention-dot"></div>
+									{/if}
+									<span class="session-title">{session.title || 'Untitled'}</span>
+									<span class="session-time">{formatRelativeTime(session.updated_at || session.created_at)}</span>
+									<span
+										class="favorite-btn"
+										class:is-favorite={session.is_favorite}
+										role="button"
+										tabindex="0"
+										onclick={(e) => handleToggleFavorite(e, session)}
+										onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleToggleFavorite(e, session); }}
+										title={session.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+									>
+										<Star size={12} strokeWidth={1.5} fill={session.is_favorite ? 'currentColor' : 'none'} />
+									</span>
+								</button>
+							{/each}
+						</div>
+					{/if}
 				</div>
 
 				<!-- Divider -->
@@ -611,7 +653,7 @@
 		flex-direction: column;
 		width: var(--sidebar-width, 390px);
 		height: 100%;
-		background: color-mix(in oklch, var(--background) 85%, black);
+		background: var(--background);
 		border-right: 1px solid var(--sidebar-border, var(--border));
 		box-shadow: 4px 0 16px -4px color-mix(in oklch, var(--foreground) 8%, transparent);
 		transition: width 200ms cubic-bezier(0.16, 1, 0.3, 1);
@@ -737,7 +779,7 @@
 		flex: 1;
 		min-width: 0;
 		gap: 10px;
-		padding: 8px 12px;
+		padding: 5px 12px;
 		background: var(--primary);
 		border: none;
 		border-radius: var(--radius);
@@ -766,7 +808,10 @@
 	.nav-items {
 		display: flex;
 		flex-direction: column;
-		gap: 1px;
+		background: var(--muted);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		overflow: clip;
 	}
 
 	.nav-item {
@@ -774,15 +819,20 @@
 		align-items: center;
 		gap: 10px;
 		padding: 7px 12px;
-		background: color-mix(in oklch, var(--background) 60%, var(--glass, transparent));
+		background: transparent;
 		border: none;
-		border-radius: calc(var(--radius) - 2px);
+		border-radius: 0;
+		border-top: 1px solid var(--border);
 		color: var(--muted-foreground);
 		font-size: 0.8125rem;
 		font-weight: 400;
 		cursor: pointer;
 		transition: all 120ms ease;
 		text-align: left;
+	}
+
+	.nav-item:first-child {
+		border-top: none;
 	}
 
 	.nav-item:hover {
@@ -793,7 +843,6 @@
 	.nav-item.active {
 		background: var(--selection-bg-emphasis);
 		color: var(--selection-text);
-		box-shadow: var(--shadow-s);
 	}
 
 	.nav-item.active :global(svg) {
@@ -812,8 +861,34 @@
 	.recent-section {
 		display: flex;
 		flex-direction: column;
-		gap: 2px;
-		padding: 0 12px;
+		margin: 0 4px 12px;
+		background: var(--muted);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		overflow: clip;
+	}
+
+	.recent-section .session-item {
+		background: transparent;
+		box-shadow: none;
+		border-radius: 0;
+		border-left: 3px solid transparent;
+		border-top: 1px solid var(--border);
+		padding: 8px 12px;
+	}
+
+	.recent-section .session-item:first-child {
+		border-top: none;
+	}
+
+	.recent-section .session-item:hover {
+		background: var(--hover-overlay);
+		box-shadow: none;
+	}
+
+	.recent-section .session-item.active {
+		background: var(--selection-bg);
+		border-left-color: var(--primary);
 	}
 
 	/* Sessions Section */
@@ -872,13 +947,12 @@
 	.search-input {
 		width: 100%;
 		padding: 6px 24px 6px 28px;
-		background: color-mix(in oklch, var(--background) 60%, var(--glass, transparent));
-		border: 1px solid var(--sidebar-border, var(--border));
+		background: var(--muted);
+		border: 1px solid var(--border);
 		border-radius: var(--radius);
 		color: var(--foreground);
 		font-size: 0.75rem;
 		outline: none;
-		box-shadow: var(--shadow-s);
 		transition: border-color 150ms ease, box-shadow 150ms ease;
 	}
 
@@ -925,9 +999,9 @@
 	.project-group {
 		display: flex;
 		flex-direction: column;
-		background: color-mix(in oklch, var(--background) 60%, var(--glass, transparent));
+		background: var(--muted);
+		border: 1px solid var(--border);
 		border-radius: var(--radius);
-		box-shadow: var(--shadow-s);
 		overflow: clip;
 	}
 
@@ -1112,7 +1186,7 @@
 		align-items: center;
 		gap: 8px;
 		padding: 10px 12px;
-		background: color-mix(in oklch, var(--background) 60%, var(--glass, transparent));
+		background: var(--muted);
 		border: none;
 		border-radius: calc(var(--radius) - 2px);
 		border-left: 3px solid transparent;
@@ -1120,14 +1194,12 @@
 		font-size: 0.8125rem;
 		cursor: pointer;
 		text-align: left;
-		box-shadow: var(--shadow-s);
-		transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+		transition: background-color 120ms ease, border-color 120ms ease;
 		position: relative;
 	}
 
 	.session-item:hover {
 		background: var(--hover-overlay);
-		box-shadow: var(--shadow-m);
 	}
 
 	.session-item.active {

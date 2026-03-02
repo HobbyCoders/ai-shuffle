@@ -388,7 +388,7 @@
 		align-items: center;
 		background: color-mix(in oklch, var(--foreground) 8%, var(--background));
 		border: 1px solid var(--border);
-		border-radius: 20px;
+		border-radius: var(--radius);
 		padding: 2px;
 		gap: 2px;
 		flex-shrink: 0;
@@ -401,7 +401,7 @@
 		padding: 4px 12px;
 		background: transparent;
 		border: none;
-		border-radius: 18px;
+		border-radius: calc(var(--radius) - 2px);
 		color: var(--muted-foreground);
 		font-size: 0.75rem;
 		font-weight: 500;
@@ -437,7 +437,7 @@
 		padding: 4px 10px;
 		background: color-mix(in oklch, var(--foreground) 8%, var(--background));
 		border: 1px solid var(--border);
-		border-radius: 16px;
+		border-radius: var(--radius);
 		color: var(--muted-foreground);
 		font-size: 0.75rem;
 		cursor: pointer;
@@ -469,7 +469,7 @@
 		overflow-y: auto;
 		background: var(--card);
 		border: 1px solid var(--border);
-		border-radius: 10px;
+		border-radius: var(--radius);
 		box-shadow: var(--shadow-l);
 		padding: 4px;
 		z-index: 100;
