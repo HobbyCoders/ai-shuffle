@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; height: 100vh; overflow: hidden; background: #f5f5f5; }
+
+  .layout {
+    display: flex;
+    height: 100vh;
+    perspective: 1200px;
+  }
+
+  .sidebar {
+    width: 260px;
+    background: #f0f0f0;
+    padding: 16px;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 2;
+    transform-origin: left center;
+    transition:
+      width 350ms cubic-bezier(0.16, 1, 0.3, 1),
+      transform 350ms cubic-bezier(0.16, 1, 0.3, 1),
+      opacity 250ms ease,
+      box-shadow 350ms ease;
+    box-shadow: 4px 0 24px -2px rgba(0,0,0,0.08), 1px 0 0 rgba(0,0,0,0.06);
+  }
+
+  .sidebar.collapsed {
+    width: 0;
+    padding: 0;
+    transform: rotateY(-12deg) scale(0.97);
+    opacity: 0;
+    box-shadow: none;
+    overflow: hidden;
+  }
+
+  .sidebar-inner {
+    opacity: 1;
+    transition: opacity 200ms ease 50ms;
+  }
+  .sidebar.collapsed .sidebar-inner {
+    opacity: 0;
+    transition: opacity 100ms ease;
+  }
+
+  .main {
+    flex: 1;
+    background: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 16px;
+    transition: border-radius 350ms ease;
+    position: relative;
+    z-index: 1;
+  }
+
+  /* Toggle button */
+  .toggle {
+    padding: 8px 20px;
+    border: 1px solid #ddd;
+    background: white;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    color: #333;
+  }
+  .toggle:hover { background: #f8f8f8; border-color: #999; }
+
+  /* Sidebar content mockup */
+  .sidebar h3 { font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+  .sidebar .item { padding: 6px 8px; font-size: 13px; color: #666; border-radius: 4px; cursor: pointer; }
+  .sidebar .item:hover { background: rgba(0,0,0,0.05); }
+  .sidebar .item.active { background: rgba(0,0,0,0.08); color: #111; }
+  .spacer { height: 16px; }
+
+  .main h1 { font-size: 28px; color: #333; font-weight: 300; }
+  .main p { color: #999; font-size: 14px; }
+</style>
+</head>
+<body>
+  <div class="layout">
+    <div class="sidebar" id="sidebar">
+      <div class="sidebar-inner">
+        <div class="item" style="border: 1px solid #ddd; text-align: center; margin-bottom: 12px; padding: 6px;">+ New session</div>
+        <h3>Pages</h3>
+        <div class="item">Docs</div>
+        <div class="item active">Files</div>
+        <div class="item">Plugins</div>
+        <div class="item">Settings</div>
+        <div class="spacer"></div>
+        <h3>Recent</h3>
+        <div class="item">Fix sidebar animation</div>
+        <div class="item">Debug websocket</div>
+        <div class="item">Add hook form</div>
+        <div class="item">Refactor stores</div>
+      </div>
+    </div>
+    <div class="main">
+      <h1>Paper Peel Sidebar</h1>
+      <p>Click the button to toggle the sidebar</p>
+      <button class="toggle" onclick="document.getElementById('sidebar').classList.toggle('collapsed')">
+        Toggle Sidebar
+      </button>
+    </div>
+  </div>
+</body>
+</html>

@@ -653,13 +653,17 @@
 		flex-direction: column;
 		width: var(--sidebar-width, 390px);
 		height: 100%;
-		background: var(--background);
+		background: color-mix(in oklch, var(--muted) 40%, var(--background));
 		border-right: 1px solid var(--sidebar-border, var(--border));
-		box-shadow: 4px 0 16px -4px color-mix(in oklch, var(--foreground) 8%, transparent);
-		transition: width 200ms cubic-bezier(0.16, 1, 0.3, 1);
+		transition:
+			width 350ms cubic-bezier(0.16, 1, 0.3, 1),
+			transform 350ms cubic-bezier(0.16, 1, 0.3, 1),
+			opacity 250ms ease,
+			box-shadow 350ms ease;
 		overflow: hidden;
 		flex-shrink: 0;
 		z-index: 1;
+		transform-origin: left center;
 	}
 
 	.side-panel.collapsed {
@@ -747,6 +751,13 @@
 		animation: fadeIn 150ms ease;
 		scrollbar-width: thin;
 		scrollbar-color: var(--scrollbar-thumb) transparent;
+		opacity: 1;
+		transition: opacity 200ms ease 50ms;
+	}
+
+	.side-panel.collapsed .side-panel-content {
+		opacity: 0;
+		transition: opacity 100ms ease;
 	}
 
 	.side-panel-content::-webkit-scrollbar {
@@ -778,26 +789,25 @@
 		justify-content: center;
 		flex: 1;
 		min-width: 0;
-		gap: 10px;
-		padding: 5px 12px;
-		background: var(--primary);
-		border: none;
+		gap: 8px;
+		padding: 6px 12px;
+		background: transparent;
+		border: 1px solid var(--border);
 		border-radius: var(--radius);
-		color: var(--primary-foreground);
+		color: var(--foreground);
 		font-size: 0.8125rem;
-		font-weight: 600;
+		font-weight: 500;
 		cursor: pointer;
-		box-shadow: var(--shadow-s);
-		transition: opacity 150ms ease, box-shadow 150ms ease;
+		transition: background-color 150ms ease, border-color 150ms ease;
 	}
 
 	.new-session-btn:hover {
-		opacity: 0.9;
-		box-shadow: var(--shadow-m);
+		background: var(--hover-overlay);
+		border-color: var(--foreground);
 	}
 
 	.new-session-btn :global(svg) {
-		color: var(--primary-foreground);
+		color: var(--muted-foreground);
 	}
 
 	/* Navigation Section */
@@ -808,31 +818,23 @@
 	.nav-items {
 		display: flex;
 		flex-direction: column;
-		background: var(--muted);
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		overflow: clip;
+		gap: 1px;
 	}
 
 	.nav-item {
 		display: flex;
 		align-items: center;
 		gap: 10px;
-		padding: 7px 12px;
+		padding: 6px 12px;
 		background: transparent;
 		border: none;
-		border-radius: 0;
-		border-top: 1px solid var(--border);
+		border-radius: calc(var(--radius) - 2px);
 		color: var(--muted-foreground);
 		font-size: 0.8125rem;
 		font-weight: 400;
 		cursor: pointer;
 		transition: all 120ms ease;
 		text-align: left;
-	}
-
-	.nav-item:first-child {
-		border-top: none;
 	}
 
 	.nav-item:hover {
@@ -849,46 +851,18 @@
 		color: var(--selection-text);
 	}
 
-	/* Divider */
+	/* Divider — spacing only, no visible line */
 	.divider {
-		height: 1px;
-		background: var(--border);
-		margin: 8px 16px;
-		opacity: 0.5;
+		height: 0;
+		margin: 6px 0;
 	}
 
 	/* Recent Sessions */
 	.recent-section {
 		display: flex;
 		flex-direction: column;
-		margin: 0 4px 12px;
-		background: var(--muted);
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		overflow: clip;
-	}
-
-	.recent-section .session-item {
-		background: transparent;
-		box-shadow: none;
-		border-radius: 0;
-		border-left: 3px solid transparent;
-		border-top: 1px solid var(--border);
-		padding: 8px 12px;
-	}
-
-	.recent-section .session-item:first-child {
-		border-top: none;
-	}
-
-	.recent-section .session-item:hover {
-		background: var(--hover-overlay);
-		box-shadow: none;
-	}
-
-	.recent-section .session-item.active {
-		background: var(--selection-bg);
-		border-left-color: var(--primary);
+		gap: 1px;
+		padding: 0 4px;
 	}
 
 	/* Sessions Section */
@@ -947,7 +921,7 @@
 	.search-input {
 		width: 100%;
 		padding: 6px 24px 6px 28px;
-		background: var(--muted);
+		background: transparent;
 		border: 1px solid var(--border);
 		border-radius: var(--radius);
 		color: var(--foreground);
@@ -991,7 +965,7 @@
 	.session-list {
 		display: flex;
 		flex-direction: column;
-		gap: 6px;
+		gap: 2px;
 		padding: 0 4px 12px;
 	}
 
@@ -999,10 +973,6 @@
 	.project-group {
 		display: flex;
 		flex-direction: column;
-		background: var(--muted);
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		overflow: clip;
 	}
 
 	.project-group-header {
@@ -1160,24 +1130,9 @@
 		padding-left: 0;
 	}
 
-	/* Sessions inside project group cards: reset card styling, use separator borders */
+	/* Sessions inside project groups */
 	.project-group-sessions .session-item {
-		background: transparent;
-		box-shadow: none;
-		border-radius: 0;
-		border-left: 3px solid transparent;
-		border-top: 1px solid var(--sidebar-border, var(--border));
-		padding: 8px 12px;
-	}
-
-	.project-group-sessions .session-item:hover {
-		background: var(--hover-overlay);
-		box-shadow: none;
-	}
-
-	.project-group-sessions .session-item.active {
-		background: var(--selection-bg);
-		border-left-color: var(--primary);
+		padding-left: 28px;
 	}
 
 	/* Session Item */
@@ -1185,8 +1140,8 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		padding: 10px 12px;
-		background: var(--muted);
+		padding: 7px 12px;
+		background: transparent;
 		border: none;
 		border-radius: calc(var(--radius) - 2px);
 		border-left: 3px solid transparent;

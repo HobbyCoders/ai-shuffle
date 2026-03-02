@@ -8,16 +8,19 @@
 	 */
 	import type { Hook, HookCreate, HookUpdate, HookEventType, HookType } from '$lib/api/client';
 	import { HOOK_EVENT_TYPES } from '$lib/api/client';
+	import { projects } from '$lib/stores/app-data';
+	import type { Project } from '$lib/stores/types';
 
 	interface Props {
 		hook?: Hook | null;
-		onSave: (data: HookCreate | HookUpdate) => void;
+		onSave: (data: HookCreate | HookUpdate, projectId: string | null) => void;
 	}
 
 	let { hook = null, onSave }: Props = $props();
 
 	// Form state
 	let name = $state(hook?.name || '');
+	let scopeProjectId = $state<string | null>(hook?.project_id ?? null);
 	let event = $state<HookEventType>(hook?.event || 'Stop');
 	let hookType = $state<HookType>(hook?.hook_type || 'bash');
 	let command = $state(hook?.command || '');
@@ -63,7 +66,7 @@
 			enabled
 		};
 
-		onSave(data);
+		onSave(data, scopeProjectId);
 	}
 
 	const eventDescriptions: Record<string, string> = {
@@ -89,6 +92,17 @@
 			placeholder="e.g., Slack Notification"
 			class="form-input"
 		/>
+	</div>
+
+	<div class="form-group">
+		<label for="hook-scope">Scope</label>
+		<select id="hook-scope" bind:value={scopeProjectId} class="form-select">
+			<option value={null}>App (all sessions)</option>
+			{#each $projects as project (project.id)}
+				<option value={project.id}>{project.name}</option>
+			{/each}
+		</select>
+		<p class="form-hint">{scopeProjectId ? 'Fires only for sessions in this project' : 'Fires for all sessions regardless of project'}</p>
 	</div>
 
 	<div class="form-group">

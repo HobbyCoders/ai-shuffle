@@ -113,6 +113,7 @@
 	class="app-layout"
 	class:mobile={isMobile}
 	class:sidebar-overlay={$sidebarOverlay}
+	class:sidebar-collapsed={$sidebarCollapsed}
 	class:resizing={isResizing}
 	style:--sidebar-width="{$sidebarWidth}px"
 >
@@ -166,6 +167,7 @@
 		height: 100dvh;
 		background: var(--background);
 		overflow: hidden;
+		perspective: 1200px;
 	}
 
 	/* Disable text selection and pointer events on iframes while resizing */
@@ -185,6 +187,28 @@
 		min-width: 0;
 		min-height: 0;
 		height: 100%;
+		background: var(--card);
+		position: relative;
+		z-index: 1;
+		border-top-left-radius: 12px;
+		border-bottom-left-radius: 12px;
+		box-shadow: -2px 0 16px -4px rgba(0,0,0,0.06);
+		transition: border-radius 350ms cubic-bezier(0.16,1,0.3,1),
+			box-shadow 350ms cubic-bezier(0.16,1,0.3,1);
+	}
+
+	/* Remove rounded left edge when sidebar is collapsed or in mobile overlay */
+	.app-layout.sidebar-collapsed .main-content,
+	.app-layout.sidebar-overlay .main-content {
+		border-top-left-radius: 0;
+		border-bottom-left-radius: 0;
+		box-shadow: none;
+	}
+
+	/* Desktop: paper-peel 3D collapse animation */
+	.app-layout:not(.sidebar-overlay) :global(.side-panel.collapsed) {
+		transform: rotateY(-12deg) scale(0.97);
+		opacity: 0;
 	}
 
 	/* Resize handle */

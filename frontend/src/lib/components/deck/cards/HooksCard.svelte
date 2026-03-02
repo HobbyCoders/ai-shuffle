@@ -145,17 +145,17 @@
 		formRef?.save();
 	}
 
-	async function handleFormSave(data: HookCreate | HookUpdate) {
+	async function handleFormSave(data: HookCreate | HookUpdate, projectId: string | null = null) {
 		formSaving = true;
 		try {
 			if (selectedHook) {
 				await hooks.updateHook(selectedHook.id, data as HookUpdate);
-			} else if (activeTab === 'app') {
+			} else if (projectId) {
+				// Project-scoped hook
+				await hooks.createHook(projectId, data as HookCreate);
+			} else {
 				// App-level hook — no project_id
 				await hooks.createAppHook(data as HookCreate);
-			} else if ($selectedProject) {
-				// Project-scoped hook
-				await hooks.createHook($selectedProject, data as HookCreate);
 			}
 			backToList();
 		} catch (e) {
