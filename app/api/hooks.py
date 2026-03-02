@@ -1,5 +1,5 @@
 """
-Project hooks management API routes
+Hook management API routes — project-scoped and app-level hooks
 """
 
 import uuid
@@ -33,7 +33,7 @@ def _validate_hook_data(hook_data: HookCreate | HookUpdate, is_create: bool = Fa
 
     hook_type = getattr(hook_data, 'hook_type', None)
     if is_create:
-        # For create, validate that command or url is provided based on type
+        # For create, validate that required fields are provided based on type
         if hook_type == 'bash' and not hook_data.command:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -44,6 +44,11 @@ def _validate_hook_data(hook_data: HookCreate | HookUpdate, is_create: bool = Fa
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Webhook hooks must have a URL"
             )
+        if hook_type == 'message' and not hook_data.message_template:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Message hooks must have a message template"
+            )
 
 
 @router.get("/events", response_model=List[str])
@@ -52,13 +57,57 @@ async def list_event_types(token: str = Depends(require_auth)):
     return VALID_HOOK_EVENTS
 
 
+# =========================================================================
+# App-level hooks (no project)
+# =========================================================================
+
+@router.get("/app", response_model=List[Hook])
+async def get_app_hooks(
+    request: Request,
+    token: str = Depends(require_auth)
+):
+    """Get all app-level hooks (not scoped to any project)"""
+    return database.get_app_hooks()
+
+
+@router.post("/app", response_model=Hook, status_code=status.HTTP_201_CREATED)
+async def create_app_hook(
+    hook_data: HookCreate,
+    request: Request,
+    token: str = Depends(require_auth)
+):
+    """Create a new app-level hook (fires for all sessions)"""
+    _validate_hook_data(hook_data, is_create=True)
+
+    hook_id = f"hook-{uuid.uuid4().hex[:12]}"
+    hook = database.create_hook(
+        hook_id=hook_id,
+        project_id=None,
+        name=hook_data.name,
+        event=hook_data.event,
+        hook_type=hook_data.hook_type,
+        command=hook_data.command,
+        timeout=hook_data.timeout,
+        url=hook_data.url,
+        secret=hook_data.secret,
+        enabled=hook_data.enabled,
+        tool_matcher=hook_data.tool_matcher,
+        message_template=hook_data.message_template
+    )
+    return hook
+
+
+# =========================================================================
+# Project-scoped hooks
+# =========================================================================
+
 @router.get("/project/{project_id}", response_model=List[Hook])
 async def get_project_hooks(
     project_id: str,
     request: Request,
     token: str = Depends(require_auth)
 ):
-    """Get all hooks for a project"""
+    """Get all hooks for a project (project-scoped + app-level)"""
     check_project_access(request, project_id)
 
     # Verify project exists
@@ -69,7 +118,7 @@ async def get_project_hooks(
             detail=f"Project not found: {project_id}"
         )
 
-    return database.get_hooks_for_project(project_id)
+    return database.get_all_hooks_for_project(project_id)
 
 
 @router.post("/project/{project_id}", response_model=Hook, status_code=status.HTTP_201_CREATED)
@@ -104,10 +153,15 @@ async def create_project_hook(
         url=hook_data.url,
         secret=hook_data.secret,
         enabled=hook_data.enabled,
-        tool_matcher=hook_data.tool_matcher
+        tool_matcher=hook_data.tool_matcher,
+        message_template=hook_data.message_template
     )
     return hook
 
+
+# =========================================================================
+# Individual hook operations
+# =========================================================================
 
 @router.get("/{hook_id}", response_model=Hook)
 async def get_hook(
@@ -123,7 +177,9 @@ async def get_hook(
             detail=f"Hook not found: {hook_id}"
         )
 
-    check_project_access(request, hook["project_id"])
+    # Only check project access for project-scoped hooks
+    if hook.get("project_id"):
+        check_project_access(request, hook["project_id"])
     return hook
 
 
@@ -142,7 +198,8 @@ async def update_hook(
             detail=f"Hook not found: {hook_id}"
         )
 
-    check_project_access(request, existing["project_id"])
+    if existing.get("project_id"):
+        check_project_access(request, existing["project_id"])
     _validate_hook_data(hook_data)
 
     hook = database.update_hook(
@@ -155,7 +212,8 @@ async def update_hook(
         url=hook_data.url,
         secret=hook_data.secret,
         enabled=hook_data.enabled,
-        tool_matcher=hook_data.tool_matcher
+        tool_matcher=hook_data.tool_matcher,
+        message_template=hook_data.message_template
     )
     return hook
 
@@ -174,7 +232,8 @@ async def delete_hook(
             detail=f"Hook not found: {hook_id}"
         )
 
-    check_project_access(request, existing["project_id"])
+    if existing.get("project_id"):
+        check_project_access(request, existing["project_id"])
 
     if not database.delete_hook(hook_id):
         raise HTTPException(
@@ -197,7 +256,8 @@ async def test_hook(
             detail=f"Hook not found: {hook_id}"
         )
 
-    check_project_access(request, hook["project_id"])
+    if hook.get("project_id"):
+        check_project_access(request, hook["project_id"])
 
     # Import hook executor and run test
     from app.core.hook_executor import test_hook as execute_test_hook
@@ -205,6 +265,10 @@ async def test_hook(
     result = await execute_test_hook(hook)
     return result
 
+
+# =========================================================================
+# Plugin hooks (read-only)
+# =========================================================================
 
 @router.get("/plugins/all", response_model=List[PluginHookInfo])
 async def get_plugin_hooks(

@@ -18,7 +18,7 @@ from app.db.base import get_db, row_to_dict, rows_to_list, logger
 class HookRow(TypedDict):
     """Full project hook row from SELECT * FROM project_hooks."""
     id: str
-    project_id: str
+    project_id: Optional[str]
     name: str
     event: str
     hook_type: str
@@ -28,6 +28,7 @@ class HookRow(TypedDict):
     secret: Optional[str]
     enabled: bool
     tool_matcher: Optional[str]
+    message_template: Optional[str]
     created_at: str
     updated_at: str
     last_triggered_at: Optional[str]
@@ -53,6 +54,27 @@ def get_hooks_for_project(project_id: str) -> List[HookRow]:
         return rows_to_list(cursor.fetchall())
 
 
+def get_app_hooks() -> List[HookRow]:
+    """Get all app-level hooks (project_id is NULL)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM project_hooks WHERE project_id IS NULL ORDER BY created_at DESC"
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def get_all_hooks_for_project(project_id: str) -> List[HookRow]:
+    """Get all hooks relevant to a project: project-scoped + app-level hooks."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM project_hooks WHERE (project_id = ? OR project_id IS NULL) ORDER BY created_at DESC",
+            (project_id,)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
 def get_enabled_hooks_for_project(project_id: str) -> List[HookRow]:
     """Get all enabled hooks for a project"""
     with get_db() as conn:
@@ -65,38 +87,50 @@ def get_enabled_hooks_for_project(project_id: str) -> List[HookRow]:
 
 
 def get_hooks_for_project_and_event(project_id: str, event: str) -> List[HookRow]:
-    """Get all enabled hooks for a project that match a specific event"""
+    """Get all enabled hooks for a project (+ app hooks) that match a specific event"""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM project_hooks WHERE project_id = ? AND event = ? AND enabled = TRUE ORDER BY created_at",
+            "SELECT * FROM project_hooks WHERE (project_id = ? OR project_id IS NULL) AND event = ? AND enabled = TRUE ORDER BY created_at",
             (project_id, event)
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def get_app_hooks_for_event(event: str) -> List[HookRow]:
+    """Get all enabled app-level hooks that match a specific event"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM project_hooks WHERE project_id IS NULL AND event = ? AND enabled = TRUE ORDER BY created_at",
+            (event,)
         )
         return rows_to_list(cursor.fetchall())
 
 
 def create_hook(
     hook_id: str,
-    project_id: str,
     name: str,
     event: str,
     hook_type: str,
+    project_id: Optional[str] = None,
     command: Optional[str] = None,
     timeout: int = 30000,
     url: Optional[str] = None,
     secret: Optional[str] = None,
     enabled: bool = True,
-    tool_matcher: Optional[str] = None
+    tool_matcher: Optional[str] = None,
+    message_template: Optional[str] = None
 ) -> Optional[HookRow]:
-    """Create a new project hook"""
+    """Create a new hook (project-scoped or app-level)"""
     now = datetime.utcnow().isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO project_hooks
-               (id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (hook_id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, now, now)
+               (id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, message_template, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (hook_id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, message_template, now, now)
         )
     return get_hook(hook_id)
 
@@ -111,9 +145,10 @@ def update_hook(
     url: Optional[str] = None,
     secret: Optional[str] = None,
     enabled: Optional[bool] = None,
-    tool_matcher: Optional[str] = None
+    tool_matcher: Optional[str] = None,
+    message_template: Optional[str] = None
 ) -> Optional[HookRow]:
-    """Update a project hook"""
+    """Update a hook"""
     existing = get_hook(hook_id)
     if not existing:
         return None
@@ -148,6 +183,9 @@ def update_hook(
     if tool_matcher is not None:
         updates.append("tool_matcher = ?")
         values.append(tool_matcher if tool_matcher else None)
+    if message_template is not None:
+        updates.append("message_template = ?")
+        values.append(message_template if message_template else None)
 
     if updates:
         updates.append("updated_at = ?")
@@ -164,7 +202,7 @@ def update_hook(
 
 
 def delete_hook(hook_id: str) -> bool:
-    """Delete a project hook"""
+    """Delete a hook"""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM project_hooks WHERE id = ?", (hook_id,))

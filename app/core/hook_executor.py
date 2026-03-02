@@ -1,5 +1,5 @@
 """
-Hook execution service for running bash commands and webhook calls
+Hook execution service for running bash commands, webhook calls, and message injection
 """
 
 import asyncio
@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -202,9 +203,107 @@ async def execute_webhook_hook(
         }
 
 
+async def execute_message_hook(
+    hook: Dict[str, Any],
+    event_data: Dict[str, Any],
+    session_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Execute a message hook by injecting a user message into the active chat session.
+
+    The message_template is rendered with event data variables and sent as a new
+    user message in the specified session.
+
+    Args:
+        hook: Hook configuration from database (must include message_template)
+        event_data: Event data for template variable substitution
+        session_id: Active session to inject the message into
+
+    Returns:
+        Dict with success, duration_ms, output, and error fields
+    """
+    template = hook.get("message_template")
+    if not template:
+        return {
+            "success": False,
+            "duration_ms": 0,
+            "output": None,
+            "error": "No message template specified"
+        }
+
+    if not session_id:
+        return {
+            "success": False,
+            "duration_ms": 0,
+            "output": None,
+            "error": "No active session to send message to"
+        }
+
+    start_time = time.time()
+
+    try:
+        # Build substitution variables from event_data
+        data = event_data.get("data", {})
+        variables = {
+            "event": event_data.get("event", ""),
+            "timestamp": event_data.get("timestamp", ""),
+            "session_id": session_id,
+            "tool_name": data.get("tool_name", ""),
+            "hook_name": hook.get("name", ""),
+            **{k: str(v) for k, v in data.items() if v is not None}
+        }
+
+        # Render template — replace {variable} placeholders
+        rendered = template
+        for key, value in variables.items():
+            rendered = rendered.replace(f"{{{key}}}", str(value))
+
+        # Inject as a user message into the session
+        message = database.add_session_message(
+            session_id=session_id,
+            role="user",
+            content=rendered,
+            metadata={"source": "hook", "hook_id": hook.get("id"), "hook_name": hook.get("name")}
+        )
+
+        # Broadcast to connected clients
+        try:
+            from app.core.sync_engine import sync_engine
+            await sync_engine.broadcast_message_added(
+                session_id=session_id,
+                message={
+                    "role": "user",
+                    "content": rendered,
+                    "metadata": {"source": "hook", "hook_id": hook.get("id")}
+                },
+                source_device_id=None  # Broadcast to all devices
+            )
+        except Exception as broadcast_err:
+            logger.warning(f"Failed to broadcast hook message: {broadcast_err}")
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        return {
+            "success": True,
+            "duration_ms": duration_ms,
+            "output": f"Message sent: {rendered[:200]}",
+            "error": None
+        }
+
+    except Exception as e:
+        duration_ms = int((time.time() - start_time) * 1000)
+        logger.exception(f"Error executing message hook {hook.get('id')}: {e}")
+        return {
+            "success": False,
+            "duration_ms": duration_ms,
+            "output": None,
+            "error": str(e)
+        }
+
+
 async def execute_hook(
     hook: Dict[str, Any],
-    event_data: Dict[str, Any]
+    event_data: Dict[str, Any],
+    session_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Execute a hook based on its type.
@@ -212,6 +311,7 @@ async def execute_hook(
     Args:
         hook: Hook configuration from database
         event_data: Event data to pass to the hook
+        session_id: Active session ID (required for message hooks)
 
     Returns:
         Dict with success, duration_ms, output, and error fields
@@ -222,6 +322,8 @@ async def execute_hook(
         result = await execute_bash_hook(hook, event_data)
     elif hook_type == "webhook":
         result = await execute_webhook_hook(hook, event_data)
+    elif hook_type == "message":
+        result = await execute_message_hook(hook, event_data, session_id=session_id)
     else:
         result = {
             "success": False,
@@ -239,30 +341,36 @@ async def execute_hook(
 
 
 async def execute_hooks_for_event(
-    project_id: str,
+    project_id: Optional[str],
     event: str,
     event_data: Dict[str, Any],
-    tool_name: Optional[str] = None
+    tool_name: Optional[str] = None,
+    session_id: Optional[str] = None
 ) -> None:
     """
-    Execute all enabled hooks for a project that match the given event.
+    Execute all enabled hooks for a project (+ app hooks) that match the given event.
     This is a fire-and-forget operation - errors are logged but not raised.
 
     Args:
-        project_id: Project ID
+        project_id: Project ID (None for app-only hooks)
         event: Event type (e.g., "PreToolUse", "SessionStart")
         event_data: Event data to pass to hooks
         tool_name: Tool name for PreToolUse/PostToolUse events (for filtering)
+        session_id: Active session ID (required for message hooks)
     """
     try:
-        hooks = database.get_hooks_for_project_and_event(project_id, event)
+        if project_id:
+            # Returns both project-scoped and app-level hooks
+            hooks_list = database.get_hooks_for_project_and_event(project_id, event)
+        else:
+            # App-level hooks only
+            hooks_list = database.get_app_hooks_for_event(event)
 
-        for hook in hooks:
+        for hook in hooks_list:
             # Check tool matcher for PreToolUse/PostToolUse events
             tool_matcher = hook.get("tool_matcher")
             if tool_matcher and tool_name:
                 # tool_matcher is a regex pattern like "Bash|Edit"
-                import re
                 if not re.match(tool_matcher, tool_name):
                     continue
 
@@ -274,15 +382,15 @@ async def execute_hooks_for_event(
             }
 
             # Execute hook asynchronously with result logging
-            async def _execute_and_log(h: Dict[str, Any], data: Dict[str, Any]) -> None:
-                result = await execute_hook(h, data)
+            async def _execute_and_log(h: Dict[str, Any], data: Dict[str, Any], sid: Optional[str]) -> None:
+                result = await execute_hook(h, data, session_id=sid)
                 if not result.get("success"):
                     logger.warning(
                         f"Hook {h.get('id')} ({h.get('name', 'unnamed')}) failed for event {event}: "
                         f"{result.get('error', 'unknown error')}"
                     )
 
-            task = asyncio.create_task(_execute_and_log(hook, full_event_data))
+            task = asyncio.create_task(_execute_and_log(hook, full_event_data, session_id))
             task.add_done_callback(
                 lambda t: logger.error(f"Hook task crashed: {t.exception()}")
                 if not t.cancelled() and t.exception() else None
@@ -296,12 +404,17 @@ async def test_hook(hook: Dict[str, Any]) -> Dict[str, Any]:
     """
     Test a hook with sample event data.
 
+    For message hooks, renders the template and returns the preview without
+    actually injecting a message into any session.
+
     Args:
         hook: Hook configuration from database
 
     Returns:
         Dict with success, duration_ms, output, and error fields
     """
+    hook_type = hook.get("hook_type")
+
     # Create test event data
     test_event_data = {
         "event": hook.get("event", "Test"),
@@ -311,8 +424,38 @@ async def test_hook(hook: Dict[str, Any]) -> Dict[str, Any]:
             "hook_id": hook.get("id"),
             "hook_name": hook.get("name"),
             "project_id": hook.get("project_id"),
+            "tool_name": "ExampleTool",
             "message": "This is a test event",
         }
     }
+
+    # For message hooks, preview the rendered template without sending
+    if hook_type == "message":
+        template = hook.get("message_template", "")
+        if not template:
+            return {
+                "success": False,
+                "duration_ms": 0,
+                "output": None,
+                "error": "No message template specified"
+            }
+
+        variables = {
+            "event": test_event_data["event"],
+            "timestamp": test_event_data["timestamp"],
+            "session_id": "test-session-id",
+            "tool_name": "ExampleTool",
+            "hook_name": hook.get("name", ""),
+        }
+        rendered = template
+        for key, value in variables.items():
+            rendered = rendered.replace(f"{{{key}}}", str(value))
+
+        return {
+            "success": True,
+            "duration_ms": 0,
+            "output": f"[Preview] Message that would be sent:\n{rendered}",
+            "error": None
+        }
 
     return await execute_hook(hook, test_event_data)

@@ -1,8 +1,9 @@
 /**
  * Hooks Management Store
  *
- * Manages state for project hooks:
- * - Custom hooks per project
+ * Manages state for hooks:
+ * - App-level hooks (project_id is null)
+ * - Project-scoped hooks
  * - Plugin-contributed hooks (read-only)
  * - Hook enable/disable state
  * - Hook testing
@@ -88,7 +89,7 @@ export const hooks = {
 	// ========================================================================
 
 	/**
-	 * Load hooks for a project
+	 * Load hooks for a project (includes app-level hooks)
 	 */
 	async loadProjectHooks(projectId: string): Promise<void> {
 		_update((state) => ({ ...state, loading: true, error: null, currentProjectId: projectId }));
@@ -104,7 +105,31 @@ export const hooks = {
 	},
 
 	/**
-	 * Create a new hook
+	 * Load app-level hooks only (no project context)
+	 */
+	async loadAppHooks(): Promise<void> {
+		_update((state) => ({ ...state, loading: true, error: null }));
+
+		try {
+			const [appHooksData, pluginHooksData] = await Promise.all([
+				api.getAppHooks(),
+				api.getPluginHooks()
+			]);
+			_update((state) => ({
+				...state,
+				hooks: appHooksData,
+				pluginHooks: pluginHooksData,
+				loading: false
+			}));
+		} catch (e) {
+			const error = e instanceof Error ? e.message : 'Failed to load app hooks';
+			_update((state) => ({ ...state, error, loading: false }));
+			throw e;
+		}
+	},
+
+	/**
+	 * Create a new project-scoped hook
 	 */
 	async createHook(projectId: string, data: HookCreate): Promise<Hook> {
 		_update((state) => ({ ...state, loading: true, error: null }));
@@ -119,6 +144,27 @@ export const hooks = {
 			return hook;
 		} catch (e) {
 			const error = e instanceof Error ? e.message : 'Failed to create hook';
+			_update((state) => ({ ...state, error, loading: false }));
+			throw e;
+		}
+	},
+
+	/**
+	 * Create a new app-level hook (no project)
+	 */
+	async createAppHook(data: HookCreate): Promise<Hook> {
+		_update((state) => ({ ...state, loading: true, error: null }));
+
+		try {
+			const hook = await api.createAppHook(data);
+			_update((state) => ({
+				...state,
+				hooks: [hook, ...state.hooks],
+				loading: false
+			}));
+			return hook;
+		} catch (e) {
+			const error = e instanceof Error ? e.message : 'Failed to create app hook';
 			_update((state) => ({ ...state, error, loading: false }));
 			throw e;
 		}
@@ -240,7 +286,7 @@ export const hooks = {
 	},
 
 	/**
-	 * Load all hooks (project + plugin)
+	 * Load all hooks (project + app + plugin)
 	 */
 	async loadAll(projectId: string): Promise<void> {
 		_update((state) => ({
@@ -251,7 +297,7 @@ export const hooks = {
 		}));
 
 		try {
-			// Load project hooks, global plugin hooks, and project plugin hooks
+			// Load project hooks (includes app hooks), global plugin hooks, and project plugin hooks
 			const [hooksData, globalPluginHooks, projectPluginHooks] = await Promise.all([
 				api.getProjectHooks(projectId),
 				api.getPluginHooks(),
@@ -325,7 +371,7 @@ function createDerived<T>(getter: () => T) {
 	};
 }
 
-// All custom hooks for current project
+// All hooks (both app + project)
 export const projectHooks = createDerived(() => _state.hooks);
 
 // Enabled hooks only
@@ -380,9 +426,12 @@ export const hookSaving = createDerived(() => _state.saving);
 export const hookStats = createDerived(() => ({
 	totalCustom: _state.hooks.length,
 	totalEnabled: _state.hooks.filter((h) => h.enabled).length,
+	totalApp: _state.hooks.filter((h) => !h.project_id).length,
+	totalProject: _state.hooks.filter((h) => !!h.project_id).length,
 	totalPlugin: _state.pluginHooks.length,
 	byType: {
 		bash: _state.hooks.filter((h) => h.hook_type === 'bash').length,
-		webhook: _state.hooks.filter((h) => h.hook_type === 'webhook').length
+		webhook: _state.hooks.filter((h) => h.hook_type === 'webhook').length,
+		message: _state.hooks.filter((h) => h.hook_type === 'message').length
 	}
 }));

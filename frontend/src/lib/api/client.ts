@@ -1400,11 +1400,11 @@ export const HOOK_EVENT_TYPES = [
 
 export type HookEventType = (typeof HOOK_EVENT_TYPES)[number];
 
-export type HookType = 'bash' | 'webhook';
+export type HookType = 'bash' | 'webhook' | 'message';
 
 export interface Hook {
 	id: string;
-	project_id: string;
+	project_id: string | null;
 	name: string;
 	event: HookEventType;
 	hook_type: HookType;
@@ -1412,6 +1412,7 @@ export interface Hook {
 	timeout: number;
 	url: string | null;
 	secret: string | null;
+	message_template: string | null;
 	enabled: boolean;
 	tool_matcher: string | null;
 	created_at: string;
@@ -1428,6 +1429,7 @@ export interface HookCreate {
 	timeout?: number;
 	url?: string;
 	secret?: string;
+	message_template?: string;
 	enabled?: boolean;
 	tool_matcher?: string;
 }
@@ -1440,6 +1442,7 @@ export interface HookUpdate {
 	timeout?: number;
 	url?: string | null;
 	secret?: string | null;
+	message_template?: string | null;
 	enabled?: boolean;
 	tool_matcher?: string | null;
 }
@@ -1468,10 +1471,17 @@ export async function getHookEventTypes(): Promise<string[]> {
 }
 
 /**
- * Get all hooks for a project
+ * Get all hooks for a project (includes app-level hooks)
  */
 export async function getProjectHooks(projectId: string): Promise<Hook[]> {
 	return api.get<Hook[]>(`/hooks/project/${projectId}`);
+}
+
+/**
+ * Get all app-level hooks (not scoped to any project)
+ */
+export async function getAppHooks(): Promise<Hook[]> {
+	return api.get<Hook[]>('/hooks/app');
 }
 
 /**
@@ -1479,6 +1489,13 @@ export async function getProjectHooks(projectId: string): Promise<Hook[]> {
  */
 export async function createHook(projectId: string, data: HookCreate): Promise<Hook> {
 	return api.post<Hook>(`/hooks/project/${projectId}`, data);
+}
+
+/**
+ * Create a new app-level hook (fires for all sessions)
+ */
+export async function createAppHook(data: HookCreate): Promise<Hook> {
+	return api.post<Hook>('/hooks/app', data);
 }
 
 /**

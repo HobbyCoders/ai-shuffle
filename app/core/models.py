@@ -922,13 +922,15 @@ class HookBase(BaseModel):
     """Base hook fields"""
     name: str = Field(..., min_length=1, max_length=100)
     event: str = Field(..., description="Hook event type")
-    hook_type: str = Field(..., pattern=r'^(bash|webhook)$', description="Type: 'bash' or 'webhook'")
+    hook_type: str = Field(..., pattern=r'^(bash|webhook|message)$', description="Type: 'bash', 'webhook', or 'message'")
     # For bash hooks
     command: Optional[str] = Field(None, description="Shell command to execute")
     timeout: int = Field(default=30000, ge=1000, le=300000, description="Timeout in ms (1-300 seconds)")
     # For webhook hooks
     url: Optional[str] = Field(None, description="Webhook URL to POST to")
     secret: Optional[str] = Field(None, description="HMAC secret for webhook signing")
+    # For message hooks
+    message_template: Optional[str] = Field(None, description="Prompt template sent as a message in the active chat")
     # Common
     enabled: bool = True
     tool_matcher: Optional[str] = Field(None, description="Tool name pattern for PreToolUse/PostToolUse (e.g., 'Bash|Edit')")
@@ -943,11 +945,12 @@ class HookUpdate(BaseModel):
     """Hook update request - all fields optional"""
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     event: Optional[str] = None
-    hook_type: Optional[str] = Field(None, pattern=r'^(bash|webhook)$')
+    hook_type: Optional[str] = Field(None, pattern=r'^(bash|webhook|message)$')
     command: Optional[str] = None
     timeout: Optional[int] = Field(None, ge=1000, le=300000)
     url: Optional[str] = None
     secret: Optional[str] = None
+    message_template: Optional[str] = None
     enabled: Optional[bool] = None
     tool_matcher: Optional[str] = None
 
@@ -955,7 +958,7 @@ class HookUpdate(BaseModel):
 class Hook(HookBase):
     """Full hook response"""
     id: str
-    project_id: str
+    project_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     last_triggered_at: Optional[datetime] = None

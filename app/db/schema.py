@@ -24,7 +24,7 @@ from app.db.base import get_db, column_exists, table_exists, column_is_not_null,
 # v35: Add fal_model_catalog table for dynamic model discovery
 # v36: Add action_steps column to automations for multi-step connector actions
 # v37: Add triggers JSON column for multi-trigger support
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 
 
 def _run_column_migrations(cursor: sqlite3.Cursor):
@@ -206,6 +206,55 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
             triggers_arr = _json.dumps([{"type": t_type, "config": t_config_parsed}])
             cursor.execute("UPDATE automations SET triggers = ? WHERE id = ?", (triggers_arr, auto_id))
         migrations_applied.append("automations.triggers_backfill")
+
+    # Add message_template column to project_hooks (v38)
+    if table_exists(cursor, "project_hooks") and not column_exists(cursor, "project_hooks", "message_template"):
+        cursor.execute("ALTER TABLE project_hooks ADD COLUMN message_template TEXT")
+        migrations_applied.append("project_hooks.message_template")
+
+    # Make project_hooks.project_id nullable (v38)
+    # SQLite doesn't support ALTER COLUMN, so we must recreate the table
+    if table_exists(cursor, "project_hooks") and column_is_not_null(cursor, "project_hooks", "project_id"):
+        logger.info("Migrating project_hooks table to make project_id nullable...")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS project_hooks_new (
+                id TEXT PRIMARY KEY,
+                project_id TEXT,
+                name TEXT NOT NULL,
+                event TEXT NOT NULL,
+                hook_type TEXT NOT NULL,
+                command TEXT,
+                timeout INTEGER DEFAULT 30000,
+                url TEXT,
+                secret TEXT,
+                enabled BOOLEAN DEFAULT TRUE,
+                tool_matcher TEXT,
+                message_template TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_triggered_at TIMESTAMP,
+                failure_count INTEGER DEFAULT 0,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute("""
+            INSERT INTO project_hooks_new (
+                id, project_id, name, event, hook_type, command, timeout,
+                url, secret, enabled, tool_matcher, message_template,
+                created_at, updated_at, last_triggered_at, failure_count
+            )
+            SELECT
+                id, project_id, name, event, hook_type, command, timeout,
+                url, secret, enabled, tool_matcher, message_template,
+                created_at, updated_at, last_triggered_at, failure_count
+            FROM project_hooks
+        """)
+        cursor.execute("DROP TABLE project_hooks")
+        cursor.execute("ALTER TABLE project_hooks_new RENAME TO project_hooks")
+        # Recreate indexes
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_project_id ON project_hooks(project_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_event ON project_hooks(event)")
+        migrations_applied.append("project_hooks.project_id_nullable")
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -814,7 +863,7 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS project_hooks (
             id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL,
+            project_id TEXT,
             name TEXT NOT NULL,
             event TEXT NOT NULL,
             hook_type TEXT NOT NULL,
@@ -824,6 +873,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             secret TEXT,
             enabled BOOLEAN DEFAULT TRUE,
             tool_matcher TEXT,
+            message_template TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_triggered_at TIMESTAMP,

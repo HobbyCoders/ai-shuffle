@@ -2,7 +2,7 @@
 	/**
 	 * HookListItem - Individual hook item in the hooks list
 	 */
-	import { Terminal, Globe, Play, Settings, Trash2, ToggleLeft, ToggleRight, Loader2, AlertCircle, CheckCircle } from 'lucide-svelte';
+	import { Terminal, Globe, MessageSquare, Play, Settings, Trash2, ToggleLeft, ToggleRight, Loader2, AlertCircle, CheckCircle } from 'lucide-svelte';
 	import type { Hook } from '$lib/api/client';
 
 	interface Props {
@@ -32,10 +32,19 @@
 	const eventColor = $derived(eventColors[hook.event] || 'var(--muted-foreground)');
 </script>
 
-<div class="hook-item" class:disabled={!hook.enabled}>
-	<div class="hook-icon" class:bash={hook.hook_type === 'bash'} class:webhook={hook.hook_type === 'webhook'}>
+<div
+	class="hook-item"
+	class:disabled={!hook.enabled}
+	role="button"
+	tabindex="0"
+	onclick={onEdit}
+	onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onEdit(); } }}
+>
+	<div class="hook-icon" class:bash={hook.hook_type === 'bash'} class:webhook={hook.hook_type === 'webhook'} class:message={hook.hook_type === 'message'}>
 		{#if hook.hook_type === 'bash'}
 			<Terminal size={16} />
+		{:else if hook.hook_type === 'message'}
+			<MessageSquare size={16} />
 		{:else}
 			<Globe size={16} />
 		{/if}
@@ -58,6 +67,8 @@
 				<code class="hook-command">{hook.command.substring(0, 60)}{hook.command.length > 60 ? '...' : ''}</code>
 			{:else if hook.hook_type === 'webhook' && hook.url}
 				<span class="hook-url">{hook.url.substring(0, 60)}{hook.url.length > 60 ? '...' : ''}</span>
+			{:else if hook.hook_type === 'message' && hook.message_template}
+				<span class="hook-message">{hook.message_template.substring(0, 60)}{hook.message_template.length > 60 ? '...' : ''}</span>
 			{/if}
 		</div>
 		{#if hook.failure_count > 0}
@@ -68,7 +79,8 @@
 		{/if}
 	</div>
 
-	<div class="hook-actions">
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div class="hook-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
 		<button
 			class="action-btn"
 			title="Test hook"
@@ -80,14 +92,6 @@
 			{:else}
 				<Play size={14} />
 			{/if}
-		</button>
-		<button
-			class="action-btn"
-			title="Edit hook"
-			onclick={onEdit}
-			disabled={saving}
-		>
-			<Settings size={14} />
 		</button>
 		<button
 			class="action-btn delete"
@@ -124,6 +128,7 @@
 		border: 1px solid var(--border);
 		border-radius: var(--radius, 0.75rem);
 		transition: all 150ms ease;
+		cursor: pointer;
 	}
 
 	.hook-item:hover {
@@ -152,6 +157,11 @@
 	.hook-icon.webhook {
 		background: color-mix(in oklch, var(--info) 20%, transparent);
 		color: var(--info);
+	}
+
+	.hook-icon.message {
+		background: color-mix(in oklch, var(--success) 20%, transparent);
+		color: var(--success);
 	}
 
 	.hook-info {
