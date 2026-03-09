@@ -9,6 +9,7 @@
 	 *   - MCP Servers (local and project scope)
 	 *   - Agents (read-only list from .claude/agents/)
 	 *   - Hooks (read-only list with toggle/test/delete)
+	 *   - Memory (CLAUDE.md file management)
 	 * - Group badge display
 	 * - Delete with inline confirmation
 	 * - Add project via shared modal with directory browser
@@ -16,12 +17,13 @@
 	 */
 	import { appData as tabs, projects } from '$lib/stores/app-data';
 	import { groups } from '$lib/stores/groups';
-	import { Search, Plus, Trash2, FolderOpen, X, Settings, Server, Bot, Zap, MessageSquare } from 'lucide-svelte';
+	import { Search, Plus, Trash2, FolderOpen, X, Settings, Server, Bot, Zap, MessageSquare, Brain } from 'lucide-svelte';
 	import type ProjectMcpTabType from './ProjectMcpTab.svelte';
 	import ProjectGeneralTab from './ProjectGeneralTab.svelte';
 	import ProjectMcpTab from './ProjectMcpTab.svelte';
 	import ProjectAgentsTab from './ProjectAgentsTab.svelte';
 	import ProjectHooksTab from './ProjectHooksTab.svelte';
+	import ProjectMemoryTab from './ProjectMemoryTab.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import './card-design-system.css';
@@ -40,7 +42,7 @@
 	let selectedProjectId = $state<string | null>(null);
 
 	// Detail view tab
-	type DetailTab = 'general' | 'mcp' | 'agents' | 'hooks';
+	type DetailTab = 'general' | 'mcp' | 'agents' | 'hooks' | 'memory';
 	let activeTab = $state<DetailTab>('general');
 
 	// Add project modal state
@@ -178,6 +180,9 @@
 					<button class="fp-tab" class:active={activeTab === 'hooks'} onclick={() => (activeTab = 'hooks')}>
 						<Zap size={14} /> Hooks
 					</button>
+					<button class="fp-tab" class:active={activeTab === 'memory'} onclick={() => (activeTab = 'memory')}>
+						<Brain size={14} /> Memory
+					</button>
 				</div>
 			{/snippet}
 
@@ -197,6 +202,8 @@
 				<ProjectAgentsTab projectId={selectedProject.id} />
 			{:else if activeTab === 'hooks'}
 				<ProjectHooksTab projectId={selectedProject.id} />
+			{:else if activeTab === 'memory'}
+				<ProjectMemoryTab projectId={selectedProject.id} />
 			{/if}
 		</FeaturePageLayout>
 	{:else}
