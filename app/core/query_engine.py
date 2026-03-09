@@ -21,49 +21,10 @@ from datetime import datetime
 from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AgentDefinition
 from claude_agent_sdk import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
-    ResultMessage, SystemMessage
+    ResultMessage, SystemMessage,
+    TaskStartedMessage, TaskProgressMessage, TaskNotificationMessage,
 )
 from claude_agent_sdk.types import StreamEvent, PermissionResultAllow, PermissionResultDeny
-
-# Monkey-patch SDK message parser to handle unknown message types gracefully.
-#
-# Root cause: The bundled CLI (v2.1.49) emits "rate_limit_event" messages, but
-# the Python SDK v0.1.39 (latest on PyPI) raises MessageParseError for unknown
-# types. The upstream fix (returning None for unknown types) is merged on main
-# at github.com/anthropics/claude-agent-sdk-python but not yet released.
-#
-# Fix: Convert unknown message types into SystemMessage with the raw data
-# preserved, so they flow through the pipeline normally instead of crashing.
-# Remove this patch once a new SDK version is released with the catch-all fix.
-def _patch_sdk_message_parser():
-    import claude_agent_sdk._internal.message_parser as _parser
-    import claude_agent_sdk._internal.client as _internal_client
-    from claude_agent_sdk._errors import MessageParseError
-
-    _original_parse = _parser.parse_message
-
-    def _safe_parse_message(data):
-        try:
-            return _original_parse(data)
-        except MessageParseError as e:
-            if "Unknown message type" in str(e):
-                _msg_type = data.get("type", "?") if isinstance(data, dict) else "?"
-                logging.getLogger(__name__).debug(
-                    f"[SDK] Unrecognized message type from CLI: {_msg_type}"
-                )
-                # Wrap as SystemMessage so it flows through the pipeline
-                # instead of killing the stream
-                return SystemMessage(subtype=_msg_type, data=data)
-            raise
-
-    _parser.parse_message = _safe_parse_message
-    # Also patch the direct reference in _internal/client.py, which imports
-    # parse_message at the top level (from .message_parser import parse_message).
-    # Without this, _internal/client.py holds a reference to the original function
-    # and the query() code path (used by generation.py) still crashes.
-    _internal_client.parse_message = _safe_parse_message
-
-_patch_sdk_message_parser()
 
 from app.db import database
 from app.core.config import settings
@@ -1584,6 +1545,7 @@ async def execute_query(
                 metadata["num_turns"] = message.num_turns
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
+                metadata["stop_reason"] = message.stop_reason
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -1867,7 +1829,28 @@ async def stream_query(
         await state.client.query(prompt)
 
         async for message in state.client.receive_response():
-            if isinstance(message, SystemMessage):
+            # Check typed task messages before generic SystemMessage
+            # (they are subclasses and would match isinstance SystemMessage)
+            if isinstance(message, TaskNotificationMessage):
+                yield {
+                    "type": "task_notification",
+                    "task_id": message.task_id,
+                    "status": message.status.value if hasattr(message.status, 'value') else str(message.status),
+                    "summary": message.summary,
+                }
+            elif isinstance(message, TaskProgressMessage):
+                yield {
+                    "type": "task_progress",
+                    "task_id": message.task_id,
+                    "description": message.description,
+                }
+            elif isinstance(message, TaskStartedMessage):
+                yield {
+                    "type": "task_started",
+                    "task_id": message.task_id,
+                    "description": message.description,
+                }
+            elif isinstance(message, SystemMessage):
                 # session_id comes in init message data after first query
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]
@@ -1986,6 +1969,7 @@ async def stream_query(
                 metadata["num_turns"] = message.num_turns
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
+                metadata["stop_reason"] = message.stop_reason
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -2431,6 +2415,7 @@ async def _run_background_query(
                 metadata["num_turns"] = message.num_turns
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
+                metadata["stop_reason"] = message.stop_reason
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -3105,7 +3090,32 @@ async def stream_to_websocket(
                 logger.debug(f"[WS] Yielding plugin message to websocket: {stderr_msg.get('type')}")
                 yield stderr_msg
 
-            if isinstance(message, SystemMessage):
+            # Check typed task messages before generic SystemMessage
+            # (they are subclasses and would match isinstance SystemMessage)
+            if isinstance(message, TaskNotificationMessage):
+                has_visible_content = True
+                yield {
+                    "type": "task_notification",
+                    "task_id": message.task_id,
+                    "status": message.status.value if hasattr(message.status, 'value') else str(message.status),
+                    "summary": message.summary,
+                    "tool_use_id": message.tool_use_id,
+                }
+            elif isinstance(message, TaskProgressMessage):
+                yield {
+                    "type": "task_progress",
+                    "task_id": message.task_id,
+                    "description": message.description,
+                    "tool_use_id": message.tool_use_id,
+                }
+            elif isinstance(message, TaskStartedMessage):
+                yield {
+                    "type": "task_started",
+                    "task_id": message.task_id,
+                    "description": message.description,
+                    "tool_use_id": message.tool_use_id,
+                }
+            elif isinstance(message, SystemMessage):
                 logger.debug(f"[WS] SystemMessage received: subtype={message.subtype}, data_keys={list(message.data.keys()) if message.data else []}, data_preview={str(message.data)[:500] if message.data else 'None'}")
                 if message.subtype == "init" and "session_id" in message.data:
                     sdk_session_id = message.data["session_id"]
@@ -3526,6 +3536,7 @@ async def stream_to_websocket(
                 metadata["num_turns"] = message.num_turns
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
+                metadata["stop_reason"] = message.stop_reason
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)

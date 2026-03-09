@@ -7,6 +7,8 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query, status, Request, UploadFile, File
 from pydantic import BaseModel
 
+from claude_agent_sdk import get_session_messages as sdk_get_session_messages
+
 from app.core.models import (
     Session,
     SessionWithMessages,
@@ -20,6 +22,107 @@ from app.core.project_utils import get_project_working_dir
 
 import logging
 logger = logging.getLogger(__name__)
+
+
+def _transform_sdk_messages(sdk_messages: list) -> list:
+    """Transform SDK SessionMessage objects into our frontend-compatible format.
+
+    The SDK's get_session_messages() returns SessionMessage objects with
+    type ("user"/"assistant"), uuid, session_id, and message (raw Anthropic API dict).
+    This transforms them into the same shape our frontend expects.
+    """
+    messages = []
+    tool_id_to_name: dict[str, str] = {}  # Track tool_use_id → tool_name
+
+    for i, sdk_msg in enumerate(sdk_messages):
+        raw = sdk_msg.message  # Raw Anthropic API message dict
+        role = raw.get("role", sdk_msg.type)
+        content = raw.get("content", "")
+
+        if role == "assistant" and isinstance(content, list):
+            # Assistant messages contain content blocks (text, tool_use, thinking, etc.)
+            for block in content:
+                block_type = block.get("type")
+
+                if block_type == "text":
+                    messages.append({
+                        "id": f"{sdk_msg.uuid}-text-{len(messages)}",
+                        "role": "assistant",
+                        "content": block.get("text", ""),
+                        "type": "text",
+                        "created_at": None,
+                    })
+
+                elif block_type == "tool_use":
+                    tool_id = block.get("id")
+                    tool_name = block.get("name", "unknown")
+                    if tool_id:
+                        tool_id_to_name[tool_id] = tool_name
+                    messages.append({
+                        "id": f"{sdk_msg.uuid}-tool-{tool_id}",
+                        "role": "assistant",
+                        "content": f"Using tool: {tool_name}",
+                        "type": "tool_use",
+                        "toolName": tool_name,
+                        "toolInput": block.get("input"),
+                        "toolId": tool_id,
+                        "tool_name": tool_name,
+                        "tool_input": block.get("input"),
+                        "created_at": None,
+                    })
+
+                elif block_type == "thinking":
+                    messages.append({
+                        "id": f"{sdk_msg.uuid}-thinking-{len(messages)}",
+                        "role": "assistant",
+                        "content": block.get("thinking", ""),
+                        "type": "thinking",
+                        "created_at": None,
+                    })
+
+        elif role == "user":
+            if isinstance(content, list):
+                # User messages with tool results
+                for block in content:
+                    block_type = block.get("type")
+                    if block_type == "tool_result":
+                        tool_use_id = block.get("tool_use_id", "")
+                        tool_name = tool_id_to_name.get(tool_use_id, "unknown")
+                        result_content = block.get("content", "")
+                        if isinstance(result_content, list):
+                            # Flatten content blocks to text
+                            result_content = "\n".join(
+                                b.get("text", "") for b in result_content
+                                if b.get("type") == "text"
+                            ) or str(result_content)
+                        messages.append({
+                            "id": f"{sdk_msg.uuid}-result-{tool_use_id}",
+                            "role": "tool_result",
+                            "content": str(result_content)[:2000],
+                            "type": "tool_result",
+                            "toolName": tool_name,
+                            "toolId": tool_use_id,
+                            "tool_name": tool_name,
+                            "created_at": None,
+                        })
+                    elif block_type == "text":
+                        messages.append({
+                            "id": f"{sdk_msg.uuid}-{len(messages)}",
+                            "role": "user",
+                            "content": block.get("text", ""),
+                            "type": "text",
+                            "created_at": None,
+                        })
+            elif isinstance(content, str):
+                messages.append({
+                    "id": sdk_msg.uuid,
+                    "role": "user",
+                    "content": content,
+                    "type": "text",
+                    "created_at": None,
+                })
+
+    return messages
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 
@@ -433,7 +536,25 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             logger.error(f"Failed to parse JSONL for session {session_id}: {e}")
             messages = []
 
-    # Fall back to database if JSONL not available or failed to parse
+    # Fallback 2: Try SDK get_session_messages() if custom parser failed.
+    # The SDK handles JSONL parsing + conversation chain building independently,
+    # so it may succeed where our parser has edge-case issues.
+    if not messages and sdk_session_id:
+        try:
+            sdk_msgs = sdk_get_session_messages(
+                session_id=sdk_session_id,
+                directory=working_dir,
+            )
+            if sdk_msgs:
+                messages = _transform_sdk_messages(sdk_msgs)
+                logger.debug(
+                    f"Loaded {len(messages)} messages via SDK get_session_messages "
+                    f"for session {session_id}"
+                )
+        except Exception as e:
+            logger.warning(f"SDK get_session_messages fallback failed for {session_id}: {e}")
+
+    # Fallback 3: Database messages (oldest data, least rich)
     if not messages:
         db_messages = database.get_session_messages(session_id)
         # Transform DB messages to include type field for frontend compatibility
@@ -581,7 +702,26 @@ async def get_live_session(
         except Exception as e:
             logger.error(f"Failed to parse JSONL for live session {session_id}: {e}")
 
-    # Fall back to DB if JSONL not available
+    # Fallback 2: SDK get_session_messages()
+    if not messages and sdk_session_id:
+        try:
+            sdk_msgs = sdk_get_session_messages(
+                session_id=sdk_session_id,
+                directory=working_dir,
+            )
+            if sdk_msgs:
+                messages = [
+                    {**m, "streaming": False}
+                    for m in _transform_sdk_messages(sdk_msgs)
+                ]
+                logger.debug(
+                    f"Live endpoint: loaded {len(messages)} messages via SDK "
+                    f"for session {session_id}"
+                )
+        except Exception as e:
+            logger.warning(f"SDK get_session_messages fallback failed for live {session_id}: {e}")
+
+    # Fallback 3: DB messages
     if not messages:
         db_messages = database.get_session_messages(session_id)
         for m in db_messages:
