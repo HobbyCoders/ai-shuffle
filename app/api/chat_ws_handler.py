@@ -24,6 +24,7 @@ from app.core.sync_engine import sync_engine
 from app.core.user_question_handler import user_question_handler
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +247,7 @@ class ChatWebSocketHandler:
         # Validate project-level authorization for API users
         # API users are scoped to a specific project — prevent cross-project access
         if self.api_user_id and project_id:
-            api_user = database.get_api_user(self.api_user_id)
+            api_user = await run_sync(database.get_api_user, self.api_user_id)
             if api_user and api_user.get("project_id") and api_user["project_id"] != project_id:
                 logger.warning(
                     f"Authorization denied: API user {self.api_user_id} attempted to access "
@@ -260,12 +261,12 @@ class ChatWebSocketHandler:
             # Validate worktree access if provided
             worktree = None
             if worktree_id:
-                worktree = database.get_worktree(worktree_id)
+                worktree = await run_sync(database.get_worktree, worktree_id)
                 if not worktree:
                     await self.send_json({"type": "error", "message": f"Worktree not found: {worktree_id}"})
                     return
                 # Get repository to verify project ownership
-                repo = database.get_git_repository(worktree["repository_id"])
+                repo = await run_sync(database.get_git_repository, worktree["repository_id"])
                 if not repo:
                     await self.send_json({"type": "error", "message": "Worktree repository not found"})
                     return
@@ -289,27 +290,32 @@ class ChatWebSocketHandler:
             wt_branch = worktree.get("branch_name") if worktree_id and worktree else None
             wt_path = worktree.get("worktree_path") if worktree_id and worktree else None
 
-            # Create session + first user message atomically so neither is orphaned
+            # Create session + first user message atomically so neither is orphaned.
+            # Wrapped in run_sync to avoid blocking the event loop during DB I/O.
             from app.db.base import transaction
-            with transaction() as txn:
-                database.create_session(
-                    session_id=session_id,
-                    profile_id=profile_id,
-                    project_id=project_id,
-                    api_user_id=self.api_user_id,
-                    title=title,
-                    worktree_id=worktree_id,
-                    worktree_branch=wt_branch,
-                    worktree_path=wt_path,
-                    _conn=txn
-                )
-                database.add_session_message(
-                    session_id=session_id,
-                    role="user",
-                    content=prompt,
-                    profile_id=profile_id,
-                    _conn=txn
-                )
+
+            def _create_session_atomic():
+                with transaction() as txn:
+                    database.create_session(
+                        session_id=session_id,
+                        profile_id=profile_id,
+                        project_id=project_id,
+                        api_user_id=self.api_user_id,
+                        title=title,
+                        worktree_id=worktree_id,
+                        worktree_branch=wt_branch,
+                        worktree_path=wt_path,
+                        _conn=txn
+                    )
+                    database.add_session_message(
+                        session_id=session_id,
+                        role="user",
+                        content=prompt,
+                        profile_id=profile_id,
+                        _conn=txn
+                    )
+
+            await run_sync(_create_session_atomic)
 
             # Immediately notify frontend of new session_id so it persists on refresh
             await self.send_json({
@@ -339,11 +345,12 @@ class ChatWebSocketHandler:
 
         # Store user message for existing sessions (new sessions already stored atomically above)
         if not is_new_session:
-            database.add_session_message(
+            await run_sync(
+                database.add_session_message,
                 session_id=session_id,
                 role="user",
                 content=prompt,
-                profile_id=profile_id
+                profile_id=profile_id,
             )
 
         # Broadcast user message to other devices
@@ -491,13 +498,13 @@ class ChatWebSocketHandler:
         if not session_id:
             return
 
-        # Try direct lookup by AI Shuffle session ID first
-        session = database.get_session(session_id)
+        # Try direct lookup by AI Shuffle session ID first (non-blocking)
+        session = await run_sync(database.get_session, session_id)
 
         # If not found, try fallback lookup by SDK session ID (Claude Code UUID)
         # This handles cases where old references might use the SDK session ID
         if not session:
-            session = database.get_session_by_sdk_id(session_id)
+            session = await run_sync(database.get_session_by_sdk_id, session_id)
             if session:
                 logger.debug(f"Session found via SDK session ID fallback: {session_id} -> {session['id']}")
                 # Update session_id to the actual AI Shuffle ID for consistency
@@ -823,11 +830,15 @@ class ChatWebSocketHandler:
         worktree_id: Optional[str] = None,
     ) -> None:
         """Execute query and stream results directly to WebSocket."""
-        from app.api.websocket import _active_chat_sessions, _delayed_session_cleanup
+        from app.api.websocket import _active_chat_sessions, schedule_delayed_cleanup, cancel_pending_cleanup
         from app.api.ws_event_handlers import EventContext, MutableStreamState, dispatch_event
         from app.core.query_engine import stream_to_websocket
         from app.core.jsonl_parser import parse_session_history
         import time
+
+        # Cancel any pending delayed cleanup for this session — a new query is starting,
+        # so the old cleanup must not fire and remove the session from live_session_store.
+        cancel_pending_cleanup(session_id)
 
         # Generate a message ID for this streaming session
         message_id = str(uuid.uuid4())
@@ -996,10 +1007,8 @@ class ChatWebSocketHandler:
                 interrupted=True
             )
 
-            # Schedule delayed cleanup of ended session (gives clients time to reconnect)
-            # This prevents memory leak while ensuring messages are available for ~30 seconds
-            _t = asyncio.create_task(_delayed_session_cleanup(session_id, delay_seconds=30))
-            _t.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            # Schedule tracked delayed cleanup (cancellable if a new query starts)
+            schedule_delayed_cleanup(session_id, delay_seconds=30)
 
             # Broadcast stream end with interrupted flag
             if stream_state.stream_started:
@@ -1023,9 +1032,8 @@ class ChatWebSocketHandler:
                 interrupted=True
             )
 
-            # Schedule delayed cleanup of ended session (gives clients time to reconnect)
-            _t = asyncio.create_task(_delayed_session_cleanup(session_id, delay_seconds=30))
-            _t.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            # Schedule tracked delayed cleanup (cancellable if a new query starts)
+            schedule_delayed_cleanup(session_id, delay_seconds=30)
 
             # Broadcast stream end on error
             if stream_state.stream_started:

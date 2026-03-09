@@ -199,7 +199,7 @@ class ConnectorManager:
                 else:
                     # Broadcast to all active sessions for this connector
                     # (no dedicated DB helper — query directly)
-                    from app.db.database import get_db, rows_to_list
+                    from app.db.base import get_db, rows_to_list
                     with get_db() as conn:
                         cursor = conn.cursor()
                         cursor.execute(

@@ -2,6 +2,7 @@
 SQLite database setup and operations
 """
 
+import re
 import sqlite3
 import json
 import logging
@@ -12,6 +13,23 @@ from contextlib import contextmanager
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Regex for valid SQLite identifiers: alphanumeric + underscores, must start with letter/underscore.
+_VALID_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_identifier(value: str, kind: str = "identifier") -> str:
+    """Validate that a string is a safe SQL identifier (table name, column name).
+
+    SQLite PRAGMA and ALTER TABLE statements do not support parameterized queries
+    for table/column names, so we must validate these values ourselves.
+    """
+    if not value or not _VALID_IDENTIFIER_RE.match(value):
+        raise ValueError(
+            f"Invalid SQL {kind}: {value!r}. "
+            f"Identifiers must match [a-zA-Z_][a-zA-Z0-9_]*"
+        )
+    return value
 
 
 # Schema version for migrations
@@ -28,7 +46,11 @@ logger = logging.getLogger(__name__)
 # v32: Add mobile device tables (mobile_devices, pending_actions, trusted_actions)
 # v33: Add file_path to notes for physical markdown files
 # v34: Add connectors tables (connectors, connector_event_log, connector_sessions)
-SCHEMA_VERSION = 34
+# v35: Add fal_model_catalog table for dynamic model discovery
+# v36: Add action_steps column to automations for multi-step connector actions
+# v37: Add triggers JSON column for multi-trigger support
+# v38: Add message_template to project_hooks, make project_id nullable
+SCHEMA_VERSION = 38
 
 
 # =============================================================================
@@ -50,8 +72,10 @@ def get_connection() -> sqlite3.Connection:
     # Use WAL mode for better concurrent access and crash recovery
     conn.execute("PRAGMA journal_mode = WAL")
     # Set busy timeout to wait up to 30 seconds if database is locked
-    # This is critical on Windows where file locking is more aggressive
-    conn.execute("PRAGMA busy_timeout = 30000")
+    # This is critical on Windows where file locking is more aggressive.
+    # PRAGMA does not support parameterized queries, so coerce to int for safety.
+    timeout_ms = int(settings.db_busy_timeout_ms)
+    conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
     return conn
 
 
@@ -71,6 +95,8 @@ def get_db():
 
 def column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
     """Check if a column exists in a table using PRAGMA table_info"""
+    _validate_identifier(table, "table name")
+    _validate_identifier(column, "column name")
     cursor.execute(f"PRAGMA table_info({table})")
     columns = [row["name"] for row in cursor.fetchall()]
     return column in columns
@@ -91,6 +117,8 @@ def column_is_not_null(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
     Returns True if the column exists and has NOT NULL constraint.
     Returns False if column doesn't exist or is nullable.
     """
+    _validate_identifier(table, "table name")
+    _validate_identifier(column, "column name")
     cursor.execute(f"PRAGMA table_info({table})")
     for row in cursor.fetchall():
         if row["name"] == column:
@@ -125,6 +153,7 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
     ]
     if table_exists(cursor, "subagents"):
         for col in subagent_cols:
+            _validate_identifier(col, "column name")  # Defense-in-depth
             col_type = "JSON" if col == "default_tools" else "TEXT"
             if not column_exists(cursor, "subagents", col):
                 sql = f"ALTER TABLE subagents ADD COLUMN {col} {col_type}"
@@ -250,6 +279,80 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
                     logger.info(f"Backfilled worktree_branch/worktree_path for {backfilled} sessions")
             except sqlite3.OperationalError:
                 pass  # worktrees table may not exist yet
+
+    # Add action_steps column to automations for multi-step connector actions (v36)
+    if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "action_steps"):
+        cursor.execute("ALTER TABLE automations ADD COLUMN action_steps TEXT DEFAULT NULL")
+        migrations_applied.append("automations.action_steps")
+
+    # Add triggers JSON column for multi-trigger support (v37)
+    if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "triggers"):
+        cursor.execute("ALTER TABLE automations ADD COLUMN triggers TEXT DEFAULT NULL")
+        migrations_applied.append("automations.triggers")
+        # Backfill: convert existing trigger_type/trigger_config into triggers array
+        cursor.execute("SELECT id, trigger_type, trigger_config FROM automations")
+        rows = cursor.fetchall()
+        for row in rows:
+            auto_id = row[0] if isinstance(row, (list, tuple)) else row["id"]
+            t_type = row[1] if isinstance(row, (list, tuple)) else row["trigger_type"]
+            t_config = row[2] if isinstance(row, (list, tuple)) else row["trigger_config"]
+            if t_config and isinstance(t_config, str):
+                try:
+                    t_config_parsed = json.loads(t_config)
+                except (ValueError, TypeError):
+                    t_config_parsed = {}
+            else:
+                t_config_parsed = t_config if isinstance(t_config, dict) else {}
+            triggers_arr = json.dumps([{"type": t_type, "config": t_config_parsed}])
+            cursor.execute("UPDATE automations SET triggers = ? WHERE id = ?", (triggers_arr, auto_id))
+        migrations_applied.append("automations.triggers_backfill")
+
+    # Add message_template column to project_hooks (v38)
+    if table_exists(cursor, "project_hooks") and not column_exists(cursor, "project_hooks", "message_template"):
+        cursor.execute("ALTER TABLE project_hooks ADD COLUMN message_template TEXT")
+        migrations_applied.append("project_hooks.message_template")
+
+    # Make project_hooks.project_id nullable (v38)
+    if table_exists(cursor, "project_hooks") and column_is_not_null(cursor, "project_hooks", "project_id"):
+        logger.info("Migrating project_hooks table to make project_id nullable...")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS project_hooks_new (
+                id TEXT PRIMARY KEY,
+                project_id TEXT,
+                name TEXT NOT NULL,
+                event TEXT NOT NULL,
+                hook_type TEXT NOT NULL,
+                command TEXT,
+                timeout INTEGER DEFAULT 30000,
+                url TEXT,
+                secret TEXT,
+                enabled BOOLEAN DEFAULT TRUE,
+                tool_matcher TEXT,
+                message_template TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_triggered_at TIMESTAMP,
+                failure_count INTEGER DEFAULT 0,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute("""
+            INSERT INTO project_hooks_new (
+                id, project_id, name, event, hook_type, command, timeout,
+                url, secret, enabled, tool_matcher, message_template,
+                created_at, updated_at, last_triggered_at, failure_count
+            )
+            SELECT
+                id, project_id, name, event, hook_type, command, timeout,
+                url, secret, enabled, tool_matcher, message_template,
+                created_at, updated_at, last_triggered_at, failure_count
+            FROM project_hooks
+        """)
+        cursor.execute("DROP TABLE project_hooks")
+        cursor.execute("ALTER TABLE project_hooks_new RENAME TO project_hooks")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_project_id ON project_hooks(project_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_event ON project_hooks(event)")
+        migrations_applied.append("project_hooks.project_id_nullable")
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
@@ -858,7 +961,7 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS project_hooks (
             id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL,
+            project_id TEXT,
             name TEXT NOT NULL,
             event TEXT NOT NULL,
             hook_type TEXT NOT NULL,
@@ -868,6 +971,7 @@ def _create_schema(cursor: sqlite3.Cursor):
             secret TEXT,
             enabled BOOLEAN DEFAULT TRUE,
             tool_matcher TEXT,
+            message_template TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_triggered_at TIMESTAMP,
@@ -1121,6 +1225,8 @@ def _create_schema(cursor: sqlite3.Cursor):
             run_count INTEGER DEFAULT 0,
             failure_count INTEGER DEFAULT 0,
             requires_approval BOOLEAN DEFAULT FALSE,
+            action_steps TEXT DEFAULT NULL,
+            triggers TEXT DEFAULT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE RESTRICT,
@@ -1173,6 +1279,32 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_automation_approvals_status ON automation_approvals(status, created_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_automations_enabled ON automations(is_enabled)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_automations_trigger ON automations(trigger_type)")
+
+    # ========================================================================
+    # fal.ai Model Catalog — dynamic model discovery cache (v35)
+    # ========================================================================
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS fal_model_catalog (
+            endpoint_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            status TEXT DEFAULT 'active',
+            thumbnail_url TEXT,
+            tags_json TEXT DEFAULT '[]',
+            group_key TEXT,
+            group_label TEXT,
+            tool_type TEXT,
+            output_type TEXT,
+            updated_at TEXT,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_category ON fal_model_catalog(category)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_tool_type ON fal_model_catalog(tool_type)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_output_type ON fal_model_catalog(output_type)")
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -1439,6 +1571,48 @@ def clear_all_sessions():
         api_count = cursor.rowcount
         logger.warning(f"Cleared {admin_count} admin sessions and {api_count} API key sessions")
         return admin_count, api_count
+
+
+def cleanup_expired_sessions() -> dict:
+    """Remove expired auth sessions, API key sessions, login attempts, and lockouts.
+
+    This should be called periodically (e.g. every hour) to prevent unbounded
+    growth of the auth-related tables. Each cleanup is idempotent.
+
+    Returns:
+        dict with counts of rows deleted from each table.
+    """
+    from datetime import timedelta
+    now_iso = datetime.utcnow().isoformat()
+    results = {}
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Expired admin sessions
+        cursor.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now_iso,))
+        results["auth_sessions"] = cursor.rowcount
+
+        # Expired API key sessions
+        cursor.execute("DELETE FROM api_key_sessions WHERE expires_at <= ?", (now_iso,))
+        results["api_key_sessions"] = cursor.rowcount
+
+        # Expired account lockouts
+        cursor.execute("DELETE FROM account_lockouts WHERE locked_until <= ?", (now_iso,))
+        results["account_lockouts"] = cursor.rowcount
+
+        # Old login attempts (older than 24 hours — well past the 15-minute window)
+        cutoff_24h = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+        cursor.execute("DELETE FROM login_attempts WHERE created_at < ?", (cutoff_24h,))
+        results["login_attempts"] = cursor.rowcount
+
+    total = sum(results.values())
+    if total > 0:
+        logger.info(f"Session cleanup: removed {results}")
+    else:
+        logger.debug("Session cleanup: nothing to remove")
+
+    return results
 
 
 # ============================================================================

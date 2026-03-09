@@ -584,7 +584,7 @@ async def handle_done(
     state: MutableStreamState,
 ) -> None:
     """Handle done/interrupted event — end streaming and broadcast."""
-    from app.api.websocket import _delayed_session_cleanup
+    from app.api.websocket import schedule_delayed_cleanup
 
     is_interrupted = event.get("type") == "interrupted"
     state.final_metadata = event.get("metadata", {})
@@ -629,8 +629,8 @@ async def handle_done(
         else:
             invalidate_parse_cache(sdk_sid)
 
-    # Schedule delayed cleanup
-    asyncio.create_task(_delayed_session_cleanup(ectx.session_id, delay_seconds=30))
+    # Schedule tracked delayed cleanup (cancellable if a new query starts)
+    schedule_delayed_cleanup(ectx.session_id, delay_seconds=30)
 
     # Broadcast stream end
     if state.stream_started:

@@ -1558,7 +1558,7 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
     Admin only.
     """
     # Delete the custom setting to revert to default
-    from app.db.database import get_db
+    from app.db.base import get_db
 
     with get_db() as conn:
         cursor = conn.cursor()

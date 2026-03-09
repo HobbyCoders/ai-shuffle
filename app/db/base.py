@@ -4,6 +4,7 @@ Shared database utilities — connection management, row conversion, constants.
 All domain modules import from here. Do NOT import domain modules from this file.
 """
 
+import re
 import sqlite3
 import logging
 from typing import Optional, List, Dict, Any
@@ -12,6 +13,35 @@ from contextlib import contextmanager
 from app.core.config import settings
 
 logger = logging.getLogger("app.db")
+
+# Regex for valid SQLite identifiers: alphanumeric + underscores, must start with letter/underscore.
+# This prevents SQL injection in PRAGMA and ALTER TABLE statements where parameterization
+# is not supported by SQLite.
+_VALID_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_identifier(value: str, kind: str = "identifier") -> str:
+    """Validate that a string is a safe SQL identifier (table name, column name).
+
+    SQLite PRAGMA and ALTER TABLE statements do not support parameterized queries
+    for table/column names, so we must validate these values ourselves.
+
+    Args:
+        value: The identifier to validate.
+        kind: Human-readable label for error messages (e.g. "table name").
+
+    Returns:
+        The validated identifier string.
+
+    Raises:
+        ValueError: If the identifier contains invalid characters.
+    """
+    if not value or not _VALID_IDENTIFIER_RE.match(value):
+        raise ValueError(
+            f"Invalid SQL {kind}: {value!r}. "
+            f"Identifiers must match [a-zA-Z_][a-zA-Z0-9_]*"
+        )
+    return value
 
 
 # =============================================================================
@@ -30,8 +60,10 @@ def get_connection() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
-    # Set busy timeout from config (default 30s) — critical on Windows where file locking is more aggressive
-    conn.execute(f"PRAGMA busy_timeout = {settings.db_busy_timeout_ms}")
+    # Set busy timeout from config (default 30s) — critical on Windows where file locking is more aggressive.
+    # PRAGMA does not support parameterized queries, so validate the value is a safe integer.
+    timeout_ms = int(settings.db_busy_timeout_ms)  # Coerce to int — prevents injection
+    conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
     return conn
 
 
@@ -83,6 +115,8 @@ def transaction():
 
 def column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
     """Check if a column exists in a table using PRAGMA table_info."""
+    _validate_identifier(table, "table name")
+    _validate_identifier(column, "column name")
     cursor.execute(f"PRAGMA table_info({table})")
     columns = [row["name"] for row in cursor.fetchall()]
     return column in columns
@@ -103,6 +137,8 @@ def column_is_not_null(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
     Returns True if the column exists and has NOT NULL constraint.
     Returns False if column doesn't exist or is nullable.
     """
+    _validate_identifier(table, "table name")
+    _validate_identifier(column, "column name")
     cursor.execute(f"PRAGMA table_info({table})")
     for row in cursor.fetchall():
         if row["name"] == column:

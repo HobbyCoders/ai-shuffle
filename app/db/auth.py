@@ -430,6 +430,49 @@ def _get_api_user_profile_ids(cursor, user_id: str) -> List[str]:
     return [row[0] for row in cursor.fetchall()]
 
 
+def cleanup_expired_sessions() -> dict:
+    """Remove expired auth sessions, API key sessions, login attempts, and lockouts.
+
+    This should be called periodically (e.g. every hour) to prevent unbounded
+    growth of the auth-related tables. Each cleanup is idempotent and safe
+    to run concurrently.
+
+    Returns:
+        dict with counts of rows deleted from each table.
+    """
+    now_iso = datetime.utcnow().isoformat()
+    results = {}
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # Expired admin sessions
+        cursor.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now_iso,))
+        results["auth_sessions"] = cursor.rowcount
+
+        # Expired API key sessions
+        cursor.execute("DELETE FROM api_key_sessions WHERE expires_at <= ?", (now_iso,))
+        results["api_key_sessions"] = cursor.rowcount
+
+        # Expired account lockouts (locked_until has passed)
+        cursor.execute("DELETE FROM account_lockouts WHERE locked_until <= ?", (now_iso,))
+        results["account_lockouts"] = cursor.rowcount
+
+        # Old login attempts (older than 24 hours — well past the 15-minute window)
+        from datetime import timedelta
+        cutoff_24h = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+        cursor.execute("DELETE FROM login_attempts WHERE created_at < ?", (cutoff_24h,))
+        results["login_attempts"] = cursor.rowcount
+
+    total = sum(results.values())
+    if total > 0:
+        logger.info(f"Session cleanup: removed {results}")
+    else:
+        logger.debug("Session cleanup: nothing to remove")
+
+    return results
+
+
 def get_api_key_session(token: str) -> Optional[ApiKeySessionRow]:
     """Get an API key session by token"""
     with get_db() as conn:

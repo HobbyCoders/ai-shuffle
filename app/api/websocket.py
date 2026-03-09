@@ -23,6 +23,7 @@ from app.core.live_session_store import live_session_store
 from app.core.config import settings
 from app.core.streaming_context import StreamingContext
 from app.db import database
+from app.db.async_database import run_sync
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
 from app.core.connectors.manager import connector_manager
 from app.core.cli_bridge import CLIBridge, RewindParser
@@ -38,6 +39,28 @@ router = APIRouter(prefix="/api/v1", tags=["WebSocket"])
 _active_chat_sessions: dict[str, asyncio.Task] = {}
 _active_sessions_lock = asyncio.Lock()
 
+# Track pending cleanup tasks by session_id so they can be cancelled when a
+# new query starts for the same session (prevents the race condition where an
+# old cleanup fires and removes a newly-started streaming session from memory).
+_pending_cleanup_tasks: dict[str, asyncio.Task] = {}
+
+
+def cancel_pending_cleanup(session_id: str) -> bool:
+    """Cancel any pending delayed cleanup for a session.
+
+    Should be called when a new query starts for a session, to prevent
+    a stale cleanup task from firing during the new query.
+
+    Returns:
+        True if a pending cleanup was cancelled, False if none existed.
+    """
+    task = _pending_cleanup_tasks.pop(session_id, None)
+    if task and not task.done():
+        task.cancel()
+        logger.debug(f"Cancelled pending cleanup for session {session_id}")
+        return True
+    return False
+
 
 async def _delayed_session_cleanup(session_id: str, delay_seconds: int = 30) -> None:
     """
@@ -46,9 +69,38 @@ async def _delayed_session_cleanup(session_id: str, delay_seconds: int = 30) -> 
     This gives reconnecting clients time to retrieve messages before
     they're removed from memory. After the delay, messages must be
     retrieved from JSONL file instead.
+
+    The task is tracked in ``_pending_cleanup_tasks`` so it can be cancelled
+    by ``cancel_pending_cleanup()`` if a new query starts before the delay
+    expires.
     """
-    await asyncio.sleep(delay_seconds)
-    await live_session_store.cleanup_ended_session(session_id)
+    try:
+        await asyncio.sleep(delay_seconds)
+        await live_session_store.cleanup_ended_session(session_id)
+    except asyncio.CancelledError:
+        logger.debug(f"Delayed cleanup cancelled for session {session_id}")
+    finally:
+        # Remove ourselves from the tracking dict (idempotent)
+        _pending_cleanup_tasks.pop(session_id, None)
+
+
+def schedule_delayed_cleanup(session_id: str, delay_seconds: int = 30) -> asyncio.Task:
+    """Schedule a delayed cleanup for a session, replacing any existing one.
+
+    This is the single entry-point for scheduling cleanup tasks. It ensures
+    only ONE cleanup task is pending per session at any time — scheduling a
+    new one automatically cancels the old one.
+
+    Returns:
+        The newly-created asyncio.Task.
+    """
+    # Cancel any existing cleanup task for this session
+    cancel_pending_cleanup(session_id)
+
+    task = asyncio.create_task(_delayed_session_cleanup(session_id, delay_seconds))
+    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+    _pending_cleanup_tasks[session_id] = task
+    return task
 
 
 async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> tuple[bool, Optional[dict]]:
@@ -64,22 +116,23 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
     import hashlib
 
     # First try the token from query parameter
+    # All DB calls use run_sync to avoid blocking the event loop during auth.
     if token:
         # Check admin session token
-        session = database.get_auth_session(token)
+        session = await run_sync(database.get_auth_session, token)
         if session:
             return (True, None)  # Admin user
 
         # Check API key web session token
-        api_key_session = database.get_api_key_session(token)
+        api_key_session = await run_sync(database.get_api_key_session, token)
         if api_key_session:
-            api_user = database.get_api_user(api_key_session["api_user_id"])
+            api_user = await run_sync(database.get_api_user, api_key_session["api_user_id"])
             if api_user and api_user.get("is_active", True):
                 return (True, api_user)
 
         # Check raw API key (hashed)
         key_hash = hashlib.sha256(token.encode()).hexdigest()
-        api_user = database.get_api_user_by_key_hash(key_hash)
+        api_user = await run_sync(database.get_api_user_by_key_hash, key_hash)
         if api_user and api_user.get("is_active", True):
             return (True, api_user)
 
@@ -87,14 +140,14 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
     cookie_token = websocket.cookies.get("session")
     if cookie_token:
         # Check admin session
-        session = database.get_auth_session(cookie_token)
+        session = await run_sync(database.get_auth_session, cookie_token)
         if session:
             return (True, None)  # Admin user
 
         # Check API key web session
-        api_key_session = database.get_api_key_session(cookie_token)
+        api_key_session = await run_sync(database.get_api_key_session, cookie_token)
         if api_key_session:
-            api_user = database.get_api_user(api_key_session["api_user_id"])
+            api_user = await run_sync(database.get_api_user, api_key_session["api_user_id"])
             if api_user and api_user.get("is_active", True):
                 return (True, api_user)
 
@@ -420,9 +473,8 @@ async def chat_websocket(
                 interrupted=True
             )
 
-            # Schedule delayed cleanup of ended session (gives clients time to reconnect)
-            # This prevents memory leak while ensuring messages are available for ~30 seconds
-            asyncio.create_task(_delayed_session_cleanup(session_id, delay_seconds=30))
+            # Schedule tracked delayed cleanup (cancellable if a new query starts)
+            schedule_delayed_cleanup(session_id, delay_seconds=30)
 
             # Broadcast stream end with interrupted flag
             if stream_state.stream_started:
@@ -446,8 +498,8 @@ async def chat_websocket(
                 interrupted=True
             )
 
-            # Schedule delayed cleanup of ended session (gives clients time to reconnect)
-            asyncio.create_task(_delayed_session_cleanup(session_id, delay_seconds=30))
+            # Schedule tracked delayed cleanup (cancellable if a new query starts)
+            schedule_delayed_cleanup(session_id, delay_seconds=30)
 
             # Broadcast stream end on error
             if stream_state.stream_started:

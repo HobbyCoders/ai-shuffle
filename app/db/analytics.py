@@ -10,6 +10,19 @@ from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
 
+# Whitelisted values for dynamic query parameters to prevent SQL injection.
+# These are the ONLY allowed values for group_by and interval parameters.
+_ALLOWED_GROUP_BY = frozenset({"profile", "user", "date"})
+_ALLOWED_INTERVALS = frozenset({"day", "week", "month"})
+
+# Mapping of interval names to safe SQLite date expressions.
+# Used instead of trusting user input directly in SQL.
+_INTERVAL_DATE_EXPR = {
+    "day": "DATE(u.created_at)",
+    "week": "strftime('%Y-W%W', u.created_at)",
+    "month": "strftime('%Y-%m', u.created_at)",
+}
+
 
 # ============================================================================
 # TypedDict definitions
@@ -318,6 +331,11 @@ def get_analytics_cost_breakdown(
             user_filter = " AND s.api_user_id = ?"
             params.append(api_user_id)
 
+        # Validate group_by against whitelist (defense-in-depth against SQL injection)
+        if group_by not in _ALLOWED_GROUP_BY:
+            logger.warning(f"Invalid group_by value rejected: {group_by!r}")
+            return []
+
         if group_by == "profile":
             cursor.execute(f"""
                 SELECT
@@ -426,14 +444,12 @@ def get_analytics_usage_trends(
             user_filter = " AND s.api_user_id = ?"
             params.append(api_user_id)
 
-        # Choose date grouping based on interval
-        if interval == "week":
-            # SQLite strftime: %Y-W%W gives year and week number
-            date_expr = "strftime('%Y-W%W', u.created_at)"
-        elif interval == "month":
-            date_expr = "strftime('%Y-%m', u.created_at)"
-        else:  # day
-            date_expr = "DATE(u.created_at)"
+        # Choose date grouping based on interval — looked up from a safe whitelist.
+        # This prevents SQL injection even if `interval` were to contain malicious input.
+        if interval not in _ALLOWED_INTERVALS:
+            logger.warning(f"Invalid interval value rejected: {interval!r}")
+            return []
+        date_expr = _INTERVAL_DATE_EXPR[interval]
 
         cursor.execute(f"""
             SELECT

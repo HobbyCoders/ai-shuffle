@@ -150,7 +150,7 @@ def _update_builtin_defaults(subagent_id: str, definition: Dict[str, Any]) -> No
     """Update only the default_* columns for a built-in subagent."""
     import json
     from datetime import datetime
-    from app.db.database import get_db
+    from app.db.base import get_db
 
     tools_json = json.dumps(definition.get("tools")) if definition.get("tools") else None
 

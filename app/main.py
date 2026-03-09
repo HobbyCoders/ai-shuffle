@@ -3,6 +3,7 @@ AI Hub - Claude Code Web Interface and API
 Main FastAPI application entry point
 """
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -25,6 +26,7 @@ from app.api import auth, profiles, projects, sessions, query, system, websocket
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
+from app.middleware.csrf import CSRFProtectionMiddleware
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -179,10 +181,33 @@ async def lifespan(app: FastAPI):
     # (browser_sdk_tools.py), no startup registration needed.
     logger.info("Browser MCP server: In-process SDK mode (no subprocess)")
 
+    # Start periodic cleanup of expired auth sessions, lockouts, and old login attempts.
+    # Runs every hour to prevent unbounded DB growth from dead tokens.
+    async def _periodic_session_cleanup():
+        """Background task: purge expired sessions every hour."""
+        while True:
+            try:
+                await asyncio.sleep(3600)  # 1 hour
+                await asyncio.to_thread(database.cleanup_expired_sessions)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Periodic session cleanup failed: {e}")
+
+    _cleanup_task = asyncio.create_task(_periodic_session_cleanup())
+    logger.info("Periodic session cleanup task started (every 1 hour)")
+
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
     yield
+
+    # Cancel the periodic cleanup task
+    _cleanup_task.cancel()
+    try:
+        await _cleanup_task
+    except asyncio.CancelledError:
+        pass
 
     # Shutdown automations (before connectors, since automations may use them)
     await automation_manager.shutdown()
@@ -285,6 +310,11 @@ app.add_middleware(AccessLogMiddleware)
 
 # Rate limit middleware - enforce per-user rate limits
 app.add_middleware(RateLimitMiddleware)
+
+# CSRF protection middleware - validates Origin/Referer on state-changing requests.
+# Must be registered AFTER RateLimitMiddleware so it runs BEFORE rate limiting
+# (Starlette processes middleware in reverse registration order for requests).
+app.add_middleware(CSRFProtectionMiddleware)
 
 # CORS middleware - configure origins via CORS_ORIGINS environment variable
 # Use "*" only for development; in production, specify exact origins

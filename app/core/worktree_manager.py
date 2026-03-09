@@ -30,7 +30,7 @@ from app.core.project_utils import (
     get_worktree_working_dir_as_path, get_project_parent_dir
 )
 from app.db import database
-from app.db.database import WorktreeStatus
+from app.db.base import WorktreeStatus
 
 logger = logging.getLogger(__name__)
 
