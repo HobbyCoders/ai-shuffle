@@ -54,8 +54,17 @@ export interface SessionSwitcherDeps {
 	onPersistTimerChanged: (timer: ReturnType<typeof setTimeout> | null) => void;
 }
 
+/** Worktree metadata from the session list, used to restore worktree state
+ * when the ephemeral cache doesn't have an entry for the target session. */
+export interface SessionWorktreeInfo {
+	worktreeId: string | null;
+	worktreeBranch: string;
+	worktreeDeleted: boolean;
+	executionMode: 'local' | 'worktree';
+}
+
 export interface SessionSwitcher {
-	switchSession: (sessionId: string, projectId?: string | null) => Promise<void>;
+	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null) => Promise<void>;
 	newChat: () => void;
 	persistSession: () => void;
 	loadPersistedSession: () => Promise<PersistedSession | null>;
@@ -227,10 +236,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	// ── Session Navigation ──────────────────────────────────────────────
 
-	async function switchSession(sessionId: string, projectId?: string | null) {
+	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null) {
 		const generation = ++_switchGeneration;
 		const state = getState();
-		console.debug(`[SessionSwitcher] switchSession(${sessionId}): gen=${generation}, leaving=${state.sessionId}, msgs=${state.messages.length}`);
+		console.debug(`[SessionSwitcher] switchSession(${sessionId}): gen=${generation}, leaving=${state.sessionId}, msgs=${state.messages.length}, worktreeInfo=${JSON.stringify(worktreeInfo)}`);
 
 		// Stop polling for the session we're leaving
 		if (state.sessionId) {
@@ -258,6 +267,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// Single update: set sessionId, cached messages, reset + restore ephemeral state.
 		// This is one _update call instead of the previous two, preventing
 		// Svelte 5 double-update issues.
+		//
+		// IMPORTANT: Worktree state fallback uses worktreeInfo (from session list)
+		// then safe defaults — NEVER s.currentValue. Using s.currentValue caused
+		// worktreeDeleted to bleed between sessions (the leaving session's state
+		// would infect the target session when no ephemeral cache existed).
 		update(s => ({
 			...s,
 			sessionId,
@@ -276,14 +290,15 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			scrollTop: ephemeral?.scrollTop || 0,
 			modelOverride: ephemeral?.modelOverride ?? s.modelOverride,
 			permissionModeOverride: ephemeral?.permissionModeOverride ?? s.permissionModeOverride,
-			executionMode: ephemeral?.executionMode ?? s.executionMode,
-			worktreeId: ephemeral?.worktreeId ?? s.worktreeId,
-			worktreeBranch: ephemeral?.worktreeBranch ?? s.worktreeBranch,
-			worktreeBaseBranch: ephemeral?.worktreeBaseBranch ?? s.worktreeBaseBranch,
-			selectedWorktreeBranch: ephemeral?.selectedWorktreeBranch ?? s.selectedWorktreeBranch,
-			worktreeMode: ephemeral?.worktreeMode ?? s.worktreeMode,
-			worktreeDeleted: ephemeral?.worktreeDeleted ?? s.worktreeDeleted,
-			queuedMessages: ephemeral?.queuedMessages ?? s.queuedMessages,
+			// Worktree fields: ephemeral > worktreeInfo from session list > safe defaults
+			executionMode: ephemeral?.executionMode ?? worktreeInfo?.executionMode ?? 'local',
+			worktreeId: ephemeral?.worktreeId ?? worktreeInfo?.worktreeId ?? null,
+			worktreeBranch: ephemeral?.worktreeBranch ?? worktreeInfo?.worktreeBranch ?? '',
+			worktreeBaseBranch: ephemeral?.worktreeBaseBranch ?? 'main',
+			selectedWorktreeBranch: ephemeral?.selectedWorktreeBranch ?? null,
+			worktreeMode: ephemeral?.worktreeMode ?? 'new',
+			worktreeDeleted: ephemeral?.worktreeDeleted ?? worktreeInfo?.worktreeDeleted ?? false,
+			queuedMessages: ephemeral?.queuedMessages ?? [],
 		}));
 
 		// Switch browser panel

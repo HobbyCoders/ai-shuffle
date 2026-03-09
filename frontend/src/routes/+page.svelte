@@ -75,12 +75,22 @@
 	 * Open an existing session by ID
 	 */
 	function handleOpenSession(sessionId: string) {
-		// Look up the session's project so switchSession can set it immediately,
-		// avoiding a window where the old project's streaming/git state leaks.
-		const sessionProjectId = $sessions.find(s => s.id === sessionId)?.project_id;
+		// Look up the session's project and worktree state so switchSession can
+		// set them immediately, avoiding state bleed from the leaving session.
+		const session = $sessions.find(s => s.id === sessionId);
+		const sessionProjectId = session?.project_id;
+
+		// Build worktree info from the session list data so the switcher can
+		// use server-authoritative values instead of stale in-memory state.
+		const worktreeInfo = session?.worktree_id || session?.worktree_branch ? {
+			worktreeId: session.worktree_id ?? null,
+			worktreeBranch: session.worktree_branch ?? '',
+			worktreeDeleted: session.worktree_deleted ?? false,
+			executionMode: 'worktree' as const,
+		} : null;
 
 		const openChat = () => {
-			activeSession.switchSession(sessionId, sessionProjectId);
+			activeSession.switchSession(sessionId, sessionProjectId, worktreeInfo);
 			layout.openChat(sessionId);
 		};
 

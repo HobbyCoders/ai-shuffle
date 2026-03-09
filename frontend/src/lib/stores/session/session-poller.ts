@@ -36,12 +36,21 @@ interface PollTimer {
 type StreamEndCallback = (sessionId: string, usage: SessionUsage) => void;
 type PollErrorCallback = (sessionId: string, consecutiveErrors: number, error: unknown) => void;
 
+/** Worktree metadata from the server, included in /live responses. */
+export interface SessionMeta {
+	worktree_id?: string | null;
+	worktree_branch?: string | null;
+	worktree_deleted?: boolean;
+	execution_mode?: string;
+}
+
 /** Data shape returned by the onPollApplied callback */
 export interface PollAppliedData {
 	messages: ChatMessage[];
 	isStreaming: boolean;
 	usage: SessionUsage;
 	todos: TodoItem[];
+	sessionMeta?: SessionMeta;
 }
 
 /** Number of consecutive failures before notifying the error callback */
@@ -254,11 +263,13 @@ class SessionPoller {
 
 			const session = sessionState.getSession(sessionId);
 			if (session) {
+				const sessionMeta = data.session_meta as SessionMeta | undefined;
 				return {
 					messages: session.messages,
 					isStreaming: session.isStreaming,
 					usage: session.usage,
 					todos: session.todos,
+					sessionMeta,
 				};
 			}
 			return null;
@@ -398,16 +409,20 @@ class SessionPoller {
 			existingMessages
 		);
 
+		// Extract session metadata (worktree state) if present in server response
+		const sessionMeta = data.session_meta as SessionMeta | undefined;
+
 		// Direct callback to activeSession — sole path from server → UI
 		if (this._onPollApplied) {
 			const session = sessionState.getSession(sessionId);
 			if (session) {
-				console.debug(`[Poller] onPollApplied(${sessionId}): ${session.messages.length} msgs, streaming=${session.isStreaming}`);
+				console.debug(`[Poller] onPollApplied(${sessionId}): ${session.messages.length} msgs, streaming=${session.isStreaming}, hasMeta=${!!sessionMeta}`);
 				this._onPollApplied(sessionId, {
 					messages: session.messages,
 					isStreaming: session.isStreaming,
 					usage: session.usage,
 					todos: session.todos,
+					sessionMeta,
 				});
 			} else {
 				console.warn(`[Poller] onPollApplied(${sessionId}): session not found in sessionState after apply`);

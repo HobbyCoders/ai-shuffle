@@ -642,6 +642,28 @@ async def get_live_session(
 
     check_session_access(request, session)
 
+    # Compute worktree metadata from DB session — included in all response
+    # paths so the frontend can correct any stale worktree state on switch.
+    session_meta = {}
+    wt_id = session.get("worktree_id")
+    if wt_id:
+        wt = database.get_worktree(wt_id)
+        if wt:
+            session_meta["worktree_id"] = wt_id
+            session_meta["worktree_branch"] = wt.get("branch_name")
+            session_meta["worktree_deleted"] = False
+            session_meta["execution_mode"] = "worktree"
+        else:
+            session_meta["worktree_id"] = None
+            session_meta["worktree_branch"] = session.get("worktree_branch")
+            session_meta["worktree_deleted"] = True
+            session_meta["execution_mode"] = "worktree"
+    elif session.get("worktree_branch"):
+        session_meta["worktree_id"] = None
+        session_meta["worktree_branch"] = session.get("worktree_branch")
+        session_meta["worktree_deleted"] = True
+        session_meta["execution_mode"] = "worktree"
+
     # Check if session is in live store (actively streaming)
     if live_session_store.has_session(session_id):
         # Check if there are updates since last poll
@@ -650,10 +672,14 @@ async def get_live_session(
             if live_data is None:
                 # No updates since last check
                 return Response(status_code=304)
+            if session_meta:
+                live_data["session_meta"] = session_meta
             return live_data
         else:
             live_data = live_session_store.get_session_dict(session_id)
             if live_data:
+                if session_meta:
+                    live_data["session_meta"] = session_meta
                 return live_data
 
     # Not streaming - load from JSONL (same as get_session but simpler response)
@@ -766,7 +792,7 @@ async def get_live_session(
         cache_creation = usage_data.get("cache_creation_tokens", cache_creation)
         cache_read = usage_data.get("cache_read_tokens", cache_read)
 
-    return {
+    result = {
         "session_id": session_id,
         "is_streaming": False,
         "last_update_id": 0,
@@ -778,6 +804,9 @@ async def get_live_session(
             "cache_read_tokens": cache_read,
         }
     }
+    if session_meta:
+        result["session_meta"] = session_meta
+    return result
 
 
 @router.patch("/{session_id}")

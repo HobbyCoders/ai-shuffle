@@ -544,13 +544,36 @@ function setupPollCallback() {
 		const todosHaveUpdate = data.todos.length > 0;
 		const streamingChanged = _state.isStreaming !== data.isStreaming;
 
+		// Build worktree metadata delta from server (corrects stale client state)
+		const metaDelta: Partial<ActiveSessionState> = {};
+		if (data.sessionMeta) {
+			const meta = data.sessionMeta;
+			// Only apply if the server has definitive worktree info
+			if (meta.worktree_deleted !== undefined && meta.worktree_deleted !== _state.worktreeDeleted) {
+				metaDelta.worktreeDeleted = meta.worktree_deleted;
+			}
+			if (meta.worktree_id !== undefined && meta.worktree_id !== _state.worktreeId) {
+				metaDelta.worktreeId = meta.worktree_id;
+			}
+			if (meta.worktree_branch !== undefined && meta.worktree_branch !== null && meta.worktree_branch !== _state.worktreeBranch) {
+				metaDelta.worktreeBranch = meta.worktree_branch;
+			}
+			if (meta.execution_mode !== undefined && meta.execution_mode !== _state.executionMode) {
+				metaDelta.executionMode = meta.execution_mode as 'local' | 'worktree';
+			}
+		}
+		const metaHasUpdate = Object.keys(metaDelta).length > 0;
+
 		// Skip if nothing actually changed
 		const msgsMatch = _state.messages === data.messages;
-		if (msgsMatch && !todosHaveUpdate && !usageHasUpdate && !streamingChanged) {
+		if (msgsMatch && !todosHaveUpdate && !usageHasUpdate && !streamingChanged && !metaHasUpdate) {
 			console.debug(`[PollCB] skipped: no changes for ${sessionId}`);
 			return;
 		}
 
+		if (metaHasUpdate) {
+			console.debug(`[PollCB] applying worktree correction:`, metaDelta);
+		}
 		console.debug(`[PollCB] applying: ${data.messages.length} msgs, streaming=${data.isStreaming}, msgsChanged=${!msgsMatch}, streamingChanged=${streamingChanged}`);
 
 		// Single authoritative update — poller is the sole writer of session state.
@@ -562,7 +585,15 @@ function setupPollCallback() {
 			// Clear streamStartTime when streaming ends
 			streamStartTime: data.isStreaming ? s.streamStartTime : null,
 			...usageDelta,
+			...metaDelta,
 		}));
+
+		// Persist corrected worktree state so the fix survives page refresh.
+		// This is rare (only when server corrects stale client state) and prevents
+		// the stale worktreeDeleted from being re-loaded on next page load.
+		if (metaHasUpdate) {
+			persistSession();
+		}
 	});
 }
 
@@ -802,11 +833,11 @@ export const activeSession = {
 
 	// ── Session Navigation (delegated to session-switcher) ─────────
 
-	switchSession: (sessionId: string, projectId?: string | null) => {
+	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: import('./session/session-switcher').SessionWorktreeInfo | null) => {
 		// User explicitly navigated to a session — clear the "new chat" flag
 		// so that future init() calls can restore from the backend normally.
 		setSkipRestore(false);
-		switcher.switchSession(sessionId, projectId);
+		switcher.switchSession(sessionId, projectId, worktreeInfo);
 	},
 	newChat: () => {
 		// Tell init() to skip restoring the old session if the component remounts.
