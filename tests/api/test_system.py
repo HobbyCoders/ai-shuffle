@@ -791,7 +791,7 @@ class TestToolCategories:
 
         execution_tools = [t["name"] for t in BUILTIN_TOOLS if t["category"] == "execution"]
 
-        expected = ["Bash", "Task"]
+        expected = ["Bash", "Task", "Agent"]
         for tool in expected:
             assert tool in execution_tools
 

@@ -120,9 +120,9 @@ If this contains an existing system prompt, use it as inspiration while improvin
 
 ## What Are Subagents?
 
-Subagents are specialized AI assistants that the main Claude agent can delegate tasks to using the "Task" tool. They run autonomously and return results to the main agent. Key characteristics:
+Subagents are specialized AI assistants that the main Claude agent can delegate tasks to using the "Agent" tool (formerly "Task"). They run autonomously and return results to the main agent. Key characteristics:
 
-- Invoked via: `Task(subagent_type="<id>", prompt="<task description>")`
+- Invoked via: `Agent(subagent_type="<id>", prompt="<task description>")`
 - Run with their own system prompt and tool restrictions
 - Return a single response to the main agent
 - Should be specialists focused on specific domains

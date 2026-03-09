@@ -17,7 +17,7 @@ TOOL_CATEGORIES: Dict[str, List[str]] = {
     "file_ops": ["Read", "Write", "Edit", "Glob", "Grep"],
     "execution": ["Bash", "KillShell"],
     "web": ["WebFetch", "WebSearch"],
-    "management": ["TodoWrite", "Task"],
+    "management": ["TodoWrite", "Task", "Agent"],
     "notebook": ["NotebookEdit"],
     "browser": [
         "browser_navigate", "browser_screenshot", "browser_click",

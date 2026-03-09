@@ -120,6 +120,7 @@
 			case 'WebSearch':
 				return String(input.query || '');
 			case 'Task':
+			case 'Agent':
 				return String(input.description || input.prompt || '').substring(0, 100);
 			default:
 				return JSON.stringify(input).substring(0, 100);

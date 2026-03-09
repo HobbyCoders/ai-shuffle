@@ -914,6 +914,29 @@ class TestSubagentTaskToolResult:
                 assert result[0]["agentStatus"] == "error"
 
 
+    def test_agent_tool_name_creates_subagent(self):
+        """Should create subagent message for 'Agent' tool name (SDK >=0.1.48)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            project_dir = projects_dir / "-workspace"
+            project_dir.mkdir(parents=True)
+            session_id = "test-session"
+            jsonl_file = project_dir / f"{session_id}.jsonl"
+            entries = [
+                {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "agent-tool-xyz", "name": "Agent", "input": {"subagent_type": "Explore", "description": "Search codebase", "prompt": "Find files"}}]}, "uuid": "agent-use", "timestamp": "2024-01-01T00:00:00Z"},
+                {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "agent-tool-xyz", "content": "Agent completed successfully"}]}, "toolUseResult": {"agentId": "agent-abc"}, "uuid": "agent-result", "timestamp": "2024-01-01T00:00:01Z"}
+            ]
+            jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
+            with patch('app.core.jsonl_parser.settings') as mock_settings:
+                mock_settings.get_claude_projects_dir = projects_dir
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
+                assert len(result) == 1
+                assert result[0]["type"] == "subagent"
+                assert result[0]["content"] == "Agent completed successfully"
+                assert result[0]["agentStatus"] == "completed"
+                assert result[0]["agentType"] == "Explore"
+
+
 class TestToolResultContentVariants:
     """Test various tool result content formats."""
 

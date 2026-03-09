@@ -71,6 +71,7 @@ BUILTIN_TOOLS = [
     # Execution tools
     {"name": "Bash", "category": "execution", "description": "Execute shell commands"},
     {"name": "Task", "category": "execution", "description": "Launch subagent tasks"},
+    {"name": "Agent", "category": "execution", "description": "Launch subagent tasks"},
     {"name": "KillShell", "category": "execution", "description": "Kill background shell"},
 
     # Browser tools (in-process SDK MCP server — names match mcp__browser-tools__<tool>)
@@ -115,6 +116,7 @@ TOOL_DESCRIPTIONS = {
     "NotebookEdit": "Edit Jupyter notebooks",
     "Bash": "Execute shell commands",
     "Task": "Launch subagent tasks",
+    "Agent": "Launch subagent tasks",
     "KillShell": "Kill background shell",
     "TodoWrite": "Manage task lists",
     "Skill": "Execute skills",
@@ -129,7 +131,7 @@ TOOL_DESCRIPTIONS = {
 TOOL_CATEGORY_RULES = {
     "read_only": ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TaskOutput"],
     "edit": ["Edit", "Write", "NotebookEdit"],
-    "execution": ["Bash", "Task", "KillShell"],
+    "execution": ["Bash", "Task", "Agent", "KillShell"],
 }
 
 # Cache for dynamically discovered tools

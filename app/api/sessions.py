@@ -1486,7 +1486,7 @@ async def import_session(
                         content_blocks = [{
                             "type": "tool_use",
                             "id": tool_id,
-                            "name": "Task",
+                            "name": "Agent",
                             "input": {
                                 "subagent_type": agent_type,
                                 "description": description

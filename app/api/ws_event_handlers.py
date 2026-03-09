@@ -486,6 +486,25 @@ async def handle_subagent_done(
     )
 
 
+async def handle_task_progress(
+    event: dict,
+    ectx: EventContext,
+    state: MutableStreamState,
+) -> None:
+    """Handle task_progress event — route usage stats to parent subagent.
+
+    The SDK emits TaskProgressMessage periodically with usage stats
+    (tokens, tool count, duration) for running Agent/Task subagents.
+    """
+    tool_use_id = event.get("tool_use_id")
+    if tool_use_id:
+        await live_session_store.update_subagent_progress(
+            session_id=ectx.session_id,
+            tool_use_id=tool_use_id,
+            usage=event.get("usage"),
+        )
+
+
 async def handle_stream_block_start(
     event: dict,
     ectx: EventContext,
@@ -640,6 +659,7 @@ EVENT_HANDLERS: Dict[str, Callable[..., Awaitable[None]]] = {
     "subagent_tool_use": handle_subagent_tool_use,
     "subagent_tool_result": handle_subagent_tool_result,
     "subagent_done": handle_subagent_done,
+    "task_progress": handle_task_progress,
     "stream_block_start": handle_stream_block_start,
     "stream_block_stop": handle_stream_block_stop,
     "stream_message_delta": handle_stream_message_delta,

@@ -67,6 +67,7 @@
 					return '';
 				}
 			case 'Task':
+			case 'Agent':
 				return String(input.description || '').substring(0, 20);
 			default:
 				return '';
@@ -84,6 +85,7 @@
 		'WebFetch': 'tool-web',
 		'WebSearch': 'tool-web',
 		'Task': 'tool-task',
+		'Agent': 'tool-task',
 		'NotebookEdit': 'tool-notebook'
 	};
 

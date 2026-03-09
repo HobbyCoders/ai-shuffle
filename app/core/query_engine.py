@@ -3102,11 +3102,20 @@ async def stream_to_websocket(
                     "tool_use_id": message.tool_use_id,
                 }
             elif isinstance(message, TaskProgressMessage):
+                # Include usage stats so the event handler can update subagent progress
+                usage_data = None
+                if message.usage:
+                    usage_data = {
+                        "total_tokens": getattr(message.usage, 'total_tokens', 0),
+                        "tool_uses": getattr(message.usage, 'tool_uses', 0),
+                        "duration_ms": getattr(message.usage, 'duration_ms', 0),
+                    }
                 yield {
                     "type": "task_progress",
                     "task_id": message.task_id,
                     "description": message.description,
                     "tool_use_id": message.tool_use_id,
+                    "usage": usage_data,
                 }
             elif isinstance(message, TaskStartedMessage):
                 yield {
@@ -3304,8 +3313,8 @@ async def stream_to_websocket(
                             "input": tool_input
                         })
 
-                        # Check if this is a Task tool (subagent) invocation
-                        if block.name == "Task":
+                        # Check if this is a subagent invocation (SDK ≤0.1.30 "Task", SDK ≥0.1.48 "Agent")
+                        if block.name in ("Task", "Agent"):
                             # Track this Task tool use
                             task_tool_uses[tool_id] = {
                                 "agent_type": tool_input.get("subagent_type", "unknown"),

@@ -555,8 +555,8 @@
 							</div>
 						</div>
 					{/if}
-				{:else if message.type === 'tool_use' && message.toolName === 'Task'}
-					<!-- Task tool_use - Skip rendering if a linked subagent message exists -->
+				{:else if message.type === 'tool_use' && (message.toolName === 'Task' || message.toolName === 'Agent')}
+					<!-- Subagent tool_use (SDK "Task" or "Agent") - Skip if a linked SubagentMessage exists -->
 					<!-- The SubagentMessage component handles displaying the agent's work -->
 					{@const hasLinkedSubagent = $activeSession.messages.some(m => m.type === 'subagent' && m.toolId === message.toolId)}
 					{#if !hasLinkedSubagent}
