@@ -190,19 +190,14 @@
 		audio: 'M9 18V5l12-2v13 M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zm12-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0z',
 	};
 
-	const ACCENT_COLORS: Record<string, string> = {
-		blue: 'var(--ring)',
-		purple: '#a855f7',
-		green: 'var(--success, #22c55e)',
-		amber: '#f59e0b',
-		rose: '#f43f5e',
-	};
+	// All categories use the same theme-consistent icon color
+	const ICON_COLOR = 'var(--foreground)';
 </script>
 
 <div class="category-card accent-{category.accent}">
 	<!-- Category header -->
 	<div class="category-header">
-		<div class="category-icon" style="color: {ACCENT_COLORS[category.accent]}">
+		<div class="category-icon" style="color: {ICON_COLOR}">
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 				<path d={CATEGORY_ICONS[category.icon] || CATEGORY_ICONS.image} />
 			</svg>
@@ -351,12 +346,8 @@
 		overflow: hidden;
 	}
 
-	/* Accent top border */
-	.category-card.accent-blue { border-top: 2px solid var(--ring); }
-	.category-card.accent-purple { border-top: 2px solid #a855f7; }
-	.category-card.accent-green { border-top: 2px solid var(--success, #22c55e); }
-	.category-card.accent-amber { border-top: 2px solid #f59e0b; }
-	.category-card.accent-rose { border-top: 2px solid #f43f5e; }
+	/* Accent top border — uniform for all categories */
+	.category-card[class*='accent-'] { border-top: 2px solid var(--border); }
 
 	/* === Category Header === */
 	.category-header {
@@ -491,21 +482,9 @@
 		white-space: nowrap;
 	}
 
-	.header-cap.cap-green {
-		background: color-mix(in srgb, var(--success, #22c55e) 12%, transparent);
-		color: var(--success, #22c55e);
-	}
-	.header-cap.cap-blue {
-		background: color-mix(in srgb, var(--ring) 12%, transparent);
-		color: var(--ring);
-	}
-	.header-cap.cap-purple {
-		background: color-mix(in srgb, #a855f7 12%, transparent);
-		color: #a855f7;
-	}
-	.header-cap.cap-amber {
-		background: color-mix(in srgb, #f59e0b 12%, transparent);
-		color: #f59e0b;
+	.header-cap[class*='cap-'] {
+		background: var(--muted);
+		color: var(--muted-foreground);
 	}
 
 	.tool-chevron {
@@ -548,21 +527,9 @@
 		line-height: 1.4;
 	}
 
-	.cap-badge.cap-green {
-		background: color-mix(in srgb, var(--success, #22c55e) 15%, transparent);
-		color: var(--success, #22c55e);
-	}
-	.cap-badge.cap-blue {
-		background: color-mix(in srgb, var(--ring) 15%, transparent);
-		color: var(--ring);
-	}
-	.cap-badge.cap-purple {
-		background: color-mix(in srgb, #a855f7 15%, transparent);
-		color: #a855f7;
-	}
-	.cap-badge.cap-amber {
-		background: color-mix(in srgb, #f59e0b 15%, transparent);
-		color: #f59e0b;
+	.cap-badge[class*='cap-'] {
+		background: var(--muted);
+		color: var(--muted-foreground);
 	}
 
 	/* === Settings Panel === */

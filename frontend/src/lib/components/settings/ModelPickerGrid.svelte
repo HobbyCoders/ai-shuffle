@@ -561,10 +561,7 @@
 		border-radius: 50%;
 	}
 
-	.cap-dot.cap-green { background: var(--success, #22c55e); }
-	.cap-dot.cap-blue { background: var(--ring); }
-	.cap-dot.cap-purple { background: #a855f7; }
-	.cap-dot.cap-amber { background: #f59e0b; }
+	.cap-dot[class*='cap-'] { background: var(--muted-foreground); }
 
 	.no-results {
 		padding: 16px;
