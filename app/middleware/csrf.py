@@ -69,8 +69,11 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
     2. Skips requests authenticated via Bearer token (API keys are CSRF-safe).
     3. Skips WebSocket upgrade requests (authenticated via token query param).
     4. Skips exempt paths (webhooks with their own auth).
-    5. For remaining requests, validates Origin or Referer header against
-       the allowed origins derived from CORS_ORIGINS config.
+    5. Extracts Origin (or Referer) from request headers.
+    6. Allows requests with no Origin from localhost clients.
+    7. Allows same-origin requests (Origin matches Host header) — covers
+       Docker and reverse-proxy deployments without explicit CORS_ORIGINS.
+    8. Validates Origin against the allowed origins from CORS_ORIGINS config.
 
     If CORS_ORIGINS contains "*" (development mode), CSRF checks are
     disabled entirely with a warning logged at startup.
@@ -90,6 +93,36 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
             logger.info(f"CSRF protection enabled for origins: {self._allowed_origins}")
         else:
             logger.warning("CSRF protection: no valid origins configured in CORS_ORIGINS")
+
+    @staticmethod
+    def _is_same_origin(request: Request, request_origin: str) -> bool:
+        """Check if the request Origin matches the Host header.
+
+        When the frontend is served by the same backend (SPA served from
+        FastAPI static files), every legitimate browser request is same-origin.
+        Comparing Origin against Host is the standard same-origin verification
+        and is inherently CSRF-safe — a cross-origin attacker cannot forge the
+        Origin header to match the victim's Host.
+
+        Handles both direct access (http://host:port) and reverse-proxy setups
+        where X-Forwarded-Host / X-Forwarded-Proto are set.
+        """
+        # Prefer forwarded headers (set by reverse proxies like nginx/traefik)
+        forwarded_host = request.headers.get("x-forwarded-host", "")
+        forwarded_proto = request.headers.get("x-forwarded-proto", "")
+        host_header = request.headers.get("host", "")
+
+        if forwarded_host:
+            scheme = forwarded_proto or "https"
+            expected_origin = f"{scheme}://{forwarded_host}"
+        elif host_header:
+            # For direct access, infer scheme from the request URL
+            scheme = request.url.scheme or "http"
+            expected_origin = f"{scheme}://{host_header}"
+        else:
+            return False
+
+        return request_origin == expected_origin
 
     async def dispatch(self, request: Request, call_next) -> Response:
         # 1. Safe methods — no CSRF risk
@@ -141,6 +174,14 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
                 status_code=403,
                 content={"detail": "CSRF validation failed: missing Origin header"},
             )
+
+        # 7. Same-origin check — if the Origin matches the Host the browser
+        #    connected to, this is by definition a same-origin request and is
+        #    CSRF-safe.  This covers Docker / reverse-proxy deployments where
+        #    the user accesses the app on an origin not listed in CORS_ORIGINS
+        #    (e.g. http://192.168.1.50:8000 or https://my-server.local).
+        if self._is_same_origin(request, request_origin):
+            return await call_next(request)
 
         if request_origin not in self._allowed_origins:
             logger.warning(
