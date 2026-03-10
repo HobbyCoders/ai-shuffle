@@ -112,12 +112,13 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         forwarded_proto = request.headers.get("x-forwarded-proto", "")
         host_header = request.headers.get("host", "")
 
+        # Determine scheme: prefer X-Forwarded-Proto (set by reverse proxies
+        # and Cloudflare Tunnel), fall back to the actual request scheme.
+        scheme = forwarded_proto or request.url.scheme or "http"
+
         if forwarded_host:
-            scheme = forwarded_proto or "https"
             expected_origin = f"{scheme}://{forwarded_host}"
         elif host_header:
-            # For direct access, infer scheme from the request URL
-            scheme = request.url.scheme or "http"
             expected_origin = f"{scheme}://{host_header}"
         else:
             return False
