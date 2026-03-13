@@ -320,14 +320,20 @@ async def handle_system(
                 # so the next frontend poll will pick up the change.
                 return
 
+    # Extract content from data if available (e.g., api_error, local_command
+    # events store their display text in data["content"])
+    system_content = ""
+    if isinstance(data, dict) and "content" in data:
+        system_content = str(data["content"])
+
     await live_session_store.add_system_message(
         session_id=ectx.session_id,
-        content="",
+        content=system_content,
         subtype=subtype,
         data=data,
     )
     chunk_data = {
-        "content": "",
+        "content": system_content,
         "subtype": subtype,
         "data": data,
     }

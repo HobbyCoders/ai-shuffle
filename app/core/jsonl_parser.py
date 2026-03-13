@@ -1047,6 +1047,8 @@ def _parse_session_history_uncached(
                         "content": error_text,
                         "type": "system",
                         "subtype": "api_error",
+                        "systemSubtype": "api_error",  # Frontend compatibility
+                        "systemData": {"content": error_text},
                         "metadata": {"timestamp": timestamp},
                         "streaming": False
                     })

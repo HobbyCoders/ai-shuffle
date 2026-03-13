@@ -279,8 +279,9 @@
 
 			case 'api_error': {
 				// API error messages from Claude SDK (e.g., max output tokens exceeded)
-				// These are synthetic messages with isApiErrorMessage: true
-				const apiErrorContent = message.content || 'An API error occurred';
+				// Content may be in message.content (from JSONL parser) or data.content
+				// (from streaming path via live_session_store)
+				const apiErrorContent = message.content || (data.content as string) || 'An API error occurred';
 				return {
 					title: 'API Error',
 					content: apiErrorContent,
