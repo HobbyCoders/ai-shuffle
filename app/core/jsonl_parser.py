@@ -25,7 +25,7 @@ import uuid
 from collections import OrderedDict
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Generator
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.core.config import settings
 
@@ -221,7 +221,7 @@ def write_system_message(
         "type": "system",
         "subtype": subtype,
         "content": content,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "uuid": f"sys-{uuid.uuid4().hex[:12]}"
     }
 

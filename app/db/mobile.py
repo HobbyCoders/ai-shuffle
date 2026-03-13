@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -78,7 +78,7 @@ def create_mobile_device(
     """Register a new mobile device"""
     import uuid
     record_id = str(uuid.uuid4())[:8]
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -135,7 +135,7 @@ def get_all_mobile_devices() -> List[MobileDeviceRow]:
 
 def update_mobile_device_capabilities(device_id: str, capabilities: Dict[str, Any]) -> Optional[MobileDeviceRow]:
     """Update capabilities for a mobile device"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -148,7 +148,7 @@ def update_mobile_device_capabilities(device_id: str, capabilities: Dict[str, An
 
 def update_mobile_device_fcm_token(device_id: str, fcm_token: str) -> Optional[MobileDeviceRow]:
     """Update FCM push token for a mobile device"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -161,7 +161,7 @@ def update_mobile_device_fcm_token(device_id: str, fcm_token: str) -> Optional[M
 
 def update_mobile_device_last_seen(device_id: str) -> None:
     """Update last_seen timestamp for a mobile device"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE mobile_devices SET last_seen = ? WHERE device_id = ?", (now, device_id))
@@ -189,7 +189,7 @@ def create_pending_action(
     """Create a new pending action"""
     import uuid
     action_id = str(uuid.uuid4())[:8]
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -217,7 +217,7 @@ def get_pending_action(action_id: str) -> Optional[PendingActionRow]:
 
 def get_pending_actions_for_device(device_id: str) -> List[PendingActionRow]:
     """Get all pending actions for a device that haven't expired"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -250,7 +250,7 @@ def update_pending_action_status(action_id: str, status: str) -> Optional[Pendin
 
 def cleanup_expired_actions() -> int:
     """Mark expired pending actions as expired"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -273,7 +273,7 @@ def create_trusted_action(
     """Create a trusted action pattern"""
     import uuid
     trusted_id = str(uuid.uuid4())[:8]
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -344,7 +344,7 @@ def save_mobile_schedule(
     last_triggered_at: Optional[str]
 ) -> Optional[MobileScheduleRow]:
     """Save or update a mobile schedule"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -404,7 +404,7 @@ def save_mobile_action(
     completed_at: Optional[str]
 ) -> Optional[PendingActionRow]:
     """Save or update a mobile action"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -452,7 +452,7 @@ def save_mobile_device(
     last_seen_at: Optional[str]
 ) -> Optional[MobileDeviceRow]:
     """Save or update a mobile device"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         # Check if device exists

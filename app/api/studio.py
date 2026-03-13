@@ -7,7 +7,7 @@ various AI providers, managing generations, and organizing assets.
 
 import logging
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, status, Depends
@@ -257,7 +257,7 @@ async def generate_image(
         )
 
     gen_id = str(uuid.uuid4())
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     generation = {
         "id": gen_id,
@@ -343,7 +343,7 @@ async def generate_video(
         )
 
     gen_id = str(uuid.uuid4())
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     generation = {
         "id": gen_id,
@@ -510,7 +510,7 @@ async def save_asset(request: AssetCreateRequest, token: str = Depends(require_a
         )
 
     asset_id = str(uuid.uuid4())
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     asset = {
         "id": asset_id,

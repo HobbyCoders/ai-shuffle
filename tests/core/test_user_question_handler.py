@@ -13,7 +13,7 @@ Tests cover:
 
 import asyncio
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 from app.core.user_question_handler import (
@@ -45,14 +45,14 @@ class TestQuestionRequest:
 
     def test_question_request_default_values(self):
         """QuestionRequest should set default values correctly."""
-        before = datetime.utcnow()
+        before = datetime.now(timezone.utc)
         request = QuestionRequest(
             request_id="req-123",
             tool_use_id="tool-456",
             session_id="session-789",
             questions=[]
         )
-        after = datetime.utcnow()
+        after = datetime.now(timezone.utc)
 
         assert before <= request.created_at <= after
         assert request.answers is None

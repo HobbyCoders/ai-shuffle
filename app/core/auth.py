@@ -11,7 +11,7 @@ import subprocess
 import json
 import asyncio
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 
 import bcrypt
@@ -178,7 +178,7 @@ class AuthService:
     def create_session(self) -> str:
         """Create a new auth session token"""
         token = secrets.token_urlsafe(32)
-        expires_at = datetime.utcnow() + timedelta(days=settings.session_expire_days)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days)
         database.create_auth_session(token, expires_at)
         return token
 
@@ -198,7 +198,7 @@ class AuthService:
                 )
                 row = cursor.fetchone()
                 if row:
-                    now_str = datetime.utcnow().isoformat()
+                    now_str = datetime.now(timezone.utc).isoformat()
                     logger.warning(
                         f"[{_SERVER_INSTANCE_ID}] Session EXPIRED: "
                         f"expires_at={row['expires_at']}, now={now_str}"

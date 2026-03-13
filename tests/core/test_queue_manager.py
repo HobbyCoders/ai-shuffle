@@ -16,7 +16,7 @@ Tests cover:
 
 import asyncio
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from app.core.queue_manager import (
@@ -32,7 +32,7 @@ class TestQueuedRequest:
 
     def test_create_queued_request(self):
         """Should create a queued request with all fields."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         request = QueuedRequest(
             id="req-123",
             user_id="user-456",
@@ -60,7 +60,7 @@ class TestQueuedRequest:
             user_id="user-456",
             api_key_id=None,
             priority=5,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             request_data={},
             callback=my_callback,
         )
@@ -69,7 +69,7 @@ class TestQueuedRequest:
 
     def test_sort_key_computed_in_post_init(self):
         """Sort key should be computed automatically."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         request = QueuedRequest(
             id="req-123",
             user_id="user-456",
@@ -84,7 +84,7 @@ class TestQueuedRequest:
 
     def test_lt_comparison_higher_priority_first(self):
         """Higher priority requests should compare as 'less than'."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         high_priority = QueuedRequest(
             id="high", user_id="u1", api_key_id=None,
             priority=10, created_at=now, request_data={}
@@ -100,7 +100,7 @@ class TestQueuedRequest:
 
     def test_lt_comparison_fifo_for_same_priority(self):
         """Earlier requests should compare as 'less than' for same priority."""
-        earlier = datetime.utcnow()
+        earlier = datetime.now(timezone.utc)
         later = earlier + timedelta(seconds=10)
 
         first_request = QueuedRequest(
@@ -119,15 +119,15 @@ class TestQueuedRequest:
         """Equality should be based on request ID."""
         request1 = QueuedRequest(
             id="same-id", user_id="u1", api_key_id=None,
-            priority=5, created_at=datetime.utcnow(), request_data={}
+            priority=5, created_at=datetime.now(timezone.utc), request_data={}
         )
         request2 = QueuedRequest(
             id="same-id", user_id="u2", api_key_id=None,
-            priority=10, created_at=datetime.utcnow(), request_data={}
+            priority=10, created_at=datetime.now(timezone.utc), request_data={}
         )
         request3 = QueuedRequest(
             id="different-id", user_id="u1", api_key_id=None,
-            priority=5, created_at=datetime.utcnow(), request_data={}
+            priority=5, created_at=datetime.now(timezone.utc), request_data={}
         )
 
         assert request1 == request2
@@ -137,7 +137,7 @@ class TestQueuedRequest:
         """Equality with non-QueuedRequest should return False."""
         request = QueuedRequest(
             id="req-123", user_id="u1", api_key_id=None,
-            priority=5, created_at=datetime.utcnow(), request_data={}
+            priority=5, created_at=datetime.now(timezone.utc), request_data={}
         )
 
         assert request != "not a request"

@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -84,7 +84,7 @@ def create_connector(
     is_active: bool = False,
 ) -> Optional[ConnectorRow]:
     """Create a new connector."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -152,7 +152,7 @@ def update_connector(connector_id: str, **kwargs) -> Optional[ConnectorRow]:
 
     if updates:
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(connector_id)
         with get_db() as conn:
             cursor = conn.cursor()
@@ -171,7 +171,7 @@ def update_connector_status(
     error: Optional[str] = None,
 ) -> None:
     """Update the runtime status of a connector."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         if status == "connected":
@@ -209,7 +209,7 @@ def delete_connector(connector_id: str) -> bool:
 
 def update_connector_event_dispatched(connector_id: str, success: bool) -> None:
     """Update last_event_at and failure_count after event dispatch."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         if success:
@@ -236,7 +236,7 @@ def create_connector_event_log(
     error: Optional[str] = None,
 ) -> None:
     """Create a connector event log entry."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -276,7 +276,7 @@ def create_connector_session(
     ai_session_id: Optional[str] = None,
 ) -> Optional[ConnectorSessionRow]:
     """Create a new connector session mapping."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -323,7 +323,7 @@ def update_connector_session_ai_session(
     session_id: str, ai_session_id: Optional[str]
 ) -> None:
     """Update the AI session linked to a connector session."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(

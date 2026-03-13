@@ -31,7 +31,7 @@ Tests cover:
 
 import pytest
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from contextlib import contextmanager
 
@@ -586,7 +586,7 @@ def setup_project(mock_db):
 @pytest.fixture
 def setup_api_user(mock_db):
     """Insert a test API user directly into the database."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     mock_db.execute(
         """INSERT INTO api_users (id, name, api_key_hash, is_active, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
@@ -1043,7 +1043,7 @@ class TestAuthSessionOperations:
 
     def test_create_auth_session(self, mock_db):
         """create_auth_session should create auth token."""
-        expires = datetime.utcnow() + timedelta(hours=24)
+        expires = datetime.now(timezone.utc) + timedelta(hours=24)
         result = db.create_auth_session("token123", expires)
 
         assert result["token"] == "token123"
@@ -1051,7 +1051,7 @@ class TestAuthSessionOperations:
 
     def test_get_auth_session_valid(self, mock_db):
         """get_auth_session should return valid session."""
-        expires = datetime.utcnow() + timedelta(hours=24)
+        expires = datetime.now(timezone.utc) + timedelta(hours=24)
         db.create_auth_session("token123", expires)
 
         result = db.get_auth_session("token123")
@@ -1061,7 +1061,7 @@ class TestAuthSessionOperations:
 
     def test_get_auth_session_expired(self, mock_db):
         """get_auth_session should not return expired session."""
-        expires = datetime.utcnow() - timedelta(hours=1)
+        expires = datetime.now(timezone.utc) - timedelta(hours=1)
         db.create_auth_session("token123", expires)
 
         result = db.get_auth_session("token123")
@@ -1070,7 +1070,7 @@ class TestAuthSessionOperations:
 
     def test_delete_auth_session(self, mock_db):
         """delete_auth_session should delete session."""
-        expires = datetime.utcnow() + timedelta(hours=24)
+        expires = datetime.now(timezone.utc) + timedelta(hours=24)
         db.create_auth_session("token123", expires)
         db.delete_auth_session("token123")
 
@@ -1370,7 +1370,7 @@ class TestClearAllSessions:
     def test_clear_all_sessions(self, mock_db, setup_api_user):
         """clear_all_sessions should delete all auth and API key sessions."""
         # Create some auth sessions
-        expires = datetime.utcnow() + timedelta(hours=24)
+        expires = datetime.now(timezone.utc) + timedelta(hours=24)
         db.create_auth_session("auth-token-1", expires)
         db.create_auth_session("auth-token-2", expires)
 
@@ -2018,7 +2018,7 @@ class TestRequestLog:
         db.log_request("req-2", None, "user-1", "/api")
 
         # Get count for last hour - signature: user_id, api_key_id, since, endpoint
-        since = datetime.utcnow() - timedelta(hours=1)
+        since = datetime.now(timezone.utc) - timedelta(hours=1)
         count = db.get_request_count(None, "user-1", since)
 
         assert count == 2

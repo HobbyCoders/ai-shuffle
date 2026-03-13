@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -57,7 +57,7 @@ def create_tag(
     color: str = "#6366f1"
 ) -> TagRow:
     """Create a new tag"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -89,7 +89,7 @@ def update_tag(
 
     if updates:
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(tag_id)
 
         with get_db() as conn:
@@ -131,7 +131,7 @@ def get_session_tags(session_id: str) -> List[TagRow]:
 def add_session_tag(session_id: str, tag_id: str) -> bool:
     """Add a tag to a session"""
     try:
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -158,7 +158,7 @@ def remove_session_tag(session_id: str, tag_id: str) -> bool:
 
 def set_session_tags(session_id: str, tag_ids: List[str]) -> List[TagRow]:
     """Set all tags for a session (replaces existing)"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         # Remove existing tags

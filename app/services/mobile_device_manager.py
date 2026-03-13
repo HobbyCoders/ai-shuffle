@@ -9,7 +9,7 @@ import logging
 import secrets
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.db import database
@@ -41,8 +41,8 @@ class MobileDevice:
     api_key_hash: Optional[str] = None
     capabilities: DeviceCapabilities = field(default_factory=DeviceCapabilities)
     is_active: bool = True
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_seen_at: Optional[datetime] = None
 
 
@@ -104,8 +104,8 @@ class MobileDeviceManager:
             api_key_hash=row.get("api_key_hash"),
             capabilities=capabilities,
             is_active=bool(row.get("is_active", True)),
-            created_at=datetime.fromisoformat(row["created_at"]) if row.get("created_at") else datetime.utcnow(),
-            updated_at=datetime.fromisoformat(row["updated_at"]) if row.get("updated_at") else datetime.utcnow(),
+            created_at=datetime.fromisoformat(row["created_at"]) if row.get("created_at") else datetime.now(timezone.utc),
+            updated_at=datetime.fromisoformat(row["updated_at"]) if row.get("updated_at") else datetime.now(timezone.utc),
             last_seen_at=datetime.fromisoformat(row["last_seen_at"]) if row.get("last_seen_at") else None,
         )
 
@@ -237,7 +237,7 @@ class MobileDeviceManager:
             microphone=capabilities.get("microphone", device.capabilities.microphone),
             local_storage=capabilities.get("local_storage", device.capabilities.local_storage),
         )
-        device.updated_at = datetime.utcnow()
+        device.updated_at = datetime.now(timezone.utc)
 
         await self._save_device_to_db(device)
 
@@ -348,7 +348,7 @@ class MobileDeviceManager:
             return None
 
         device.fcm_token = token
-        device.updated_at = datetime.utcnow()
+        device.updated_at = datetime.now(timezone.utc)
 
         await self._save_device_to_db(device)
 
@@ -372,7 +372,7 @@ class MobileDeviceManager:
         if not device:
             return None
 
-        device.last_seen_at = datetime.utcnow()
+        device.last_seen_at = datetime.now(timezone.utc)
 
         # Only save periodically to avoid excessive DB writes
         await self._save_device_to_db(device)
@@ -402,7 +402,7 @@ class MobileDeviceManager:
             return None
 
         device.is_active = is_active
-        device.updated_at = datetime.utcnow()
+        device.updated_at = datetime.now(timezone.utc)
 
         await self._save_device_to_db(device)
 

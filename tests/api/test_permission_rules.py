@@ -10,7 +10,7 @@ Tests cover:
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import patch
 from fastapi import HTTPException
 
@@ -132,7 +132,7 @@ class TestRequestResponseModels:
 
 def sample_profile():
     """Create a sample profile for testing."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     return {
         "id": "test-profile",
         "name": "Test Profile",
@@ -149,7 +149,7 @@ def sample_profile():
 
 def sample_permission_rule():
     """Create a sample permission rule for testing."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     return {
         "id": "rule-abc123",
         "profile_id": "test-profile",
@@ -162,7 +162,7 @@ def sample_permission_rule():
 
 def sample_permission_rule_list():
     """Create a list of sample permission rules."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     return [
         {
             "id": "rule-001",
@@ -367,7 +367,7 @@ class TestCreatePermissionRuleEndpoint:
         from app.api.permission_rules import create_permission_rule, PermissionRuleCreate
 
         profile = sample_profile()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_rule = {
             "id": "rule-new123",
             "profile_id": "test-profile",
@@ -409,7 +409,7 @@ class TestCreatePermissionRuleEndpoint:
         from app.api.permission_rules import create_permission_rule, PermissionRuleCreate
 
         profile = sample_profile()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_rule = {
             "id": "rule-new456",
             "profile_id": "test-profile",
@@ -448,7 +448,7 @@ class TestCreatePermissionRuleEndpoint:
         from app.api.permission_rules import create_permission_rule, PermissionRuleCreate
 
         profile = sample_profile()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_rule = {
             "id": "rule-deny123",
             "profile_id": "test-profile",
@@ -668,7 +668,7 @@ class TestEdgeCases:
         from app.api.permission_rules import create_permission_rule, PermissionRuleCreate
 
         profile = sample_profile()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_rule = {
             "id": "rule-empty",
             "profile_id": "test-profile",
@@ -702,7 +702,7 @@ class TestEdgeCases:
         from app.api.permission_rules import create_permission_rule, PermissionRuleCreate
 
         profile = sample_profile()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_rule = {
             "id": "rule-wildcard",
             "profile_id": "test-profile",
@@ -735,7 +735,7 @@ class TestEdgeCases:
         from app.api.permission_rules import create_permission_rule, PermissionRuleCreate
 
         profile = sample_profile()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_rule = {
             "id": "rule-special",
             "profile_id": "test-profile",
@@ -788,7 +788,7 @@ class TestEdgeCases:
 
         profile = sample_profile()
         long_pattern = "a" * 1000
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_rule = {
             "id": "rule-long",
             "profile_id": "test-profile",
@@ -829,7 +829,7 @@ class TestMultipleRulesScenarios:
         """Listing rules should return rules from all profiles when no filter."""
         from app.api.permission_rules import list_permission_rules
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         multi_profile_rules = [
             {
                 "id": "rule-p1-001",
@@ -868,7 +868,7 @@ class TestMultipleRulesScenarios:
         """Filtering rules by tool name should only return matching rules."""
         from app.api.permission_rules import list_permission_rules
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         bash_rules = [
             {
                 "id": "rule-bash-001",
@@ -932,7 +932,7 @@ class TestDecisionValidation:
         from app.api.permission_rules import create_permission_rule, PermissionRuleCreate
 
         profile = sample_profile()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_rule = {
             "id": "rule-allow",
             "profile_id": "test-profile",
@@ -965,7 +965,7 @@ class TestDecisionValidation:
         from app.api.permission_rules import create_permission_rule, PermissionRuleCreate
 
         profile = sample_profile()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_rule = {
             "id": "rule-deny",
             "profile_id": "test-profile",

@@ -9,7 +9,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
@@ -51,8 +51,8 @@ class QueuedAction:
     status: ActionStatus = ActionStatus.PENDING
     executor_result: Optional[str] = None
     error_message: Optional[str] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    expires_at: datetime = field(default_factory=lambda: datetime.utcnow() + timedelta(seconds=DEFAULT_EXPIRY_SECONDS))
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_EXPIRY_SECONDS))
     confirmed_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
@@ -157,7 +157,7 @@ class ActionQueue:
             action_type=action_type,
             params=params,
             security_level=security_level,
-            expires_at=datetime.utcnow() + timedelta(seconds=expiry),
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=expiry),
         )
 
         self._actions[action_id] = action
@@ -237,13 +237,13 @@ class ActionQueue:
             return self._action_to_dict(action)
 
         # Check if expired
-        if datetime.utcnow() > action.expires_at:
+        if datetime.now(timezone.utc) > action.expires_at:
             action.status = ActionStatus.EXPIRED
             await self._save_action_to_db(action)
             logger.debug(f"Action {action_id} was already expired")
             return self._action_to_dict(action)
 
-        action.confirmed_at = datetime.utcnow()
+        action.confirmed_at = datetime.now(timezone.utc)
 
         if approved:
             action.status = ActionStatus.APPROVED
@@ -288,7 +288,7 @@ class ActionQueue:
             logger.warning(f"Cannot complete action {action_id} with status {action.status}")
             return self._action_to_dict(action)
 
-        action.completed_at = datetime.utcnow()
+        action.completed_at = datetime.now(timezone.utc)
 
         if success:
             action.status = ActionStatus.COMPLETED
@@ -314,7 +314,7 @@ class ActionQueue:
         if not self._initialized:
             await self.initialize()
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expired_count = 0
 
         for action in list(self._actions.values()):
@@ -365,7 +365,7 @@ class ActionQueue:
         if not self._initialized:
             await self.initialize()
 
-        cutoff = datetime.utcnow() - timedelta(hours=older_than_hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
         removed_count = 0
 
         terminal_statuses = {
@@ -413,7 +413,7 @@ class ActionQueue:
                 await self.expire_old_actions()
 
                 # Cleanup old completed actions once per hour
-                if datetime.utcnow().minute == 0:
+                if datetime.now(timezone.utc).minute == 0:
                     await self.cleanup_completed_actions()
 
             except asyncio.CancelledError:
@@ -435,8 +435,8 @@ class ActionQueue:
                     status=ActionStatus(row.get("status", "pending")),
                     executor_result=row.get("executor_result"),
                     error_message=row.get("error_message"),
-                    created_at=datetime.fromisoformat(row["created_at"]) if row.get("created_at") else datetime.utcnow(),
-                    expires_at=datetime.fromisoformat(row["expires_at"]) if row.get("expires_at") else datetime.utcnow() + timedelta(seconds=self._expiry_seconds),
+                    created_at=datetime.fromisoformat(row["created_at"]) if row.get("created_at") else datetime.now(timezone.utc),
+                    expires_at=datetime.fromisoformat(row["expires_at"]) if row.get("expires_at") else datetime.now(timezone.utc) + timedelta(seconds=self._expiry_seconds),
                     confirmed_at=datetime.fromisoformat(row["confirmed_at"]) if row.get("confirmed_at") else None,
                     completed_at=datetime.fromisoformat(row["completed_at"]) if row.get("completed_at") else None,
                 )

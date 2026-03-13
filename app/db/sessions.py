@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -284,7 +284,7 @@ def create_session(
         worktree_path: Optional worktree path (persisted for display after worktree deletion)
         _conn: Optional existing DB connection for transaction grouping
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     if _conn is not None:
         cursor = _conn.cursor()
         cursor.execute(
@@ -332,7 +332,7 @@ def create_session_with_stats(
         total_tokens_out: Total output tokens
         turn_count: Number of conversation turns
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -365,7 +365,7 @@ def update_session(
         worktree_id: Set to a worktree ID to link, or empty string "" to unlink
     """
     updates = ["updated_at = ?"]
-    values = [datetime.utcnow().isoformat()]
+    values = [datetime.now(timezone.utc).isoformat()]
 
     if sdk_session_id is not None:
         updates.append("sdk_session_id = ?")
@@ -421,7 +421,7 @@ def toggle_session_favorite(session_id: str) -> Optional[SessionRow]:
         cursor.execute(
             """UPDATE sessions SET is_favorite = NOT is_favorite, updated_at = ?
                WHERE id = ?""",
-            (datetime.utcnow().isoformat(), session_id)
+            (datetime.now(timezone.utc).isoformat(), session_id)
         )
         if cursor.rowcount == 0:
             return None
@@ -435,7 +435,7 @@ def set_session_favorite(session_id: str, is_favorite: bool) -> Optional[Session
         cursor.execute(
             """UPDATE sessions SET is_favorite = ?, updated_at = ?
                WHERE id = ?""",
-            (is_favorite, datetime.utcnow().isoformat(), session_id)
+            (is_favorite, datetime.now(timezone.utc).isoformat(), session_id)
         )
         if cursor.rowcount == 0:
             return None
@@ -555,7 +555,7 @@ def add_session_message(
         profile_id: Optional profile ID that created this message (for per-query tracking)
         _conn: Optional existing DB connection for transaction grouping
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     params = (session_id, role, content, tool_name,
               json.dumps(tool_input) if tool_input else None,
               json.dumps(metadata) if metadata else None,
@@ -976,7 +976,7 @@ def add_sync_log(
     data: Optional[Dict[str, Any]] = None
 ) -> SyncLogRow:
     """Add an entry to the sync log for polling fallback"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1036,7 +1036,7 @@ def update_message_content(
     metadata: Optional[Dict[str, Any]] = None
 ) -> Optional[SessionMessageRow]:
     """Update message content (used during streaming)"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
 

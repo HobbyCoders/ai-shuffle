@@ -10,7 +10,7 @@ import heapq
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -124,7 +124,7 @@ class RequestQueue:
                 user_id=user_id,
                 api_key_id=api_key_id,
                 priority=priority,
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc),
                 request_data=request_data,
                 callback=callback
             )

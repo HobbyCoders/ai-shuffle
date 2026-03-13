@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -227,7 +227,7 @@ def get_auth_session(token: str) -> Optional[AuthSessionRow]:
     global _auth_session_empty_logged
     with get_db() as conn:
         cursor = conn.cursor()
-        now_iso = datetime.utcnow().isoformat()
+        now_iso = datetime.now(timezone.utc).isoformat()
         cursor.execute(
             "SELECT * FROM auth_sessions WHERE token = ? AND expires_at > ?",
             (token, now_iso)
@@ -337,14 +337,14 @@ def record_login_attempt(ip_address: str, username: Optional[str], success: bool
         cursor.execute(
             """INSERT INTO login_attempts (ip_address, username, success, created_at)
                VALUES (?, ?, ?, ?)""",
-            (ip_address, username, success, datetime.utcnow().isoformat())
+            (ip_address, username, success, datetime.now(timezone.utc).isoformat())
         )
 
 
 def get_failed_attempts_count(ip_address: str, window_minutes: int = 15) -> int:
     """Get the number of failed login attempts from an IP in the time window"""
     from datetime import timedelta
-    cutoff = (datetime.utcnow() - timedelta(minutes=window_minutes)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -359,7 +359,7 @@ def get_failed_attempts_count(ip_address: str, window_minutes: int = 15) -> int:
 def get_failed_attempts_for_username(username: str, window_minutes: int = 15) -> int:
     """Get the number of failed login attempts for a username in the time window"""
     from datetime import timedelta
-    cutoff = (datetime.utcnow() - timedelta(minutes=window_minutes)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -379,19 +379,19 @@ def create_lockout(ip_address: Optional[str], username: Optional[str],
                    duration_minutes: int, reason: str):
     """Create a lockout for an IP or username"""
     from datetime import timedelta
-    locked_until = (datetime.utcnow() + timedelta(minutes=duration_minutes)).isoformat()
+    locked_until = (datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO account_lockouts (ip_address, username, locked_until, reason, created_at)
                VALUES (?, ?, ?, ?, ?)""",
-            (ip_address, username, locked_until, reason, datetime.utcnow().isoformat())
+            (ip_address, username, locked_until, reason, datetime.now(timezone.utc).isoformat())
         )
 
 
 def is_ip_locked(ip_address: str) -> Optional[AccountLockoutRow]:
     """Check if an IP address is currently locked out"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -405,7 +405,7 @@ def is_ip_locked(ip_address: str) -> Optional[AccountLockoutRow]:
 
 def is_username_locked(username: str) -> Optional[AccountLockoutRow]:
     """Check if a username is currently locked out"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -440,7 +440,7 @@ def cleanup_expired_sessions() -> dict:
     Returns:
         dict with counts of rows deleted from each table.
     """
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
     results = {}
 
     with get_db() as conn:
@@ -460,7 +460,7 @@ def cleanup_expired_sessions() -> dict:
 
         # Old login attempts (older than 24 hours — well past the 15-minute window)
         from datetime import timedelta
-        cutoff_24h = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+        cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         cursor.execute("DELETE FROM login_attempts WHERE created_at < ?", (cutoff_24h,))
         results["login_attempts"] = cursor.rowcount
 
@@ -482,7 +482,7 @@ def get_api_key_session(token: str) -> Optional[ApiKeySessionRow]:
                FROM api_key_sessions aks
                JOIN api_users au ON aks.api_user_id = au.id
                WHERE aks.token = ? AND aks.expires_at > ? AND au.is_active = TRUE""",
-            (token, datetime.utcnow().isoformat())
+            (token, datetime.now(timezone.utc).isoformat())
         )
         session = row_to_dict(cursor.fetchone())
         if session:

@@ -7,7 +7,7 @@ User-Specific Analytics:
 """
 
 from typing import Optional, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query, HTTPException, status, Request
 
@@ -59,7 +59,7 @@ def validate_date_format(date_str: Optional[str], param_name: str) -> Optional[s
 
 def get_default_date_range() -> tuple[str, str]:
     """Get default date range (last 30 days)"""
-    end_date = datetime.utcnow().date()
+    end_date = datetime.now(timezone.utc).date()
     start_date = end_date - timedelta(days=30)
     return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 

@@ -15,7 +15,7 @@ import asyncio
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -46,7 +46,7 @@ class SessionState:
     is_connected: bool = False
     is_streaming: bool = False
     interrupt_requested: bool = False
-    last_activity: datetime = field(default_factory=datetime.now)
+    last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     background_task: Optional[asyncio.Task] = None
     written_agent_ids: list = field(default_factory=list)
     agents_dir: Optional[Path] = None
@@ -67,7 +67,12 @@ class SessionState:
 
 
 def is_subprocess_alive(state: SessionState) -> bool:
-    """Check if the subprocess for a session state is still running."""
+    """Check if the subprocess for a session state is still running.
+
+    WARNING: Accesses private SDK internals (_query, transport, _process).
+    Tested against claude-agent-sdk 0.x — may break if SDK internals change.
+    The try/except ensures graceful degradation if the internal structure changes.
+    """
     if not state.client:
         return False
     try:
@@ -76,6 +81,7 @@ def is_subprocess_alive(state: SessionState) -> bool:
         process = getattr(transport, '_process', None) if transport else None
         return process is not None and process.returncode is None
     except Exception:
+        # SDK internals may have changed — assume process is not alive
         return False
 
 
@@ -307,11 +313,11 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
         return True
     if old.cwd != new_options.cwd:
         return True
-    if str(old.mcp_servers or {}) != str(new_options.mcp_servers or {}):
+    if (old.mcp_servers or {}) != (new_options.mcp_servers or {}):
         return True
-    if str(old.plugins or []) != str(new_options.plugins or []):
+    if (old.plugins or []) != (new_options.plugins or []):
         return True
-    if str(old.tools or []) != str(new_options.tools or []):
+    if (old.tools or []) != (new_options.tools or []):
         return True
 
     # These can be changed at runtime — no reconnect needed

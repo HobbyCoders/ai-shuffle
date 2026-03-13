@@ -12,7 +12,7 @@ Tests cover:
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
 from fastapi import Request
 
@@ -53,7 +53,7 @@ class TestRequestResponseModels:
         """SubagentResponse should accept valid data."""
         from app.api.profiles import SubagentResponse
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         response = SubagentResponse(
             id="test-agent",
             name="Test Agent",
@@ -73,7 +73,7 @@ class TestRequestResponseModels:
         """SubagentResponse should accept minimal data."""
         from app.api.profiles import SubagentResponse
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         response = SubagentResponse(
             id="minimal-agent",
             name="Minimal",
@@ -146,7 +146,7 @@ def create_mock_request(api_user=None):
 
 def sample_profile():
     """Create a sample profile for testing."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     return {
         "id": "test-profile",
         "name": "Test Profile",
@@ -163,7 +163,7 @@ def sample_profile():
 
 def sample_builtin_profile():
     """Create a sample builtin profile for testing."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     return {
         "id": "claude-code",
         "name": "Claude Code",
@@ -180,7 +180,7 @@ def sample_builtin_profile():
 
 def sample_subagent():
     """Create a sample subagent for testing."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     return {
         "id": "test-subagent",
         "name": "Test Subagent",
@@ -380,7 +380,7 @@ class TestCreateProfileEndpoint:
         from app.api.profiles import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_profile = {
             "id": "new-profile",
             "name": "New Profile",
@@ -595,8 +595,8 @@ class TestGetProfileAgentsEndpoint:
             "name": "Empty",
             "config": {},  # No enabled_agents
             "is_builtin": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
         with patch("app.api.profiles.database") as mock_db:
@@ -662,7 +662,7 @@ class TestCreateProfileAgentEndpoint:
         from app.api.profiles import create_profile_agent, ProfileSubagentRequest
 
         profile = sample_profile()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_subagent = {
             "id": "new-agent",
             "name": "New Agent",
@@ -799,8 +799,8 @@ class TestUpdateProfileAgentEndpoint:
             "name": "Test Profile",
             "config": {"enabled_agents": ["test-subagent"]},
             "is_builtin": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
         subagent = sample_subagent()
         updated_subagent = {**subagent, "description": "Updated description"}
@@ -879,8 +879,8 @@ class TestDeleteProfileAgentEndpoint:
             "name": "Test Profile",
             "config": {"enabled_agents": ["test-subagent"]},
             "is_builtin": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
         subagent = sample_subagent()
 
@@ -905,8 +905,8 @@ class TestDeleteProfileAgentEndpoint:
             "name": "Test Profile",
             "config": {"enabled_agents": ["test-subagent", "other-agent"]},
             "is_builtin": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
         subagent = sample_subagent()
 
@@ -989,8 +989,8 @@ class TestGetEnabledAgentsEndpoint:
             "name": "Empty",
             "config": {},
             "is_builtin": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
         with patch("app.api.profiles.database") as mock_db:
@@ -1160,8 +1160,8 @@ class TestEnableSubagentEndpoint:
             "name": "Test Profile",
             "config": {"enabled_agents": ["test-subagent"]},  # Already enabled
             "is_builtin": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
         subagent = sample_subagent()
 
@@ -1224,8 +1224,8 @@ class TestDisableSubagentEndpoint:
             "name": "Test Profile",
             "config": {"enabled_agents": ["test-subagent", "other-agent"]},
             "is_builtin": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
         with patch("app.api.profiles.database") as mock_db:
@@ -1318,8 +1318,8 @@ class TestExportProfileEndpoint:
                 "enabled_agents": ["agent-1"]
             },
             "is_builtin": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
         with patch("app.api.profiles.database") as mock_db:
@@ -1407,7 +1407,7 @@ class TestImportProfileEndpoint:
         from app.api.profiles import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_profile = {
             "id": "imported-agent",
             "name": "Imported Agent",
@@ -1442,7 +1442,7 @@ class TestImportProfileEndpoint:
         from app.api.profiles import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_profile = {
             "id": "custom-id",
             "name": "Imported Agent",
@@ -1476,7 +1476,7 @@ class TestImportProfileEndpoint:
         from app.api.profiles import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_profile = {
             "id": "imported-agent-1",
             "name": "Imported Agent",
@@ -1576,7 +1576,7 @@ class TestImportProfileEndpoint:
         from app.api.profiles import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_profile = {
             "id": "custom-prompt-agent",
             "name": "Custom Prompt Agent",
@@ -1615,7 +1615,7 @@ class TestImportProfileEndpoint:
         from app.api.profiles import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_profile = {
             "id": "preset-append-agent",
             "name": "Preset Append Agent",
@@ -1690,8 +1690,8 @@ class TestEdgeCases:
             "name": "Empty Config",
             "config": {},
             "is_builtin": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
         with patch("app.api.profiles.database") as mock_db:
@@ -1718,8 +1718,8 @@ class TestEdgeCases:
                 "system_prompt": None
             },
             "is_builtin": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
         with patch("app.api.profiles.database") as mock_db:
@@ -1739,7 +1739,7 @@ class TestEdgeCases:
         from app.api.profiles import create_profile_agent, ProfileSubagentRequest
 
         profile = sample_profile()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_subagent = {
             "id": "my-new-agent",
             "name": "My_New Agent",
@@ -1776,7 +1776,7 @@ class TestEdgeCases:
         from app.api.profiles import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_profile = {
             "id": "test-agent-2024",
             "name": "Test Agent @#$% 2024!",
@@ -1810,7 +1810,7 @@ class TestEdgeCases:
         from app.api.profiles import import_profile
         from app.core.models import AgentImportRequest, AgentExportData, AIToolsConfig
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_profile = {
             "id": "full-agent",
             "name": "Full Agent",
@@ -1860,7 +1860,7 @@ class TestEdgeCases:
         from app.api.profiles import import_profile
         from app.core.models import AgentImportRequest, AgentExportData
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         created_profile = {
             "id": "imported-agent",
             "name": "@#$%^",
@@ -1892,7 +1892,7 @@ class TestEdgeCases:
         """Deleting agent by name when it exists in enabled_agents should work."""
         from app.api.profiles import delete_profile_agent
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         profile = {
             "id": "test-profile",
             "name": "Test Profile",

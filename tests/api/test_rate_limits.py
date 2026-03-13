@@ -13,7 +13,7 @@ Tests cover:
 
 import pytest
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, AsyncMock
 from dataclasses import dataclass, field
 
@@ -44,9 +44,9 @@ class MockRateLimitStatus:
     hour_remaining: int = 150
     day_remaining: int = 900
     concurrent_remaining: int = 2
-    minute_reset: datetime = field(default_factory=lambda: datetime.utcnow() + timedelta(minutes=1))
-    hour_reset: datetime = field(default_factory=lambda: datetime.utcnow() + timedelta(hours=1))
-    day_reset: datetime = field(default_factory=lambda: datetime.utcnow() + timedelta(days=1))
+    minute_reset: datetime = field(default_factory=lambda: datetime.now(timezone.utc) + timedelta(minutes=1))
+    hour_reset: datetime = field(default_factory=lambda: datetime.now(timezone.utc) + timedelta(hours=1))
+    day_reset: datetime = field(default_factory=lambda: datetime.now(timezone.utc) + timedelta(days=1))
     is_limited: bool = False
     retry_after: int = 0
 
@@ -88,8 +88,8 @@ def mock_database():
             "concurrent_requests": 3,
             "priority": 0,
             "is_unlimited": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         mock_db.update_rate_limit.return_value = {
             "id": "test-rate-limit-id",
@@ -101,8 +101,8 @@ def mock_database():
             "concurrent_requests": 5,
             "priority": 1,
             "is_unlimited": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         mock_db.delete_rate_limit.return_value = True
         yield mock_db
@@ -290,7 +290,7 @@ class TestRateLimitStatusResponse:
     def test_rate_limit_status_response_fields(self):
         """RateLimitStatusResponse should have all required fields."""
         from app.api.rate_limits import RateLimitStatusResponse
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         model = RateLimitStatusResponse(
             minute_count=5,
             minute_limit=20,
@@ -360,7 +360,7 @@ class TestGetCurrentUser:
         mock_database.get_auth_session.return_value = {
             "id": "session-id",
             "token": "test-token",
-            "expires_at": (datetime.utcnow() + timedelta(hours=1)).isoformat()
+            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         }
 
         user_id, api_key_id, is_admin = await get_current_user("test-token", None)
@@ -679,8 +679,8 @@ class TestListRateLimitConfigs:
                 "concurrent_requests": 3,
                 "priority": 0,
                 "is_unlimited": False,
-                "created_at": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }
         ]
 
@@ -770,8 +770,8 @@ class TestCreateRateLimitConfig:
             "concurrent_requests": 10,
             "priority": 5,
             "is_unlimited": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
         with patch("app.api.rate_limits.database", mock_database):
@@ -854,8 +854,8 @@ class TestCreateRateLimitConfig:
             "concurrent_requests": 3,
             "priority": 100,
             "is_unlimited": True,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
         with patch("app.api.rate_limits.database", mock_database):
@@ -958,8 +958,8 @@ class TestUpdateRateLimitConfig:
             "concurrent_requests": 3,
             "priority": 0,
             "is_unlimited": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
         with patch("app.api.rate_limits.database", mock_database):
@@ -1167,8 +1167,8 @@ class TestEdgeCases:
             "concurrent_requests": 3,
             "priority": 0,
             "is_unlimited": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
         with patch("app.api.rate_limits.database", mock_database):
@@ -1226,8 +1226,8 @@ class TestEdgeCases:
             "concurrent_requests": 100,
             "priority": 100,
             "is_unlimited": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
         with patch("app.api.rate_limits.database", mock_database):
@@ -1265,8 +1265,8 @@ class TestEdgeCases:
             "concurrent_requests": 1,
             "priority": -100,
             "is_unlimited": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
         with patch("app.api.rate_limits.database", mock_database):
@@ -1316,8 +1316,8 @@ class TestRateLimitFlow:
             "concurrent_requests": 5,
             "priority": 1,
             "is_unlimited": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         mock_database.create_rate_limit.return_value = created_config
 

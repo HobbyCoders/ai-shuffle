@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -101,7 +101,7 @@ def create_rate_limit(
     is_unlimited: bool = False
 ) -> RateLimitRow:
     """Create a new rate limit configuration"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -130,7 +130,7 @@ def update_rate_limit(
         return None
 
     updates = ["updated_at = ?"]
-    values = [datetime.utcnow().isoformat()]
+    values = [datetime.now(timezone.utc).isoformat()]
 
     if requests_per_minute is not None:
         updates.append("requests_per_minute = ?")
@@ -183,7 +183,7 @@ def log_request(
     duration_ms: Optional[int] = None
 ) -> RequestLogEntry:
     """Log a request for rate limit tracking"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(

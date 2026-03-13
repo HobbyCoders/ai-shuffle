@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -74,7 +74,7 @@ def create_webhook(
     is_active: bool = True
 ) -> Optional[WebhookRow]:
     """Create a new webhook"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -135,7 +135,7 @@ def delete_webhook(webhook_id: str) -> bool:
 
 def update_webhook_triggered(webhook_id: str, success: bool) -> None:
     """Update the last_triggered_at timestamp and failure_count for a webhook"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         if success:

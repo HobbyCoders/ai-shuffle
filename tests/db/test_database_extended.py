@@ -5,7 +5,7 @@ These tests cover additional functions to increase coverage beyond the base test
 """
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from contextlib import contextmanager
 import sqlite3
@@ -73,7 +73,7 @@ def setup_project(mock_db):
 @pytest.fixture
 def setup_api_user(mock_db):
     """Insert a test API user directly into the database."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     mock_db.execute(
         """INSERT INTO api_users (id, name, api_key_hash, is_active, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?)""",

@@ -13,7 +13,7 @@ Tests cover:
 
 import pytest
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from app.services.proactive_scheduler import (
@@ -87,7 +87,7 @@ class TestScheduledTask:
 
     def test_create_event_reminder_task(self):
         """Should create event reminder task."""
-        trigger_time = datetime.utcnow() + timedelta(hours=1)
+        trigger_time = datetime.now(timezone.utc) + timedelta(hours=1)
         task = ScheduledTask(
             id="task-2",
             device_id="device-1",
@@ -226,7 +226,7 @@ class TestScheduleEventReminder:
         with patch("app.services.proactive_scheduler.asyncio.create_task"):
             await scheduler.initialize()
 
-        trigger_time = datetime.utcnow() + timedelta(hours=2)
+        trigger_time = datetime.now(timezone.utc) + timedelta(hours=2)
         schedule_id = await scheduler.schedule_event_reminder(
             device_id="device-1",
             event_id="event-123",
@@ -246,7 +246,7 @@ class TestScheduleEventReminder:
         with patch("app.services.proactive_scheduler.asyncio.create_task"):
             await scheduler.initialize()
 
-        trigger_time = datetime.utcnow() + timedelta(hours=1)
+        trigger_time = datetime.now(timezone.utc) + timedelta(hours=1)
         schedule_id = await scheduler.schedule_event_reminder(
             device_id="device-1",
             event_id="event-456",
@@ -506,7 +506,7 @@ class TestDatabasePersistence:
                 "minute": 0,
                 "params": "{}",
                 "enabled": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
             }
         ]

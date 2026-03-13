@@ -16,7 +16,7 @@ import pytest
 import hmac
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 
@@ -154,7 +154,7 @@ class TestTaskResponseModel:
             id="task-1",
             type="text-to-3d",
             status="succeeded",
-            created_at=datetime.utcnow()
+            created_at=datetime.now(timezone.utc)
         )
         assert task.id == "task-1"
         assert task.type == "text-to-3d"
@@ -348,7 +348,7 @@ class TestMeshyWebhookEndpoint:
             "type": "text-to-3d",
             "status": "pending",
             "prompt": "Original prompt",
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc)
         }
 
         # Then send webhook update
@@ -458,7 +458,7 @@ class TestListTasksEndpoint:
 
     def test_list_tasks_with_tasks(self, client, mock_meshy_auth, mock_meshy_tasks):
         """Should return list of tasks."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         mock_meshy_tasks["task-1"] = {
             "id": "task-1",
             "type": "text-to-3d",
@@ -483,7 +483,7 @@ class TestListTasksEndpoint:
 
     def test_list_tasks_filter_by_status(self, client, mock_meshy_auth, mock_meshy_tasks):
         """Should filter tasks by status."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         mock_meshy_tasks["task-1"] = {
             "id": "task-1",
             "status": "succeeded",
@@ -503,7 +503,7 @@ class TestListTasksEndpoint:
 
     def test_list_tasks_filter_by_type(self, client, mock_meshy_auth, mock_meshy_tasks):
         """Should filter tasks by type."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         mock_meshy_tasks["task-1"] = {
             "id": "task-1",
             "type": "text-to-3d",
@@ -525,7 +525,7 @@ class TestListTasksEndpoint:
 
     def test_list_tasks_with_limit(self, client, mock_meshy_auth, mock_meshy_tasks):
         """Should respect limit parameter."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         for i in range(10):
             mock_meshy_tasks[f"task-{i}"] = {
                 "id": f"task-{i}",
@@ -542,7 +542,7 @@ class TestListTasksEndpoint:
     def test_list_tasks_sorted_by_created_at(self, client, mock_meshy_auth, mock_meshy_tasks):
         """Should sort tasks by created_at descending."""
         from datetime import timedelta
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         mock_meshy_tasks["old-task"] = {
             "id": "old-task",
             "status": "succeeded",
@@ -566,7 +566,7 @@ class TestGetTaskEndpoint:
 
     def test_get_task_success(self, client, mock_meshy_auth, mock_meshy_tasks):
         """Should return task details."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         mock_meshy_tasks["task-123"] = {
             "id": "task-123",
             "type": "text-to-3d",
@@ -596,7 +596,7 @@ class TestGetTaskEndpoint:
 
     def test_get_task_with_error(self, client, mock_meshy_auth, mock_meshy_tasks):
         """Should include error details for failed tasks."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         mock_meshy_tasks["failed-task"] = {
             "id": "failed-task",
             "type": "text-to-3d",
@@ -620,7 +620,7 @@ class TestDeleteTaskEndpoint:
         mock_meshy_tasks["task-to-delete"] = {
             "id": "task-to-delete",
             "status": "succeeded",
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc)
         }
 
         response = client.delete("/api/v1/meshy/tasks/task-to-delete")
@@ -933,7 +933,7 @@ class TestEdgeCases:
         """Should handle task with missing optional fields."""
         mock_meshy_tasks["minimal-task"] = {
             "id": "minimal-task",
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc)
         }
 
         response = client.get("/api/v1/meshy/tasks/minimal-task")

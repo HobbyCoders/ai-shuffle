@@ -1043,7 +1043,7 @@ async def export_session(
         - For markdown: Plain text Markdown representation
         - For JSON: Full session data including metadata and messages
     """
-    from datetime import datetime
+    from datetime import datetime, timezone
     from fastapi.responses import Response
     import json
 
@@ -1299,7 +1299,7 @@ async def import_session(
     """
     import json
     import uuid
-    from datetime import datetime
+    from datetime import datetime, timezone
     from app.core.config import settings
 
     # Validate file type
@@ -1394,7 +1394,7 @@ async def import_session(
 
     # Create session in database
     title = session_data.get('title') or 'Imported Session'
-    _now = datetime.utcnow().isoformat()  # Available for future metadata use
+    _now = datetime.now(timezone.utc).isoformat()  # Available for future metadata use
 
     # Create session - result used implicitly by subsequent operations
     database.create_session(
@@ -1444,7 +1444,7 @@ async def import_session(
                 role = msg.get('role', 'user')
                 content = msg.get('content', '')
                 msg_type = msg.get('type')
-                timestamp = msg.get('metadata', {}).get('timestamp') or datetime.utcnow().isoformat()
+                timestamp = msg.get('metadata', {}).get('timestamp') or datetime.now(timezone.utc).isoformat()
                 msg_uuid = msg.get('id') or str(uuid.uuid4())
 
                 if role == 'user' and msg_type != 'tool_result':

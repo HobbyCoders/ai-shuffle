@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
@@ -147,7 +147,7 @@ class PushNotificationService:
             "body": body,
             "data": data or {},
             "priority": priority.value,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
 
         if self._mock_mode:
@@ -159,7 +159,7 @@ class PushNotificationService:
         self, notification_data: Dict[str, Any]
     ) -> NotificationResult:
         """Send notification in mock mode (for development/testing)."""
-        mock_message_id = f"mock_{datetime.utcnow().timestamp()}"
+        mock_message_id = f"mock_{datetime.now(timezone.utc).timestamp()}"
         notification_data["message_id"] = mock_message_id
 
         self._sent_notifications.append(notification_data)

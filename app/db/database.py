@@ -6,7 +6,7 @@ import re
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
@@ -1474,7 +1474,7 @@ def get_auth_session(token: str) -> Optional[Dict[str, Any]]:
     global _auth_session_empty_logged
     with get_db() as conn:
         cursor = conn.cursor()
-        now_iso = datetime.utcnow().isoformat()
+        now_iso = datetime.now(timezone.utc).isoformat()
         cursor.execute(
             "SELECT * FROM auth_sessions WHERE token = ? AND expires_at > ?",
             (token, now_iso)
@@ -1583,7 +1583,7 @@ def cleanup_expired_sessions() -> dict:
         dict with counts of rows deleted from each table.
     """
     from datetime import timedelta
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
     results = {}
 
     with get_db() as conn:
@@ -1602,7 +1602,7 @@ def cleanup_expired_sessions() -> dict:
         results["account_lockouts"] = cursor.rowcount
 
         # Old login attempts (older than 24 hours — well past the 15-minute window)
-        cutoff_24h = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+        cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         cursor.execute("DELETE FROM login_attempts WHERE created_at < ?", (cutoff_24h,))
         results["login_attempts"] = cursor.rowcount
 
@@ -1652,7 +1652,7 @@ def create_profile(
     mcp_tools: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """Create a new profile"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1678,38 +1678,50 @@ def update_profile(
         description: Optional new description
         config: Optional new config
         allow_builtin: If True, allows updating builtin profiles (for migrations)
+
+    Uses a single database connection for the existence check, update, and
+    final read to avoid opening three separate connections.
     """
-    existing = get_profile(profile_id)
-    if not existing:
-        return None
-    if existing["is_builtin"] and not allow_builtin:
-        return None
+    with get_db() as conn:
+        cursor = conn.cursor()
 
-    updates = []
-    values = []
-    if name is not None:
-        updates.append("name = ?")
-        values.append(name)
-    if description is not None:
-        updates.append("description = ?")
-        values.append(description)
-    if config is not None:
-        updates.append("config = ?")
-        values.append(json.dumps(config))
+        # Check existence within the same connection
+        cursor.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,))
+        existing = row_to_dict(cursor.fetchone())
+        if not existing:
+            return None
+        if existing.get("is_builtin") and not allow_builtin:
+            return None
 
-    if updates:
-        updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
-        values.append(profile_id)
+        updates = []
+        values = []
+        if name is not None:
+            updates.append("name = ?")
+            values.append(name)
+        if description is not None:
+            updates.append("description = ?")
+            values.append(description)
+        if config is not None:
+            updates.append("config = ?")
+            values.append(json.dumps(config))
 
-        with get_db() as conn:
-            cursor = conn.cursor()
+        if updates:
+            updates.append("updated_at = ?")
+            values.append(datetime.now(timezone.utc).isoformat())
+            values.append(profile_id)
+
             cursor.execute(
                 f"UPDATE profiles SET {', '.join(updates)} WHERE id = ?",
                 values
             )
 
-    return get_profile(profile_id)
+        # Re-read the updated row within the same connection
+        cursor.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,))
+        row = row_to_dict(cursor.fetchone())
+        if row:
+            row["config"] = json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
+            row["mcp_tools"] = json.loads(row["mcp_tools"]) if isinstance(row["mcp_tools"], str) else row["mcp_tools"]
+        return row
 
 
 def delete_profile(profile_id: str) -> bool:
@@ -1761,7 +1773,7 @@ def set_profile_builtin(profile_id: str, is_builtin: bool) -> bool:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE profiles SET is_builtin = ?, updated_at = ? WHERE id = ?",
-            (is_builtin, datetime.utcnow().isoformat(), profile_id)
+            (is_builtin, datetime.now(timezone.utc).isoformat(), profile_id)
         )
         return cursor.rowcount > 0
 
@@ -1800,7 +1812,7 @@ def create_project(
     settings_dict: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Create a new project"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1817,36 +1829,48 @@ def update_project(
     description: Optional[str] = None,
     settings_dict: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
-    """Update a project"""
-    existing = get_project(project_id)
-    if not existing:
-        return None
+    """Update a project.
 
-    updates = []
-    values = []
-    if name is not None:
-        updates.append("name = ?")
-        values.append(name)
-    if description is not None:
-        updates.append("description = ?")
-        values.append(description)
-    if settings_dict is not None:
-        updates.append("settings = ?")
-        values.append(json.dumps(settings_dict))
+    Uses a single database connection for the existence check, update, and
+    final read to avoid opening three separate connections.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
 
-    if updates:
-        updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
-        values.append(project_id)
+        # Check existence within the same connection
+        cursor.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
+        existing = row_to_dict(cursor.fetchone())
+        if not existing:
+            return None
 
-        with get_db() as conn:
-            cursor = conn.cursor()
+        updates = []
+        values = []
+        if name is not None:
+            updates.append("name = ?")
+            values.append(name)
+        if description is not None:
+            updates.append("description = ?")
+            values.append(description)
+        if settings_dict is not None:
+            updates.append("settings = ?")
+            values.append(json.dumps(settings_dict))
+
+        if updates:
+            updates.append("updated_at = ?")
+            values.append(datetime.now(timezone.utc).isoformat())
+            values.append(project_id)
+
             cursor.execute(
                 f"UPDATE projects SET {', '.join(updates)} WHERE id = ?",
                 values
             )
 
-    return get_project(project_id)
+        # Re-read the updated row within the same connection
+        cursor.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
+        row = row_to_dict(cursor.fetchone())
+        if row:
+            row["settings"] = json.loads(row["settings"]) if isinstance(row["settings"], str) else row["settings"]
+        return row
 
 
 def get_project_session_count(project_id: str) -> int:
@@ -1870,13 +1894,24 @@ def get_all_project_session_counts() -> Dict[str, int]:
         return {row["project_id"]: row["count"] for row in cursor.fetchall()}
 
 
-def delete_project(project_id: str) -> bool:
-    """Delete a project and all associated sessions (sessions are cwd-dependent)"""
+def delete_project(project_id: str, hard_delete: bool = False) -> bool:
+    """Delete a project and disassociate its sessions.
+
+    By default performs a soft-delete: sessions have their project_id set to
+    NULL (preserving chat history) and the project row is deleted.  Pass
+    ``hard_delete=True`` to permanently remove the session rows as well.
+    """
     with get_db() as conn:
         cursor = conn.cursor()
-        # First delete all sessions associated with this project
-        cursor.execute("DELETE FROM sessions WHERE project_id = ?", (project_id,))
-        # Then delete the project
+        if hard_delete:
+            cursor.execute("DELETE FROM sessions WHERE project_id = ?", (project_id,))
+        else:
+            # Soft-delete: unlink sessions so chat history is preserved
+            cursor.execute(
+                "UPDATE sessions SET project_id = NULL WHERE project_id = ?",
+                (project_id,),
+            )
+        # Delete the project itself
         cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         return cursor.rowcount > 0
 
@@ -2051,7 +2086,7 @@ def create_session(
         worktree_path: Optional worktree path (persisted for display after worktree deletion)
         _conn: Optional existing DB connection for transaction grouping
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, now, now)
     sql = """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
@@ -2094,7 +2129,7 @@ def create_session_with_stats(
         total_tokens_out: Total output tokens
         turn_count: Number of conversation turns
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -2127,7 +2162,7 @@ def update_session(
         worktree_id: Set to a worktree ID to link, or empty string "" to unlink
     """
     updates = ["updated_at = ?"]
-    values = [datetime.utcnow().isoformat()]
+    values = [datetime.now(timezone.utc).isoformat()]
 
     if sdk_session_id is not None:
         updates.append("sdk_session_id = ?")
@@ -2183,7 +2218,7 @@ def toggle_session_favorite(session_id: str) -> Optional[Dict[str, Any]]:
         cursor.execute(
             """UPDATE sessions SET is_favorite = NOT is_favorite, updated_at = ?
                WHERE id = ?""",
-            (datetime.utcnow().isoformat(), session_id)
+            (datetime.now(timezone.utc).isoformat(), session_id)
         )
         if cursor.rowcount == 0:
             return None
@@ -2197,7 +2232,7 @@ def set_session_favorite(session_id: str, is_favorite: bool) -> Optional[Dict[st
         cursor.execute(
             """UPDATE sessions SET is_favorite = ?, updated_at = ?
                WHERE id = ?""",
-            (is_favorite, datetime.utcnow().isoformat(), session_id)
+            (is_favorite, datetime.now(timezone.utc).isoformat(), session_id)
         )
         if cursor.rowcount == 0:
             return None
@@ -2271,7 +2306,7 @@ def add_session_message(
         profile_id: Optional profile ID that created this message (for per-query tracking)
         _conn: Optional existing DB connection for transaction grouping
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     params = (session_id, role, content, tool_name,
               json.dumps(tool_input) if tool_input else None,
               json.dumps(metadata) if metadata else None,
@@ -2839,7 +2874,7 @@ def create_api_user(
     description: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a new API user and optionally link profile IDs."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -2895,7 +2930,7 @@ def update_api_user_last_used(user_id: str):
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE api_users SET last_used_at = ? WHERE id = ?",
-            (datetime.utcnow().isoformat(), user_id)
+            (datetime.now(timezone.utc).isoformat(), user_id)
         )
 
 
@@ -2928,7 +2963,7 @@ def update_api_user(user_id: str, **kwargs) -> Optional[Dict[str, Any]]:
 
     profile_ids = kwargs.pop("profile_ids", None)
 
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     updates = ["updated_at = ?"]
     values: list = [now]
 
@@ -3001,12 +3036,12 @@ def update_credential_policy(policy_id: str, policy: str, description: Optional[
         if description is not None:
             cursor.execute(
                 "UPDATE credential_policies SET policy = ?, description = ?, updated_at = ? WHERE id = ?",
-                (policy, description, datetime.utcnow().isoformat(), policy_id)
+                (policy, description, datetime.now(timezone.utc).isoformat(), policy_id)
             )
         else:
             cursor.execute(
                 "UPDATE credential_policies SET policy = ?, updated_at = ? WHERE id = ?",
-                (policy, datetime.utcnow().isoformat(), policy_id)
+                (policy, datetime.now(timezone.utc).isoformat(), policy_id)
             )
     return get_credential_policy(policy_id)
 
@@ -3048,7 +3083,7 @@ def set_user_credential_policy(api_user_id: str, credential_type: str, policy: s
     if policy not in valid_policies:
         return None
 
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -3142,7 +3177,7 @@ def get_all_user_credentials(api_user_id: str) -> List[Dict[str, Any]]:
 def set_user_credential(api_user_id: str, credential_type: str, encrypted_value: str) -> Dict[str, Any]:
     """Set or update a credential for a user (value should be pre-encrypted)"""
     import uuid
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -3200,7 +3235,7 @@ def add_sync_log(
     data: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Add an entry to the sync log for polling fallback"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -3260,7 +3295,7 @@ def update_message_content(
     metadata: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
     """Update message content (used during streaming)"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
 
@@ -3299,14 +3334,14 @@ def record_login_attempt(ip_address: str, username: Optional[str], success: bool
         cursor.execute(
             """INSERT INTO login_attempts (ip_address, username, success, created_at)
                VALUES (?, ?, ?, ?)""",
-            (ip_address, username, success, datetime.utcnow().isoformat())
+            (ip_address, username, success, datetime.now(timezone.utc).isoformat())
         )
 
 
 def get_failed_attempts_count(ip_address: str, window_minutes: int = 15) -> int:
     """Get the number of failed login attempts from an IP in the time window"""
     from datetime import timedelta
-    cutoff = (datetime.utcnow() - timedelta(minutes=window_minutes)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -3321,7 +3356,7 @@ def get_failed_attempts_count(ip_address: str, window_minutes: int = 15) -> int:
 def get_failed_attempts_for_username(username: str, window_minutes: int = 15) -> int:
     """Get the number of failed login attempts for a username in the time window"""
     from datetime import timedelta
-    cutoff = (datetime.utcnow() - timedelta(minutes=window_minutes)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -3341,19 +3376,19 @@ def create_lockout(ip_address: Optional[str], username: Optional[str],
                    duration_minutes: int, reason: str):
     """Create a lockout for an IP or username"""
     from datetime import timedelta
-    locked_until = (datetime.utcnow() + timedelta(minutes=duration_minutes)).isoformat()
+    locked_until = (datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO account_lockouts (ip_address, username, locked_until, reason, created_at)
                VALUES (?, ?, ?, ?, ?)""",
-            (ip_address, username, locked_until, reason, datetime.utcnow().isoformat())
+            (ip_address, username, locked_until, reason, datetime.now(timezone.utc).isoformat())
         )
 
 
 def is_ip_locked(ip_address: str) -> Optional[Dict[str, Any]]:
     """Check if an IP address is currently locked out"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -3367,7 +3402,7 @@ def is_ip_locked(ip_address: str) -> Optional[Dict[str, Any]]:
 
 def is_username_locked(username: str) -> Optional[Dict[str, Any]]:
     """Check if a username is currently locked out"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -3392,7 +3427,7 @@ def get_api_key_session(token: str) -> Optional[Dict[str, Any]]:
                FROM api_key_sessions aks
                JOIN api_users au ON aks.api_user_id = au.id
                WHERE aks.token = ? AND aks.expires_at > ? AND au.is_active = TRUE""",
-            (token, datetime.utcnow().isoformat())
+            (token, datetime.now(timezone.utc).isoformat())
         )
         session = row_to_dict(cursor.fetchone())
         if session:
@@ -3428,7 +3463,7 @@ def set_user_preference(user_type: str, user_id: str, key: str, value: Any) -> D
     """Set a user preference (upsert)"""
     with get_db() as conn:
         cursor = conn.cursor()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         value_json = json.dumps(value)
 
         cursor.execute(
@@ -3526,7 +3561,7 @@ def create_subagent(
         is_builtin: Whether this is a built-in subagent (cannot be deleted)
         store_defaults: If True, also store current values as defaults (for built-in subagents)
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     tools_json = json.dumps(tools) if tools else None
 
     with get_db() as conn:
@@ -3590,7 +3625,7 @@ def update_subagent(
 
     if updates:
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(subagent_id)
 
         with get_db() as conn:
@@ -3617,7 +3652,7 @@ def set_subagent_builtin(subagent_id: str, is_builtin: bool) -> bool:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE subagents SET is_builtin = ?, updated_at = ? WHERE id = ?",
-            (is_builtin, datetime.utcnow().isoformat(), subagent_id)
+            (is_builtin, datetime.now(timezone.utc).isoformat(), subagent_id)
         )
         return cursor.rowcount > 0
 
@@ -3659,7 +3694,7 @@ def revert_subagent_to_defaults(subagent_id: str) -> Optional[Dict[str, Any]]:
                 model = default_model,
                 updated_at = ?
                WHERE id = ?""",
-            (datetime.utcnow().isoformat(), subagent_id)
+            (datetime.now(timezone.utc).isoformat(), subagent_id)
         )
 
     return get_subagent(subagent_id)
@@ -3701,7 +3736,7 @@ def add_permission_rule(
     """Add a permission rule for a profile"""
     import uuid
     rule_id = f"rule-{uuid.uuid4().hex[:8]}"
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -3776,7 +3811,7 @@ def set_system_setting(key: str, value: str) -> None:
     """Set a system setting (upsert)"""
     with get_db() as conn:
         cursor = conn.cursor()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         cursor.execute(
             """INSERT INTO system_settings (key, value, updated_at)
                VALUES (?, ?, ?)
@@ -3830,7 +3865,7 @@ def create_tag(
     color: str = "#6366f1"
 ) -> Dict[str, Any]:
     """Create a new tag"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -3862,7 +3897,7 @@ def update_tag(
 
     if updates:
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(tag_id)
 
         with get_db() as conn:
@@ -3904,7 +3939,7 @@ def get_session_tags(session_id: str) -> List[Dict[str, Any]]:
 def add_session_tag(session_id: str, tag_id: str) -> bool:
     """Add a tag to a session"""
     try:
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -3931,7 +3966,7 @@ def remove_session_tag(session_id: str, tag_id: str) -> bool:
 
 def set_session_tags(session_id: str, tag_ids: List[str]) -> List[Dict[str, Any]]:
     """Set all tags for a session (replaces existing)"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         # Remove existing tags
@@ -4332,7 +4367,7 @@ def create_template(
     is_builtin: bool = False
 ) -> Dict[str, Any]:
     """Create a new template"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -4385,7 +4420,7 @@ def update_template(
 
     if updates:
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(template_id)
 
         with get_db() as conn:
@@ -4430,7 +4465,7 @@ def set_template_builtin(template_id: str, is_builtin: bool) -> bool:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE templates SET is_builtin = ?, updated_at = ? WHERE id = ?",
-            (is_builtin, datetime.utcnow().isoformat(), template_id)
+            (is_builtin, datetime.now(timezone.utc).isoformat(), template_id)
         )
         return cursor.rowcount > 0
 
@@ -4482,7 +4517,7 @@ def create_webhook(
     is_active: bool = True
 ) -> Optional[Dict[str, Any]]:
     """Create a new webhook"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -4543,7 +4578,7 @@ def delete_webhook(webhook_id: str) -> bool:
 
 def update_webhook_triggered(webhook_id: str, success: bool) -> None:
     """Update the last_triggered_at timestamp and failure_count for a webhook"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         if success:
@@ -4591,7 +4626,7 @@ def create_connector(
     is_active: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Create a new connector."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -4659,7 +4694,7 @@ def update_connector(connector_id: str, **kwargs) -> Optional[Dict[str, Any]]:
 
     if updates:
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(connector_id)
         with get_db() as conn:
             cursor = conn.cursor()
@@ -4678,7 +4713,7 @@ def update_connector_status(
     error: Optional[str] = None,
 ) -> None:
     """Update the runtime status of a connector."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         if status == "connected":
@@ -4716,7 +4751,7 @@ def delete_connector(connector_id: str) -> bool:
 
 def update_connector_event_dispatched(connector_id: str, success: bool) -> None:
     """Update last_event_at and failure_count after event dispatch."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         if success:
@@ -4743,7 +4778,7 @@ def create_connector_event_log(
     error: Optional[str] = None,
 ) -> None:
     """Create a connector event log entry."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -4783,7 +4818,7 @@ def create_connector_session(
     ai_session_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Create a new connector session mapping."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -4830,7 +4865,7 @@ def update_connector_session_ai_session(
     session_id: str, ai_session_id: Optional[str]
 ) -> None:
     """Update the AI session linked to a connector session."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -4899,7 +4934,7 @@ def create_rate_limit(
     is_unlimited: bool = False
 ) -> Dict[str, Any]:
     """Create a new rate limit configuration"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -4928,7 +4963,7 @@ def update_rate_limit(
         return None
 
     updates = ["updated_at = ?"]
-    values = [datetime.utcnow().isoformat()]
+    values = [datetime.now(timezone.utc).isoformat()]
 
     if requests_per_minute is not None:
         updates.append("requests_per_minute = ?")
@@ -4981,7 +5016,7 @@ def log_request(
     duration_ms: Optional[int] = None
 ) -> Dict[str, Any]:
     """Log a request for rate limit tracking"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -5076,7 +5111,7 @@ def create_git_repository(
     github_repo_name: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """Create a new git repository record"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -5129,7 +5164,7 @@ def update_git_repository(
 
 def update_git_repository_synced(repository_id: str) -> Optional[Dict[str, Any]]:
     """Update the last_synced_at timestamp for a git repository"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -5303,7 +5338,7 @@ def create_worktree(
     status: str = "active"
 ) -> Optional[Dict[str, Any]]:
     """Create a new worktree record"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -5426,7 +5461,7 @@ def create_note(
     file_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """Create a new note"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -5480,7 +5515,7 @@ def update_note(
 
     if updates:
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(note_id)
 
         with get_db() as conn:
@@ -5699,7 +5734,7 @@ def create_mobile_device(
     """Register a new mobile device"""
     import uuid
     record_id = str(uuid.uuid4())[:8]
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -5756,7 +5791,7 @@ def get_all_mobile_devices() -> List[Dict[str, Any]]:
 
 def update_mobile_device_capabilities(device_id: str, capabilities: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Update capabilities for a mobile device"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -5769,7 +5804,7 @@ def update_mobile_device_capabilities(device_id: str, capabilities: Dict[str, An
 
 def update_mobile_device_fcm_token(device_id: str, fcm_token: str) -> Optional[Dict[str, Any]]:
     """Update FCM push token for a mobile device"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -5782,7 +5817,7 @@ def update_mobile_device_fcm_token(device_id: str, fcm_token: str) -> Optional[D
 
 def update_mobile_device_last_seen(device_id: str) -> None:
     """Update last_seen timestamp for a mobile device"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE mobile_devices SET last_seen = ? WHERE device_id = ?", (now, device_id))
@@ -5810,7 +5845,7 @@ def create_pending_action(
     """Create a new pending action"""
     import uuid
     action_id = str(uuid.uuid4())[:8]
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -5838,7 +5873,7 @@ def get_pending_action(action_id: str) -> Optional[Dict[str, Any]]:
 
 def get_pending_actions_for_device(device_id: str) -> List[Dict[str, Any]]:
     """Get all pending actions for a device that haven't expired"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -5871,7 +5906,7 @@ def update_pending_action_status(action_id: str, status: str) -> Optional[Dict[s
 
 def cleanup_expired_actions() -> int:
     """Mark expired pending actions as expired"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -5894,7 +5929,7 @@ def create_trusted_action(
     """Create a trusted action pattern"""
     import uuid
     trusted_id = str(uuid.uuid4())[:8]
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -5965,7 +6000,7 @@ def save_mobile_schedule(
     last_triggered_at: Optional[str]
 ) -> Dict[str, Any]:
     """Save or update a mobile schedule"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -6025,7 +6060,7 @@ def save_mobile_action(
     completed_at: Optional[str]
 ) -> Dict[str, Any]:
     """Save or update a mobile action"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -6073,7 +6108,7 @@ def save_mobile_device(
     last_seen_at: Optional[str]
 ) -> Dict[str, Any]:
     """Save or update a mobile device"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         # Check if device exists
@@ -6155,7 +6190,7 @@ def create_automation(
     triggers: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Create a new automation."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     if output_config is None:
         output_config = {"type": "session"}
     # Build triggers array if not provided
@@ -6275,7 +6310,7 @@ def update_automation(automation_id: str, **kwargs) -> Optional[Dict[str, Any]]:
 
     if updates:
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(automation_id)
         with get_db() as conn:
             cursor = conn.cursor()
@@ -6305,7 +6340,7 @@ def create_automation_run(
     prompt_rendered: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Create a new automation run."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -6369,7 +6404,7 @@ def update_automation_run(run_id: str, **kwargs) -> Optional[Dict[str, Any]]:
 
 def get_automation_daily_stats(automation_id: str) -> Dict[str, Any]:
     """Get today's run count and cost for an automation."""
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -6382,6 +6417,31 @@ def get_automation_daily_stats(automation_id: str) -> Dict[str, Any]:
         return {"run_count": row["run_count"], "total_cost": row["total_cost"]}
 
 
+def get_automation_aggregate_stats(automation_id: str) -> Dict[str, Any]:
+    """Get all-time aggregate statistics for an automation using SQL queries."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT
+                COUNT(*) as total_runs,
+                COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as successful_runs,
+                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) as failed_runs,
+                COALESCE(SUM(cost_usd), 0) as total_cost_usd,
+                AVG(CASE WHEN duration_ms > 0 THEN duration_ms END) as avg_duration_ms
+            FROM automation_runs
+            WHERE automation_id = ?""",
+            (automation_id,)
+        )
+        row = cursor.fetchone()
+        return {
+            "total_runs": row["total_runs"],
+            "successful_runs": row["successful_runs"],
+            "failed_runs": row["failed_runs"],
+            "total_cost_usd": row["total_cost_usd"],
+            "avg_duration_ms": row["avg_duration_ms"] or 0,
+        }
+
+
 # ---- Automation Approvals ----
 
 def create_automation_approval(
@@ -6391,7 +6451,7 @@ def create_automation_approval(
     prompt_preview: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Create a new automation approval."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -6427,7 +6487,7 @@ def get_pending_automation_approvals() -> List[Dict[str, Any]]:
 
 def update_automation_approval(approval_id: str, status: str, decided_by: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Update an automation approval status."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(

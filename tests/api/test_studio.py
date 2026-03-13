@@ -13,7 +13,7 @@ Tests cover:
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
 
@@ -57,7 +57,7 @@ def clear_databases():
 def sample_generation():
     """Create a sample generation in the database."""
     gen_id = "test-gen-id-123"
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     generation = {
         "id": gen_id,
         "type": "image",
@@ -84,7 +84,7 @@ def sample_generation():
 def completed_generation():
     """Create a completed generation in the database."""
     gen_id = "completed-gen-id-456"
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     generation = {
         "id": gen_id,
         "type": "image",
@@ -111,7 +111,7 @@ def completed_generation():
 def sample_asset():
     """Create a sample asset in the database."""
     asset_id = "test-asset-id-789"
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     asset = {
         "id": asset_id,
         "type": "image",
@@ -134,7 +134,7 @@ def sample_asset():
 def video_generation():
     """Create a sample video generation."""
     gen_id = "video-gen-id-101"
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     generation = {
         "id": gen_id,
         "type": "video",
@@ -612,7 +612,7 @@ class TestListGenerations:
                 "status": "pending",
                 "progress": 0.0,
                 "provider": "google-gemini",
-                "created_at": datetime.utcnow()
+                "created_at": datetime.now(timezone.utc)
             }
 
         response = client.get("/api/v1/studio/generations?limit=5")
@@ -633,7 +633,7 @@ class TestListGenerations:
                 "status": "pending",
                 "progress": 0.0,
                 "provider": "google-gemini",
-                "created_at": datetime.utcnow()
+                "created_at": datetime.now(timezone.utc)
             }
 
         response = client.get("/api/v1/studio/generations?limit=5&offset=5")
@@ -750,7 +750,7 @@ class TestListAssets:
             "url": "https://example.com/video.mp4",
             "prompt": "A video",
             "provider": "google-veo",
-            "created_at": datetime.utcnow(),
+            "created_at": datetime.now(timezone.utc),
             "tags": []
         }
 
@@ -788,7 +788,7 @@ class TestListAssets:
                 "url": f"https://example.com/asset{i}.jpg",
                 "prompt": f"Asset {i}",
                 "provider": "google-gemini",
-                "created_at": datetime.utcnow(),
+                "created_at": datetime.now(timezone.utc),
                 "tags": []
             }
 
@@ -868,7 +868,7 @@ class TestSaveAsset:
             "progress": 100.0,
             "result_url": None,
             "provider": "google-gemini",
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc)
         }
 
         response = client.post(
@@ -1149,7 +1149,7 @@ class TestResponseModels:
             status="pending",
             progress=0.0,
             provider="google-gemini",
-            created_at=datetime.utcnow()
+            created_at=datetime.now(timezone.utc)
         )
         assert response.id == "gen-123"
         assert response.thumbnail_url is None
@@ -1165,7 +1165,7 @@ class TestResponseModels:
             url="https://example.com/image.jpg",
             prompt="A sunset",
             provider="google-gemini",
-            created_at=datetime.utcnow()
+            created_at=datetime.now(timezone.utc)
         )
         assert response.tags == []
         assert response.thumbnail_url is None
@@ -1259,8 +1259,8 @@ class TestHelperFunctions:
             "thumbnail_url": "https://example.com/thumb.jpg",
             "result_url": "https://example.com/result.jpg",
             "provider": "google-gemini",
-            "created_at": datetime.utcnow(),
-            "completed_at": datetime.utcnow(),
+            "created_at": datetime.now(timezone.utc),
+            "completed_at": datetime.now(timezone.utc),
             "error": None,
             "metadata": {"aspect_ratio": "1:1"}
         }
@@ -1280,7 +1280,7 @@ class TestHelperFunctions:
             "prompt": "Test",
             "status": "pending",
             "provider": "google-gemini",
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc)
         }
 
         response = _create_generation_response(gen_data)
@@ -1298,7 +1298,7 @@ class TestHelperFunctions:
             "thumbnail_url": "https://example.com/thumb.jpg",
             "prompt": "A sunset",
             "provider": "google-gemini",
-            "created_at": datetime.utcnow(),
+            "created_at": datetime.now(timezone.utc),
             "tags": ["nature"],
             "metadata": {"aspect_ratio": "16:9"}
         }
@@ -1317,7 +1317,7 @@ class TestHelperFunctions:
             "url": "https://example.com/image.jpg",
             "prompt": "A sunset",
             "provider": "google-gemini",
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc)
         }
 
         response = _create_asset_response(asset_data)

@@ -4,7 +4,7 @@ Mobile device API routes for push notifications and action confirmations
 
 import secrets
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
@@ -90,7 +90,7 @@ async def register_device(request: MobileDeviceRegisterRequest):
     api_key_hash = hash_api_key(api_key)
 
     # Calculate expiry
-    expires_at = datetime.utcnow() + timedelta(days=MOBILE_API_KEY_EXPIRY_DAYS)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=MOBILE_API_KEY_EXPIRY_DAYS)
 
     # Create device record
     capabilities_dict = device_info.capabilities.model_dump()
@@ -210,7 +210,7 @@ async def confirm_action(
     expires_at = action["expires_at"]
     if isinstance(expires_at, str):
         expires_at = datetime.fromisoformat(expires_at)
-    if datetime.utcnow() > expires_at:
+    if datetime.now(timezone.utc) > expires_at:
         db.update_pending_action_status(action_id, "expired")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

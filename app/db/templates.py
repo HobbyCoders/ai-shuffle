@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -77,7 +77,7 @@ def create_template(
     is_builtin: bool = False
 ) -> TemplateRow:
     """Create a new template"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -130,7 +130,7 @@ def update_template(
 
     if updates:
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(template_id)
 
         with get_db() as conn:
@@ -175,6 +175,6 @@ def set_template_builtin(template_id: str, is_builtin: bool) -> bool:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE templates SET is_builtin = ?, updated_at = ? WHERE id = ?",
-            (is_builtin, datetime.utcnow().isoformat(), template_id)
+            (is_builtin, datetime.now(timezone.utc).isoformat(), template_id)
         )
         return cursor.rowcount > 0

@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -50,7 +50,7 @@ def set_user_preference(user_type: str, user_id: str, key: str, value: Any) -> U
     """Set a user preference (upsert)"""
     with get_db() as conn:
         cursor = conn.cursor()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         value_json = json.dumps(value)
 
         cursor.execute(
@@ -115,7 +115,7 @@ def set_system_setting(key: str, value: str) -> None:
     """Set a system setting (upsert)"""
     with get_db() as conn:
         cursor = conn.cursor()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         cursor.execute(
             """INSERT INTO system_settings (key, value, updated_at)
                VALUES (?, ?, ?)

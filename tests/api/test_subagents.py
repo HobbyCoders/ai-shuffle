@@ -10,7 +10,7 @@ including:
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import patch
 from fastapi import HTTPException, FastAPI
 from fastapi.testclient import TestClient
@@ -105,7 +105,7 @@ class TestSubagentModels:
         """SubagentResponse should have all required fields."""
         from app.api.subagents import SubagentResponse
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         response = SubagentResponse(
             id="test-subagent",
             name="Test Subagent",
@@ -130,7 +130,7 @@ class TestSubagentModels:
         """SubagentResponse should handle optional fields."""
         from app.api.subagents import SubagentResponse
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         response = SubagentResponse(
             id="test-subagent",
             name="Test Subagent",

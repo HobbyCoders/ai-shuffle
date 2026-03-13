@@ -11,7 +11,7 @@ import asyncio
 import logging
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ class QuestionRequest:
     tool_use_id: str
     session_id: str
     questions: List[Dict[str, Any]]
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     response_event: asyncio.Event = field(default_factory=asyncio.Event)
     answers: Optional[Dict[str, Any]] = None
 

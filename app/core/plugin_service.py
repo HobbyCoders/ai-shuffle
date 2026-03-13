@@ -22,7 +22,7 @@ import subprocess
 import shutil
 import threading
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -350,7 +350,7 @@ class PluginService:
                 "url": url
             },
             "installLocation": install_location,
-            "lastUpdated": datetime.utcnow().isoformat() + "Z"
+            "lastUpdated": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         }
         self._write_json_file(self.MARKETPLACES_FILE, data)
 
@@ -359,7 +359,7 @@ class PluginService:
             source="git",
             url=url,
             install_location=install_location,
-            last_updated=datetime.utcnow()
+            last_updated=datetime.now(timezone.utc)
         )
 
     def remove_marketplace(self, marketplace_id: str) -> bool:
@@ -441,7 +441,7 @@ class PluginService:
             raise RuntimeError("Marketplace sync timed out")
 
         # Update lastUpdated
-        data[marketplace_id]["lastUpdated"] = datetime.utcnow().isoformat() + "Z"
+        data[marketplace_id]["lastUpdated"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         self._write_json_file(self.MARKETPLACES_FILE, data)
 
         return True
@@ -1078,7 +1078,7 @@ class PluginService:
         if "plugins" not in installed:
             installed["plugins"] = {}
 
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         installed["plugins"][plugin_id] = [{
             "scope": scope,
             "installPath": str(cache_path),

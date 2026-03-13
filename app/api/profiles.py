@@ -3,7 +3,7 @@ Profile management API routes
 """
 
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 import logging
 
@@ -757,7 +757,7 @@ async def export_profile(
     export_data = AgentExport(
         version="1.0",
         type="ai-shuffle-agent",
-        exported_at=datetime.utcnow().isoformat() + "Z",
+        exported_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         agent=agent_data
     )
 

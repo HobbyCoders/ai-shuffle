@@ -8,7 +8,7 @@ Only system fields (is_builtin, created_at, updated_at) are excluded from export
 
 import logging
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File
@@ -118,7 +118,7 @@ async def export_profiles(token: str = Depends(require_admin)):
     return ExportData(
         version="1.0",
         export_type="profiles",
-        exported_at=datetime.utcnow().isoformat() + "Z",
+        exported_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         profiles=exported_profiles
     )
 
@@ -136,7 +136,7 @@ async def export_single_profile(profile_id: str, token: str = Depends(require_ad
     return ExportData(
         version="1.0",
         export_type="profiles",
-        exported_at=datetime.utcnow().isoformat() + "Z",
+        exported_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         profiles=[_export_profile(profile)]
     )
 
@@ -151,7 +151,7 @@ async def export_subagents(token: str = Depends(require_admin)):
     return {
         "version": "1.0",
         "export_type": "subagents",
-        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "exported_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "subagents": exported_subagents
     }
 
@@ -169,7 +169,7 @@ async def export_single_subagent(subagent_id: str, token: str = Depends(require_
     return {
         "version": "1.0",
         "export_type": "subagents",
-        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "exported_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "subagents": [_export_subagent(subagent)]
     }
 
@@ -186,7 +186,7 @@ async def export_all(token: str = Depends(require_admin)):
     return {
         "version": "1.0",
         "export_type": "all",
-        "exported_at": datetime.utcnow().isoformat() + "Z",
+        "exported_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "profiles": [p.model_dump() for p in exported_profiles],
         "subagents": exported_subagents
     }

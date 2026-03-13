@@ -12,7 +12,7 @@ Tests cover:
 """
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
 from fastapi import FastAPI
@@ -278,7 +278,7 @@ class TestGetPendingActions:
         mock_database.get_mobile_device_by_api_key_hash.return_value = {
             "device_id": "test-device"
         }
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         mock_database.get_pending_actions_for_device.return_value = [
             {
                 "id": "action-1",
@@ -313,7 +313,7 @@ class TestConfirmAction:
         mock_database.get_mobile_device_by_api_key_hash.return_value = {
             "device_id": "test-device"
         }
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         mock_database.get_pending_action.return_value = {
             "id": "action-1",
             "device_id": "test-device",
@@ -339,7 +339,7 @@ class TestConfirmAction:
         mock_database.get_mobile_device_by_api_key_hash.return_value = {
             "device_id": "test-device"
         }
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         mock_database.get_pending_action.return_value = {
             "id": "action-2",
             "device_id": "test-device",
@@ -420,7 +420,7 @@ class TestConfirmAction:
         mock_database.get_mobile_device_by_api_key_hash.return_value = {
             "device_id": "test-device"
         }
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         mock_database.get_pending_action.return_value = {
             "id": "action-1",
             "device_id": "test-device",

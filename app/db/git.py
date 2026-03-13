@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -97,7 +97,7 @@ def create_git_repository(
     github_repo_name: Optional[str] = None
 ) -> Optional[GitRepositoryRow]:
     """Create a new git repository record"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -150,7 +150,7 @@ def update_git_repository(
 
 def update_git_repository_synced(repository_id: str) -> Optional[GitRepositoryRow]:
     """Update the last_synced_at timestamp for a git repository"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -324,7 +324,7 @@ def create_worktree(
     status: str = "active"
 ) -> Optional[WorktreeRow]:
     """Create a new worktree record"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(

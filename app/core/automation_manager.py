@@ -11,7 +11,7 @@ import hmac
 import logging
 import secrets
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -183,7 +183,7 @@ class AutomationManager:
 
     async def _on_schedule_trigger(self, automation_id: str) -> None:
         """Called by APScheduler when a cron/interval job fires."""
-        trigger_data = {"trigger": "schedule", "fired_at": datetime.utcnow().isoformat()}
+        trigger_data = {"trigger": "schedule", "fired_at": datetime.now(timezone.utc).isoformat()}
         self._create_tracked_task(self._execute(automation_id, trigger_data), name=f"auto-schedule-{automation_id}")
 
     async def handle_connector_event(self, event_type: str, data: Dict[str, Any]) -> None:
@@ -283,7 +283,7 @@ class AutomationManager:
         if not automation:
             return None
 
-        trigger_data = {"trigger": "manual", "fired_at": datetime.utcnow().isoformat()}
+        trigger_data = {"trigger": "manual", "fired_at": datetime.now(timezone.utc).isoformat()}
         self._create_tracked_task(self._execute(automation_id, trigger_data), name=f"auto-manual-{automation_id}")
         return {"automation_id": automation_id, "status": "triggered"}
 
@@ -367,7 +367,7 @@ class AutomationManager:
             try:
                 database.update_automation_run(
                     run_id, status="failed", error=str(e),
-                    completed_at=datetime.utcnow().isoformat()
+                    completed_at=datetime.now(timezone.utc).isoformat()
                 )
                 database.update_automation(
                     automation_id,
@@ -403,19 +403,19 @@ class AutomationManager:
             logger.info(f"Automation {automation_id} has no prompt and no action_steps — skipping")
             database.update_automation_run(
                 run_id, status="completed",
-                started_at=datetime.utcnow().isoformat(),
-                completed_at=datetime.utcnow().isoformat(),
+                started_at=datetime.now(timezone.utc).isoformat(),
+                completed_at=datetime.now(timezone.utc).isoformat(),
             )
             database.update_automation(
                 automation_id, status="idle",
-                last_run_at=datetime.utcnow().isoformat(),
+                last_run_at=datetime.now(timezone.utc).isoformat(),
                 run_count=automation.get("run_count", 0) + 1,
                 last_error=None,
             )
             return
 
         database.update_automation_run(
-            run_id, status="running", started_at=datetime.utcnow().isoformat()
+            run_id, status="running", started_at=datetime.now(timezone.utc).isoformat()
         )
         database.update_automation(automation_id, status="running")
 
@@ -472,14 +472,14 @@ class AutomationManager:
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 duration_ms=duration_ms,
-                completed_at=datetime.utcnow().isoformat(),
+                completed_at=datetime.now(timezone.utc).isoformat(),
             )
 
             # Update automation stats
             database.update_automation(
                 automation_id,
                 status="idle",
-                last_run_at=datetime.utcnow().isoformat(),
+                last_run_at=datetime.now(timezone.utc).isoformat(),
                 run_count=automation.get("run_count", 0) + 1,
                 total_cost_used=automation.get("total_cost_used", 0) + cost,
                 last_error=None,
@@ -493,7 +493,7 @@ class AutomationManager:
             error_msg = f"Execution timed out after {automation.get('timeout_seconds', 300)}s"
             database.update_automation_run(
                 run_id, status="failed", error=error_msg,
-                duration_ms=duration_ms, completed_at=datetime.utcnow().isoformat()
+                duration_ms=duration_ms, completed_at=datetime.now(timezone.utc).isoformat()
             )
             database.update_automation(
                 automation_id, status="error", last_error=error_msg,
@@ -516,7 +516,7 @@ class AutomationManager:
             error_msg = str(actual)
             database.update_automation_run(
                 run_id, status="failed", error=error_msg,
-                duration_ms=duration_ms, completed_at=datetime.utcnow().isoformat()
+                duration_ms=duration_ms, completed_at=datetime.now(timezone.utc).isoformat()
             )
             database.update_automation(
                 automation_id, status="error", last_error=error_msg,
@@ -633,13 +633,14 @@ class AutomationManager:
                     body_template = step.get("body", "")
                     rendered_body = render_prompt(body_template, {**trigger_data, "response": response_text}) if body_template else ""
 
-                    async with httpx.AsyncClient(timeout=30) as client:
-                        resp = await client.request(
-                            method, url,
-                            content=rendered_body if rendered_body else None,
-                            headers=headers,
-                        )
-                        resp.raise_for_status()
+                    from app.core.http_client import get_http_client
+                    client = get_http_client()
+                    resp = await client.request(
+                        method, url,
+                        content=rendered_body if rendered_body else None,
+                        headers=headers,
+                    )
+                    resp.raise_for_status()
                     logger.info(
                         f"Automation {automation_id} run {run_id}: "
                         f"webhook_call step {i} completed ({method} {url} → {resp.status_code})"
@@ -732,7 +733,7 @@ class AutomationManager:
         dedup_window = output_config.get("deduplicate_window_seconds")
         if dedup_window and isinstance(dedup_window, (int, float)) and dedup_window > 0 and response:
             recent = database.get_automation_runs(automation["id"], limit=5)
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             for prev in recent:
                 if prev["id"] == run_id:
                     continue
@@ -820,12 +821,13 @@ class AutomationManager:
             "automation_id": automation["id"],
             "automation_name": automation["name"],
             "response": response,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, content=payload, headers=headers)
-            resp.raise_for_status()
+        from app.core.http_client import get_http_client
+        client = get_http_client()
+        resp = await client.post(url, content=payload, headers=headers)
+        resp.raise_for_status()
 
     # ------------------------------------------------------------------
     # Approval notifications

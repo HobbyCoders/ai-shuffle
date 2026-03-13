@@ -149,7 +149,7 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
 def _update_builtin_defaults(subagent_id: str, definition: Dict[str, Any]) -> None:
     """Update only the default_* columns for a built-in subagent."""
     import json
-    from datetime import datetime
+    from datetime import datetime, timezone
     from app.db.base import get_db
 
     tools_json = json.dumps(definition.get("tools")) if definition.get("tools") else None
@@ -171,7 +171,7 @@ def _update_builtin_defaults(subagent_id: str, definition: Dict[str, Any]) -> No
                 definition["prompt"],
                 tools_json,
                 definition.get("model"),
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
                 subagent_id
             )
         )

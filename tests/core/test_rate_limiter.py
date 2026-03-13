@@ -13,7 +13,7 @@ Tests cover:
 
 import pytest
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from app.core.rate_limiter import (
@@ -85,7 +85,7 @@ class TestRateLimitStatus:
 
     def test_custom_status(self):
         """Should accept custom status values."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         status = RateLimitStatus(
             minute_count=5,
             hour_count=50,
@@ -116,7 +116,7 @@ class TestRequestWindow:
     def test_add_request(self):
         """Should track added requests."""
         window = RequestWindow()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         window.add_request(now)
 
@@ -126,7 +126,7 @@ class TestRequestWindow:
     def test_add_multiple_requests(self):
         """Should track multiple requests."""
         window = RequestWindow()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         for i in range(5):
             window.add_request(now + timedelta(seconds=i))
@@ -137,7 +137,7 @@ class TestRequestWindow:
     def test_complete_request(self):
         """Should decrease concurrent count on completion."""
         window = RequestWindow()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         window.add_request(now)
         assert window.concurrent_count == 1
@@ -155,7 +155,7 @@ class TestRequestWindow:
     def test_complete_multiple_requests(self):
         """Should handle multiple completions correctly."""
         window = RequestWindow()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         for i in range(3):
             window.add_request(now + timedelta(seconds=i))
@@ -175,7 +175,7 @@ class TestRequestWindow:
     def test_count_since(self):
         """Should count requests since a given time."""
         window = RequestWindow()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         window.add_request(now - timedelta(seconds=30))
         window.add_request(now - timedelta(seconds=20))
@@ -190,7 +190,7 @@ class TestRequestWindow:
     def test_count_since_all_old(self):
         """Should return 0 when all requests are old."""
         window = RequestWindow()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         window.add_request(now - timedelta(minutes=10))
         window.add_request(now - timedelta(minutes=5))
@@ -201,7 +201,7 @@ class TestRequestWindow:
     def test_count_since_all_new(self):
         """Should count all requests when all are recent."""
         window = RequestWindow()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         window.add_request(now - timedelta(seconds=5))
         window.add_request(now - timedelta(seconds=3))
@@ -213,13 +213,13 @@ class TestRequestWindow:
     def test_count_since_empty(self):
         """Should return 0 for empty window."""
         window = RequestWindow()
-        count = window.count_since(datetime.utcnow())
+        count = window.count_since(datetime.now(timezone.utc))
         assert count == 0
 
     def test_cleanup_old(self):
         """Should remove old timestamps."""
         window = RequestWindow()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         window.add_request(now - timedelta(minutes=10))
         window.add_request(now - timedelta(minutes=5))
@@ -234,7 +234,7 @@ class TestRequestWindow:
     def test_cleanup_preserves_concurrent_count(self):
         """Cleanup should not affect concurrent count."""
         window = RequestWindow()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         window.add_request(now - timedelta(minutes=10))
         window.add_request(now - timedelta(minutes=5))
@@ -246,7 +246,7 @@ class TestRequestWindow:
     def test_cleanup_removes_all(self):
         """Cleanup should remove all timestamps if all are old."""
         window = RequestWindow()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         window.add_request(now - timedelta(hours=2))
         window.add_request(now - timedelta(hours=1))
@@ -307,7 +307,7 @@ class TestRateLimiter:
         limiter._cache_config("test:key", config)
 
         limiter._config_cache["test:key"] = (
-            config, datetime.utcnow() - timedelta(minutes=10)
+            config, datetime.now(timezone.utc) - timedelta(minutes=10)
         )
 
         cached = limiter._get_cached_config("test:key")
@@ -434,7 +434,7 @@ class TestRateLimiter:
         }
 
         key = limiter._get_key("user123", None)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         async with limiter._lock:
             limiter._windows[key].add_request(now - timedelta(seconds=30))
@@ -459,7 +459,7 @@ class TestRateLimiter:
         }
 
         key = limiter._get_key("user123", None)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         async with limiter._lock:
             limiter._windows[key].add_request(now - timedelta(minutes=30))
@@ -484,7 +484,7 @@ class TestRateLimiter:
         }
 
         key = limiter._get_key("user123", None)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         async with limiter._lock:
             limiter._windows[key].add_request(now - timedelta(hours=10))
@@ -509,7 +509,7 @@ class TestRateLimiter:
         }
 
         key = limiter._get_key("user123", None)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         async with limiter._lock:
             limiter._windows[key].add_request(now)
@@ -527,7 +527,7 @@ class TestRateLimiter:
     async def test_check_rate_limit_cleans_old_timestamps(self, limiter, mock_database):
         """Should clean up old timestamps during check."""
         key = limiter._get_key("user123", None)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         async with limiter._lock:
             limiter._windows[key].timestamps = [
@@ -657,7 +657,7 @@ class TestRateLimiter:
     def test_get_rate_limit_status_normal_user(self, limiter, mock_database):
         """Normal user should get accurate status."""
         key = limiter._get_key("user123", None)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         limiter._windows[key].add_request(now - timedelta(seconds=30))
         limiter._windows[key].add_request(now - timedelta(seconds=20))
@@ -683,7 +683,7 @@ class TestRateLimiter:
 
     def test_cleanup(self, limiter, mock_database):
         """Should clean up old data from all windows."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         limiter._windows["user:user1"].timestamps = [
             now - timedelta(hours=48),
@@ -810,7 +810,7 @@ class TestRateLimitStatusCalculations:
     async def test_remaining_calculations(self, limiter, mock_database):
         """Should calculate remaining requests correctly."""
         key = limiter._get_key("user123", None)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         async with limiter._lock:
             for i in range(3):
@@ -837,7 +837,7 @@ class TestRateLimitStatusCalculations:
         }
 
         key = limiter._get_key("user123", None)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         async with limiter._lock:
             for i in range(5):
@@ -900,7 +900,7 @@ class TestRateLimiterEdgeCases:
         }
 
         key = limiter._get_key("user123", None)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         async with limiter._lock:
             for i in range(3):
@@ -924,7 +924,7 @@ class TestRateLimiterEdgeCases:
         }
 
         key = limiter._get_key("user123", None)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         async with limiter._lock:
             for i in range(2):
@@ -939,7 +939,7 @@ class TestRateLimiterEdgeCases:
 
     def test_get_rate_limit_status_calculates_reset_times(self, limiter, mock_database):
         """Should calculate appropriate reset times."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         status = limiter.get_rate_limit_status(
             user_id="user123", api_key_id=None, is_admin=False

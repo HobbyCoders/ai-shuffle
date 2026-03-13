@@ -11,7 +11,7 @@ Tests all template management endpoints:
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import patch
 from fastapi import HTTPException
 
@@ -133,7 +133,7 @@ class TestTemplateModels:
         """Template response model should accept complete data."""
         from app.core.models import Template
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         template = Template(
             id="tmpl-test123",
             name="Full Template",

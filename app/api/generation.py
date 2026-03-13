@@ -8,7 +8,7 @@ Features comprehensive prompts, domain awareness, and interactive clarification.
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict
 
 from fastapi import APIRouter, HTTPException, Depends, status
@@ -309,7 +309,7 @@ async def _generate_profile_internal(
     export_data = AgentExport(
         version="1.0",
         type="ai-shuffle-agent",
-        exported_at=datetime.utcnow().isoformat() + "Z",
+        exported_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         agent=agent_data
     )
 
@@ -392,7 +392,7 @@ async def _generate_subagent_internal(
     export_data = SubagentExport(
         version="1.0",
         type="ai-shuffle-subagent",
-        exported_at=datetime.utcnow().isoformat() + "Z",
+        exported_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         subagent=subagent_data
     )
 

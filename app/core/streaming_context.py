@@ -30,9 +30,9 @@ class StreamingContext:
     @property
     def log_prefix(self) -> str:
         """Short prefix for structured log lines."""
-        s = self.session_id[:8] if self.session_id else "?"
-        d = self.device_id[:8] if self.device_id else "?"
-        m = self.message_id[:8] if self.message_id else "?"
+        s = self.session_id[:12] if self.session_id else "?"
+        d = self.device_id[:12] if self.device_id else "?"
+        m = self.message_id[:12] if self.message_id else "?"
         return f"[s={s} d={d} m={m} r={self.request_id}]"
 
     def debug(self, logger: logging.Logger, msg: str) -> None:

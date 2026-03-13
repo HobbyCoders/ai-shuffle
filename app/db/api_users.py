@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -100,7 +100,7 @@ def create_api_user(
     description: Optional[str] = None,
 ) -> ApiUserRow:
     """Create a new API user and optionally link profile IDs."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -198,7 +198,7 @@ def update_api_user_last_used(user_id: str):
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE api_users SET last_used_at = ? WHERE id = ?",
-            (datetime.utcnow().isoformat(), user_id)
+            (datetime.now(timezone.utc).isoformat(), user_id)
         )
 
 
@@ -231,7 +231,7 @@ def update_api_user(user_id: str, **kwargs) -> Optional[ApiUserRow]:
 
     profile_ids = kwargs.pop("profile_ids", None)
 
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     updates = ["updated_at = ?"]
     values: list = [now]
 
@@ -304,12 +304,12 @@ def update_credential_policy(policy_id: str, policy: str, description: Optional[
         if description is not None:
             cursor.execute(
                 "UPDATE credential_policies SET policy = ?, description = ?, updated_at = ? WHERE id = ?",
-                (policy, description, datetime.utcnow().isoformat(), policy_id)
+                (policy, description, datetime.now(timezone.utc).isoformat(), policy_id)
             )
         else:
             cursor.execute(
                 "UPDATE credential_policies SET policy = ?, updated_at = ? WHERE id = ?",
-                (policy, datetime.utcnow().isoformat(), policy_id)
+                (policy, datetime.now(timezone.utc).isoformat(), policy_id)
             )
     return get_credential_policy(policy_id)
 
@@ -351,7 +351,7 @@ def set_user_credential_policy(api_user_id: str, credential_type: str, policy: s
     if policy not in valid_policies:
         return None
 
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -445,7 +445,7 @@ def get_all_user_credentials(api_user_id: str) -> List[UserCredentialRow]:
 def set_user_credential(api_user_id: str, credential_type: str, encrypted_value: str) -> UserCredentialRow:
     """Set or update a credential for a user (value should be pre-encrypted)"""
     import uuid
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     with get_db() as conn:
         cursor = conn.cursor()

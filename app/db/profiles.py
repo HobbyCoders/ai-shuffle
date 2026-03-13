@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -60,7 +60,7 @@ def create_profile(
     mcp_tools: Optional[List[str]] = None
 ) -> ProfileRow:
     """Create a new profile"""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -107,7 +107,7 @@ def update_profile(
 
     if updates:
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(profile_id)
 
         with get_db() as conn:
@@ -169,6 +169,6 @@ def set_profile_builtin(profile_id: str, is_builtin: bool) -> bool:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE profiles SET is_builtin = ?, updated_at = ? WHERE id = ?",
-            (is_builtin, datetime.utcnow().isoformat(), profile_id)
+            (is_builtin, datetime.now(timezone.utc).isoformat(), profile_id)
         )
         return cursor.rowcount > 0

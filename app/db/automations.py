@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -147,7 +147,7 @@ def create_automation(
     triggers: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[AutomationRow]:
     """Create a new automation."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     if output_config is None:
         output_config = {"type": "session"}
     # Build triggers array if not provided
@@ -268,7 +268,7 @@ def update_automation(automation_id: str, **kwargs) -> Optional[AutomationRow]:
 
     if updates:
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(automation_id)
         with get_db() as conn:
             cursor = conn.cursor()
@@ -298,7 +298,7 @@ def create_automation_run(
     prompt_rendered: Optional[str] = None,
 ) -> Optional[AutomationRunRow]:
     """Create a new automation run."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -362,7 +362,7 @@ def update_automation_run(run_id: str, **kwargs) -> Optional[AutomationRunRow]:
 
 def get_automation_daily_stats(automation_id: str) -> AutomationDailyStats:
     """Get today's run count and cost for an automation."""
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -384,7 +384,7 @@ def create_automation_approval(
     prompt_preview: Optional[str] = None,
 ) -> Optional[AutomationApprovalRow]:
     """Create a new automation approval."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -420,7 +420,7 @@ def get_pending_automation_approvals() -> List[AutomationApprovalWithName]:
 
 def update_automation_approval(approval_id: str, status: str, decided_by: Optional[str] = None) -> Optional[AutomationApprovalRow]:
     """Update an automation approval status."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(

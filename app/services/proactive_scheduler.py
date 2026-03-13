@@ -9,7 +9,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
@@ -36,7 +36,7 @@ class ScheduledTask:
     minute: Optional[int] = None  # For daily schedules (0-59)
     params: Dict[str, Any] = field(default_factory=dict)
     enabled: bool = True
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_triggered_at: Optional[datetime] = None
 
 
@@ -300,7 +300,7 @@ class ProactiveScheduler:
         if not task or not task.enabled:
             return
 
-        task.last_triggered_at = datetime.utcnow()
+        task.last_triggered_at = datetime.now(timezone.utc)
         await self._save_schedule_to_db(task)
 
         logger.debug(f"Triggered schedule {schedule_id}")
@@ -325,7 +325,7 @@ class ProactiveScheduler:
 
     async def _check_schedules(self) -> None:
         """Check and trigger due schedules."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         for task in list(self._schedules.values()):
             if not task.enabled:
@@ -363,7 +363,7 @@ class ProactiveScheduler:
                     minute=row.get("minute"),
                     params=json.loads(row.get("params", "{}")),
                     enabled=bool(row.get("enabled", True)),
-                    created_at=datetime.fromisoformat(row["created_at"]) if row.get("created_at") else datetime.utcnow(),
+                    created_at=datetime.fromisoformat(row["created_at"]) if row.get("created_at") else datetime.now(timezone.utc),
                     last_triggered_at=datetime.fromisoformat(row["last_triggered_at"]) if row.get("last_triggered_at") else None,
                 )
                 self._schedules[task.id] = task

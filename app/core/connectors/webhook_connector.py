@@ -5,7 +5,7 @@ import hmac
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import httpx
@@ -268,7 +268,7 @@ class WebhookConnector(BaseConnector):
         payload = {
             "event": event_type,
             "data": data,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
         payload_json = json.dumps(payload)
 
@@ -409,7 +409,7 @@ class WebhookConnector(BaseConnector):
                 "message": "Test webhook from connector",
                 "connector_id": self.connector_id,
             },
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
         payload_json = json.dumps(payload)
 

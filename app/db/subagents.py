@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
@@ -93,7 +93,7 @@ def create_subagent(
         is_builtin: Whether this is a built-in subagent (cannot be deleted)
         store_defaults: If True, also store current values as defaults (for built-in subagents)
     """
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     tools_json = json.dumps(tools) if tools else None
 
     with get_db() as conn:
@@ -157,7 +157,7 @@ def update_subagent(
 
     if updates:
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(subagent_id)
 
         with get_db() as conn:
@@ -184,7 +184,7 @@ def set_subagent_builtin(subagent_id: str, is_builtin: bool) -> bool:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE subagents SET is_builtin = ?, updated_at = ? WHERE id = ?",
-            (is_builtin, datetime.utcnow().isoformat(), subagent_id)
+            (is_builtin, datetime.now(timezone.utc).isoformat(), subagent_id)
         )
         return cursor.rowcount > 0
 
@@ -226,7 +226,7 @@ def revert_subagent_to_defaults(subagent_id: str) -> Optional[SubagentRow]:
                 model = default_model,
                 updated_at = ?
                WHERE id = ?""",
-            (datetime.utcnow().isoformat(), subagent_id)
+            (datetime.now(timezone.utc).isoformat(), subagent_id)
         )
 
     return get_subagent(subagent_id)
@@ -268,7 +268,7 @@ def add_permission_rule(
     """Add a permission rule for a profile"""
     import uuid
     rule_id = f"rule-{uuid.uuid4().hex[:8]}"
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(

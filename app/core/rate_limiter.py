@@ -6,11 +6,12 @@ Uses in-memory tracking for speed with database persistence for configuration.
 """
 
 import asyncio
+import bisect
 import logging
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
@@ -48,9 +49,9 @@ class RateLimitStatus:
     hour_remaining: int = 0
     day_remaining: int = 0
     concurrent_remaining: int = 0
-    minute_reset: datetime = field(default_factory=datetime.utcnow)
-    hour_reset: datetime = field(default_factory=datetime.utcnow)
-    day_reset: datetime = field(default_factory=datetime.utcnow)
+    minute_reset: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    hour_reset: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    day_reset: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     is_limited: bool = False
     retry_after: int = 0  # seconds
 
@@ -72,12 +73,19 @@ class RequestWindow:
             self.concurrent_count -= 1
 
     def count_since(self, since: datetime) -> int:
-        """Count requests since a given time"""
-        return sum(1 for ts in self.timestamps if ts >= since)
+        """Count requests since a given time using binary search (O(log n)).
+
+        Timestamps are kept sorted (append-only with monotonic clock) so
+        bisect can find the cutoff index efficiently.
+        """
+        idx = bisect.bisect_left(self.timestamps, since)
+        return len(self.timestamps) - idx
 
     def cleanup_old(self, cutoff: datetime) -> None:
-        """Remove timestamps older than the cutoff"""
-        self.timestamps = [ts for ts in self.timestamps if ts >= cutoff]
+        """Remove timestamps older than the cutoff using binary search."""
+        idx = bisect.bisect_left(self.timestamps, cutoff)
+        if idx:
+            del self.timestamps[:idx]
 
 
 class RateLimiter:
@@ -123,13 +131,13 @@ class RateLimiter:
         """Get cached configuration if still valid"""
         if key in self._config_cache:
             config, cached_at = self._config_cache[key]
-            if datetime.utcnow() - cached_at < self._config_cache_ttl:
+            if datetime.now(timezone.utc) - cached_at < self._config_cache_ttl:
                 return config
         return None
 
     def _cache_config(self, key: str, config: RateLimitConfig) -> None:
         """Cache a configuration"""
-        self._config_cache[key] = (config, datetime.utcnow())
+        self._config_cache[key] = (config, datetime.now(timezone.utc))
 
     def get_limit_config(
         self,
@@ -199,7 +207,7 @@ class RateLimiter:
             return (RateLimitResult.ALLOWED, RateLimitStatus(is_limited=False))
 
         async with self._lock:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             window = self._windows[key]
 
             # Clean up old timestamps (keep last 24 hours)
@@ -280,7 +288,7 @@ class RateLimiter:
         key = self._get_key(user_id, api_key_id)
 
         async with self._lock:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             self._windows[key].add_request(now)
 
         # Log to database for persistence (fire and forget)
@@ -338,7 +346,7 @@ class RateLimiter:
         if config.is_unlimited:
             return RateLimitStatus(is_limited=False)
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         window = self._windows.get(key, RequestWindow())
 
         minute_count = window.count_since(now - timedelta(minutes=1))
@@ -366,7 +374,7 @@ class RateLimiter:
 
     def cleanup(self) -> None:
         """Clean up old data from memory"""
-        cutoff = datetime.utcnow() - timedelta(hours=24)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
         for window in self._windows.values():
             window.cleanup_old(cutoff)
 

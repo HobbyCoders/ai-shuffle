@@ -15,7 +15,7 @@ Tests cover:
 
 import pytest
 from unittest.mock import patch
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import HTTPException
 
 
@@ -65,7 +65,7 @@ class TestListWebhooks:
                 "secret": "secret123",
                 "events": ["session.complete"],
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }]
@@ -136,7 +136,7 @@ class TestCreateWebhook:
                 "events": ["session.complete"],
                 "secret": "my-secret-123",
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -166,7 +166,7 @@ class TestCreateWebhook:
                 "events": ["session.complete", "session.error", "session.started"],
                 "secret": None,
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -193,7 +193,7 @@ class TestCreateWebhook:
                 "events": ["session.complete"],
                 "secret": None,
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -256,7 +256,7 @@ class TestCreateWebhook:
                 "events": [],
                 "secret": None,
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -285,7 +285,7 @@ class TestGetWebhook:
                 "events": ["session.complete"],
                 "secret": "secret123",
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -332,7 +332,7 @@ class TestUpdateWebhook:
                 "events": ["session.complete"],
                 "secret": "secret123",
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -360,7 +360,7 @@ class TestUpdateWebhook:
                 "events": ["session.complete", "session.error"],
                 "secret": "secret123",
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -388,7 +388,7 @@ class TestUpdateWebhook:
                 "events": ["session.complete"],
                 "secret": "new-secret",
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -416,7 +416,7 @@ class TestUpdateWebhook:
                 "events": ["session.complete"],
                 "secret": "secret123",
                 "is_active": False,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -449,7 +449,7 @@ class TestUpdateWebhook:
                 "events": ["session.error"],
                 "secret": "new-secret",
                 "is_active": False,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -518,7 +518,7 @@ class TestUpdateWebhook:
                 "events": ["session.complete"],
                 "secret": "secret123",
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -546,7 +546,7 @@ class TestUpdateWebhook:
                 "events": ["session.complete"],
                 "secret": "secret123",
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -616,7 +616,7 @@ class TestTestWebhook:
                 "events": ["session.complete"],
                 "secret": "secret123",
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -648,7 +648,7 @@ class TestTestWebhook:
                 "events": ["session.complete"],
                 "secret": "secret123",
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -680,7 +680,7 @@ class TestTestWebhook:
                 "events": ["session.complete"],
                 "secret": "secret123",
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -775,7 +775,7 @@ class TestEventTypeValidation:
                     "events": [event],
                     "secret": None,
                     "is_active": True,
-                    "created_at": datetime.utcnow().isoformat(),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
                     "last_triggered_at": None,
                     "failure_count": 0
                 }
@@ -812,7 +812,7 @@ class TestEdgeCases:
                 "events": ["session.complete"],
                 "secret": None,
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
@@ -842,7 +842,7 @@ class TestEdgeCases:
                 "events": ["session.complete"],
                 "secret": special_secret,
                 "is_active": True,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "last_triggered_at": None,
                 "failure_count": 0
             }
