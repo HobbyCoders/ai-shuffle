@@ -423,15 +423,29 @@ export const hookTesting = createDerived(() => _state.testing);
 export const hookSaving = createDerived(() => _state.saving);
 
 // Stats
-export const hookStats = createDerived(() => ({
-	totalCustom: _state.hooks.length,
-	totalEnabled: _state.hooks.filter((h) => h.enabled).length,
-	totalApp: _state.hooks.filter((h) => !h.project_id).length,
-	totalProject: _state.hooks.filter((h) => !!h.project_id).length,
-	totalPlugin: _state.pluginHooks.length,
-	byType: {
-		bash: _state.hooks.filter((h) => h.hook_type === 'bash').length,
-		webhook: _state.hooks.filter((h) => h.hook_type === 'webhook').length,
-		message: _state.hooks.filter((h) => h.hook_type === 'message').length
+export const hookStats = createDerived(() => {
+	let totalEnabled = 0;
+	let totalApp = 0;
+	let totalProject = 0;
+	let bash = 0;
+	let webhook = 0;
+	let message = 0;
+
+	for (const h of _state.hooks) {
+		if (h.enabled) totalEnabled++;
+		if (!h.project_id) totalApp++;
+		else totalProject++;
+		if (h.hook_type === 'bash') bash++;
+		else if (h.hook_type === 'webhook') webhook++;
+		else if (h.hook_type === 'message') message++;
 	}
-}));
+
+	return {
+		totalCustom: _state.hooks.length,
+		totalEnabled,
+		totalApp,
+		totalProject,
+		totalPlugin: _state.pluginHooks.length,
+		byType: { bash, webhook, message }
+	};
+});

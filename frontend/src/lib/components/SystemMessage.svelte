@@ -1,13 +1,10 @@
 <script lang="ts">
 	import type { ChatMessage } from '$lib/stores/types';
-	import { marked } from 'marked';
+	import { Marked } from 'marked';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 
-	// Configure marked for system message rendering
-	marked.setOptions({
-		breaks: true,
-		gfm: true
-	});
+	// Create a local marked instance to avoid mutating global config
+	const localMarked = new Marked({ breaks: true, gfm: true });
 
 	interface Props {
 		message: ChatMessage;
@@ -21,7 +18,7 @@
 	}
 
 	function renderMarkdown(content: string): string {
-		return marked(content, { breaks: true }) as string;
+		return localMarked.parse(content, { breaks: true }) as string;
 	}
 
 	// Get formatted content based on subtype

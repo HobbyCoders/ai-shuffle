@@ -131,6 +131,53 @@ function _notifySubscribers() {
 }
 
 // ============================================================================
+// Event listener references (for cleanup)
+// ============================================================================
+
+function _handleOnline() {
+	_update((s) => ({ ...s, isOnline: true }));
+	_notifySubscribers();
+	pwa.checkForUpdates();
+}
+
+function _handleOffline() {
+	_update((s) => ({ ...s, isOnline: false }));
+	_notifySubscribers();
+}
+
+function _handleVisibilityChange() {
+	if (document.visibilityState === 'visible') {
+		pwa.checkForUpdates();
+	}
+}
+
+function _handleFocus() {
+	pwa.checkForUpdates();
+}
+
+function _handleBeforeInstallPrompt(e: Event) {
+	e.preventDefault();
+	if (wasRecentlyDismissed()) return;
+
+	_update((s) => ({
+		...s,
+		isInstallable: true,
+		installPromptEvent: e as BeforeInstallPromptEvent
+	}));
+	_notifySubscribers();
+}
+
+function _handleAppInstalled() {
+	_update((s) => ({
+		...s,
+		isInstalled: true,
+		isInstallable: false,
+		installPromptEvent: null
+	}));
+	_notifySubscribers();
+}
+
+// ============================================================================
 // Exported Store
 // ============================================================================
 
@@ -160,51 +207,33 @@ export const pwa = {
 		if (!(window as any).__pwa_listeners) {
 			(window as any).__pwa_listeners = true;
 
-			window.addEventListener('online', () => {
-				_update((s) => ({ ...s, isOnline: true }));
-				_notifySubscribers();
-				pwa.checkForUpdates();
-			});
-
-			window.addEventListener('offline', () => {
-				_update((s) => ({ ...s, isOnline: false }));
-				_notifySubscribers();
-			});
-
-			document.addEventListener('visibilitychange', () => {
-				if (document.visibilityState === 'visible') {
-					pwa.checkForUpdates();
-				}
-			});
-
-			window.addEventListener('focus', () => {
-				pwa.checkForUpdates();
-			});
-
-			window.addEventListener('beforeinstallprompt', (e) => {
-				e.preventDefault();
-				if (wasRecentlyDismissed()) return;
-
-				_update((s) => ({
-					...s,
-					isInstallable: true,
-					installPromptEvent: e as BeforeInstallPromptEvent
-				}));
-				_notifySubscribers();
-			});
-
-			window.addEventListener('appinstalled', () => {
-				_update((s) => ({
-					...s,
-					isInstalled: true,
-					isInstallable: false,
-					installPromptEvent: null
-				}));
-				_notifySubscribers();
-			});
+			window.addEventListener('online', _handleOnline);
+			window.addEventListener('offline', _handleOffline);
+			document.addEventListener('visibilitychange', _handleVisibilityChange);
+			window.addEventListener('focus', _handleFocus);
+			window.addEventListener('beforeinstallprompt', _handleBeforeInstallPrompt);
+			window.addEventListener('appinstalled', _handleAppInstalled);
 		}
 
 		registerServiceWorker();
+	},
+
+	/**
+	 * Remove all event listeners registered by init().
+	 * Call from appropriate cleanup points (e.g., app teardown).
+	 */
+	destroy() {
+		if (!browser) return;
+
+		window.removeEventListener('online', _handleOnline);
+		window.removeEventListener('offline', _handleOffline);
+		document.removeEventListener('visibilitychange', _handleVisibilityChange);
+		window.removeEventListener('focus', _handleFocus);
+		window.removeEventListener('beforeinstallprompt', _handleBeforeInstallPrompt);
+		window.removeEventListener('appinstalled', _handleAppInstalled);
+
+		// Allow re-registration after destroy
+		delete (window as any).__pwa_listeners;
 	},
 
 	async promptInstall(): Promise<boolean> {

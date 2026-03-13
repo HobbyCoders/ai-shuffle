@@ -12,13 +12,13 @@
 	let { message }: Props = $props();
 
 	// Filter valid children (ensure they have required id field)
-	const validChildren = $derived(() =>
+	const validChildren = $derived(
 		(message.agentChildren || []).filter(c => c && c.id)
 	);
 
 	// Count children by type
-	const childCounts = $derived(() => {
-		const children = validChildren();
+	const childCounts = $derived.by(() => {
+		const children = validChildren;
 		const toolUseChildren = children.filter(c => c.type === 'tool_use');
 		const completedTools = toolUseChildren.filter(c => c.toolStatus === 'complete').length;
 
@@ -30,10 +30,10 @@
 	});
 
 	// Get status display
-	const statusInfo = $derived(() => ({
+	const statusInfo = $derived({
 		isRunning: message.agentStatus === 'running',
 		isError: message.agentStatus === 'error'
-	}));
+	});
 
 	// Get model display name
 	function getModelBadge(agentType?: string): { label: string; color: string } {
@@ -133,11 +133,11 @@
 <details class="w-full border border-border rounded-lg overflow-hidden shadow-s group">
 	<summary class="subagent-summary w-full min-w-0 px-4 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
 		<!-- Status icon -->
-		{#if statusInfo().isRunning}
+		{#if statusInfo.isRunning}
 			<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 			</svg>
-		{:else if statusInfo().isError}
+		{:else if statusInfo.isError}
 			<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 			</svg>
@@ -166,10 +166,10 @@
 		</span>
 
 		<!-- Tool count (if any) -->
-		{#if childCounts().toolUse > 0}
+		{#if childCounts.toolUse > 0}
 			<span class="text-muted-foreground flex-shrink-0">•</span>
 			<span class="text-xs text-muted-foreground flex-shrink-0">
-				{childCounts().completedTools}/{childCounts().toolUse} tools
+				{childCounts.completedTools}/{childCounts.toolUse} tools
 			</span>
 		{/if}
 
@@ -202,8 +202,8 @@
 			{/if}
 
 			<!-- Agent children (tool calls and text messages) -->
-			{#if validChildren().length > 0}
-				{#each validChildren() as child (child.id)}
+			{#if validChildren.length > 0}
+				{#each validChildren as child (child.id)}
 					{#if child.type === 'tool_use'}
 						<div class="px-4 py-2 border-b border-border/50 last:border-b-0">
 							<details class="group/tool">

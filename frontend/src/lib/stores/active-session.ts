@@ -172,7 +172,7 @@ function getOrCreateDeviceId(): string {
 	const LEGACY_KEY = 'aihub_device_id';
 
 	if (typeof window === 'undefined') {
-		return `device-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+		return `device-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
 	}
 
 	let deviceId = localStorage.getItem(CANONICAL_KEY);
@@ -185,7 +185,7 @@ function getOrCreateDeviceId(): string {
 		return legacyId;
 	}
 
-	deviceId = `device-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+	deviceId = `device-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
 	localStorage.setItem(CANONICAL_KEY, deviceId);
 	return deviceId;
 }
@@ -812,6 +812,7 @@ async function init() {
 function destroy() {
 	disconnect();
 	wsConn.destroy();
+	switcher.destroy();
 	if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
 	_state = defaultState();
 	_notifySubscribers();

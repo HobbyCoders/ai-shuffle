@@ -65,6 +65,8 @@
 		class:active={currentValue !== null}
 		onclick={handleClick}
 		title="{title} (session only)"
+		aria-haspopup="menu"
+		aria-expanded={showDropdown}
 	>
 		{@render icon()}
 		{#if currentValue !== null}
@@ -73,7 +75,7 @@
 	</button>
 
 	{#if showDropdown}
-		<div class="override-dropdown">
+		<div class="override-dropdown" role="menu" aria-label={title}>
 			<div class="override-dropdown-header">{title}</div>
 			{#each modes as mode (mode.value)}
 				<button
@@ -81,6 +83,7 @@
 					class="override-dropdown-item"
 					class:selected={currentValue === mode.value}
 					onclick={() => handleSelect(mode.value)}
+					role="menuitem"
 				>
 					<span class="override-item-label">{mode.label}</span>
 					{#if currentValue === mode.value}

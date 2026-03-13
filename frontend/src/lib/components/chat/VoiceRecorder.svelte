@@ -3,7 +3,7 @@
 	 * VoiceRecorder - Handles microphone access, MediaRecorder, audio level
 	 * visualization, and transcription. Extracted from ChatInput.
 	 */
-	import { tick } from 'svelte';
+	import { tick, onDestroy } from 'svelte';
 
 	interface Props {
 		onTranscription: (text: string) => void;
@@ -276,6 +276,31 @@
 			await startRecording();
 		}
 	}
+
+	// Cleanup all media resources on component unmount
+	onDestroy(() => {
+		// Cancel animation frame
+		if (animationFrameId) {
+			cancelAnimationFrame(animationFrameId);
+			animationFrameId = null;
+		}
+		// Stop MediaRecorder
+		if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+			try {
+				mediaRecorder.stop();
+				// Stop all tracks on the stream
+				mediaRecorder.stream.getTracks().forEach(track => track.stop());
+			} catch {
+				// Ignore errors during cleanup
+			}
+		}
+		// Close AudioContext
+		if (audioContext) {
+			audioContext.close().catch(() => {});
+			audioContext = null;
+		}
+		analyserNode = null;
+	});
 </script>
 
 <!-- Recording Error Message -->

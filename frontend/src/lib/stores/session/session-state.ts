@@ -36,6 +36,10 @@ function _sync(): void {
 export const sessionState = {
 	subscribe: _store.subscribe,
 
+	get current(): SessionStateMap {
+		return { sessions: sessionStateManager.sessions };
+	},
+
 	getSession(sessionId: string): SessionData | undefined {
 		return sessionStateManager.getSession(sessionId);
 	},

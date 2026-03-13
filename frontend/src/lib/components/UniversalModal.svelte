@@ -9,6 +9,7 @@
 	 * - Fullscreen on mobile (like sessions panel)
 	 * - Footer with cancel/save actions
 	 */
+	import type { Snippet } from 'svelte';
 
 	interface Tab {
 		id: string;
@@ -30,6 +31,9 @@
 		showFooter?: boolean;
 		size?: 'sm' | 'md' | 'lg' | 'xl' | 'full';
 		twoColumn?: boolean;
+		children?: Snippet;
+		left?: Snippet;
+		right?: Snippet;
 	}
 
 	let {
@@ -46,7 +50,10 @@
 		saving = false,
 		showFooter = true,
 		size = 'lg',
-		twoColumn = false
+		twoColumn = false,
+		children,
+		left,
+		right
 	}: Props = $props();
 
 	// Handle escape key
@@ -152,11 +159,11 @@
 			<div class="flex-1 overflow-y-auto overflow-x-hidden {twoColumn ? 'p-0' : 'p-6'}">
 				{#if twoColumn}
 					<div class="grid grid-cols-1 md:grid-cols-2 gap-0 md:divide-x divide-border min-h-full">
-						<slot name="left" />
-						<slot name="right" />
+						{@render left?.()}
+						{@render right?.()}
 					</div>
 				{:else}
-					<slot />
+					{@render children?.()}
 				{/if}
 			</div>
 

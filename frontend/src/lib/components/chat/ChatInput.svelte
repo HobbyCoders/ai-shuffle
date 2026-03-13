@@ -129,6 +129,25 @@
 	// was already cleared and we don't want to overwrite it with stale text.
 	// Check the store imperatively (get()) since $effects don't run during teardown.
 	onDestroy(() => {
+		// Clean up voice recording resources to prevent media leaks
+		if (animationFrameId) {
+			cancelAnimationFrame(animationFrameId);
+			animationFrameId = null;
+		}
+		if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+			try {
+				mediaRecorder.stop();
+				mediaRecorder.stream.getTracks().forEach(track => track.stop());
+			} catch {
+				// Ignore errors during cleanup
+			}
+		}
+		if (audioContext) {
+			audioContext.close().catch(() => {});
+			audioContext = null;
+		}
+		analyserNode = null;
+
 		if (messageSent) return;
 		const currentSessionId = get(activeSession).sessionId;
 		if (currentSessionId !== initialSessionId) return; // session switched
@@ -436,7 +455,7 @@
 	// File upload
 	function triggerFileUpload() {
 		if (!$activeSession.project) {
-			alert('Please select a project first to upload files.');
+			recordingError = 'Please select a project first to upload files.';
 			return;
 		}
 		fileInputRef?.click();
@@ -475,7 +494,7 @@
 		} catch (error: unknown) {
 			console.error('Upload failed:', error);
 			const err = error as { detail?: string };
-			alert(`Upload failed: ${err.detail || 'Unknown error'}`);
+			recordingError = `Upload failed: ${err.detail || 'Unknown error'}`;
 		} finally {
 			isUploading = false;
 			input.value = '';
@@ -520,7 +539,7 @@
 		if (!e.dataTransfer?.files?.length) return;
 
 		if (!$activeSession.project) {
-			alert('Please select a project first to upload files.');
+			recordingError = 'Please select a project first to upload files.';
 			return;
 		}
 
@@ -545,7 +564,7 @@
 		} catch (error: unknown) {
 			console.error('Upload failed:', error);
 			const err = error as { detail?: string };
-			alert(`Upload failed: ${err.detail || 'Unknown error'}`);
+			recordingError = `Upload failed: ${err.detail || 'Unknown error'}`;
 		} finally {
 			isUploading = false;
 		}
@@ -809,8 +828,6 @@
 		}
 	}
 
-	// Context color - always themed (no usage-based color changes)
-	const contextColor = $derived('');
 </script>
 
 <div
@@ -1023,7 +1040,7 @@
 				<div class="controls-dock">
 					<!-- Left: Usage Indicator -->
 					<div class="controls-left">
-						<div class="usage-indicator {contextColor}" title="{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)} tokens">
+						<div class="usage-indicator" title="{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)} tokens">
 							<div class="usage-bar">
 								<div class="usage-fill" style="width: {Math.min(contextPercent, 100)}%"></div>
 							</div>
@@ -1417,8 +1434,11 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 28px;
-		height: 28px;
+		min-width: 44px;
+		min-height: 44px;
+		width: 44px;
+		height: 44px;
+		padding: 8px;
 		background: var(--button-primary-gradient);
 		border: none;
 		border-radius: calc(var(--radius, 0.75rem) * 0.67);

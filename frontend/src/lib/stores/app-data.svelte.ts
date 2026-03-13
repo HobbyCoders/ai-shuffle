@@ -121,14 +121,29 @@ async function loadSessionsInternal(tagId?: string | null) {
 async function loadMoreSessionsInternal() {
 	if (_state.sessionsLoadingMore || !_state.sessionsHasMore) return;
 
+	// Capture offset and tag filter before the async fetch so we can
+	// detect if a concurrent reset (e.g. tag change, reload) invalidated
+	// this request while it was in flight.
+	const capturedOffset = _state.sessionsOffset;
+	const capturedTagFilter = _state.sessionsTagFilter;
+	const newOffset = capturedOffset + SESSIONS_PAGE_SIZE;
+
 	_update(s => ({ ...s, sessionsLoadingMore: true }));
 	try {
-		const newOffset = _state.sessionsOffset + SESSIONS_PAGE_SIZE;
 		let url = `/sessions/paginated?limit=${SESSIONS_PAGE_SIZE}&offset=${newOffset}&admin_only=true`;
-		if (_state.sessionsTagFilter) {
-			url += `&tag_id=${encodeURIComponent(_state.sessionsTagFilter)}`;
+		if (capturedTagFilter) {
+			url += `&tag_id=${encodeURIComponent(capturedTagFilter)}`;
 		}
 		const result = await api.get<PaginatedSessions>(url);
+
+		// Verify offset and tag filter haven't changed while we were fetching.
+		// If they changed (e.g. user switched tag filter, or sessions were
+		// reloaded), discard this stale response to avoid duplicates.
+		if (_state.sessionsOffset !== capturedOffset || _state.sessionsTagFilter !== capturedTagFilter) {
+			_update(s => ({ ...s, sessionsLoadingMore: false }));
+			return;
+		}
+
 		_update(s => ({
 			...s,
 			sessions: [...s.sessions, ...result.items],

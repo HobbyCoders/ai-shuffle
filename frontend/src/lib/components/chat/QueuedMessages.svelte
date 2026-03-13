@@ -134,14 +134,16 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 14px;
-		height: 14px;
+		width: 44px;
+		height: 44px;
+		padding: 15px;
 		background: none;
 		border: none;
 		border-radius: 50%;
 		cursor: pointer;
 		color: var(--muted-foreground);
 		transition: color 0.15s, background 0.15s;
+		margin: -15px -15px -15px 0;
 	}
 
 	.chip-remove:hover {

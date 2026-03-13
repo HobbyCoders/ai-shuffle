@@ -8,7 +8,6 @@
  * expose a runes-compatible interface (.current + .subscribe).
  */
 
-import { get } from 'svelte/store';
 import { untrack } from 'svelte';
 import { activeSession } from '../active-session';
 import { sessionState } from '../session/session-state';
@@ -27,19 +26,23 @@ function createMultiDerived<T>(
 	getter: () => T
 ): { readonly current: T; subscribe: (fn: Subscriber<T>) => () => void } {
 	const subscribers = new Set<Subscriber<T>>();
-	let initialized = false;
+	let parentUnsubs: Array<() => void> = [];
 
-	function setup() {
-		if (initialized) return;
-		initialized = true;
-		for (const parent of parents) {
+	function subscribeToParents() {
+		if (parentUnsubs.length > 0) return; // already subscribed
+		parentUnsubs = parents.map((parent) =>
 			parent.subscribe(() => {
 				untrack(() => {
 					const value = getter();
 					for (const fn of subscribers) fn(value);
 				});
-			});
-		}
+			})
+		);
+	}
+
+	function unsubscribeFromParents() {
+		for (const unsub of parentUnsubs) unsub();
+		parentUnsubs = [];
 	}
 
 	return {
@@ -47,11 +50,14 @@ function createMultiDerived<T>(
 			return getter();
 		},
 		subscribe(fn: Subscriber<T>) {
-			setup();
+			subscribeToParents();
 			subscribers.add(fn);
 			untrack(() => fn(getter()));
 			return () => {
 				subscribers.delete(fn);
+				if (subscribers.size === 0) {
+					unsubscribeFromParents();
+				}
 			};
 		}
 	};
@@ -75,8 +81,8 @@ const EMPTY_USAGE: SessionUsage = {
 export const activeUsage = createMultiDerived<SessionUsage>(
 	[activeSession, sessionState],
 	() => {
-		const active = get(activeSession);
-		const state = get(sessionState);
+		const active = activeSession.current;
+		const state = sessionState.current;
 
 		if (active.sessionId) {
 			const session = state.sessions.get(active.sessionId);

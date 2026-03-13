@@ -73,7 +73,7 @@ const initialState: McpState = {
 
 /** Extract a human-readable error message from ApiError or Error objects */
 function extractError(e: unknown, fallback: string): string {
-	if (e && typeof e === 'object' && 'detail' in e) return (e as any).detail;
+	if (e && typeof e === 'object' && 'detail' in e) return (e as { detail: string }).detail;
 	if (e instanceof Error) return e.message;
 	return fallback;
 }

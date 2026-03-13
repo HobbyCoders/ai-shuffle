@@ -2,10 +2,8 @@
 	/**
 	 * TodoList - Cursor-style minimal task progress display
 	 */
-	import { onMount, tick } from 'svelte';
-	import { get } from 'svelte/store';
 	import type { TodoItem } from '$lib/stores/types';
-	import { chatPreferences, type ChatPreferences, DEFAULT_PREFERENCES } from '$lib/stores/chatPreferences';
+	import { chatPreferences } from '$lib/stores/chatPreferences';
 
 	interface Props {
 		todos: TodoItem[];
@@ -15,26 +13,13 @@
 
 	let { todos, initialExpanded }: Props = $props();
 
-	// Current preferences - starts with defaults, updated reactively
-	let prefs = $state<ChatPreferences>(DEFAULT_PREFERENCES);
+	// Chat preferences (reactive via .current getter)
+	const prefs = $derived(chatPreferences.current);
 
 	// Track if user has manually toggled this list
 	// Once toggled, user's choice takes precedence over preference
 	let userToggled = $state(false);
 	let userExpandedChoice = $state(false);
-
-	// Subscribe to preferences on mount (client-side only)
-	onMount(() => {
-		// Get current value immediately (may have been updated before mount)
-		prefs = get(chatPreferences);
-		tick(); // Force re-render with current preferences
-
-		// Subscribe to future changes
-		const unsubscribe = chatPreferences.subscribe(p => {
-			prefs = p;
-		});
-		return unsubscribe;
-	});
 
 	// Compute expanded state: prop override > user toggle > preference
 	const isExpanded = $derived(
@@ -51,26 +36,26 @@
 	}
 
 	// Compute statistics
-	const stats = $derived(() => {
+	const stats = $derived.by(() => {
 		const total = todos.length;
 		const completed = todos.filter(t => t.status === 'completed').length;
 		return { total, completed };
 	});
 
 	// Get the currently active task (first in_progress, or first pending)
-	const activeTask = $derived(() => {
+	const activeTask = $derived.by(() => {
 		const inProgressTask = todos.find(t => t.status === 'in_progress');
 		if (inProgressTask) return inProgressTask;
 		return todos.find(t => t.status === 'pending');
 	});
 
 	// Check if all tasks are completed
-	const allCompleted = $derived(() => {
-		return todos.length > 0 && todos.every(t => t.status === 'completed');
-	});
+	const allCompleted = $derived(
+		todos.length > 0 && todos.every(t => t.status === 'completed')
+	);
 
 	// Progress percentage for circular progress bar
-	const progress = $derived(() => {
+	const progress = $derived.by(() => {
 		if (todos.length === 0) return 0;
 		return (todos.filter(t => t.status === 'completed').length / todos.length) * 100;
 	});
@@ -88,7 +73,7 @@
 			class="todo-toggle-btn w-full flex items-center gap-2 py-1.5 text-left rounded px-2 -mx-2 transition-colors"
 		>
 			<!-- Circular Progress or Checkmark -->
-			{#if allCompleted()}
+			{#if allCompleted}
 				<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 				</svg>
@@ -116,25 +101,25 @@
 						stroke-linecap="round"
 						class="text-green-500 transition-all duration-300"
 						stroke-dasharray={circumference}
-						stroke-dashoffset={circumference - (progress() / 100) * circumference}
+						stroke-dashoffset={circumference - (progress / 100) * circumference}
 					/>
 				</svg>
 			{/if}
 
 			<!-- Task text -->
 			<span class="flex-1 text-sm text-muted-foreground truncate">
-				{#if allCompleted()}
+				{#if allCompleted}
 					All tasks completed
-				{:else if activeTask()}
-					{activeTask()?.status === 'in_progress' ? activeTask()?.activeForm : activeTask()?.content}
+				{:else if activeTask}
+					{activeTask?.status === 'in_progress' ? activeTask?.activeForm : activeTask?.content}
 				{:else}
-					{stats().total} pending tasks
+					{stats.total} pending tasks
 				{/if}
 			</span>
 
 			<!-- Progress count -->
 			<span class="text-sm text-muted-foreground tabular-nums flex-shrink-0">
-				{stats().completed}/{stats().total}
+				{stats.completed}/{stats.total}
 			</span>
 
 			<!-- Chevron -->

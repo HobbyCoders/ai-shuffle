@@ -53,6 +53,8 @@
 		class="context-selector-btn {$activeSession.profile ? '' : 'unset'}"
 		onclick={handleProfileClick}
 		title="Change profile"
+		aria-haspopup="menu"
+		aria-expanded={showProfileDropdown}
 	>
 		<div class="selector-icon">
 			<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -66,7 +68,7 @@
 	</button>
 
 	{#if showProfileDropdown}
-		<div class="selector-dropdown">
+		<div class="selector-dropdown" role="menu" aria-label="Profile selection">
 			{#if $profiles.length === 0}
 				<div class="dropdown-empty">No profiles available</div>
 			{:else}
@@ -76,6 +78,7 @@
 						class="dropdown-item"
 						class:selected={profile.id === $activeSession.profile}
 						onclick={() => selectProfile(profile.id)}
+						role="menuitem"
 					>
 						<svg class="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />

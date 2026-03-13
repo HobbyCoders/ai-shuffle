@@ -13,9 +13,12 @@
 	import { files } from '$lib/stores/files';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { onDestroy } from 'svelte';
+	import type { Snippet } from 'svelte';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 	import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
 	import OfflineBanner from '$lib/components/OfflineBanner.svelte';
+
+	let { children }: { children: Snippet } = $props();
 
 	let initialized = false;
 
@@ -148,5 +151,5 @@
 	{/if}
 	<InstallPrompt />
 
-	<slot />
+	{@render children?.()}
 {/if}

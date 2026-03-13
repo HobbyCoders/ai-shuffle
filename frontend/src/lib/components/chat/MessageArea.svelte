@@ -17,7 +17,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles } from '$lib/stores/app-data';
 	import type { ChatMessage, TodoItem } from '$lib/stores/types';
-	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
+	import { chatPreferences } from '$lib/stores/chatPreferences';
 	import { messageCache } from '$lib/stores/message-cache';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
@@ -93,18 +93,12 @@
 		return sessionProfile?.name ?? 'Assistant';
 	}
 
-	// Chat preferences (reactive subscription)
-	let chatPrefs = $state<ChatPreferences | null>(null);
-	$effect(() => {
-		const unsubscribe = chatPreferences.subscribe(p => {
-			chatPrefs = p;
-		});
-		return unsubscribe;
-	});
+	// Chat preferences (reactive via .current getter)
+	const chatPrefs = $derived(chatPreferences.current);
 
 	// Find the last streaming message index - only that message should show the streaming indicator
 	// This prevents multiple bouncing dots from appearing after each tool call
-	const lastStreamingMessageIndex = $derived(() => {
+	const lastStreamingMessageIndex = $derived.by(() => {
 		for (let i = $activeSession.messages.length - 1; i >= 0; i--) {
 			if ($activeSession.messages[i].streaming) {
 				return i;
@@ -415,7 +409,7 @@
 	let prevLastMetadata = $state<string | null>(null);
 
 	// Get last message content for streaming detection (includes toolInput for TodoWrite)
-	const lastMessageContent = $derived(() => {
+	const lastMessageContent = $derived.by(() => {
 		const lastMsg = $activeSession.messages[$activeSession.messages.length - 1];
 		if (!lastMsg) return '';
 		// For tool_use messages, track toolInput changes (especially TodoWrite)
@@ -428,7 +422,7 @@
 	// Get metadata for the last assistant message that has metadata (cost/duration
 	// rendered there). This message may not be the absolute last in the array
 	// (e.g. a TodoWrite tool_use could follow it).
-	const lastMessageMetadata = $derived(() => {
+	const lastMessageMetadata = $derived.by(() => {
 		const msg = $activeSession.messages.findLast(m => m.role === 'assistant' && m.metadata);
 		if (!msg?.metadata) return null;
 		const m = msg.metadata as Record<string, unknown>;
@@ -445,8 +439,8 @@
 
 		// Get current values
 		const currentLength = $activeSession.messages.length;
-		const currentContent = lastMessageContent();
-		const currentMetadata = lastMessageMetadata();
+		const currentContent = lastMessageContent;
+		const currentMetadata = lastMessageMetadata;
 
 		// Only scroll if there's an actual change (new message, content update, or metadata added)
 		const hasNewMessage = currentLength !== prevMessagesLength;
@@ -538,7 +532,7 @@
 						messageId={message.id}
 						messageUuid={message.jsonlUuid}
 						sessionId={$activeSession.sessionId}
-						streaming={message.streaming && messageIndex === lastStreamingMessageIndex()}
+						streaming={message.streaming && messageIndex === lastStreamingMessageIndex}
 						{hasPartialMessages}
 						{fileCheckpointingEnabled}
 						metadata={message.metadata}

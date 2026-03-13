@@ -18,7 +18,22 @@ interface CacheEntry {
 	timestamp: number;
 }
 
+let _cachedDB: IDBDatabase | null = null;
+
 function openDB(): Promise<IDBDatabase> {
+	// Return cached connection if it's still open
+	if (_cachedDB) {
+		try {
+			// Verify the connection is still usable by checking its name
+			// (accessing properties on a closed db throws)
+			if (_cachedDB.name === DB_NAME) {
+				return Promise.resolve(_cachedDB);
+			}
+		} catch {
+			_cachedDB = null;
+		}
+	}
+
 	return new Promise((resolve, reject) => {
 		const request = indexedDB.open(DB_NAME, DB_VERSION);
 		request.onupgradeneeded = () => {
@@ -27,7 +42,16 @@ function openDB(): Promise<IDBDatabase> {
 				db.createObjectStore(STORE_NAME, { keyPath: 'sessionId' });
 			}
 		};
-		request.onsuccess = () => resolve(request.result);
+		request.onsuccess = () => {
+			_cachedDB = request.result;
+			// Clear the cache if the browser closes the connection
+			_cachedDB.onclose = () => { _cachedDB = null; };
+			_cachedDB.onversionchange = () => {
+				_cachedDB?.close();
+				_cachedDB = null;
+			};
+			resolve(_cachedDB);
+		};
 		request.onerror = () => reject(request.error);
 	});
 }
@@ -42,11 +66,9 @@ async function withStore<T>(
 		const store = tx.objectStore(STORE_NAME);
 		const request = fn(store);
 		request.onsuccess = () => {
-			db.close();
 			resolve(request.result);
 		};
 		request.onerror = () => {
-			db.close();
 			reject(request.error);
 		};
 	});

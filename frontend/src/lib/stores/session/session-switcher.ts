@@ -72,6 +72,7 @@ export interface SessionSwitcher {
 	getPersistedProject: () => string;
 	loadSelectionFromBackend: () => Promise<{ selectedProfile: string; selectedProject: string } | null>;
 	saveSelectionToBackend: (profile: string, project: string) => void;
+	destroy: () => void;
 }
 
 // ─── Module-Level Selection Helpers ──────────────────────────────────────────
@@ -156,14 +157,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		selectionSyncTimeout = setTimeout(async () => {
 			if (!pendingSelection) return;
 			try {
-				await fetch('/api/v1/preferences/selection', {
-					method: 'PUT',
-					headers: { 'Content-Type': 'application/json' },
-					credentials: 'include',
-					body: JSON.stringify({
-						key: 'selection',
-						value: { selectedProfile: pendingSelection.profile, selectedProject: pendingSelection.project },
-					}),
+				await api.put('/preferences/selection', {
+					key: 'selection',
+					value: { selectedProfile: pendingSelection.profile, selectedProject: pendingSelection.project },
 				});
 			} catch (e) {
 				console.error('[ActiveSession] Failed to sync selection to backend:', e);
@@ -420,6 +416,17 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		persistSessionImmediate();
 	}
 
+	function destroy() {
+		if (selectionSyncTimeout) {
+			clearTimeout(selectionSyncTimeout);
+			selectionSyncTimeout = null;
+		}
+		if (persistTimer) {
+			clearTimeout(persistTimer);
+			persistTimer = null;
+		}
+	}
+
 	return {
 		switchSession,
 		newChat,
@@ -429,5 +436,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		getPersistedProject,
 		loadSelectionFromBackend,
 		saveSelectionToBackend,
+		destroy,
 	};
 }

@@ -2,9 +2,7 @@
 	/**
 	 * ToolUseMessage - Collapsible tool execution display
 	 */
-	import { onMount, tick } from 'svelte';
-	import { get } from 'svelte/store';
-	import { chatPreferences, type ChatPreferences, DEFAULT_PREFERENCES } from '$lib/stores/chatPreferences';
+	import { chatPreferences } from '$lib/stores/chatPreferences';
 
 	interface Props {
 		name: string;
@@ -17,38 +15,23 @@
 
 	let { name, input, partialInput, result, status, streaming = false }: Props = $props();
 
-	// Current preferences - starts with defaults, updated reactively
-	let prefs = $state<ChatPreferences>(DEFAULT_PREFERENCES);
+	// Chat preferences (reactive via .current getter)
+	const prefs = $derived(chatPreferences.current);
 
 	// Track if user has manually toggled this details element
 	// Once toggled, user's choice takes precedence over preference
 	let userToggled = $state(false);
-	let userExpandedChoice = $state(false);
+	let detailsOpen = $state(false);
 
-	// Subscribe to preferences on mount (client-side only)
-	onMount(() => {
-		// Get current value immediately (may have been updated before mount)
-		prefs = get(chatPreferences);
-		tick(); // Force re-render with current preferences
-
-		// Subscribe to future changes
-		const unsubscribe = chatPreferences.subscribe(p => {
-			prefs = p;
-		});
-		return unsubscribe;
+	// Sync from preferences when user hasn't manually toggled
+	$effect(() => {
+		if (!userToggled) {
+			detailsOpen = prefs.toolsStartExpanded;
+		}
 	});
 
-	// Compute expanded state: user toggle > preference
-	const isExpanded = $derived(
-		userToggled
-			? userExpandedChoice
-			: prefs.toolsStartExpanded
-	);
-
-	function handleToggle(event: Event) {
-		const details = event.target as HTMLDetailsElement;
+	function handleToggle() {
 		userToggled = true;
-		userExpandedChoice = details.open;
 	}
 
 	// Extract field from partial JSON string using regex (for streaming)
@@ -230,7 +213,7 @@
 
 <div class="w-full tool-use-message">
 	<div class="min-w-0">
-		<details class="w-full border border-border rounded-lg overflow-hidden group" open={isExpanded} ontoggle={handleToggle}>
+		<details class="w-full border border-border rounded-lg overflow-hidden group" bind:open={detailsOpen} ontoggle={handleToggle}>
 			<summary class="tool-summary w-full px-3 py-2 flex items-center gap-2 cursor-pointer list-none transition-colors">
 				<!-- Status indicator - use toolStatus as primary, not streaming -->
 				{#if status === 'running'}

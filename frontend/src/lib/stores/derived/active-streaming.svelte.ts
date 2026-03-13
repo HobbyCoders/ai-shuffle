@@ -8,7 +8,6 @@
  * expose a runes-compatible interface (.current + .subscribe).
  */
 
-import { get } from 'svelte/store';
 import { untrack } from 'svelte';
 import { activeSession, streamingSessions } from '../active-session';
 import { sessionState } from '../session/session-state';
@@ -29,19 +28,23 @@ function createMultiDerived<T>(
 	getter: () => T
 ): { readonly current: T; subscribe: (fn: Subscriber<T>) => () => void } {
 	const subscribers = new Set<Subscriber<T>>();
-	let initialized = false;
+	let parentUnsubs: Array<() => void> = [];
 
-	function setup() {
-		if (initialized) return;
-		initialized = true;
-		for (const parent of parents) {
+	function subscribeToParents() {
+		if (parentUnsubs.length > 0) return; // already subscribed
+		parentUnsubs = parents.map((parent) =>
 			parent.subscribe(() => {
 				untrack(() => {
 					const value = getter();
 					for (const fn of subscribers) fn(value);
 				});
-			});
-		}
+			})
+		);
+	}
+
+	function unsubscribeFromParents() {
+		for (const unsub of parentUnsubs) unsub();
+		parentUnsubs = [];
 	}
 
 	return {
@@ -49,11 +52,14 @@ function createMultiDerived<T>(
 			return getter();
 		},
 		subscribe(fn: Subscriber<T>) {
-			setup();
+			subscribeToParents();
 			subscribers.add(fn);
 			untrack(() => fn(getter()));
 			return () => {
 				subscribers.delete(fn);
+				if (subscribers.size === 0) {
+					unsubscribeFromParents();
+				}
 			};
 		}
 	};
@@ -67,8 +73,8 @@ function createMultiDerived<T>(
 export const activeIsStreaming = createMultiDerived(
 	[activeSession, sessionState],
 	() => {
-		const active = get(activeSession);
-		const state = get(sessionState);
+		const active = activeSession.current;
+		const state = sessionState.current;
 
 		// Store-level isStreaming is set immediately when user sends a message
 		if (active.isStreaming) return true;
@@ -89,9 +95,9 @@ export const activeIsStreaming = createMultiDerived(
 export const workspaceIsStreaming = createMultiDerived(
 	[activeSession, sessionState, streamingSessions],
 	() => {
-		const active = get(activeSession);
-		const state = get(sessionState);
-		const streaming = get(streamingSessions);
+		const active = activeSession.current;
+		const state = sessionState.current;
+		const streaming = streamingSessions.current;
 
 		// Active session is streaming
 		if (active.isStreaming) return true;
@@ -120,9 +126,9 @@ export const workspaceIsStreaming = createMultiDerived(
 export const gitControlsStreaming = createMultiDerived(
 	[activeSession, sessionState, streamingSessions],
 	() => {
-		const active = get(activeSession);
-		const state = get(sessionState);
-		const streaming = get(streamingSessions);
+		const active = activeSession.current;
+		const state = sessionState.current;
+		const streaming = streamingSessions.current;
 
 		// Active session is streaming (always relevant)
 		if (active.isStreaming) return true;
@@ -152,7 +158,7 @@ export const gitControlsStreaming = createMultiDerived(
 export const activeWsConnected = createMultiDerived(
 	[activeSession],
 	() => {
-		const active = get(activeSession);
+		const active = activeSession.current;
 		return active.wsConnected;
 	}
 );

@@ -99,7 +99,14 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 
 		pingTimer = setInterval(() => {
 			if (ws?.readyState === WebSocket.OPEN) {
-				ws.send(JSON.stringify({ type: 'pong' }));
+				try {
+					ws.send(JSON.stringify({ type: 'pong' }));
+				} catch (e) {
+					console.warn('[WsConnection] Failed to send ping:', e);
+					reconnectAttempts = 0;
+					connect();
+					return;
+				}
 
 				let healthTimeout: number;
 				if (config.hasPendingTools()) healthTimeout = TOOL_EXECUTION_TIMEOUT_MS;
@@ -209,8 +216,13 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 
 	function send(data: unknown): boolean {
 		if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-		ws.send(JSON.stringify(data));
-		return true;
+		try {
+			ws.send(JSON.stringify(data));
+			return true;
+		} catch (e) {
+			console.warn('[WsConnection] Failed to send message:', e);
+			return false;
+		}
 	}
 
 	// ── Visibility Change ────────────────────────────────────────────────
