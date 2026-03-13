@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse
 
 from app.core.rate_limiter import rate_limiter, RateLimitResult, RateLimitStatus
 from app.db import database
+from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
@@ -119,9 +120,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         """
         Extract user information from request.
 
+        Reuses auth info already resolved by the auth dependency (stored on
+        request.state) to avoid redundant DB queries.  Falls back to its own
+        resolution when request.state has not been populated yet.
+
         Returns:
             Tuple of (user_id, api_key_id, is_admin)
         """
+        # Reuse auth info if already resolved by the auth dependency
+        if getattr(request.state, "user_info", None) is not None:
+            return request.state.user_info
+
         user_id = None
         api_key_id = None
         is_admin = False
@@ -129,7 +138,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # Check session cookie (admin auth)
         session_token = request.cookies.get("session")
         if session_token:
-            session = database.get_auth_session(session_token)
+            session = await run_sync(database.get_auth_session, session_token)
             if session:
                 is_admin = True
                 user_id = "admin"
@@ -141,15 +150,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             if token.startswith("aih_"):
                 # API key authentication
                 key_hash = hashlib.sha256(token.encode()).hexdigest()
-                api_user = database.get_api_user_by_key_hash(key_hash)
+                api_user = await run_sync(database.get_api_user_by_key_hash, key_hash)
                 if api_user:
                     api_key_id = api_user["id"]
                     user_id = api_user.get("username") or api_user["name"]
             else:
                 # Check if it's a session token
-                api_session = database.get_api_key_session(token)
+                api_session = await run_sync(database.get_api_key_session, token)
                 if api_session:
-                    api_user = database.get_api_user(api_session["api_user_id"])
+                    api_user = await run_sync(database.get_api_user, api_session["api_user_id"])
                     if api_user:
                         api_key_id = api_user["id"]
                         user_id = api_user.get("username") or api_user["name"]
@@ -159,20 +168,23 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             token = request.query_params.get("token")
             if token:
                 # Check admin session
-                session = database.get_auth_session(token)
+                session = await run_sync(database.get_auth_session, token)
                 if session:
                     is_admin = True
                     user_id = "admin"
                 else:
                     # Check API key session
-                    api_session = database.get_api_key_session(token)
+                    api_session = await run_sync(database.get_api_key_session, token)
                     if api_session:
-                        api_user = database.get_api_user(api_session["api_user_id"])
+                        api_user = await run_sync(database.get_api_user, api_session["api_user_id"])
                         if api_user:
                             api_key_id = api_user["id"]
                             user_id = api_user.get("username") or api_user["name"]
 
-        return user_id, api_key_id, is_admin
+        result = (user_id, api_key_id, is_admin)
+        # Cache on request.state so downstream code can reuse
+        request.state.user_info = result
+        return result
 
     def _add_rate_limit_headers(
         self,

@@ -2,6 +2,7 @@
 Advanced search API routes with filters
 """
 
+import asyncio
 import re
 import logging
 from datetime import datetime
@@ -9,6 +10,43 @@ from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Depends, Query, status, Request
 from pydantic import BaseModel
+
+# Regex safety limits
+_MAX_REGEX_LENGTH = 500
+# Patterns that indicate nested quantifiers (catastrophic backtracking risk)
+_NESTED_QUANTIFIER_RE = re.compile(
+    r'(?:\([^)]*[+*][^)]*\)[+*?])'   # (a+)+, (a*)+, (a+)*, (a+)?
+    r'|(?:\([^)]*[+*][^)]*\)\{)'     # (a+){2,}
+    r'|(?:[+*]\??\s*[+*])'           # a++, a*+, a*? followed by quantifier
+)
+
+
+def _validate_regex_pattern(pattern: str) -> re.Pattern:
+    """
+    Validate and compile a regex pattern with safety checks.
+
+    Raises HTTPException (400) if the pattern is invalid or potentially dangerous.
+    Returns the compiled pattern on success.
+    """
+    if len(pattern) > _MAX_REGEX_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Regex pattern too long ({len(pattern)} chars). Maximum is {_MAX_REGEX_LENGTH}."
+        )
+
+    if _NESTED_QUANTIFIER_RE.search(pattern):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Regex pattern rejected: nested quantifiers can cause catastrophic backtracking."
+        )
+
+    try:
+        return re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid regex pattern: {str(e)}"
+        )
 
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
@@ -57,7 +95,7 @@ def _extract_code_blocks(content: str) -> List[str]:
     return matches
 
 
-def _highlight_snippet(text: str, query: str, is_regex: bool = False, context_chars: int = 50) -> str:
+def _highlight_snippet(text: str, query: str, is_regex: bool = False, context_chars: int = 50, compiled_re: re.Pattern = None) -> str:
     """
     Create a snippet around the match with context.
     Returns the snippet with the match highlighted using **bold**.
@@ -67,8 +105,9 @@ def _highlight_snippet(text: str, query: str, is_regex: bool = False, context_ch
 
     try:
         if is_regex:
-            # Find the first match position
-            match = re.search(query, text, re.IGNORECASE)
+            # Use pre-compiled pattern if available, otherwise compile safely
+            pattern = compiled_re or re.compile(query, re.IGNORECASE)
+            match = pattern.search(text)
             if match:
                 start = match.start()
                 end = match.end()
@@ -134,7 +173,8 @@ def _search_in_content(
     content: str,
     query: str,
     is_regex: bool = False,
-    in_code_only: bool = False
+    in_code_only: bool = False,
+    compiled_re: re.Pattern = None,
 ) -> bool:
     """
     Check if query matches in content.
@@ -153,11 +193,12 @@ def _search_in_content(
 
     try:
         if is_regex:
-            return bool(re.search(query, search_text, re.IGNORECASE))
+            pattern = compiled_re or re.compile(query, re.IGNORECASE)
+            return bool(pattern.search(search_text))
         else:
             return query.lower() in search_text.lower()
     except re.error:
-        # Invalid regex, treat as literal
+        # Invalid regex (only reachable when called without pre-compiled pattern)
         return query.lower() in search_text.lower()
 
 
@@ -165,7 +206,8 @@ def _search_session_jsonl(
     session: Dict[str, Any],
     query: str,
     is_regex: bool = False,
-    in_code_only: bool = False
+    in_code_only: bool = False,
+    compiled_re: re.Pattern = None,
 ) -> List[SearchMatch]:
     """
     Search through a session's JSONL file for matches.
@@ -222,13 +264,13 @@ def _search_session_jsonl(
                 continue
 
             # Check for match
-            if _search_in_content(text_content, query, is_regex, in_code_only):
+            if _search_in_content(text_content, query, is_regex, in_code_only, compiled_re):
                 # Determine what text to use for snippet
                 if in_code_only:
                     code_blocks = _extract_code_blocks(text_content)
                     for block in code_blocks:
-                        if _search_in_content(block, query, is_regex, False):
-                            snippet = _highlight_snippet(block, query, is_regex)
+                        if _search_in_content(block, query, is_regex, False, compiled_re):
+                            snippet = _highlight_snippet(block, query, is_regex, compiled_re=compiled_re)
                             matches.append(SearchMatch(
                                 message_index=msg_index,
                                 snippet=snippet,
@@ -237,7 +279,7 @@ def _search_session_jsonl(
                             ))
                             break
                 else:
-                    snippet = _highlight_snippet(text_content, query, is_regex)
+                    snippet = _highlight_snippet(text_content, query, is_regex, compiled_re=compiled_re)
                     matches.append(SearchMatch(
                         message_index=msg_index,
                         snippet=snippet,
@@ -286,15 +328,10 @@ async def advanced_search(
     """
     api_user = get_api_user_from_request(request)
 
-    # Validate regex if provided
+    # Validate and compile regex if provided (also checks for ReDoS patterns)
+    compiled_pattern = None
     if regex:
-        try:
-            re.compile(q)
-        except re.error as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid regex pattern: {str(e)}"
-            )
+        compiled_pattern = _validate_regex_pattern(q)
 
     # Parse dates if provided
     date_filter_start = None
@@ -340,64 +377,71 @@ async def advanced_search(
     # Get profile names for results
     profiles = {p["id"]: p["name"] for p in database.get_all_profiles()}
 
-    results: List[AdvancedSearchResult] = []
-    sessions_searched = 0
+    # Run the CPU-bound / file-scanning search in a thread to avoid blocking
+    # the async event loop.
+    def _do_search() -> List[AdvancedSearchResult]:
+        _results: List[AdvancedSearchResult] = []
+        sessions_searched = 0
 
-    for session in sessions:
-        # Apply date filters
-        if date_filter_start or date_filter_end:
-            session_created = datetime.fromisoformat(session["created_at"].replace("Z", "+00:00"))
-            # Make timezone-naive for comparison
-            if session_created.tzinfo:
-                session_created = session_created.replace(tzinfo=None)
+        for session in sessions:
+            # Apply date filters
+            if date_filter_start or date_filter_end:
+                session_created = datetime.fromisoformat(session["created_at"].replace("Z", "+00:00"))
+                # Make timezone-naive for comparison
+                if session_created.tzinfo:
+                    session_created = session_created.replace(tzinfo=None)
 
-            if date_filter_start and session_created < date_filter_start:
-                continue
-            if date_filter_end and session_created > date_filter_end:
-                continue
+                if date_filter_start and session_created < date_filter_start:
+                    continue
+                if date_filter_end and session_created > date_filter_end:
+                    continue
 
-        # Search session title first
-        title = session.get("title") or ""
-        title_match = False
-        if title and _search_in_content(title, q, regex, False):
-            title_match = True
+            # Search session title first
+            title = session.get("title") or ""
+            title_match = False
+            if title and _search_in_content(title, q, regex, False, compiled_pattern):
+                title_match = True
 
-        # Search session JSONL content
-        matches = _search_session_jsonl(session, q, regex, in_code_only)
+            # Search session JSONL content
+            matches = _search_session_jsonl(session, q, regex, in_code_only, compiled_pattern)
 
-        # Include session if title matched or content matched
-        if title_match or matches:
-            # If title matched but no content matches, add a title match indicator
-            if title_match and not matches:
-                matches.append(SearchMatch(
-                    message_index=-1,
-                    snippet=_highlight_snippet(title, q, regex),
-                    role="title",
-                    timestamp=session.get("created_at")
+            # Include session if title matched or content matched
+            if title_match or matches:
+                # If title matched but no content matches, add a title match indicator
+                if title_match and not matches:
+                    matches.append(SearchMatch(
+                        message_index=-1,
+                        snippet=_highlight_snippet(title, q, regex, compiled_re=compiled_pattern),
+                        role="title",
+                        timestamp=session.get("created_at")
+                    ))
+
+                _results.append(AdvancedSearchResult(
+                    session_id=session["id"],
+                    session_title=session.get("title"),
+                    created_at=session["created_at"],
+                    updated_at=session["updated_at"],
+                    profile_id=session.get("profile_id"),
+                    profile_name=profiles.get(session.get("profile_id")),
+                    project_id=session.get("project_id"),
+                    matches=matches,
+                    match_count=len(matches)
                 ))
 
-            results.append(AdvancedSearchResult(
-                session_id=session["id"],
-                session_title=session.get("title"),
-                created_at=session["created_at"],
-                updated_at=session["updated_at"],
-                profile_id=session.get("profile_id"),
-                profile_name=profiles.get(session.get("profile_id")),
-                project_id=session.get("project_id"),
-                matches=matches,
-                match_count=len(matches)
-            ))
+            sessions_searched += 1
 
-        sessions_searched += 1
+            # Apply offset and limit
+            if len(_results) >= offset + limit:
+                break
 
-        # Apply offset and limit
-        if len(results) >= offset + limit:
-            break
+        return _results
+
+    results = await asyncio.to_thread(_do_search)
 
     # Apply pagination
     paginated_results = results[offset:offset + limit]
 
-    logger.debug(f"Advanced search '{q}': {len(paginated_results)} results from {sessions_searched} sessions searched")
+    logger.debug(f"Advanced search '{q}': {len(paginated_results)} results")
 
     return paginated_results
 

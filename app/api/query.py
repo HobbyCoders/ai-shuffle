@@ -121,7 +121,7 @@ async def stream_one_shot_query(
 
         except Exception as e:
             logger.error(f"Stream error: {e}")
-            error_data = json.dumps({"type": "error", "message": str(e)})
+            error_data = json.dumps({"type": "error", "message": "An internal error occurred"})
             yield f"event: error\ndata: {error_data}\n\n"
 
     return StreamingResponse(
@@ -232,7 +232,7 @@ async def stream_conversation(
 
         except Exception as e:
             logger.error(f"Stream error: {e}")
-            error_data = json.dumps({"type": "error", "message": str(e)})
+            error_data = json.dumps({"type": "error", "message": "An internal error occurred"})
             yield f"event: error\ndata: {error_data}\n\n"
 
     return StreamingResponse(

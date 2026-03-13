@@ -13,6 +13,7 @@ Additional endpoints:
 import logging
 import asyncio
 import uuid
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Awaitable, Callable
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
@@ -161,6 +162,8 @@ async def authenticate_websocket(websocket: WebSocket, token: Optional[str]) -> 
 @router.websocket("/ws/chat")
 async def chat_websocket(
     websocket: WebSocket,
+    # SECURITY: Token is passed via query param (unavoidable for WebSocket auth).
+    # Never log the raw token value — only log `token is not None` for diagnostics.
     token: Optional[str] = Query(None, description="Authentication token (optional if cookie auth)"),
     device_id: Optional[str] = Query(None, description="Unique device identifier for multi-device sync")
 ):
@@ -372,7 +375,7 @@ async def chat_websocket(
                     # Timeout expired, send heartbeat with pending counts
                     heartbeat_data: dict = {
                         "type": "heartbeat",
-                        "timestamp": asyncio.get_event_loop().time(),
+                        "timestamp": asyncio.get_running_loop().time(),
                     }
                     # Include pending permission/question counts so the frontend
                     # can recover from missed WebSocket messages
@@ -488,7 +491,7 @@ async def chat_websocket(
 
         except Exception as e:
             ctx.error(logger, f"Query error: {e}", exc_info=True)
-            await send_json({"type": "error", "message": str(e)})
+            await send_json({"type": "error", "message": "An internal error occurred"})
 
             # End live session store on error
             # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
@@ -506,7 +509,7 @@ async def chat_websocket(
                 await sync_engine.broadcast_stream_end(
                     session_id=session_id,
                     message_id=message_id,
-                    metadata={"error": str(e)},
+                    metadata={"error": "An internal error occurred"},
                     interrupted=True,
                     source_device_id=None
                 )
@@ -588,8 +591,9 @@ async def chat_websocket(
             # Clean up task reference only if it's still our task (avoid TOCTOU race
             # where a different device started a new query for the same session)
             current_task = asyncio.current_task()
-            if _active_chat_sessions.get(session_id) is current_task:
-                del _active_chat_sessions[session_id]
+            async with _active_sessions_lock:
+                if _active_chat_sessions.get(session_id) is current_task:
+                    del _active_chat_sessions[session_id]
 
             # If no devices are connected after query finished, schedule cleanup
             # (don't destroy immediately — user may reopen within 30s)
@@ -713,12 +717,13 @@ async def chat_websocket(
                         )
 
                         # Cancel any existing query for this session
-                        if session_id in _active_chat_sessions:
-                            _active_chat_sessions[session_id].cancel()
-                            try:
-                                await _active_chat_sessions[session_id]
-                            except asyncio.CancelledError:
-                                pass
+                        async with _active_sessions_lock:
+                            if session_id in _active_chat_sessions:
+                                _active_chat_sessions[session_id].cancel()
+                                try:
+                                    await _active_chat_sessions[session_id]
+                                except asyncio.CancelledError:
+                                    pass
 
                         # Start new query task
                         # Note: broadcast_stream_start is called inside run_query when actual
@@ -726,7 +731,8 @@ async def chat_websocket(
                         query_task = asyncio.create_task(
                             run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id)
                         )
-                        _active_chat_sessions[session_id] = query_task
+                        async with _active_sessions_lock:
+                            _active_chat_sessions[session_id] = query_task
 
                     elif msg_type == "stop":
                         # Stop current query - use interrupt_session for proper SDK-level cancellation
@@ -741,18 +747,18 @@ async def chat_websocket(
                             logger.debug(f"Interrupt session {session_id}: {interrupted}")
 
                             # Safety timeout: force-cancel if SDK doesn't stop within 10s
-                            if session_id in _active_chat_sessions:
-                                task = _active_chat_sessions[session_id]
-                                if not task.done():
-                                    async def _safety_cancel(t, sid, timeout=10.0):
-                                        try:
-                                            await asyncio.sleep(timeout)
-                                            if not t.done():
-                                                logger.warning(f"SDK interrupt safety timeout for {sid}, force cancelling")
-                                                t.cancel()
-                                        except asyncio.CancelledError:
-                                            pass
-                                    asyncio.create_task(_safety_cancel(task, session_id))
+                            async with _active_sessions_lock:
+                                task = _active_chat_sessions.get(session_id)
+                            if task and not task.done():
+                                async def _safety_cancel(t, sid, timeout=10.0):
+                                    try:
+                                        await asyncio.sleep(timeout)
+                                        if not t.done():
+                                            logger.warning(f"SDK interrupt safety timeout for {sid}, force cancelling")
+                                            t.cancel()
+                                    except asyncio.CancelledError:
+                                        pass
+                                asyncio.create_task(_safety_cancel(task, session_id))
 
                     elif msg_type == "interrupt_and_query":
                         # Interrupt current streaming and immediately send a new query
@@ -783,14 +789,14 @@ async def chat_websocket(
                         # the subprocess to flush JSONL writes before the new query reads it.
                         # Without sufficient time, the new subprocess reads incomplete JSONL
                         # and loses conversation context.
-                        if session_id in _active_chat_sessions:
-                            task = _active_chat_sessions[session_id]
-                            if not task.done():
-                                task.cancel()
-                                try:
-                                    await asyncio.wait_for(task, timeout=8.0)
-                                except (asyncio.CancelledError, asyncio.TimeoutError):
-                                    pass
+                        async with _active_sessions_lock:
+                            task = _active_chat_sessions.get(session_id)
+                        if task and not task.done():
+                            task.cancel()
+                            try:
+                                await asyncio.wait_for(task, timeout=8.0)
+                            except (asyncio.CancelledError, asyncio.TimeoutError):
+                                pass
 
                         # Step 3: Store user message with profile_id for per-query tracking
                         database.add_session_message(
@@ -815,7 +821,8 @@ async def chat_websocket(
                         query_task = asyncio.create_task(
                             run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id)
                         )
-                        _active_chat_sessions[session_id] = query_task
+                        async with _active_sessions_lock:
+                            _active_chat_sessions[session_id] = query_task
                         logger.debug(f"Started new query after interrupt for session {session_id}")
 
                     elif msg_type == "load_session":
@@ -959,7 +966,8 @@ async def chat_websocket(
                                 # from the SDK). This ensures late-joining devices see the session
                                 # as streaming even during the SDK initialization delay.
                                 if not is_streaming:
-                                    pending_task = _active_chat_sessions.get(session_id)
+                                    async with _active_sessions_lock:
+                                        pending_task = _active_chat_sessions.get(session_id)
                                     if pending_task and not pending_task.done():
                                         is_streaming = True
                                         logger.debug(f"Session {session_id} has pending query task, marking as streaming")
@@ -968,7 +976,8 @@ async def chat_websocket(
                                 streaming_usage = None
                                 active_block_type = None
                                 if is_streaming:
-                                    active_task = _active_chat_sessions.get(session_id)
+                                    async with _active_sessions_lock:
+                                        active_task = _active_chat_sessions.get(session_id)
                                     if active_task is None or active_task.done():
                                         # Stale streaming state - clean it up silently
                                         # Don't broadcast interrupted=True as the stream completed normally,
@@ -1219,7 +1228,8 @@ async def chat_websocket(
                 # Check if this was the last device for this session
                 # If so, and no active query is running, cleanup the session resources
                 remaining_devices = sync_engine.get_device_count(current_session_id)
-                active_task = _active_chat_sessions.get(current_session_id)
+                async with _active_sessions_lock:
+                    active_task = _active_chat_sessions.get(current_session_id)
                 is_task_done = active_task is None or active_task.done()
 
                 if remaining_devices == 0 and is_task_done:
@@ -1232,10 +1242,11 @@ async def chat_websocket(
                         logger.debug(f"Cleaned up stuck streaming session {current_session_id}")
 
                     # Remove from active chat sessions tracking
-                    _active_chat_sessions.pop(current_session_id, None)
+                    async with _active_sessions_lock:
+                        _active_chat_sessions.pop(current_session_id, None)
 
                     # Clear streaming state in sync engine (no need to broadcast - no devices left)
-                    sync_engine.clear_streaming_state(current_session_id)
+                    await sync_engine.clear_streaming_state(current_session_id)
 
                     # Cleanup browser session if one exists
                     try:
@@ -1301,6 +1312,9 @@ async def session_sync_websocket(
         - pong: Response to ping
         - subscribe: Start watching a session (automatic on connect)
     """
+    # Accept connection first (must accept before close per WebSocket protocol)
+    await websocket.accept()
+
     # Authenticate
     auth_ok, _api_user = await authenticate_websocket(websocket, token)
     if not auth_ok:
@@ -1312,9 +1326,6 @@ async def session_sync_websocket(
     if not session:
         await websocket.close(code=4004, reason="Session not found")
         return
-
-    # Accept connection
-    await websocket.accept()
     logger.debug(f"WebSocket connected: device={device_id}, session={session_id}")
 
     # Register device with sync engine
@@ -1354,7 +1365,7 @@ async def session_sync_websocket(
 
                     if msg_type == "pong":
                         # Client responding to ping - connection is alive
-                        connection.last_activity = connection.connected_at.__class__.utcnow()
+                        connection.last_activity = datetime.now(timezone.utc)
 
                     elif msg_type == "request_state":
                         # Client requesting current state
@@ -1393,7 +1404,8 @@ async def session_sync_websocket(
 
         # Check if this was the last device and cleanup if needed
         remaining_devices = sync_engine.get_device_count(session_id)
-        active_task = _active_chat_sessions.get(session_id)
+        async with _active_sessions_lock:
+            active_task = _active_chat_sessions.get(session_id)
         is_task_done = active_task is None or active_task.done()
 
         if remaining_devices == 0 and is_task_done:
@@ -1402,7 +1414,8 @@ async def session_sync_websocket(
             if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
                 await live_session_store.cleanup_session(session_id)
 
-            _active_chat_sessions.pop(session_id, None)
+            async with _active_sessions_lock:
+                _active_chat_sessions.pop(session_id, None)
             if sync_engine.is_session_streaming(session_id):
                 await sync_engine.broadcast_stream_end(
                     session_id=session_id,
@@ -1595,11 +1608,15 @@ async def cli_websocket(
 
     cli_bridge: Optional[CLIBridge] = None
     output_buffer = ""  # For parsing rewind output
+    MAX_OUTPUT_BUFFER_SIZE = 1024 * 1024  # 1MB max buffer size
 
     async def on_output(data: str):
         """Handle CLI output"""
         nonlocal output_buffer
         output_buffer += data
+        # Enforce buffer size limit: keep the most recent data
+        if len(output_buffer) > MAX_OUTPUT_BUFFER_SIZE:
+            output_buffer = output_buffer[-MAX_OUTPUT_BUFFER_SIZE:]
 
         if websocket.client_state == WebSocketState.CONNECTED:
             await websocket.send_json({

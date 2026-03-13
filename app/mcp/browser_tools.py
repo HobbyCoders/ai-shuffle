@@ -16,6 +16,7 @@ visual context is needed.
 Each tool uses Playwright for headless Chromium browser automation.
 """
 
+import contextvars
 import json
 import logging
 import re
@@ -25,21 +26,24 @@ from app.mcp.browser_session import browser_session_manager, BrowserSession
 
 logger = logging.getLogger(__name__)
 
-# Session ID is injected by the query engine when calling tools
-_current_session_id: Optional[str] = None
+# Session ID is injected by the query engine when calling tools.
+# Uses ContextVar so concurrent sessions each get their own value.
+_current_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    '_current_session_id', default=None
+)
 
 
 def set_session_id(session_id: str):
     """Set the current session ID for browser tool calls."""
-    global _current_session_id
-    _current_session_id = session_id
+    _current_session_id.set(session_id)
 
 
 def get_session_id() -> str:
     """Get current session ID, raising if not set."""
-    if not _current_session_id:
+    sid = _current_session_id.get()
+    if not sid:
         raise ValueError("No browser session ID set. Browser tools require an active chat session.")
-    return _current_session_id
+    return sid
 
 
 # ============================================================================
@@ -100,6 +104,25 @@ def _truncate_text(text: str, max_chars: int = 4000) -> str:
             truncated = truncated[:last_period + 1]
 
     return truncated + f"\n\n[... truncated, {len(text) - len(truncated)} chars remaining]"
+
+
+def _escape_css_string(value: str) -> str:
+    """Escape a string for safe use inside a CSS attribute selector value.
+
+    Escapes backslashes, quotes, and other characters that are significant
+    inside CSS ``[attr="value"]`` selectors so that user-supplied input
+    cannot break out of the quoted context.
+    """
+    # Backslash must be escaped first to avoid double-escaping
+    value = value.replace("\\", "\\\\")
+    value = value.replace('"', '\\"')
+    value = value.replace("'", "\\'")
+    value = value.replace("\n", "\\n")
+    value = value.replace("\r", "\\r")
+    value = value.replace("\t", "\\t")
+    # Null bytes
+    value = value.replace("\0", "\\0 ")
+    return value
 
 
 def _clean_text(text: str) -> str:
@@ -385,43 +408,63 @@ async def _get_interactive_elements(page) -> List[Dict[str, Any]]:
     locators = page.locator(selectors)
     count = await locators.count()
 
-    for i in range(min(count, 50)):  # Cap at 50 elements
+    # Batch-retrieve all element attributes in a single page.evaluate() call
+    # to avoid hundreds of cross-process IPC round-trips.
+    cap = min(count, 50)
+    try:
+        all_attrs = await page.evaluate("""
+            (selector) => {
+                const nodes = document.querySelectorAll(selector);
+                const results = [];
+                const limit = Math.min(nodes.length, 50);
+                for (let i = 0; i < limit; i++) {
+                    const el = nodes[i];
+                    // Quick visibility check (not perfect but avoids IPC)
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width === 0 && rect.height === 0) continue;
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden') continue;
+
+                    const tag = el.tagName.toLowerCase();
+                    const noText = ['input', 'select', 'textarea'];
+                    const textContent = noText.includes(tag) ? '' : (el.innerText || '').trim().slice(0, 100);
+                    const ariaLabel = el.getAttribute('aria-label') || '';
+                    const placeholder = el.placeholder || '';
+                    const elName = el.name || '';
+
+                    results.push({
+                        tag: tag,
+                        type: el.type || '',
+                        textContent: textContent,
+                        placeholder: placeholder,
+                        href: el.href || '',
+                        role: el.getAttribute('role') || '',
+                        ariaLabel: ariaLabel,
+                        name: elName,
+                        value: el.value || '',
+                        optionCount: tag === 'select' ? el.options.length : 0,
+                        label: ariaLabel || textContent || placeholder || elName || '',
+                    });
+                }
+                return results;
+            }
+        """, selectors)
+    except Exception:
+        all_attrs = []
+
+    for i, attrs in enumerate(all_attrs):
         loc = locators.nth(i)
-        try:
-            if not await loc.is_visible():
-                continue
-
-            tag = await loc.evaluate("el => el.tagName.toLowerCase()")
-            el_type = await loc.evaluate("el => el.type || ''")
-            text_content = (await loc.inner_text()).strip()[:100] if tag not in ("input", "select", "textarea") else ""
-            placeholder = await loc.evaluate("el => el.placeholder || ''")
-            href = await loc.evaluate("el => el.href || ''")
-            role = await loc.evaluate("el => el.getAttribute('role') || ''")
-            aria_label = await loc.evaluate("el => el.getAttribute('aria-label') || ''")
-            name = await loc.evaluate("el => el.name || ''")
-            value = await loc.evaluate("el => el.value || ''")
-
-            # Build display label
-            label = aria_label or text_content or placeholder or name or ""
-
-            # Count options for select
-            option_count = 0
-            if tag == "select":
-                option_count = await loc.evaluate("el => el.options.length")
-
-            elements.append({
-                "locator": loc,
-                "tag": tag,
-                "type": el_type,
-                "label": label,
-                "href": href,
-                "role": role,
-                "placeholder": placeholder,
-                "value": value,
-                "option_count": option_count,
-            })
-        except Exception:
-            continue
+        elements.append({
+            "locator": loc,
+            "tag": attrs["tag"],
+            "type": attrs["type"],
+            "label": attrs["label"],
+            "href": attrs["href"],
+            "role": attrs["role"],
+            "placeholder": attrs["placeholder"],
+            "value": attrs["value"],
+            "option_count": attrs["optionCount"],
+        })
 
     return elements
 
@@ -568,18 +611,20 @@ async def browser_fill(label: str, value: str) -> Dict[str, Any]:
             except Exception:
                 pass
 
-        # Strategy 3: Use aria-label
+        # Strategy 3: Use aria-label (escape user input for CSS selector safety)
         if not filled:
             try:
-                await session.page.locator(f'[aria-label="{label}"]').fill(value, timeout=3000)
+                escaped_label = _escape_css_string(label)
+                await session.page.locator(f'[aria-label="{escaped_label}"]').fill(value, timeout=3000)
                 filled = True
             except Exception:
                 pass
 
-        # Strategy 4: Use name attribute
+        # Strategy 4: Use name attribute (escape user input for CSS selector safety)
         if not filled:
             try:
-                await session.page.locator(f'[name="{label}"]').fill(value, timeout=3000)
+                escaped_label = _escape_css_string(label)
+                await session.page.locator(f'[name="{escaped_label}"]').fill(value, timeout=3000)
                 filled = True
             except Exception:
                 pass

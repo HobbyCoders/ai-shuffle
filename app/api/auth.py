@@ -2,6 +2,7 @@
 Authentication API routes
 """
 
+import ipaddress
 import os
 import hashlib
 import subprocess
@@ -9,7 +10,7 @@ import logging
 import uuid as _uuid
 from pathlib import Path
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import bcrypt
 from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
@@ -35,20 +36,45 @@ _auth_module.set_server_instance_id(_SERVER_INSTANCE_ID)
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
 
+# Private/loopback networks whose direct connections we trust as reverse proxies
+_TRUSTED_PROXY_NETWORKS = (
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
+
+
+def _is_trusted_proxy(host: str) -> bool:
+    """Check if the direct client IP belongs to a trusted proxy (private/loopback)."""
+    try:
+        addr = ipaddress.ip_address(host)
+        return any(addr in net for net in _TRUSTED_PROXY_NETWORKS)
+    except (ValueError, TypeError):
+        return False
+
+
 def get_client_ip(request: Request) -> str:
-    """Get the real client IP address, respecting reverse proxy headers"""
-    # Check trusted proxy headers in order
-    trusted_headers = settings.trusted_proxy_headers.split(",")
-    for header in trusted_headers:
-        header = header.strip()
-        value = request.headers.get(header)
-        if value:
-            # X-Forwarded-For can contain multiple IPs, take the first (original client)
-            if "," in value:
-                return value.split(",")[0].strip()
-            return value.strip()
-    # Fall back to direct client IP
-    return request.client.host if request.client else "unknown"
+    """Get the real client IP address, respecting reverse proxy headers
+    only when the direct connection comes from a trusted proxy."""
+    direct_ip = request.client.host if request.client else "unknown"
+
+    # Only trust proxy headers when the immediate connection is from a
+    # private/loopback address (i.e., a known reverse proxy).
+    if direct_ip != "unknown" and _is_trusted_proxy(direct_ip):
+        trusted_headers = settings.trusted_proxy_headers.split(",")
+        for header in trusted_headers:
+            header = header.strip()
+            value = request.headers.get(header)
+            if value:
+                # X-Forwarded-For can contain multiple IPs, take the first (original client)
+                if "," in value:
+                    return value.split(",")[0].strip()
+                return value.strip()
+
+    return direct_ip
 
 
 def check_rate_limit(request: Request, username: Optional[str] = None) -> None:
@@ -59,7 +85,7 @@ def check_rate_limit(request: Request, username: Optional[str] = None) -> None:
     ip_lockout = db.is_ip_locked(client_ip)
     if ip_lockout:
         locked_until = datetime.fromisoformat(ip_lockout["locked_until"])
-        remaining_minutes = int((locked_until - datetime.utcnow()).total_seconds() / 60)
+        remaining_minutes = int((locked_until - datetime.now(timezone.utc)).total_seconds() / 60)
         logger.warning(f"Blocked login attempt from locked IP: {client_ip}")
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -71,7 +97,7 @@ def check_rate_limit(request: Request, username: Optional[str] = None) -> None:
         username_lockout = db.is_username_locked(username)
         if username_lockout:
             locked_until = datetime.fromisoformat(username_lockout["locked_until"])
-            remaining_minutes = int((locked_until - datetime.utcnow()).total_seconds() / 60)
+            remaining_minutes = int((locked_until - datetime.now(timezone.utc)).total_seconds() / 60)
             logger.warning(f"Blocked login attempt for locked user: {username}")
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -161,6 +187,9 @@ def require_auth(request: Request) -> str:
         if auth_service.validate_session(token):
             request.state.is_admin = True
             request.state.api_user = None
+            request.state.auth_token = token
+            # Store user_info tuple for rate_limit / csrf middleware reuse
+            request.state.user_info = ("admin", None, True)
             return token
 
         # Diagnostic logging - session token exists but validation failed
@@ -182,6 +211,10 @@ def require_auth(request: Request) -> str:
             # Store API user info in request state for later use
             request.state.is_admin = False
             request.state.api_user = api_user
+            request.state.auth_token = f"api_key:{api_user['id']}"
+            user_id = api_user.get("username") or api_user["name"]
+            # Store user_info tuple for rate_limit / csrf middleware reuse
+            request.state.user_info = (user_id, api_user["id"], False)
             return f"api_key:{api_user['id']}"
 
     # Log what auth methods were attempted
@@ -360,6 +393,7 @@ async def login(req: Request, login_data: LoginRequest, response: Response):
     logger.info(f"Successful admin login for user '{login_data.username}' from IP {client_ip}")
 
     # Set encryption key in memory (derived from password)
+    encryption_warning = None
     try:
         encryption.set_encryption_key(login_data.password, db)
         # Encrypt any existing plaintext API keys (migration)
@@ -367,8 +401,8 @@ async def login(req: Request, login_data: LoginRequest, response: Response):
         if encrypted_count > 0:
             logger.info(f"Encrypted {encrypted_count} existing plaintext API keys")
     except Exception as e:
-        logger.error(f"Failed to set up encryption: {e}")
-        # Don't fail login, but log the error
+        logger.warning(f"Encryption setup failed during login: {e}")
+        encryption_warning = "Encryption setup failed. API key management may be unavailable."
 
     # Set session cookie
     response.set_cookie(
@@ -380,7 +414,10 @@ async def login(req: Request, login_data: LoginRequest, response: Response):
         max_age=settings.session_expire_days * 24 * 60 * 60
     )
 
-    return {"status": "ok", "message": "Logged in", "is_admin": True}
+    result = {"status": "ok", "message": "Logged in", "is_admin": True}
+    if encryption_warning:
+        result["encryption_warning"] = encryption_warning
+    return result
 
 
 @router.post("/logout")

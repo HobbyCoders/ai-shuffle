@@ -134,7 +134,12 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         if self._wildcard_mode:
             return await call_next(request)
 
-        # 3. Bearer-token auth (API keys) — inherently CSRF-resistant
+        # 3. Bearer-token auth (API keys) — inherently CSRF-resistant.
+        #    Reuse auth info from request.state if already resolved by the
+        #    auth dependency, avoiding a redundant header check.
+        if getattr(request.state, "auth_token", None) and not getattr(request.state, "is_admin", False):
+            # API-key authenticated request — CSRF-safe
+            return await call_next(request)
         auth_header = request.headers.get("authorization", "")
         if auth_header.startswith("Bearer "):
             return await call_next(request)

@@ -16,7 +16,7 @@ from app.core.models import (
     VALID_HOOK_EVENTS,
 )
 from app.db import database
-from app.api.auth import require_auth, get_api_user_from_request
+from app.api.auth import require_admin, get_api_user_from_request
 from app.api.common import check_project_access
 
 router = APIRouter(prefix="/api/v1/hooks", tags=["Hooks"])
@@ -52,7 +52,7 @@ def _validate_hook_data(hook_data: HookCreate | HookUpdate, is_create: bool = Fa
 
 
 @router.get("/events", response_model=List[str])
-async def list_event_types(token: str = Depends(require_auth)):
+async def list_event_types(token: str = Depends(require_admin)):
     """List all valid hook event types"""
     return VALID_HOOK_EVENTS
 
@@ -64,7 +64,7 @@ async def list_event_types(token: str = Depends(require_auth)):
 @router.get("/app", response_model=List[Hook])
 async def get_app_hooks(
     request: Request,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_admin)
 ):
     """Get all app-level hooks (not scoped to any project)"""
     return database.get_app_hooks()
@@ -74,7 +74,7 @@ async def get_app_hooks(
 async def create_app_hook(
     hook_data: HookCreate,
     request: Request,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_admin)
 ):
     """Create a new app-level hook (fires for all sessions)"""
     _validate_hook_data(hook_data, is_create=True)
@@ -105,7 +105,7 @@ async def create_app_hook(
 async def get_project_hooks(
     project_id: str,
     request: Request,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_admin)
 ):
     """Get all hooks for a project (project-scoped + app-level)"""
     check_project_access(request, project_id)
@@ -126,7 +126,7 @@ async def create_project_hook(
     project_id: str,
     hook_data: HookCreate,
     request: Request,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_admin)
 ):
     """Create a new hook for a project"""
     check_project_access(request, project_id)
@@ -167,7 +167,7 @@ async def create_project_hook(
 async def get_hook(
     hook_id: str,
     request: Request,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_admin)
 ):
     """Get a hook by ID"""
     hook = database.get_hook(hook_id)
@@ -188,7 +188,7 @@ async def update_hook(
     hook_id: str,
     hook_data: HookUpdate,
     request: Request,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_admin)
 ):
     """Update a hook"""
     existing = database.get_hook(hook_id)
@@ -222,7 +222,7 @@ async def update_hook(
 async def delete_hook(
     hook_id: str,
     request: Request,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_admin)
 ):
     """Delete a hook"""
     existing = database.get_hook(hook_id)
@@ -246,7 +246,7 @@ async def delete_hook(
 async def test_hook(
     hook_id: str,
     request: Request,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_admin)
 ):
     """Test a hook with sample event data"""
     hook = database.get_hook(hook_id)
@@ -273,7 +273,7 @@ async def test_hook(
 @router.get("/plugins/all", response_model=List[PluginHookInfo])
 async def get_plugin_hooks(
     request: Request,
-    token: str = Depends(require_auth)
+    token: str = Depends(require_admin)
 ):
     """Get all hooks contributed by installed plugins (read-only)"""
     # Import plugin service to get hook info

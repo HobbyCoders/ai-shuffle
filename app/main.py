@@ -209,6 +209,10 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+    # Close shared HTTP client
+    from app.core.http_client import close_http_client
+    await close_http_client()
+
     # Shutdown automations (before connectors, since automations may use them)
     await automation_manager.shutdown()
 
@@ -249,13 +253,13 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # Request body size limit middleware
 class LimitRequestBodyMiddleware(BaseHTTPMiddleware):
-    """Limit request body size to prevent DoS attacks"""
+    """Limit request body size to prevent DoS attacks, including chunked transfers."""
 
     async def dispatch(self, request: Request, call_next):
-        # Check Content-Length header if present
-        content_length = request.headers.get("content-length")
         max_size = settings.max_request_body_mb * 1024 * 1024
 
+        # Check Content-Length header if present
+        content_length = request.headers.get("content-length")
         if content_length and int(content_length) > max_size:
             from fastapi.responses import JSONResponse
             return JSONResponse(
@@ -263,7 +267,40 @@ class LimitRequestBodyMiddleware(BaseHTTPMiddleware):
                 content={"detail": f"Request body too large. Maximum size is {settings.max_request_body_mb}MB"}
             )
 
-        return await call_next(request)
+        # For chunked transfers (no Content-Length), wrap the body stream
+        # to enforce the limit by tracking bytes read.
+        if not content_length and request.method in ("POST", "PUT", "PATCH"):
+            original_body = request._body if hasattr(request, "_body") else None  # noqa: SLF001
+            if original_body is None:
+                # Wrap the receive callable to track bytes
+                original_receive = request._receive  # noqa: SLF001
+                bytes_read = 0
+
+                async def limited_receive():
+                    nonlocal bytes_read
+                    message = await original_receive()
+                    if message.get("type") == "http.request":
+                        body_chunk = message.get("body", b"")
+                        bytes_read += len(body_chunk)
+                        if bytes_read > max_size:
+                            from fastapi.responses import JSONResponse
+                            raise ValueError(
+                                f"Request body too large. Maximum size is {settings.max_request_body_mb}MB"
+                            )
+                    return message
+
+                request._receive = limited_receive  # noqa: SLF001
+
+        try:
+            return await call_next(request)
+        except ValueError as e:
+            if "Request body too large" in str(e):
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": str(e)}
+                )
+            raise
 
 app.add_middleware(LimitRequestBodyMiddleware)
 

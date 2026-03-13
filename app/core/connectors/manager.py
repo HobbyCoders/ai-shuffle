@@ -585,9 +585,10 @@ class ConnectorManager:
                     except Exception as e:
                         logger.error(f"Failed to encrypt connector field '{key}': {e}")
                 else:
-                    logger.warning(
-                        f"Storing connector config field '{key}' as plaintext — "
-                        "encryption key not loaded"
+                    raise ValueError(
+                        f"Cannot store connector config field '{key}': "
+                        "encryption is not available. Set the ENCRYPTION_KEY "
+                        "environment variable before saving sensitive configuration."
                     )
         return encrypted
 

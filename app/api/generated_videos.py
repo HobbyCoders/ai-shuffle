@@ -10,11 +10,12 @@ allowed workspace paths.
 """
 
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import FileResponse
 
 from app.core.config import settings
 from app.api.common import is_path_safe
+from app.api.auth import require_auth
 
 router = APIRouter(prefix="/api/generated-videos", tags=["generated-videos"])
 
@@ -31,7 +32,7 @@ MEDIA_TYPES = {
 
 
 @router.get("/by-path")
-async def get_video_by_path(path: str = Query(..., description="Full path to the video file")):
+async def get_video_by_path(path: str = Query(..., description="Full path to the video file"), token: str = Depends(require_auth)):
     """
     Serve a generated video by its full path.
 
@@ -79,7 +80,7 @@ async def get_video_by_path(path: str = Query(..., description="Full path to the
 
 
 @router.get("/{filename}")
-async def get_generated_video(filename: str):
+async def get_generated_video(filename: str, token: str = Depends(require_auth)):
     """
     Serve a generated video by filename from the default workspace location.
 
@@ -128,7 +129,7 @@ async def get_generated_video(filename: str):
 
 
 @router.get("/")
-async def list_generated_videos():
+async def list_generated_videos(token: str = Depends(require_auth)):
     """
     List generated videos from the default workspace location.
     For debugging/admin purposes.
@@ -136,7 +137,7 @@ async def list_generated_videos():
     generated_videos_dir = settings.effective_workspace_dir / "generated-videos"
 
     if not generated_videos_dir.exists():
-        return {"videos": [], "directory": str(generated_videos_dir)}
+        return {"videos": []}
 
     videos = []
     for f in generated_videos_dir.iterdir():
@@ -144,7 +145,6 @@ async def list_generated_videos():
             videos.append({
                 "filename": f.name,
                 "url": f"/api/generated-videos/{f.name}",
-                "path": str(f),
                 "size_bytes": f.stat().st_size,
                 "created_at": f.stat().st_ctime
             })
@@ -152,4 +152,4 @@ async def list_generated_videos():
     # Sort by creation time, newest first
     videos.sort(key=lambda x: x["created_at"], reverse=True)
 
-    return {"videos": videos, "directory": str(generated_videos_dir)}
+    return {"videos": videos}

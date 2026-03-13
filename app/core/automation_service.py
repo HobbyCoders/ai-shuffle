@@ -104,6 +104,12 @@ def encrypt_webhook_secret(trigger_config: Dict[str, Any]) -> Dict[str, Any]:
                 config["secret"] = encryption.encrypt_value(secret)
             except Exception as e:
                 logger.error(f"Failed to encrypt webhook secret: {e}")
+        else:
+            raise ValueError(
+                "Cannot store webhook secret: encryption is not available. "
+                "Set the ENCRYPTION_KEY environment variable before saving "
+                "automation secrets."
+            )
     return config
 
 
@@ -320,21 +326,16 @@ def get_automation_stats(automation_id: str) -> Dict:
 
     daily = database.get_automation_daily_stats(automation_id)
 
-    # Get all-time stats from runs
-    runs = database.get_automation_runs(automation_id, limit=10000)
-    successful = sum(1 for r in runs if r.get("status") == "completed")
-    failed = sum(1 for r in runs if r.get("status") == "failed")
-    total_cost = sum(r.get("cost_usd", 0) for r in runs)
-    durations = [r.get("duration_ms", 0) for r in runs if r.get("duration_ms")]
-    avg_duration = sum(durations) / len(durations) if durations else 0
+    # Get all-time stats via SQL aggregates (avoids loading all rows into memory)
+    agg = database.get_automation_aggregate_stats(automation_id)
 
     return {
         "automation_id": automation_id,
-        "total_runs": len(runs),
-        "successful_runs": successful,
-        "failed_runs": failed,
-        "total_cost_usd": total_cost,
-        "avg_duration_ms": avg_duration,
+        "total_runs": agg["total_runs"],
+        "successful_runs": agg["successful_runs"],
+        "failed_runs": agg["failed_runs"],
+        "total_cost_usd": agg["total_cost_usd"],
+        "avg_duration_ms": agg["avg_duration_ms"],
         "today_runs": daily["run_count"],
         "today_cost_usd": daily["total_cost"],
     }

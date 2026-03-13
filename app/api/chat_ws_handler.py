@@ -196,7 +196,7 @@ class ChatWebSocketHandler:
                             logger.debug(f"Cleaned up stuck streaming session {self.current_session_id}")
 
                         # Clear streaming state in sync engine (no need to broadcast - no devices left)
-                        sync_engine.clear_streaming_state(self.current_session_id)
+                        await sync_engine.clear_streaming_state(self.current_session_id)
 
                         # Cleanup browser session if one exists
                         try:
@@ -903,7 +903,7 @@ class ChatWebSocketHandler:
                     # Timeout expired, send heartbeat with pending counts
                     heartbeat_data: dict = {
                         "type": "heartbeat",
-                        "timestamp": asyncio.get_event_loop().time(),
+                        "timestamp": asyncio.get_running_loop().time(),
                     }
                     # Include pending permission/question counts so the frontend
                     # can recover from missed WebSocket messages
@@ -1022,7 +1022,7 @@ class ChatWebSocketHandler:
 
         except Exception as e:
             ctx.error(logger, f"Query error: {e}", exc_info=True)
-            await self.send_json({"type": "error", "message": str(e)})
+            await self.send_json({"type": "error", "message": "An internal error occurred"})
 
             # End live session store on error
             # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
@@ -1040,7 +1040,7 @@ class ChatWebSocketHandler:
                 await sync_engine.broadcast_stream_end(
                     session_id=session_id,
                     message_id=message_id,
-                    metadata={"error": str(e)},
+                    metadata={"error": "An internal error occurred"},
                     interrupted=True,
                     source_device_id=None
                 )

@@ -13,7 +13,7 @@ Tests cover:
 
 import hashlib
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from starlette.responses import Response
@@ -249,9 +249,9 @@ class TestDispatchNonRateLimited:
             minute_remaining=19,
             hour_remaining=199,
             day_remaining=999,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.get_rate_limit_status.return_value = mock_status
         mock_rate_limiter.get_limit_config.return_value = RateLimitConfig()
@@ -280,9 +280,9 @@ class TestDispatchNonRateLimited:
 
         mock_status = RateLimitStatus(
             minute_remaining=19,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.get_rate_limit_status.return_value = mock_status
         mock_rate_limiter.get_limit_config.return_value = RateLimitConfig()
@@ -326,9 +326,9 @@ class TestDispatchRateLimited:
             minute_remaining=15,
             hour_remaining=150,
             day_remaining=900,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.check_rate_limit = AsyncMock(
             return_value=(RateLimitResult.ALLOWED, mock_status)
@@ -369,9 +369,9 @@ class TestDispatchRateLimited:
             day_remaining=900,
             is_limited=True,
             retry_after=60,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.check_rate_limit = AsyncMock(
             return_value=(RateLimitResult.DENIED, mock_status)
@@ -399,9 +399,9 @@ class TestDispatchRateLimited:
 
         mock_status = RateLimitStatus(
             minute_remaining=15,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.check_rate_limit = AsyncMock(
             return_value=(RateLimitResult.ALLOWED, mock_status)
@@ -433,9 +433,9 @@ class TestDispatchRateLimited:
 
         mock_status = RateLimitStatus(
             minute_remaining=15,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.check_rate_limit = AsyncMock(
             return_value=(RateLimitResult.ALLOWED, mock_status)
@@ -467,9 +467,9 @@ class TestDispatchRateLimited:
 
         mock_status = RateLimitStatus(
             minute_remaining=15,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.check_rate_limit = AsyncMock(
             return_value=(RateLimitResult.ALLOWED, mock_status)
@@ -785,7 +785,7 @@ class TestAddRateLimitHeaders:
         """Should add all rate limit headers to response."""
         response = create_mock_response()
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         mock_status = RateLimitStatus(
             minute_remaining=15,
             hour_remaining=150,
@@ -833,7 +833,7 @@ class TestAddRateLimitHeaders:
         """Should add headers with correct config for API key user."""
         response = create_mock_response()
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         mock_status = RateLimitStatus(
             minute_remaining=10,
             hour_remaining=90,
@@ -866,7 +866,7 @@ class TestCreateRateLimitResponse:
 
     def test_create_rate_limit_response_status_code(self, middleware):
         """Should return 429 status code."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         status = RateLimitStatus(
             minute_remaining=0,
             hour_remaining=150,
@@ -883,7 +883,7 @@ class TestCreateRateLimitResponse:
 
     def test_create_rate_limit_response_headers(self, middleware):
         """Should include required headers."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         status = RateLimitStatus(
             minute_remaining=0,
             hour_remaining=150,
@@ -904,7 +904,7 @@ class TestCreateRateLimitResponse:
         """Should include rate limit info in body."""
         import json
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         status = RateLimitStatus(
             minute_remaining=0,
             hour_remaining=150,
@@ -930,7 +930,7 @@ class TestCreateRateLimitResponse:
 
     def test_create_rate_limit_response_retry_after_large(self, middleware):
         """Should handle large retry_after values."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         status = RateLimitStatus(
             minute_remaining=0,
             hour_remaining=0,
@@ -970,9 +970,9 @@ class TestDispatchErrorHandling:
 
         mock_status = RateLimitStatus(
             minute_remaining=15,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.check_rate_limit = AsyncMock(
             return_value=(RateLimitResult.ALLOWED, mock_status)
@@ -1017,9 +1017,9 @@ class TestDispatchWithDuration:
 
         mock_status = RateLimitStatus(
             minute_remaining=15,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.check_rate_limit = AsyncMock(
             return_value=(RateLimitResult.ALLOWED, mock_status)
@@ -1057,9 +1057,9 @@ class TestDispatchWithDuration:
 
         mock_status = RateLimitStatus(
             minute_remaining=15,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.check_rate_limit = AsyncMock(
             return_value=(RateLimitResult.ALLOWED, mock_status)
@@ -1110,9 +1110,9 @@ class TestRateLimitLogging:
             minute_remaining=0,
             is_limited=True,
             retry_after=60,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.check_rate_limit = AsyncMock(
             return_value=(RateLimitResult.DENIED, mock_status)
@@ -1153,9 +1153,9 @@ class TestRateLimitLogging:
             minute_remaining=0,
             is_limited=True,
             retry_after=60,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.check_rate_limit = AsyncMock(
             return_value=(RateLimitResult.DENIED, mock_status)
@@ -1240,9 +1240,9 @@ class TestIntegrationScenarios:
             minute_remaining=0,
             is_limited=True,
             retry_after=60,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.check_rate_limit = AsyncMock(
             return_value=(RateLimitResult.DENIED, mock_status)
@@ -1305,9 +1305,9 @@ class TestIntegrationScenarios:
 
         mock_status = RateLimitStatus(
             minute_remaining=15,
-            minute_reset=datetime.utcnow() + timedelta(minutes=1),
-            hour_reset=datetime.utcnow() + timedelta(hours=1),
-            day_reset=datetime.utcnow() + timedelta(hours=24),
+            minute_reset=datetime.now(timezone.utc) + timedelta(minutes=1),
+            hour_reset=datetime.now(timezone.utc) + timedelta(hours=1),
+            day_reset=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         mock_rate_limiter.check_rate_limit = AsyncMock(
             return_value=(RateLimitResult.ALLOWED, mock_status)

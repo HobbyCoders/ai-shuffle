@@ -311,6 +311,9 @@ async def list_project_files(
     return {"files": files, "path": path, "projectId": project_id}
 
 
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
+
+
 @router.post("/{project_id}/upload")
 async def upload_file(
     request: Request,
@@ -328,6 +331,14 @@ async def upload_file(
     If worktree_id is provided directly (e.g. before a session exists), it is used
     as a fallback to resolve the worktree.
     """
+    # Check Content-Length header for early rejection
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large. Maximum upload size is {MAX_UPLOAD_SIZE // (1024 * 1024)}MB"
+        )
+
     check_project_access(request, project_id)
     project = database.get_project(project_id)
     if not project:
@@ -380,10 +391,26 @@ async def upload_file(
             file_path = target_dir / f"{stem}_{counter}{suffix}"
             counter += 1
 
-    # Save the file
+    # Save the file with size limit enforcement
     try:
-        content = await file.read()
+        # Read in chunks to enforce size limit without trusting Content-Length
+        chunks = []
+        total_size = 0
+        while True:
+            chunk = await file.read(64 * 1024)  # 64KB chunks
+            if not chunk:
+                break
+            total_size += len(chunk)
+            if total_size > MAX_UPLOAD_SIZE:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File too large. Maximum upload size is {MAX_UPLOAD_SIZE // (1024 * 1024)}MB"
+                )
+            chunks.append(chunk)
+        content = b"".join(chunks)
         file_path.write_bytes(content)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Failed to save uploaded file")
         raise HTTPException(

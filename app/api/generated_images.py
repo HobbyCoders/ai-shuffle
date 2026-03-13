@@ -11,11 +11,12 @@ allowed workspace paths.
 """
 
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import FileResponse
 
 from app.core.config import settings
 from app.api.common import is_path_safe
+from app.api.auth import require_auth
 
 router = APIRouter(prefix="/api/generated-images", tags=["generated-images"])
 
@@ -33,7 +34,7 @@ MEDIA_TYPES = {
 
 
 @router.get("/by-path")
-async def get_image_by_path(path: str = Query(..., description="Full path to the image file")):
+async def get_image_by_path(path: str = Query(..., description="Full path to the image file"), token: str = Depends(require_auth)):
     """
     Serve a generated image by its full path.
 
@@ -81,7 +82,7 @@ async def get_image_by_path(path: str = Query(..., description="Full path to the
 
 
 @router.get("/{filename}")
-async def get_generated_image(filename: str):
+async def get_generated_image(filename: str, token: str = Depends(require_auth)):
     """
     Serve a generated image by filename from the default workspace location.
 
@@ -130,7 +131,7 @@ async def get_generated_image(filename: str):
 
 
 @router.get("/")
-async def list_generated_images():
+async def list_generated_images(token: str = Depends(require_auth)):
     """
     List generated images from the default workspace location.
     For debugging/admin purposes.
@@ -138,7 +139,7 @@ async def list_generated_images():
     generated_images_dir = settings.effective_workspace_dir / "generated-images"
 
     if not generated_images_dir.exists():
-        return {"images": [], "directory": str(generated_images_dir)}
+        return {"images": []}
 
     images = []
     for f in generated_images_dir.iterdir():
@@ -146,7 +147,6 @@ async def list_generated_images():
             images.append({
                 "filename": f.name,
                 "url": f"/api/generated-images/{f.name}",
-                "path": str(f),
                 "size_bytes": f.stat().st_size,
                 "created_at": f.stat().st_ctime
             })
@@ -154,4 +154,4 @@ async def list_generated_images():
     # Sort by creation time, newest first
     images.sort(key=lambda x: x["created_at"], reverse=True)
 
-    return {"images": images, "directory": str(generated_images_dir)}
+    return {"images": images}
