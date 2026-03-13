@@ -85,7 +85,7 @@ class IMessageRpcClient:
             "params": params or {},
         }
 
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[req_id] = future
 
         data = json.dumps(payload) + "\n"

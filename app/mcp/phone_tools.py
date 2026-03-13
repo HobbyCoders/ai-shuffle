@@ -129,10 +129,10 @@ async def _wait_for_action_completion(
     Returns:
         ActionResult with success/failure and data
     """
-    start_time = asyncio.get_event_loop().time()
+    start_time = asyncio.get_running_loop().time()
 
     while True:
-        elapsed = asyncio.get_event_loop().time() - start_time
+        elapsed = asyncio.get_running_loop().time() - start_time
         if elapsed >= timeout_seconds:
             return ActionResult(
                 success=False,

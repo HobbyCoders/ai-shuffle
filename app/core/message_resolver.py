@@ -66,7 +66,7 @@ def _normalize_jsonl_message(m: Dict[str, Any]) -> Dict[str, Any]:
     }
     for f in _OPTIONAL_FIELDS:
         value = m.get(f)
-        if value:
+        if value is not None:
             msg[f] = value
     return msg
 

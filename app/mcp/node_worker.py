@@ -57,7 +57,7 @@ class NodeWorker:
         self._stderr_task = asyncio.create_task(self._read_stderr())
 
         # Wait for ready signal (first message from worker)
-        ready_future: asyncio.Future = asyncio.get_event_loop().create_future()
+        ready_future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._ready_future = ready_future
 
         try:
@@ -162,7 +162,7 @@ class NodeWorker:
 
         # Create request with unique ID
         req_id = str(uuid.uuid4())
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[req_id] = future
 
         # Send request

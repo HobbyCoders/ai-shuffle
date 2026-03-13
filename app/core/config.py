@@ -119,7 +119,10 @@ class Settings(BaseSettings):
 
     @property
     def effective_workspace_dir(self) -> Path:
-        """Get the effective workspace directory (always returns a valid Path)"""
+        """Get the effective workspace directory (always returns a valid Path).
+        Checks runtime overrides first, then settings, then defaults."""
+        if "workspace_dir" in _runtime_overrides:
+            return _runtime_overrides["workspace_dir"]
         if self.workspace_dir is not None:
             return self.workspace_dir
         return _get_default_workspace_dir()
@@ -174,6 +177,10 @@ class Settings(BaseSettings):
 # Global settings instance
 settings = Settings()
 
+# Mutable runtime overrides (separate from frozen Pydantic settings)
+# These take priority over settings fields when set.
+_runtime_overrides: dict[str, Path] = {}
+
 # Internal token for MCP subprocess → REST API browser calls.
 # Generated once at module load; the MCP browser server receives it via env var.
 INTERNAL_BROWSER_TOKEN = secrets.token_hex(32)
@@ -204,7 +211,7 @@ def load_workspace_from_database():
         if configured_path:
             path = Path(configured_path)
             if path.exists() or path.parent.exists():
-                object.__setattr__(settings, 'workspace_dir', path)
+                _runtime_overrides["workspace_dir"] = path
                 logger.info(f"Workspace directory set to: {path}")
             else:
                 logger.warning(f"Configured workspace path does not exist: {path}")

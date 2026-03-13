@@ -14,7 +14,7 @@ import hmac
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 import httpx
@@ -28,6 +28,53 @@ logger = logging.getLogger(__name__)
 WEBHOOK_TIMEOUT = 10.0  # seconds
 MAX_RETRIES = 3
 RETRY_DELAYS = [1, 5, 30]  # seconds between retries
+
+# Circuit breaker configuration
+CIRCUIT_BREAKER_THRESHOLD = 5  # consecutive failures before opening circuit
+CIRCUIT_BREAKER_COOLDOWN = 300.0  # seconds (5 minutes) before auto-reset
+
+# Circuit breaker state: {webhook_id: {"failures": int, "opened_at": float | None}}
+_circuit_breaker_state: Dict[str, Dict[str, Any]] = {}
+
+
+def _is_circuit_open(webhook_id: str) -> bool:
+    """Check if the circuit breaker is open (delivery should be skipped) for a webhook."""
+    state = _circuit_breaker_state.get(webhook_id)
+    if not state:
+        return False
+    if state["failures"] < CIRCUIT_BREAKER_THRESHOLD:
+        return False
+    # Circuit is open - check if cooldown has elapsed for auto-reset
+    opened_at = state.get("opened_at")
+    if opened_at and (time.time() - opened_at) >= CIRCUIT_BREAKER_COOLDOWN:
+        # Cooldown elapsed, reset and allow a probe delivery
+        state["failures"] = 0
+        state["opened_at"] = None
+        logger.info(f"Circuit breaker reset for webhook {webhook_id} after cooldown")
+        return False
+    return True
+
+
+def _record_circuit_success(webhook_id: str) -> None:
+    """Record a successful delivery, resetting the circuit breaker."""
+    if webhook_id in _circuit_breaker_state:
+        _circuit_breaker_state[webhook_id] = {"failures": 0, "opened_at": None}
+
+
+def _record_circuit_failure(webhook_id: str) -> None:
+    """Record a failed delivery, potentially opening the circuit breaker."""
+    state = _circuit_breaker_state.get(webhook_id)
+    if not state:
+        state = {"failures": 0, "opened_at": None}
+        _circuit_breaker_state[webhook_id] = state
+    state["failures"] += 1
+    if state["failures"] >= CIRCUIT_BREAKER_THRESHOLD and state["opened_at"] is None:
+        state["opened_at"] = time.time()
+        logger.warning(
+            f"Circuit breaker OPEN for webhook {webhook_id} after "
+            f"{state['failures']} consecutive failures. "
+            f"Will auto-reset after {CIRCUIT_BREAKER_COOLDOWN}s cooldown."
+        )
 
 
 def generate_signature(payload: str, secret: str) -> str:
@@ -65,7 +112,7 @@ async def dispatch_webhook(
     # Build the event payload
     payload = {
         "event": event_type,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "data": data
     }
 
@@ -80,6 +127,12 @@ async def dispatch_webhook(
 
     tasks = []
     for webhook in webhooks:
+        webhook_id = webhook["id"]
+        if _is_circuit_open(webhook_id):
+            logger.debug(
+                f"Skipping webhook {webhook_id}: circuit breaker is open"
+            )
+            continue
         task = asyncio.create_task(
             _deliver_webhook(webhook, payload, retry)
         )
@@ -132,12 +185,14 @@ async def _deliver_webhook(
 
     for attempt in range(max_attempts):
         try:
-            async with httpx.AsyncClient(timeout=WEBHOOK_TIMEOUT) as client:
-                response = await client.post(
-                    url,
-                    content=payload_json,
-                    headers=headers
-                )
+            from app.core.http_client import get_http_client
+            client = get_http_client()
+            response = await client.post(
+                url,
+                content=payload_json,
+                headers=headers,
+                timeout=WEBHOOK_TIMEOUT,
+            )
 
             # Check for success (2xx status codes)
             if 200 <= response.status_code < 300:
@@ -146,6 +201,7 @@ async def _deliver_webhook(
                     f"(status={response.status_code})"
                 )
                 database.update_webhook_triggered(webhook_id, success=True)
+                _record_circuit_success(webhook_id)
                 return True
             else:
                 last_error = f"HTTP {response.status_code}: {response.text[:200]}"
@@ -186,6 +242,7 @@ async def _deliver_webhook(
         f"(last_error={last_error})"
     )
     database.update_webhook_triggered(webhook_id, success=False)
+    _record_circuit_failure(webhook_id)
     return False
 
 
@@ -205,7 +262,7 @@ async def send_test_webhook(webhook: Dict[str, Any]) -> WebhookTestResponse:
     # Build test payload
     payload = {
         "event": "test",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "data": {
             "message": "This is a test webhook from AI Hub",
             "webhook_id": webhook["id"]
@@ -229,12 +286,14 @@ async def send_test_webhook(webhook: Dict[str, Any]) -> WebhookTestResponse:
     start_time = time.time()
 
     try:
-        async with httpx.AsyncClient(timeout=WEBHOOK_TIMEOUT) as client:
-            response = await client.post(
-                url,
-                content=payload_json,
-                headers=headers
-            )
+        from app.core.http_client import get_http_client
+        client = get_http_client()
+        response = await client.post(
+            url,
+            content=payload_json,
+            headers=headers,
+            timeout=WEBHOOK_TIMEOUT,
+        )
 
         elapsed_ms = int((time.time() - start_time) * 1000)
 

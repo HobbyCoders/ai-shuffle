@@ -16,7 +16,7 @@ import uuid
 import asyncio
 from pathlib import Path
 from typing import Optional, Dict, Any, AsyncGenerator
-from datetime import datetime
+from datetime import datetime, timezone
 
 from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AgentDefinition
 from claude_agent_sdk import (
@@ -47,7 +47,21 @@ from app.core.message_resolver import message_resolver, resolve_working_dir
 logger = logging.getLogger(__name__)
 
 # Sentinel for "use default" (distinguishes None from "not provided")
-_UNSET = object()
+class _Sentinel:
+    _instance = None
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    def __repr__(self):
+        return '<UNSET>'
+    def __bool__(self):
+        return False
+
+_UNSET = _Sentinel()
+
+# Pending background tasks awaiting pool entry creation
+_pending_background_tasks: Dict[str, asyncio.Task] = {}
 
 # Use centralized constants from config (can be overridden via env vars)
 MAX_TOOL_OUTPUT_SIZE = settings.max_tool_output_chars
@@ -115,15 +129,16 @@ def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -
     if content_len <= max_size:
         return content_str[:MAX_DISPLAY_OUTPUT_SIZE]
 
-    # Check if it looks like base64 image data
-    # Common patterns: data:image/..., very long alphanumeric strings, iVBOR (PNG), /9j/ (JPEG)
+    # Check if it looks like base64 image data using quick prefix checks
+    # Common patterns: data:image/..., iVBOR (PNG), /9j/ (JPEG), R0lGOD (GIF)
+    prefix = content_str[:100]
     is_likely_base64 = (
-        'data:image/' in content_str[:100] or
-        content_str[:10].startswith('iVBOR') or  # PNG base64 signature
-        content_str[:10].startswith('/9j/') or   # JPEG base64 signature
-        content_str[:10].startswith('R0lGOD') or # GIF base64 signature
-        # Check for very high ratio of alphanumeric chars (typical of base64)
-        (content_len > 10000 and sum(c.isalnum() or c in '+/=' for c in content_str[:1000]) > 950)
+        'data:image/' in prefix or
+        prefix.startswith('iVBOR') or   # PNG base64 signature
+        prefix.startswith('/9j/') or    # JPEG base64 signature
+        prefix.startswith('R0lGOD') or  # GIF base64 signature
+        # For very large content, sample a small window for base64 character ratio
+        (content_len > 10000 and sum(c.isalnum() or c in '+/=' for c in prefix) > 95)
     )
 
     if is_likely_base64:
@@ -222,21 +237,33 @@ def write_agents_to_filesystem(agents_dict: Dict[str, AgentDefinition], cwd: str
     written_files = []
 
     for agent_id, agent_def in agents_dict.items():
-        # Build YAML frontmatter
+        # Build YAML frontmatter with proper escaping
+        def _yaml_quote(s: str) -> str:
+            """Quote a string if it contains YAML special characters."""
+            if not s:
+                return '""'
+            # Characters that require quoting in YAML values
+            needs_quoting = any(c in s for c in ':{}[]|>&*!#%@`\'"?,\n\\')
+            if needs_quoting or s.strip() != s:
+                # Use double quotes with escaped internal double quotes
+                escaped = s.replace('\\', '\\\\').replace('"', '\\"')
+                return f'"{escaped}"'
+            return s
+
         frontmatter_lines = [
             "---",
-            f"name: {agent_id}",
-            f"description: {agent_def.description}",
+            f"name: {_yaml_quote(agent_id)}",
+            f"description: {_yaml_quote(agent_def.description)}",
         ]
 
         # Add tools if specified
         if agent_def.tools:
             tools_str = ", ".join(agent_def.tools)
-            frontmatter_lines.append(f"tools: {tools_str}")
+            frontmatter_lines.append(f"tools: {_yaml_quote(tools_str)}")
 
         # Add model if specified
         if agent_def.model:
-            frontmatter_lines.append(f"model: {agent_def.model}")
+            frontmatter_lines.append(f"model: {_yaml_quote(agent_def.model)}")
 
         frontmatter_lines.append("---")
         frontmatter_lines.append("")  # Empty line after frontmatter
@@ -1015,7 +1042,7 @@ def generate_environment_details(
     """
     is_git = _is_git_repo(working_dir)
     os_version = _get_os_version()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     # Build execution mode lines
     execution_lines = f"\nExecution mode: {execution_mode}"
@@ -1616,6 +1643,22 @@ async def execute_query(
         duration_ms=metadata.get("duration_ms", 0)
     )
 
+    # Notify connected frontends that this session has new messages
+    # (non-streaming queries don't use LiveSessionStore, so we broadcast
+    # a session_updated event so the frontend poller picks up the changes)
+    try:
+        from app.core.sync_engine import sync_engine
+        await sync_engine.broadcast_session_updated(
+            session_id=session_id,
+            updates={
+                "has_new_messages": True,
+                "metadata": metadata,
+            },
+            source_device_id=None,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to broadcast non-streaming session update: {e}")
+
     return {
         "response": full_response,
         "session_id": session_id,
@@ -1770,6 +1813,7 @@ async def stream_query(
         except asyncio.TimeoutError:
             logger.error(f"Timed out connecting to Claude SDK for session {session_id} (60s)")
             yield {"type": "error", "message": "Connection timed out — an MCP server may be unreachable"}
+            return
         except Exception as e:
             import traceback
             logger.error(f"Failed to connect to Claude SDK for session {session_id}: {e}")
@@ -1795,10 +1839,10 @@ async def stream_query(
 
     # Mark as streaming
     state.is_streaming = True
-    state.last_activity = datetime.now()
+    state.last_activity = datetime.now(timezone.utc)
 
     # Generate a message ID for streaming sync
-    assistant_msg_id = f"streaming-{session_id}-{datetime.now().timestamp()}"
+    assistant_msg_id = f"streaming-{session_id}-{datetime.now(timezone.utc).timestamp()}"
 
     # Broadcast stream start to other devices
     await sync_engine.broadcast_stream_start(
@@ -1997,7 +2041,7 @@ async def stream_query(
     finally:
         # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
-        state.last_activity = datetime.now()
+        state.last_activity = datetime.now(timezone.utc)
 
         # Remove dead clients from pool
         if not state.is_connected:
@@ -2244,13 +2288,16 @@ async def _run_background_query(
         )
         pool.put(session_id, state)
 
+    # Store pending background task reference now that pool entry exists
+    _store_background_task(session_id)
+
     # Mark as streaming
     state.is_streaming = True
-    state.last_activity = datetime.now()
+    state.last_activity = datetime.now(timezone.utc)
 
     # Use provided message_id or generate a new one
     # If message_id is provided, stream_start was already broadcast by start_background_query
-    assistant_msg_id = message_id or f"streaming-{session_id}-{datetime.now().timestamp()}"
+    assistant_msg_id = message_id or f"streaming-{session_id}-{datetime.now(timezone.utc).timestamp()}"
 
     # Only broadcast stream_start if we generated a new message_id
     # (i.e., if message_id wasn't provided by start_background_query)
@@ -2447,7 +2494,7 @@ async def _run_background_query(
     finally:
         # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
-        state.last_activity = datetime.now()
+        state.last_activity = datetime.now(timezone.utc)
         state.background_task = None
 
         # Remove dead clients from pool
@@ -2478,73 +2525,88 @@ async def _run_background_query(
 
     # Update session in database
     if sdk_session_id:
-        database.update_session(
-            session_id=session_id,
-            sdk_session_id=sdk_session_id,
-            cost_increment=metadata.get("total_cost_usd", 0),
-            tokens_in_increment=metadata.get("tokens_in", 0),
-            tokens_out_increment=metadata.get("tokens_out", 0),
-            turn_increment=metadata.get("num_turns", 0)
-        )
-        logger.debug(f"[Background] Updated session {session_id}, sdk_session_id={sdk_session_id}")
+        try:
+            database.update_session(
+                session_id=session_id,
+                sdk_session_id=sdk_session_id,
+                cost_increment=metadata.get("total_cost_usd", 0),
+                tokens_in_increment=metadata.get("tokens_in", 0),
+                tokens_out_increment=metadata.get("tokens_out", 0),
+                turn_increment=metadata.get("num_turns", 0)
+            )
+            logger.debug(f"[Background] Updated session {session_id}, sdk_session_id={sdk_session_id}")
+        except Exception as e:
+            logger.error(f"[Background] Failed to update session {session_id}: {e}")
 
     # Store tool messages (tool_use and tool_result)
     for tool_msg in tool_messages:
-        if tool_msg["type"] == "tool_use":
-            database.add_session_message(
-                session_id=session_id,
-                role="tool_use",
-                content=f"Using tool: {tool_msg['name']}",
-                tool_name=tool_msg["name"],
-                tool_input=tool_msg.get("input"),
-                metadata={"tool_id": tool_msg.get("tool_id")},
-                profile_id=profile_id
-            )
-        elif tool_msg["type"] == "tool_result":
-            database.add_session_message(
-                session_id=session_id,
-                role="tool_result",
-                content=tool_msg.get("output", ""),
-                tool_name=tool_msg["name"],
-                metadata={"tool_id": tool_msg.get("tool_id")},
-                profile_id=profile_id
-            )
+        try:
+            if tool_msg["type"] == "tool_use":
+                database.add_session_message(
+                    session_id=session_id,
+                    role="tool_use",
+                    content=f"Using tool: {tool_msg['name']}",
+                    tool_name=tool_msg["name"],
+                    tool_input=tool_msg.get("input"),
+                    metadata={"tool_id": tool_msg.get("tool_id")},
+                    profile_id=profile_id
+                )
+            elif tool_msg["type"] == "tool_result":
+                database.add_session_message(
+                    session_id=session_id,
+                    role="tool_result",
+                    content=tool_msg.get("output", ""),
+                    tool_name=tool_msg["name"],
+                    metadata={"tool_id": tool_msg.get("tool_id")},
+                    profile_id=profile_id
+                )
+        except Exception as e:
+            logger.error(f"[Background] Failed to store tool message for session {session_id}: {e}")
 
     # Store assistant response
     full_response = "\n".join(response_text)
     if full_response or interrupted or tool_messages:
-        assistant_msg = database.add_session_message(
-            session_id=session_id,
-            role="assistant",
-            content=full_response + ("\n[Interrupted]" if interrupted else ""),
-            metadata=metadata,
-            profile_id=profile_id
-        )
+        try:
+            assistant_msg = database.add_session_message(
+                session_id=session_id,
+                role="assistant",
+                content=full_response + ("\n[Interrupted]" if interrupted else ""),
+                metadata=metadata,
+                profile_id=profile_id
+            )
 
-        # Log stream end for polling fallback
-        database.add_sync_log(
-            session_id=session_id,
-            event_type="stream_end",
-            entity_type="message",
-            entity_id=str(assistant_msg["id"]),
-            data={
-                "message": assistant_msg,
-                "metadata": metadata,
-                "interrupted": interrupted
-            }
-        )
+            # Log stream end for polling fallback
+            try:
+                database.add_sync_log(
+                    session_id=session_id,
+                    event_type="stream_end",
+                    entity_type="message",
+                    entity_id=str(assistant_msg["id"]),
+                    data={
+                        "message": assistant_msg,
+                        "metadata": metadata,
+                        "interrupted": interrupted
+                    }
+                )
+            except Exception as e:
+                logger.error(f"[Background] Failed to add sync log for session {session_id}: {e}")
+        except Exception as e:
+            logger.error(f"[Background] Failed to store assistant message for session {session_id}: {e}")
 
     # Log usage
     if metadata and not metadata.get("error"):
-        database.log_usage(
-            session_id=session_id,
-            profile_id=profile["id"],
-            model=metadata.get("model"),
-            tokens_in=metadata.get("tokens_in", 0),
-            tokens_out=metadata.get("tokens_out", 0),
-            cost_usd=metadata.get("total_cost_usd", 0),
-            duration_ms=metadata.get("duration_ms", 0)
-        )
+        try:
+            database.log_usage(
+                session_id=session_id,
+                profile_id=profile["id"],
+                model=metadata.get("model"),
+                tokens_in=metadata.get("tokens_in", 0),
+                tokens_out=metadata.get("tokens_out", 0),
+                cost_usd=metadata.get("total_cost_usd", 0),
+                duration_ms=metadata.get("duration_ms", 0)
+            )
+        except Exception as e:
+            logger.error(f"[Background] Failed to log usage for session {session_id}: {e}")
 
     logger.debug(f"[Background] Query completed for session {session_id}")
 
@@ -2600,7 +2662,7 @@ async def start_background_query(
         logger.debug(f"Created new session {session_id} with title: {title}")
 
     # Generate a message ID for streaming
-    assistant_msg_id = f"streaming-{session_id}-{datetime.now().timestamp()}"
+    assistant_msg_id = f"streaming-{session_id}-{datetime.now(timezone.utc).timestamp()}"
 
     # Broadcast stream_start BEFORE returning so the WebSocket can pick it up
     # This ensures is_streaming=true and buffer exists when client connects
@@ -2623,7 +2685,7 @@ async def start_background_query(
     await live_session_store.start_streaming(session_id, initial_messages)
 
     # Add user message to live store
-    user_msg_id = f"user-{int(datetime.now().timestamp() * 1000)}"
+    user_msg_id = f"user-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     await live_session_store.add_user_message(session_id, prompt, user_msg_id)
 
     # Start background task
@@ -2642,12 +2704,8 @@ async def start_background_query(
     )
 
     # Store task reference for interrupt support
-    # Note: state may not exist yet, it will be created in the background task
-    # We'll store the task reference after the state is created
-    # For now, we use a temporary holder
-    asyncio.get_event_loop().call_soon(
-        lambda: _store_background_task(session_id, task)
-    )
+    # The background task picks this up after pool.put() creates the state entry
+    _pending_background_tasks[session_id] = task
 
     return {
         "session_id": session_id,
@@ -2656,11 +2714,16 @@ async def start_background_query(
     }
 
 
-def _store_background_task(session_id: str, task: asyncio.Task):
-    """Store background task reference after state is created"""
-    state = get_session_pool().peek(session_id)
-    if state:
-        state.background_task = task
+def _store_background_task(session_id: str):
+    """Store pending background task reference on the pool state entry.
+
+    Called from _run_background_query after pool.put() ensures the state exists.
+    """
+    task = _pending_background_tasks.pop(session_id, None)
+    if task:
+        state = get_session_pool().peek(session_id)
+        if state:
+            state.background_task = task
 
 
 async def interrupt_session(session_id: str) -> bool:
@@ -2689,14 +2752,14 @@ async def interrupt_session(session_id: str) -> bool:
 
     try:
         await state.client.interrupt()
-        # Mark as not streaming immediately after interrupt
-        state.is_streaming = False
+        # Don't set is_streaming = False here. The streaming loop will set it
+        # when it actually finishes processing final messages. Setting it
+        # prematurely causes a race where the loop still processes messages
+        # but the session appears idle.
         logger.debug(f"Successfully interrupted session {session_id}")
         return True
     except Exception as e:
         logger.error(f"Failed to interrupt session {session_id}: {e}", exc_info=True)
-        # Even if interrupt failed, mark as not streaming to prevent getting stuck
-        state.is_streaming = False
         return False
 
 
@@ -2783,20 +2846,20 @@ async def stream_to_websocket(
     # Plugin hooks run in the SDK's async loop but need to send messages to our streaming loop
     stderr_queue: asyncio.Queue = asyncio.Queue()
 
+    # Build options once (without callback — callback is set later if needed)
+    options, agents_dict = build_options_from_profile(
+        profile=profile,
+        project=project,
+        overrides=overrides,
+        resume_session_id=resume_id,
+        can_use_tool=None,
+        hooks=None,
+        api_user_id=api_user_id,
+        session_id=session_id
+    )
+
     if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
         # Candidate for reuse — check if critical options changed
-        # Build options without callback just for comparison
-        options, agents_dict = build_options_from_profile(
-            profile=profile,
-            project=project,
-            overrides=overrides,
-            resume_session_id=resume_id,
-            can_use_tool=None,  # Not needed for comparison
-            hooks=None,
-            api_user_id=api_user_id,
-            session_id=session_id
-        )
-
         if not requires_reconnect(existing_state, options):
             # REUSE: Subprocess is alive and options are compatible
             state = existing_state
@@ -2935,17 +2998,8 @@ async def stream_to_websocket(
                 else:
                     return PermissionResultAllow()
 
-        # Build options with callback
-        options, agents_dict = build_options_from_profile(
-            profile=profile,
-            project=project,
-            overrides=overrides,
-            resume_session_id=resume_id,
-            can_use_tool=can_use_tool_callback,
-            hooks=None,  # Will be set after we have working_dir
-            api_user_id=api_user_id,
-            session_id=session_id
-        )
+        # Set the callback on the already-built options (avoid redundant rebuild)
+        options.can_use_tool = can_use_tool_callback
 
         # Build hooks configuration from all sources (plugins, database)
         from app.core.hook_service import build_hooks_config
@@ -3041,7 +3095,7 @@ async def stream_to_websocket(
 
     # Mark as streaming (both reuse and create paths)
     state.is_streaming = True
-    state.last_activity = datetime.now()
+    state.last_activity = datetime.now(timezone.utc)
 
     # Initialize sdk_session_id - use resume_id if resuming, otherwise None until we get it from SDK
     sdk_session_id = resume_id
@@ -3605,7 +3659,7 @@ async def stream_to_websocket(
         # Mark as not streaming and reset interrupt flag
         state.is_streaming = False
         state.interrupt_requested = False
-        state.last_activity = datetime.now()
+        state.last_activity = datetime.now(timezone.utc)
 
         # Clear stale broadcast ref — will be set fresh on next query
         if state.callback_refs:

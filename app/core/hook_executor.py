@@ -9,7 +9,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import httpx
@@ -17,6 +17,9 @@ import httpx
 from app.db import database
 
 logger = logging.getLogger(__name__)
+
+# Track active hook tasks to prevent silent loss on shutdown
+_active_hook_tasks: set = set()
 
 
 async def execute_bash_hook(
@@ -164,8 +167,9 @@ async def execute_webhook_hook(
             headers["X-Hook-Signature"] = f"sha256={signature}"
 
         # Make the request
-        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-            response = await client.post(url, content=payload, headers=headers)
+        from app.core.http_client import get_http_client
+        client = get_http_client()
+        response = await client.post(url, content=payload, headers=headers, timeout=timeout_seconds)
 
         duration_ms = int((time.time() - start_time) * 1000)
 
@@ -371,13 +375,13 @@ async def execute_hooks_for_event(
             tool_matcher = hook.get("tool_matcher")
             if tool_matcher and tool_name:
                 # tool_matcher is a regex pattern like "Bash|Edit"
-                if not re.match(tool_matcher, tool_name):
+                if not re.fullmatch(tool_matcher, tool_name):
                     continue
 
             # Prepare event data with timestamp
             full_event_data = {
                 "event": event,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "data": event_data,
             }
 
@@ -390,11 +394,14 @@ async def execute_hooks_for_event(
                         f"{result.get('error', 'unknown error')}"
                     )
 
+            def _on_hook_done(t):
+                _active_hook_tasks.discard(t)
+                if not t.cancelled() and t.exception():
+                    logger.error(f"Hook task crashed: {t.exception()}")
+
             task = asyncio.create_task(_execute_and_log(hook, full_event_data, session_id))
-            task.add_done_callback(
-                lambda t: logger.error(f"Hook task crashed: {t.exception()}")
-                if not t.cancelled() and t.exception() else None
-            )
+            _active_hook_tasks.add(task)
+            task.add_done_callback(_on_hook_done)
 
     except Exception as e:
         logger.exception(f"Error executing hooks for event {event} in project {project_id}: {e}")
@@ -418,7 +425,7 @@ async def test_hook(hook: Dict[str, Any]) -> Dict[str, Any]:
     # Create test event data
     test_event_data = {
         "event": hook.get("event", "Test"),
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "data": {
             "test": True,
             "hook_id": hook.get("id"),

@@ -186,7 +186,7 @@ async def discover_tools_from_cli(force_refresh: bool = False) -> Dict[str, Any]
             'exit'  # Minimal prompt
         ]
 
-        result = await asyncio.get_event_loop().run_in_executor(
+        result = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: subprocess.run(
                 cmd,

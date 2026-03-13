@@ -231,7 +231,7 @@ class SessionSyncService:
 
         result = {
             "imported_count": len(imported_sessions),
-            "skipped_count": len(unimported) - len(imported_sessions) - len(errors),
+            "skipped_count": max(0, len(unimported) - len(imported_sessions) - len(errors)),
             "errors": errors,
             "sessions": imported_sessions
         }

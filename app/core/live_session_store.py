@@ -160,7 +160,7 @@ class LiveSession:
     messages: List[LiveMessage] = field(default_factory=list)
     is_streaming: bool = True
     last_update_id: int = 0  # Monotonically increasing for efficient polling
-    started_at: datetime = field(default_factory=datetime.utcnow)
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Number of initial (history) messages loaded at stream start.
     # These messages never change during streaming, so delta polls can skip them.
@@ -218,7 +218,16 @@ class LiveSessionStore:
 
     def __init__(self):
         self._sessions: Dict[str, LiveSession] = {}
-        self._lock = asyncio.Lock()
+        self._lock = asyncio.Lock()  # Global lock for session creation/deletion only
+        self._session_locks: Dict[str, asyncio.Lock] = {}  # Per-session locks
+
+    def _get_session_lock(self, session_id: str) -> asyncio.Lock:
+        """Get or create a per-session lock."""
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        return lock
 
     def _increment_update_id(self, session: LiveSession) -> None:
         """Increment the update ID for change detection."""
@@ -274,12 +283,14 @@ class LiveSessionStore:
                 initial_message_count=len(messages),
             )
             self._sessions[session_id] = session
+            # Create a per-session lock for this session
+            self._session_locks[session_id] = asyncio.Lock()
             logger.debug(f"Started live streaming for session {session_id} with {len(messages)} initial messages")
             return session
 
     async def add_user_message(self, session_id: str, content: str, message_id: str) -> None:
         """Add a user message to the session."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"Cannot add user message: session {session_id} not found")
@@ -298,7 +309,7 @@ class LiveSessionStore:
 
     async def start_assistant_message(self, session_id: str, message_id: str) -> None:
         """Start a new assistant text message for streaming."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"Cannot start assistant message: session {session_id} not found")
@@ -317,7 +328,7 @@ class LiveSessionStore:
 
     async def append_text(self, session_id: str, content: str) -> None:
         """Append text to the current streaming text message."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"append_text: session {session_id} not found (data dropped)")
@@ -345,7 +356,7 @@ class LiveSessionStore:
 
     async def append_thinking(self, session_id: str, content: str) -> None:
         """Append thinking content to the current streaming thinking message."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"append_thinking: session {session_id} not found (data dropped)")
@@ -385,7 +396,7 @@ class LiveSessionStore:
 
     async def finalize_thinking(self, session_id: str) -> None:
         """Mark the current thinking message as complete (not streaming)."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"finalize_thinking: session {session_id} not found")
@@ -406,7 +417,7 @@ class LiveSessionStore:
         tool_input: Dict[str, Any]
     ) -> None:
         """Add a tool use message, or update an existing one created early by stream_block_start."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"add_tool_use: session {session_id} not found (tool {name} dropped)")
@@ -460,7 +471,7 @@ class LiveSessionStore:
         the full AssistantMessage arrives. This makes the tool visible to
         polling clients immediately instead of waiting for the complete input.
         """
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"add_early_tool_use: session {session_id} not found")
@@ -499,7 +510,7 @@ class LiveSessionStore:
         input_delta: str
     ) -> None:
         """Update tool input during streaming (for partial JSON input)."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"update_tool_input_streaming: session {session_id} not found")
@@ -521,7 +532,7 @@ class LiveSessionStore:
         is_error: bool = False
     ) -> None:
         """Add tool result to the matching tool_use message."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"add_tool_result: session {session_id} not found (tool {tool_id} result dropped)")
@@ -557,7 +568,7 @@ class LiveSessionStore:
         data: Optional[Dict[str, Any]] = None
     ) -> None:
         """Add a system message (e.g., /context output)."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"add_system_message: session {session_id} not found (system message dropped)")
@@ -600,7 +611,7 @@ class LiveSessionStore:
         Called when we discover that a tool_use created by stream_block_start
         is actually a Task tool (subagent). Returns True if conversion happened.
         """
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 return False
@@ -635,7 +646,7 @@ class LiveSessionStore:
         tool_id: Optional[str] = None
     ) -> None:
         """Start a subagent message group."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"add_subagent_start: session {session_id} not found (agent {agent_id} dropped)")
@@ -673,7 +684,7 @@ class LiveSessionStore:
         content: str
     ) -> None:
         """Append text to a subagent's output."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"append_subagent_text: session {session_id} not found")
@@ -715,7 +726,7 @@ class LiveSessionStore:
         tool_input: Dict[str, Any]
     ) -> None:
         """Add a tool use within a subagent."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"add_subagent_tool_use: session {session_id} not found")
@@ -755,7 +766,7 @@ class LiveSessionStore:
         is_error: bool = False
     ) -> None:
         """Add tool result within a subagent."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"add_subagent_tool_result: session {session_id} not found")
@@ -780,7 +791,7 @@ class LiveSessionStore:
         is_error: bool = False
     ) -> None:
         """Mark a subagent as complete."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"complete_subagent: session {session_id} not found (agent {agent_id})")
@@ -813,7 +824,7 @@ class LiveSessionStore:
 
         Matches the subagent by its parent tool_use_id. Returns True if found.
         """
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 return False
@@ -836,7 +847,7 @@ class LiveSessionStore:
         cache_read_tokens: int = 0
     ) -> None:
         """Update token usage counts."""
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"update_usage: session {session_id} not found")
@@ -875,7 +886,7 @@ class LiveSessionStore:
         Returns:
             The final messages as a list of dicts, or None if session not found
         """
-        async with self._lock:
+        async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
                 logger.warning(f"Cannot end streaming: session {session_id} not found")
@@ -935,6 +946,7 @@ class LiveSessionStore:
                     logger.debug(f"Skipping cleanup of session {session_id}: still streaming (new query took over)")
                     return False
                 del self._sessions[session_id]
+                self._session_locks.pop(session_id, None)
                 logger.debug(f"Cleaned up ended session {session_id} from memory")
                 return True
             return False
@@ -943,10 +955,15 @@ class LiveSessionStore:
         """
         Get current session state.
 
-        This is a non-blocking read for polling. Thread-safe because we're
-        returning a reference to immutable-ish data that gets replaced atomically.
+        Returns a snapshot (shallow copy) of the session data. Callers should
+        not modify the returned object; if mutation is needed, work on the copy
+        and push updates through the store's public API.
         """
-        return self._sessions.get(session_id)
+        import copy
+        session = self._sessions.get(session_id)
+        if session is None:
+            return None
+        return copy.copy(session)
 
     def get_session_dict(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get session state as a dictionary for JSON response."""
@@ -987,9 +1004,12 @@ class LiveSessionStore:
         # Setting initial_message_count=0 tells the frontend to treat this as
         # a full replace (no history merge), avoiding message duplication or loss.
         if session.needs_full_refresh:
+            # Safe without async lock: this is a sync method in a single-threaded
+            # asyncio context with no await points between check and clear.
             session.needs_full_refresh = False
             result = session.to_dict(delta_only=False)
-            result['initial_message_count'] = 0
+            if result is not None:
+                result['initial_message_count'] = 0
             return result
 
         # Delta polls: skip initial history messages (frontend already has them)
@@ -1009,6 +1029,7 @@ class LiveSessionStore:
         """Remove a session from the store (e.g., on error)."""
         async with self._lock:
             self._sessions.pop(session_id, None)
+            self._session_locks.pop(session_id, None)
             logger.debug(f"Cleaned up session {session_id} from live store")
 
 

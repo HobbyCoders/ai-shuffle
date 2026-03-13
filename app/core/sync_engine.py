@@ -8,7 +8,7 @@ watching the same session.
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Any
 
 from fastapi import WebSocket
@@ -22,7 +22,7 @@ class SyncEvent:
     event_type: str  # 'message_added', 'message_chunk', 'stream_start', 'stream_end', 'session_updated'
     session_id: str
     data: Dict[str, Any]
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     source_device_id: Optional[str] = None  # Device that originated the event
 
     def to_dict(self) -> Dict[str, Any]:
@@ -41,14 +41,14 @@ class DeviceConnection:
     device_id: str
     session_id: str
     websocket: WebSocket
-    connected_at: datetime = field(default_factory=datetime.utcnow)
-    last_activity: datetime = field(default_factory=datetime.utcnow)
+    connected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     async def send_event(self, event: SyncEvent) -> bool:
         """Send an event to this device. Returns False if send failed."""
         try:
             await self.websocket.send_json(event.to_dict())
-            self.last_activity = datetime.utcnow()
+            self.last_activity = datetime.now(timezone.utc)
             return True
         except Exception as e:
             logger.warning(f"Failed to send event to device {self.device_id}: {e}")
@@ -61,14 +61,14 @@ class UserDeviceConnection:
     device_id: str
     user_id: str
     websocket: WebSocket
-    connected_at: datetime = field(default_factory=datetime.utcnow)
-    last_activity: datetime = field(default_factory=datetime.utcnow)
+    connected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     async def send_json(self, data: Dict[str, Any]) -> bool:
         """Send JSON data to this device. Returns False if send failed."""
         try:
             await self.websocket.send_json(data)
-            self.last_activity = datetime.utcnow()
+            self.last_activity = datetime.now(timezone.utc)
             return True
         except Exception as e:
             logger.warning(f"Failed to send to device {self.device_id}: {e}")
@@ -188,15 +188,16 @@ class SyncEngine:
         """Check if a session is currently streaming"""
         return session_id in self._streaming_sessions
 
-    def clear_streaming_state(self, session_id: str) -> None:
+    async def clear_streaming_state(self, session_id: str) -> None:
         """Clear streaming state for a session without broadcasting.
 
         Used during cleanup when no devices are connected to receive broadcasts.
         """
-        self._streaming_sessions.discard(session_id)
-        self._session_user_map.pop(session_id, None)
-        self._session_project_map.pop(session_id, None)
-        self._session_worktree_map.pop(session_id, None)
+        async with self._lock:
+            self._streaming_sessions.discard(session_id)
+            self._session_user_map.pop(session_id, None)
+            self._session_project_map.pop(session_id, None)
+            self._session_worktree_map.pop(session_id, None)
 
     async def acquire_session_lock(self, session_id: str, device_id: str) -> tuple[bool, Optional[str]]:
         """Acquire exclusive lock on a session for a device.
@@ -274,12 +275,15 @@ class SyncEngine:
 
         session_id = event.session_id
 
-        if session_id not in self._connections:
-            logger.debug(f"No connections for session {session_id}, skipping broadcast")
-            return
+        # Snapshot connections under lock to avoid TOCTOU race with
+        # register_device/unregister_device which modify _connections under lock.
+        async with self._lock:
+            if session_id not in self._connections:
+                logger.debug(f"No connections for session {session_id}, skipping broadcast")
+                return
 
-        # Get connections to broadcast to
-        connections = list(self._connections[session_id].values())
+            # Get connections to broadcast to
+            connections = list(self._connections[session_id].values())
         logger.debug(f"Broadcasting {event.event_type} to {len(connections)} devices for session {session_id[:8]}...")
 
         # Pre-serialize once so a serialization error doesn't disconnect all devices
@@ -299,7 +303,7 @@ class SyncEngine:
             logger.debug(f"Sending {event.event_type} to device {conn.device_id[:8]}")
             try:
                 await conn.websocket.send_text(event_text)
-                conn.last_activity = datetime.utcnow()
+                conn.last_activity = datetime.now(timezone.utc)
             except Exception as e:
                 logger.warning(f"Failed to send event to device {conn.device_id}: {e}")
                 failed_devices.append(conn.device_id)
@@ -336,18 +340,20 @@ class SyncEngine:
             worktree_id: Optional worktree ID — worktree sessions have independent working
                 directories and should not lock git controls for project-mode sessions
         """
-        # Mark session as streaming (idempotent)
-        self._streaming_sessions.add(session_id)
+        # Mark session as streaming (idempotent) — acquire lock to protect
+        # shared streaming maps from concurrent broadcast_stream_start/end calls.
+        async with self._lock:
+            self._streaming_sessions.add(session_id)
 
-        # Store user_id mapping so broadcast_stream_end can look it up
-        if user_id:
-            self._session_user_map[session_id] = user_id
-        # Store project_id mapping for workspace-level streaming awareness
-        if project_id is not None:
-            self._session_project_map[session_id] = project_id
-        # Store worktree_id mapping for worktree-aware git control locking
-        if worktree_id is not None:
-            self._session_worktree_map[session_id] = worktree_id
+            # Store user_id mapping so broadcast_stream_end can look it up
+            if user_id:
+                self._session_user_map[session_id] = user_id
+            # Store project_id mapping for workspace-level streaming awareness
+            if project_id is not None:
+                self._session_project_map[session_id] = project_id
+            # Store worktree_id mapping for worktree-aware git control locking
+            if worktree_id is not None:
+                self._session_worktree_map[session_id] = worktree_id
 
         data = {"message_id": message_id}
         if usage:
@@ -431,13 +437,15 @@ class SyncEngine:
         source_device_id: Optional[str] = None
     ):
         """Notify all devices that streaming has ended"""
-        self._streaming_sessions.discard(session_id)
-        # Pop user_id mapping (used for user-level broadcast below)
-        stored_user_id = self._session_user_map.pop(session_id, None)
-        # Pop project_id mapping (used for user-level broadcast below)
-        stored_project_id = self._session_project_map.pop(session_id, None)
-        # Pop worktree_id mapping
-        stored_worktree_id = self._session_worktree_map.pop(session_id, None)
+        # Acquire lock to protect shared streaming maps from concurrent access.
+        async with self._lock:
+            self._streaming_sessions.discard(session_id)
+            # Pop user_id mapping (used for user-level broadcast below)
+            stored_user_id = self._session_user_map.pop(session_id, None)
+            # Pop project_id mapping (used for user-level broadcast below)
+            stored_project_id = self._session_project_map.pop(session_id, None)
+            # Pop worktree_id mapping
+            stored_worktree_id = self._session_worktree_map.pop(session_id, None)
 
         event = SyncEvent(
             event_type="stream_end",
@@ -626,39 +634,47 @@ class SyncEngine:
             tabs_data: The tab state to broadcast (matches PersistedTabsState)
             source_device_id: Device that made the change (excluded from broadcast)
         """
+        # Take a snapshot of connections under the lock, then release before
+        # performing potentially-slow WebSocket sends.
         async with self._user_lock:
             user_devices = self._user_connections.get(user_id, {})
             if not user_devices:
                 return
+            # Snapshot: list of (device_id, connection) pairs
+            targets = [
+                (did, conn) for did, conn in user_devices.items()
+                if did != source_device_id
+            ]
 
-            message = {
-                "type": "tabs_sync",
-                "tabs": tabs_data.get("tabs", []),
-                "activeTabId": tabs_data.get("activeTabId"),
-                "source_device_id": source_device_id
-            }
+        if not targets:
+            return
 
-            failed_devices = []
-            for device_id, conn in user_devices.items():
-                # Don't send back to source device
-                if device_id == source_device_id:
-                    continue
+        message = {
+            "type": "tabs_sync",
+            "tabs": tabs_data.get("tabs", []),
+            "activeTabId": tabs_data.get("activeTabId"),
+            "source_device_id": source_device_id
+        }
 
-                success = await conn.send_json(message)
-                if not success:
-                    failed_devices.append(device_id)
+        failed_devices = []
+        for device_id, conn in targets:
+            success = await conn.send_json(message)
+            if not success:
+                failed_devices.append(device_id)
 
-            # Clean up failed connections
-            for device_id in failed_devices:
-                if device_id in self._user_connections.get(user_id, {}):
-                    del self._user_connections[user_id][device_id]
+        # Clean up failed connections under the lock
+        if failed_devices:
+            async with self._user_lock:
+                for device_id in failed_devices:
+                    if device_id in self._user_connections.get(user_id, {}):
+                        del self._user_connections[user_id][device_id]
 
-            if self._user_connections.get(user_id) and not self._user_connections[user_id]:
-                del self._user_connections[user_id]
+                if self._user_connections.get(user_id) and not self._user_connections[user_id]:
+                    del self._user_connections[user_id]
 
-            sent_count = len(user_devices) - len(failed_devices) - (1 if source_device_id in user_devices else 0)
-            if sent_count > 0:
-                logger.debug(f"Broadcast tabs_sync to {sent_count} devices for user {user_id[:8]}...")
+        sent_count = len(targets) - len(failed_devices)
+        if sent_count > 0:
+            logger.debug(f"Broadcast tabs_sync to {sent_count} devices for user {user_id[:8]}...")
 
     async def _broadcast_user_message(
         self,

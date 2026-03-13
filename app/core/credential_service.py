@@ -51,44 +51,46 @@ async def validate_fal_api_key(api_key: str) -> CredentialValidationResponse:
         )
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            # Use the fal.ai REST API to check key validity
-            # A GET to any model's queue status with an invalid key returns 401
-            response = await client.get(
-                "https://queue.fal.run/fal-ai/flux/schnell/requests/test-validation/status",
-                headers={"Authorization": f"Key {api_key.strip()}"}
-            )
+        from app.core.http_client import get_http_client
+        client = get_http_client()
+        # Use the fal.ai REST API to check key validity
+        # A GET to any model's queue status with an invalid key returns 401
+        response = await client.get(
+            "https://queue.fal.run/fal-ai/flux/schnell/requests/test-validation/status",
+            headers={"Authorization": f"Key {api_key.strip()}"},
+            timeout=10.0,
+        )
 
-            if response.status_code in (401, 403):
-                return CredentialValidationResponse(
-                    result=ValidationResult.INVALID,
-                    message="Invalid fal.ai API key"
-                )
-            elif response.status_code in (404, 422):
-                # Key is valid but request doesn't exist — expected
-                return CredentialValidationResponse(
-                    result=ValidationResult.VALID,
-                    message="fal.ai API key is valid"
-                )
-            elif response.status_code == 429:
-                # Rate limited but key is valid
-                return CredentialValidationResponse(
-                    result=ValidationResult.VALID,
-                    message="fal.ai API key is valid (rate limited)"
-                )
-            elif response.status_code == 200:
-                return CredentialValidationResponse(
-                    result=ValidationResult.VALID,
-                    message="fal.ai API key is valid"
-                )
-            else:
-                logger.warning(
-                    f"fal.ai API returned unexpected status {response.status_code}: {response.text}"
-                )
-                return CredentialValidationResponse(
-                    result=ValidationResult.ERROR,
-                    message=f"Could not validate key: API returned status {response.status_code}"
-                )
+        if response.status_code in (401, 403):
+            return CredentialValidationResponse(
+                result=ValidationResult.INVALID,
+                message="Invalid fal.ai API key"
+            )
+        elif response.status_code in (404, 422):
+            # Key is valid but request doesn't exist — expected
+            return CredentialValidationResponse(
+                result=ValidationResult.VALID,
+                message="fal.ai API key is valid"
+            )
+        elif response.status_code == 429:
+            # Rate limited but key is valid
+            return CredentialValidationResponse(
+                result=ValidationResult.VALID,
+                message="fal.ai API key is valid (rate limited)"
+            )
+        elif response.status_code == 200:
+            return CredentialValidationResponse(
+                result=ValidationResult.VALID,
+                message="fal.ai API key is valid"
+            )
+        else:
+            logger.warning(
+                f"fal.ai API returned unexpected status {response.status_code}: {response.text}"
+            )
+            return CredentialValidationResponse(
+                result=ValidationResult.ERROR,
+                message=f"Could not validate key: API returned status {response.status_code}"
+            )
 
     except httpx.TimeoutException:
         logger.warning("Timeout while validating fal.ai API key")
@@ -122,48 +124,50 @@ async def validate_github_pat(pat: str) -> CredentialValidationResponse:
         CredentialValidationResponse with validation result and user info in metadata
     """
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                "https://api.github.com/user",
-                headers={
-                    "Authorization": f"Bearer {pat}",
-                    "Accept": "application/vnd.github+json"
+        from app.core.http_client import get_http_client
+        client = get_http_client()
+        response = await client.get(
+            "https://api.github.com/user",
+            headers={
+                "Authorization": f"Bearer {pat}",
+                "Accept": "application/vnd.github+json"
+            },
+            timeout=10.0,
+        )
+
+        if response.status_code == 200:
+            user_data = response.json()
+            return CredentialValidationResponse(
+                result=ValidationResult.VALID,
+                message="GitHub Personal Access Token is valid",
+                metadata={
+                    "github_username": user_data.get("login"),
+                    "github_avatar_url": user_data.get("avatar_url")
                 }
             )
-
-            if response.status_code == 200:
-                user_data = response.json()
+        elif response.status_code == 401:
+            return CredentialValidationResponse(
+                result=ValidationResult.INVALID,
+                message="Invalid GitHub Personal Access Token"
+            )
+        elif response.status_code == 403:
+            if "rate limit" in response.text.lower():
                 return CredentialValidationResponse(
                     result=ValidationResult.VALID,
-                    message="GitHub Personal Access Token is valid",
-                    metadata={
-                        "github_username": user_data.get("login"),
-                        "github_avatar_url": user_data.get("avatar_url")
-                    }
+                    message="GitHub token is valid (rate limited)"
                 )
-            elif response.status_code == 401:
-                return CredentialValidationResponse(
-                    result=ValidationResult.INVALID,
-                    message="Invalid GitHub Personal Access Token"
-                )
-            elif response.status_code == 403:
-                if "rate limit" in response.text.lower():
-                    return CredentialValidationResponse(
-                        result=ValidationResult.VALID,
-                        message="GitHub token is valid (rate limited)"
-                    )
-                return CredentialValidationResponse(
-                    result=ValidationResult.INVALID,
-                    message="GitHub token lacks required permissions"
-                )
-            else:
-                logger.warning(
-                    f"GitHub API returned unexpected status {response.status_code}: {response.text}"
-                )
-                return CredentialValidationResponse(
-                    result=ValidationResult.ERROR,
-                    message=f"Could not validate token: API returned status {response.status_code}"
-                )
+            return CredentialValidationResponse(
+                result=ValidationResult.INVALID,
+                message="GitHub token lacks required permissions"
+            )
+        else:
+            logger.warning(
+                f"GitHub API returned unexpected status {response.status_code}: {response.text}"
+            )
+            return CredentialValidationResponse(
+                result=ValidationResult.ERROR,
+                message=f"Could not validate token: API returned status {response.status_code}"
+            )
 
     except httpx.TimeoutException:
         logger.warning("Timeout while validating GitHub PAT")

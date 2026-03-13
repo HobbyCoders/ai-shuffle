@@ -79,8 +79,10 @@ class GitHubStatusResponse(BaseModel):
 # Helper Functions
 # =============================================================================
 
-def get_project_path(project_id: str) -> str:
-    """Get the filesystem path for a project."""
+def get_project_path(request: Request, project_id: str) -> str:
+    """Get the filesystem path for a project after verifying access."""
+    check_project_access(request, project_id)
+
     project = database.get_project(project_id)
     if not project:
         raise HTTPException(
@@ -98,9 +100,9 @@ def get_project_path(project_id: str) -> str:
     return str(project_path)
 
 
-def get_repo_for_project(project_id: str) -> str:
+def get_repo_for_project(request: Request, project_id: str) -> str:
     """Get the GitHub repository for a project from git remote."""
-    project_path = get_project_path(project_id)
+    project_path = get_project_path(request, project_id)
     repo = github_service.get_repo_from_remote(project_path)
 
     if not repo:
@@ -178,7 +180,7 @@ async def get_github_status(
         return response
 
     try:
-        project_path = get_project_path(project_id)
+        project_path = get_project_path(request, project_id)
         repo = github_service.get_repo_from_remote(project_path)
 
         if repo:
@@ -221,7 +223,7 @@ async def list_pull_requests(
     if limit > 100:
         limit = 100
 
-    repo = get_repo_for_project(project_id)
+    repo = get_repo_for_project(request, project_id)
     pulls = github_service.list_pulls(repo, state=state, limit=limit)
 
     return [pr_to_response(pr) for pr in pulls]
@@ -240,7 +242,7 @@ async def get_pull_request(
     check_project_access(request, project_id)
     check_github_auth()
 
-    repo = get_repo_for_project(project_id)
+    repo = get_repo_for_project(request, project_id)
     pr = github_service.get_pull(repo, number)
 
     if not pr:
@@ -267,7 +269,7 @@ async def create_pull_request(
     check_project_access(request, project_id)
     check_github_auth()
 
-    repo = get_repo_for_project(project_id)
+    repo = get_repo_for_project(request, project_id)
     pr = github_service.create_pull(
         repo=repo,
         title=body.title,
@@ -306,7 +308,7 @@ async def merge_pull_request(
 
     method = body.method if body else "merge"
 
-    repo = get_repo_for_project(project_id)
+    repo = get_repo_for_project(request, project_id)
     success = github_service.merge_pull(repo, number, method=method)
 
     if not success:
@@ -331,7 +333,7 @@ async def close_pull_request(
     check_project_access(request, project_id)
     check_github_auth()
 
-    repo = get_repo_for_project(project_id)
+    repo = get_repo_for_project(request, project_id)
     success = github_service.close_pull(repo, number)
 
     if not success:
@@ -366,7 +368,7 @@ async def list_workflow_runs(
     if limit > 50:
         limit = 50
 
-    repo = get_repo_for_project(project_id)
+    repo = get_repo_for_project(request, project_id)
     runs = github_service.list_runs(repo, limit=limit)
 
     return [run_to_response(run) for run in runs]
@@ -385,7 +387,7 @@ async def get_workflow_run(
     check_project_access(request, project_id)
     check_github_auth()
 
-    repo = get_repo_for_project(project_id)
+    repo = get_repo_for_project(request, project_id)
     run = github_service.get_run(repo, run_id)
 
     if not run:
@@ -410,7 +412,7 @@ async def rerun_workflow(
     check_project_access(request, project_id)
     check_github_auth()
 
-    repo = get_repo_for_project(project_id)
+    repo = get_repo_for_project(request, project_id)
     success = github_service.rerun_workflow(repo, run_id)
 
     if not success:

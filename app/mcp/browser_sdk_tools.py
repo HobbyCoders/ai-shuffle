@@ -91,13 +91,14 @@ async def _proxy_request(
     url = f"{api_url}{path}"
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            if method == "GET":
-                resp = await client.get(url, headers=headers, params=args or None)
-            elif method == "DELETE":
-                resp = await client.delete(url, headers=headers)
-            else:
-                resp = await client.post(url, headers=headers, json=args or {})
+        from app.core.http_client import get_http_client
+        client = get_http_client()
+        if method == "GET":
+            resp = await client.get(url, headers=headers, params=args or None, timeout=60.0)
+        elif method == "DELETE":
+            resp = await client.delete(url, headers=headers, timeout=60.0)
+        else:
+            resp = await client.post(url, headers=headers, json=args or {}, timeout=60.0)
 
             if resp.status_code >= 400:
                 error_detail = resp.text[:500]
