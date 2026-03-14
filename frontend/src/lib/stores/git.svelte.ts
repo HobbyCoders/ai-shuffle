@@ -561,7 +561,11 @@ export const git = {
 				_state.worktreeId ?? undefined
 			);
 
-			await Promise.all([git.refreshStatus(), git.refreshDiffStats()]);
+			await Promise.all([
+				git.refreshStatus(),
+				git.refreshDiffStats(),
+				git.loadBranches()
+			]);
 
 			return response;
 		} catch (e) {
@@ -592,7 +596,12 @@ export const git = {
 				_state.worktreeId ?? undefined
 			);
 
-			await git.refreshStatus();
+			// Refresh both status and branches so the Push badge
+			// (which reads branch.ahead) reflects the new state.
+			await Promise.all([
+				git.refreshStatus(),
+				git.loadBranches()
+			]);
 
 			return response;
 		} catch (e) {
