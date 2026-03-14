@@ -116,14 +116,28 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         # and Cloudflare Tunnel), fall back to the actual request scheme.
         scheme = forwarded_proto or request.url.scheme or "http"
 
+        # Build candidate origins to check against. Some reverse proxies
+        # (e.g. Unraid, nginx) may send comma-separated X-Forwarded-Host
+        # values when there are multiple proxy hops.
+        candidates = set()
         if forwarded_host:
-            expected_origin = f"{scheme}://{forwarded_host}"
-        elif host_header:
-            expected_origin = f"{scheme}://{host_header}"
-        else:
+            for host in forwarded_host.split(","):
+                host = host.strip()
+                if host:
+                    candidates.add(f"{scheme}://{host}")
+        if host_header:
+            candidates.add(f"{scheme}://{host_header}")
+
+        if not candidates:
             return False
 
-        return request_origin == expected_origin
+        is_match = request_origin in candidates
+        if not is_match and candidates:
+            logger.debug(
+                f"CSRF same-origin mismatch: request Origin {request_origin!r} "
+                f"does not match any host candidate: {candidates}"
+            )
+        return is_match
 
     async def dispatch(self, request: Request, call_next) -> Response:
         # 1. Safe methods — no CSRF risk
@@ -190,13 +204,24 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         if request_origin not in self._allowed_origins:
+            host_header = request.headers.get("host", "")
+            forwarded_host = request.headers.get("x-forwarded-host", "")
             logger.warning(
                 f"CSRF blocked: origin {request_origin!r} not in allowed origins "
-                f"for {request.method} {path}"
+                f"{self._allowed_origins or '{}'} for {request.method} {path}. "
+                f"Host={host_header!r}, X-Forwarded-Host={forwarded_host!r}. "
+                f"Set CORS_ORIGINS to include {request_origin} to fix this."
             )
             return JSONResponse(
                 status_code=403,
-                content={"detail": "CSRF validation failed: origin not allowed"},
+                content={
+                    "detail": (
+                        f"CSRF validation failed: origin {request_origin} not allowed. "
+                        f"Server sees Host={host_header!r}, X-Forwarded-Host={forwarded_host!r}. "
+                        f"Ensure CORS_ORIGINS includes {request_origin} or fix your reverse proxy "
+                        f"to forward the correct Host header."
+                    )
+                },
             )
 
         return await call_next(request)
