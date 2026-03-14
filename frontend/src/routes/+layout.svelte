@@ -20,7 +20,7 @@
 
 	let { children }: { children: Snippet } = $props();
 
-	let initialized = false;
+	let initialized = $state(false);
 
 	// Auth poll: detects gh login/logout happening in a terminal.
 	// Auth changes are rare, so 2-minute polling is plenty.

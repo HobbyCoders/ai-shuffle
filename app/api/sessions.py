@@ -7,7 +7,10 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query, status, Request, UploadFile, File
 from pydantic import BaseModel
 
-from claude_agent_sdk import get_session_messages as sdk_get_session_messages
+try:
+    from claude_agent_sdk import get_session_messages as sdk_get_session_messages
+except ImportError:
+    sdk_get_session_messages = None
 
 from app.core.models import (
     Session,
@@ -539,7 +542,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     # Fallback 2: Try SDK get_session_messages() if custom parser failed.
     # The SDK handles JSONL parsing + conversation chain building independently,
     # so it may succeed where our parser has edge-case issues.
-    if not messages and sdk_session_id:
+    if not messages and sdk_session_id and sdk_get_session_messages:
         try:
             sdk_msgs = sdk_get_session_messages(
                 session_id=sdk_session_id,
@@ -729,7 +732,7 @@ async def get_live_session(
             logger.error(f"Failed to parse JSONL for live session {session_id}: {e}")
 
     # Fallback 2: SDK get_session_messages()
-    if not messages and sdk_session_id:
+    if not messages and sdk_session_id and sdk_get_session_messages:
         try:
             sdk_msgs = sdk_get_session_messages(
                 session_id=sdk_session_id,

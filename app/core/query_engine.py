@@ -22,8 +22,17 @@ from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AgentDe
 from claude_agent_sdk import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage,
-    TaskStartedMessage, TaskProgressMessage, TaskNotificationMessage,
 )
+try:
+    from claude_agent_sdk import TaskStartedMessage, TaskProgressMessage, TaskNotificationMessage
+except ImportError:
+    # Stub classes for SDK versions that don't have task message types
+    class TaskStartedMessage:
+        pass
+    class TaskProgressMessage:
+        pass
+    class TaskNotificationMessage:
+        pass
 from claude_agent_sdk.types import StreamEvent, PermissionResultAllow, PermissionResultDeny
 
 from app.db import database
@@ -1572,7 +1581,7 @@ async def execute_query(
                 metadata["num_turns"] = message.num_turns
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
-                metadata["stop_reason"] = message.stop_reason
+                metadata["stop_reason"] = getattr(message, 'stop_reason', None)
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -2013,7 +2022,7 @@ async def stream_query(
                 metadata["num_turns"] = message.num_turns
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
-                metadata["stop_reason"] = message.stop_reason
+                metadata["stop_reason"] = getattr(message, 'stop_reason', None)
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -2462,7 +2471,7 @@ async def _run_background_query(
                 metadata["num_turns"] = message.num_turns
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
-                metadata["stop_reason"] = message.stop_reason
+                metadata["stop_reason"] = getattr(message, 'stop_reason', None)
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -3623,7 +3632,7 @@ async def stream_to_websocket(
                 metadata["num_turns"] = message.num_turns
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
-                metadata["stop_reason"] = message.stop_reason
+                metadata["stop_reason"] = getattr(message, 'stop_reason', None)
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)

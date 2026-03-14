@@ -1434,11 +1434,11 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		min-width: 44px;
-		min-height: 44px;
-		width: 44px;
-		height: 44px;
-		padding: 8px;
+		min-width: 32px;
+		min-height: 32px;
+		width: 32px;
+		height: 32px;
+		padding: 6px;
 		background: var(--button-primary-gradient);
 		border: none;
 		border-radius: calc(var(--radius, 0.75rem) * 0.67);
