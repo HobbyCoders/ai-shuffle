@@ -273,15 +273,14 @@
 								<div class="fp-item-content">
 									<div class="fp-item-header">
 										<span class="fp-item-name">{project.name}</span>
-										{#if $groups.projects.assignments[project.id]}
-											<span class="card-badge card-badge--primary">
-												{$groups.projects.assignments[project.id]}
-											</span>
-										{/if}
 									</div>
 									<span class="fp-item-id">{project.path}</span>
 									<div class="fp-item-meta">
 										<span class="fp-meta-chip"><MessageSquare size={12} /> {project.session_count || 0} sessions</span>
+										{#if $groups.projects.assignments[project.id]}
+											<span class="fp-meta-dot"></span>
+											<span class="fp-meta-chip" style="color: var(--primary);">{$groups.projects.assignments[project.id]}</span>
+										{/if}
 									</div>
 								</div>
 								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">

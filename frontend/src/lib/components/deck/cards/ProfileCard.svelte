@@ -248,6 +248,10 @@
 		const allowed = profile.config?.allowed_tools;
 		const disallowed = profile.config?.disallowed_tools;
 
+		// Empty allowed_tools array = "none" mode (all tools disabled)
+		if (Array.isArray(allowed) && allowed.length === 0) {
+			return 0;
+		}
 		if (allowed && allowed.length > 0) {
 			return allowed.length;
 		} else if (disallowed && disallowed.length > 0) {
