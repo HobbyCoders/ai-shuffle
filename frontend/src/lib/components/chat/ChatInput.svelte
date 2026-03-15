@@ -331,7 +331,7 @@
 		// Get serialized message from editor (includes inline @path references)
 		const finalPrompt = editorRef?.getMessage() ?? '';
 
-		if (!finalPrompt.trim() || isUploading || $activeSession.worktreeDeleted) return;
+		if (!finalPrompt.trim() || isUploading || $activeSession.worktreeDeleted || ($activeSession.executionMode === 'worktree' && !$activeSession.worktreeId)) return;
 
 		// Require profile and project to be selected
 		if (!$activeSession.profile) {
@@ -1029,8 +1029,8 @@
 								<button
 									type="submit"
 									class="send-btn"
-									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing || $activeSession.worktreeDeleted}
-									title={$activeSession.worktreeDeleted ? "This worktree session has been completed" : isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
+									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing || $activeSession.worktreeDeleted || ($activeSession.executionMode === "worktree" && !$activeSession.worktreeId)}
+									title={$activeSession.worktreeDeleted ? "This worktree session has been completed" : ($activeSession.executionMode === "worktree" && !$activeSession.worktreeId) ? "Select a branch first" : isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
 								>
 									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
