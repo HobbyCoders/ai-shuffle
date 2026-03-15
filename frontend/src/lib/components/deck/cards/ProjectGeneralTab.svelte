@@ -30,14 +30,21 @@
 	let nameError = $state<string | null>(null);
 	let nameDirty = $derived(editName !== (project?.name ?? ''));
 
+	// Path editing state
+	let editPath = $state('');
+	let pathLoading = $state(false);
+	let pathError = $state<string | null>(null);
+	let pathDirty = $derived(editPath !== (project?.path ?? ''));
+
 	// Group creation state
 	let creatingGroup = $state(false);
 	let newGroupName = $state('');
 
-	// Sync editName when project changes
+	// Sync edit fields when project changes
 	$effect(() => {
 		if (project) {
 			editName = project.name;
+			editPath = project.path;
 		}
 	});
 
@@ -52,6 +59,20 @@
 			nameError = err.detail || err.message || 'Failed to update name';
 		} finally {
 			nameLoading = false;
+		}
+	}
+
+	async function handleSavePath() {
+		if (!pathDirty || pathLoading || !editPath.trim()) return;
+		pathLoading = true;
+		pathError = null;
+		try {
+			await appData.updateProject(projectId, { path: editPath.trim() });
+		} catch (e: unknown) {
+			const err = e as { detail?: string; message?: string };
+			pathError = err.detail || err.message || 'Failed to update path';
+		} finally {
+			pathLoading = false;
 		}
 	}
 
@@ -138,8 +159,34 @@
 
 				<!-- Project Path -->
 				<div class="pf-field">
-					<span class="pf-label">Path</span>
-					<input type="text" class="pf-input pf-input--mono" value={project.path} readonly />
+					<label for="project-path" class="pf-label">Path</label>
+					<div class="name-input-row">
+						<input
+							id="project-path"
+							type="text"
+							bind:value={editPath}
+							class="pf-input pf-input--mono"
+							placeholder="Project path"
+							onkeydown={(e) => { if (e.key === 'Enter') handleSavePath(); }}
+						/>
+						{#if pathDirty}
+							<button
+								class="pf-btn-new-group"
+								onclick={handleSavePath}
+								disabled={pathLoading || !editPath.trim()}
+								title="Save path"
+							>
+								{#if pathLoading}
+									<Loader2 size={14} class="animate-spin" />
+								{:else}
+									<Check size={14} />
+								{/if}
+							</button>
+						{/if}
+					</div>
+					{#if pathError}
+						<p class="field-error">{pathError}</p>
+					{/if}
 				</div>
 
 				<!-- Group Assignment -->

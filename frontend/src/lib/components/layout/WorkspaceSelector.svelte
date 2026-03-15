@@ -4,11 +4,12 @@
 	 *
 	 * Codex-style workspace picker shown when starting a new chat.
 	 * Centered hero with clickable workspace name dropdown.
-	 * Includes unified "Add Project" modal with directory browser.
+	 * Uses GroupedSelector for group-aware project selection.
 	 */
-	import { FolderClosed, ChevronDown, FolderPlus, Check } from 'lucide-svelte';
+	import { ChevronDown, FolderClosed } from 'lucide-svelte';
 	import { projects } from '$lib/stores/app-data';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
+	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
 
 	interface Props {
 		selectedProject: string | null;
@@ -19,6 +20,7 @@
 
 	let showDropdown = $state(false);
 	let dropdownRef = $state<HTMLDivElement | null>(null);
+	let groupedSelector = $state<ReturnType<typeof GroupedSelector> | null>(null);
 
 	// Add project modal state
 	let showAddModal = $state(false);
@@ -44,6 +46,14 @@
 		showDropdown = false;
 		showAddModal = true;
 	}
+
+	function toggleDropdown() {
+		showDropdown = !showDropdown;
+		if (showDropdown) {
+			// Reset grouped selector to main panel when opening
+			groupedSelector?.reset();
+		}
+	}
 </script>
 
 <svelte:window onclick={handleClickOutside} />
@@ -65,7 +75,7 @@
 	<div class="picker-container" bind:this={dropdownRef}>
 		<button
 			class="picker-trigger"
-			onclick={() => showDropdown = !showDropdown}
+			onclick={toggleDropdown}
 		>
 			<span class="picker-name">{selectedProjectName}</span>
 			<ChevronDown
@@ -77,29 +87,18 @@
 
 		{#if showDropdown}
 			<div class="picker-dropdown">
-				<p class="dropdown-label">Select your workspace</p>
-				<div class="dropdown-scroll">
-					{#each $projects as project (project.id)}
-						<button
-							class="dropdown-item"
-							class:selected={selectedProject === project.id}
-							onclick={() => handleSelect(project.id)}
-						>
-							<FolderClosed size={16} strokeWidth={1.5} />
-							<span class="item-name">{project.name}</span>
-							{#if selectedProject === project.id}
-								<Check size={16} strokeWidth={2} class="check-icon" />
-							{/if}
-						</button>
-					{:else}
-						<p class="dropdown-empty">No workspaces available</p>
-					{/each}
-				</div>
-				<div class="dropdown-divider"></div>
-				<button class="dropdown-item new-project-item" onclick={openAddModal}>
-					<FolderPlus size={16} strokeWidth={1.5} />
-					<span class="item-name">Add Project</span>
-				</button>
+				<GroupedSelector
+					bind:this={groupedSelector}
+					items={$projects}
+					entityType="projects"
+					selectedId={selectedProject}
+					onSelect={handleSelect}
+					label="Select your workspace"
+					addLabel="Add Project"
+					onAdd={openAddModal}
+					emptyMessage="No workspaces available"
+					itemIcon={FolderClosed}
+				/>
 			</div>
 		{/if}
 	</div>
@@ -203,86 +202,10 @@
 		}
 	}
 
-	.dropdown-scroll {
-		max-height: min(40vh, 320px);
-		overflow-y: auto;
-		overscroll-behavior: contain;
-	}
-
-	.dropdown-label {
-		padding: 8px 12px 4px;
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		font-weight: 500;
-	}
-
-	.dropdown-item {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		width: 100%;
-		padding: 10px 12px;
-		background: transparent;
-		border: none;
-		border-radius: 8px;
-		color: var(--foreground);
-		font-size: 0.875rem;
-		cursor: pointer;
-		text-align: left;
-		transition: background-color 120ms ease;
-	}
-
-	.dropdown-item:hover {
-		background: var(--hover-overlay);
-	}
-
-	.dropdown-item.selected {
-		background: color-mix(in oklch, var(--primary) 8%, transparent);
-	}
-
-	.dropdown-item :global(svg) {
-		color: var(--muted-foreground);
-		flex-shrink: 0;
-	}
-
-	.dropdown-item.selected :global(svg) {
-		color: var(--foreground);
-	}
-
-	.item-name {
-		flex: 1;
-	}
-
-	.dropdown-item :global(.check-icon) {
-		color: var(--primary);
-	}
-
-	.dropdown-empty {
-		padding: 12px;
-		text-align: center;
-		color: var(--muted-foreground);
-		font-size: 0.8125rem;
-	}
-
-	.dropdown-divider {
-		height: 1px;
-		background: var(--border);
-		margin: 4px 0;
-	}
-
-	.new-project-item {
-		color: var(--primary) !important;
-	}
-
-	.new-project-item :global(svg) {
-		color: var(--primary) !important;
-	}
-
 	/* Reduced motion */
 	@media (prefers-reduced-motion: reduce) {
 		.picker-dropdown {
 			animation: none;
 		}
 	}
-
 </style>

@@ -55,7 +55,7 @@ def validate_workspace_path(path: str) -> Path:
     Validate and resolve a path within the workspace directory.
     Prevents path traversal outside the workspace boundary.
     """
-    workspace = settings.workspace_dir.resolve()
+    workspace = settings.effective_workspace_dir.resolve()
     raw_path = workspace / path
 
     # On Windows, resolve() converts reserved names (NUL, CON, etc.) to device
@@ -83,7 +83,7 @@ async def list_workspace_files(
     token: str = Depends(require_auth)
 ):
     """List files in the workspace directory."""
-    workspace = settings.workspace_dir.resolve()
+    workspace = settings.effective_workspace_dir.resolve()
 
     if path:
         full_path = validate_workspace_path(path)
@@ -137,7 +137,7 @@ async def upload_file(
     token: str = Depends(require_auth)
 ):
     """Upload a file to the workspace."""
-    workspace = settings.workspace_dir.resolve()
+    workspace = settings.effective_workspace_dir.resolve()
 
     if path:
         target_dir = validate_workspace_path(path)
@@ -217,7 +217,7 @@ async def create_folder(
     token: str = Depends(require_auth)
 ):
     """Create a new folder within the workspace."""
-    workspace = settings.workspace_dir.resolve()
+    workspace = settings.effective_workspace_dir.resolve()
 
     folder_name = body.name.strip()
     if not folder_name or "/" in folder_name or "\\" in folder_name:
@@ -260,7 +260,7 @@ async def rename_file_or_folder(
     token: str = Depends(require_auth)
 ):
     """Rename a file or folder within the workspace."""
-    workspace = settings.workspace_dir.resolve()
+    workspace = settings.effective_workspace_dir.resolve()
 
     new_name = body.new_name.strip()
     if not new_name or "/" in new_name or "\\" in new_name:
@@ -305,7 +305,7 @@ async def delete_file_or_folder(
     token: str = Depends(require_auth)
 ):
     """Delete a file or folder within the workspace."""
-    workspace = settings.workspace_dir.resolve()
+    workspace = settings.effective_workspace_dir.resolve()
 
     target_path = validate_workspace_path(path)
     is_reserved = _is_windows_reserved_name(target_path.name)

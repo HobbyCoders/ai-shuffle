@@ -10,6 +10,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles } from '$lib/stores/app-data';
 	import { claudeAuthenticated } from '$lib/stores/auth';
+	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
 	import { browserState } from '$lib/stores/browser';
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
@@ -203,6 +204,7 @@
 	// Dropdown state for profile/project selection
 	let showProfileDropdown = $state(false);
 	let profileDropdownRef = $state<HTMLDivElement | null>(null);
+	let profileGroupedSelector = $state<ReturnType<typeof GroupedSelector> | null>(null);
 
 	// Override dropdown state
 	let showPermissionDropdown = $state(false);
@@ -232,6 +234,9 @@
 	function handleProfileClick(e: MouseEvent) {
 		e.stopPropagation();
 		showProfileDropdown = !showProfileDropdown;
+		if (showProfileDropdown) {
+			profileGroupedSelector?.reset();
+		}
 	}
 
 	// Select a profile
@@ -1071,28 +1076,14 @@
 
 							{#if showProfileDropdown}
 								<div class="selector-dropdown">
-									{#if $profiles.length === 0}
-										<div class="dropdown-empty">No profiles available</div>
-									{:else}
-										{#each $profiles as profile}
-											<button
-												type="button"
-												class="dropdown-item"
-												class:selected={profile.id === $activeSession.profile}
-												onclick={() => selectProfile(profile.id)}
-											>
-												<svg class="w-3.5 h-3.5 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-												</svg>
-												<span>{profile.name}</span>
-												{#if profile.id === $activeSession.profile}
-													<svg class="w-3.5 h-3.5 ml-auto text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-													</svg>
-												{/if}
-											</button>
-										{/each}
-									{/if}
+									<GroupedSelector
+										bind:this={profileGroupedSelector}
+										items={$profiles}
+										entityType="profiles"
+										selectedId={$activeSession.profile}
+										onSelect={selectProfile}
+										emptyMessage="No profiles available"
+									/>
 								</div>
 							{/if}
 						</div>
@@ -1811,44 +1802,6 @@
 			opacity: 1;
 			transform: translateX(-50%) translateY(0);
 		}
-	}
-
-	.dropdown-empty {
-		padding: 12px 16px;
-		font-size: 13px;
-		color: var(--muted-foreground);
-		text-align: center;
-	}
-
-	.dropdown-item {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		width: 100%;
-		padding: 8px 12px;
-		font-size: 13px;
-		color: var(--popover-foreground);
-		background: transparent;
-		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
-		cursor: pointer;
-		transition: background-color 0.15s;
-		text-align: left;
-	}
-
-	.dropdown-item:hover {
-		background: var(--hover-overlay);
-	}
-
-	.dropdown-item.selected {
-		background: var(--selection-bg);
-	}
-
-	.dropdown-item span {
-		flex: 1;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
 	}
 
 	/* Scrollbar styling for dropdown */

@@ -191,6 +191,7 @@ class ProjectUpdate(BaseModel):
     """Project update request"""
     name: Optional[str] = None
     description: Optional[str] = None
+    path: Optional[str] = None
     settings: Optional[ProjectSettings] = None
 
 

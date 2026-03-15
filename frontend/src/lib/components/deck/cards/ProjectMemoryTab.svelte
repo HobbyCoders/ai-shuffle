@@ -583,8 +583,19 @@
 	}
 
 	/* -----------------------------------------------------------------------
-	   BUTTON OVERRIDES (card-btn-primary)
+	   BUTTON OVERRIDES
 	   ----------------------------------------------------------------------- */
+
+	.card-btn-secondary {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-1, 4px);
+		padding: var(--space-1, 4px) var(--space-3, 12px);
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 500;
+		border-radius: var(--radius, 6px);
+		white-space: nowrap;
+	}
 
 	.card-btn-primary {
 		display: inline-flex;

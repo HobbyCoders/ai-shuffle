@@ -210,6 +210,17 @@ async def update_project(
             detail=f"Project not found: {project_id}"
         )
 
+    # Validate new path if provided
+    db_path = None
+    if request.path is not None:
+        effective_path = normalize_docker_path(request.path) if request.path else None
+        if effective_path and is_absolute_project_path(effective_path):
+            validate_project_path(effective_path, allow_create=False)
+            db_path = effective_path
+        elif effective_path:
+            validate_project_path(effective_path)
+            db_path = effective_path
+
     settings_dict = None
     if request.settings:
         settings_dict = request.settings.model_dump(exclude_none=True)
@@ -218,6 +229,7 @@ async def update_project(
         project_id=project_id,
         name=request.name,
         description=request.description,
+        path=db_path,
         settings_dict=settings_dict
     )
 

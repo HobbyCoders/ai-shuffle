@@ -286,7 +286,7 @@ export const appData = {
 		await appData.loadProjects();
 	},
 
-	async updateProject(projectId: string, data: { name?: string; description?: string }) {
+	async updateProject(projectId: string, data: { name?: string; description?: string; path?: string }) {
 		await api.put(`/projects/${projectId}`, data);
 		await appData.loadProjects();
 	},

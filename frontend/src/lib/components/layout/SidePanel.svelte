@@ -133,7 +133,6 @@
 
 	// Navigation items
 	const navItems: { type: ViewType; label: string; icon: typeof Settings; adminOnly?: boolean }[] = [
-		{ type: 'docs', label: 'Docs', icon: BookOpen },
 		{ type: 'file-browser', label: 'Files', icon: FolderOpen },
 		{ type: 'plugins', label: 'Plugins', icon: Puzzle },
 		{ type: 'mcp', label: 'MCP Servers', icon: Server },
@@ -141,11 +140,20 @@
 		{ type: 'notes', label: 'Notes', icon: StickyNote },
 		{ type: 'hooks', label: 'Hooks', icon: Webhook },
 		{ type: 'automations', label: 'Automations', icon: CalendarClock, adminOnly: true },
-		{ type: 'stats', label: 'Stats', icon: BarChart3 },
 		{ type: 'profile', label: 'Profiles', icon: Users },
-		{ type: 'project', label: 'Projects', icon: FolderKanban },
+		{ type: 'project', label: 'Projects', icon: FolderKanban }
+	];
+
+	// Footer bar items (icon-only with tooltips)
+	const footerItems: { type: ViewType; label: string; icon: typeof Settings; adminOnly?: boolean }[] = [
+		{ type: 'docs', label: 'Docs', icon: BookOpen },
+		{ type: 'stats', label: 'Stats', icon: BarChart3 },
 		{ type: 'settings', label: 'Settings', icon: Settings, adminOnly: true }
 	];
+
+	const filteredFooterItems = $derived(
+		footerItems.filter((item) => !item.adminOnly || isAdmin)
+	);
 
 	const filteredNavItems = $derived(
 		navItems.filter((item) => !item.adminOnly || isAdmin)
@@ -642,6 +650,20 @@
 					{/if}
 				</div>
 			{/if}
+		</div>
+
+		<!-- Footer bar: icon-only shortcuts -->
+		<div class="sidebar-footer">
+			{#each filteredFooterItems as item}
+				<button
+					class="footer-icon-btn"
+					class:active={isActiveView(item.type)}
+					onclick={() => onOpenFeature(item.type)}
+					title={item.label}
+				>
+					<item.icon size={18} strokeWidth={1.5} />
+				</button>
+			{/each}
 		</div>
 	{/if}
 </aside>
@@ -1281,6 +1303,50 @@
 	}
 
 	/* Mobile: no extra overrides needed, side-panel-content handles all scrolling */
+
+	/* Sidebar Footer */
+	.sidebar-footer {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 4px;
+		padding: 8px 12px;
+		flex-shrink: 0;
+		border-top: 1px solid var(--border);
+	}
+
+	.footer-icon-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 36px;
+		height: 36px;
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius) - 2px);
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: color 120ms ease, background-color 120ms ease;
+		position: relative;
+	}
+
+	.footer-icon-btn:hover {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+
+	.footer-icon-btn.active {
+		background: var(--selection-bg-emphasis);
+		color: var(--selection-text);
+	}
+
+	/* Mobile: larger tap targets */
+	@media (max-width: 639px) {
+		.footer-icon-btn {
+			width: 44px;
+			height: 44px;
+		}
+	}
 
 	/* Reduced motion */
 	@media (prefers-reduced-motion: reduce) {
