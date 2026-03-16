@@ -93,20 +93,23 @@
 	// which would re-trigger the effect. The guard ensures connectScreencast is
 	// called exactly once per session ID.
 	let _connectedSessionId: string | null = null;
+	let _wasStreaming = false; // Track if we were streaming (for reconnect detection)
 
 	$effect(() => {
 		const state: BrowserState = $browserState;
 		const container = canvasContainer;
 
 		if (state.isOpen && state.sessionId && container) {
-			// Connect if session changed OR if the WS disconnected (isStreaming went false)
-			// while the panel is still open. The second condition enables auto-reconnection
-			// after transient network errors.
-			const needsConnect = state.sessionId !== _connectedSessionId ||
-				(state.isActive && !state.isStreaming && _connectedSessionId === state.sessionId);
+			// Detect if streaming dropped (was true, now false) — indicates disconnect
+			const streamingDropped = _wasStreaming && !state.isStreaming &&
+				state.displayMode === 'screencast' && _connectedSessionId === state.sessionId;
+
+			// Connect if session changed OR if streaming dropped (auto-reconnect)
+			const needsConnect = state.sessionId !== _connectedSessionId || streamingDropped;
 
 			if (needsConnect) {
 				_connectedSessionId = state.sessionId;
+				_wasStreaming = false;
 				const rect = container.getBoundingClientRect();
 				const width = Math.round(rect.width) || 800;
 				const height = Math.round(rect.height) || 600;
@@ -114,9 +117,13 @@
 				canvasWidth = width;
 				canvasHeight = height;
 			}
+
+			// Track streaming state for reconnect detection
+			if (state.isStreaming) _wasStreaming = true;
 		} else {
 			// Panel closed or no session — reset guard so next open reconnects
 			_connectedSessionId = null;
+			_wasStreaming = false;
 		}
 
 		// Note: disconnecting is handled by switchSession/closePanel in the store
@@ -490,7 +497,15 @@
 			onwheel={handleCanvasWheel}
 			oncontextmenu={handleContextMenu}
 		>
-			{#if $browserState.isStreaming}
+			{#if $browserState.displayMode === 'novnc' && $browserState.novncUrl}
+				<!-- noVNC mode: real Chrome via VNC in iframe -->
+				<iframe
+					src={$browserState.novncUrl}
+					class="browser-novnc-iframe"
+					title="Browser - noVNC"
+					allow="clipboard-read; clipboard-write"
+				></iframe>
+			{:else if $browserState.isStreaming}
 				<canvas
 					bind:this={canvasEl}
 					class="browser-canvas"
@@ -789,6 +804,13 @@
 		height: 100%;
 		display: block;
 		object-fit: fill;
+	}
+
+	.browser-novnc-iframe {
+		width: 100%;
+		height: 100%;
+		border: none;
+		display: block;
 	}
 
 	.empty-state {

@@ -8,6 +8,7 @@ These endpoints serve two callers:
 Both callers share the same Playwright browser instance per session.
 """
 
+import asyncio
 import json
 import logging
 import secrets
@@ -19,7 +20,7 @@ from pydantic import BaseModel
 
 from app.api.auth import require_auth
 from app.core.config import INTERNAL_BROWSER_TOKEN
-from app.mcp.browser_session import browser_session_manager
+from app.mcp.chrome_session import chrome_session_manager as browser_session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +82,10 @@ async def create_browser_session(
     """Create a browser session without navigating. Returns empty state."""
     session = await _get_or_create_session(session_id)
     title = await session.get_title()
+    url = await session.get_url()
     return {
         "success": True,
-        "url": session.current_url,
+        "url": url,
         "title": title,
         "is_active": True,
     }
@@ -101,11 +103,13 @@ async def get_browser_state(
 
     session = await browser_session_manager.get_session(session_id)
     title = await session.get_title() if session else ""
+    url = await session.get_url() if session else ""
 
     return {
         "is_active": True,
-        "url": state["url"],
+        "url": url,
         "title": title,
+        "display_mode": state.get("display_mode", "screencast"),
         "created_at": state["created_at"],
         "last_activity": state["last_activity"],
     }
@@ -260,10 +264,8 @@ async def browser_refresh(
     _auth=Depends(require_browser_auth),
 ):
     """Reload the current page."""
-    # browser_tools doesn't have a dedicated refresh, use navigate to current URL
     session = await browser_session_manager.get_session(session_id)
     if not session:
-        # Create session first
         session = await _get_or_create_session(session_id)
     try:
         await session.reload()
@@ -272,9 +274,10 @@ async def browser_refresh(
 
     screenshot_b64 = await session.take_screenshot()
     title = await session.get_title()
+    url = await session.get_url()
     return {
         "success": True,
-        "url": session.current_url,
+        "url": url,
         "title": title,
         "screenshot": screenshot_b64,
     }
@@ -327,17 +330,19 @@ async def browser_keypress(
     if not session:
         session = await _get_or_create_session(session_id)
     try:
-        await session.page.keyboard.press(req.key)
-        await session.page.wait_for_timeout(50)
+        await session.cdp_key_event("keyDown", key=req.key, code=req.key)
+        await session.cdp_key_event("keyUp", key=req.key, code=req.key)
+        await asyncio.sleep(0.05)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
     screenshot_b64 = await session.take_screenshot()
     title = await session.get_title()
+    url = await session.get_url()
     return {
         "success": True,
         "key": req.key,
-        "url": session.current_url,
+        "url": url,
         "title": title,
         "screenshot": screenshot_b64,
     }
@@ -508,3 +513,20 @@ async def get_accessibility_tree(
 
     tree = await session.get_accessibility_tree()
     return {"success": True, "tree": tree}
+
+
+@router.get("/{session_id}/display")
+async def get_display_info(
+    session_id: str,
+    _auth=Depends(require_browser_auth),
+):
+    """Get display connection info for the frontend.
+
+    Returns either:
+    - {"mode": "novnc", "novnc_port": N} — use noVNC iframe
+    - {"mode": "screencast"} — use CDP screencast WebSocket
+    """
+    info = browser_session_manager.get_session_display_info(session_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="No active browser session")
+    return info

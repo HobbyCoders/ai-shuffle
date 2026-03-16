@@ -229,8 +229,8 @@ async def lifespan(app: FastAPI):
 
     # Cleanup browser sessions on shutdown
     try:
-        from app.mcp.browser_session import browser_session_manager
-        await browser_session_manager.close_all()
+        from app.mcp.chrome_session import chrome_session_manager
+        await chrome_session_manager.close_all()
         logger.info("Browser sessions cleaned up")
     except Exception:
         pass

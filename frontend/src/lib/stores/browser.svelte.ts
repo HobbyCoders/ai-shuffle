@@ -36,6 +36,10 @@ export interface BrowserState {
 	sessionId: string | null;
 	/** Whether live screencast is streaming */
 	isStreaming: boolean;
+	/** Display mode: 'screencast' (CDP frames) or 'novnc' (iframe) */
+	displayMode: 'screencast' | 'novnc' | null;
+	/** noVNC WebSocket URL for iframe mode */
+	novncUrl: string | null;
 }
 
 /** Per-session browser content (saved/restored on session switch) */
@@ -55,7 +59,9 @@ const DEFAULT_STATE: BrowserState = {
 	panelWidth: 480,
 	isLoading: false,
 	sessionId: null,
-	isStreaming: false
+	isStreaming: false,
+	displayMode: null,
+	novncUrl: null
 };
 
 const EMPTY_CONTENT: BrowserSessionContent = {
@@ -206,10 +212,31 @@ export const browserState = {
 
 	/**
 	 * Connect the screencast WebSocket to a session.
+	 * First queries the display mode endpoint to determine rendering strategy.
 	 */
 	connectScreencast(sessionId: string, width: number, height: number) {
-		const ws = _ensureBrowserWs();
-		ws.connect(sessionId, width, height);
+		// Query display mode from backend (fire-and-forget to avoid
+		// async store updates re-triggering the calling $effect)
+		fetch(`/api/v1/browser/${sessionId}/display`, { credentials: 'include' })
+			.then((r) => r.ok ? r.json() : null)
+			.then((info) => {
+				if (info?.mode === 'novnc' && info.novnc_port) {
+					const host = window.location.hostname;
+					const novncUrl = `http://${host}:${info.novnc_port}/vnc.html?autoconnect=true&resize=scale`;
+					_update((s) => ({ ...s, displayMode: 'novnc', novncUrl }));
+				} else {
+					// CDP screencast mode — connect WebSocket
+					_update((s) => ({ ...s, displayMode: 'screencast', novncUrl: null }));
+					const ws = _ensureBrowserWs();
+					ws.connect(sessionId, width, height);
+				}
+			})
+			.catch(() => {
+				// Fallback to screencast
+				_update((s) => ({ ...s, displayMode: 'screencast', novncUrl: null }));
+				const ws = _ensureBrowserWs();
+				ws.connect(sessionId, width, height);
+			});
 	},
 
 	/**

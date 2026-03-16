@@ -200,7 +200,7 @@ class ChatWebSocketHandler:
 
                         # Cleanup browser session if one exists
                         try:
-                            from app.mcp.browser_session import browser_session_manager
+                            from app.mcp.chrome_session import chrome_session_manager as browser_session_manager
                             if browser_session_manager.has_session(self.current_session_id):
                                 await browser_session_manager.close_session(self.current_session_id)
                                 logger.info(f"Cleaned up browser session for {self.current_session_id}")

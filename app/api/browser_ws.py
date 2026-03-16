@@ -39,7 +39,7 @@ from fastapi.websockets import WebSocketState
 from app.api.websocket import authenticate_websocket
 from app.core.config import INTERNAL_BROWSER_TOKEN
 from app.db import database
-from app.mcp.browser_session import browser_session_manager
+from app.mcp.chrome_session import chrome_session_manager as browser_session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -136,9 +136,10 @@ async def browser_websocket(
 
     # Send initial browser state
     title = await session.get_title()
+    url = await session.get_url()
     await send_json_safe({
         "type": "state",
-        "url": session.current_url,
+        "url": url,
         "title": title,
         "isActive": True,
     })
@@ -163,9 +164,10 @@ async def browser_websocket(
         async def _send_state():
             try:
                 t = await session.get_title()
+                u = await session.get_url()
                 await send_json_safe({
                     "type": "state",
-                    "url": session.current_url,
+                    "url": u,
                     "title": t,
                     "isActive": True,
                 })
@@ -174,8 +176,9 @@ async def browser_websocket(
 
         asyncio.create_task(_send_state())
 
-    # Register the load listener — use a named reference so we can remove it in cleanup
-    session.page.on("load", on_page_load)
+    # Register the load listener via CDP event
+    if session.cdp_client:
+        session.cdp_client.on("Page.loadEventFired", on_page_load)
 
     # Simple rate limiter for input events (mouse/key/scroll)
     _last_input_time = 0.0
@@ -290,12 +293,16 @@ async def browser_websocket(
 
                     try:
                         if action == "press":
-                            await session.cdp_key_event("keyDown", key, code, text, modifiers)
-                            if text and len(text) == 1:
-                                await session.cdp_key_event("char", key, code, text, modifiers)
+                            # For printable characters: use keyDown (no text) + insertText + keyUp.
+                            # keyDown with text AND char events both cause double input in raw CDP.
+                            # insertText is the reliable way to inject characters.
+                            await session.cdp_key_event("keyDown", key, code, "", modifiers)
+                            if text and len(text) == 1 and not modifiers:
+                                if session.cdp_client and session.cdp_client.connected:
+                                    await session.cdp_client.insert_text(text)
                             await session.cdp_key_event("keyUp", key, code, "", modifiers)
                         elif action == "down":
-                            await session.cdp_key_event("keyDown", key, code, text, modifiers)
+                            await session.cdp_key_event("keyDown", key, code, "", modifiers)
                         elif action == "up":
                             await session.cdp_key_event("keyUp", key, code, "", modifiers)
                     except Exception as e:
@@ -334,9 +341,10 @@ async def browser_websocket(
         nav_listener_active = False
         ping_task.cancel()
 
-        # Remove the page load listener to prevent accumulating orphaned closures
+        # Remove the CDP page load listener
         try:
-            session.page.remove_listener("load", on_page_load)
+            if session.cdp_client:
+                session.cdp_client.off("Page.loadEventFired", on_page_load)
         except Exception:
             pass
 
