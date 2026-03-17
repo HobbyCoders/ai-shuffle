@@ -837,22 +837,24 @@
 
 <div
 	class="chat-input-wrapper"
-	ondragenter={handleDragEnter}
-	ondragleave={handleDragLeave}
-	ondragover={handleDragOver}
-	ondrop={handleDrop}
 	role="region"
 	aria-label="Chat input with file drop"
 >
-	{#if isDragging}
-		<div class="drag-overlay">
-			<div class="drag-overlay-content">
-				<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-				<span>Drop files to attach</span>
+	<div
+		class="chat-input-container"
+		ondragenter={handleDragEnter}
+		ondragleave={handleDragLeave}
+		ondragover={handleDragOver}
+		ondrop={handleDrop}
+	>
+		{#if isDragging}
+			<div class="drag-overlay">
+				<div class="drag-overlay-content">
+					<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+					<span>Drop files to attach</span>
+				</div>
 			</div>
-		</div>
-	{/if}
-	<div class="chat-input-container">
+		{/if}
 		<!-- Hidden file input -->
 		<input
 			type="file"
@@ -1180,7 +1182,6 @@
 <style>
 	/* Wrapper - provides safe spacing */
 	.chat-input-wrapper {
-		position: relative;
 		padding: 0.5rem 0.75rem 0.75rem;
 		flex-shrink: 0;
 	}
@@ -1189,6 +1190,13 @@
 		.chat-input-wrapper {
 			padding: 0.75rem 1rem 1rem;
 		}
+	}
+
+	/* Container with max-width - positioning context for drag overlay */
+	.chat-input-container {
+		position: relative;
+		max-width: 56rem;
+		margin: 0 auto;
 	}
 
 	/* Drag overlay */
@@ -1222,12 +1230,6 @@
 		width: 1.25rem;
 		height: 1.25rem;
 		flex-shrink: 0;
-	}
-
-	/* Container with max-width */
-	.chat-input-container {
-		max-width: 56rem;
-		margin: 0 auto;
 	}
 
 	/* Error banner */
