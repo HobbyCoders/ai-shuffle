@@ -108,8 +108,6 @@ docker pull ghcr.io/hobbycoders/ai-shuffle:latest
 # Or use docker-compose
 docker compose up -d
 
-# First-time: authenticate Claude
-docker exec -it ai-shuffle claude login
 ```
 
 **Key environment variables:**
@@ -127,9 +125,7 @@ docker exec -it ai-shuffle claude login
 ## Prerequisites
 
 - **Python 3.10+**
-- **Node.js 18+** (for Claude CLI installation only — not needed to run the app)
-- **Claude CLI** — `npm install -g @anthropic-ai/claude-code`
-- **Claude auth** — `claude login`
+- **Claude auth or API Key** — `claude login`
 
 ---
 
@@ -172,11 +168,7 @@ AI Shuffle exposes a full REST + WebSocket API. See the [API Reference](docs/con
 
 ## Contributing
 
-1. Fork the repo
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Make your changes
-4. Run tests (`cd frontend && npm test` · `cd .. && python -m pytest`)
-5. Submit a pull request
+NOT accepting contributions at the moment.
 
 ---
 
