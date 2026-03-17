@@ -57,13 +57,15 @@ services:
       start_period: 10s
 
     # Resource limits (adjust based on your Unraid server)
+    # Note: The container runs Python + Node.js (Claude CLI) + MCP servers
+    # concurrently. 4 CPUs is recommended; reduce to 2 for constrained hosts.
     deploy:
       resources:
         limits:
-          cpus: '2.0'
-          memory: 2G
+          cpus: '4.0'
+          memory: 4G
         reservations:
-          cpus: '0.5'
+          cpus: '1.0'
           memory: 512M
 
     # Logging configuration

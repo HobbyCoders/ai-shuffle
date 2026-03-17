@@ -883,12 +883,16 @@ def _build_extra_args(
     """
     extra_args = dict(base_extra_args) if base_extra_args else {}
 
-    # In Docker mode, enable CLI debug output to stderr for diagnosing
-    # initialization hangs and other subprocess issues
+    # CLI debug output to stderr: opt-in only via LOG_LEVEL=DEBUG.
+    # Previously this was always-on in Docker mode, but the Claude CLI
+    # generates tens of thousands of debug lines per query during tool use.
+    # Even with Python's log level filtering, every line still requires:
+    # pipe read → bytes decode → string format → callback → logger check,
+    # causing significant CPU overhead in production.
     if deployment_mode and deployment_mode != DeploymentMode.LOCAL:
-        if "debug-to-stderr" not in extra_args:
+        if settings.log_level.upper() == "DEBUG" and "debug-to-stderr" not in extra_args:
             extra_args["debug-to-stderr"] = None
-            logger.debug("Added --debug-to-stderr for Docker CLI diagnostics")
+            logger.debug("Added --debug-to-stderr for Docker CLI diagnostics (LOG_LEVEL=DEBUG)")
 
     # Get tool names from hooks
     hook_tools = _get_hook_tool_names(hooks)
@@ -1255,8 +1259,9 @@ def build_options_from_profile(
     # Note: We only log stderr, don't forward to frontend. The SDK sends proper
     # typed messages for important events (compact_boundary, api errors via
     # synthetic AssistantMessage with isApiErrorMessage, etc.)
+    # Use lazy %-formatting to avoid f-string overhead when debug is disabled
     def stderr_callback(line: str):
-        logger.debug(f"[Claude CLI stderr] {line}")
+        logger.debug("[Claude CLI stderr] %s", line)
 
     # Process model selection - handle special 1M context models
     # Models ending in "-1m" use the base model with 1M context beta header
