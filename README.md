@@ -96,7 +96,7 @@ python run_local.py
 # macOS/Linux: ./run_local.sh
 ```
 
-Open `http://localhost:8000`. Uses your existing `claude login` credentials.
+Open `http://localhost:8000`. You'll be guided through account setup and Claude authentication on first launch.
 
 **Options:** `--port 3000` · `--no-browser` · `--check` (verify prerequisites)
 
@@ -125,7 +125,8 @@ docker compose up -d
 ## Prerequisites
 
 - **Python 3.10+**
-- **Claude auth or API Key** — `claude login`
+- **Node.js 18+** — For building the frontend
+- **GitHub CLI** — [Download](https://cli.github.com/) (used for PR reviews, issue management, etc.)
 
 ---
 

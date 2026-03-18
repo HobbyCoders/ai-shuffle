@@ -95,13 +95,39 @@ if %errorlevel% equ 0 (
     echo [INFO] Install Node.js from https://nodejs.org if you need the web UI
 )
 
-REM Check Claude CLI
-where claude >nul 2>&1
+REM Check GitHub CLI (used for PR reviews, issue management, etc.)
+where gh >nul 2>&1
 if %errorlevel% equ 0 (
-    echo [OK] Claude CLI found
+    echo [OK] GitHub CLI found
 ) else (
-    echo [WARN] Claude CLI not found
-    echo [INFO] Install with: npm install -g @anthropic-ai/claude-code
+    echo [WARN] GitHub CLI not found - attempting to install...
+    where winget >nul 2>&1
+    if !errorlevel! equ 0 (
+        echo [INFO] Installing via winget...
+        winget install --id GitHub.cli --accept-source-agreements --accept-package-agreements >nul 2>&1
+        if !errorlevel! equ 0 (
+            echo [OK] GitHub CLI installed via winget
+            echo [INFO] You may need to restart your terminal for 'gh' to be on PATH
+        ) else (
+            echo [ERROR] Failed to install GitHub CLI via winget
+            echo [INFO] Please install manually from https://cli.github.com
+        )
+    ) else (
+        where scoop >nul 2>&1
+        if !errorlevel! equ 0 (
+            echo [INFO] Installing via Scoop...
+            scoop install gh >nul 2>&1
+            if !errorlevel! equ 0 (
+                echo [OK] GitHub CLI installed via Scoop
+            ) else (
+                echo [ERROR] Failed to install GitHub CLI via Scoop
+                echo [INFO] Please install manually from https://cli.github.com
+            )
+        ) else (
+            echo [ERROR] Could not auto-install GitHub CLI ^(no winget or scoop found^)
+            echo [INFO] Please install manually from https://cli.github.com
+        )
+    )
 )
 
 echo.

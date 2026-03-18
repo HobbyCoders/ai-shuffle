@@ -63,16 +63,53 @@ check_python() {
     print_status "Python $PY_VERSION detected" "success"
 }
 
+install_github_cli() {
+    print_status "Attempting to install GitHub CLI..." "info"
+
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS - try Homebrew
+        if command -v brew &> /dev/null; then
+            print_status "Installing via Homebrew..." "info"
+            if brew install gh 2>/dev/null; then
+                print_status "GitHub CLI installed via Homebrew" "success"
+                return 0
+            fi
+        fi
+    else
+        # Linux - try package managers
+        if command -v apt-get &> /dev/null && [[ $(id -u) -eq 0 ]]; then
+            print_status "Installing via apt..." "info"
+            apt-get update -qq 2>/dev/null
+            if apt-get install -y -qq gh 2>/dev/null && command -v gh &> /dev/null; then
+                print_status "GitHub CLI installed via apt" "success"
+                return 0
+            fi
+        fi
+
+        if command -v brew &> /dev/null; then
+            print_status "Installing via Homebrew..." "info"
+            if brew install gh 2>/dev/null; then
+                print_status "GitHub CLI installed via Homebrew" "success"
+                return 0
+            fi
+        fi
+
+        if command -v conda &> /dev/null; then
+            print_status "Installing via conda-forge..." "info"
+            if conda install -y -c conda-forge gh 2>/dev/null && command -v gh &> /dev/null; then
+                print_status "GitHub CLI installed via conda" "success"
+                return 0
+            fi
+        fi
+    fi
+
+    print_status "Could not auto-install GitHub CLI" "warning"
+    print_status "  Please install manually from https://cli.github.com/" "info"
+    return 1
+}
+
 check_prerequisites() {
     echo -e "\n${BOLD}Checking prerequisites...${NC}"
-
-    # Check Claude CLI
-    if command -v claude &> /dev/null; then
-        print_status "Claude CLI found at $(which claude)" "success"
-    else
-        print_status "Claude CLI not found" "warning"
-        print_status "  Install: npm install -g @anthropic-ai/claude-code" "info"
-    fi
 
     # Check Node.js
     if command -v node &> /dev/null; then
@@ -83,12 +120,12 @@ check_prerequisites() {
         print_status "  Install from https://nodejs.org or use your package manager" "info"
     fi
 
-    # Check GitHub CLI
+    # Check GitHub CLI (used for PR reviews, issue management, etc.)
     if command -v gh &> /dev/null; then
         print_status "GitHub CLI found at $(which gh)" "success"
     else
-        print_status "GitHub CLI not found (optional)" "warning"
-        print_status "  Install from https://cli.github.com" "info"
+        print_status "GitHub CLI not found" "warning"
+        install_github_cli
     fi
 }
 
@@ -140,11 +177,11 @@ build_frontend() {
 
 check_claude_auth() {
     if [[ -f "$HOME/.claude/.credentials.json" ]]; then
-        print_status "Claude CLI credentials found" "success"
+        print_status "Claude credentials found" "success"
         return 0
     else
-        print_status "Claude CLI not authenticated" "warning"
-        print_status "  Run 'claude login' to authenticate" "info"
+        print_status "Claude not authenticated" "warning"
+        print_status "  You'll be guided through authentication on first launch" "info"
         return 1
     fi
 }

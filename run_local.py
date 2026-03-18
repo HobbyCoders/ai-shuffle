@@ -6,7 +6,7 @@ Cross-platform launcher script for running AI Hub on your local PC.
 This script handles:
 - Virtual environment setup
 - Dependency installation
-- Prerequisite checks (Claude CLI, GitHub CLI)
+- Prerequisite checks (Node.js, GitHub CLI)
 - Frontend building (if needed)
 - Starting the server
 
@@ -101,19 +101,95 @@ def check_prerequisite(name: str, cmd: str, install_hint: str) -> bool:
         return False
 
 
+def install_github_cli() -> bool:
+    """Attempt to automatically install GitHub CLI"""
+    print_status("Attempting to install GitHub CLI...", "info")
+
+    try:
+        if sys.platform == 'darwin':
+            # macOS - try Homebrew
+            if shutil.which("brew"):
+                print_status("Installing via Homebrew...", "info")
+                result = subprocess.run(
+                    ["brew", "install", "gh"],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0 and shutil.which("gh"):
+                    print_status("GitHub CLI installed via Homebrew", "success")
+                    return True
+
+        elif sys.platform == 'win32':
+            # Windows - try winget, then scoop
+            if shutil.which("winget"):
+                print_status("Installing via winget...", "info")
+                result = subprocess.run(
+                    ["winget", "install", "--id", "GitHub.cli", "--accept-source-agreements", "--accept-package-agreements"],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    print_status("GitHub CLI installed via winget", "success")
+                    print_status("  You may need to restart your terminal for 'gh' to be on PATH", "info")
+                    return True
+            if shutil.which("scoop"):
+                print_status("Installing via Scoop...", "info")
+                result = subprocess.run(
+                    ["scoop", "install", "gh"],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    print_status("GitHub CLI installed via Scoop", "success")
+                    return True
+
+        else:
+            # Linux - try package managers in order of preference
+            if shutil.which("apt-get") and os.geteuid() == 0:
+                # Debian/Ubuntu (with root)
+                print_status("Installing via apt...", "info")
+                subprocess.run(
+                    ["apt-get", "update", "-qq"],
+                    capture_output=True, text=True
+                )
+                result = subprocess.run(
+                    ["apt-get", "install", "-y", "-qq", "gh"],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0 and shutil.which("gh"):
+                    print_status("GitHub CLI installed via apt", "success")
+                    return True
+
+            if shutil.which("brew"):
+                print_status("Installing via Homebrew...", "info")
+                result = subprocess.run(
+                    ["brew", "install", "gh"],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0 and shutil.which("gh"):
+                    print_status("GitHub CLI installed via Homebrew", "success")
+                    return True
+
+            if shutil.which("conda"):
+                print_status("Installing via conda-forge...", "info")
+                result = subprocess.run(
+                    ["conda", "install", "-y", "-c", "conda-forge", "gh"],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0 and shutil.which("gh"):
+                    print_status("GitHub CLI installed via conda", "success")
+                    return True
+
+    except Exception as e:
+        print_status(f"Auto-install failed: {e}", "warning")
+
+    print_status("Could not auto-install GitHub CLI", "warning")
+    print_status("  Please install manually from https://cli.github.com/", "info")
+    return False
+
+
 def check_prerequisites():
     """Check all prerequisites are installed"""
     print(f"\n{Colors.BOLD}Checking prerequisites...{Colors.END}")
 
     all_ok = True
-
-    # Check Claude CLI
-    if not check_prerequisite(
-        "Claude CLI",
-        "claude",
-        "npm install -g @anthropic-ai/claude-code"
-    ):
-        all_ok = False
 
     # Check Node.js (for building frontend)
     if not check_prerequisite(
@@ -123,13 +199,13 @@ def check_prerequisites():
     ):
         print_status("  Node.js is needed to build the frontend", "info")
 
-    # Check GitHub CLI (optional but recommended)
-    if not check_prerequisite(
-        "GitHub CLI",
-        "gh",
-        "https://cli.github.com/"
-    ):
-        print_status("  GitHub CLI is optional but recommended", "info")
+    # Check GitHub CLI (used for PR reviews, issue management, etc.)
+    if not shutil.which("gh"):
+        print_status("GitHub CLI not found", "warning")
+        if not install_github_cli():
+            all_ok = False
+    else:
+        print_status(f"GitHub CLI found at {shutil.which('gh')}", "success")
 
     return all_ok
 
@@ -238,14 +314,14 @@ def build_frontend():
 
 
 def check_claude_auth():
-    """Check if Claude CLI is authenticated"""
+    """Check if Claude is authenticated (credentials exist from in-app setup)"""
     creds_file = Path.home() / ".claude" / ".credentials.json"
     if creds_file.exists():
-        print_status("Claude CLI credentials found", "success")
+        print_status("Claude credentials found", "success")
         return True
     else:
-        print_status("Claude CLI not authenticated", "warning")
-        print_status("Run 'claude login' to authenticate", "info")
+        print_status("Claude not authenticated", "warning")
+        print_status("  You'll be guided through authentication on first launch", "info")
         return False
 
 

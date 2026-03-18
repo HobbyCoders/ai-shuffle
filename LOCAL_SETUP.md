@@ -27,15 +27,9 @@ Or double-click `run_local.bat`
 ## Prerequisites
 
 ### Required
-- **Python 3.10+** - [Download](https://www.python.org/downloads/)
-- **Node.js 18+** - [Download](https://nodejs.org/) (for building frontend)
-- **Claude Code CLI** - Install after Node.js:
-  ```bash
-  npm install -g @anthropic-ai/claude-code
-  ```
-
-### Optional
-- **GitHub CLI** - [Download](https://cli.github.com/) (for GitHub integration)
+- **Python 3.10+** — [Download](https://www.python.org/downloads/)
+- **Node.js 18+** — [Download](https://nodejs.org/) (for building frontend)
+- **GitHub CLI** — [Download](https://cli.github.com/) (used for PR reviews, issue management, etc.)
 
 ## Manual Setup
 
@@ -78,13 +72,7 @@ rm -rf app/static/_app && cp -r frontend/build/_app app/static/_app && cp fronte
 rm -rf app/static/_app && cp -r frontend/build/* app/static/
 ```
 
-### 5. Authenticate Claude
-```bash
-claude login
-```
-Follow the prompts to authenticate with your Anthropic account.
-
-### 6. Start the Server
+### 5. Start the Server
 ```bash
 # Set local mode
 export LOCAL_MODE=true  # or set LOCAL_MODE=true on Windows
@@ -93,7 +81,7 @@ export LOCAL_MODE=true  # or set LOCAL_MODE=true on Windows
 python -m app.main
 ```
 
-Visit http://127.0.0.1:8000 in your browser.
+Visit http://127.0.0.1:8000 in your browser. On first launch, you'll be guided through account setup and Claude authentication.
 
 ## Configuration
 
@@ -140,15 +128,6 @@ WORKSPACE_DIR=/path/to/custom/workspace
 | Data isolation | Volume mounts | User directories |
 
 ## Troubleshooting
-
-### "Claude CLI not found"
-```bash
-# Install globally via npm
-npm install -g @anthropic-ai/claude-code
-
-# Verify installation
-claude --version
-```
 
 ### "Frontend not built"
 ```bash

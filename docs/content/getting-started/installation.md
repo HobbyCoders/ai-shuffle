@@ -10,7 +10,7 @@ order: 2
 
 - **Python 3.11+** — Backend runtime
 - **Node.js 18+** — Frontend build tooling
-- **Claude CLI** — Anthropic's Claude Code CLI, authenticated with your account
+- **GitHub CLI** — [Download](https://cli.github.com/) — Used for PR reviews, issue management, etc.
 - **Git** — For project management and worktree features
 
 ## Quick Start
@@ -44,16 +44,7 @@ npm run build
 cd ..
 ```
 
-### 5. Authenticate Claude CLI
-
-Make sure the Claude CLI is installed and authenticated:
-
-```bash
-claude --version
-claude auth login
-```
-
-### 6. Start the Server
+### 5. Start the Server
 
 ```bash
 python -m app.main
@@ -66,7 +57,7 @@ The application starts on `http://localhost:8000` by default.
 On first launch, you'll be directed to the setup page where you:
 
 1. **Create an admin account** — Set a username and password
-2. **Authenticate Claude** — Connect your Anthropic account via the Claude CLI
+2. **Authenticate Claude** — Connect your Anthropic account via OAuth
 3. **Configure workspace** — Set the default working directory for projects
 
 ## Configuration

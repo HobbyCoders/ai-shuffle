@@ -28,7 +28,7 @@ Please be respectful and constructive in all interactions. We're building this t
 - **Python 3.11+**
 - **Node.js 20+**
 - **Git**
-- **Claude CLI** (for authentication): `npm install -g @anthropic-ai/claude-code`
+- **GitHub CLI** — [Download](https://cli.github.com/)
 
 ### Fork and Clone
 
