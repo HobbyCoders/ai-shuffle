@@ -91,9 +91,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
-    outputs:
-      digest: ${{ steps.inspect.outputs.digest }}
 
     steps:
       - name: Download digests
@@ -142,37 +139,5 @@ jobs:
             $(printf '${{ env.IMAGE }}@sha256:%s ' *)
 
       - name: Inspect image
-        id: inspect
         run: |
           docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
-          digest=$(docker buildx imagetools inspect --raw ${{ env.IMAGE }}:${{ steps.meta.outputs.version }} | sha256sum | awk '{print "sha256:"$1}')
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-
-  attest:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: merge
-    if: github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
-
-    steps:
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Lowercase image name
-        run: echo "IMAGE=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_ENV"
-
-      - name: Generate artifact attestation
-        continue-on-error: true
-        uses: actions/attest-build-provenance@v1
-        with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ needs.merge.outputs.digest }}
-          push-to-registry: true
