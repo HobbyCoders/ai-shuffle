@@ -66,7 +66,7 @@ function serializeNode(node: JSONContent): string {
 		result += node.text || '';
 	} else if (node.type === 'fileChip') {
 		const attrs = node.attrs as FileChipAttributes;
-		result += `@${attrs.path}`;
+		result += `@${attrs.fullPath || attrs.path}`;
 	} else if (node.type === 'hardBreak') {
 		result += '\n';
 	} else if (node.type === 'paragraph') {
