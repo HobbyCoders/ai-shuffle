@@ -265,12 +265,24 @@
 		}
 	}
 
+	// Handle queued message edit events from QueuedMessages component
+	function handleQueuedMessageEdit(e: Event) {
+		const content = (e as CustomEvent<{ content: string }>).detail.content;
+		inputValue = content;
+		plainTextValue = content;
+		editorRef?.setContent(content);
+		// Focus the editor after setting content
+		tick().then(() => editorRef?.focus());
+	}
+
 	onMount(() => {
 		document.addEventListener('click', handleClickOutside);
 		document.addEventListener('keydown', handleEscape);
+		window.addEventListener('queued-message-edit', handleQueuedMessageEdit);
 		return () => {
 			document.removeEventListener('click', handleClickOutside);
 			document.removeEventListener('keydown', handleEscape);
+			window.removeEventListener('queued-message-edit', handleQueuedMessageEdit);
 		};
 	});
 

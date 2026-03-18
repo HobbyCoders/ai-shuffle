@@ -5,6 +5,12 @@
 		activeSession.removeQueuedMessage(messageId);
 	}
 
+	function editMessage(msg: { id: string; content: string }) {
+		activeSession.removeQueuedMessage(msg.id);
+		// Dispatch a custom event so ChatInput can pick up the content
+		window.dispatchEvent(new CustomEvent('queued-message-edit', { detail: { content: msg.content } }));
+	}
+
 	function clearAll() {
 		activeSession.clearQueuedMessages();
 	}
@@ -31,14 +37,14 @@
 			</div>
 			<div class="queued-chips">
 				{#each $activeSession.queuedMessages as msg (msg.id)}
-					<div class="queued-chip">
+					<button class="queued-chip" onclick={() => editMessage(msg)} title="Click to edit message">
 						<span class="chip-text">{truncate(msg.content)}</span>
-						<button class="chip-remove" onclick={() => removeMessage(msg.id)} title="Remove from queue">
+						<span class="chip-remove" role="img" aria-label="Remove from queue">
 							<svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12" />
 							</svg>
-						</button>
-					</div>
+						</span>
+					</button>
 				{/each}
 			</div>
 		</div>
@@ -112,14 +118,22 @@
 	.queued-chip {
 		display: flex;
 		align-items: center;
-		gap: 0.25rem;
-		padding: 0.1875rem 0.375rem;
+		gap: 0.375rem;
+		padding: 0.25rem 0.5rem;
 		background: var(--muted);
 		border: 1px solid var(--border-subtle);
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		font-size: 0.6875rem;
+		font-family: inherit;
 		color: var(--foreground);
 		max-width: 100%;
+		cursor: pointer;
+		transition: border-color 0.15s, background 0.15s;
+	}
+
+	.queued-chip:hover {
+		border-color: var(--border);
+		background: color-mix(in srgb, var(--muted) 80%, var(--foreground) 5%);
 	}
 
 	.chip-text {
@@ -134,19 +148,14 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 44px;
-		height: 44px;
-		padding: 15px;
-		background: none;
-		border: none;
+		width: 1rem;
+		height: 1rem;
 		border-radius: 50%;
-		cursor: pointer;
 		color: var(--muted-foreground);
 		transition: color 0.15s, background 0.15s;
-		margin: -15px -15px -15px 0;
 	}
 
-	.chip-remove:hover {
+	.queued-chip:hover .chip-remove {
 		color: var(--destructive);
 		background: color-mix(in srgb, var(--destructive) 15%, transparent);
 	}
