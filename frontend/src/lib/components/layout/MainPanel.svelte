@@ -215,6 +215,11 @@
 	let _gitLastActivity = 0; // timestamp of last git_hint or streaming event
 
 	function gitPollNow() {
+		// Skip polling while a commit/push/PR/pull operation is in progress.
+		// These operations make their own API calls; polling concurrently
+		// would saturate the browser's connection pool (6 per host) and
+		// cause progressive slowdown / eventual UI hang.
+		if (git.operationInProgress) return;
 		git.refreshStatus();
 		git.refreshDiffStats();
 	}
@@ -374,6 +379,9 @@
 
 		const worktreeId = activeTab?.worktreeId ?? undefined;
 
+		// Pause git polling while the operation runs to prevent
+		// HTTP request accumulation that saturates the connection pool.
+		git.setOperationInProgress(true);
 		try {
 			let finalMessage = message;
 
@@ -413,6 +421,8 @@
 		} catch (e: any) {
 			_pendingPRModal = false;
 			progressError = e?.detail || e?.message || 'An error occurred';
+		} finally {
+			git.setOperationInProgress(false);
 		}
 	}
 
@@ -437,6 +447,7 @@
 
 		const worktreeId = activeTab?.worktreeId ?? undefined;
 
+		git.setOperationInProgress(true);
 		try {
 			let prTitle = title;
 			let prBody = body;
@@ -478,6 +489,8 @@
 			progressCompleted = true;
 		} catch (e: any) {
 			progressError = e?.detail || e?.message || 'An error occurred';
+		} finally {
+			git.setOperationInProgress(false);
 		}
 	}
 
@@ -517,6 +530,7 @@
 		// Track for post-cleanup worktree state update
 		_finishedWorktreeCleanup = !!(cleanup && isWorktreeMode && worktreeId);
 
+		git.setOperationInProgress(true);
 		try {
 			// Step 1: Merge pull request
 			await mergePullRequest(projectId, prNumber, mergeMethod);
@@ -548,6 +562,8 @@
 			await git.refreshDiffStats();
 		} catch (e: any) {
 			progressError = e?.detail || e?.message || 'An error occurred';
+		} finally {
+			git.setOperationInProgress(false);
 		}
 	}
 
@@ -579,12 +595,15 @@
 		progressHasCleanup = false;
 		showProgressModal = true;
 
+		git.setOperationInProgress(true);
 		try {
 			const branch = $gitStatus?.current_branch ?? undefined;
 			await git.pushCommits(branch, true, force);
 			progressCompleted = true;
 		} catch (e: any) {
 			progressError = e?.detail || e?.message || 'Failed to push';
+		} finally {
+			git.setOperationInProgress(false);
 		}
 	}
 
@@ -641,6 +660,7 @@
 			return;
 		}
 
+		git.setOperationInProgress(true);
 		try {
 			const result = await git.pull(strategy, autoStash);
 
@@ -658,6 +678,8 @@
 			progressCompleted = true;
 		} catch (e: any) {
 			progressError = e?.detail || e?.message || 'Failed to pull';
+		} finally {
+			git.setOperationInProgress(false);
 		}
 	}
 </script>

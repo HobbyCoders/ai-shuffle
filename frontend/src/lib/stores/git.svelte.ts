@@ -101,6 +101,19 @@ let _loadedKey: string | null = null;
 let _loadInFlight: string | null = null;
 let _bgFetchRunning = false;
 
+// In-flight guards for poll-triggered refreshes to prevent HTTP request accumulation.
+// Without these, the git poller (2–5s interval) can queue overlapping requests
+// that saturate the browser's connection pool (6 per host), causing commit/push
+// operations to hang waiting for a free connection.
+let _statusInFlight = false;
+let _diffStatsInFlight = false;
+let _branchesInFlight = false;
+
+// Flag to pause polling during commit/push/PR operations.
+// Operations set this to true at start and false at end, so the poller
+// knows not to fire competing HTTP requests.
+let _operationInProgress = false;
+
 const _cache = new Map<string, CachedState>();
 
 function _makeKey(projectId: string, worktreeId?: string | null): string {
@@ -294,8 +307,10 @@ export const git = {
 
 	async refreshStatus() {
 		if (!_state.projectId) return;
+		if (_statusInFlight) return; // Prevent overlapping requests
 		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
 
+		_statusInFlight = true;
 		try {
 			const status = await gitApi.getGitStatus(
 				_state.projectId,
@@ -307,13 +322,17 @@ export const git = {
 			if (_loadedKey !== key) return;
 			const error = e as { detail?: string };
 			_update((s) => ({ ...s, error: error.detail || 'Failed to refresh status' }));
+		} finally {
+			_statusInFlight = false;
 		}
 	},
 
 	async loadBranches() {
 		if (!_state.projectId) return;
+		if (_branchesInFlight) return; // Prevent overlapping requests
 		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
 
+		_branchesInFlight = true;
 		try {
 			const branches = await gitApi.getBranches(
 				_state.projectId,
@@ -326,6 +345,8 @@ export const git = {
 			if (_loadedKey !== key) return;
 			const error = e as { detail?: string };
 			_update((s) => ({ ...s, error: error.detail || 'Failed to load branches' }));
+		} finally {
+			_branchesInFlight = false;
 		}
 	},
 
@@ -529,8 +550,10 @@ export const git = {
 
 	async refreshDiffStats() {
 		if (!_state.projectId) return;
+		if (_diffStatsInFlight) return; // Prevent overlapping requests
 		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
 
+		_diffStatsInFlight = true;
 		try {
 			const diffStats = await gitApi.getDiffStats(
 				_state.projectId,
@@ -542,6 +565,8 @@ export const git = {
 		} catch (e) {
 			if (_loadedKey !== key) return;
 			console.debug('Failed to refresh diff stats:', e);
+		} finally {
+			_diffStatsInFlight = false;
 		}
 	},
 
@@ -621,6 +646,24 @@ export const git = {
 	clear() {
 		_loadedKey = null;
 		_set({ ...EMPTY_STATE });
+	},
+
+	/**
+	 * Whether a commit/push/PR operation is currently in progress.
+	 * Used by the git poller to skip firing while these operations run,
+	 * preventing HTTP request accumulation that saturates the browser
+	 * connection pool and causes progressive UI slowdown.
+	 */
+	get operationInProgress() {
+		return _operationInProgress;
+	},
+
+	/**
+	 * Set the operation-in-progress flag. Call with `true` before starting
+	 * a commit/push/PR/pull operation, and `false` when it completes or fails.
+	 */
+	setOperationInProgress(value: boolean) {
+		_operationInProgress = value;
 	}
 };
 
