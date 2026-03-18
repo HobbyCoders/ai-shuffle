@@ -51,7 +51,6 @@ function createMockDeps(overrides?: Partial<MessageHandlerDeps>): MessageHandler
 		internal: createMockInternal(),
 		onNewChat: vi.fn(),
 		onPersistSession: vi.fn(),
-		onProcessNextQueuedMessage: vi.fn(),
 		onNotifySessionComplete: vi.fn(),
 		onNotifyWaitingForResponse: vi.fn(),
 		wsIsConnected: vi.fn(() => true),
@@ -180,26 +179,7 @@ describe('ws-message-handlers', () => {
 			);
 		});
 
-		it('should process next queued message', () => {
-			vi.useFakeTimers();
-			const state = mockState();
-			state.isStreaming = true;
-			state.sessionId = 'session-1';
-			state.queuedMessages = [{ id: 'q1', content: 'follow-up', queuedAt: Date.now() }];
-
-			deps = createMockDeps({ getState: vi.fn(() => state) });
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				type: 'done',
-				session_id: 'session-1',
-			});
-
-			vi.runAllTimers();
-			vi.useRealTimers();
-
-			expect(deps.onProcessNextQueuedMessage).toHaveBeenCalled();
-		});
+		// Queue processing is now handled server-side — no frontend trigger to test
 	});
 
 	describe('stopped handler', () => {
@@ -432,24 +412,7 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
-	describe('stream_message_delta should not process queued messages', () => {
-		it('should NOT process queued messages on stop_reason: tool_use', () => {
-			const state = mockState();
-			state.sessionId = 'session-1';
-			state.isStreaming = true;
-			state.queuedMessages = [{ id: 'q1', content: 'follow-up', queuedAt: Date.now() }];
-
-			deps = createMockDeps({ getState: vi.fn(() => state) });
-			handlers = createMessageHandlers(deps);
-
-			handlers.handleMessage({
-				type: 'stream_message_delta',
-				delta: { stop_reason: 'tool_use' },
-			});
-
-			expect(deps.onProcessNextQueuedMessage).not.toHaveBeenCalled();
-		});
-	});
+	// Queue processing is now server-side — no frontend tests needed
 
 	describe('sync event forwarding', () => {
 		it('should forward sync events to session notifier', () => {

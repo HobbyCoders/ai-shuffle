@@ -138,7 +138,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			selectedWorktreeBranch: state.selectedWorktreeBranch,
 			worktreeMode: state.worktreeMode,
 			worktreeDeleted: state.worktreeDeleted,
-			queuedMessages: state.queuedMessages,
 		};
 	}
 
@@ -189,7 +188,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 				selectedWorktreeBranch: state.selectedWorktreeBranch,
 				worktreeMode: state.worktreeMode,
 				worktreeDeleted: state.worktreeDeleted,
-				queuedMessages: state.queuedMessages,
 			} satisfies PersistedSession,
 		});
 	}
@@ -302,7 +300,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			selectedWorktreeBranch: ephemeral?.selectedWorktreeBranch ?? null,
 			worktreeMode: ephemeral?.worktreeMode ?? 'new',
 			worktreeDeleted: ephemeral?.worktreeDeleted ?? worktreeInfo?.worktreeDeleted ?? false,
-			queuedMessages: ephemeral?.queuedMessages ?? [],
+			queuedMessages: [],  // Populated from backend via history/queue_updated
 		}));
 
 		// Switch browser panel

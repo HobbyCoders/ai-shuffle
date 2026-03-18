@@ -206,13 +206,15 @@
 
 	import { sessionNotifier } from '$lib/stores/session/session-notifier';
 
-	const GIT_POLL_ACTIVE_MS = 2_000;
-	const GIT_POLL_IDLE_MS = 5_000;
+	const GIT_POLL_ACTIVE_MS = 3_000;
+	const GIT_POLL_IDLE_MS = 10_000;
 	const GIT_IDLE_THRESHOLD_MS = 30_000;
+	const GIT_HINT_DEBOUNCE_MS = 3_000; // Min time between hint-triggered polls
 
 	let _gitPollTimer: ReturnType<typeof setTimeout> | null = null;
 	let _gitPollProject: string | null = null;
 	let _gitLastActivity = 0; // timestamp of last git_hint or streaming event
+	let _lastHintPoll = 0; // timestamp of last hint-triggered immediate poll
 
 	function gitPollNow() {
 		// Skip polling while a commit/push/PR/pull operation is in progress.
@@ -307,14 +309,19 @@
 	});
 
 	// Listen for git_hint on stream_chunk events to accelerate polling.
+	// Debounced: at most one immediate poll per GIT_HINT_DEBOUNCE_MS window.
 	$effect(() => {
 		const unsub = sessionNotifier.onEvent((event) => {
 			if (event.event_type === 'stream_chunk' || event.type === 'stream_chunk') {
-				// git_hint is nested inside the data payload of the stream_chunk
 				const data = (event as Record<string, unknown>).data as Record<string, unknown> | undefined;
 				if (data?.git_hint === true) {
-					_gitLastActivity = Date.now();
-					gitPollNow();
+					const now = Date.now();
+					_gitLastActivity = now;
+					// Only fire an immediate poll if enough time has passed since the last one
+					if (now - _lastHintPoll >= GIT_HINT_DEBOUNCE_MS) {
+						_lastHintPoll = now;
+						gitPollNow();
+					}
 					scheduleGitPoll(); // Reset timer to active interval
 				}
 			}

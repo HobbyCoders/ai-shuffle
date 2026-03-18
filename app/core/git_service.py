@@ -1038,15 +1038,24 @@ class GitService:
             "conflicts": []
         }
 
-        if not self.is_git_repo(working_dir):
+        # Use rev-parse --git-dir to check if it's a repo (avoids separate is_git_repo call)
+        try:
+            check = self._run_git(working_dir, ["rev-parse", "--git-dir"], timeout=5)
+            if check.returncode != 0:
+                return status
+        except (subprocess.SubprocessError, OSError):
             return status
 
         status["is_git_repo"] = True
-        status["remote_url"] = self.get_remote_url(working_dir)
 
         try:
-            # Get current branch and HEAD
-            result = self._run_git(working_dir, ["rev-parse", "--abbrev-ref", "HEAD"], timeout=5)
+            # Combine branch + HEAD + remote URL in fewer calls
+            # Get branch and HEAD in one rev-parse call (two queries)
+            result = self._run_git(
+                working_dir,
+                ["rev-parse", "--abbrev-ref", "HEAD"],
+                timeout=5
+            )
             if result.returncode == 0:
                 branch = result.stdout.strip()
                 if branch == "HEAD":
@@ -1057,6 +1066,11 @@ class GitService:
             result = self._run_git(working_dir, ["rev-parse", "HEAD"], timeout=5)
             if result.returncode == 0:
                 status["head_commit"] = result.stdout.strip()[:12]
+
+            # Get remote URL (single lightweight call)
+            result = self._run_git(working_dir, ["remote", "get-url", "origin"], timeout=5)
+            if result.returncode == 0:
+                status["remote_url"] = result.stdout.strip()
 
             # Get ahead/behind relative to the default branch (main/master).
             # This is more useful for the PR workflow than comparing against

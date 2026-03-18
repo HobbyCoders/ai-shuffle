@@ -162,7 +162,6 @@ export interface PersistedSession {
 	selectedWorktreeBranch?: string | null;
 	worktreeMode?: 'new' | 'existing';
 	worktreeDeleted?: boolean;
-	queuedMessages?: QueuedMessage[];
 }
 
 // ─── Module-Level Helpers ────────────────────────────────────────────────────
@@ -429,93 +428,6 @@ const switcher = createSessionSwitcher({
 // Alias for internal use (message handlers, queued messages, etc.)
 const persistSession = switcher.persistSession;
 
-function processNextQueuedMessage() {
-	if (_state.queuedMessages.length === 0) return;
-	if (!wsConn.isConnected()) return;
-	if (!_state.sessionId) return;
-
-	const nextQueued = _state.queuedMessages[0];
-
-	_update(s => ({
-		...s,
-		queuedMessages: s.queuedMessages.slice(1)
-	}));
-
-	const userMsgId = `user-${Date.now()}`;
-	const queryProfileId = _state.currentQueryProfileId || _state.profile;
-
-	if (_state.isStreaming && _state.sessionId) {
-		// Currently streaming — use interrupt_and_query for clean transition.
-		// This mirrors the interrupt path in sendMessage().
-		sessionPoller.stop(_state.sessionId);
-		sessionState.removeSession(_state.sessionId);
-		internal.interruptPending = true;
-
-		_update(s => {
-			const updatedMessages = s.messages.map(m => {
-				if (m.type === 'tool_use' && m.toolStatus === 'running') {
-					return { ...m, streaming: false, toolStatus: 'error' as const };
-				}
-				return m.streaming ? { ...m, streaming: false } : m;
-			});
-			return {
-				...s,
-				messages: [...updatedMessages, {
-					id: userMsgId,
-					role: 'user' as const,
-					content: nextQueued.content,
-					profileId: queryProfileId,
-				}],
-				isStreaming: true,
-				error: null,
-				streamStartTime: Date.now(),
-			};
-		});
-
-		internal.pendingTools.clear();
-		wsConn.resetLastMessageTime();
-		wsConn.send({
-			type: 'interrupt_and_query',
-			prompt: nextQueued.content,
-			session_id: _state.sessionId,
-			profile: _state.profile,
-			project: _state.project || undefined,
-			worktree_id: _state.worktreeId || undefined,
-		});
-	} else {
-		// Not streaming — normal query (safety net from done/stopped handler)
-		_update(s => ({
-			...s,
-			messages: [...s.messages, {
-				id: userMsgId,
-				role: 'user' as const,
-				content: nextQueued.content,
-				profileId: queryProfileId
-			}],
-			isStreaming: true,
-			error: null,
-			streamStartTime: Date.now()
-		}));
-
-		const overrides: Record<string, string> = {};
-		if (_state.modelOverride) overrides.model = _state.modelOverride;
-		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
-
-		wsConn.resetLastMessageTime();
-		wsConn.send({
-			type: 'query',
-			prompt: nextQueued.content,
-			session_id: _state.sessionId,
-			profile: _state.profile,
-			project: _state.project || undefined,
-			worktree_id: _state.worktreeId || undefined,
-			...(Object.keys(overrides).length > 0 ? { overrides } : {})
-		});
-	}
-
-	persistSession();
-}
-
 // ─── WebSocket helpers (delegated to wsConn) ─────────────────────────────────
 
 function disconnect() {
@@ -651,7 +563,6 @@ const { handleMessage } = createMessageHandlers({
 	internal,
 	onNewChat: () => activeSession.newChat(),
 	onPersistSession: () => persistSession(),
-	onProcessNextQueuedMessage: () => processNextQueuedMessage(),
 	onNotifySessionComplete: (info) => notifySessionComplete(info),
 	onNotifyWaitingForResponse: (type, details) => notifyWaitingForResponse(type, details),
 	wsIsConnected: () => wsConn.isConnected(),
@@ -785,7 +696,6 @@ async function init() {
 					worktreeMode: persisted.worktreeMode || 'new',
 					selectedWorktreeBranch: persisted.selectedWorktreeBranch ?? null,
 					worktreeDeleted: persisted.worktreeDeleted ?? false,
-					queuedMessages: persisted.queuedMessages || [],
 				}));
 
 				if (persisted.sessionId) {
@@ -1146,22 +1056,33 @@ export const activeSession = {
 		}
 	},
 
-	// ── Queued Messages ─────────────────────────────────────────────
+	// ── Queued Messages (server-side queue) ─────────────────────────
 
 	queueMessage(content: string) {
-		const id = `queued-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-		_update(s => ({ ...s, queuedMessages: [...s.queuedMessages, { id, content, queuedAt: Date.now() }] }));
-		persistSession();
+		if (!_state.sessionId) return;
+		wsConn.send({
+			type: 'queue_message',
+			session_id: _state.sessionId,
+			content,
+			profile: _state.currentQueryProfileId || _state.profile,
+			project: _state.project || undefined,
+		});
 	},
 
 	removeQueuedMessage(id: string) {
-		_update(s => ({ ...s, queuedMessages: s.queuedMessages.filter(m => m.id !== id) }));
-		persistSession();
+		wsConn.send({
+			type: 'remove_queued_message',
+			message_id: id,
+			session_id: _state.sessionId,
+		});
 	},
 
 	clearQueuedMessages() {
-		_update(s => ({ ...s, queuedMessages: [] }));
-		persistSession();
+		if (!_state.sessionId) return;
+		wsConn.send({
+			type: 'clear_queued_messages',
+			session_id: _state.sessionId,
+		});
 	},
 
 	// ── System Messages & Error Handling ────────────────────────────

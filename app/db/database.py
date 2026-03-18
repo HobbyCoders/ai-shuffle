@@ -50,7 +50,8 @@ def _validate_identifier(value: str, kind: str = "identifier") -> str:
 # v36: Add action_steps column to automations for multi-step connector actions
 # v37: Add triggers JSON column for multi-trigger support
 # v38: Add message_template to project_hooks, make project_id nullable
-SCHEMA_VERSION = 38
+# v39: Add queued_messages table for server-side message queueing
+SCHEMA_VERSION = 39
 
 
 # =============================================================================
@@ -953,6 +954,25 @@ def _create_schema(cursor: sqlite3.Cursor):
     # Indexes for efficient queries
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(is_pinned DESC, updated_at DESC)")
+
+    # =========================================================================
+    # Queued Messages — server-side message queue for streaming sessions
+    # =========================================================================
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS queued_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            profile_id TEXT,
+            project_id TEXT,
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+    """)
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_queued_messages_session ON queued_messages(session_id, position ASC)")
 
     # =========================================================================
     # Project Hooks - For Claude Code event handling
@@ -6499,4 +6519,26 @@ def update_automation_approval(approval_id: str, status: str, decided_by: Option
             (status, decided_by, now, approval_id)
         )
     return get_automation_approval(approval_id)
+
+
+# ============================================================================
+# Queued Message Operations (delegates to app.db.queued_messages)
+# ============================================================================
+
+from app.db import queued_messages as _queued_mod
+
+def add_queued_message(session_id: str, content: str, profile_id=None, project_id=None):
+    return _queued_mod.add_queued_message(session_id, content, profile_id, project_id)
+
+def get_queued_messages(session_id: str):
+    return _queued_mod.get_queued_messages(session_id)
+
+def pop_next_queued_message(session_id: str):
+    return _queued_mod.pop_next_queued_message(session_id)
+
+def remove_queued_message(message_id: str):
+    return _queued_mod.remove_queued_message(message_id)
+
+def clear_queued_messages(session_id: str):
+    return _queued_mod.clear_queued_messages(session_id)
 

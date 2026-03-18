@@ -76,7 +76,6 @@ export interface MessageHandlerDeps {
 	// Callbacks for complex side effects that remain in active-session.ts
 	onNewChat: () => void;
 	onPersistSession: () => void;
-	onProcessNextQueuedMessage: () => void;
 	onNotifySessionComplete: (info: {
 		sessionId: string;
 		sessionTitle: string | null;
@@ -108,7 +107,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		appLoadSessions, appLoadApiUserSessions,
 		internal,
 		onNewChat, onPersistSession,
-		onProcessNextQueuedMessage,
 		onNotifySessionComplete, onNotifyWaitingForResponse,
 		clearStopTimeout,
 	} = deps;
@@ -151,7 +149,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			});
 
 			onPersistSession();
-			setTimeout(() => onProcessNextQueuedMessage(), 500);
 		}
 
 		// Always clean up streamingSessions (cross-session/cross-device)
@@ -190,8 +187,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				return newMap;
 			});
 		}
-
-		setTimeout(() => onProcessNextQueuedMessage(), 500);
 	}
 
 	// ── Main dispatch ────────────────────────────────────────────────
@@ -217,6 +212,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 		// Handle sync events from other devices — notifier already triggered pollNow
 		if (eventType) {
+			// queue_updated is handled here directly since queue state
+			// is not part of the poll response — it's server-side only.
+			if (eventType === 'queue_updated') {
+				const syncData = data.data as Record<string, unknown> | undefined;
+				const messages = (syncData?.queued_messages ?? []) as Array<{ id: string; content: string; created_at: string }>;
+				update(s => ({ ...s, queuedMessages: messages.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime() })) }));
+			}
 			return;
 		}
 
@@ -327,6 +329,14 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// If we receive a WS history message, just trigger a poll to sync.
 				if (data.session_id && state.sessionId === data.session_id) {
 					sessionPoller.pollNow(data.session_id as string);
+					// Populate server-side queue state from history response
+					const historyQueued = data.queuedMessages as Array<{ id: string; content: string; created_at: string }> | undefined;
+					if (historyQueued) {
+						update(s => ({ ...s, queuedMessages: historyQueued.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime() })) }));
+					} else {
+						// No queued messages in response — clear local state
+						update(s => s.queuedMessages.length > 0 ? { ...s, queuedMessages: [] } : s);
+					}
 				}
 				break;
 
@@ -420,6 +430,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 			case 'message_queued':
 			case 'queued_message_processing':
+				// Legacy — replaced by queue_updated
 				break;
 
 			case 'session_locked': {

@@ -488,6 +488,22 @@ class SyncEngine:
         )
         await self.broadcast_event(event, exclude_device_id=source_device_id)
 
+    async def broadcast_queue_updated(
+        self,
+        session_id: str,
+        queued_messages: list,
+        source_device_id: Optional[str] = None
+    ):
+        """Broadcast updated queue state to all devices watching this session."""
+        event = SyncEvent(
+            event_type="queue_updated",
+            session_id=session_id,
+            data={"queued_messages": queued_messages},
+            source_device_id=source_device_id
+        )
+        # Send to ALL devices (including source) so everyone is in sync
+        await self.broadcast_event(event, exclude_device_id=None)
+
     async def broadcast_session_updated(
         self,
         session_id: str,

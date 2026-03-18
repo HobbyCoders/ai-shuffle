@@ -6,7 +6,7 @@
  * Memory-only (not persisted to backend).
  */
 
-import type { ExecutionMode, QueuedMessage } from './types';
+import type { ExecutionMode } from './types';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -23,7 +23,6 @@ export interface SessionEphemeral {
 	selectedWorktreeBranch: string | null;
 	worktreeMode: 'new' | 'existing';
 	worktreeDeleted: boolean;
-	queuedMessages: QueuedMessage[];
 }
 
 // ─── LRU Cache ───────────────────────────────────────────────────────────────

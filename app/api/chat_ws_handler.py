@@ -66,6 +66,9 @@ class ChatWebSocketHandler:
             "get_pending_questions": self.handle_get_pending_questions,
             "tabs_update": self.handle_tabs_update,
             "pong": self._handle_pong,
+            "queue_message": self.handle_queue_message,
+            "remove_queued_message": self.handle_remove_queued_message,
+            "clear_queued_messages": self.handle_clear_queued_messages,
         }
 
     # ------------------------------------------------------------------
@@ -675,6 +678,10 @@ class ChatWebSocketHandler:
             history_response["pendingPermissions"] = pending_perms
         if pending_qs:
             history_response["pendingQuestions"] = pending_qs
+        # Include queued messages so frontend displays server-side queue
+        queued = await run_sync(database.get_queued_messages, session_id)
+        if queued:
+            history_response["queuedMessages"] = queued
         await self.send_json(history_response)
 
         # Broadcast to other devices that this session was opened
@@ -815,6 +822,146 @@ class ChatWebSocketHandler:
     async def _handle_pong(self, data: dict) -> None:
         """Handle 'pong' message type — keep-alive response, no-op."""
         pass
+
+    # ------------------------------------------------------------------
+    # handle_queue_message
+    # ------------------------------------------------------------------
+
+    async def handle_queue_message(self, data: dict) -> None:
+        """Handle 'queue_message' — add a message to the server-side queue."""
+        from app.api.websocket import _active_chat_sessions
+
+        content = (data.get("content") or "").strip()
+        session_id = data.get("session_id") or self.current_session_id
+        profile_id = data.get("profile")
+        project_id = data.get("project")
+
+        if not content:
+            await self.send_json({"type": "error", "message": "Empty queue content"})
+            return
+        if not session_id:
+            await self.send_json({"type": "error", "message": "No session for queue"})
+            return
+
+        # Store in DB
+        await run_sync(
+            database.add_queued_message,
+            session_id=session_id,
+            content=content,
+            profile_id=profile_id,
+            project_id=project_id,
+        )
+
+        # Broadcast updated queue to all devices
+        queue = await run_sync(database.get_queued_messages, session_id)
+        await sync_engine.broadcast_queue_updated(session_id, queue)
+
+        # If session is NOT currently streaming, immediately process the queue
+        active_task = _active_chat_sessions.get(session_id)
+        if not active_task or active_task.done():
+            await self._process_next_queued(session_id)
+
+    # ------------------------------------------------------------------
+    # handle_remove_queued_message
+    # ------------------------------------------------------------------
+
+    async def handle_remove_queued_message(self, data: dict) -> None:
+        """Handle 'remove_queued_message' — remove a single message from the queue."""
+        message_id = data.get("message_id")
+        session_id = data.get("session_id") or self.current_session_id
+
+        if not message_id:
+            return
+
+        await run_sync(database.remove_queued_message, message_id)
+
+        # Broadcast updated queue
+        if session_id:
+            queue = await run_sync(database.get_queued_messages, session_id)
+            await sync_engine.broadcast_queue_updated(session_id, queue)
+
+    # ------------------------------------------------------------------
+    # handle_clear_queued_messages
+    # ------------------------------------------------------------------
+
+    async def handle_clear_queued_messages(self, data: dict) -> None:
+        """Handle 'clear_queued_messages' — remove all queued messages for a session."""
+        session_id = data.get("session_id") or self.current_session_id
+
+        if not session_id:
+            return
+
+        await run_sync(database.clear_queued_messages, session_id)
+        await sync_engine.broadcast_queue_updated(session_id, [])
+
+    # ------------------------------------------------------------------
+    # _process_next_queued — auto-send next queued message
+    # ------------------------------------------------------------------
+
+    async def _process_next_queued(self, session_id: str) -> None:
+        """Pop the next queued message and start a query for it.
+
+        Called after a query completes (done/stopped/error) or when a new
+        message is queued and the session is idle. Runs entirely server-side
+        — does not require the originating browser to be connected.
+        """
+        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
+
+        msg = await run_sync(database.pop_next_queued_message, session_id)
+        if not msg:
+            return
+
+        content = msg["content"]
+        profile_id = msg.get("profile_id") or "claude-code"
+        project_id = msg.get("project_id")
+
+        logger.info(f"[Queue] Auto-processing queued message for session {session_id}: {content[:80]}...")
+
+        # Broadcast updated queue to all devices
+        queue = await run_sync(database.get_queued_messages, session_id)
+        await sync_engine.broadcast_queue_updated(session_id, queue)
+
+        # Store user message in DB
+        await run_sync(
+            database.add_session_message,
+            session_id=session_id,
+            role="user",
+            content=content,
+            profile_id=profile_id,
+        )
+
+        # Broadcast user message to all devices (no source_device_id — server-originated)
+        await sync_engine.broadcast_message_added(
+            session_id=session_id,
+            message={
+                "role": "user",
+                "content": content,
+                "profile_id": profile_id
+            },
+            source_device_id=None  # Send to ALL devices
+        )
+
+        # Cancel any existing query (shouldn't be one, but safety)
+        async with _active_sessions_lock:
+            existing_task = _active_chat_sessions.get(session_id)
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
+            try:
+                await existing_task
+            except asyncio.CancelledError:
+                pass
+
+        # Look up worktree_id from session
+        session_data = await run_sync(database.get_session, session_id)
+        worktree_id = session_data.get("worktree_id") if session_data else None
+
+        # Start the query
+        task = asyncio.create_task(
+            self.run_query(content, session_id, profile_id, project_id, None, worktree_id)
+        )
+        async with _active_sessions_lock:
+            _active_chat_sessions[session_id] = task
+        self.query_task = task
 
     # ------------------------------------------------------------------
     # run_query — the streaming pipeline
@@ -1137,3 +1284,11 @@ class ChatWebSocketHandler:
                     # Only force-cleanup if still marked as streaming (abnormal state)
                     await live_session_store.cleanup_session(session_id)
                     ctx.debug(logger, "Cleaned up stuck streaming session")
+
+            # Auto-process next queued message (server-side, no browser needed).
+            # Delay slightly to let the done/stopped event propagate to clients first.
+            await asyncio.sleep(0.5)
+            try:
+                await self._process_next_queued(session_id)
+            except Exception as queue_err:
+                logger.warning(f"[Queue] Failed to auto-process next queued message: {queue_err}")

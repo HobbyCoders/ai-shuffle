@@ -11,10 +11,11 @@ Provides endpoints for git repository operations including:
 """
 
 import asyncio
+import time
 import uuid
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
@@ -342,16 +343,30 @@ def get_working_dir(project_id: str, worktree_id: Optional[str] = None) -> str:
     return get_project_path(project_id)
 
 
+# In-memory cache for git repository records to avoid DB+git calls on every poll.
+# Maps project_id -> (record, timestamp). TTL = 60s.
+_repo_record_cache: Dict[str, Tuple[Optional[dict], float]] = {}
+_REPO_RECORD_TTL = 60.0  # seconds
+
+
 def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[dict]:
     """
     Ensure a git_repositories record exists for this project if it's a git repo.
     Creates one if needed, returns the record or None if not a git repo.
+    Uses an in-memory cache to avoid repeated DB/git calls during polling.
     """
+    now = time.monotonic()
+    cached = _repo_record_cache.get(project_id)
+    if cached and (now - cached[1]) < _REPO_RECORD_TTL:
+        return cached[0]
+
     if not git_service.is_git_repo(working_dir):
+        _repo_record_cache[project_id] = (None, now)
         return None
 
     repo = database.get_git_repository_by_project(project_id)
     if repo:
+        _repo_record_cache[project_id] = (repo, now)
         return repo
 
     # Create a new record
@@ -385,6 +400,7 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
         github_repo_name=github_repo_name
     )
     logger.debug(f"Created git repository record for project {project_id}: {repo_id}")
+    _repo_record_cache[project_id] = (repo, time.monotonic())
     return repo
 
 
@@ -974,13 +990,8 @@ async def get_diff_stats(
     check_project_access(request, project_id)
     working_dir = get_working_dir(project_id, worktree_id)
 
-    if not await asyncio.to_thread(git_service.is_git_repo, working_dir):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Project is not a git repository"
-        )
-
-    # Get diff stats directly from git CLI
+    # get_diff_stats handles non-git-repo gracefully (returns zeros),
+    # so skip the separate is_git_repo check to avoid an extra subprocess call.
     stats = await asyncio.to_thread(git_service.get_diff_stats, working_dir, include_unstaged=include_unstaged)
 
     return DiffStatsResponse(
