@@ -811,6 +811,7 @@ async function init() {
 
 function destroy() {
 	disconnect();
+	sessionPoller.stopAll();
 	wsConn.destroy();
 	switcher.destroy();
 	if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }

@@ -281,6 +281,14 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			worktreeError: null,
 			sessionLocked: false,
 			sessionLockedBy: undefined,
+			// Reset token/context fields — loadSession → onPollApplied will
+			// populate with correct values. Without this, the previous session's
+			// contextUsed bleeds into the newly loaded session.
+			totalTokensIn: 0,
+			totalTokensOut: 0,
+			totalCacheCreationTokens: 0,
+			totalCacheReadTokens: 0,
+			contextUsed: null,
 			// Merge ephemeral state in the same update
 			draft: ephemeral?.draft || '',
 			scrollTop: ephemeral?.scrollTop || 0,

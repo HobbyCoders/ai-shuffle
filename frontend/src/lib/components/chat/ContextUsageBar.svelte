@@ -3,11 +3,16 @@
 	 * ContextUsageBar - Shows context window usage as a progress bar with percentage.
 	 * Resolves the effective model (override → profile → default) to determine whether
 	 * the context window is 200k (standard) or 1M (extended).
+	 *
+	 * IMPORTANT: Context usage comes from $activeSession.contextUsed which is set by the
+	 * onPollApplied callback (session-poller → active-session). Do NOT import from
+	 * session-state.svelte.ts directly — that .svelte.ts file suffers from dual module
+	 * evaluation (see KNOWN_ISSUES Root Cause 10), causing reads to hit a different
+	 * instance than the one the poller writes to.
 	 */
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles } from '$lib/stores/app-data';
 	import { AUTO_COMPACTION_BASE, getContextMaxForModel } from '$lib/constants/chat';
-	import { sessionStateManager } from '$lib/stores/session/session-state.svelte';
 
 	function formatTokenCount(count: number): string {
 		if (count >= 1000000) {
@@ -28,21 +33,11 @@
 
 	const contextMax = $derived(getContextMaxForModel(effectiveModel));
 
-	// Context usage: prefer real-time session state (updated by poller during streaming),
-	// fall back to tab store values for idle/resumed sessions.
-	const sessionUsage = $derived(
-		$activeSession.sessionId
-			? sessionStateManager.getSession($activeSession.sessionId)?.usage
-			: undefined
-	);
-	// IMPORTANT: The fallback must use $activeSession.contextUsed (per-turn context window
-	// tokens set by onStreamEnd/bridge), NOT totalTokensIn which is CUMULATIVE across all
-	// turns and would massively overcount for multi-turn sessions (showing 100% always).
-	const baseContextUsed = $derived(
-		(sessionUsage && sessionUsage.contextUsed > 0)
-			? sessionUsage.contextUsed
-			: ($activeSession.contextUsed ?? 0)
-	);
+	// Context usage from activeSession — set by onPollApplied callback after each
+	// successful poll. This is the sole reliable path: poller → activeSession._update().
+	// Uses per-turn context window tokens (input + cache_creation + cache_read),
+	// NOT cumulative totalTokensIn which would massively overcount.
+	const baseContextUsed = $derived($activeSession.contextUsed ?? 0);
 	const contextUsed = $derived(baseContextUsed + AUTO_COMPACTION_BASE);
 	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
