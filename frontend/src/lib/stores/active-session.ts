@@ -253,9 +253,14 @@ function formatWorktreeError(rawError: string, branchName: string): string {
 	return `Failed to create worktree for '${branchName}': ${rawError}`;
 }
 
-/** Build a partial store update from SessionUsage, skipping if no context data. */
+/** Build a partial store update from SessionUsage.
+ *
+ * Always returns token fields so that contextUsed is set even when the
+ * server reports 0 (e.g. session with no JSONL data). Without this,
+ * switchSession's contextUsed:null reset is never overwritten and the
+ * component shows stale/wrong values on the next render.
+ */
 function usageStoreUpdate(usage: SessionUsage): Partial<ActiveSessionState> {
-	if (usage.contextUsed <= 0) return {};
 	return {
 		totalTokensIn: usage.inputTokens,
 		totalTokensOut: usage.outputTokens,
@@ -540,7 +545,7 @@ function setupPollCallback() {
 
 		// Build usage delta
 		const usageDelta = usageStoreUpdate(data.usage);
-		const usageHasUpdate = 'totalTokensIn' in usageDelta;
+		const usageHasUpdate = usageDelta.contextUsed !== _state.contextUsed;
 		const todosHaveUpdate = data.todos.length > 0;
 		const streamingChanged = _state.isStreaming !== data.isStreaming;
 
