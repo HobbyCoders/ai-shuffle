@@ -38,6 +38,7 @@ type PollErrorCallback = (sessionId: string, consecutiveErrors: number, error: u
 
 /** Worktree metadata from the server, included in /live responses. */
 export interface SessionMeta {
+	title?: string;
 	worktree_id?: string | null;
 	worktree_branch?: string | null;
 	worktree_deleted?: boolean;
@@ -236,9 +237,17 @@ class SessionPoller {
 	async loadSession(sessionId: string): Promise<PollAppliedData | null> {
 		console.debug(`[Poller] loadSession(${sessionId}): starting`);
 
-		// Initialize session state for a fresh fetch (reset lastUpdateId to 0)
-		sessionState.removeSession(sessionId);
-		sessionState.initSession(sessionId);
+		// Ensure session state exists. Use initSession (which is a no-op if
+		// already present) instead of the destructive removeSession+initSession
+		// pattern. The old pattern wiped contextUsed → 0 before the HTTP
+		// response arrived, causing a visible flash (16% → correct value) and
+		// risking data mismatches if the re-fetch returned different values
+		// (e.g., from JSONL compaction or live store timing). Resetting the
+		// lastUpdateId to 0 forces _applyPollResult to always apply the
+		// response (the fast-path only skips for lastUpdateId > 0).
+		if (!sessionState.getSession(sessionId)) {
+			sessionState.initSession(sessionId);
+		}
 
 		try {
 			const response = await fetch(

@@ -353,21 +353,30 @@ const wsConn: WsConnection = createWsConnection({
 		handleMessage(data);
 	},
 	onConnected: () => {
-		console.debug(`[ActiveSession] onConnected: sessionId=${_state.sessionId}`);
+		console.debug(`[ActiveSession] onConnected: sessionId=${_state.sessionId}, isStreaming=${_state.isStreaming}, hasMessages=${_state.messages.length > 0}`);
 		_update(s => ({ ...s, wsConnected: true, error: null }));
 
-		// Reload session via HTTP — sole authority for session state.
-		// This replaces the old WS load_session → history flow.
 		if (_state.sessionId) {
 			const sessionId = _state.sessionId;
 			// Register with SyncEngine to receive broadcast events from other devices
 			wsConn.send({ type: 'watch_session', session_id: sessionId });
-			sessionPoller.loadSession(sessionId).then(pollData => {
-				console.debug(`[ActiveSession] onConnected loadSession result: streaming=${pollData?.isStreaming}, msgs=${pollData?.messages?.length ?? 0}`);
-				if (pollData && pollData.isStreaming) {
-					sessionPoller.startStreaming(sessionId);
-				}
-			});
+
+			// Only re-fetch from server if the session might have changed:
+			// - Currently streaming (need live updates)
+			// - No messages loaded yet (first connection or stale state)
+			// For completed sessions with messages already loaded, skip the
+			// re-fetch to avoid resetting contextUsed and causing phantom
+			// usage jumps. The data is already correct in the frontend state.
+			if (_state.isStreaming || _state.messages.length === 0) {
+				sessionPoller.loadSession(sessionId).then(pollData => {
+					console.debug(`[ActiveSession] onConnected loadSession result: streaming=${pollData?.isStreaming}, msgs=${pollData?.messages?.length ?? 0}`);
+					if (pollData && pollData.isStreaming) {
+						sessionPoller.startStreaming(sessionId);
+					}
+				});
+			} else {
+				console.debug(`[ActiveSession] onConnected: skipping re-fetch for completed session ${sessionId} (${_state.messages.length} msgs already loaded)`);
+			}
 		}
 	},
 	onDisconnected: (code, _reason, wasClean) => {
@@ -465,6 +474,10 @@ function setupPollCallback() {
 		const metaDelta: Partial<ActiveSessionState> = {};
 		if (data.sessionMeta) {
 			const meta = data.sessionMeta;
+			// Sync title from server — corrects stale 'New Chat' or ephemeral cache values
+			if (meta.title && meta.title !== _state.title) {
+				metaDelta.title = meta.title;
+			}
 			// Only apply if the server has definitive worktree info
 			if (meta.worktree_deleted !== undefined && meta.worktree_deleted !== _state.worktreeDeleted) {
 				metaDelta.worktreeDeleted = meta.worktree_deleted;
@@ -978,9 +991,13 @@ export const activeSession = {
 	/** Clear all messages (e.g. before reloading after rewind). */
 	clearMessages() { _update(s => ({ ...s, messages: [], todos: [] })); },
 
-	/** Reload the current session from backend (e.g. after rewind). */
+	/** Reload the current session from backend (e.g. after rewind).
+	 * Unlike WS-reconnect reloads, this is an explicit user action that
+	 * should do a full reset to pick up truncated/changed data. */
 	async reloadSession(_forceJsonl = false) {
 		if (_state.sessionId) {
+			// Force a fresh fetch by removing stale session state first
+			sessionState.removeSession(_state.sessionId);
 			await sessionPoller.loadSession(_state.sessionId);
 		}
 	},
@@ -1107,7 +1124,9 @@ export const activeSession = {
 	async rewindToMessage(_messageId: string) {
 		if (!_state.sessionId) return;
 		// After rewind completes externally (via MessageActions component),
-		// reload the session to pick up the truncated message list
+		// reload the session to pick up the truncated message list.
+		// Force reset since the JSONL was modified by the rewind.
+		sessionState.removeSession(_state.sessionId);
 		await sessionPoller.loadSession(_state.sessionId);
 	},
 
@@ -1120,6 +1139,8 @@ export const activeSession = {
 		if (wsConn.isConnected()) {
 			wsConn.send({ type: 'load_session', session_id: _state.sessionId, force: true });
 		}
+		// Force reset — takeover may load different state from another device
+		sessionState.removeSession(_state.sessionId);
 		await sessionPoller.loadSession(_state.sessionId);
 	},
 

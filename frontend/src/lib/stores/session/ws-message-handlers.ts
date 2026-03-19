@@ -200,17 +200,28 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			console.debug(`[WS] handleMessage: type=${msgType}, event_type=${eventType}, session_id=${data.session_id}`);
 		}
 
-		// Forward to notification system (triggers poller via pollNow/startStreaming)
+		// Forward to notification system (triggers poller via pollNow/startStreaming).
+		// IMPORTANT: Only forward when the session is streaming or expected to stream.
+		// For completed sessions, forwarding events to the notifier can trigger
+		// unnecessary polls that reset and re-fetch context usage, causing phantom
+		// token count jumps (e.g., 16% → 99% from re-parsing JSONL with different values).
 		const state = getState();
 		if (state.sessionId) {
 			const isInterruptTransition = internal.interruptPending &&
 				(msgType === 'interrupted' || msgType === 'stopped');
-			if (!isInterruptTransition) {
+			const shouldNotify = state.isStreaming ||
+				internal.awaitingNewSession ||
+				msgType === 'start' ||
+				msgType === 'stream_start' ||
+				msgType === 'done' ||
+				msgType === 'stopped' ||
+				msgType === 'interrupted';
+			if (!isInterruptTransition && shouldNotify) {
 				sessionNotifier.handleMessage(state.sessionId, data);
 			}
 		}
 
-		// Handle sync events from other devices — notifier already triggered pollNow
+		// Handle sync events from other devices
 		if (eventType) {
 			// queue_updated is handled here directly since queue state
 			// is not part of the poll response — it's server-side only.
@@ -288,15 +299,16 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			case 'session_created': {
 				if (!data.session_id) break;
 				const sessionId = data.session_id as string;
+				const title = (data.title as string) || undefined;
 				const currentState = getState();
 				const acceptCreated = currentState.sessionId === sessionId ||
 					(!currentState.sessionId && internal.awaitingNewSession);
-				console.debug(`[WS] session_created: id=${sessionId}, accept=${acceptCreated}, currentId=${currentState.sessionId}, awaiting=${internal.awaitingNewSession}`);
+				console.debug(`[WS] session_created: id=${sessionId}, accept=${acceptCreated}, currentId=${currentState.sessionId}, awaiting=${internal.awaitingNewSession}, title=${title}`);
 				if (acceptCreated) {
 					internal.awaitingNewSession = false;
-					// Set the sessionId so the poller callback knows which session to write to.
-					// This is the ONLY state write for session lifecycle — just the ID.
-					update(s => ({ ...s, sessionId }));
+					// Set the sessionId and title so the header shows the correct
+					// session title immediately (not stale 'New Chat').
+					update(s => ({ ...s, sessionId, ...(title ? { title } : {}) }));
 					onPersistSession();
 				}
 				appLoadSessions();

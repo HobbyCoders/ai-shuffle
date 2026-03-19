@@ -3689,19 +3689,13 @@ async def stream_to_websocket(
             # Normal case: keep in pool for reuse!
             logger.debug(f"[WS] Kept session {session_id} in pool for reuse")
 
-    # Update session in database
-    # Only set title for new sessions (when resume_id was None, meaning first message)
-    # This preserves the first user message as the session title
-    title_to_set = None
-    if not resume_id:
-        title_to_set = prompt[:50].strip()
-        if len(prompt) > 50:
-            title_to_set += "..."
-
+    # Update session in database with usage stats and SDK session ID.
+    # Title is NOT set here — it was already set atomically during session
+    # creation in the WebSocket handler. Setting it again would overwrite
+    # the 100-char title with a shorter 50-char version.
     database.update_session(
         session_id=session_id,
         sdk_session_id=sdk_session_id,
-        title=title_to_set,
         cost_increment=metadata.get("total_cost_usd", 0),
         tokens_in_increment=metadata.get("tokens_in", 0),
         tokens_out_increment=metadata.get("tokens_out", 0),

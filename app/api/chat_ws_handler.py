@@ -324,6 +324,7 @@ class ChatWebSocketHandler:
             await self.send_json({
                 "type": "session_created",
                 "session_id": session_id,
+                "title": title,
                 "worktree_id": worktree_id  # Include worktree_id in response
             })
 

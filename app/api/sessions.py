@@ -645,9 +645,15 @@ async def get_live_session(
 
     check_session_access(request, session)
 
-    # Compute worktree metadata from DB session — included in all response
-    # paths so the frontend can correct any stale worktree state on switch.
+    # Compute session metadata from DB session — included in all response
+    # paths so the frontend can correct any stale state on switch.
     session_meta = {}
+
+    # Always include the title so the frontend header stays in sync
+    session_title = session.get("title")
+    if session_title:
+        session_meta["title"] = session_title
+
     wt_id = session.get("worktree_id")
     if wt_id:
         wt = database.get_worktree(wt_id)

@@ -267,8 +267,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// then safe defaults — NEVER s.currentValue. Using s.currentValue caused
 		// worktreeDeleted to bleed between sessions (the leaving session's state
 		// would infect the target session when no ephemeral cache existed).
-		// Resolve title: ephemeral cache > caller-provided > 'New Chat'
-		const resolvedTitle = ephemeral?.title || title || 'New Chat';
+		// Resolve title: caller-provided (from sessions list API) > ephemeral cache > 'New Chat'
+		// Caller-provided title is authoritative (from the backend); ephemeral may
+		// be stale (e.g., 'New Chat' saved before the backend set the real title).
+		const resolvedTitle = title || ephemeral?.title || 'New Chat';
 
 		update(s => ({
 			...s,
