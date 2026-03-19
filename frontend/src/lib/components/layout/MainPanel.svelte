@@ -249,7 +249,9 @@
 	function startGitPoll(project: string) {
 		stopGitPoll();
 		_gitPollProject = project;
-		_gitLastActivity = Date.now();
+		// Don't reset _gitLastActivity — keep idle mode unless there's actual
+		// git activity (hint events, streaming). This prevents session/tab
+		// switches from spuriously triggering 30s of active polling.
 		scheduleGitPoll();
 	}
 
@@ -289,12 +291,13 @@
 		}
 	}
 
-	// Main effect: start/stop adaptive poll when project/auth changes.
+	// Main effect: start/stop adaptive poll when project/auth/worktree changes.
+	// NOTE: activeSessionId deliberately excluded — session switches within the
+	// same project shouldn't restart polling (worktreeId covers tab-switch context).
 	$effect(() => {
 		const project = activeProject;
 		const worktreeId = activeWorktreeId; // Track worktree changes for tab switches
 		const authenticated = $githubAuthenticated;
-		const _sessionId = activeSessionId; // Track session changes for tab switches
 
 		// Clear stale PR state immediately when any dependency changes.
 		branchPR = null;
