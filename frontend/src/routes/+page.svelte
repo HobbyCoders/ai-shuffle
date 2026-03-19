@@ -89,8 +89,10 @@
 			executionMode: 'worktree' as const,
 		} : null;
 
+		const sessionTitle = session?.title || null;
+
 		const openChat = () => {
-			activeSession.switchSession(sessionId, sessionProjectId, worktreeInfo);
+			activeSession.switchSession(sessionId, sessionProjectId, worktreeInfo, sessionTitle);
 			layout.openChat(sessionId);
 		};
 

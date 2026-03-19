@@ -750,11 +750,11 @@ export const activeSession = {
 
 	// ── Session Navigation (delegated to session-switcher) ─────────
 
-	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: import('./session/session-switcher').SessionWorktreeInfo | null) => {
+	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: import('./session/session-switcher').SessionWorktreeInfo | null, title?: string | null) => {
 		// User explicitly navigated to a session — clear the "new chat" flag
 		// so that future init() calls can restore from the backend normally.
 		setSkipRestore(false);
-		switcher.switchSession(sessionId, projectId, worktreeInfo);
+		switcher.switchSession(sessionId, projectId, worktreeInfo, title);
 	},
 	newChat: () => {
 		// Tell init() to skip restoring the old session if the component remounts.

@@ -64,7 +64,7 @@ export interface SessionWorktreeInfo {
 }
 
 export interface SessionSwitcher {
-	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null) => Promise<void>;
+	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null) => Promise<void>;
 	newChat: () => void;
 	persistSession: () => void;
 	loadPersistedSession: () => Promise<PersistedSession | null>;
@@ -126,6 +126,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	function buildEphemeral(state: ActiveSessionState): SessionEphemeral {
 		return {
+			title: state.title,
 			draft: state.draft,
 			scrollTop: state.scrollTop,
 			project: state.project,
@@ -230,7 +231,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	// ── Session Navigation ──────────────────────────────────────────────
 
-	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null) {
+	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null) {
 		const generation = ++_switchGeneration;
 		const state = getState();
 		console.debug(`[SessionSwitcher] switchSession(${sessionId}): gen=${generation}, leaving=${state.sessionId}, msgs=${state.messages.length}, worktreeInfo=${JSON.stringify(worktreeInfo)}`);
@@ -266,9 +267,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// then safe defaults — NEVER s.currentValue. Using s.currentValue caused
 		// worktreeDeleted to bleed between sessions (the leaving session's state
 		// would infect the target session when no ephemeral cache existed).
+		// Resolve title: ephemeral cache > caller-provided > 'New Chat'
+		const resolvedTitle = ephemeral?.title || title || 'New Chat';
+
 		update(s => ({
 			...s,
 			sessionId,
+			title: resolvedTitle,
 			project: targetProject,
 			messages: cachedMessages && cachedMessages.length > 0 ? cachedMessages : [],
 			error: null,

@@ -259,24 +259,18 @@
 		50% { opacity: 0.6; }
 	}
 
-	/* Desktop layout — title is absolutely centered across the full header,
-	   with right elements (git actions, context badges) pushed to the right edge. */
+	/* Desktop layout — title fills available space and truncates,
+	   right elements (git actions, context badges) pushed to the right edge. */
 	@media (min-width: 1024px) {
-		.page-header {
-			position: relative;
-		}
-
 		.header-left {
-			flex: 0 0 auto;
+			flex: 1 1 0%;
+			min-width: 0;
+			justify-content: center;
 		}
 
 		.header-title {
-			position: absolute;
-			left: 50%;
-			transform: translateX(-50%);
-			max-width: 50%;
 			text-align: center;
-			pointer-events: none;
+			max-width: 100%;
 		}
 
 		.header-right {

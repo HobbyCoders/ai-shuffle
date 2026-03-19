@@ -11,6 +11,7 @@ import type { ExecutionMode } from './types';
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface SessionEphemeral {
+	title: string;
 	draft: string;
 	scrollTop: number;
 	project: string;
