@@ -11,9 +11,50 @@ for the API layer to interact with git repositories.
 import logging
 import subprocess
 import os
+import threading
+import time
 from typing import List, Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Lightweight TTL cache for expensive git operations
+# ---------------------------------------------------------------------------
+_STATUS_CACHE_TTL = 5.0        # seconds — short enough for UI freshness
+_DIFF_STATS_CACHE_TTL = 5.0    # seconds
+_DEFAULT_BRANCH_CACHE_TTL = 300.0  # 5 minutes — rarely changes
+
+class _GitResultCache:
+    """Thread-safe per-key TTL cache for git results."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # key -> (result, monotonic_timestamp)
+        self._data: Dict[str, tuple] = {}
+
+    def get(self, key: str, ttl: float) -> Optional[Any]:
+        with self._lock:
+            entry = self._data.get(key)
+            if entry and (time.monotonic() - entry[1]) < ttl:
+                return entry[0]
+            return None
+
+    def put(self, key: str, value: Any) -> None:
+        with self._lock:
+            self._data[key] = (value, time.monotonic())
+
+    def invalidate(self, key: str) -> None:
+        with self._lock:
+            self._data.pop(key, None)
+
+    def invalidate_prefix(self, prefix: str) -> None:
+        """Invalidate all keys starting with *prefix*."""
+        with self._lock:
+            to_remove = [k for k in self._data if k.startswith(prefix)]
+            for k in to_remove:
+                del self._data[k]
+
+_git_cache = _GitResultCache()
 
 
 class GitService:
@@ -161,7 +202,13 @@ class GitService:
         """
         Get the default branch name (usually main or master).
         Checks remote HEAD first, falls back to common names.
+        Results are cached for 5 minutes per repo.
         """
+        cache_key = f"default_branch:{working_dir}"
+        cached = _git_cache.get(cache_key, _DEFAULT_BRANCH_CACHE_TTL)
+        if cached is not None:
+            return cached
+
         try:
             # Try to get remote HEAD
             result = self._run_git(
@@ -170,8 +217,9 @@ class GitService:
                 timeout=5
             )
             if result.returncode == 0:
-                # Returns something like "origin/main"
-                return result.stdout.strip().replace("origin/", "")
+                branch = result.stdout.strip().replace("origin/", "")
+                _git_cache.put(cache_key, branch)
+                return branch
 
             # Fallback: check if main or master exists
             for branch in ["main", "master"]:
@@ -181,8 +229,10 @@ class GitService:
                     timeout=5
                 )
                 if result.returncode == 0:
+                    _git_cache.put(cache_key, branch)
                     return branch
 
+            _git_cache.put(cache_key, "main")
             return "main"  # Default fallback
         except (subprocess.SubprocessError, OSError) as e:
             logger.warning(f"get_default_branch failed for '{working_dir}': {e}")
@@ -400,6 +450,7 @@ class GitService:
             result = self._run_git(working_dir, ["checkout", safe_ref], timeout=30)
             if result.returncode == 0:
                 logger.debug(f"Checked out: {ref}")
+                self.invalidate_status_cache(working_dir)
                 return True
 
             logger.warning(f"Failed to checkout {ref}: {result.stderr}")
@@ -703,6 +754,7 @@ class GitService:
     ) -> Dict[str, Any]:
         """
         Get diff statistics (lines added/removed).
+        Results are cached for a short TTL to coalesce rapid polls.
 
         Args:
             working_dir: Repository directory
@@ -714,6 +766,11 @@ class GitService:
             - deletions: Total lines deleted
             - files_changed: Number of files changed
         """
+        cache_key = f"diff_stats:{working_dir}:{include_unstaged}"
+        cached = _git_cache.get(cache_key, _DIFF_STATS_CACHE_TTL)
+        if cached is not None:
+            return cached
+
         try:
             total_additions = 0
             total_deletions = 0
@@ -748,11 +805,13 @@ class GitService:
                             total_deletions += deleted
                             files.add(parts[2])
 
-            return {
+            result_data = {
                 "additions": total_additions,
                 "deletions": total_deletions,
                 "files_changed": len(files)
             }
+            _git_cache.put(cache_key, result_data)
+            return result_data
         except Exception as e:
             logger.error(f"Error getting diff stats: {e}")
             return {"additions": 0, "deletions": 0, "files_changed": 0}
@@ -774,6 +833,7 @@ class GitService:
 
             if result.returncode == 0:
                 logger.debug(f"Staged {len(files)} file(s)")
+                self.invalidate_status_cache(working_dir)
                 return True
 
             logger.warning(f"Failed to stage files: {result.stderr}")
@@ -805,6 +865,7 @@ class GitService:
                 sha_result = self._run_git(working_dir, ["rev-parse", "HEAD"], timeout=5)
                 commit_sha = sha_result.stdout.strip()[:12] if sha_result.returncode == 0 else None
                 logger.debug(f"Created commit: {commit_sha}")
+                self.invalidate_status_cache(working_dir)
                 return True, commit_sha
 
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
@@ -850,6 +911,7 @@ class GitService:
 
             if result.returncode == 0:
                 logger.debug(f"Pushed to {remote}/{branch or 'current branch'}")
+                self.invalidate_status_cache(working_dir)
                 return True, None
 
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
@@ -951,6 +1013,7 @@ class GitService:
 
             if result.returncode == 0:
                 logger.debug(f"Pulled from {remote}/{branch} using {strategy}")
+                self.invalidate_status_cache(working_dir)
                 # Pop stash after successful pull
                 if stashed:
                     pop_ok, pop_err = self.stash_pop(working_dir)
@@ -1001,9 +1064,20 @@ class GitService:
         except Exception:
             return []
 
+    def invalidate_status_cache(self, working_dir: str) -> None:
+        """Invalidate cached status/diff for a working directory.
+
+        Call after mutations (commit, checkout, stage, push, pull, etc.)
+        so the next poll gets fresh data.
+        """
+        _git_cache.invalidate(f"status:{working_dir}")
+        _git_cache.invalidate(f"diff_stats:{working_dir}")
+
     def get_status(self, working_dir: str) -> Dict[str, Any]:
         """
         Get repository status.
+
+        Results are cached for a short TTL to coalesce rapid polls.
 
         Args:
             working_dir: Repository directory
@@ -1023,6 +1097,11 @@ class GitService:
             - behind: Commits behind upstream
             - conflicts: List of files with merge conflicts
         """
+        cache_key = f"status:{working_dir}"
+        cached = _git_cache.get(cache_key, _STATUS_CACHE_TTL)
+        if cached is not None:
+            return cached
+
         status = {
             "is_git_repo": False,
             "current_branch": None,
@@ -1132,6 +1211,7 @@ class GitService:
         except Exception as e:
             logger.error(f"Error getting git status: {e}")
 
+        _git_cache.put(cache_key, status)
         return status
 
     def get_diff_text(

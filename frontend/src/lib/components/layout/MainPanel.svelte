@@ -206,10 +206,10 @@
 
 	import { sessionNotifier } from '$lib/stores/session/session-notifier';
 
-	const GIT_POLL_ACTIVE_MS = 3_000;
-	const GIT_POLL_IDLE_MS = 10_000;
+	const GIT_POLL_ACTIVE_MS = 5_000;
+	const GIT_POLL_IDLE_MS = 30_000;
 	const GIT_IDLE_THRESHOLD_MS = 30_000;
-	const GIT_HINT_DEBOUNCE_MS = 3_000; // Min time between hint-triggered polls
+	const GIT_HINT_DEBOUNCE_MS = 5_000; // Min time between hint-triggered polls
 
 	let _gitPollTimer: ReturnType<typeof setTimeout> | null = null;
 	let _gitPollProject: string | null = null;
@@ -222,8 +222,13 @@
 		// would saturate the browser's connection pool (6 per host) and
 		// cause progressive slowdown / eventual UI hang.
 		if (git.operationInProgress) return;
+		const isActive = (Date.now() - _gitLastActivity) < GIT_IDLE_THRESHOLD_MS;
 		git.refreshStatus();
-		git.refreshDiffStats();
+		// Only poll diff stats during active periods — it's a second HTTP
+		// request and another set of git subprocess calls on the backend.
+		if (isActive) {
+			git.refreshDiffStats();
+		}
 	}
 
 	function gitPollInterval(): number {
