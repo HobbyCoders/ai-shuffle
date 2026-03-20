@@ -118,6 +118,11 @@ class SessionPoller {
 	/**
 	 * Start polling for a session at the streaming rate.
 	 * If already polling this session at streaming rate, this is a no-op.
+	 *
+	 * Preserves existing session state (messages, usage) when restarting
+	 * polling for an existing session. Only creates fresh state for sessions
+	 * not yet tracked. This prevents the context usage bar from flashing
+	 * to 0% on visibility changes, WS reconnects, or fallback recovery.
 	 */
 	startStreaming(sessionId: string): void {
 		if (this._timers.has(sessionId)) {
@@ -151,9 +156,18 @@ class SessionPoller {
 		}
 		this._inFlight.delete(sessionId);
 
-		// Reset session state for the new streaming session.
-		sessionState.removeSession(sessionId);
-		sessionState.initSession(sessionId);
+		// Prepare session state for polling.
+		// If the session already has state (e.g., resuming after visibility
+		// change or WS reconnect), preserve it and only reset the lastUpdateId
+		// so the next poll fetches fresh data. This avoids the destructive
+		// removeSession→initSession pattern that wiped contextUsed to 0,
+		// causing the context usage bar to flash on every tab switch.
+		const existingSession = sessionState.getSession(sessionId);
+		if (existingSession) {
+			sessionState.resetForPolling(sessionId);
+		} else {
+			sessionState.initSession(sessionId);
+		}
 
 		// Poll immediately, then on interval
 		this._poll(sessionId);

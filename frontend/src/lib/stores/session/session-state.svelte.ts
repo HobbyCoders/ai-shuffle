@@ -240,6 +240,24 @@ class SessionStateManager {
 	}
 
 	/**
+	 * Reset a session's lastUpdateId to 0, forcing the next poll to fetch
+	 * fresh data from the server. Unlike removeSession() + initSession(),
+	 * this preserves existing session data (messages, usage, todos) so
+	 * there's no visible flash of stale/zero values in the UI.
+	 *
+	 * Used by startStreaming() when restarting polling for an existing
+	 * session (visibility change, WS reconnect, fallback recovery).
+	 */
+	resetForPolling(sessionId: string): void {
+		const existing = this.sessions.get(sessionId);
+		if (!existing) return;
+		this.sessions.set(sessionId, {
+			...existing,
+			lastUpdateId: 0,
+		});
+	}
+
+	/**
 	 * Mark a session as no longer streaming (e.g., on 'done' event).
 	 * The poller will confirm this on next poll, but we update eagerly
 	 * for responsive UI.

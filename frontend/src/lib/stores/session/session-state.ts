@@ -77,6 +77,11 @@ export const sessionState = {
 		_sync();
 	},
 
+	resetForPolling(sessionId: string): void {
+		sessionStateManager.resetForPolling(sessionId);
+		_sync();
+	},
+
 	markStreamingEnded(sessionId: string): void {
 		sessionStateManager.markStreamingEnded(sessionId);
 		_sync();
