@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 _STATUS_CACHE_TTL = 5.0        # seconds — short enough for UI freshness
 _DIFF_STATS_CACHE_TTL = 5.0    # seconds
 _DEFAULT_BRANCH_CACHE_TTL = 300.0  # 5 minutes — rarely changes
+_AHEAD_BEHIND_CACHE_TTL = 30.0  # seconds — only changes on commit/push/fetch
 
 class _GitResultCache:
     """Thread-safe per-key TTL cache for git results."""
@@ -1071,7 +1072,8 @@ class GitService:
         so the next poll gets fresh data.
         """
         _git_cache.invalidate(f"status:{working_dir}")
-        _git_cache.invalidate(f"diff_stats:{working_dir}")
+        _git_cache.invalidate_prefix(f"diff_stats:{working_dir}:")
+        _git_cache.invalidate_prefix(f"ahead_behind:{working_dir}:")
 
     def get_status(self, working_dir: str) -> Dict[str, Any]:
         """
@@ -1154,22 +1156,30 @@ class GitService:
             # Get ahead/behind relative to the default branch (main/master).
             # This is more useful for the PR workflow than comparing against
             # the upstream tracking branch (which would be 0 after pushing).
+            # Cached separately with a longer TTL because rev-list walks the
+            # commit graph (O(n) in divergence) and only changes on
+            # commit/push/fetch — all of which call invalidate_status_cache.
             if status["current_branch"]:
-                default_branch = self.get_default_branch(working_dir)
-                # Try origin/<default> first, fall back to local <default>
-                for ref in [f"origin/{default_branch}", default_branch]:
-                    result = self._run_git(
-                        working_dir,
-                        ["rev-list", "--left-right", "--count",
-                         f"{status['current_branch']}...{ref}"],
-                        timeout=5
-                    )
-                    if result.returncode == 0:
-                        parts = result.stdout.strip().split()
-                        if len(parts) >= 2:
-                            status["ahead"] = int(parts[0])
-                            status["behind"] = int(parts[1])
-                        break
+                ab_cache_key = f"ahead_behind:{working_dir}:{status['current_branch']}"
+                ab_cached = _git_cache.get(ab_cache_key, _AHEAD_BEHIND_CACHE_TTL)
+                if ab_cached is not None:
+                    status["ahead"], status["behind"] = ab_cached
+                else:
+                    default_branch = self.get_default_branch(working_dir)
+                    for ref in [f"origin/{default_branch}", default_branch]:
+                        result = self._run_git(
+                            working_dir,
+                            ["rev-list", "--left-right", "--count",
+                             f"{status['current_branch']}...{ref}"],
+                            timeout=5
+                        )
+                        if result.returncode == 0:
+                            parts = result.stdout.strip().split()
+                            if len(parts) >= 2:
+                                status["ahead"] = int(parts[0])
+                                status["behind"] = int(parts[1])
+                            _git_cache.put(ab_cache_key, (status["ahead"], status["behind"]))
+                            break
 
             # Get file status using porcelain format
             result = self._run_git(working_dir, ["status", "--porcelain=v1"], timeout=10)

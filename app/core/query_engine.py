@@ -2530,6 +2530,18 @@ async def _run_background_query(
             source_device_id=None
         )
 
+        # Clean up per-session state that is no longer needed.
+        # Permission rules and pending requests accumulate per session and are
+        # never cleared otherwise, causing unbounded memory growth.
+        permission_handler.clear_session_rules(session_id)
+        await permission_handler.cancel_all_requests(session_id)
+
+        # Release session lock in sync engine (in case not released by WS disconnect).
+        # Use the public API which checks ownership — but in the stream-end path
+        # there's no device_id, so directly pop under the lock.
+        async with sync_engine._lock:
+            sync_engine._session_locks.pop(session_id, None)  # noqa: SLF001
+
         # Schedule delayed cleanup of live store data (keep for 30s for late joiners)
         async def _delayed_cleanup():
             await asyncio.sleep(30)

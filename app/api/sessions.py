@@ -19,12 +19,21 @@ from app.core.models import (
     PaginatedSessions,
     PaginatedSessionSearchResults
 )
+import time
 from app.db import database
+from app.db.tags import get_tags_for_sessions
+from app.db.sessions import get_fork_info_for_sessions
 from app.api.auth import require_auth, get_api_user_from_request
 from app.core.project_utils import get_project_working_dir
 
 import logging
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Throttle for session sync — at most once per 60 s per project
+# ---------------------------------------------------------------------------
+_SESSION_SYNC_THROTTLE_S = 60.0
+_last_sync_times: dict[str, float] = {}  # project_id -> monotonic timestamp
 
 
 def _transform_sdk_messages(sdk_messages: list) -> list:
@@ -159,8 +168,17 @@ def check_session_access(request: Request, session: dict) -> None:
 
 
 def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
-    """Add tags array, has_forks field, and api_user_name to each session"""
-    # Batch-lookup API user names for efficiency
+    """Add tags array, has_forks field, and api_user_name to each session.
+
+    Uses batch DB queries (2 total) instead of per-session queries to avoid
+    O(N) round-trips that slow down with session count.
+    """
+    if not sessions:
+        return sessions
+
+    session_ids = [s["id"] for s in sessions]
+
+    # Batch-lookup API user names
     api_user_ids = {s["api_user_id"] for s in sessions if s.get("api_user_id")}
     api_user_names: dict[str, str] = {}
     for uid in api_user_ids:
@@ -168,9 +186,17 @@ def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
         if user:
             api_user_names[uid] = user.get("name") or user.get("username") or uid
 
+    # Batch: tags for all sessions (1 query instead of N)
+    tags_by_session = get_tags_for_sessions(session_ids)
+
+    # Batch: fork info for all sessions (2 queries instead of N)
+    fork_info_by_session = get_fork_info_for_sessions(session_ids)
+
     for session in sessions:
-        session["tags"] = database.get_session_tags(session["id"])
-        session["has_forks"] = database.session_has_forks(session["id"])
+        sid = session["id"]
+        session["tags"] = tags_by_session.get(sid, [])
+        fork_info = fork_info_by_session.get(sid)
+        session["has_forks"] = fork_info["has_forks"] if fork_info else False
         if session.get("api_user_id"):
             session["api_user_name"] = api_user_names.get(session["api_user_id"])
     return sessions
@@ -208,23 +234,27 @@ def _apply_session_filters(
         api_users_only = False
 
     # Auto-sync Claude Code sessions (only for specific project, not global).
-    # Global sync is too expensive to run synchronously on every request.
-    # Use POST /api/v1/projects/{id}/sync-sessions for explicit sync.
+    # Throttled to at most once per 60 s per project — disk scan + N DB
+    # lookups is too expensive to run on every list request.
     if sync_claude_sessions and project_id:
-        try:
-            from app.core.session_sync import session_sync_service
-            sync_result = session_sync_service.sync_project_sessions(
-                project_id=project_id,
-                profile_id=profile_id or "default"
-            )
-            if sync_result["imported_count"] > 0:
-                logger.debug(
-                    f"Auto-imported {sync_result['imported_count']} Claude Code sessions "
-                    f"for project {project_id}"
+        now = time.monotonic()
+        last = _last_sync_times.get(project_id, 0.0)
+        if now - last >= _SESSION_SYNC_THROTTLE_S:
+            try:
+                from app.core.session_sync import session_sync_service
+                _last_sync_times[project_id] = now
+                sync_result = session_sync_service.sync_project_sessions(
+                    project_id=project_id,
+                    profile_id=profile_id or "default"
                 )
-        except Exception as e:
-            # Don't fail the request if sync fails - just log and continue
-            logger.warning(f"Failed to auto-sync Claude Code sessions: {e}")
+                if sync_result["imported_count"] > 0:
+                    logger.debug(
+                        f"Auto-imported {sync_result['imported_count']} Claude Code sessions "
+                        f"for project {project_id}"
+                    )
+            except Exception as e:
+                # Don't fail the request if sync fails - just log and continue
+                logger.warning(f"Failed to auto-sync Claude Code sessions: {e}")
 
     # Determine api_user_id filter value:
     # - admin_only=True  -> filter for sessions with api_user_id IS NULL

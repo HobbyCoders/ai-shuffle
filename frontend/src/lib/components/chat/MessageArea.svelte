@@ -30,14 +30,24 @@
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
 
-	// Non-reactive scroll position cache to avoid triggering effects
-	// This is module-level so it persists across component instances
+	// Non-reactive scroll position cache to avoid triggering effects.
+	// Module-level so it persists across component instances.
+	// Capped at 100 entries to prevent unbounded growth over long sessions.
+	const SCROLL_CACHE_MAX = 100;
 	const scrollPositionCache = new Map<string, number>();
-	// Persist auto-scroll state across component mount/destroy cycles (e.g.
-	// navigating away from chat to settings and returning, or transitioning
-	// between empty and active states) so the component scrolls to bottom
-	// instead of restoring a now-stale scroll position
+	// Persist auto-scroll state across component mount/destroy cycles
 	const autoScrollCache = new Map<string, boolean>();
+
+	function evictOldest(map: Map<string, unknown>, max: number) {
+		if (map.size <= max) return;
+		const it = map.keys();
+		let excess = map.size - max;
+		while (excess-- > 0) {
+			const { value, done } = it.next();
+			if (done) break;
+			map.delete(value);
+		}
+	}
 
 	/**
 	 * Reload the session after a rewind completes.
@@ -331,6 +341,9 @@
 			scrollPositionCache.set(prevId, containerRef.scrollTop);
 			autoScrollCache.set(prevId, shouldAutoScroll);
 			activeSession.setScrollTop(containerRef.scrollTop);
+			// Prevent unbounded growth over long usage
+			evictOldest(scrollPositionCache, SCROLL_CACHE_MAX);
+			evictOldest(autoScrollCache, SCROLL_CACHE_MAX);
 		}
 
 		prevTrackedSessionId = currentId;
