@@ -356,6 +356,7 @@
 	});
 
 	// When streaming ends, do an immediate refresh so buttons update promptly.
+	// Mark as active so gitPollNow() also refreshes diff stats (not just status).
 	let _wasStreaming = false;
 	$effect(() => {
 		const streaming = $gitControlsStreaming;
@@ -364,7 +365,11 @@
 		} else if (_wasStreaming) {
 			_wasStreaming = false;
 			if (activeProject) {
-				untrack(() => gitPollNow());
+				untrack(() => {
+					_gitLastActivity = Date.now();
+					gitPollNow();
+					scheduleGitPoll(); // Reset to active interval for post-streaming cool-down
+				});
 			}
 		}
 	});
