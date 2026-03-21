@@ -37,8 +37,13 @@
 	// successful poll. This is the sole reliable path: poller → activeSession._update().
 	// Uses per-turn context window tokens (input + cache_creation + cache_read),
 	// NOT cumulative totalTokensIn which would massively overcount.
+	//
+	// AUTO_COMPACTION_BASE is a floor (not additive) because the SDK's
+	// input_tokens + cache_creation + cache_read already includes everything
+	// in the context window (system prompt, message history, tool results).
+	// Adding it on top would double-count the ~33k system prompt.
 	const baseContextUsed = $derived($activeSession.contextUsed ?? 0);
-	const contextUsed = $derived(baseContextUsed + AUTO_COMPACTION_BASE);
+	const contextUsed = $derived(Math.max(baseContextUsed, AUTO_COMPACTION_BASE));
 	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
 	// Context color - always themed (no usage-based color changes)

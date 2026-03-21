@@ -431,6 +431,7 @@ const switcher = createSessionSwitcher({
 	messageCache,
 	browserState,
 	sessionPoller,
+	sessionState,
 	onPersistTimerChanged: (timer) => { persistTimer = timer; },
 });
 
@@ -535,10 +536,13 @@ function setupPollCallback() {
 
 function setupOnStreamEnd() {
 	sessionPoller.onStreamEnd((sessionId, _usage) => {
-		// If in interrupt_and_query transition, skip cleanup
-		if (internal.interruptPending) return;
+		// If in interrupt_and_query transition for THIS session, skip cleanup.
+		// Guard against interruptPending applying to a different session's stream end.
+		if (internal.interruptPending && _state.sessionId === sessionId) return;
 
-		// If a new query started, this callback is stale — skip it
+		// If a new query started for THIS session, this callback is stale — skip it.
+		// Only skip when the actively-polling session matches the one that ended,
+		// otherwise we'd incorrectly skip cleanup for background sessions.
 		if (_state.isStreaming && _state.sessionId === sessionId && sessionPoller.isPolling(sessionId)) {
 			return;
 		}

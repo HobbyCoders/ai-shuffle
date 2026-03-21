@@ -201,12 +201,22 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		}
 
 		// Forward to notification system (triggers poller via pollNow/startStreaming).
-		// IMPORTANT: Only forward when the session is streaming or expected to stream.
-		// For completed sessions, forwarding events to the notifier can trigger
-		// unnecessary polls that reset and re-fetch context usage, causing phantom
-		// token count jumps (e.g., 16% → 99% from re-parsing JSONL with different values).
+		//
+		// CRITICAL: Use the event's actual session_id for routing, NOT the active
+		// session's ID. Events from background/old sessions must not trigger polls
+		// for the active session — that causes ghost polls that refresh context
+		// values from JSONL, producing phantom token count jumps (16% → 99%).
+		//
+		// Only forward events that belong to the active session (or new sessions
+		// we're awaiting). Events for other sessions are handled by handleDone/
+		// handleStoppedOrInterrupted directly — the notifier doesn't need them.
 		const state = getState();
-		if (state.sessionId) {
+		const eventSessionId = data.session_id as string | undefined;
+		const isForActiveSession = !eventSessionId ||
+			eventSessionId === state.sessionId ||
+			(!state.sessionId && internal.awaitingNewSession);
+
+		if (state.sessionId && isForActiveSession) {
 			const isInterruptTransition = internal.interruptPending &&
 				(msgType === 'interrupted' || msgType === 'stopped');
 			const shouldNotify = state.isStreaming ||

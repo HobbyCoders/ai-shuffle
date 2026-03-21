@@ -61,7 +61,8 @@
 	// directly — that .svelte.ts file suffers from dual module evaluation
 	// (see KNOWN_ISSUES Root Cause 10).
 	const baseContextUsed = $derived($activeSession.contextUsed ?? 0);
-	const contextUsed = $derived(baseContextUsed + AUTO_COMPACTION_BASE);
+	// Floor (not additive): SDK values already include system prompt in cache tokens
+	const contextUsed = $derived(Math.max(baseContextUsed, AUTO_COMPACTION_BASE));
 	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
 

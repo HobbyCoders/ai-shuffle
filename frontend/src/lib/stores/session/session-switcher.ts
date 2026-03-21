@@ -49,6 +49,9 @@ export interface SessionSwitcherDeps {
 		loadSession: (sessionId: string) => Promise<PollAppliedData | null>;
 		startStreaming: (sessionId: string) => void;
 	};
+	sessionState?: {
+		removeSession: (sessionId: string) => void;
+	};
 
 	// Callbacks
 	onPersistTimerChanged: (timer: ReturnType<typeof setTimeout> | null) => void;
@@ -236,9 +239,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const state = getState();
 		console.debug(`[SessionSwitcher] switchSession(${sessionId}): gen=${generation}, leaving=${state.sessionId}, msgs=${state.messages.length}, worktreeInfo=${JSON.stringify(worktreeInfo)}`);
 
-		// Stop polling for the session we're leaving
+		// Stop polling and clean up session state for the session we're leaving.
+		// Without removeSession, the old session lingers in sessionState with
+		// isStreaming: true, causing stale streaming detection if a late poll arrives.
 		if (state.sessionId) {
 			sessionPoller.stop(state.sessionId);
+			deps.sessionState?.removeSession(state.sessionId);
 		}
 
 		// Reset cross-session internal state
@@ -348,9 +354,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const leavingSessionId = state.sessionId;
 		console.debug(`[SessionSwitcher] newChat(): leaving sessionId=${leavingSessionId}, messages=${state.messages.length}`);
 
-		// Stop polling for the session we're leaving
+		// Stop polling and clean up session state for the session we're leaving.
+		// Without removeSession, the old session lingers with isStreaming: true,
+		// causing stale streaming detection if a late poll arrives.
 		if (leavingSessionId) {
 			sessionPoller.stop(leavingSessionId);
+			deps.sessionState?.removeSession(leavingSessionId);
 		}
 
 		// Save ephemeral for the session we're leaving
