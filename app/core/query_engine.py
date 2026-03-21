@@ -36,6 +36,7 @@ except ImportError:
 from claude_agent_sdk.types import StreamEvent, PermissionResultAllow, PermissionResultDeny
 
 from app.db import database
+from app.db.async_database import run_sync
 from app.core.config import settings
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
@@ -1458,13 +1459,13 @@ async def execute_query(
     # Get project if specified
     project = None
     if project_id:
-        project = database.get_project(project_id)
+        project = await run_sync(database.get_project, project_id)
         if not project:
             raise ValueError(f"Project not found: {project_id}")
 
     # Get or create session
     if session_id:
-        session = database.get_session(session_id)
+        session = await run_sync(database.get_session, session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
         resume_id = session.get("sdk_session_id")
@@ -1474,7 +1475,8 @@ async def execute_query(
         title = prompt[:50].strip()
         if len(prompt) > 50:
             title += "..."
-        session = database.create_session(
+        session = await run_sync(
+            database.create_session,
             session_id=session_id,
             profile_id=profile_id,
             project_id=project_id,
@@ -1492,7 +1494,8 @@ async def execute_query(
         )
 
     # Store user message with profile_id for per-query tracking
-    database.add_session_message(
+    await run_sync(
+        database.add_session_message,
         session_id=session_id,
         role="user",
         content=prompt,
@@ -1605,7 +1608,8 @@ async def execute_query(
 
     # Update session with SDK session ID for resume
     if sdk_session_id:
-        database.update_session(
+        await run_sync(
+            database.update_session,
             session_id=session_id,
             sdk_session_id=sdk_session_id,
             cost_increment=metadata.get("total_cost_usd", 0),
@@ -1617,7 +1621,8 @@ async def execute_query(
     # Store tool messages (tool_use and tool_result)
     for tool_msg in tool_messages:
         if tool_msg["type"] == "tool_use":
-            database.add_session_message(
+            await run_sync(
+                database.add_session_message,
                 session_id=session_id,
                 role="tool_use",
                 content=f"Using tool: {tool_msg['name']}",
@@ -1627,7 +1632,8 @@ async def execute_query(
                 profile_id=profile_id
             )
         elif tool_msg["type"] == "tool_result":
-            database.add_session_message(
+            await run_sync(
+                database.add_session_message,
                 session_id=session_id,
                 role="tool_result",
                 content=tool_msg.get("output", ""),
@@ -1638,7 +1644,8 @@ async def execute_query(
 
     # Store assistant response
     full_response = "\n".join(response_text)
-    database.add_session_message(
+    await run_sync(
+        database.add_session_message,
         session_id=session_id,
         role="assistant",
         content=full_response,
@@ -1647,7 +1654,8 @@ async def execute_query(
     )
 
     # Log usage
-    database.log_usage(
+    await run_sync(
+        database.log_usage,
         session_id=session_id,
         profile_id=profile_id,
         model=metadata.get("model"),
@@ -1707,7 +1715,7 @@ async def stream_query(
     # Get project if specified
     project = None
     if project_id:
-        project = database.get_project(project_id)
+        project = await run_sync(database.get_project, project_id)
         if not project:
             yield {"type": "error", "message": f"Project not found: {project_id}"}
             return
@@ -1717,7 +1725,7 @@ async def stream_query(
     resume_id = None
 
     if session_id:
-        session = database.get_session(session_id)
+        session = await run_sync(database.get_session, session_id)
         if not session:
             yield {"type": "error", "message": f"Session not found: {session_id}"}
             return
@@ -1729,7 +1737,8 @@ async def stream_query(
         title = prompt[:50].strip()
         if len(prompt) > 50:
             title += "..."
-        session = database.create_session(
+        session = await run_sync(
+            database.create_session,
             session_id=session_id,
             profile_id=profile_id,
             project_id=project_id,
@@ -1740,7 +1749,8 @@ async def stream_query(
         logger.debug(f"Created new session {session_id} with title: {title}")
 
     # Store user message and broadcast to other devices
-    user_msg = database.add_session_message(
+    user_msg = await run_sync(
+        database.add_session_message,
         session_id=session_id,
         role="user",
         content=prompt,
@@ -1755,7 +1765,8 @@ async def stream_query(
     )
 
     # Log to sync log for polling fallback
-    database.add_sync_log(
+    await run_sync(
+        database.add_sync_log,
         session_id=session_id,
         event_type="message_added",
         entity_type="message",
@@ -1867,7 +1878,8 @@ async def stream_query(
     )
 
     # Log stream start for polling fallback
-    database.add_sync_log(
+    await run_sync(
+        database.add_sync_log,
         session_id=session_id,
         event_type="stream_start",
         entity_type="message",
@@ -2076,7 +2088,8 @@ async def stream_query(
     try:
         # Update session in database
         if sdk_session_id:
-            database.update_session(
+            await run_sync(
+                database.update_session,
                 session_id=session_id,
                 sdk_session_id=sdk_session_id,
                 cost_increment=metadata.get("total_cost_usd", 0),
@@ -2092,7 +2105,8 @@ async def stream_query(
         # Store tool messages (tool_use and tool_result)
         for tool_msg in tool_messages:
             if tool_msg.get("type") == "tool_use":
-                database.add_session_message(
+                await run_sync(
+                    database.add_session_message,
                     session_id=session_id,
                     role="tool_use",
                     content=f"Using tool: {tool_msg.get('name', 'unknown')}",
@@ -2102,7 +2116,8 @@ async def stream_query(
                     profile_id=profile_id
                 )
             elif tool_msg.get("type") == "tool_result":
-                database.add_session_message(
+                await run_sync(
+                    database.add_session_message,
                     session_id=session_id,
                     role="tool_result",
                     content=tool_msg.get("output", ""),
@@ -2117,7 +2132,8 @@ async def stream_query(
         # Store assistant response
         full_response = "\n".join(response_text)
         if full_response or interrupted or tool_messages:
-            assistant_msg = database.add_session_message(
+            assistant_msg = await run_sync(
+                database.add_session_message,
                 session_id=session_id,
                 role="assistant",
                 content=full_response + ("\n[Interrupted]" if interrupted else ""),
@@ -2126,7 +2142,8 @@ async def stream_query(
             )
 
             # Log stream end for polling fallback
-            database.add_sync_log(
+            await run_sync(
+                database.add_sync_log,
                 session_id=session_id,
                 event_type="stream_end",
                 entity_type="message",
@@ -2143,7 +2160,8 @@ async def stream_query(
     try:
         # Log usage
         if metadata:
-            database.log_usage(
+            await run_sync(
+                database.log_usage,
                 session_id=session_id,
                 profile_id=profile_id,
                 model=metadata.get("model"),
@@ -2189,7 +2207,8 @@ async def _run_background_query(
     profile_id = profile.get("id")
 
     # Store user message and broadcast to other devices
-    user_msg = database.add_session_message(
+    user_msg = await run_sync(
+        database.add_session_message,
         session_id=session_id,
         role="user",
         content=prompt,
@@ -2204,7 +2223,8 @@ async def _run_background_query(
     )
 
     # Log to sync log for polling fallback
-    database.add_sync_log(
+    await run_sync(
+        database.add_sync_log,
         session_id=session_id,
         event_type="message_added",
         entity_type="message",
@@ -2324,7 +2344,8 @@ async def _run_background_query(
         )
 
     # Log stream start for polling fallback
-    database.add_sync_log(
+    await run_sync(
+        database.add_sync_log,
         session_id=session_id,
         event_type="stream_start",
         entity_type="message",
@@ -2552,7 +2573,8 @@ async def _run_background_query(
     # Update session in database
     if sdk_session_id:
         try:
-            database.update_session(
+            await run_sync(
+                database.update_session,
                 session_id=session_id,
                 sdk_session_id=sdk_session_id,
                 cost_increment=metadata.get("total_cost_usd", 0),
@@ -2568,7 +2590,8 @@ async def _run_background_query(
     for tool_msg in tool_messages:
         try:
             if tool_msg["type"] == "tool_use":
-                database.add_session_message(
+                await run_sync(
+                    database.add_session_message,
                     session_id=session_id,
                     role="tool_use",
                     content=f"Using tool: {tool_msg['name']}",
@@ -2578,7 +2601,8 @@ async def _run_background_query(
                     profile_id=profile_id
                 )
             elif tool_msg["type"] == "tool_result":
-                database.add_session_message(
+                await run_sync(
+                    database.add_session_message,
                     session_id=session_id,
                     role="tool_result",
                     content=tool_msg.get("output", ""),
@@ -2593,7 +2617,8 @@ async def _run_background_query(
     full_response = "\n".join(response_text)
     if full_response or interrupted or tool_messages:
         try:
-            assistant_msg = database.add_session_message(
+            assistant_msg = await run_sync(
+                database.add_session_message,
                 session_id=session_id,
                 role="assistant",
                 content=full_response + ("\n[Interrupted]" if interrupted else ""),
@@ -2603,7 +2628,8 @@ async def _run_background_query(
 
             # Log stream end for polling fallback
             try:
-                database.add_sync_log(
+                await run_sync(
+                    database.add_sync_log,
                     session_id=session_id,
                     event_type="stream_end",
                     entity_type="message",
@@ -2622,7 +2648,8 @@ async def _run_background_query(
     # Log usage
     if metadata and not metadata.get("error"):
         try:
-            database.log_usage(
+            await run_sync(
+                database.log_usage,
                 session_id=session_id,
                 profile_id=profile["id"],
                 model=metadata.get("model"),
@@ -2660,7 +2687,7 @@ async def start_background_query(
     # Get project if specified
     project = None
     if project_id:
-        project = database.get_project(project_id)
+        project = await run_sync(database.get_project, project_id)
         if not project:
             raise ValueError(f"Project not found: {project_id}")
 
@@ -2668,7 +2695,7 @@ async def start_background_query(
     resume_id = None
 
     if session_id:
-        session = database.get_session(session_id)
+        session = await run_sync(database.get_session, session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
         resume_id = session.get("sdk_session_id")
@@ -2678,7 +2705,8 @@ async def start_background_query(
         title = prompt[:50].strip()
         if len(prompt) > 50:
             title += "..."
-        session = database.create_session(
+        session = await run_sync(
+            database.create_session,
             session_id=session_id,
             profile_id=profile_id,
             project_id=project_id,
@@ -2840,13 +2868,13 @@ async def stream_to_websocket(
     # Get project if specified
     project = None
     if project_id:
-        project = database.get_project(project_id)
+        project = await run_sync(database.get_project, project_id)
         if not project:
             yield {"type": "error", "message": f"Project not found: {project_id}"}
             return
 
     # Get session for resume ID
-    session = database.get_session(session_id)
+    session = await run_sync(database.get_session, session_id)
     resume_id = session.get("sdk_session_id") if session else None
 
     # Determine permission mode
@@ -3705,7 +3733,8 @@ async def stream_to_websocket(
     # Title is NOT set here — it was already set atomically during session
     # creation in the WebSocket handler. Setting it again would overwrite
     # the 100-char title with a shorter 50-char version.
-    database.update_session(
+    await run_sync(
+        database.update_session,
         session_id=session_id,
         sdk_session_id=sdk_session_id,
         cost_increment=metadata.get("total_cost_usd", 0),
@@ -3718,7 +3747,8 @@ async def stream_to_websocket(
     # Store tool messages (tool_use and tool_result)
     for tool_msg in tool_messages:
         if tool_msg["type"] == "tool_use":
-            database.add_session_message(
+            await run_sync(
+                database.add_session_message,
                 session_id=session_id,
                 role="tool_use",
                 content=f"Using tool: {tool_msg['name']}",
@@ -3728,7 +3758,8 @@ async def stream_to_websocket(
                 profile_id=profile_id
             )
         elif tool_msg["type"] == "tool_result":
-            database.add_session_message(
+            await run_sync(
+                database.add_session_message,
                 session_id=session_id,
                 role="tool_result",
                 content=tool_msg.get("output", ""),
@@ -3740,7 +3771,8 @@ async def stream_to_websocket(
     # Store assistant response
     full_response = "".join(response_text)
     if full_response or tool_messages or interrupted:
-        database.add_session_message(
+        await run_sync(
+            database.add_session_message,
             session_id=session_id,
             role="assistant",
             content=full_response + ("\n\n[Interrupted]" if interrupted else ""),
@@ -3750,7 +3782,8 @@ async def stream_to_websocket(
 
     # Log usage
     if metadata:
-        database.log_usage(
+        await run_sync(
+            database.log_usage,
             session_id=session_id,
             profile_id=profile_id,
             model=metadata.get("model"),

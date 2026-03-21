@@ -701,25 +701,38 @@ class SyncEngine:
         """Send a message to all devices for a user, excluding source device.
 
         Private helper used by user-level broadcast methods.
+
+        Takes a snapshot of connections under the lock, then releases before
+        performing potentially-slow WebSocket sends (same pattern as
+        broadcast_tabs_updated).
         """
+        # Snapshot connections under lock, then release before I/O
         async with self._user_lock:
             user_devices = self._user_connections.get(user_id, {})
             if not user_devices:
                 return
+            targets = [
+                (did, conn) for did, conn in user_devices.items()
+                if did != source_device_id
+            ]
 
-            failed_devices = []
-            for device_id, conn in user_devices.items():
-                if device_id == source_device_id:
-                    continue
-                success = await conn.send_json(message)
-                if not success:
-                    failed_devices.append(device_id)
+        if not targets:
+            return
 
-            for device_id in failed_devices:
-                if device_id in self._user_connections.get(user_id, {}):
-                    del self._user_connections[user_id][device_id]
-            if self._user_connections.get(user_id) and not self._user_connections[user_id]:
-                del self._user_connections[user_id]
+        failed_devices = []
+        for device_id, conn in targets:
+            success = await conn.send_json(message)
+            if not success:
+                failed_devices.append(device_id)
+
+        # Clean up failed connections under the lock
+        if failed_devices:
+            async with self._user_lock:
+                for device_id in failed_devices:
+                    if device_id in self._user_connections.get(user_id, {}):
+                        del self._user_connections[user_id][device_id]
+                if self._user_connections.get(user_id) and not self._user_connections[user_id]:
+                    del self._user_connections[user_id]
 
     async def broadcast_user_session_created(
         self,

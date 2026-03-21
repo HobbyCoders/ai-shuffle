@@ -335,17 +335,17 @@ async def chat_websocket(
         else:
             # Fall back to JSONL parsing (normal path: no interrupted session in memory)
             initial_messages = []
-            session_data = database.get_session(session_id)
+            session_data = await run_sync(database.get_session, session_id)
             if session_data:
                 sdk_session_id = session_data.get("sdk_session_id")
                 if sdk_session_id:
                     working_dir = str(settings.workspace_dir)
                     if project_id:
-                        project = database.get_project(project_id)
+                        project = await run_sync(database.get_project, project_id)
                         if project:
                             working_dir = get_project_working_dir(project)
                     try:
-                        initial_messages, _usage = parse_session_history(sdk_session_id, working_dir)
+                        initial_messages, _usage = await run_sync(parse_session_history, sdk_session_id, working_dir)
                     except Exception as e:
                         ctx.warning(logger, f"Failed to load history for live store: {e}")
 
@@ -436,7 +436,7 @@ async def chat_websocket(
             import time as time_module
             duration = time_module.time() - stream_state.query_start_time
             final_metadata = stream_state.final_metadata
-            session_data = database.get_session(session_id)
+            session_data = await run_sync(database.get_session, session_id)
             try:
                 # Legacy webhook dispatch
                 asyncio.create_task(dispatch_session_complete(
@@ -515,7 +515,7 @@ async def chat_websocket(
                 )
 
             # Dispatch notifications for session error (non-blocking)
-            session_data = database.get_session(session_id)
+            session_data = await run_sync(database.get_session, session_id)
             try:
                 # Legacy webhook dispatch
                 asyncio.create_task(dispatch_session_error(
@@ -636,12 +636,12 @@ async def chat_websocket(
                         if not session_id:
                             # Validate worktree access if provided
                             if worktree_id:
-                                worktree = database.get_worktree(worktree_id)
+                                worktree = await run_sync(database.get_worktree, worktree_id)
                                 if not worktree:
                                     await send_json({"type": "error", "message": f"Worktree not found: {worktree_id}"})
                                     continue
                                 # Get repository to verify project ownership
-                                repo = database.get_git_repository(worktree["repository_id"])
+                                repo = await run_sync(database.get_git_repository, worktree["repository_id"])
                                 if not repo:
                                     await send_json({"type": "error", "message": "Worktree repository not found"})
                                     continue
@@ -663,7 +663,8 @@ async def chat_websocket(
                             # Get worktree info for persistent storage on session
                             wt_branch = worktree.get("branch_name") if worktree_id and worktree else None
                             wt_path = worktree.get("worktree_path") if worktree_id and worktree else None
-                            database.create_session(
+                            await run_sync(
+                                database.create_session,
                                 session_id=session_id,
                                 profile_id=profile_id,
                                 project_id=project_id,
@@ -698,7 +699,8 @@ async def chat_websocket(
                             current_session_id = session_id
 
                         # Store user message with profile_id for per-query tracking
-                        database.add_session_message(
+                        await run_sync(
+                            database.add_session_message,
                             session_id=session_id,
                             role="user",
                             content=prompt,
@@ -799,7 +801,8 @@ async def chat_websocket(
                                 pass
 
                         # Step 3: Store user message with profile_id for per-query tracking
-                        database.add_session_message(
+                        await run_sync(
+                            database.add_session_message,
                             session_id=session_id,
                             role="user",
                             content=prompt,
@@ -830,12 +833,12 @@ async def chat_websocket(
                         session_id = data.get("session_id")
                         if session_id:
                             # Try direct lookup by AI Shuffle session ID first
-                            session = database.get_session(session_id)
+                            session = await run_sync(database.get_session, session_id)
 
                             # If not found, try fallback lookup by SDK session ID (Claude Code UUID)
                             # This handles cases where old references might use the SDK session ID
                             if not session:
-                                session = database.get_session_by_sdk_id(session_id)
+                                session = await run_sync(database.get_session_by_sdk_id, session_id)
                                 if session:
                                     logger.debug(f"Session found via SDK session ID fallback: {session_id} -> {session['id']}")
                                     # Update session_id to the actual AI Shuffle ID for consistency
@@ -886,7 +889,7 @@ async def chat_websocket(
                                 working_dir = str(settings.workspace_dir)
                                 project_id = session.get("project_id")
                                 if project_id:
-                                    project = database.get_project(project_id)
+                                    project = await run_sync(database.get_project, project_id)
                                     if project:
                                         working_dir = get_project_working_dir(project)
 
@@ -895,7 +898,7 @@ async def chat_websocket(
                                     try:
                                         from app.core.jsonl_parser import parse_session_history
 
-                                        messages, usage_data = parse_session_history(sdk_session_id, working_dir)
+                                        messages, usage_data = await run_sync(parse_session_history, sdk_session_id, working_dir)
                                         logger.debug(f"Loaded {len(messages)} messages from JSONL for session {session_id}")
 
                                         # Merge profile_id using cached map (avoids loading all DB messages)
@@ -928,7 +931,7 @@ async def chat_websocket(
 
                                 # Fall back to database if JSONL not available or failed
                                 if not messages:
-                                    db_messages = database.get_session_messages(session_id)
+                                    db_messages = await run_sync(database.get_session_messages, session_id)
                                     # Transform DB messages to streaming format
                                     for m in db_messages:
                                         msg_type_value = None
@@ -1012,7 +1015,7 @@ async def chat_websocket(
                                 # Add worktree info if session is linked to a worktree
                                 worktree_id = session.get("worktree_id")
                                 if worktree_id:
-                                    worktree = database.get_worktree(worktree_id)
+                                    worktree = await run_sync(database.get_worktree, worktree_id)
                                     if worktree:
                                         session["worktree_id"] = worktree_id
                                         session["worktree_branch"] = worktree.get("branch_name")
@@ -1322,7 +1325,7 @@ async def session_sync_websocket(
         return
 
     # Verify session exists
-    session = database.get_session(session_id)
+    session = await run_sync(database.get_session, session_id)
     if not session:
         await websocket.close(code=4004, reason="Session not found")
         return
@@ -1339,7 +1342,7 @@ async def session_sync_websocket(
         # Send initial state
         state = await sync_engine.get_session_state(session_id)
         state["session"] = session
-        state["messages"] = database.get_session_messages(session_id)
+        state["messages"] = await run_sync(database.get_session_messages, session_id)
 
         await websocket.send_json({
             "event_type": "state",
@@ -1370,8 +1373,8 @@ async def session_sync_websocket(
                     elif msg_type == "request_state":
                         # Client requesting current state
                         state = await sync_engine.get_session_state(session_id)
-                        state["session"] = database.get_session(session_id)
-                        state["messages"] = database.get_session_messages(session_id)
+                        state["session"] = await run_sync(database.get_session, session_id)
+                        state["messages"] = await run_sync(database.get_session_messages, session_id)
                         await websocket.send_json({
                             "event_type": "state",
                             "session_id": session_id,
@@ -1582,7 +1585,7 @@ async def cli_websocket(
         return
 
     # Get session info
-    session = database.get_session(session_id)
+    session = await run_sync(database.get_session, session_id)
     if not session:
         await websocket.close(code=4004, reason="Session not found")
         return
@@ -1600,7 +1603,7 @@ async def cli_websocket(
     working_dir = str(settings.workspace_dir)
     project_id = session.get("project_id")
     if project_id:
-        project = database.get_project(project_id)
+        project = await run_sync(database.get_project, project_id)
         if project:
             working_dir = get_project_working_dir(project)
 

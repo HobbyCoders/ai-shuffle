@@ -21,6 +21,7 @@ from app.core.models import (
 )
 import time
 from app.db import database
+from app.db.async_database import run_sync
 from app.db.tags import get_tags_for_sessions
 from app.db.sessions import get_fork_info_for_sessions
 from app.api.auth import require_auth, get_api_user_from_request
@@ -301,7 +302,8 @@ async def list_sessions(
         request, project_id, profile_id, api_user_id, admin_only, api_users_only, sync_claude_sessions
     )
 
-    sessions = database.get_sessions(
+    sessions = await run_sync(
+        database.get_sessions,
         project_id=project_id,
         profile_id=profile_id,
         status=status_filter,
@@ -339,7 +341,8 @@ async def list_sessions_paginated(
         request, project_id, profile_id, api_user_id, admin_only, api_users_only, sync_claude_sessions
     )
 
-    sessions, total = database.get_sessions_paginated(
+    sessions, total = await run_sync(
+        database.get_sessions_paginated,
         project_id=project_id,
         profile_id=profile_id,
         status=status_filter,
@@ -393,7 +396,8 @@ async def search_sessions(
         # Admin requesting only admin sessions
         filter_api_user_id = None
 
-    results = database.search_sessions(
+    results = await run_sync(
+        database.search_sessions,
         query=q,
         project_id=project_id,
         profile_id=profile_id,
@@ -406,10 +410,27 @@ async def search_sessions(
 
 
 def enrich_search_results_with_tags(results: list) -> list:
-    """Add tags array and has_forks field to each search result"""
+    """Add tags array and has_forks field to each search result.
+
+    Uses batch DB queries (2 total) instead of per-result queries to avoid
+    O(N) round-trips that slow down with result count.
+    """
+    if not results:
+        return results
+
+    session_ids = [r["id"] for r in results]
+
+    # Batch: tags for all results (1 query instead of N)
+    tags_by_session = get_tags_for_sessions(session_ids)
+
+    # Batch: fork info for all results (2 queries instead of N)
+    fork_info_by_session = get_fork_info_for_sessions(session_ids)
+
     for result in results:
-        result["tags"] = database.get_session_tags(result["id"])
-        result["has_forks"] = database.session_has_forks(result["id"])
+        sid = result["id"]
+        result["tags"] = tags_by_session.get(sid, [])
+        fork_info = fork_info_by_session.get(sid)
+        result["has_forks"] = fork_info["has_forks"] if fork_info else False
     return results
 
 
@@ -442,7 +463,8 @@ async def search_sessions_paginated(
     elif admin_only:
         filter_api_user_id = None
 
-    results, total = database.search_sessions_paginated(
+    results, total = await run_sync(
+        database.search_sessions_paginated,
         query=q,
         project_id=project_id,
         profile_id=profile_id,
@@ -472,12 +494,12 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     logger.debug(f"Loading session: {session_id}")
 
     # Try direct lookup by AI Shuffle session ID first
-    session = database.get_session(session_id)
+    session = await run_sync(database.get_session, session_id)
 
     # If not found, try fallback lookup by SDK session ID (Claude Code UUID)
     # This handles cases where old references might use the SDK session ID
     if not session:
-        session = database.get_session_by_sdk_id(session_id)
+        session = await run_sync(database.get_session_by_sdk_id, session_id)
         if session:
             logger.debug(f"Session found via SDK session ID fallback: {session_id} -> {session['id']}")
 
@@ -503,11 +525,11 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             # Get working dir from project if available
             project_id = session.get("project_id")
             if project_id:
-                project = database.get_project(project_id)
+                project = await run_sync(database.get_project, project_id)
                 if project:
                     working_dir = get_project_working_dir(project)
 
-            jsonl_messages, usage_data = parse_session_history(sdk_session_id, working_dir)
+            jsonl_messages, usage_data = await run_sync(parse_session_history, sdk_session_id, working_dir)
             if jsonl_messages:
                 # Get profile_id map (cached to avoid loading all DB messages every time)
                 from app.core.cost_utils import get_cached_profile_map
@@ -589,7 +611,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
 
     # Fallback 3: Database messages (oldest data, least rich)
     if not messages:
-        db_messages = database.get_session_messages(session_id)
+        db_messages = await run_sync(database.get_session_messages, session_id)
         # Transform DB messages to include type field for frontend compatibility
         for m in db_messages:
             msg = dict(m)
@@ -607,13 +629,13 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     attach_cost_metadata(messages, session_id)
 
     session["messages"] = messages
-    session["tags"] = database.get_session_tags(session_id)
-    session["has_forks"] = database.session_has_forks(session_id)
+    session["tags"] = await run_sync(database.get_session_tags, session_id)
+    session["has_forks"] = await run_sync(database.session_has_forks, session_id)
 
     # Add worktree info if session is linked to a worktree
     worktree_id = session.get("worktree_id")
     if worktree_id:
-        worktree = database.get_worktree(worktree_id)
+        worktree = await run_sync(database.get_worktree, worktree_id)
         if worktree:
             session["worktree_id"] = worktree_id
             session["worktree_branch"] = worktree.get("branch_name")
@@ -666,7 +688,7 @@ async def get_live_session(
     from app.core.live_session_store import live_session_store
 
     # Check session exists and user has access
-    session = database.get_session(session_id)
+    session = await run_sync(database.get_session, session_id)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -686,7 +708,7 @@ async def get_live_session(
 
     wt_id = session.get("worktree_id")
     if wt_id:
-        wt = database.get_worktree(wt_id)
+        wt = await run_sync(database.get_worktree, wt_id)
         if wt:
             session_meta["worktree_id"] = wt_id
             session_meta["worktree_branch"] = wt.get("branch_name")
@@ -734,11 +756,11 @@ async def get_live_session(
 
             project_id = session.get("project_id")
             if project_id:
-                project = database.get_project(project_id)
+                project = await run_sync(database.get_project, project_id)
                 if project:
                     working_dir = get_project_working_dir(project)
 
-            jsonl_messages, usage_data = parse_session_history(sdk_session_id, working_dir)
+            jsonl_messages, usage_data = await run_sync(parse_session_history, sdk_session_id, working_dir)
             if jsonl_messages:
                 # Optional fields to include when present (system, tool, subagent, metadata)
                 _OPTIONAL_LIVE_FIELDS = (
@@ -788,7 +810,7 @@ async def get_live_session(
 
     # Fallback 3: DB messages
     if not messages:
-        db_messages = database.get_session_messages(session_id)
+        db_messages = await run_sync(database.get_session_messages, session_id)
         for m in db_messages:
             msg = {
                 "id": str(m.get("id", "")),
@@ -857,7 +879,7 @@ async def update_session(
     token: str = Depends(require_auth)
 ):
     """Update session title or status. API users can only modify their accessible sessions."""
-    existing = database.get_session(session_id)
+    existing = await run_sync(database.get_session, session_id)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -866,7 +888,8 @@ async def update_session(
 
     check_session_access(request, existing)
 
-    session = database.update_session(
+    session = await run_sync(
+        database.update_session,
         session_id=session_id,
         title=title,
         status=session_status
@@ -878,7 +901,7 @@ async def update_session(
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_session(request: Request, session_id: str, token: str = Depends(require_auth)):
     """Delete a session and its messages. API users can only delete their accessible sessions."""
-    existing = database.get_session(session_id)
+    existing = await run_sync(database.get_session, session_id)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -891,7 +914,7 @@ async def delete_session(request: Request, session_id: str, token: str = Depends
     from app.core.session_pool import get_session_pool
     await get_session_pool().remove(session_id)
 
-    database.delete_session(session_id)
+    await run_sync(database.delete_session, session_id)
 
 
 @router.post("/batch-delete", status_code=status.HTTP_200_OK)
@@ -910,7 +933,7 @@ async def batch_delete_sessions(
 
     for session_id in body.session_ids:
         try:
-            existing = database.get_session(session_id)
+            existing = await run_sync(database.get_session, session_id)
             if not existing:
                 errors.append(f"Session not found: {session_id}")
                 continue
@@ -919,7 +942,7 @@ async def batch_delete_sessions(
             # Evict from session pool before deleting
             from app.core.session_pool import get_session_pool
             await get_session_pool().remove(session_id)
-            database.delete_session(session_id)
+            await run_sync(database.delete_session, session_id)
             deleted_count += 1
         except HTTPException as e:
             errors.append(f"Access denied for session {session_id}: {e.detail}")
@@ -936,7 +959,7 @@ async def batch_delete_sessions(
 @router.post("/{session_id}/archive")
 async def archive_session(request: Request, session_id: str, token: str = Depends(require_auth)):
     """Archive a session. API users can only archive their accessible sessions."""
-    existing = database.get_session(session_id)
+    existing = await run_sync(database.get_session, session_id)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -946,7 +969,8 @@ async def archive_session(request: Request, session_id: str, token: str = Depend
     check_session_access(request, existing)
 
     # Update session - result not needed for response
-    database.update_session(
+    await run_sync(
+        database.update_session,
         session_id=session_id,
         status="archived"
     )
@@ -957,7 +981,7 @@ async def archive_session(request: Request, session_id: str, token: str = Depend
 @router.patch("/{session_id}/favorite", response_model=Session)
 async def toggle_session_favorite(request: Request, session_id: str, token: str = Depends(require_auth)):
     """Toggle the favorite status of a session. Returns the updated session."""
-    existing = database.get_session(session_id)
+    existing = await run_sync(database.get_session, session_id)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -966,7 +990,7 @@ async def toggle_session_favorite(request: Request, session_id: str, token: str 
 
     check_session_access(request, existing)
 
-    session = database.toggle_session_favorite(session_id)
+    session = await run_sync(database.toggle_session_favorite, session_id)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -996,7 +1020,7 @@ async def get_sync_changes(
         - latest_id: The most recent sync ID (use for next poll)
         - is_streaming: Whether the session is currently streaming
     """
-    existing = database.get_session(session_id)
+    existing = await run_sync(database.get_session, session_id)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1005,8 +1029,8 @@ async def get_sync_changes(
 
     check_session_access(request, existing)
 
-    changes = database.get_sync_logs(session_id, since_id=since_id)
-    latest_id = database.get_latest_sync_id(session_id)
+    changes = await run_sync(database.get_sync_logs, session_id, since_id=since_id)
+    latest_id = await run_sync(database.get_latest_sync_id, session_id)
 
     # Check if streaming (import here to avoid circular import)
     from app.core.sync_engine import sync_engine
@@ -1040,7 +1064,7 @@ async def get_session_state(
         - connected_devices: Number of devices watching this session
         - streaming_messages: Buffered messages if streaming (for late-joiners)
     """
-    session = database.get_session(session_id)
+    session = await run_sync(database.get_session, session_id)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1093,7 +1117,7 @@ async def export_session(
             detail="Invalid format. Must be 'markdown' or 'json'"
         )
 
-    session = database.get_session(session_id)
+    session = await run_sync(database.get_session, session_id)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1115,11 +1139,11 @@ async def export_session(
             # Get working dir from project if available
             project_id = session.get("project_id")
             if project_id:
-                project = database.get_project(project_id)
+                project = await run_sync(database.get_project, project_id)
                 if project:
                     working_dir = get_project_working_dir(project)
 
-            jsonl_messages, _usage = parse_session_history(sdk_session_id, working_dir)
+            jsonl_messages, _usage = await run_sync(parse_session_history, sdk_session_id, working_dir)
             if jsonl_messages:
                 messages = jsonl_messages
         except Exception as e:
@@ -1128,7 +1152,7 @@ async def export_session(
 
     # Fall back to database if JSONL not available
     if not messages:
-        db_messages = database.get_session_messages(session_id)
+        db_messages = await run_sync(database.get_session_messages, session_id)
         for m in db_messages:
             msg = dict(m)
             if msg.get("tool_name"):
@@ -1412,13 +1436,13 @@ async def import_session(
     profile_id = session_data.get('profile_id') or 'default'
 
     # Verify profile exists, fall back to default if not
-    profile = database.get_profile(profile_id)
+    profile = await run_sync(database.get_profile, profile_id)
     if not profile:
         profile_id = 'default'
-        profile = database.get_profile(profile_id)
+        profile = await run_sync(database.get_profile, profile_id)
         if not profile:
             # Create default profile if it doesn't exist
-            profiles = database.get_all_profiles()
+            profiles = await run_sync(database.get_all_profiles)
             if profiles:
                 profile_id = profiles[0]['id']
             else:
@@ -1436,7 +1460,8 @@ async def import_session(
     _now = datetime.now(timezone.utc).isoformat()  # Available for future metadata use
 
     # Create session - result used implicitly by subsequent operations
-    database.create_session(
+    await run_sync(
+        database.create_session,
         session_id=new_session_id,
         profile_id=profile_id,
         project_id=session_data.get('project_id'),
@@ -1445,7 +1470,8 @@ async def import_session(
     )
 
     # Update session with SDK session ID and stats
-    database.update_session(
+    await run_sync(
+        database.update_session,
         session_id=new_session_id,
         sdk_session_id=new_sdk_session_id,
         cost_increment=session_data.get('total_cost_usd') or 0,
@@ -1464,7 +1490,7 @@ async def import_session(
         # Determine project directory - use /workspace by default
         working_dir = "/workspace"
         if session_data.get('project_id'):
-            project = database.get_project(session_data['project_id'])
+            project = await run_sync(database.get_project, session_data['project_id'])
             if project:
                 working_dir = get_project_working_dir(project)
 
@@ -1689,7 +1715,7 @@ async def import_jsonl_session(
     sdk_session_id = jsonl_path.stem
 
     # Check if this session is already imported
-    existing_session = database.get_session_by_sdk_id(sdk_session_id)
+    existing_session = await run_sync(database.get_session_by_sdk_id, sdk_session_id)
     if existing_session:
         return ImportJSONLResponse(
             session_id=existing_session["id"],
@@ -1706,14 +1732,14 @@ async def import_jsonl_session(
 
     # Get profile (default to 'default')
     profile_id = body.profile_id or 'default'
-    profile = database.get_profile(profile_id)
+    profile = await run_sync(database.get_profile, profile_id)
     if not profile:
         profile_id = 'default'
 
     # Validate project if specified
     project_id = body.project_id
     if project_id:
-        project = database.get_project(project_id)
+        project = await run_sync(database.get_project, project_id)
         if not project:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -1738,7 +1764,8 @@ async def import_jsonl_session(
     # Create new session in database
     new_session_id = f"ses-{uuid.uuid4().hex[:16]}"
 
-    database.create_session(
+    await run_sync(
+        database.create_session,
         session_id=new_session_id,
         profile_id=profile_id,
         project_id=project_id,
@@ -1747,7 +1774,8 @@ async def import_jsonl_session(
     )
 
     # Update session with SDK session ID and stats
-    database.update_session(
+    await run_sync(
+        database.update_session,
         session_id=new_session_id,
         sdk_session_id=sdk_session_id,
         cost_increment=total_cost,
@@ -1812,7 +1840,7 @@ async def fork_session(
     from app.core.jsonl_parser import get_session_jsonl_path, parse_jsonl_file
 
     # Get the original session
-    original_session = database.get_session(session_id)
+    original_session = await run_sync(database.get_session, session_id)
     if not original_session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1832,7 +1860,7 @@ async def fork_session(
     working_dir = "/workspace"
     project_id = original_session.get("project_id")
     if project_id:
-        project = database.get_project(project_id)
+        project = await run_sync(database.get_project, project_id)
         if project:
             working_dir = get_project_working_dir(project)
 
@@ -1899,7 +1927,8 @@ async def fork_session(
     fork_title = f"Fork of {original_title}"
 
     # Create the forked session in database - result used implicitly
-    database.create_session(
+    await run_sync(
+        database.create_session,
         session_id=new_session_id,
         profile_id=original_session.get('profile_id'),
         project_id=original_session.get('project_id'),
@@ -1910,7 +1939,8 @@ async def fork_session(
     )
 
     # Update with SDK session ID
-    database.update_session(
+    await run_sync(
+        database.update_session,
         session_id=new_session_id,
         sdk_session_id=new_sdk_session_id
     )
@@ -1943,7 +1973,7 @@ async def fork_session(
     except Exception as e:
         logger.exception("Failed to create JSONL file for forked session")
         # Delete the session we just created since fork failed
-        database.delete_session(new_session_id)
+        await run_sync(database.delete_session, new_session_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create forked session"
@@ -2009,7 +2039,7 @@ async def create_session_with_worktree(
     from app.core.worktree_manager import worktree_manager
 
     # Verify project exists and user has access
-    project = database.get_project(body.project_id)
+    project = await run_sync(database.get_project, body.project_id)
     if not project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

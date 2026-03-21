@@ -158,9 +158,13 @@ class SessionPool:
 
     - OrderedDict for O(1) LRU tracking (move_to_end on access)
     - Configurable max_size (default 3)
+    - Hard cap at max_size * 2 to prevent unbounded growth when all sessions stream
     - Eviction only on insertion when full (lazy — no background timer)
     - Thread-safe within a single asyncio event loop
     """
+
+    # Hard cap multiplier — even with all sessions streaming, never exceed this
+    _HARD_CAP_MULTIPLIER = 2
 
     def __init__(self, max_size: int = 3):
         self._pool: OrderedDict[str, SessionState] = OrderedDict()
@@ -194,13 +198,28 @@ class SessionPool:
         self._pool[session_id] = state
         self._pool.move_to_end(session_id)
 
+    @property
+    def hard_cap(self) -> int:
+        """Absolute maximum pool size, even when all sessions are streaming."""
+        return self._max_size * self._HARD_CAP_MULTIPLIER
+
+    def is_at_hard_cap(self) -> bool:
+        """Check if the pool has reached its absolute maximum size.
+
+        Callers should check this before starting new sessions and reject
+        with a "server busy" error if True.
+        """
+        return len(self._pool) >= self.hard_cap
+
     async def evict_if_needed(self) -> Optional[str]:
         """If pool is at capacity, evict the LRU non-streaming session.
 
         Returns the evicted session_id, or None if no eviction was needed/possible.
 
-        IMPORTANT: Never evicts a session that is currently streaming.
-        If all sessions are streaming, returns None (pool temporarily over capacity).
+        IMPORTANT: Prefers non-streaming sessions for eviction. If all sessions
+        are streaming, allows temporary over-capacity up to the hard cap
+        (max_size * 2). Beyond the hard cap, forcibly evicts the LRU streaming
+        session to prevent unbounded memory growth.
         """
         async with self._eviction_lock:
             if len(self._pool) < self._max_size:
@@ -212,11 +231,23 @@ class SessionPool:
                     return await self._do_evict(session_id, state)
 
             # All sessions are streaming — allow temporary over-capacity
-            logger.warning(
-                f"[Pool] At capacity ({self._max_size}) with all sessions streaming. "
-                f"Allowing temporary over-capacity ({len(self._pool)} sessions)."
+            # up to the hard cap
+            hard_cap = self.hard_cap
+            if len(self._pool) < hard_cap:
+                logger.warning(
+                    f"[Pool] At capacity ({self._max_size}) with all sessions streaming. "
+                    f"Allowing temporary over-capacity ({len(self._pool)}/{hard_cap} sessions)."
+                )
+                return None
+
+            # Hard cap reached — forcibly evict the LRU session (even if streaming)
+            # to prevent unbounded memory/subprocess growth
+            lru_session_id, lru_state = next(iter(self._pool.items()))
+            logger.error(
+                f"[Pool] Hard cap reached ({hard_cap}). Force-evicting LRU streaming "
+                f"session {lru_session_id} to prevent resource exhaustion."
             )
-            return None
+            return await self._do_evict(lru_session_id, lru_state)
 
     async def _do_evict(self, session_id: str, state: SessionState) -> str:
         """Evict a specific session. Returns the evicted session_id."""
