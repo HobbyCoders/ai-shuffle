@@ -275,6 +275,12 @@ class LiveSessionStore:
                     )
                     messages.append(msg)
 
+            # Carry forward token usage from the previous session if it exists.
+            # Without this, a new query in the same session resets usage to 0,
+            # causing the frontend context bar to flash to 0% until the first
+            # stream_start event arrives with fresh usage data (~300ms gap).
+            prev_session = self._sessions.get(session_id)
+
             session = LiveSession(
                 session_id=session_id,
                 messages=messages,
@@ -282,6 +288,13 @@ class LiveSessionStore:
                 last_update_id=1,
                 initial_message_count=len(messages),
             )
+
+            if prev_session:
+                session.input_tokens = prev_session.input_tokens
+                session.output_tokens = prev_session.output_tokens
+                session.cache_creation_tokens = prev_session.cache_creation_tokens
+                session.cache_read_tokens = prev_session.cache_read_tokens
+
             self._sessions[session_id] = session
             # Create a per-session lock for this session
             self._session_locks[session_id] = asyncio.Lock()

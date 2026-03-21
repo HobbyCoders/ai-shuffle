@@ -12,7 +12,7 @@
 	 */
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles } from '$lib/stores/app-data';
-	import { AUTO_COMPACTION_BASE, getContextMaxForModel } from '$lib/constants/chat';
+	import { getContextMaxForModel } from '$lib/constants/chat';
 
 	function formatTokenCount(count: number): string {
 		if (count >= 1000000) {
@@ -38,12 +38,11 @@
 	// Uses per-turn context window tokens (input + cache_creation + cache_read),
 	// NOT cumulative totalTokensIn which would massively overcount.
 	//
-	// AUTO_COMPACTION_BASE is a floor (not additive) because the SDK's
-	// input_tokens + cache_creation + cache_read already includes everything
-	// in the context window (system prompt, message history, tool results).
-	// Adding it on top would double-count the ~33k system prompt.
-	const baseContextUsed = $derived($activeSession.contextUsed ?? 0);
-	const contextUsed = $derived(Math.max(baseContextUsed, AUTO_COMPACTION_BASE));
+	// No additive or floor constant: the SDK's token values already include
+	// everything in the context window (system prompt, message history, tool
+	// results). Adding AUTO_COMPACTION_BASE double-counted; using it as a floor
+	// leaked a phantom 3% into empty sessions.
+	const contextUsed = $derived($activeSession.contextUsed ?? 0);
 	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
 	// Context color - always themed (no usage-based color changes)

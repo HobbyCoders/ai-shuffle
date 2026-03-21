@@ -15,7 +15,7 @@
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
-	import { AUTO_COMPACTION_BASE, getContextMaxForModel } from '$lib/constants/chat';
+	import { getContextMaxForModel } from '$lib/constants/chat';
 	import TiptapEditor from './TiptapEditor.svelte';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery } from './tiptap/serialization';
 
@@ -60,9 +60,9 @@
 	// successful poll. Do NOT import sessionStateManager from session-state.svelte.ts
 	// directly — that .svelte.ts file suffers from dual module evaluation
 	// (see KNOWN_ISSUES Root Cause 10).
-	const baseContextUsed = $derived($activeSession.contextUsed ?? 0);
-	// Floor (not additive): SDK values already include system prompt in cache tokens
-	const contextUsed = $derived(Math.max(baseContextUsed, AUTO_COMPACTION_BASE));
+	// SDK token values already include everything in the context window.
+	// No additive constant or floor — they caused double-counting and phantom values.
+	const contextUsed = $derived($activeSession.contextUsed ?? 0);
 	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
 
