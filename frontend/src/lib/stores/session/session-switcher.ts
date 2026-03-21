@@ -237,7 +237,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null) {
 		const generation = ++_switchGeneration;
 		const state = getState();
-		console.debug(`[SessionSwitcher] switchSession(${sessionId}): gen=${generation}, leaving=${state.sessionId}, msgs=${state.messages.length}, worktreeInfo=${JSON.stringify(worktreeInfo)}`);
+		// switchSession: gen=${generation}, leaving=${state.sessionId}
 
 		// Stop polling and clean up session state for the session we're leaving.
 		// Without removeSession, the old session lingers in sessionState with
@@ -352,7 +352,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		++_switchGeneration;
 		const state = getState();
 		const leavingSessionId = state.sessionId;
-		console.debug(`[SessionSwitcher] newChat(): leaving sessionId=${leavingSessionId}, messages=${state.messages.length}`);
+		// newChat: leaving sessionId=${leavingSessionId}
 
 		// Stop polling and clean up session state for the session we're leaving.
 		// Without removeSession, the old session lingers with isStreaming: true,
@@ -432,7 +432,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		}));
 
 		const afterState = getState();
-		console.debug(`[SessionSwitcher] newChat() done: sessionId=${afterState.sessionId}, messages=${afterState.messages.length}`);
+		// newChat complete
 
 		// Persist immediately (not debounced)
 		persistSessionImmediate();

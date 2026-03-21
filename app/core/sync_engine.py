@@ -685,7 +685,7 @@ class SyncEngine:
                     if device_id in self._user_connections.get(user_id, {}):
                         del self._user_connections[user_id][device_id]
 
-                if self._user_connections.get(user_id) and not self._user_connections[user_id]:
+                if user_id in self._user_connections and not self._user_connections[user_id]:
                     del self._user_connections[user_id]
 
         sent_count = len(targets) - len(failed_devices)
@@ -731,7 +731,7 @@ class SyncEngine:
                 for device_id in failed_devices:
                     if device_id in self._user_connections.get(user_id, {}):
                         del self._user_connections[user_id][device_id]
-                if self._user_connections.get(user_id) and not self._user_connections[user_id]:
+                if user_id in self._user_connections and not self._user_connections[user_id]:
                     del self._user_connections[user_id]
 
     async def broadcast_user_session_created(

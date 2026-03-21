@@ -116,7 +116,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	function handleDone(data: Record<string, unknown>): void {
 		const metadata = data.metadata as Record<string, unknown>;
 		const sessionId = data.session_id as string;
-		console.debug(`[WS] done: session_id=${sessionId}`);
+		// done event — poller will handle streaming→ended transition
 
 		internal.interruptPending = false;
 
@@ -195,10 +195,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		const msgType = data.type as string;
 		const eventType = data.event_type as string;
 
-		// Debug: log all WS messages for diagnostics
-		if (msgType === 'session_created' || msgType === 'start' || msgType === 'done' || msgType === 'stopped' || msgType === 'error') {
-			console.debug(`[WS] handleMessage: type=${msgType}, event_type=${eventType}, session_id=${data.session_id}`);
-		}
+		// Lifecycle events logged only on error path (see 'error' case below)
 
 		// Forward to notification system (triggers poller via pollNow/startStreaming).
 		//
@@ -313,7 +310,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const currentState = getState();
 				const acceptCreated = currentState.sessionId === sessionId ||
 					(!currentState.sessionId && internal.awaitingNewSession);
-				console.debug(`[WS] session_created: id=${sessionId}, accept=${acceptCreated}, currentId=${currentState.sessionId}, awaiting=${internal.awaitingNewSession}, title=${title}`);
 				if (acceptCreated) {
 					internal.awaitingNewSession = false;
 					// Set the sessionId and title so the header shows the correct
@@ -332,7 +328,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const currentState = getState();
 				const acceptStart = currentState.sessionId === sessionId ||
 					(!currentState.sessionId && internal.awaitingNewSession);
-				console.debug(`[WS] start: id=${sessionId}, accept=${acceptStart}, currentId=${currentState.sessionId}, awaiting=${internal.awaitingNewSession}`);
 				if (acceptStart) {
 					internal.awaitingNewSession = false;
 					// Set sessionId and streamStartTime so completion notification
@@ -587,7 +582,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			default:
-				if (msgType) console.debug(`[ActiveSession] Unhandled message type: ${msgType}`);
 				break;
 		}
 	}

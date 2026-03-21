@@ -73,7 +73,6 @@ class SessionNotifier {
 				(eventType === 'stream_chunk' || msgType === 'chunk' || msgType === 'stream_delta') &&
 				!sessionPoller.isPolling(sessionId)
 			) {
-				console.debug(`[Notifier] Got streaming data but not polling — starting streaming for ${sessionId}`);
 				sessionPoller.startStreaming(sessionId);
 				return;
 			}

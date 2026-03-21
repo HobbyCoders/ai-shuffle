@@ -84,6 +84,9 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 	// Visibility change handler reference (for cleanup)
 	let visibilityHandler: (() => void) | null = null;
 
+	// Track visibility health-check timeout so it can be cancelled
+	let visibilityCheckTimer: ReturnType<typeof setTimeout> | null = null;
+
 	// ── Ping / Health Check ──────────────────────────────────────────────
 
 	function stopPing() {
@@ -233,6 +236,12 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		visibilityHandler = () => {
 			if (destroyed) return;
 
+			// Cancel any pending health-check from a previous visibility change
+			if (visibilityCheckTimer !== null) {
+				clearTimeout(visibilityCheckTimer);
+				visibilityCheckTimer = null;
+			}
+
 			if (document.hidden) {
 				// Tab is hidden — pause pings to reduce idle CPU.
 				// The backend ping will keep the connection alive.
@@ -262,7 +271,8 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 						return;
 					}
 					// If no server message arrives within 5s, force reconnect
-					setTimeout(() => {
+					visibilityCheckTimer = setTimeout(() => {
+						visibilityCheckTimer = null;
 						if (lastMessageTime === preVisibilityTime && ws?.readyState === WebSocket.OPEN) {
 							console.warn('[WsConnection] No server response after tab return, forcing reconnect');
 							ws.close(4000, 'Half-open connection detected');
@@ -300,6 +310,11 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		destroy() {
 			destroyed = true;
 			disconnect();
+
+			if (visibilityCheckTimer !== null) {
+				clearTimeout(visibilityCheckTimer);
+				visibilityCheckTimer = null;
+			}
 
 			if (visibilityHandler && typeof document !== 'undefined') {
 				document.removeEventListener('visibilitychange', visibilityHandler);

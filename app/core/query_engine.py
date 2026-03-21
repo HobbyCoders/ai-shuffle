@@ -2761,6 +2761,12 @@ async def start_background_query(
     # The background task picks this up after pool.put() creates the state entry
     _pending_background_tasks[session_id] = task
 
+    # Safety net: if the task completes without _store_background_task being
+    # called (e.g., connection failure or early return), remove the orphaned entry.
+    def _cleanup_pending(t: asyncio.Task):
+        _pending_background_tasks.pop(session_id, None)
+    task.add_done_callback(_cleanup_pending)
+
     return {
         "session_id": session_id,
         "status": "started",
