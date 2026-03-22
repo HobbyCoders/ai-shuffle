@@ -12,6 +12,7 @@ import platform
 import re
 import subprocess
 import sys
+import time
 import uuid
 import asyncio
 from pathlib import Path
@@ -2961,6 +2962,7 @@ async def stream_to_websocket(
     stderr_queue: asyncio.Queue = asyncio.Queue()
 
     # Build options once (without callback — callback is set later if needed)
+    _build_opts_start = time.monotonic()
     options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
@@ -2971,6 +2973,9 @@ async def stream_to_websocket(
         api_user_id=api_user_id,
         session_id=session_id
     )
+    _build_opts_elapsed = time.monotonic() - _build_opts_start
+    if _build_opts_elapsed > 0.5:
+        logger.warning(f"[WS] build_options_from_profile took {_build_opts_elapsed:.2f}s for session {session_id}")
 
     if existing_state and existing_state.is_connected and is_subprocess_alive(existing_state):
         # Candidate for reuse — check if critical options changed
@@ -3173,8 +3178,10 @@ async def stream_to_websocket(
         logger.debug("[WS] ClaudeSDKClient created, attempting connect...")
 
         try:
+            _connect_start = time.monotonic()
             await asyncio.wait_for(client.connect(), timeout=60.0)
-            logger.debug(f"[WS] Connected to Claude SDK for session {session_id}")
+            _connect_elapsed = time.monotonic() - _connect_start
+            logger.info(f"[WS] SDK connect for session {session_id}: {_connect_elapsed:.1f}s (reuse=False)")
         except Exception as e:
             import traceback
             logger.error(f"[WS] Failed to connect for session {session_id}: {e}")
@@ -3245,13 +3252,21 @@ async def stream_to_websocket(
         # Resolve virtual @Notes/note-id references to actual content
         prompt = resolve_note_references(prompt)
 
+        _query_send_start = time.monotonic()
         await state.client.query(prompt)
+        _query_send_elapsed = time.monotonic() - _query_send_start
+        if _query_send_elapsed > 1.0:
+            logger.warning(f"[WS] client.query() took {_query_send_elapsed:.1f}s for session {session_id}")
 
+        _stream_start = time.monotonic()
+        _event_count = 0
         async for message in state.client.receive_response():
             # Don't break immediately on interrupt_requested — let receive_response()
             # end naturally so remaining in-flight tool calls reach the UI.
             # The SDK's client.interrupt() causes receive_response() to end after
             # completing any in-progress operations.
+
+            _event_count += 1
 
             # Drain stderr queue and yield any plugin messages
             for stderr_msg in await drain_stderr_queue():
@@ -3764,6 +3779,10 @@ async def stream_to_websocket(
 
             else:
                 logger.warning(f"[WS] Unhandled message type: {type(message).__name__}")
+
+        # Log streaming performance summary
+        _stream_elapsed = time.monotonic() - _stream_start
+        logger.info(f"[WS] Streaming complete for session {session_id}: {_event_count} events in {_stream_elapsed:.1f}s")
 
         # Check if the loop ended due to an interrupt request
         # (SDK's receive_response() ended naturally after client.interrupt())

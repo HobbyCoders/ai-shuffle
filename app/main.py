@@ -188,7 +188,10 @@ async def lifespan(app: FastAPI):
         while True:
             try:
                 await asyncio.sleep(3600)  # 1 hour
+                _cleanup_start = time.monotonic()
                 await asyncio.to_thread(database.cleanup_expired_sessions)
+                _cleanup_elapsed = time.monotonic() - _cleanup_start
+                logger.info(f"Periodic session cleanup completed in {_cleanup_elapsed:.2f}s")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -196,6 +199,11 @@ async def lifespan(app: FastAPI):
 
     _cleanup_task = asyncio.create_task(_periodic_session_cleanup())
     logger.info("Periodic session cleanup task started (every 1 hour)")
+
+    # Start resource monitor for diagnosing progressive slowdown.
+    # Logs dict sizes, connection counts, pool sizes, memory usage every 5 minutes.
+    from app.core.resource_monitor import start_resource_monitor, stop_resource_monitor
+    _monitor_task = await start_resource_monitor(interval_seconds=300)
 
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
@@ -208,6 +216,9 @@ async def lifespan(app: FastAPI):
         await _cleanup_task
     except asyncio.CancelledError:
         pass
+
+    # Stop resource monitor
+    await stop_resource_monitor(_monitor_task)
 
     # Close shared HTTP client
     from app.core.http_client import close_http_client

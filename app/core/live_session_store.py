@@ -932,7 +932,7 @@ class LiveSessionStore:
             session.is_streaming = False
             session.active_block_type = None
             self._increment_update_id(session)
-            logger.debug(f"Ended streaming for session {session_id} with {len(session.messages)} messages (kept in memory)")
+            logger.info(f"Ended streaming for session {session_id}: {len(session.messages)} messages kept in memory (interrupted={interrupted}). Total in store: sessions={len(self._sessions)} locks={len(self._session_locks)}")
 
             return [m.to_dict() for m in session.messages]
 
@@ -956,12 +956,20 @@ class LiveSessionStore:
             session = self._sessions.get(session_id)
             if session:
                 if session.is_streaming:
-                    logger.debug(f"Skipping cleanup of session {session_id}: still streaming (new query took over)")
+                    logger.info(f"Skipping cleanup of session {session_id}: still streaming (new query took over)")
                     return False
+                msg_count = len(session.messages)
                 del self._sessions[session_id]
                 self._session_locks.pop(session_id, None)
-                logger.debug(f"Cleaned up ended session {session_id} from memory")
+                remaining = len(self._sessions)
+                remaining_locks = len(self._session_locks)
+                logger.info(f"Cleaned up ended session {session_id} ({msg_count} messages). Remaining: sessions={remaining} locks={remaining_locks}")
                 return True
+            else:
+                # Log orphaned lock cleanup attempt
+                orphaned_lock = self._session_locks.pop(session_id, None)
+                if orphaned_lock:
+                    logger.warning(f"Cleaned up orphaned lock for session {session_id} (no session in store). Remaining locks={len(self._session_locks)}")
             return False
 
     def get_session(self, session_id: str) -> Optional[LiveSession]:
@@ -1041,9 +1049,10 @@ class LiveSessionStore:
     async def cleanup_session(self, session_id: str) -> None:
         """Remove a session from the store (e.g., on error)."""
         async with self._lock:
-            self._sessions.pop(session_id, None)
+            removed_session = self._sessions.pop(session_id, None)
             self._session_locks.pop(session_id, None)
-            logger.debug(f"Cleaned up session {session_id} from live store")
+            msg_count = len(removed_session.messages) if removed_session else 0
+            logger.info(f"Force-cleaned session {session_id} ({msg_count} messages). Remaining: sessions={len(self._sessions)} locks={len(self._session_locks)}")
 
 
 # Global instance

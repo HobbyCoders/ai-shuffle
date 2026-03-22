@@ -77,9 +77,10 @@ async def _delayed_session_cleanup(session_id: str, delay_seconds: int = 30) -> 
     """
     try:
         await asyncio.sleep(delay_seconds)
-        await live_session_store.cleanup_ended_session(session_id)
+        cleaned = await live_session_store.cleanup_ended_session(session_id)
+        logger.info(f"Delayed cleanup for session {session_id}: {'removed' if cleaned else 'skipped (still streaming or not found)'}. Pending cleanups remaining: {len(_pending_cleanup_tasks) - 1}")
     except asyncio.CancelledError:
-        logger.debug(f"Delayed cleanup cancelled for session {session_id}")
+        logger.debug(f"Delayed cleanup cancelled for session {session_id} (new query started)")
     finally:
         # Remove ourselves from the tracking dict (idempotent)
         _pending_cleanup_tasks.pop(session_id, None)
@@ -345,7 +346,13 @@ async def chat_websocket(
                         if project:
                             working_dir = get_project_working_dir(project)
                     try:
+                        jsonl_start = time.monotonic()
                         initial_messages, _usage = await run_sync(parse_session_history, sdk_session_id, working_dir)
+                        jsonl_elapsed = time.monotonic() - jsonl_start
+                        if jsonl_elapsed > 1.0:
+                            ctx.warning(logger, f"JSONL parse took {jsonl_elapsed:.1f}s ({len(initial_messages)} messages)")
+                        else:
+                            ctx.debug(logger, f"JSONL parse: {jsonl_elapsed:.2f}s ({len(initial_messages)} messages)")
                     except Exception as e:
                         ctx.warning(logger, f"Failed to load history for live store: {e}")
 
@@ -387,8 +394,9 @@ async def chat_websocket(
                             heartbeat_data["pending_questions"] = question_count
                     await send_json(heartbeat_data)
 
+        query_wall_start = time.monotonic()
         try:
-            ctx.debug(logger, f"Starting query profile={profile_id}, project={project_id}, overrides={overrides}")
+            ctx.info(logger, f"Query start profile={profile_id} project={project_id}")
             if not await send_json({"type": "start", "session_id": session_id, "message_id": message_id}):
                 ctx.warning(logger, "Connection lost before query could start")
                 await live_session_store.cleanup_session(session_id)
@@ -430,7 +438,8 @@ async def chat_websocket(
                 # Dispatch to handler — updates live_session_store and broadcasts via sync_engine
                 await dispatch_event(event, event_ctx, stream_state)
 
-            ctx.debug(logger, "Query completed")
+            query_wall_elapsed = time.monotonic() - query_wall_start
+            ctx.info(logger, f"Query completed in {query_wall_elapsed:.1f}s")
 
             # Dispatch notifications for session completion (non-blocking)
             import time as time_module
@@ -466,7 +475,8 @@ async def chat_websocket(
 
         except asyncio.CancelledError:
             await send_json({"type": "stopped", "session_id": session_id})
-            ctx.debug(logger, "Query cancelled")
+            query_wall_elapsed = time.monotonic() - query_wall_start
+            ctx.info(logger, f"Query cancelled after {query_wall_elapsed:.1f}s")
 
             # End live session store with interrupted flag
             # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
@@ -490,7 +500,8 @@ async def chat_websocket(
                 )
 
         except Exception as e:
-            ctx.error(logger, f"Query error: {e}", exc_info=True)
+            query_wall_elapsed = time.monotonic() - query_wall_start
+            ctx.error(logger, f"Query error after {query_wall_elapsed:.1f}s: {e}", exc_info=True)
             await send_json({"type": "error", "message": "An internal error occurred"})
 
             # End live session store on error
@@ -594,6 +605,7 @@ async def chat_websocket(
             async with _active_sessions_lock:
                 if _active_chat_sessions.get(session_id) is current_task:
                     del _active_chat_sessions[session_id]
+                ctx.info(logger, f"Query teardown: active_sessions={len(_active_chat_sessions)} pending_cleanups={len(_pending_cleanup_tasks)}")
 
             # If no devices are connected after query finished, schedule cleanup
             # (don't destroy immediately — user may reopen within 30s)
