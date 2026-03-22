@@ -244,22 +244,4 @@
 		padding: 0 8px;
 	}
 
-	/* Small primary button */
-	.card-btn-primary--small {
-		padding: 6px 12px;
-		font-size: var(--text-sm, 0.75rem);
-	}
-
-	.card-btn-primary--small svg {
-		width: 14px;
-		height: 14px;
-	}
-
-	/* Mobile: larger touch targets */
-	@media (max-width: 639px) {
-		.card-btn-primary--small {
-			padding: 8px 16px;
-			min-height: 40px;
-		}
-	}
 </style>

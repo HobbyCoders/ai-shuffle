@@ -173,17 +173,6 @@
 		gap: 2px;
 	}
 
-	.setting-info label {
-		font-size: 0.875rem;
-		font-weight: 500;
-		color: var(--foreground);
-	}
-
-	.setting-desc {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-	}
-
 	.input {
 		padding: 8px 12px;
 		background-color: var(--input);

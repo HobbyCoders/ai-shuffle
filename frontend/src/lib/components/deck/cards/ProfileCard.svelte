@@ -867,19 +867,20 @@
 						</div>
 						<div class="pf-field-grid">
 							<div class="pf-field">
-								<label class="pf-label">Name <span class="required">*</span></label>
-								<input bind:value={profileForm.name} class="pf-input" placeholder="My Custom Agent" />
+								<label class="pf-label" for="profile-name">Name <span class="required">*</span></label>
+								<input id="profile-name" bind:value={profileForm.name} class="pf-input" placeholder="My Custom Agent" />
 							</div>
 							<div class="pf-field">
-								<label class="pf-label">Description</label>
-								<input bind:value={profileForm.description} class="pf-input" placeholder="A coding assistant for frontend work" />
+								<label class="pf-label" for="profile-description">Description</label>
+								<input id="profile-description" bind:value={profileForm.description} class="pf-input" placeholder="A coding assistant for frontend work" />
 							</div>
 							{#if editingProfile}
 								<div class="pf-field">
-									<label class="pf-label">Group</label>
+									<label class="pf-label" for="profile-group">Group</label>
 									<div class="pf-group-wrapper">
 									<div class="pf-group-row">
 										<select
+											id="profile-group"
 											class="pf-select"
 											value={groups?.profiles?.assignments?.[editingProfile.id] ?? ''}
 											onchange={(e) => {
@@ -911,6 +912,7 @@
 										{/if}
 									</div>
 									{#if creatingGroup}
+										<!-- svelte-ignore a11y_autofocus -->
 										<input
 											type="text"
 											class="pf-input pf-group-input"
@@ -938,8 +940,8 @@
 						</div>
 						<div class="pf-field-grid">
 							<div class="pf-field">
-								<label class="pf-label">Model</label>
-								<select class="pf-select" value={customModelMode ? '__custom__' : profileForm.model} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v === '__custom__') { customModelMode = true; profileForm.model = ''; } else { customModelMode = false; profileForm.model = v; } }}>
+								<label class="pf-label" for="profile-model">Model</label>
+								<select id="profile-model" class="pf-select" value={customModelMode ? '__custom__' : profileForm.model} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v === '__custom__') { customModelMode = true; profileForm.model = ''; } else { customModelMode = false; profileForm.model = v; } }}>
 									<option value="haiku">Haiku</option>
 									<option value="sonnet">Sonnet</option>
 									<option value="opus">Opus</option>
@@ -950,8 +952,8 @@
 								{/if}
 							</div>
 							<div class="pf-field">
-								<label class="pf-label">Permission Mode</label>
-								<select bind:value={profileForm.permission_mode} class="pf-select">
+								<label class="pf-label" for="profile-permission">Permission Mode</label>
+								<select id="profile-permission" bind:value={profileForm.permission_mode} class="pf-select">
 									<option value="default">Default</option>
 									<option value="acceptEdits">Accept Edits</option>
 									<option value="plan">Plan</option>
@@ -959,8 +961,8 @@
 								</select>
 							</div>
 							<div class="pf-field">
-								<label class="pf-label">Thinking Mode</label>
-								<select bind:value={profileForm.thinking_mode} class="pf-select">
+								<label class="pf-label" for="profile-thinking">Thinking Mode</label>
+								<select id="profile-thinking" bind:value={profileForm.thinking_mode} class="pf-select">
 									<option value="default">Default</option>
 									<option value="disabled">Off</option>
 									<option value="adaptive">Adaptive</option>
@@ -970,8 +972,8 @@
 								</select>
 							</div>
 							<div class="pf-field">
-								<label class="pf-label">Effort Level</label>
-								<select class="pf-select" value={profileForm.effort || ''} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; profileForm.effort = v ? v as 'low' | 'medium' | 'high' | 'max' : null; }}>
+								<label class="pf-label" for="profile-effort">Effort Level</label>
+								<select id="profile-effort" class="pf-select" value={profileForm.effort || ''} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; profileForm.effort = v ? v as 'low' | 'medium' | 'high' | 'max' : null; }}>
 									<option value="">Default</option>
 									<option value="low">Low</option>
 									<option value="medium">Medium</option>
@@ -980,8 +982,8 @@
 								</select>
 							</div>
 							<div class="pf-field">
-								<label class="pf-label">Max Turns</label>
-								<input type="number" bind:value={profileForm.max_turns} class="pf-input" placeholder="Unlimited" />
+								<label class="pf-label" for="profile-max-turns">Max Turns</label>
+								<input id="profile-max-turns" type="number" bind:value={profileForm.max_turns} class="pf-input" placeholder="Unlimited" />
 							</div>
 							</div>
 					</div>
@@ -1004,6 +1006,7 @@
 								class:active={profileForm.include_partial_messages}
 								role="switch"
 								aria-checked={profileForm.include_partial_messages}
+								aria-label="Toggle include partial messages"
 								onclick={() => profileForm.include_partial_messages = !profileForm.include_partial_messages}
 							>
 								<span class="pf-toggle-knob"></span>
@@ -1020,6 +1023,7 @@
 								class:active={profileForm.enable_file_checkpointing}
 								role="switch"
 								aria-checked={profileForm.enable_file_checkpointing}
+								aria-label="Toggle file checkpointing"
 								onclick={() => profileForm.enable_file_checkpointing = !profileForm.enable_file_checkpointing}
 							>
 								<span class="pf-toggle-knob"></span>
@@ -1282,6 +1286,7 @@
 							class:active={profileForm.system_prompt_inject_env}
 							role="switch"
 							aria-checked={profileForm.system_prompt_inject_env}
+							aria-label="Toggle inject environment details"
 							onclick={() => profileForm.system_prompt_inject_env = !profileForm.system_prompt_inject_env}
 						>
 							<span class="pf-toggle-knob"></span>
@@ -1298,12 +1303,12 @@
 						<p class="pf-desc">Configure the working environment for this profile.</p>
 						<div class="pf-field-grid">
 							<div class="pf-field">
-								<label class="pf-label">Working Directory</label>
-								<input bind:value={profileForm.cwd} class="pf-input pf-input--mono" placeholder="/home/user/projects/my-api" />
+								<label class="pf-label" for="profile-cwd">Working Directory</label>
+								<input id="profile-cwd" bind:value={profileForm.cwd} class="pf-input pf-input--mono" placeholder="/home/user/projects/my-api" />
 							</div>
 							<div class="pf-field">
-								<label class="pf-label">Run as User</label>
-								<input bind:value={profileForm.user} class="pf-input" placeholder="default" />
+								<label class="pf-label" for="profile-user">Run as User</label>
+								<input id="profile-user" bind:value={profileForm.user} class="pf-input" placeholder="default" />
 							</div>
 						</div>
 					</div>
@@ -1315,8 +1320,8 @@
 						</div>
 						<div class="pf-field-grid">
 							<div class="pf-field">
-								<label class="pf-label">Max Output Buffer</label>
-								<input type="number" bind:value={profileForm.max_buffer_size} class="pf-input" placeholder="200,000 chars" />
+								<label class="pf-label" for="profile-max-buffer">Max Output Buffer</label>
+								<input id="profile-max-buffer" type="number" bind:value={profileForm.max_buffer_size} class="pf-input" placeholder="200,000 chars" />
 							</div>
 						</div>
 					</div>

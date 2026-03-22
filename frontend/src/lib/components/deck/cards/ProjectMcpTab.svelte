@@ -195,6 +195,8 @@
 								{/if}
 							</div>
 						</div>
+						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<!-- svelte-ignore a11y_click_events_have_key_events -->
 						<div class="server-actions" onclick={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
 							<button
 								class="card-action-btn"
@@ -262,6 +264,8 @@
 								{/if}
 							</div>
 						</div>
+						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<!-- svelte-ignore a11y_click_events_have_key_events -->
 						<div class="server-actions" onclick={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
 							<button
 								class="card-action-btn"
@@ -433,12 +437,6 @@
 		font-weight: 500;
 		color: var(--muted-foreground);
 		padding: var(--space-1) 0;
-	}
-
-	.scope-icon {
-		width: 16px;
-		height: 16px;
-		flex-shrink: 0;
 	}
 
 	/* ─── Server Items ─── */

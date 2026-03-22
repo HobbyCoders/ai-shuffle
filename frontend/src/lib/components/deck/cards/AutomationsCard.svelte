@@ -1022,7 +1022,10 @@
 											<ChevronRight size={14} />
 										{/if}
 										<span class="af-item-type-badge">
-											<svelte:component this={getTriggerIcon(trigger.type)} size={12} />
+											{#if getTriggerIcon(trigger.type)}
+												{@const TriggerIcon = getTriggerIcon(trigger.type)}
+												<TriggerIcon size={12} />
+											{/if}
 											{triggerTypeLabel(trigger.type)}
 										</span>
 										{#if !expandedTriggers.has(trigIdx)}
@@ -1095,8 +1098,8 @@
 												{:else}
 													<div class="cron-builder-grid">
 														<div class="cron-field">
-															<label class="af-label">Minute</label>
-															<select class="af-input" bind:value={cronMinute}
+															<label class="af-label" for="auto-cron-minute-{trigIdx}">Minute</label>
+															<select class="af-input" id="auto-cron-minute-{trigIdx}" bind:value={cronMinute}
 																onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
 																<option value="*">Every minute</option>
 																<option value="*/5">Every 5 min</option>
@@ -1110,8 +1113,8 @@
 															</select>
 														</div>
 														<div class="cron-field">
-															<label class="af-label">Hour</label>
-															<select class="af-input" bind:value={cronHour}
+															<label class="af-label" for="auto-cron-hour-{trigIdx}">Hour</label>
+															<select class="af-input" id="auto-cron-hour-{trigIdx}" bind:value={cronHour}
 																onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
 																<option value="*">Every hour</option>
 																{#each Array.from({length: 24}, (_, i) => i) as h}
@@ -1120,8 +1123,8 @@
 															</select>
 														</div>
 														<div class="cron-field">
-															<label class="af-label">Day</label>
-															<select class="af-input" bind:value={cronDayOfMonth}
+															<label class="af-label" for="auto-cron-day-{trigIdx}">Day</label>
+															<select class="af-input" id="auto-cron-day-{trigIdx}" bind:value={cronDayOfMonth}
 																onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
 																<option value="*">Every day</option>
 																{#each Array.from({length: 31}, (_, i) => i + 1) as d}
@@ -1130,8 +1133,8 @@
 															</select>
 														</div>
 														<div class="cron-field">
-															<label class="af-label">Month</label>
-															<select class="af-input" bind:value={cronMonth}
+															<label class="af-label" for="auto-cron-month-{trigIdx}">Month</label>
+															<select class="af-input" id="auto-cron-month-{trigIdx}" bind:value={cronMonth}
 																onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
 																<option value="*">Every month</option>
 																{#each ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'] as m, mi}
@@ -1140,8 +1143,8 @@
 															</select>
 														</div>
 														<div class="cron-field" style="grid-column: 1 / -1">
-															<label class="af-label">Day of Week</label>
-															<select class="af-input" bind:value={cronDayOfWeek}
+															<label class="af-label" for="auto-cron-dow-{trigIdx}">Day of Week</label>
+															<select class="af-input" id="auto-cron-dow-{trigIdx}" bind:value={cronDayOfWeek}
 																onchange={() => { const expr = buildCronFromFields(); updateTriggerConfig(trigIdx, { ...trigger.config, expression: expr }); }}>
 																<option value="*">Every day</option>
 																<option value="1-5">Weekdays (Mon–Fri)</option>
@@ -1174,8 +1177,8 @@
 											</div>
 										{:else if trigger.type === 'interval'}
 											<div class="af-trigger-config">
-												<label class="af-label">Interval (seconds)</label>
-												<input type="number" class="af-input" min="60"
+												<label class="af-label" for="auto-interval-{trigIdx}">Interval (seconds)</label>
+												<input type="number" class="af-input" id="auto-interval-{trigIdx}" min="60"
 													value={trigger.config.seconds || ''}
 													oninput={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, seconds: parseInt(e.currentTarget.value) || 0 })}
 													placeholder="3600" />
@@ -1183,8 +1186,8 @@
 											</div>
 										{:else if trigger.type === 'connector_event'}
 											<div class="af-trigger-config">
-												<label class="af-label">Connector</label>
-												<select class="af-input"
+												<label class="af-label" for="auto-evt-connector-{trigIdx}">Connector</label>
+												<select class="af-input" id="auto-evt-connector-{trigIdx}"
 													value={trigger.config.connector_id || ''}
 													onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, connector_id: e.currentTarget.value })}>
 													<option value="">Select a connector...</option>
@@ -1192,8 +1195,8 @@
 														<option value={c.id}>{c.name} ({c.type})</option>
 													{/each}
 												</select>
-												<label class="af-label" style="margin-top: 12px">Event Type</label>
-												<select class="af-input"
+												<label class="af-label" for="auto-evt-type-{trigIdx}" style="margin-top: 12px">Event Type</label>
+												<select class="af-input" id="auto-evt-type-{trigIdx}"
 													value={trigger.config.event_type || ''}
 													onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, event_type: e.currentTarget.value })}>
 													<option value="">Select an event...</option>
@@ -1206,8 +1209,8 @@
 											</div>
 										{:else if trigger.type === 'connector_trigger'}
 											<div class="af-trigger-config">
-												<label class="af-label">Connector</label>
-												<select class="af-input"
+												<label class="af-label" for="auto-trig-connector-{trigIdx}">Connector</label>
+												<select class="af-input" id="auto-trig-connector-{trigIdx}"
 													value={trigger.config.connector_id || ''}
 													onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, connector_id: e.currentTarget.value, trigger_id: '' })}>
 													<option value="">Select a connector...</option>
@@ -1216,8 +1219,8 @@
 													{/each}
 												</select>
 												{#if trigger.config.connector_id}
-													<label class="af-label" style="margin-top: 12px">Trigger</label>
-													<select class="af-input"
+													<label class="af-label" for="auto-trig-id-{trigIdx}" style="margin-top: 12px">Trigger</label>
+													<select class="af-input" id="auto-trig-id-{trigIdx}"
 														value={trigger.config.trigger_id || ''}
 														onchange={(e) => updateTriggerConfig(trigIdx, { ...trigger.config, trigger_id: e.currentTarget.value })}>
 														<option value="">Select a trigger...</option>
@@ -1230,12 +1233,12 @@
 										{:else if trigger.type === 'webhook'}
 											<div class="af-trigger-config">
 												{#if currentView === 'edit' && selectedAutomation}
-													<label class="af-label">Webhook URL</label>
-													<input type="text" class="af-input af-input--mono"
+													<label class="af-label" for="auto-webhook-url-{trigIdx}">Webhook URL</label>
+													<input type="text" class="af-input af-input--mono" id="auto-webhook-url-{trigIdx}"
 														value={trigger.config.webhook_url || 'Generated after creation'} readonly />
 													{#if trigger.config.secret}
-														<label class="af-label" style="margin-top: 12px">Secret</label>
-														<input type="text" class="af-input af-input--mono"
+														<label class="af-label" for="auto-webhook-secret-{trigIdx}" style="margin-top: 12px">Secret</label>
+														<input type="text" class="af-input af-input--mono" id="auto-webhook-secret-{trigIdx}"
 															value={trigger.config.secret} readonly />
 													{/if}
 												{:else}
@@ -1363,8 +1366,8 @@
 														<div style="margin-top: 8px;">
 															{#each Object.entries(actionDef.input_schema.properties) as [key, schemaDef]}
 																{@const schemaObj = schemaDef as Record<string, any>}
-																<label class="af-label" style="font-size: 11px;">{key}</label>
-																<input type="text" class="af-input" style="font-size: 12px;"
+																<label class="af-label" for="auto-param-{i}-{key}" style="font-size: 11px;">{key}</label>
+																<input type="text" class="af-input" id="auto-param-{i}-{key}" style="font-size: 12px;"
 																	value={(step.params || {})[key] || ''}
 																	oninput={(e) => { if (!step.params) step.params = {}; step.params[key] = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}
 																	placeholder={schemaObj.description || key} />
@@ -1381,8 +1384,8 @@
 												oninput={(e) => { step.prompt = e.currentTarget.value; formActionSteps = [...formActionSteps]; }}></textarea>
 											<div class="af-field-grid" style="margin-top: 8px;">
 												<div class="af-field">
-													<label class="af-label" style="font-size: 11px;">Profile (optional)</label>
-													<select class="af-input" style="font-size: 12px;"
+													<label class="af-label" for="auto-step-profile-{i}" style="font-size: 11px;">Profile (optional)</label>
+													<select class="af-input" id="auto-step-profile-{i}" style="font-size: 12px;"
 														value={step.profile_id || ''}
 														onchange={(e) => { step.profile_id = e.currentTarget.value || undefined; formActionSteps = [...formActionSteps]; }}>
 														<option value="">Default (automation profile)</option>
@@ -1392,8 +1395,8 @@
 													</select>
 												</div>
 												<div class="af-field">
-													<label class="af-label" style="font-size: 11px;">Max turns</label>
-													<input type="number" class="af-input" style="font-size: 12px;"
+													<label class="af-label" for="auto-step-maxturns-{i}" style="font-size: 11px;">Max turns</label>
+													<input type="number" class="af-input" id="auto-step-maxturns-{i}" style="font-size: 12px;"
 														min="1" max="25"
 														value={step.max_turns ?? 1}
 														oninput={(e) => { step.max_turns = parseInt(e.currentTarget.value) || 1; formActionSteps = [...formActionSteps]; }} />
@@ -1421,8 +1424,8 @@
 											<p class="af-hint" style="margin-top: 4px;">Use {'{{response}}'} or {'{{trigger.data.field}}'} for template variables</p>
 										{:else if step.type === 'delay'}
 											<div style="margin-top: 8px;">
-												<label class="af-label" style="font-size: 11px;">Seconds to wait</label>
-												<input type="number" class="af-input" min="1" max="300"
+												<label class="af-label" for="auto-step-delay-{i}" style="font-size: 11px;">Seconds to wait</label>
+												<input type="number" class="af-input" id="auto-step-delay-{i}" min="1" max="300"
 													placeholder="5"
 													value={step.seconds ?? 5}
 													oninput={(e) => { step.seconds = parseInt(e.currentTarget.value) || 0; formActionSteps = [...formActionSteps]; }} />
@@ -2201,6 +2204,7 @@
 		color: var(--text-secondary, var(--muted-foreground));
 		display: -webkit-box;
 		-webkit-line-clamp: 1;
+		line-clamp: 1;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 	}
@@ -2905,6 +2909,7 @@
 		color: var(--text-secondary, var(--muted-foreground));
 		display: -webkit-box;
 		-webkit-line-clamp: 3;
+		line-clamp: 3;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 		margin: 0;

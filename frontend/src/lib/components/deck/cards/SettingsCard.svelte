@@ -1244,8 +1244,7 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 		gap: 2px;
 	}
 
-	.setting-info label,
-	.setting-label {
+	.setting-info label {
 		font-size: 0.875rem;
 		font-weight: 500;
 		color: var(--foreground);
@@ -1280,19 +1279,6 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	.input.compact {
 		padding: 6px 10px;
 		font-size: 0.8125rem;
-	}
-
-	.input.number {
-		width: 70px;
-		text-align: center;
-	}
-
-	/* Note: Select styling is handled by global select.input in app.css */
-	/* Do NOT add appearance/background-image here to avoid duplicate arrows */
-
-	.input.textarea {
-		resize: vertical;
-		min-height: 60px;
 	}
 
 	.input-group {
@@ -1354,13 +1340,6 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 		color: var(--destructive-foreground);
 	}
 
-	.btn.destructive {
-		background: var(--destructive);
-		color: var(--destructive-foreground, #fff);
-	}
-
-	.btn.destructive:hover:not(:disabled) { filter: brightness(1.1); }
-
 	.btn.compact {
 		padding: 6px 12px;
 		font-size: 0.8125rem;
@@ -1393,12 +1372,6 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 		border-color: var(--primary);
 	}
 
-	.toggle.small {
-		width: 36px;
-		height: 20px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.83);
-	}
-
 	.toggle-knob {
 		position: absolute;
 		top: 2px;
@@ -1413,15 +1386,6 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 
 	.toggle.active .toggle-knob {
 		transform: translateX(20px);
-	}
-
-	.toggle.small .toggle-knob {
-		width: 14px;
-		height: 14px;
-	}
-
-	.toggle.small.active .toggle-knob {
-		transform: translateX(16px);
 	}
 
 	/* Theme Switcher */
@@ -1580,18 +1544,6 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 		color: var(--destructive);
 	}
 
-	.inline-success {
-		font-size: 0.75rem;
-		color: var(--success);
-		margin-left: 8px;
-	}
-
-	.inline-error {
-		font-size: 0.75rem;
-		color: var(--destructive);
-		margin-left: 8px;
-	}
-
 	.validation-result {
 		font-size: 0.8125rem;
 		padding: 6px 10px;
@@ -1674,347 +1626,11 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 		color: var(--success);
 	}
 
-	/* API Keys */
-	.api-key-row {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		padding: 12px;
-		background: var(--muted);
-		border-radius: var(--radius);
-	}
-
-	.api-key-info {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-	}
-
-	.api-key-name {
-		font-weight: 500;
-		font-size: 0.875rem;
-	}
-
-	.masked-key {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		background: var(--secondary);
-		padding: 2px 6px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-	}
-
-	.api-key-input {
-		display: flex;
-		gap: 6px;
-	}
-
-	.api-key-input .input {
-		flex: 1;
-	}
-
-	/* fal.ai API Key */
-	.section-compact {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-
-	.section-header-compact h4 {
-		margin: 0;
-		font-size: 0.9375rem;
-		font-weight: 600;
-		color: var(--foreground);
-	}
-
-	.description-text {
-		margin: 0;
-		font-size: 0.8125rem;
-		color: var(--muted-foreground);
-		line-height: 1.5;
-	}
-
-	.key-input-row {
-		display: flex;
-		gap: 6px;
-	}
-
-	.key-input-row .input {
-		flex: 1;
-	}
-
-	/* Model Selectors */
-	.model-selector {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-
-	.model-selector .input {
-		flex: 1;
-	}
-
-	.loading-indicator {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-	}
-
-	/* Slider */
-	.slider {
-		width: 100%;
-		height: 6px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.25);
-		background: var(--muted);
-		appearance: none;
-		cursor: pointer;
-	}
-
-	.slider::-webkit-slider-thumb {
-		appearance: none;
-		width: 16px;
-		height: 16px;
-		border-radius: 50%;
-		background: var(--primary);
-		cursor: pointer;
-		box-shadow: var(--shadow-s);
-	}
-
-	.slider::-moz-range-thumb {
-		width: 16px;
-		height: 16px;
-		border-radius: 50%;
-		background: var(--primary);
-		cursor: pointer;
-		border: none;
-	}
-
 	/* Dividers */
 	.divider {
 		border: none;
 		border-top: 1px solid var(--border);
 		margin: 12px 0;
-	}
-
-	.subsection-title {
-		font-size: 0.8125rem;
-		font-weight: 600;
-		color: var(--muted-foreground);
-		margin: 8px 0 4px;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-	}
-
-	/* Users */
-	.users-list {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-
-	.user-row {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 10px 12px;
-		background: var(--muted);
-		border-radius: var(--radius);
-		transition: opacity 150ms ease;
-	}
-
-	.user-row.inactive {
-		opacity: 0.6;
-	}
-
-	.user-info {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex-wrap: wrap;
-	}
-
-	.user-name {
-		font-weight: 500;
-		font-size: 0.875rem;
-	}
-
-	.user-desc {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-	}
-
-	.user-actions {
-		display: flex;
-		gap: 4px;
-	}
-
-	.icon-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 32px;
-		height: 32px;
-		background: transparent;
-		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-
-	.icon-btn:hover {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-
-	.icon-btn:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.icon-btn.danger:hover {
-		background: color-mix(in oklch, var(--destructive) 15%, transparent);
-		color: var(--destructive);
-	}
-
-	.icon-btn svg {
-		width: 16px;
-		height: 16px;
-	}
-
-	.user-form {
-		padding: 16px;
-		background: var(--muted);
-		border-radius: var(--radius);
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-		margin-bottom: 12px;
-	}
-
-	.user-form h4 {
-		margin: 0 0 4px;
-		font-size: 0.9375rem;
-		font-weight: 600;
-	}
-
-	.form-actions {
-		display: flex;
-		gap: 8px;
-		justify-content: flex-end;
-		margin-top: 4px;
-	}
-
-	.checkbox-label {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		font-size: 0.875rem;
-		cursor: pointer;
-	}
-
-	.checkbox-label input {
-		width: 16px;
-		height: 16px;
-		accent-color: var(--primary);
-	}
-
-	.api-key-display {
-		padding: 12px;
-		background: color-mix(in oklch, var(--warning) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
-		border-radius: var(--radius);
-		font-size: 0.8125rem;
-	}
-
-	.api-key-display code {
-		display: block;
-		margin-top: 6px;
-		padding: 8px;
-		background: var(--muted);
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		font-family: var(--font-mono);
-		font-size: 0.75rem;
-		word-break: break-all;
-	}
-
-	/* Per-model settings */
-	.model-settings-panel {
-		margin-top: 10px;
-		padding: 10px 12px;
-		background: var(--muted);
-		border-radius: var(--radius);
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-	}
-
-	.setting-group {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.setting-group-label {
-		font-size: 0.75rem;
-		font-weight: 500;
-		color: var(--muted-foreground);
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-	}
-
-	.pill-group {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 4px;
-	}
-
-	.pill {
-		padding: 4px 10px;
-		font-size: 0.8125rem;
-		border-radius: 999px;
-		border: 1px solid var(--border);
-		background: transparent;
-		color: var(--foreground);
-		cursor: pointer;
-		transition: all 0.15s ease;
-		line-height: 1.4;
-	}
-
-	.pill:hover:not(:disabled) {
-		border-color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 8%, transparent);
-	}
-
-	.pill.active {
-		background: var(--primary);
-		color: var(--primary-foreground);
-		border-color: var(--primary);
-	}
-
-	.pill:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.cap-badges {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 4px;
-	}
-
-	.cap-badge {
-		display: inline-flex;
-		align-items: center;
-		padding: 2px 8px;
-		font-size: 0.6875rem;
-		font-weight: 500;
-		border-radius: 999px;
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		color: var(--primary);
-	}
-
-	.cap-badge.audio {
-		background: color-mix(in oklch, var(--success) 12%, transparent);
-		color: var(--success);
 	}
 
 	/* Utility */
@@ -2026,43 +1642,6 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 
 	.mb-3 {
 		margin-bottom: 12px;
-	}
-
-	.mt-3 {
-		margin-top: 12px;
-	}
-
-	/* Mobile adjustments */
-	.settings.mobile .tab-bar {
-		padding: 8px 12px;
-	}
-
-	.settings.mobile .tab-btn {
-		padding: 6px 12px;
-		font-size: 0.8125rem;
-	}
-
-	.settings.mobile .tab-btn span {
-		display: none;
-	}
-
-	.settings.mobile .content {
-		padding: 12px;
-	}
-
-	.settings.mobile .connection-row,
-	.settings.mobile .api-key-row {
-		flex-direction: column;
-		align-items: stretch;
-	}
-
-	.settings.mobile .connection-actions,
-	.settings.mobile .api-key-input {
-		flex-direction: column;
-	}
-
-	.settings.mobile .oauth-flow {
-		flex-direction: column;
 	}
 
 	/* -----------------------------------------------------------------------

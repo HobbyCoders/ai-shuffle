@@ -191,10 +191,11 @@
 
 				<!-- Group Assignment -->
 				<div class="pf-field">
-					<label class="pf-label">Group</label>
+					<label class="pf-label" for="project-group">Group</label>
 					<div class="pf-group-wrapper">
 						<div class="pf-group-row">
 							<select
+								id="project-group"
 								class="pf-select"
 								value={groups?.projects?.assignments?.[projectId] ?? ''}
 								onchange={handleGroupChange}
@@ -220,6 +221,7 @@
 							{/if}
 						</div>
 						{#if creatingGroup}
+							<!-- svelte-ignore a11y_autofocus -->
 							<input
 								type="text"
 								class="pf-input pf-group-input"

@@ -14,26 +14,26 @@
 	// Supported file extensions
 	const SUPPORTED_EXTENSIONS = ['.txt', '.md', '.markdown', '.json', '.yaml', '.yml', '.py', '.js', '.ts', '.html', '.css', '.xml', '.csv', '.log'];
 
-	let documents: KnowledgeDocumentSummary[] = [];
-	let stats: KnowledgeStats = { document_count: 0, total_size: 0, total_chunks: 0 };
-	let loading = true;
-	let error = '';
-	let uploading = false;
+	let documents = $state<KnowledgeDocumentSummary[]>([]);
+	let stats = $state<KnowledgeStats>({ document_count: 0, total_size: 0, total_chunks: 0 });
+	let loading = $state(true);
+	let error = $state('');
+	let uploading = $state(false);
 
 	// Preview modal state
-	let previewDocument: { filename: string; preview: string; truncated: boolean } | null = null;
+	let previewDocument = $state<{ filename: string; preview: string; truncated: boolean } | null>(null);
 
 	// Search state
-	let searchQuery = '';
-	let searchResults: KnowledgeSearchResult[] = [];
-	let searching = false;
-	let showSearchResults = false;
+	let searchQuery = $state('');
+	let searchResults = $state<KnowledgeSearchResult[]>([]);
+	let searching = $state(false);
+	let showSearchResults = $state(false);
 
 	// Drag and drop state
-	let isDragging = false;
+	let isDragging = $state(false);
 
 	// Delete confirmation state
-	let confirmDelete: string | null = null;
+	let confirmDelete = $state<string | null>(null);
 
 	// Load documents and stats
 	async function loadDocuments() {

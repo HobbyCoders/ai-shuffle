@@ -808,11 +808,6 @@
 		background: var(--muted);
 	}
 
-	.session-item:hover .session-arrow {
-		opacity: 1;
-		transform: translateX(2px);
-	}
-
 	.session-rank {
 		display: flex;
 		align-items: center;
@@ -838,13 +833,6 @@
 	.session-cost {
 		font-size: 0.75rem;
 		color: var(--muted-foreground);
-		flex-shrink: 0;
-	}
-
-	.session-arrow {
-		color: var(--muted-foreground);
-		opacity: 0;
-		transition: all 180ms ease;
 		flex-shrink: 0;
 	}
 

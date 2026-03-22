@@ -35,11 +35,6 @@
 		border-radius: 0 0 12px 12px;
 	}
 
-	.files-card-content.mobile {
-		height: 100%;
-		border-radius: 0;
-	}
-
 	/* Ensure FilesView fills the card */
 	.files-card-content :global(.files-view) {
 		flex: 1;

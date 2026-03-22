@@ -16,17 +16,17 @@
 		{ name: 'Gray', value: '#6b7280' }
 	];
 
-	let tags: Tag[] = [];
-	let loading = true;
-	let error = '';
+	let tags = $state<Tag[]>([]);
+	let loading = $state(true);
+	let error = $state('');
 
 	// Form state
-	let newTagName = '';
-	let newTagColor = TAG_COLORS[4].value; // Default to blue
-	let editingTag: Tag | null = null;
-	let editName = '';
-	let editColor = '';
-	let confirmDelete: string | null = null;
+	let newTagName = $state('');
+	let newTagColor = $state(TAG_COLORS[4].value); // Default to blue
+	let editingTag = $state<Tag | null>(null);
+	let editName = $state('');
+	let editColor = $state('');
+	let confirmDelete = $state<string | null>(null);
 
 	// Load tags on mount
 	async function loadTags() {

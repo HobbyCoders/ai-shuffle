@@ -149,7 +149,8 @@
 						onclick={() => handleSelect(item.id)}
 					>
 						{#if itemIcon}
-							<svelte:component this={itemIcon} size={16} strokeWidth={1.5} />
+							{@const ItemIcon = itemIcon}
+							<ItemIcon size={16} strokeWidth={1.5} />
 						{/if}
 						<span class="item-name">{item.name}</span>
 						{#if selectedId === item.id}
@@ -184,7 +185,8 @@
 							onclick={() => handleSelect(item.id)}
 						>
 							{#if itemIcon}
-								<svelte:component this={itemIcon} size={16} strokeWidth={1.5} />
+								{@const ItemIcon = itemIcon}
+								<ItemIcon size={16} strokeWidth={1.5} />
 							{/if}
 							<span class="item-name">{item.name}</span>
 							{#if selectedId === item.id}
@@ -228,7 +230,8 @@
 					onclick={() => handleSelect(item.id)}
 				>
 					{#if itemIcon}
-						<svelte:component this={itemIcon} size={16} strokeWidth={1.5} />
+						{@const ItemIcon = itemIcon}
+						<ItemIcon size={16} strokeWidth={1.5} />
 					{/if}
 					<span class="item-name">{item.name}</span>
 					{#if selectedId === item.id}

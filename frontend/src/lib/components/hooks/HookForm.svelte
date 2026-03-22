@@ -6,6 +6,7 @@
 	 * Parent provides the Save button via FeaturePageLayout footer.
 	 * Exposes save() and getIsValid() for parent to call/check via bind:this.
 	 */
+	import { untrack } from 'svelte';
 	import type { Hook, HookCreate, HookUpdate, HookEventType, HookType } from '$lib/api/client';
 	import { HOOK_EVENT_TYPES } from '$lib/api/client';
 	import { projects } from '$lib/stores/app-data';
@@ -18,18 +19,33 @@
 
 	let { hook = null, onSave }: Props = $props();
 
+	// Capture initial values (intentionally not reactive to prop changes)
+	const initial = untrack(() => ({
+		name: hook?.name || '',
+		scopeProjectId: hook?.project_id ?? null,
+		event: (hook?.event || 'Stop') as HookEventType,
+		hookType: (hook?.hook_type || 'bash') as HookType,
+		command: hook?.command || '',
+		timeout: hook?.timeout || 30000,
+		url: hook?.url || '',
+		secret: hook?.secret || '',
+		toolMatcher: hook?.tool_matcher || '',
+		messageTemplate: hook?.message_template || '',
+		enabled: hook?.enabled ?? true,
+	}));
+
 	// Form state
-	let name = $state(hook?.name || '');
-	let scopeProjectId = $state<string | null>(hook?.project_id ?? null);
-	let event = $state<HookEventType>(hook?.event || 'Stop');
-	let hookType = $state<HookType>(hook?.hook_type || 'bash');
-	let command = $state(hook?.command || '');
-	let timeout = $state(hook?.timeout || 30000);
-	let url = $state(hook?.url || '');
-	let secret = $state(hook?.secret || '');
-	let toolMatcher = $state(hook?.tool_matcher || '');
-	let messageTemplate = $state(hook?.message_template || '');
-	let enabled = $state(hook?.enabled ?? true);
+	let name = $state(initial.name);
+	let scopeProjectId = $state<string | null>(initial.scopeProjectId);
+	let event = $state<HookEventType>(initial.event);
+	let hookType = $state<HookType>(initial.hookType);
+	let command = $state(initial.command);
+	let timeout = $state(initial.timeout);
+	let url = $state(initial.url);
+	let secret = $state(initial.secret);
+	let toolMatcher = $state(initial.toolMatcher);
+	let messageTemplate = $state(initial.messageTemplate);
+	let enabled = $state(initial.enabled);
 
 	// Validation
 	const isToolEvent = $derived(event === 'PreToolUse' || event === 'PostToolUse');

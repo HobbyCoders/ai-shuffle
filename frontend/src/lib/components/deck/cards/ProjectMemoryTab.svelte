@@ -168,7 +168,10 @@
 						<div class="memory-header">
 							<div class="memory-header-left">
 								<div class="memory-icon" class:memory-icon--active={file.exists}>
-									<svelte:component this={meta.icon} size={16} />
+									{#if meta.icon}
+										{@const MetaIcon = meta.icon}
+										<MetaIcon size={16} />
+									{/if}
 								</div>
 								<div class="memory-header-info">
 									<div class="memory-header-title">

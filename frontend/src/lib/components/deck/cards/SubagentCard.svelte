@@ -813,10 +813,11 @@
 
 				{#if isEditMode && editingSubagent}
 					<div class="card-form-section">
-						<label class="card-form-label">Group</label>
+						<label class="card-form-label" for="subagent-group">Group</label>
 						<div class="pf-group-wrapper">
 						<div class="pf-group-row">
 							<select
+								id="subagent-group"
 								class="pf-select"
 								value={$groups.subagents.assignments[editingSubagent.id] ?? ''}
 								onchange={(e) => {
@@ -848,6 +849,7 @@
 							{/if}
 						</div>
 						{#if creatingGroup}
+							<!-- svelte-ignore a11y_autofocus -->
 							<input
 								type="text"
 								class="card-form-input pf-group-input"
@@ -983,22 +985,6 @@
 {/if}
 
 <style>
-	.subagent-card {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		background: var(--card);
-		overflow: hidden;
-	}
-
-	/* Centered content wrapper */
-	.centered-content {
-		width: 100%;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4, 16px);
-	}
-
 	.hidden {
 		display: none;
 	}
@@ -1007,26 +993,12 @@
 		flex: 1;
 	}
 
-	/* Search wrapper */
-	.card-search-wrapper {
-		padding: 0 var(--space-4) var(--space-3);
-		border-bottom: 1px solid var(--border-subtle);
-		background: linear-gradient(180deg, transparent 0%, color-mix(in oklch, var(--muted) 20%, transparent) 100%);
-	}
-
 	/* Loading state */
 	.loading-container {
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		padding: var(--space-8);
-	}
-
-	/* Editor header */
-	.editor-header-left {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3);
 	}
 
 	/* Tab label visibility */
@@ -1069,39 +1041,6 @@
 		min-height: 200px;
 		font-family: var(--card-font-mono);
 		font-size: var(--text-sm);
-	}
-
-	/* Section header */
-	.section-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		margin-bottom: var(--space-2);
-	}
-
-	.section-header .card-form-label {
-		margin-bottom: 0;
-	}
-
-	/* Info and warning boxes */
-	.info-box {
-		font-size: var(--text-xs);
-		padding: var(--space-3);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md);
-		color: var(--text-primary);
-		margin-top: var(--space-3);
-	}
-
-	.warning-box {
-		font-size: var(--text-xs);
-		padding: var(--space-3);
-		background: color-mix(in oklch, var(--warning) 10%, transparent);
-		border: 1px solid color-mix(in oklch, var(--warning) 25%, transparent);
-		border-radius: var(--radius-md);
-		color: var(--warning);
-		margin-top: var(--space-3);
 	}
 
 	/* Tools List */
@@ -1229,11 +1168,6 @@
 	/* Required indicator */
 	.required {
 		color: var(--destructive);
-	}
-
-	/* Responsive footer */
-	.subagent-card :global(.card-footer) {
-		flex-wrap: wrap;
 	}
 
 	/* Search bar between header and list */
@@ -1433,67 +1367,6 @@
 		display: flex;
 		align-items: center;
 		gap: 10px;
-	}
-
-	.pf-btn-delete {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 8px 14px;
-		background: transparent;
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		color: var(--destructive);
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 200ms;
-	}
-
-	.pf-btn-delete:hover {
-		background: color-mix(in oklch, var(--destructive) 10%, transparent);
-		border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
-	}
-
-	.pf-btn-export {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 8px 14px;
-		background: transparent;
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		color: var(--text-secondary);
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 200ms;
-	}
-
-	.pf-btn-export:hover {
-		background: var(--surface-1);
-		color: var(--text-primary);
-		border-color: var(--border-default);
-	}
-
-	.pf-btn-cancel {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 8px 18px;
-		background: var(--secondary);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		color: var(--text-primary);
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 200ms;
-	}
-
-	.pf-btn-cancel:hover {
-		background: var(--surface-hover);
-		border-color: var(--border-emphasis);
 	}
 
 	.pf-btn-save {

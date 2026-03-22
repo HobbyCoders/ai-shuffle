@@ -423,124 +423,6 @@
 		overflow: hidden;
 	}
 
-	/* Tabs */
-	.plugin-tabs {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		padding: 8px 16px;
-		border-bottom: 1px solid var(--border);
-		background: var(--surface-1);
-		overflow-x: auto;
-		flex-shrink: 0;
-	}
-
-	.plugin-tab {
-		padding: 6px 12px;
-		font-size: 0.8125rem;
-		font-weight: 500;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		white-space: nowrap;
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		color: var(--muted-foreground);
-		background: transparent;
-		border: 1px solid transparent;
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-
-	.plugin-tab:hover {
-		color: var(--foreground);
-		border-color: var(--accent);
-		box-shadow: 0 0 8px color-mix(in oklch, var(--accent) 20%, transparent);
-	}
-
-	.plugin-tab:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.plugin-tab.active {
-		background: var(--selection-bg-emphasis);
-		color: var(--selection-text);
-		border-color: var(--selection-ring);
-		box-shadow: var(--selection-shadow);
-	}
-
-	.plugin-tab-count {
-		padding: 1px 6px;
-		font-size: 0.6875rem;
-		border-radius: 9999px;
-		background: var(--muted);
-		color: var(--muted-foreground);
-	}
-
-	.plugin-tab-count.active {
-		background: color-mix(in oklch, var(--selection) 20%, transparent);
-		color: var(--selection-text);
-	}
-
-	/* Search bar */
-	.plugin-search-bar {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		padding: 12px 16px;
-		border-bottom: 1px solid var(--border);
-		flex-shrink: 0;
-	}
-
-	.search-input-wrapper {
-		position: relative;
-		flex: 1;
-	}
-
-	.search-input-wrapper :global(.search-icon) {
-		position: absolute;
-		left: 12px;
-		top: 50%;
-		transform: translateY(-50%);
-		color: var(--muted-foreground);
-	}
-
-	.search-input {
-		width: 100%;
-		padding: 8px 12px 8px 36px;
-		border-radius: 6px;
-		background: var(--input);
-		border: 1px solid var(--border);
-		color: var(--foreground);
-		font-size: 0.875rem;
-		transition: all 150ms ease;
-	}
-
-	.search-input::placeholder {
-		color: var(--muted-foreground);
-	}
-
-	.search-input:focus {
-		outline: none;
-		border-color: var(--ring);
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 25%, transparent);
-	}
-
-	.marketplace-select {
-		padding: 8px 12px;
-		border-radius: 6px;
-		background: var(--input);
-		border: 1px solid var(--border);
-		color: var(--foreground);
-		font-size: 0.875rem;
-		cursor: pointer;
-	}
-
-	.marketplace-select:focus {
-		outline: none;
-		border-color: var(--ring);
-	}
-
 	.batch-install-btn {
 		display: flex;
 		align-items: center;
@@ -671,23 +553,6 @@
 
 	.clear-search-btn:hover {
 		text-decoration: underline;
-	}
-
-	/* Footer */
-	.plugin-footer {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: 12px 16px;
-		border-top: 1px solid var(--border);
-		background: var(--surface-1);
-		flex-shrink: 0;
-	}
-
-	.footer-info,
-	.footer-stats {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
 	}
 
 	/* Add Marketplace Modal */
@@ -840,43 +705,6 @@
 		to {
 			transform: rotate(360deg);
 		}
-	}
-
-	/* Mobile adjustments */
-	.plugin-card.mobile .plugin-tabs {
-		padding: 6px 8px;
-		gap: 2px;
-		scrollbar-width: none;
-	}
-
-	.plugin-card.mobile .plugin-tabs::-webkit-scrollbar {
-		display: none;
-	}
-
-	.plugin-card.mobile .plugin-tab {
-		padding: 5px 8px;
-		font-size: 0.75rem;
-		gap: 4px;
-		flex-shrink: 0;
-	}
-
-	.plugin-card.mobile .plugin-tab-count {
-		font-size: 0.625rem;
-		padding: 0 4px;
-	}
-
-	.plugin-card.mobile .plugin-search-bar {
-		flex-wrap: wrap;
-		padding: 8px;
-		gap: 8px;
-	}
-
-	.plugin-card.mobile .search-input-wrapper {
-		width: 100%;
-	}
-
-	.plugin-card.mobile .marketplace-select {
-		flex: 1;
 	}
 
 	.fp-search-bar {

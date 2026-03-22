@@ -1372,6 +1372,7 @@
 		font-size: 0.8125rem;
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
+		line-clamp: 2;
 		-webkit-box-orient: vertical;
 		white-space: normal;
 		word-break: break-word;

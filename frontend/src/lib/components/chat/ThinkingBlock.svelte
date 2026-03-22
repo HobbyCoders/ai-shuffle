@@ -185,9 +185,7 @@
 		margin: 0.5rem 0;
 	}
 
-	.thinking-block.streaming {
-		/* Subtle pulse effect while streaming */
-	}
+	/* .thinking-block.streaming — reserved for future pulse effect */
 
 	.thinking-header {
 		display: flex;

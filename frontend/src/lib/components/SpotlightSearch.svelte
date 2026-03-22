@@ -22,11 +22,11 @@
   let searchInput = $state<HTMLInputElement | undefined>(undefined);
   let listElement = $state<HTMLDivElement | undefined>(undefined);
 
-  // Quick actions
-  const quickActions = [
+  // Quick actions (derived so prop references stay reactive)
+  const quickActions = $derived([
     { id: 'new-chat', label: 'New conversation', icon: 'plus', action: onNewChat },
     { id: 'settings', label: 'Open settings', icon: 'settings', action: onOpenSettings }
-  ];
+  ]);
 
   // Computed filtered items
   let filteredSessions = $derived.by(() => {

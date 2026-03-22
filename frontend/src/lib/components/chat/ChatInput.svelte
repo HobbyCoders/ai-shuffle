@@ -843,6 +843,8 @@
 >
 	<div
 		class="chat-input-container"
+		role="region"
+		aria-label="File drop zone"
 		ondragenter={handleDragEnter}
 		ondragleave={handleDragLeave}
 		ondragover={handleDragOver}
@@ -1289,54 +1291,6 @@
 		overflow: visible;
 	}
 
-	/* Uploaded files section - now inside input-wrapper */
-	.uploaded-files {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.375rem;
-		padding: 8px 12px;
-		margin-bottom: 4px;
-		background: transparent;
-	}
-
-	.file-chip {
-		display: flex;
-		align-items: center;
-		gap: 0.375rem;
-		padding: 0.25rem 0.5rem;
-		background: var(--chip-primary-bg);
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
-		font-size: 0.75rem;
-	}
-
-	/* Chat history reference chip - purple theme */
-	.file-chip.chat-history-chip {
-		background: color-mix(in oklch, var(--feature-agents) 15%, transparent);
-	}
-
-	/* Note reference chip - green theme */
-	.file-chip.note-chip {
-		background: var(--status-success-bg);
-	}
-
-	.file-name {
-		max-width: 100px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		color: var(--foreground);
-	}
-
-	.file-remove {
-		opacity: 0.5;
-		transition: opacity 0.15s, color 0.15s;
-	}
-
-	.file-remove:hover {
-		opacity: 1;
-		color: var(--destructive);
-	}
-
 	/* ===== INPUT WRAPPER - THE HERO (glass outer frame) ===== */
 	.input-wrapper {
 		position: relative;
@@ -1374,44 +1328,6 @@
 		min-width: 0;
 		position: relative;
 		background: transparent;
-	}
-
-	/* Textarea */
-	.chat-textarea {
-		width: 100%;
-		min-height: 24px;
-		max-height: 300px;
-		padding: 0;
-		background: transparent !important;
-		background-color: transparent !important;
-		border: none !important;
-		outline: none !important;
-		box-shadow: none !important;
-		resize: none;
-		font-family: var(--font-sans);
-		font-size: 15px;
-		font-weight: 400;
-		line-height: 1.5;
-		color: var(--foreground);
-		field-sizing: content;
-		-webkit-appearance: none;
-		-moz-appearance: none;
-		appearance: none;
-	}
-
-	.chat-textarea:focus {
-		outline: none !important;
-		border: none !important;
-		box-shadow: none !important;
-	}
-
-	.chat-textarea::placeholder {
-		color: var(--input-placeholder);
-		font-weight: 300;
-	}
-
-	.chat-textarea:focus::placeholder {
-		color: var(--muted-foreground);
 	}
 
 	/* Send button wrapper - stays vertically centered regardless of text height */
@@ -1559,42 +1475,6 @@
 		gap: 4px;
 		justify-content: center;
 		flex: 2;
-	}
-
-	/* Context badge - shared base styles for worktree and locked project badges */
-	.context-badge {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 4px 10px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
-		font-size: 12px;
-		font-weight: 500;
-	}
-
-	.context-badge svg {
-		flex-shrink: 0;
-	}
-
-	.context-badge-text {
-		max-width: 120px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	/* Worktree badge variant - primary colors */
-	.context-badge.worktree {
-		background: color-mix(in srgb, var(--primary) 15%, transparent);
-		border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
-		color: var(--primary);
-	}
-
-	/* Locked project badge variant - muted colors */
-	.context-badge.locked {
-		background: var(--muted);
-		border: 1px solid var(--border-subtle);
-		color: var(--muted-foreground);
 	}
 
 	.controls-right {
@@ -1745,17 +1625,6 @@
 		cursor: not-allowed;
 	}
 
-	.dock-action-btn.recording {
-		background: var(--status-error-bg);
-		color: var(--destructive);
-		animation: pulse 1.5s ease-in-out infinite;
-	}
-
-	.dock-action-btn.transcribing {
-		background: var(--chip-primary-bg);
-		color: var(--primary);
-	}
-
 	.dock-action-btn.active {
 		color: var(--primary);
 		background: color-mix(in oklch, var(--primary) 12%, transparent);
@@ -1863,12 +1732,6 @@
 		/* Tighter gap in center */
 		.controls-center {
 			gap: 4px;
-		}
-
-		/* Smaller context badge text on mobile */
-		.context-badge-text {
-			max-width: 80px;
-			font-size: 11px;
 		}
 	}
 

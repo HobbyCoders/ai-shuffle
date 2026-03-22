@@ -84,7 +84,10 @@
 				{/if}
 			{:else}
 				<div class="fph-icon" aria-hidden="true">
-					<svelte:component this={icon} size={18} strokeWidth={1.5} />
+					{#if icon}
+						{@const IconComponent = icon}
+						<IconComponent size={18} strokeWidth={1.5} />
+					{/if}
 				</div>
 				<h1 class="fph-title">{title}</h1>
 				{#if itemCount !== undefined}

@@ -495,10 +495,6 @@
 		min-height: 0;
 	}
 
-	.notes-card-content.mobile {
-		height: 100%;
-	}
-
 	/* ============================================
 	   LIST VIEW
 	   ============================================ */
@@ -507,62 +503,6 @@
 		flex-direction: column;
 		height: 100%;
 		overflow: hidden;
-	}
-
-	.notes-toolbar {
-		display: flex;
-		gap: var(--space-2);
-		padding: var(--space-3);
-		border-bottom: 1px solid var(--border-default);
-	}
-
-	.search-box {
-		flex: 1;
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		padding: var(--space-2) var(--space-3);
-		background: var(--surface-1);
-		border-radius: var(--radius-md);
-		color: var(--text-secondary);
-	}
-
-	.search-input {
-		flex: 1;
-		background: none;
-		border: none;
-		color: var(--text-primary);
-		font-size: var(--text-md);
-		outline: none;
-	}
-
-	.search-input::placeholder {
-		color: var(--text-secondary);
-	}
-
-	.new-note-btn {
-		display: flex;
-		align-items: center;
-		gap: calc(var(--space-1) * 1.5);
-		padding: var(--space-2) var(--space-3);
-		background: var(--primary);
-		color: var(--primary-foreground);
-		border: none;
-		border-radius: var(--radius-md);
-		font-size: var(--text-md);
-		font-weight: 500;
-		cursor: pointer;
-		transition: all var(--transition-smooth);
-	}
-
-	.new-note-btn:hover:not(:disabled) {
-		opacity: 0.9;
-		box-shadow: var(--shadow-glow-soft);
-	}
-
-	.new-note-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
 	}
 
 	/* ============================================
@@ -658,12 +598,6 @@
 	.note-tag.more {
 		background: var(--surface-1);
 		color: var(--text-secondary);
-	}
-
-	.linked-sessions {
-		display: flex;
-		align-items: center;
-		gap: var(--space-1);
 	}
 
 	.note-date {
@@ -819,13 +753,6 @@
 		resize: none;
 		outline: none;
 		overflow: hidden;
-	}
-
-	/* On mobile, let the textarea scroll internally instead of auto-resizing.
-	   This prevents the view from jumping when the virtual keyboard is open. */
-	.mobile .content-textarea {
-		flex: 1;
-		overflow-y: auto;
 	}
 
 	@media (pointer: coarse), (max-width: 639px) {

@@ -33,7 +33,7 @@
 	let showHistory = $state(false);
 
 	// Refs
-	let searchInput: HTMLInputElement;
+	let searchInput = $state<HTMLInputElement>(undefined!);
 	let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// Local storage key

@@ -501,22 +501,24 @@
 						{#each groupedSessions as group (group.key)}
 							<div class="project-group">
 								<!-- Project group header -->
-								<button
-									class="project-group-header"
-									onclick={() => toggleProjectGroup(group.key)}
-								>
-									<div class="project-group-chevron">
-										{#if isProjectExpanded(group.key)}
-											<ChevronDown size={12} strokeWidth={1.5} />
-										{:else}
-											<ChevronRight size={12} strokeWidth={1.5} />
-										{/if}
-									</div>
-									<FolderClosed size={13} strokeWidth={1.5} class="project-group-icon" />
-									<span class="project-group-name">
-										{group.project?.name || 'Ungrouped'}
-									</span>
-									<span class="project-group-count">{group.sessions.length}</span>
+								<div class="project-group-header" role="group">
+									<button
+										class="project-group-toggle"
+										onclick={() => toggleProjectGroup(group.key)}
+									>
+										<div class="project-group-chevron">
+											{#if isProjectExpanded(group.key)}
+												<ChevronDown size={12} strokeWidth={1.5} />
+											{:else}
+												<ChevronRight size={12} strokeWidth={1.5} />
+											{/if}
+										</div>
+										<FolderClosed size={13} strokeWidth={1.5} class="project-group-icon" />
+										<span class="project-group-name">
+											{group.project?.name || 'Ungrouped'}
+										</span>
+										<span class="project-group-count">{group.sessions.length}</span>
+									</button>
 
 									{#if group.project}
 										{#if deletingProjectId === group.project.id}
@@ -545,7 +547,7 @@
 											</button>
 										{/if}
 									{/if}
-								</button>
+								</div>
 
 								{#if isProjectExpanded(group.key)}
 									<div class="project-group-sessions">
@@ -724,9 +726,7 @@
 		background: var(--hover-overlay);
 	}
 
-	/* Desktop: show PanelLeftClose, hide mobile close */
-	.desktop-collapse {
-	}
+	/* Desktop: show PanelLeftClose, hide mobile close — .desktop-collapse visibility managed by media queries */
 
 	.mobile-close-btn {
 		display: none;
@@ -1000,23 +1000,36 @@
 	.project-group-header {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		padding: 8px 12px;
-		background: transparent;
-		border: none;
-		border-radius: 0;
+		gap: 0;
+		padding: 0;
 		color: var(--muted-foreground);
 		font-size: 0.6875rem;
 		font-weight: 600;
-		cursor: pointer;
-		transition: color 120ms ease, background-color 120ms ease;
-		text-align: left;
 		letter-spacing: 0.02em;
+		transition: color 120ms ease, background-color 120ms ease;
 	}
 
 	.project-group-header:hover {
 		color: var(--foreground);
 		background: var(--hover-overlay);
+	}
+
+	.project-group-toggle {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex: 1;
+		min-width: 0;
+		padding: 8px 12px;
+		background: transparent;
+		border: none;
+		border-radius: 0;
+		color: inherit;
+		font-size: inherit;
+		font-weight: inherit;
+		letter-spacing: inherit;
+		cursor: pointer;
+		text-align: left;
 	}
 
 	.project-group-chevron {
@@ -1055,6 +1068,7 @@
 		justify-content: center;
 		width: 20px;
 		height: 20px;
+		margin-right: 8px;
 		padding: 0;
 		background: transparent;
 		border: none;
@@ -1082,6 +1096,7 @@
 		justify-content: center;
 		width: 22px;
 		height: 22px;
+		margin-left: 2px;
 		padding: 0;
 		background: color-mix(in oklch, var(--destructive, #ef4444) 15%, transparent);
 		border: 1px solid var(--destructive, #ef4444);
@@ -1108,6 +1123,7 @@
 		justify-content: center;
 		width: 22px;
 		height: 22px;
+		margin-right: 8px;
 		padding: 0;
 		background: transparent;
 		border: 1px solid var(--border);

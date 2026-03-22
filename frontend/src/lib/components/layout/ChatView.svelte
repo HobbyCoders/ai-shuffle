@@ -315,54 +315,6 @@
 	}
 
 	/* ========================================
-	   LOADING STATE
-	   ======================================== */
-
-	.chat-loading {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: 16px;
-		color: var(--muted-foreground);
-		padding: 24px;
-	}
-
-	.chat-loading p {
-		color: var(--foreground);
-		font-size: 0.875rem;
-		font-weight: 500;
-	}
-
-	.loading-error {
-		color: var(--destructive) !important;
-		font-size: 0.9375rem !important;
-		font-weight: 600 !important;
-	}
-
-	.loading-error-hint {
-		color: var(--muted-foreground) !important;
-		font-size: 0.8125rem !important;
-		font-weight: 400 !important;
-		text-align: center;
-		max-width: 300px;
-	}
-
-	.spinner {
-		width: 24px;
-		height: 24px;
-		border: 2px solid var(--border);
-		border-top-color: var(--primary);
-		border-radius: 50%;
-		animation: spin 0.8s linear infinite;
-	}
-
-	@keyframes spin {
-		to { transform: rotate(360deg); }
-	}
-
-	/* ========================================
 	   Modal Overlay for Permission/Question
 	   ======================================== */
 

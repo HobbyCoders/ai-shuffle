@@ -3,20 +3,20 @@
 	let { show = $bindable(false), onclose, onimported }: { show: boolean; onclose?: () => void; onimported?: (data: { sessionId: string; title: string; messageCount: number }) => void } = $props();
 
 	// State
-	let fileInput: HTMLInputElement;
-	let selectedFile: File | null = null;
-	let previewData: {
+	let fileInput = $state<HTMLInputElement>(undefined!);
+	let selectedFile = $state<File | null>(null);
+	let previewData = $state<{
 		title: string;
 		messageCount: number;
 		createdAt: string;
 		exportedAt: string;
 		totalCost: number;
 		turnCount: number;
-	} | null = null;
-	let parseError: string | null = null;
-	let isImporting = false;
-	let importError: string | null = null;
-	let isDragOver = false;
+	} | null>(null);
+	let parseError = $state<string | null>(null);
+	let isImporting = $state(false);
+	let importError = $state<string | null>(null);
+	let isDragOver = $state(false);
 
 	function close() {
 		show = false;
