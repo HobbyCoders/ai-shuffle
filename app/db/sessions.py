@@ -313,7 +313,8 @@ def create_session_with_stats(
     total_cost_usd: float = 0.0,
     total_tokens_in: int = 0,
     total_tokens_out: int = 0,
-    turn_count: int = 0
+    turn_count: int = 0,
+    created_at: Optional[str] = None
 ) -> SessionRow:
     """Create a new session with all stats in a single atomic transaction.
 
@@ -331,8 +332,10 @@ def create_session_with_stats(
         total_tokens_in: Total input tokens
         total_tokens_out: Total output tokens
         turn_count: Number of conversation turns
+        created_at: Optional creation timestamp (ISO format), defaults to now
     """
     now = datetime.now(timezone.utc).isoformat()
+    ts_created = created_at or now
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -343,7 +346,7 @@ def create_session_with_stats(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, profile_id, project_id, title, api_user_id,
              sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
-             now, now)
+             ts_created, now)
         )
     return get_session(session_id)
 

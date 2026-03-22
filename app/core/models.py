@@ -49,6 +49,9 @@ class SubagentDefinition(BaseModel):
     prompt: str = Field(..., min_length=1, description="System prompt for the agent")
     tools: Optional[List[str]] = Field(None, description="Allowed tools (inherits all if not specified)")
     model: Optional[str] = Field(None, description="Model override: sonnet, opus, haiku, or inherit")
+    skills: Optional[List[str]] = Field(None, description="Skills the agent can use")
+    memory: Optional[str] = Field(None, description="Memory scope: user, project, or local")
+    mcp_servers: Optional[List[Any]] = Field(None, description="MCP servers the agent can access (names or config dicts)")
 
 
 # ============================================================================

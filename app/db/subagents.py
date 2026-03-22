@@ -6,7 +6,7 @@ import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, TypedDict
+from typing import Any, Optional, List, Dict, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
 
@@ -23,6 +23,9 @@ class SubagentRow(TypedDict):
     prompt: str
     tools: Optional[List[str]]
     model: Optional[str]
+    skills: Optional[List[str]]
+    memory: Optional[str]
+    mcp_servers: Optional[List[Any]]
     is_builtin: bool
     default_name: Optional[str]
     default_description: Optional[str]
@@ -47,15 +50,24 @@ class PermissionRuleRow(TypedDict):
 # Subagent Operations
 # ============================================================================
 
+def _parse_json_fields(row: dict) -> dict:
+    """Parse JSON-serialized fields on a subagent row."""
+    if not row:
+        return row
+    for field in ("tools", "skills", "mcp_servers"):
+        val = row.get(field)
+        if val and isinstance(val, str):
+            row[field] = json.loads(val)
+    return row
+
+
 def get_subagent(subagent_id: str) -> Optional[SubagentRow]:
     """Get a subagent by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM subagents WHERE id = ?", (subagent_id,))
         row = row_to_dict(cursor.fetchone())
-        if row and row.get("tools"):
-            row["tools"] = json.loads(row["tools"]) if isinstance(row["tools"], str) else row["tools"]
-        return row
+        return _parse_json_fields(row)
 
 
 def get_all_subagents() -> List[SubagentRow]:
@@ -65,8 +77,7 @@ def get_all_subagents() -> List[SubagentRow]:
         cursor.execute("SELECT * FROM subagents ORDER BY name ASC")
         rows = rows_to_list(cursor.fetchall())
         for row in rows:
-            if row.get("tools"):
-                row["tools"] = json.loads(row["tools"]) if isinstance(row["tools"], str) else row["tools"]
+            _parse_json_fields(row)
         return rows
 
 
@@ -77,6 +88,9 @@ def create_subagent(
     prompt: str,
     tools: Optional[List[str]] = None,
     model: Optional[str] = None,
+    skills: Optional[List[str]] = None,
+    memory: Optional[str] = None,
+    mcp_servers: Optional[List[Any]] = None,
     is_builtin: bool = False,
     store_defaults: bool = False
 ) -> SubagentRow:
@@ -90,11 +104,16 @@ def create_subagent(
         prompt: System prompt for the subagent
         tools: List of allowed tools (None = inherit all)
         model: Model override (None = inherit from profile)
+        skills: List of skills the agent can use
+        memory: Memory scope: user, project, or local
+        mcp_servers: MCP servers the agent can access
         is_builtin: Whether this is a built-in subagent (cannot be deleted)
         store_defaults: If True, also store current values as defaults (for built-in subagents)
     """
     now = datetime.now(timezone.utc).isoformat()
     tools_json = json.dumps(tools) if tools else None
+    skills_json = json.dumps(skills) if skills else None
+    mcp_servers_json = json.dumps(mcp_servers) if mcp_servers else None
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -102,19 +121,24 @@ def create_subagent(
             # For built-in subagents, store both current values and defaults
             cursor.execute(
                 """INSERT INTO subagents (
-                    id, name, description, prompt, tools, model, is_builtin,
+                    id, name, description, prompt, tools, model, skills, memory, mcp_servers,
+                    is_builtin,
                     default_name, default_description, default_prompt, default_tools, default_model,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (subagent_id, name, description, prompt, tools_json, model, is_builtin,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (subagent_id, name, description, prompt, tools_json, model,
+                 skills_json, memory, mcp_servers_json, is_builtin,
                  name, description, prompt, tools_json, model,
                  now, now)
             )
         else:
             cursor.execute(
-                """INSERT INTO subagents (id, name, description, prompt, tools, model, is_builtin, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (subagent_id, name, description, prompt, tools_json, model, is_builtin, now, now)
+                """INSERT INTO subagents (
+                    id, name, description, prompt, tools, model, skills, memory, mcp_servers,
+                    is_builtin, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (subagent_id, name, description, prompt, tools_json, model,
+                 skills_json, memory, mcp_servers_json, is_builtin, now, now)
             )
     return get_subagent(subagent_id)
 
@@ -125,7 +149,10 @@ def update_subagent(
     description: Optional[str] = ...,  # type: ignore[assignment]
     prompt: Optional[str] = ...,  # type: ignore[assignment]
     tools: Optional[List[str]] = ...,  # type: ignore[assignment]
-    model: Optional[str] = ...  # type: ignore[assignment]
+    model: Optional[str] = ...,  # type: ignore[assignment]
+    skills: Optional[List[str]] = ...,  # type: ignore[assignment]
+    memory: Optional[str] = ...,  # type: ignore[assignment]
+    mcp_servers: Optional[List[Any]] = ...,  # type: ignore[assignment]
 ) -> Optional[SubagentRow]:
     """
     Update a subagent.
@@ -154,6 +181,15 @@ def update_subagent(
     if model is not ...:
         updates.append("model = ?")
         values.append(model)
+    if skills is not ...:
+        updates.append("skills = ?")
+        values.append(json.dumps(skills) if skills else None)
+    if memory is not ...:
+        updates.append("memory = ?")
+        values.append(memory)
+    if mcp_servers is not ...:
+        updates.append("mcp_servers = ?")
+        values.append(json.dumps(mcp_servers) if mcp_servers else None)
 
     if updates:
         updates.append("updated_at = ?")

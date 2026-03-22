@@ -26,6 +26,9 @@ class SubagentResponse(BaseModel):
     prompt: str
     tools: Optional[List[str]] = None
     model: Optional[str] = None
+    skills: Optional[List[str]] = None
+    memory: Optional[str] = None
+    mcp_servers: Optional[list] = None
     is_builtin: bool = False
     is_modified: bool = False  # Only relevant for built-in subagents
     created_at: datetime
@@ -40,6 +43,9 @@ class SubagentCreateRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     tools: Optional[List[str]] = None
     model: Optional[str] = None
+    skills: Optional[List[str]] = None
+    memory: Optional[str] = None
+    mcp_servers: Optional[list] = None
 
 
 class SubagentUpdateRequest(BaseModel):
@@ -49,6 +55,9 @@ class SubagentUpdateRequest(BaseModel):
     prompt: Optional[str] = None
     tools: Optional[List[str]] = None
     model: Optional[str] = None
+    skills: Optional[List[str]] = None
+    memory: Optional[str] = None
+    mcp_servers: Optional[list] = None
 
 
 # ============================================================================
@@ -69,6 +78,9 @@ def _build_subagent_response(s: dict) -> SubagentResponse:
         prompt=s["prompt"],
         tools=s.get("tools"),
         model=s.get("model"),
+        skills=s.get("skills"),
+        memory=s.get("memory"),
+        mcp_servers=s.get("mcp_servers"),
         is_builtin=is_builtin,
         is_modified=is_modified,
         created_at=s["created_at"],
@@ -118,6 +130,9 @@ async def create_subagent(request: SubagentCreateRequest, token: str = Depends(r
         prompt=request.prompt,
         tools=request.tools,
         model=request.model,
+        skills=request.skills,
+        memory=request.memory,
+        mcp_servers=request.mcp_servers,
         is_builtin=False
     )
 
@@ -147,7 +162,10 @@ async def update_subagent(
         description=request.description if 'description' in fields else ...,
         prompt=request.prompt if 'prompt' in fields else ...,
         tools=request.tools if 'tools' in fields else ...,
-        model=request.model if 'model' in fields else ...
+        model=request.model if 'model' in fields else ...,
+        skills=request.skills if 'skills' in fields else ...,
+        memory=request.memory if 'memory' in fields else ...,
+        mcp_servers=request.mcp_servers if 'mcp_servers' in fields else ...,
     )
 
     return _build_subagent_response(subagent)

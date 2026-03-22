@@ -33,6 +33,11 @@ except ImportError:
         pass
     class TaskNotificationMessage:
         pass
+try:
+    from claude_agent_sdk import RateLimitEvent
+except ImportError:
+    class RateLimitEvent:
+        pass
 from claude_agent_sdk.types import StreamEvent, PermissionResultAllow, PermissionResultDeny
 
 from app.db import database
@@ -274,6 +279,29 @@ def write_agents_to_filesystem(agents_dict: Dict[str, AgentDefinition], cwd: str
         # Add model if specified
         if agent_def.model:
             frontmatter_lines.append(f"model: {_yaml_quote(agent_def.model)}")
+
+        # Add skills if specified (SDK 0.1.49+)
+        if agent_def.skills:
+            skills_str = ", ".join(agent_def.skills)
+            frontmatter_lines.append(f"skills: {_yaml_quote(skills_str)}")
+
+        # Add memory if specified (SDK 0.1.49+)
+        if agent_def.memory:
+            frontmatter_lines.append(f"memory: {_yaml_quote(agent_def.memory)}")
+
+        # Add mcpServers if specified (SDK 0.1.49+)
+        if agent_def.mcpServers:
+            # mcpServers can be a list of strings or dicts — serialize as YAML list
+            mcp_items = []
+            for s in agent_def.mcpServers:
+                if isinstance(s, str):
+                    mcp_items.append(s)
+                else:
+                    # Complex config — skip for filesystem workaround (SDK handles these via --agents)
+                    pass
+            if mcp_items:
+                mcp_str = ", ".join(mcp_items)
+                frontmatter_lines.append(f"mcpServers: {_yaml_quote(mcp_str)}")
 
         frontmatter_lines.append("---")
         frontmatter_lines.append("")  # Empty line after frontmatter
@@ -1232,7 +1260,10 @@ def build_options_from_profile(
                     description=subagent.get("description", ""),
                     prompt=subagent.get("prompt", ""),
                     tools=subagent.get("tools"),
-                    model=subagent.get("model")
+                    model=subagent.get("model"),
+                    skills=subagent.get("skills"),
+                    memory=subagent.get("memory"),
+                    mcpServers=subagent.get("mcp_servers"),
                 )
                 agents_dict[agent_id] = agent_def
                 logger.debug(f"Loaded subagent '{agent_id}': description='{agent_def.description[:50]}...', tools={agent_def.tools}, model={agent_def.model}")
@@ -1583,6 +1614,9 @@ async def execute_query(
                             "tool_id": block.tool_use_id,
                             "output": output
                         })
+
+            elif isinstance(message, RateLimitEvent):
+                logger.debug(f"Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
 
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
@@ -2002,6 +2036,13 @@ async def stream_query(
 
                 metadata["model"] = message.model
 
+                # Per-turn usage from AssistantMessage (SDK 0.1.49+)
+                if message.usage:
+                    yield {
+                        "type": "turn_usage",
+                        "usage": message.usage
+                    }
+
             elif isinstance(message, UserMessage):
                 # UserMessage contains tool results from Claude's tool executions
                 for block in message.content:
@@ -2033,6 +2074,16 @@ async def stream_query(
                             chunk_data={"name": tool_name, "output": output, "tool_use_id": block.tool_use_id},
                             source_device_id=device_id
                         )
+
+            elif isinstance(message, RateLimitEvent):
+                logger.debug(f"Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
+                yield {
+                    "type": "rate_limit",
+                    "status": message.rate_limit_info.status,
+                    "rate_limit_type": message.rate_limit_info.rate_limit_type,
+                    "resets_at": message.rate_limit_info.resets_at,
+                    "utilization": message.rate_limit_info.utilization,
+                }
 
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
@@ -2491,6 +2542,9 @@ async def _run_background_query(
                             },
                             source_device_id=None
                         )
+
+            elif isinstance(message, RateLimitEvent):
+                logger.debug(f"[Background] Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
 
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
@@ -3551,6 +3605,13 @@ async def stream_to_websocket(
 
                 metadata["model"] = message.model
 
+                # Per-turn usage from AssistantMessage (SDK 0.1.49+)
+                if message.usage:
+                    yield {
+                        "type": "turn_usage",
+                        "usage": message.usage
+                    }
+
             elif isinstance(message, UserMessage):
                 # UserMessage can contain:
                 # 1. Tool results from Claude's tool executions (ToolResultBlock)
@@ -3677,6 +3738,16 @@ async def stream_to_websocket(
                             if screenshot_b64:
                                 event["screenshot"] = screenshot_b64
                             yield event
+
+            elif isinstance(message, RateLimitEvent):
+                logger.debug(f"[WS] Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
+                yield {
+                    "type": "rate_limit",
+                    "status": message.rate_limit_info.status,
+                    "rate_limit_type": message.rate_limit_info.rate_limit_type,
+                    "resets_at": message.rate_limit_info.resets_at,
+                    "utilization": message.rate_limit_info.utilization,
+                }
 
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms

@@ -34,6 +34,9 @@ class SubagentResponse(BaseModel):
     prompt: str
     tools: Optional[List[str]] = None
     model: Optional[str] = None
+    skills: Optional[List[str]] = None
+    memory: Optional[str] = None
+    mcp_servers: Optional[list] = None
     is_builtin: bool = False
     created_at: datetime
     updated_at: datetime
@@ -151,6 +154,9 @@ async def get_profile_agents(
                 prompt=subagent["prompt"],
                 tools=subagent.get("tools"),
                 model=subagent.get("model"),
+                skills=subagent.get("skills"),
+                memory=subagent.get("memory"),
+                mcp_servers=subagent.get("mcp_servers"),
                 is_builtin=subagent.get("is_builtin", False),
                 created_at=subagent["created_at"],
                 updated_at=subagent["updated_at"]
@@ -377,6 +383,9 @@ async def create_profile_agent(
         prompt=subagent["prompt"],
         tools=subagent.get("tools"),
         model=subagent.get("model"),
+        skills=subagent.get("skills"),
+        memory=subagent.get("memory"),
+        mcp_servers=subagent.get("mcp_servers"),
         is_builtin=subagent.get("is_builtin", False),
         created_at=subagent["created_at"],
         updated_at=subagent["updated_at"]
@@ -434,6 +443,9 @@ async def update_profile_agent(
         prompt=updated["prompt"],
         tools=updated.get("tools"),
         model=updated.get("model"),
+        skills=updated.get("skills"),
+        memory=updated.get("memory"),
+        mcp_servers=updated.get("mcp_servers"),
         is_builtin=updated.get("is_builtin", False),
         created_at=updated["created_at"],
         updated_at=updated["updated_at"]

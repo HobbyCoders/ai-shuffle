@@ -74,6 +74,9 @@ class SubagentExportData(BaseModel):
     prompt: str
     tools: Optional[list[str]] = None
     model: Optional[str] = None
+    skills: Optional[list[str]] = None
+    memory: Optional[str] = None
+    mcp_servers: Optional[list] = None
 
 
 class SubagentExport(BaseModel):

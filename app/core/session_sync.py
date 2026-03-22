@@ -150,6 +150,17 @@ class SessionSyncService:
             # Generate new AI Shuffle session ID
             new_session_id = f"ses-{uuid.uuid4().hex[:16]}"
 
+            # Convert SDK created_at (unix timestamp) to ISO format if available
+            created_at_iso = None
+            if session_info.created_at:
+                try:
+                    from datetime import datetime, timezone
+                    created_at_iso = datetime.fromtimestamp(
+                        session_info.created_at, tz=timezone.utc
+                    ).isoformat()
+                except (ValueError, OSError):
+                    pass
+
             # Create session with all stats in a single atomic transaction
             # This prevents orphaned sessions if any part of the insert fails
             database.create_session_with_stats(
@@ -162,7 +173,8 @@ class SessionSyncService:
                 total_cost_usd=total_cost,
                 total_tokens_in=total_tokens_in,
                 total_tokens_out=total_tokens_out,
-                turn_count=0  # Accurate count requires full JSONL parse; updated on first load
+                turn_count=0,  # Accurate count requires full JSONL parse; updated on first load
+                created_at=created_at_iso,
             )
 
             logger.debug(

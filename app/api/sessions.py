@@ -12,6 +12,21 @@ try:
 except ImportError:
     sdk_get_session_messages = None
 
+try:
+    from claude_agent_sdk import rename_session as sdk_rename_session
+except ImportError:
+    sdk_rename_session = None
+
+try:
+    from claude_agent_sdk import tag_session as sdk_tag_session
+except ImportError:
+    sdk_tag_session = None
+
+try:
+    from claude_agent_sdk import get_session_info as sdk_get_session_info
+except ImportError:
+    sdk_get_session_info = None
+
 from app.core.models import (
     Session,
     SessionWithMessages,
@@ -888,6 +903,15 @@ async def update_session(
 
     check_session_access(request, existing)
 
+    # Sync title rename to Claude SDK session if available
+    sdk_sid = existing.get("sdk_session_id")
+    if title and sdk_sid and sdk_rename_session:
+        try:
+            sdk_rename_session(session_id=sdk_sid, title=title)
+            logger.debug(f"Renamed SDK session {sdk_sid} to '{title}'")
+        except Exception as e:
+            logger.warning(f"Failed to rename SDK session {sdk_sid}: {e}")
+
     session = await run_sync(
         database.update_session,
         session_id=session_id,
@@ -896,6 +920,105 @@ async def update_session(
     )
 
     return session
+
+
+@router.post("/{session_id}/sdk-tag")
+async def tag_sdk_session(
+    request: Request,
+    session_id: str,
+    tag: Optional[str] = Query(None, description="Tag to set (null to clear)"),
+    token: str = Depends(require_auth)
+):
+    """Tag a session in the Claude SDK. Requires the session to have an SDK session ID."""
+    if not sdk_tag_session:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="SDK tag_session not available (requires SDK 0.1.49+)"
+        )
+
+    existing = await run_sync(database.get_session, session_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}"
+        )
+
+    check_session_access(request, existing)
+
+    sdk_sid = existing.get("sdk_session_id")
+    if not sdk_sid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Session has no SDK session ID"
+        )
+
+    try:
+        sdk_tag_session(session_id=sdk_sid, tag=tag)
+        return {"status": "ok", "session_id": session_id, "tag": tag}
+    except Exception as e:
+        logger.error(f"Failed to tag SDK session {sdk_sid}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to tag session: {e}"
+        )
+
+
+@router.get("/{session_id}/sdk-info")
+async def get_sdk_session_info(
+    request: Request,
+    session_id: str,
+    token: str = Depends(require_auth)
+):
+    """Get session metadata from the Claude SDK (tag, created_at, git_branch, etc.)."""
+    if not sdk_get_session_info:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="SDK get_session_info not available (requires SDK 0.1.50+)"
+        )
+
+    existing = await run_sync(database.get_session, session_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}"
+        )
+
+    check_session_access(request, existing)
+
+    sdk_sid = existing.get("sdk_session_id")
+    if not sdk_sid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Session has no SDK session ID"
+        )
+
+    try:
+        info = sdk_get_session_info(session_id=sdk_sid)
+        if not info:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"SDK session not found: {sdk_sid}"
+            )
+        return {
+            "sdk_session_id": info.session_id,
+            "summary": info.summary,
+            "custom_title": info.custom_title,
+            "first_prompt": info.first_prompt,
+            "git_branch": info.git_branch,
+            "cwd": info.cwd,
+            "tag": info.tag,
+            "created_at": info.created_at,
+            "last_modified": info.last_modified,
+            "file_size": info.file_size,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get SDK session info for {sdk_sid}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get session info: {e}"
+        )
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
