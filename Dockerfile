@@ -97,7 +97,9 @@ WORKDIR /app
 
 # ── Layer 8: Backend code + static assets (changes most frequently) ──
 COPY --chown=appuser:appuser app/ ./app/
-RUN mkdir -p /app/app/static && cp -r /app/frontend/build/* /app/app/static/
+RUN mkdir -p /app/app/static && cp -r /app/frontend/build/* /app/app/static/ && \
+    # Remove frontend source and node_modules — only the built static assets are needed at runtime
+    rm -rf /app/frontend
 
 COPY --chown=appuser:appuser .env.example .
 

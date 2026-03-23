@@ -7,6 +7,7 @@
 README.md
 LICENSE
 *.md
+docs/
 
 # Python
 __pycache__
@@ -38,6 +39,7 @@ ENV/
 .pytest_cache/
 .coverage
 htmlcov/
+tests/
 
 # OS
 .DS_Store
@@ -51,6 +53,19 @@ Dockerfile.*
 *.log
 logs/
 
+# Runtime data (user uploads, generated content, databases)
+uploads/
+generated-images/
+data/
+*.db
+
+# Root node_modules (tools has its own npm install in Dockerfile)
+node_modules/
+
+# Claude config
+.claude/
+
+# Frontend build artifacts (rebuilt inside container)
 frontend/node_modules/
 frontend/build/
 frontend/.svelte-kit/
