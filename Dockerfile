@@ -64,6 +64,14 @@ RUN node --version && npm --version && gh --version
 # Note: Claude Code CLI is bundled with claude-agent-sdk Python package
 # No need to install separately via npm
 
+# ── Create non-root user EARLY so COPY --chown works without duplicate layers ──
+# Default UID/GID 1000, entrypoint.sh adjusts at runtime via PUID/PGID env vars
+RUN groupadd -g 1000 appuser && \
+    useradd -m -u 1000 -g 1000 appuser && \
+    mkdir -p /home/appuser/.config/claude /home/appuser/.claude && \
+    mkdir -p /data /workspace && \
+    chown -R appuser:appuser /home/appuser /data /workspace
+
 # ── Layer 4: Python dependencies (changes when requirements.txt changes) ──
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -74,7 +82,7 @@ RUN playwright install chromium && \
     chmod -R 755 $PLAYWRIGHT_BROWSERS_PATH
 
 # ── Layer 6: Frontend deps (changes when package-lock.json changes) ──
-COPY frontend/package.json frontend/package-lock.json ./frontend/
+COPY --chown=appuser:appuser frontend/package.json frontend/package-lock.json ./frontend/
 WORKDIR /app/frontend
 RUN npm ci
 
@@ -82,33 +90,27 @@ RUN npm ci
 # CACHEBUST arg invalidates Docker layer cache for this step and all below.
 # Usage: docker compose build --build-arg CACHEBUST=$(date +%s)
 ARG CACHEBUST=0
-COPY frontend/ ./
+COPY --chown=appuser:appuser frontend/ ./
 RUN npm run build
 
 WORKDIR /app
 
 # ── Layer 8: Backend code + static assets (changes most frequently) ──
-COPY app/ ./app/
+COPY --chown=appuser:appuser app/ ./app/
 RUN mkdir -p /app/app/static && cp -r /app/frontend/build/* /app/app/static/
 
-COPY .env.example .
+COPY --chown=appuser:appuser .env.example .
 
 # Copy AI tools to /opt/ai-tools (accessible by Claude agent)
-COPY tools/ /opt/ai-tools/
+COPY --chown=appuser:appuser tools/ /opt/ai-tools/
 RUN cd /opt/ai-tools && npm install --omit=dev --ignore-scripts && rm -rf /root/.npm
 
 # Copy entrypoint script
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Create required directories
-RUN mkdir -p /data /workspace
-
-# Create a non-root user for security (default UID/GID, will be modified at runtime)
-RUN groupadd -g 1000 appuser && \
-    useradd -m -u 1000 -g 1000 appuser && \
-    mkdir -p /home/appuser/.config/claude /home/appuser/.claude && \
-    chown -R appuser:appuser /app /home/appuser /data /workspace /opt/ai-tools
+# Ensure /app is owned by appuser (pip/system installs stay as root, that's fine)
+RUN chown appuser:appuser /app
 
 # Expose port
 EXPOSE 8000

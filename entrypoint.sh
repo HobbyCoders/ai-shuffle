@@ -40,9 +40,13 @@ if [ "$PUID" != "$CURRENT_UID" ] || [ "$PGID" != "$CURRENT_GID" ]; then
     # Modify user
     usermod -o -u "$PUID" appuser
 
-    # Fix ownership of critical directories
+    # Fix ownership of critical directories (skip node_modules to avoid slow recursive chown)
     echo "Updating ownership of /app and /home/appuser"
-    chown -R appuser:appuser /app /home/appuser
+    chown -R appuser:appuser /home/appuser
+    # Only chown app code and static assets, not the massive node_modules trees
+    chown -R appuser:appuser /app/app /data /workspace
+    chown appuser:appuser /app /app/.env.example 2>/dev/null || true
+    find /opt/ai-tools -not -path "*/node_modules/*" -exec chown appuser:appuser {} + 2>/dev/null || true
 else
     echo "UID/GID already correct, skipping user modification"
 fi
