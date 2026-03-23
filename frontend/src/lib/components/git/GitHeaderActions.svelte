@@ -33,11 +33,11 @@
 		onOpenCreatePRModal: () => void;
 		onOpenFinishModal: () => void;
 		onOpenPullModal: () => void;
-		/** Open changed files panel */
-		onOpenChangedFiles?: () => void;
+		/** Open diff review panel (side-by-side) */
+		onOpenDiffReview?: () => void;
 	}
 
-	let { projectId, isStreaming = false, isGitRepo = true, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onOpenCommitModal, onOpenCreatePRModal, onOpenFinishModal, onOpenPullModal, onOpenChangedFiles }: Props = $props();
+	let { projectId, isStreaming = false, isGitRepo = true, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onOpenCommitModal, onOpenCreatePRModal, onOpenFinishModal, onOpenPullModal, onOpenDiffReview }: Props = $props();
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
@@ -306,12 +306,12 @@
 		</button>
 	{/if}
 
-	<!-- Diff stats (clickable to open changed files panel) -->
+	<!-- Diff stats (clickable to open review panel) -->
 	{#if hasChanges}
 		<button
 			class="diff-stats"
-			onclick={onOpenChangedFiles}
-			title="View {filesChanged} changed file{filesChanged === 1 ? '' : 's'}"
+			onclick={onOpenDiffReview}
+			title="Review {filesChanged} changed file{filesChanged === 1 ? '' : 's'}"
 		>
 			{#if additions > 0}
 				<span class="stat additions">+{additions}</span>

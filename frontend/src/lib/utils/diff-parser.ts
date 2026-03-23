@@ -166,6 +166,114 @@ export function getDiffDescription(parsed: ParsedDiff): string {
 	return 'Modified';
 }
 
+// ============================================================================
+// Side-by-Side Diff
+// ============================================================================
+
+/** A single row in side-by-side view, pairing old (left) and new (right) lines. */
+export interface SideBySidePair {
+	left: DiffLine | null;
+	right: DiffLine | null;
+	type: 'context' | 'changed' | 'header';
+}
+
+/**
+ * Convert parsed diff hunks into side-by-side pairs for two-column rendering.
+ *
+ * Algorithm: walks each hunk and collects consecutive deletion/addition runs,
+ * then zips them together. Context lines appear on both sides. If a run has
+ * more deletions than additions (or vice versa), the shorter side gets null
+ * entries (blank lines in the UI).
+ */
+export function toSideBySide(hunks: DiffHunk[]): SideBySidePair[] {
+	const pairs: SideBySidePair[] = [];
+
+	for (const hunk of hunks) {
+		// Emit hunk header row
+		const headerLine = hunk.lines.find(l => l.type === 'header') ?? null;
+		if (headerLine) {
+			pairs.push({ left: headerLine, right: headerLine, type: 'header' });
+		}
+
+		// Collect runs of changes, flush on context lines
+		let deletions: DiffLine[] = [];
+		let additions: DiffLine[] = [];
+
+		function flushChanges() {
+			const maxLen = Math.max(deletions.length, additions.length);
+			for (let i = 0; i < maxLen; i++) {
+				pairs.push({
+					left: deletions[i] ?? null,
+					right: additions[i] ?? null,
+					type: 'changed'
+				});
+			}
+			deletions = [];
+			additions = [];
+		}
+
+		for (const line of hunk.lines) {
+			if (line.type === 'header') continue; // already emitted
+
+			if (line.type === 'deletion') {
+				deletions.push(line);
+			} else if (line.type === 'addition') {
+				additions.push(line);
+			} else {
+				// Context line — flush any pending changes first
+				flushChanges();
+				pairs.push({ left: line, right: line, type: 'context' });
+			}
+		}
+
+		// Flush remaining changes at end of hunk
+		flushChanges();
+	}
+
+	return pairs;
+}
+
+// ============================================================================
+// Helpers for DiffViewer component
+// ============================================================================
+
+/** Minimal file info shape used by shouldRefetchDiff. */
+interface FileRef {
+	file: string;
+	category: string;
+}
+
+/**
+ * Determine whether a diff needs re-fetching when the file prop changes.
+ *
+ * Compares by filename + category (staged vs modified produces different diffs)
+ * rather than object identity, preventing unnecessary re-fetches during
+ * streaming when the store refreshes and creates new object references.
+ */
+export function shouldRefetchDiff(
+	oldFile: FileRef | null,
+	newFile: FileRef | null
+): boolean {
+	if (oldFile === null && newFile === null) return false;
+	if (oldFile === null || newFile === null) return true;
+	return oldFile.file !== newFile.file || oldFile.category !== newFile.category;
+}
+
+/**
+ * Resolve the effective diff rendering mode for a given viewport width.
+ *
+ * On narrow viewports (<640px), side-by-side mode is unusable because the
+ * grid splits into tiny columns. This function downgrades to unified mode
+ * on mobile regardless of the requested mode.
+ */
+export function effectiveDiffMode(
+	requested: 'unified' | 'side-by-side',
+	viewportWidth: number
+): 'unified' | 'side-by-side' {
+	if (requested === 'unified') return 'unified';
+	return viewportWidth < 640 ? 'unified' : 'side-by-side';
+}
+
 /**
  * Count total additions and deletions in a parsed diff.
  */

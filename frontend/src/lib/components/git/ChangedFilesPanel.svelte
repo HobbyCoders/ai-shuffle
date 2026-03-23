@@ -3,24 +3,30 @@
 	 * ChangedFilesPanel — Slide-out panel showing all changed files in a git repo,
 	 * grouped by category (conflicts, staged, modified, untracked), with actions
 	 * to stage/unstage/discard files and view diffs.
+	 *
+	 * When `reviewMode` is true, the panel widens to show a file sidebar + inline
+	 * side-by-side DiffViewer with per-file Accept / Decline actions.
 	 */
 	import {
 		X, ChevronDown, ChevronRight,
 		Plus, Minus, Eye, Undo2, Trash2,
 		AlertTriangle, Check, Circle,
-		FileText
+		FileText, Loader2
 	} from 'lucide-svelte';
 	import { git, changedFiles, changedFilesLoading } from '$lib/stores/git.svelte';
 	import type { FileChangeInfo } from '$lib/api/git';
+	import DiffViewer from './DiffViewer.svelte';
 
 	interface Props {
 		projectId: string;
 		open: boolean;
 		onClose: () => void;
 		onViewDiff: (file: FileChangeInfo) => void;
+		/** When true, shows the full review layout with inline side-by-side diff */
+		reviewMode?: boolean;
 	}
 
-	let { projectId, open, onClose, onViewDiff }: Props = $props();
+	let { projectId, open, onClose, onViewDiff, reviewMode = false }: Props = $props();
 
 	// ── Grouped file lists ──────────────────────────────────────────────
 	const conflicts = $derived(($changedFiles ?? []).filter(f => f.category === 'conflict'));
@@ -75,6 +81,71 @@
 		const next = new Set(confirmingDiscard);
 		next.delete(file);
 		confirmingDiscard = next;
+	}
+
+	// ── Review mode: selected file + footer confirmation ────────────────
+	let reviewSelectedFile = $state<FileChangeInfo | null>(null);
+	let reviewConfirmingDecline = $state(false);
+	let reviewActionInFlight = $state(false);
+
+	// Flat ordered list for keyboard nav in review mode
+	const flatFiles = $derived([...conflicts, ...staged, ...modified, ...untracked]);
+
+	// Auto-select first file when review mode opens and files load
+	$effect(() => {
+		if (reviewMode && open && flatFiles.length > 0 && !reviewSelectedFile) {
+			reviewSelectedFile = flatFiles[0];
+		}
+	});
+
+	function selectReviewFile(file: FileChangeInfo) {
+		reviewSelectedFile = file;
+		reviewConfirmingDecline = false;
+	}
+
+	async function reviewAccept() {
+		if (!reviewSelectedFile || reviewActionInFlight) return;
+		reviewActionInFlight = true;
+		try {
+			if (reviewSelectedFile.category === 'staged') {
+				await git.unstageFiles([reviewSelectedFile.file]);
+			} else {
+				await git.stageFiles([reviewSelectedFile.file]);
+			}
+			await git.refreshChangedFiles();
+			advanceReviewFile();
+		} finally {
+			reviewActionInFlight = false;
+		}
+	}
+
+	async function reviewDecline() {
+		if (!reviewSelectedFile || reviewActionInFlight) return;
+		reviewActionInFlight = true;
+		reviewConfirmingDecline = false;
+		try {
+			await git.discardChanges(
+				[reviewSelectedFile.file],
+				{ [reviewSelectedFile.file]: reviewSelectedFile.category }
+			);
+			await git.refreshChangedFiles();
+			advanceReviewFile();
+		} finally {
+			reviewActionInFlight = false;
+		}
+	}
+
+	function advanceReviewFile() {
+		const files = $changedFiles ?? [];
+		if (files.length === 0) {
+			reviewSelectedFile = null;
+			return;
+		}
+		const curIdx = reviewSelectedFile
+			? files.findIndex(f => f.file === reviewSelectedFile!.file)
+			: -1;
+		const nextIdx = Math.min(curIdx >= 0 ? curIdx : 0, files.length - 1);
+		reviewSelectedFile = files[nextIdx];
 	}
 
 	// ── Actions ─────────────────────────────────────────────────────────
@@ -170,19 +241,77 @@
 		if (e.key === 'Escape') {
 			e.preventDefault();
 			onClose();
+			return;
+		}
+
+		// Arrow key navigation in review mode
+		if (reviewMode && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+			e.preventDefault();
+			if (flatFiles.length === 0) return;
+			const curIdx = reviewSelectedFile
+				? flatFiles.findIndex(f => f.file === reviewSelectedFile!.file)
+				: -1;
+			let nextIdx = curIdx;
+			if (e.key === 'ArrowDown') nextIdx = Math.min(curIdx + 1, flatFiles.length - 1);
+			else nextIdx = Math.max(curIdx - 1, 0);
+			reviewSelectedFile = flatFiles[nextIdx];
+			reviewConfirmingDecline = false;
 		}
 	}
 
-	// Reset confirmation state when panel closes
+	// ── Resize logic ────────────────────────────────────────────────────
+	let panelWidth = $state(
+		typeof window !== 'undefined' && window.innerWidth < 640
+			? window.innerWidth
+			: Math.min(window?.innerWidth * 0.6 || 800, 1100)
+	);
+	let isResizing = $state(false);
+	let panelElement: HTMLElement | undefined = $state(undefined);
+
+	function startResize(e: PointerEvent) {
+		if (typeof window !== 'undefined' && window.innerWidth < 640) return; // no resize on mobile
+		e.preventDefault();
+		isResizing = true;
+		const startX = e.clientX;
+		const startWidth = panelWidth;
+
+		function onMove(ev: PointerEvent) {
+			const delta = startX - ev.clientX;
+			const newWidth = Math.max(400, Math.min(window.innerWidth - 60, startWidth + delta));
+			panelWidth = newWidth;
+		}
+
+		function onUp() {
+			isResizing = false;
+			window.removeEventListener('pointermove', onMove);
+			window.removeEventListener('pointerup', onUp);
+		}
+
+		window.addEventListener('pointermove', onMove);
+		window.addEventListener('pointerup', onUp);
+	}
+
+	// ── Mobile detection ────────────────────────────────────────────────
+	let isMobile = $state(typeof window !== 'undefined' && window.innerWidth < 640);
+
+	function handleResize() {
+		isMobile = window.innerWidth < 640;
+		if (isMobile) panelWidth = window.innerWidth;
+	}
+
+	// Reset state when panel closes
 	$effect(() => {
 		if (!open) {
 			confirmingDiscard = new Set();
 			confirmingGroupAction = null;
+			reviewSelectedFile = null;
+			reviewConfirmingDecline = false;
+			reviewActionInFlight = false;
 		}
 	});
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onresize={handleResize} />
 
 {#snippet statusIcon(status: string)}
 	<span class={`flex-shrink-0 ${statusColor(status)}`}>
@@ -264,7 +393,7 @@
 					<button
 						class="action-btn"
 						title="View diff"
-						onclick={() => onViewDiff(file)}
+						onclick={() => reviewMode ? selectReviewFile(file) : onViewDiff(file)}
 					>
 						<Eye size={14} strokeWidth={1.5} />
 					</button>
@@ -288,7 +417,7 @@
 					<button
 						class="action-btn"
 						title="View diff"
-						onclick={() => onViewDiff(file)}
+						onclick={() => reviewMode ? selectReviewFile(file) : onViewDiff(file)}
 					>
 						<Eye size={14} strokeWidth={1.5} />
 					</button>
@@ -313,7 +442,7 @@
 					<button
 						class="action-btn"
 						title="View diff"
-						onclick={() => onViewDiff(file)}
+						onclick={() => reviewMode ? selectReviewFile(file) : onViewDiff(file)}
 					>
 						<Eye size={14} strokeWidth={1.5} />
 					</button>
@@ -355,7 +484,7 @@
 			<span class={`section-count ${accentClass}`}>{count}</span>
 		</button>
 
-		{#if groupActions}
+		{#if groupActions && !reviewMode}
 			<div class="section-actions">
 				{#if groupActions.type === 'staged'}
 					<button
@@ -426,29 +555,140 @@
 	</div>
 {/snippet}
 
+<!-- ═══════════════════════════════════════════════════════════════════
+     REVIEW MODE: file sidebar + inline diff + accept/decline footer
+     ═══════════════════════════════════════════════════════════════════ -->
+{#snippet reviewFileItem(file: FileChangeInfo)}
+	{@const isActive = reviewSelectedFile?.file === file.file}
+	<button
+		class="review-file-item"
+		class:review-file-active={isActive}
+		onclick={() => selectReviewFile(file)}
+		title={file.file}
+	>
+		{@render statusIcon(file.status)}
+		<span class="review-file-name">
+			<span class="file-basename">{basename(file.file)}</span>
+			{#if dirname(file.file)}
+				<span class="file-dirname">{dirname(file.file)}</span>
+			{/if}
+		</span>
+	</button>
+{/snippet}
+
+{#snippet fileListContent()}
+	{#if $changedFilesLoading && totalCount === 0}
+		<div class="loading-skeleton">
+			{#each Array(5) as _}
+				<div class="skeleton-row">
+					<div class="skeleton-icon"></div>
+					<div class="skeleton-text"></div>
+				</div>
+			{/each}
+		</div>
+	{:else if isEmpty}
+		<div class="empty-state">
+			<div class="empty-icon">
+				<Check size={28} strokeWidth={1.5} />
+			</div>
+			<span class="empty-text">Working tree clean</span>
+		</div>
+	{:else}
+		{#if conflicts.length > 0}
+			{@render sectionHeader('conflicts', 'Merge Conflicts', conflicts.length, 'text-red-400', AlertTriangle)}
+			{#if !isSectionCollapsed('conflicts')}
+				<div class="section-files">
+					{#each conflicts as file (file.file)}
+						{#if reviewMode}
+							{@render reviewFileItem(file)}
+						{:else}
+							{@render fileRow(file, 'conflict')}
+						{/if}
+					{/each}
+				</div>
+			{/if}
+		{/if}
+
+		{#if staged.length > 0}
+			{@render sectionHeader('staged', 'Staged Changes', staged.length, 'text-green-400', Check, { files: staged, type: 'staged' })}
+			{#if !isSectionCollapsed('staged')}
+				<div class="section-files">
+					{#each staged as file (file.file)}
+						{#if reviewMode}
+							{@render reviewFileItem(file)}
+						{:else}
+							{@render fileRow(file, 'staged')}
+						{/if}
+					{/each}
+				</div>
+			{/if}
+		{/if}
+
+		{#if modified.length > 0}
+			{@render sectionHeader('modified', 'Changes', modified.length, 'text-amber-400', Circle, { files: modified, type: 'modified' })}
+			{#if !isSectionCollapsed('modified')}
+				<div class="section-files">
+					{#each modified as file (file.file)}
+						{#if reviewMode}
+							{@render reviewFileItem(file)}
+						{:else}
+							{@render fileRow(file, 'modified')}
+						{/if}
+					{/each}
+				</div>
+			{/if}
+		{/if}
+
+		{#if untracked.length > 0}
+			{@render sectionHeader('untracked', 'Untracked Files', untracked.length, 'text-zinc-500', Plus, { files: untracked, type: 'untracked' })}
+			{#if !isSectionCollapsed('untracked')}
+				<div class="section-files">
+					{#each untracked as file (file.file)}
+						{#if reviewMode}
+							{@render reviewFileItem(file)}
+						{:else}
+							{@render fileRow(file, 'untracked')}
+						{/if}
+					{/each}
+				</div>
+			{/if}
+		{/if}
+	{/if}
+{/snippet}
+
 {#if open}
-	<!-- Backdrop -->
-	<div class="panel-backdrop" transition:fade={{ duration: 150 }}>
-		<button
-			class="backdrop-click-target"
-			onclick={onClose}
-			tabindex="-1"
-			aria-label="Close changed files panel"
-		></button>
-	</div>
+	<!-- Backdrop (no click-to-close — panel is persistent) -->
+	<div class="panel-backdrop" class:review-backdrop={reviewMode} transition:fade={{ duration: 150 }}></div>
 
 	<!-- Panel -->
 	<div
+		bind:this={panelElement}
 		class="panel"
+		class:panel-review={reviewMode}
+		class:panel-mobile={isMobile}
+		class:panel-resizing={isResizing}
 		role="dialog"
 		aria-modal="true"
-		aria-label="Changed files"
+		aria-label={reviewMode ? 'Review changes' : 'Changed files'}
+		style={reviewMode && !isMobile ? `width: ${panelWidth}px` : ''}
 		transition:slideIn={{ duration: 200 }}
 	>
+		<!-- Resize handle (desktop review mode only) -->
+		{#if reviewMode && !isMobile}
+			<div
+				class="resize-handle"
+				onpointerdown={startResize}
+				role="separator"
+				aria-orientation="vertical"
+				aria-label="Resize panel"
+			>
+				<div class="resize-handle-bar"></div>
+			</div>
+		{/if}
 		<!-- Header -->
 		<div class="panel-header">
 			<div class="panel-header-left">
-				<h2 class="panel-title">Changed Files</h2>
+				<h2 class="panel-title">{reviewMode ? 'Review Changes' : 'Changed Files'}</h2>
 				{#if totalCount > 0}
 					<span class="total-badge">{totalCount}</span>
 				{/if}
@@ -462,76 +702,81 @@
 			</button>
 		</div>
 
-		<!-- Content -->
-		<div class="panel-content">
-			{#if $changedFilesLoading && totalCount === 0}
-				<!-- Loading skeleton -->
-				<div class="loading-skeleton">
-					{#each Array(5) as _}
-						<div class="skeleton-row">
-							<div class="skeleton-icon"></div>
-							<div class="skeleton-text"></div>
-						</div>
-					{/each}
+		{#if reviewMode}
+			<!-- ═══ Review layout: sidebar + diff viewport ═══ -->
+			<div class="review-body">
+				<!-- File sidebar -->
+				<div class="review-sidebar">
+					{@render fileListContent()}
 				</div>
-			{:else if isEmpty}
-				<!-- Empty state -->
-				<div class="empty-state">
-					<div class="empty-icon">
-						<Check size={28} strokeWidth={1.5} />
+
+				<!-- Diff viewport -->
+				<div class="review-viewport">
+					{#if reviewSelectedFile}
+						{#key reviewSelectedFile.file}
+							<DiffViewer
+								{projectId}
+								file={reviewSelectedFile}
+								onClose={() => { reviewSelectedFile = null; }}
+								mode="unified"
+								embedded
+							/>
+						{/key}
+					{:else if !isEmpty}
+						<div class="review-viewport-empty">
+							<FileText size={32} strokeWidth={1} />
+							<span>Select a file to view its diff</span>
+						</div>
+					{/if}
+				</div>
+			</div>
+
+			<!-- Accept / Decline footer -->
+			{#if reviewSelectedFile}
+				<div class="review-footer">
+					<div class="review-footer-info">
+						<span class="review-footer-filename" title={reviewSelectedFile.file}>
+							{basename(reviewSelectedFile.file)}
+						</span>
+						<span class="review-footer-category review-cat-{reviewSelectedFile.category}">
+							{reviewSelectedFile.category}
+						</span>
 					</div>
-					<span class="empty-text">Working tree clean</span>
+					<div class="review-footer-actions">
+						{#if reviewConfirmingDecline}
+							<span class="review-confirm-text">Discard changes?</span>
+							<button class="review-btn review-btn-danger" onclick={reviewDecline} disabled={reviewActionInFlight}>
+								Yes
+							</button>
+							<button class="review-btn review-btn-neutral" onclick={() => { reviewConfirmingDecline = false; }} disabled={reviewActionInFlight}>
+								No
+							</button>
+						{:else}
+							{#if reviewSelectedFile.category === 'staged'}
+								<button class="review-btn review-btn-unstage" onclick={reviewAccept} disabled={reviewActionInFlight}>
+									{#if reviewActionInFlight}<Loader2 size={14} strokeWidth={2} class="animate-spin" />{:else}<Undo2 size={14} strokeWidth={2} />{/if}
+									Unstage
+								</button>
+							{:else}
+								<button class="review-btn review-btn-accept" onclick={reviewAccept} disabled={reviewActionInFlight}>
+									{#if reviewActionInFlight}<Loader2 size={14} strokeWidth={2} class="animate-spin" />{:else}<Check size={14} strokeWidth={2} />{/if}
+									Accept
+								</button>
+							{/if}
+							<button class="review-btn review-btn-decline" onclick={() => { reviewConfirmingDecline = true; }} disabled={reviewActionInFlight}>
+								<X size={14} strokeWidth={2} />
+								Decline
+							</button>
+						{/if}
+					</div>
 				</div>
-			{:else}
-				<!-- Merge Conflicts -->
-				{#if conflicts.length > 0}
-					{@render sectionHeader('conflicts', 'Merge Conflicts', conflicts.length, 'text-red-400', AlertTriangle)}
-					{#if !isSectionCollapsed('conflicts')}
-						<div class="section-files">
-							{#each conflicts as file (file.file)}
-								{@render fileRow(file, 'conflict')}
-							{/each}
-						</div>
-					{/if}
-				{/if}
-
-				<!-- Staged Changes -->
-				{#if staged.length > 0}
-					{@render sectionHeader('staged', 'Staged Changes', staged.length, 'text-green-400', Check, { files: staged, type: 'staged' })}
-					{#if !isSectionCollapsed('staged')}
-						<div class="section-files">
-							{#each staged as file (file.file)}
-								{@render fileRow(file, 'staged')}
-							{/each}
-						</div>
-					{/if}
-				{/if}
-
-				<!-- Changes (unstaged) -->
-				{#if modified.length > 0}
-					{@render sectionHeader('modified', 'Changes', modified.length, 'text-amber-400', Circle, { files: modified, type: 'modified' })}
-					{#if !isSectionCollapsed('modified')}
-						<div class="section-files">
-							{#each modified as file (file.file)}
-								{@render fileRow(file, 'modified')}
-							{/each}
-						</div>
-					{/if}
-				{/if}
-
-				<!-- Untracked -->
-				{#if untracked.length > 0}
-					{@render sectionHeader('untracked', 'Untracked Files', untracked.length, 'text-zinc-500', Plus, { files: untracked, type: 'untracked' })}
-					{#if !isSectionCollapsed('untracked')}
-						<div class="section-files">
-							{#each untracked as file (file.file)}
-								{@render fileRow(file, 'untracked')}
-							{/each}
-						</div>
-					{/if}
-				{/if}
 			{/if}
-		</div>
+		{:else}
+			<!-- ═══ Classic file list layout ═══ -->
+			<div class="panel-content">
+				{@render fileListContent()}
+			</div>
+		{/if}
 	</div>
 {/if}
 
@@ -562,15 +807,8 @@
 		background: rgba(0, 0, 0, 0.4);
 	}
 
-	.backdrop-click-target {
-		position: absolute;
-		inset: 0;
-		width: 100%;
-		height: 100%;
-		background: transparent;
-		border: none;
-		cursor: default;
-		padding: 0;
+	.review-backdrop {
+		background: rgba(0, 0, 0, 0.55);
 	}
 
 	/* ── Panel ───────────────────────────────────────────────────────── */
@@ -592,9 +830,57 @@
 		overflow: hidden;
 	}
 
+	/* Review mode: width controlled by JS via style attribute */
+	.panel-review {
+		width: min(80vw, 1100px);
+	}
+
+	/* Mobile: always fullscreen */
+	.panel-mobile {
+		width: 100% !important;
+		border-left: none;
+	}
+
+	/* Disable pointer events on content while dragging resize */
+	.panel-resizing {
+		user-select: none;
+	}
+
+	.panel-resizing :global(*) {
+		pointer-events: none;
+	}
+
+	/* ── Resize handle ──────────────────────────────────────────────── */
+	.resize-handle {
+		position: absolute;
+		top: 0;
+		left: -4px;
+		bottom: 0;
+		width: 8px;
+		z-index: 100;
+		cursor: col-resize;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.resize-handle-bar {
+		width: 3px;
+		height: 48px;
+		border-radius: 2px;
+		background: rgb(63 63 70 / 0.4);
+		transition: background 150ms ease, height 150ms ease;
+	}
+
+	.resize-handle:hover .resize-handle-bar {
+		background: rgb(147 197 253 / 0.6);
+		height: 64px;
+	}
+
 	@media (max-width: 639px) {
 		.panel {
-			width: 100%;
+			width: 100% !important;
+			border-left: none;
 		}
 	}
 
@@ -661,7 +947,7 @@
 		outline-offset: -2px;
 	}
 
-	/* ── Content ─────────────────────────────────────────────────────── */
+	/* ── Content (classic mode) ──────────────────────────────────────── */
 	.panel-content {
 		flex: 1;
 		overflow-y: auto;
@@ -670,22 +956,273 @@
 	}
 
 	/* Custom scrollbar */
-	.panel-content::-webkit-scrollbar {
-		width: 6px;
+	.panel-content::-webkit-scrollbar { width: 6px; }
+	.panel-content::-webkit-scrollbar-track { background: transparent; }
+	.panel-content::-webkit-scrollbar-thumb { background: rgb(63 63 70 / 0.6); border-radius: 3px; }
+	.panel-content::-webkit-scrollbar-thumb:hover { background: rgb(82 82 91 / 0.8); }
+
+	/* ═══════════════════════════════════════════════════════════════════
+	   REVIEW MODE LAYOUT
+	   ═══════════════════════════════════════════════════════════════════ */
+
+	.review-body {
+		display: flex;
+		flex: 1;
+		min-height: 0;
+		overflow: hidden;
 	}
 
-	.panel-content::-webkit-scrollbar-track {
+	/* ─── Review sidebar (file list) ──────────────────────────────── */
+	.review-sidebar {
+		width: 220px;
+		min-width: 180px;
+		flex-shrink: 0;
+		overflow-y: auto;
+		overflow-x: hidden;
+		overscroll-behavior: contain;
+		border-right: 1px solid rgb(63 63 70 / 0.3);
+		background: rgb(24 24 27 / 0.6);
+	}
+
+	.review-sidebar::-webkit-scrollbar { width: 4px; }
+	.review-sidebar::-webkit-scrollbar-track { background: transparent; }
+	.review-sidebar::-webkit-scrollbar-thumb { background: rgb(63 63 70 / 0.5); border-radius: 2px; }
+
+	@media (max-width: 639px) {
+		.review-body { flex-direction: column; }
+		.review-sidebar {
+			width: 100%;
+			min-width: 0;
+			max-height: 30vh;
+			border-right: none;
+			border-bottom: 1px solid rgb(63 63 70 / 0.3);
+			flex-shrink: 0;
+		}
+	}
+
+	/* ─── Review file item (clickable row in sidebar) ──────────────── */
+	.review-file-item {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		width: 100%;
+		padding: 5px 10px 5px 20px;
+		min-height: 30px;
 		background: transparent;
+		border: none;
+		cursor: pointer;
+		text-align: left;
+		transition: background 80ms ease;
 	}
 
-	.panel-content::-webkit-scrollbar-thumb {
+	.review-file-item:hover {
+		background: rgb(63 63 70 / 0.3);
+	}
+
+	.review-file-active {
+		background: rgb(63 63 70 / 0.5);
+		box-shadow: inset 2px 0 0 rgb(147 197 253 / 0.6);
+	}
+
+	.review-file-active:hover {
 		background: rgb(63 63 70 / 0.6);
-		border-radius: 3px;
 	}
 
-	.panel-content::-webkit-scrollbar-thumb:hover {
-		background: rgb(82 82 91 / 0.8);
+	@media (pointer: coarse) {
+		.review-file-item { min-height: 44px; }
 	}
+
+	.review-file-name {
+		display: flex;
+		flex-direction: column;
+		gap: 0;
+		min-width: 0;
+		overflow: hidden;
+	}
+
+	/* ─── Review viewport (diff area) ──────────────────────────────── */
+	.review-viewport {
+		flex: 1;
+		min-width: 0;
+		min-height: 0;
+		overflow: auto;
+		background: rgb(9 9 11);
+	}
+
+	.review-viewport::-webkit-scrollbar { width: 6px; height: 6px; }
+	.review-viewport::-webkit-scrollbar-track { background: transparent; }
+	.review-viewport::-webkit-scrollbar-thumb { background: rgb(63 63 70 / 0.5); border-radius: 3px; }
+	.review-viewport::-webkit-scrollbar-corner { background: transparent; }
+
+	.review-viewport-empty {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 10px;
+		height: 100%;
+		min-height: 200px;
+		padding: 2rem;
+		text-align: center;
+		color: rgb(63 63 70);
+	}
+
+	.review-viewport-empty span {
+		font-size: 0.8125rem;
+		color: rgb(113 113 122);
+	}
+
+	/* ─── Review footer (Accept / Decline) ─────────────────────────── */
+	.review-footer {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		padding: 8px 16px;
+		border-top: 1px solid rgb(63 63 70 / 0.5);
+		background: rgb(39 39 42 / 0.95);
+		backdrop-filter: blur(4px);
+		flex-shrink: 0;
+	}
+
+	.review-footer-info {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+		flex: 1;
+	}
+
+	.review-footer-filename {
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: rgb(228 228 231);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+	}
+
+	.review-footer-category {
+		font-size: 0.5625rem;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		flex-shrink: 0;
+	}
+
+	.review-cat-staged { color: rgb(74 222 128); }
+	.review-cat-modified { color: rgb(251 191 36); }
+	.review-cat-untracked { color: rgb(56 189 248); }
+	.review-cat-conflict { color: rgb(248 113 113); }
+
+	.review-footer-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex-shrink: 0;
+	}
+
+	.review-confirm-text {
+		font-size: 0.75rem;
+		color: rgb(250 204 21);
+		font-weight: 500;
+		white-space: nowrap;
+	}
+
+	.review-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		padding: 5px 12px;
+		font-size: 0.75rem;
+		font-weight: 600;
+		border: 1px solid transparent;
+		border-radius: 6px;
+		cursor: pointer;
+		transition: all 120ms ease;
+		white-space: nowrap;
+	}
+
+	.review-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+		pointer-events: none;
+	}
+
+	.review-btn:focus-visible {
+		outline: 2px solid rgb(161 161 170 / 0.5);
+		outline-offset: 1px;
+	}
+
+	.review-btn-accept {
+		background: rgb(22 163 74 / 0.2);
+		border-color: rgb(22 163 74 / 0.4);
+		color: rgb(74 222 128);
+	}
+	.review-btn-accept:hover:not(:disabled) {
+		background: rgb(22 163 74 / 0.35);
+		border-color: rgb(22 163 74 / 0.6);
+	}
+
+	.review-btn-unstage {
+		background: rgb(217 119 6 / 0.15);
+		border-color: rgb(217 119 6 / 0.3);
+		color: rgb(251 191 36);
+	}
+	.review-btn-unstage:hover:not(:disabled) {
+		background: rgb(217 119 6 / 0.25);
+		border-color: rgb(217 119 6 / 0.5);
+	}
+
+	.review-btn-decline {
+		background: rgb(220 38 38 / 0.12);
+		border-color: rgb(220 38 38 / 0.3);
+		color: rgb(248 113 113);
+	}
+	.review-btn-decline:hover:not(:disabled) {
+		background: rgb(220 38 38 / 0.22);
+		border-color: rgb(220 38 38 / 0.5);
+	}
+
+	.review-btn-danger {
+		background: rgb(220 38 38 / 0.5);
+		border-color: rgb(220 38 38 / 0.6);
+		color: rgb(254 226 226);
+	}
+	.review-btn-danger:hover:not(:disabled) {
+		background: rgb(220 38 38 / 0.7);
+	}
+
+	.review-btn-neutral {
+		background: rgb(63 63 70 / 0.4);
+		border-color: rgb(63 63 70 / 0.5);
+		color: rgb(161 161 170);
+	}
+	.review-btn-neutral:hover:not(:disabled) {
+		background: rgb(63 63 70 / 0.7);
+		color: rgb(228 228 231);
+	}
+
+	@media (max-width: 639px) {
+		.review-footer {
+			flex-direction: column;
+			gap: 8px;
+			padding: 10px 16px;
+		}
+		.review-footer-info {
+			width: 100%;
+		}
+		.review-footer-actions {
+			width: 100%;
+			justify-content: flex-end;
+		}
+		.review-btn { padding: 8px 16px; min-height: 44px; }
+	}
+
+	/* ═══════════════════════════════════════════════════════════════════
+	   CLASSIC MODE STYLES (unchanged from original)
+	   ═══════════════════════════════════════════════════════════════════ */
 
 	/* ── Section header ──────────────────────────────────────────────── */
 	.section-header {
@@ -755,22 +1292,17 @@
 		flex-shrink: 0;
 	}
 
-	/* Show group actions on hover (desktop) and always on mobile */
 	.section-header:hover .section-actions,
 	.section-header:focus-within .section-actions {
 		display: flex;
 	}
 
 	@media (max-width: 639px) {
-		.section-actions {
-			display: flex;
-		}
+		.section-actions { display: flex; }
 	}
 
 	@media (pointer: coarse) {
-		.section-actions {
-			display: flex;
-		}
+		.section-actions { display: flex; }
 	}
 
 	.group-action-btn {
@@ -828,13 +1360,11 @@
 	}
 
 	@media (pointer: coarse) {
-		.file-row {
-			min-height: 44px;
-		}
+		.file-row { min-height: 44px; }
 	}
 
 	/* ── File name ───────────────────────────────────────────────────── */
-	.file-name {
+	.file-name, .review-file-name {
 		display: flex;
 		flex-direction: column;
 		gap: 1px;
@@ -852,12 +1382,21 @@
 		text-overflow: ellipsis;
 	}
 
+	/* Smaller basename in review sidebar */
+	.review-file-item .file-basename {
+		font-size: 0.6875rem;
+	}
+
 	.file-dirname {
 		font-size: 0.6875rem;
 		color: rgb(113 113 122);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+
+	.review-file-item .file-dirname {
+		font-size: 0.5625rem;
 	}
 
 	/* ── Diff stats ──────────────────────────────────────────────────── */
@@ -878,20 +1417,14 @@
 		flex-shrink: 0;
 	}
 
-	.file-row:hover .file-actions {
-		display: flex;
-	}
+	.file-row:hover .file-actions { display: flex; }
 
 	@media (max-width: 639px) {
-		.file-actions {
-			display: flex;
-		}
+		.file-actions { display: flex; }
 	}
 
 	@media (pointer: coarse) {
-		.file-actions {
-			display: flex;
-		}
+		.file-actions { display: flex; }
 	}
 
 	.action-btn {
@@ -956,9 +1489,7 @@
 		transition: all 120ms ease;
 	}
 
-	.confirm-yes:hover {
-		background: rgb(220 38 38 / 0.7);
-	}
+	.confirm-yes:hover { background: rgb(220 38 38 / 0.7); }
 
 	.confirm-no {
 		padding: 3px 12px;

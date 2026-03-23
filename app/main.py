@@ -47,11 +47,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # runtime style injection and component libraries).
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob: https:; "
             "media-src 'self' blob:; "
-            "connect-src 'self' ws: wss:; "
+            "connect-src 'self' ws: wss: https://*.cloudflareaccess.com; "
             "font-src 'self'; "
             "frame-ancestors 'self';"
         )

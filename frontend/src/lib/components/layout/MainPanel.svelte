@@ -138,6 +138,7 @@
 
 	// Changed files panel state
 	let showChangedFilesPanel = $state(false);
+	let reviewMode = $state(false);
 	let selectedDiffFile = $state<import('$lib/api/git').FileChangeInfo | null>(null);
 
 	// PR detection for current branch
@@ -741,7 +742,7 @@
 							onOpenCreatePRModal={() => { showCommitModalMode = 'pr-only'; showCommitModal = true; }}
 							onOpenFinishModal={() => showFinishModal = true}
 							onOpenPullModal={() => showPullModal = true}
-							onOpenChangedFiles={() => { showChangedFilesPanel = true; git.refreshChangedFiles(); }}
+							onOpenDiffReview={() => { showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
 						/>
 					{/if}
 				{/snippet}
@@ -892,11 +893,12 @@
 	<ChangedFilesPanel
 		projectId={activeTab.project}
 		open={showChangedFilesPanel}
-		onClose={() => { showChangedFilesPanel = false; selectedDiffFile = null; }}
+		{reviewMode}
+		onClose={() => { showChangedFilesPanel = false; reviewMode = false; selectedDiffFile = null; }}
 		onViewDiff={(file) => { selectedDiffFile = file; }}
 	/>
 
-	{#if selectedDiffFile}
+	{#if selectedDiffFile && !reviewMode}
 		<DiffViewer
 			projectId={activeTab.project}
 			file={selectedDiffFile}
