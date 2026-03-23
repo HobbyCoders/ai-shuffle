@@ -12,7 +12,7 @@
 	 */
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles } from '$lib/stores/app-data';
-	import { getContextMaxForModel } from '$lib/constants/chat';
+	import { getContextMaxForModel, AUTO_COMPACTION_BASE } from '$lib/constants/chat';
 
 	function formatTokenCount(count: number): string {
 		if (count >= 1000000) {
@@ -31,17 +31,17 @@
 		return profile?.config?.model || 'sonnet';
 	});
 
-	const contextMax = $derived(getContextMaxForModel(effectiveModel));
+	const contextWindowMax = $derived(getContextMaxForModel(effectiveModel));
+
+	// Available context = total window minus the ~33k autocompact reserve
+	// (system prompt, tool definitions, output buffer). This shows users when
+	// they're approaching the autocompaction threshold, not the raw model limit.
+	const contextMax = $derived(contextWindowMax - AUTO_COMPACTION_BASE);
 
 	// Context usage from activeSession — set by onPollApplied callback after each
 	// successful poll. This is the sole reliable path: poller → activeSession._update().
 	// Uses per-turn context window tokens (input + cache_creation + cache_read),
 	// NOT cumulative totalTokensIn which would massively overcount.
-	//
-	// No additive or floor constant: the SDK's token values already include
-	// everything in the context window (system prompt, message history, tool
-	// results). Adding AUTO_COMPACTION_BASE double-counted; using it as a floor
-	// leaked a phantom 3% into empty sessions.
 	const contextUsed = $derived($activeSession.contextUsed ?? 0);
 	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
