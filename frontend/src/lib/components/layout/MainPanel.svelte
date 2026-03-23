@@ -26,6 +26,8 @@
 	import FinishModal from '$lib/components/git/FinishModal.svelte';
 	import PullModal from '$lib/components/git/PullModal.svelte';
 	import InitRepoModal from '$lib/components/git/InitRepoModal.svelte';
+	import ChangedFilesPanel from '$lib/components/git/ChangedFilesPanel.svelte';
+	import DiffViewer from '$lib/components/git/DiffViewer.svelte';
 
 	// Feature page components
 	import SettingsCard from '$lib/components/deck/cards/SettingsCard.svelte';
@@ -133,6 +135,10 @@
 
 	// Init repo modal state
 	let showInitRepoModal = $state(false);
+
+	// Changed files panel state
+	let showChangedFilesPanel = $state(false);
+	let selectedDiffFile = $state<import('$lib/api/git').FileChangeInfo | null>(null);
 
 	// PR detection for current branch
 	let branchPR = $state<{ number: number; title: string; url: string; head_branch: string } | null>(null);
@@ -735,6 +741,7 @@
 							onOpenCreatePRModal={() => { showCommitModalMode = 'pr-only'; showCommitModal = true; }}
 							onOpenFinishModal={() => showFinishModal = true}
 							onOpenPullModal={() => showPullModal = true}
+							onOpenChangedFiles={() => { showChangedFilesPanel = true; git.refreshChangedFiles(); }}
 						/>
 					{/if}
 				{/snippet}
@@ -881,6 +888,21 @@
 			}
 		}}
 	/>
+
+	<ChangedFilesPanel
+		projectId={activeTab.project}
+		open={showChangedFilesPanel}
+		onClose={() => { showChangedFilesPanel = false; selectedDiffFile = null; }}
+		onViewDiff={(file) => { selectedDiffFile = file; }}
+	/>
+
+	{#if selectedDiffFile}
+		<DiffViewer
+			projectId={activeTab.project}
+			file={selectedDiffFile}
+			onClose={() => { selectedDiffFile = null; }}
+		/>
+	{/if}
 {/if}
 
 <style>

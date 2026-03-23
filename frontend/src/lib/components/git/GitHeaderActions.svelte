@@ -33,9 +33,11 @@
 		onOpenCreatePRModal: () => void;
 		onOpenFinishModal: () => void;
 		onOpenPullModal: () => void;
+		/** Open changed files panel */
+		onOpenChangedFiles?: () => void;
 	}
 
-	let { projectId, isStreaming = false, isGitRepo = true, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onOpenCommitModal, onOpenCreatePRModal, onOpenFinishModal, onOpenPullModal }: Props = $props();
+	let { projectId, isStreaming = false, isGitRepo = true, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onOpenCommitModal, onOpenCreatePRModal, onOpenFinishModal, onOpenPullModal, onOpenChangedFiles }: Props = $props();
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
@@ -54,6 +56,7 @@
 	);
 	const additions = $derived($diffStats?.additions ?? 0);
 	const deletions = $derived($diffStats?.deletions ?? 0);
+	const filesChanged = $derived($diffStats?.files_changed ?? 0);
 	const commitsAhead = $derived($gitStatus?.ahead ?? 0);
 	const defaultBranch = $derived($githubRepoInfo?.default_branch ?? 'main');
 	const isOnDefaultBranch = $derived(currentBranch === defaultBranch);
@@ -303,16 +306,21 @@
 		</button>
 	{/if}
 
-	<!-- Diff stats -->
+	<!-- Diff stats (clickable to open changed files panel) -->
 	{#if hasChanges}
-		<div class="diff-stats">
+		<button
+			class="diff-stats"
+			onclick={onOpenChangedFiles}
+			title="View {filesChanged} changed file{filesChanged === 1 ? '' : 's'}"
+		>
 			{#if additions > 0}
 				<span class="stat additions">+{additions}</span>
 			{/if}
 			{#if deletions > 0}
 				<span class="stat deletions">-{deletions}</span>
 			{/if}
-		</div>
+			<span class="stat files-count">{filesChanged} file{filesChanged === 1 ? '' : 's'}</span>
+		</button>
 	{/if}
 
 	{:else}
@@ -548,7 +556,22 @@
 		display: flex;
 		align-items: center;
 		gap: 6px;
-		padding: 0 4px;
+		padding: 2px 8px;
+		background: none;
+		border: 1px solid transparent;
+		border-radius: 4px;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.diff-stats:hover {
+		background: var(--hover-bg, rgba(255, 255, 255, 0.06));
+		border-color: rgba(255, 255, 255, 0.1);
+	}
+
+	.diff-stats:focus-visible {
+		outline: 2px solid var(--primary);
+		outline-offset: 1px;
 	}
 
 	.stat {
@@ -564,6 +587,12 @@
 
 	.stat.deletions {
 		color: var(--destructive);
+	}
+
+	.stat.files-count {
+		color: var(--muted-fg, rgba(255, 255, 255, 0.45));
+		font-size: 0.625rem;
+		margin-left: 2px;
 	}
 
 	/* Spin animation */

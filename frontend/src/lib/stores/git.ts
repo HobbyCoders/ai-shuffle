@@ -15,6 +15,8 @@ export {
 	currentBranch,
 	localBranches,
 	remoteBranches,
+	changedFiles,
+	changedFilesLoading,
 } from './git.svelte';
 
 export type {
@@ -26,4 +28,8 @@ export type {
 	DiffStats,
 	PullResponse,
 	GitMode,
+	FileChangeInfo,
+	ChangedFilesResponse,
+	FileDiffResponse,
+	OperationResponse,
 } from './git.svelte';

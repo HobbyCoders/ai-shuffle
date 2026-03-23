@@ -843,6 +843,305 @@ class GitService:
             logger.error(f"Error staging files: {e}")
             return False
 
+    def unstage_files(self, working_dir: str, files: List[str]) -> bool:
+        """
+        Unstage files (remove from index, keep working tree changes).
+
+        Args:
+            working_dir: Repository directory
+            files: List of file paths to unstage (use ['.'] for all)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            args = ["reset", "HEAD", "--"] + files
+            result = self._run_git(working_dir, args, timeout=30)
+
+            if result.returncode == 0:
+                logger.debug(f"Unstaged {len(files)} file(s)")
+                self.invalidate_status_cache(working_dir)
+                return True
+
+            logger.warning(f"Failed to unstage files: {result.stderr}")
+            return False
+        except Exception as e:
+            logger.error(f"Error unstaging files: {e}")
+            return False
+
+    def discard_changes(
+        self,
+        working_dir: str,
+        files: List[str],
+        file_statuses: Optional[Dict[str, str]] = None,
+    ) -> Tuple[bool, List[str]]:
+        """
+        Discard changes for specific files.
+
+        Routes to the appropriate git command based on file status:
+        - modified (tracked, unstaged): git checkout -- <file>
+        - staged: git reset HEAD -- <file>, then git checkout -- <file>
+        - untracked: delete the file from disk
+
+        Args:
+            working_dir: Repository directory
+            files: List of file paths to discard
+            file_statuses: Map of file path → category ('modified', 'staged', 'untracked').
+                          If not provided, auto-detects from git status.
+
+        Returns:
+            Tuple of (overall_success, list_of_failed_files)
+        """
+        failed: List[str] = []
+        real_working_dir = os.path.realpath(working_dir)
+
+        # Auto-detect statuses if not provided
+        if not file_statuses:
+            status = self.get_status(working_dir)
+            file_statuses = {}
+            for sf in status.get("staged", []):
+                fname = sf["file"] if isinstance(sf, dict) else sf
+                file_statuses[fname] = "staged"
+            for f in status.get("modified", []):
+                file_statuses[f] = "modified"
+            for f in status.get("untracked", []):
+                file_statuses[f] = "untracked"
+
+        # Group files by operation
+        staged = [f for f in files if file_statuses.get(f) == "staged"]
+        modified = [f for f in files if file_statuses.get(f) == "modified"]
+        untracked = [f for f in files if file_statuses.get(f) == "untracked"]
+
+        try:
+            # Unstage staged files first, then restore
+            if staged:
+                result = self._run_git(
+                    working_dir, ["reset", "HEAD", "--"] + staged, timeout=30
+                )
+                if result.returncode != 0:
+                    logger.warning(f"Failed to reset staged files: {result.stderr}")
+                    failed.extend(staged)
+                    staged = []  # Don't try checkout on files we couldn't reset
+
+                # Checkout the successfully reset files
+                if staged:
+                    result = self._run_git(
+                        working_dir, ["checkout", "--"] + staged, timeout=30
+                    )
+                    if result.returncode != 0:
+                        logger.warning(f"Failed to checkout staged files: {result.stderr}")
+                        failed.extend(staged)
+
+            # Checkout modified files
+            if modified:
+                result = self._run_git(
+                    working_dir, ["checkout", "--"] + modified, timeout=30
+                )
+                if result.returncode != 0:
+                    logger.warning(f"Failed to checkout modified files: {result.stderr}")
+                    failed.extend(modified)
+
+            # Delete untracked files (with path traversal protection)
+            for f in untracked:
+                full_path = os.path.realpath(os.path.join(working_dir, f))
+                if not full_path.startswith(real_working_dir + os.sep) and full_path != real_working_dir:
+                    logger.warning(f"Path traversal attempt blocked: {f}")
+                    failed.append(f)
+                    continue
+                try:
+                    if os.path.isdir(full_path):
+                        import shutil
+                        shutil.rmtree(full_path)
+                    elif os.path.exists(full_path):
+                        os.remove(full_path)
+                except OSError as e:
+                    logger.warning(f"Failed to delete untracked file {f}: {e}")
+                    failed.append(f)
+
+        except Exception as e:
+            logger.error(f"Error discarding changes: {e}")
+            failed.extend(files)
+
+        self.invalidate_status_cache(working_dir)
+        return (len(failed) == 0, failed)
+
+    def get_file_diff(
+        self,
+        working_dir: str,
+        file_path: str,
+        staged: bool = False,
+        max_chars: int = 50000,
+    ) -> Dict[str, Any]:
+        """
+        Get unified diff for a single file.
+
+        For tracked files, runs git diff. For untracked files, reads
+        the file and synthesizes an all-additions diff.
+
+        Args:
+            working_dir: Repository directory
+            file_path: Path to the file (relative to repo root)
+            staged: If True, show staged diff (index vs HEAD)
+            max_chars: Maximum diff chars before truncation
+
+        Returns:
+            Dictionary with: file, diff, is_binary, truncated
+        """
+        result_data: Dict[str, Any] = {
+            "file": file_path,
+            "diff": "",
+            "is_binary": False,
+            "truncated": False,
+        }
+
+        try:
+            # Check if file is untracked
+            status_result = self._run_git(
+                working_dir,
+                ["status", "--porcelain=v1", "--", file_path],
+                timeout=5,
+            )
+            is_untracked = False
+            if status_result.returncode == 0:
+                for line in status_result.stdout.split("\n"):
+                    if line and len(line) >= 3 and line[0:2] == "??":
+                        is_untracked = True
+                        break
+
+            if is_untracked:
+                # Synthesize diff for untracked file
+                full_path = os.path.realpath(os.path.join(working_dir, file_path))
+                real_wd = os.path.realpath(working_dir)
+                if not full_path.startswith(real_wd + os.sep) and full_path != real_wd:
+                    result_data["diff"] = "Error: path traversal blocked"
+                    return result_data
+
+                # Check if binary
+                numstat = self._run_git(
+                    working_dir,
+                    ["diff", "--no-index", "--numstat", "/dev/null", file_path],
+                    timeout=5,
+                )
+                if numstat.returncode in (0, 1) and numstat.stdout.strip():
+                    parts = numstat.stdout.strip().split("\t")
+                    if len(parts) >= 2 and parts[0] == "-" and parts[1] == "-":
+                        result_data["is_binary"] = True
+                        result_data["diff"] = "Binary file (not displayable)"
+                        return result_data
+
+                # Use git diff --no-index for proper unified diff format
+                diff_result = self._run_git(
+                    working_dir,
+                    ["diff", "--no-index", "--", "/dev/null", file_path],
+                    timeout=15,
+                )
+                # --no-index returns exit code 1 when files differ (normal)
+                if diff_result.returncode in (0, 1) and diff_result.stdout:
+                    diff_text = diff_result.stdout
+                    if len(diff_text) > max_chars:
+                        diff_text = diff_text[:max_chars] + "\n\n[... diff truncated ...]"
+                        result_data["truncated"] = True
+                    result_data["diff"] = diff_text
+                return result_data
+
+            # Check if binary (tracked file)
+            numstat_args = ["diff", "--numstat"]
+            if staged:
+                numstat_args.append("--staged")
+            numstat_args.extend(["--", file_path])
+            numstat = self._run_git(working_dir, numstat_args, timeout=5)
+            if numstat.returncode == 0 and numstat.stdout.strip():
+                parts = numstat.stdout.strip().split("\t")
+                if len(parts) >= 2 and parts[0] == "-" and parts[1] == "-":
+                    result_data["is_binary"] = True
+                    result_data["diff"] = "Binary file (not displayable)"
+                    return result_data
+
+            # Get the unified diff
+            diff_args = ["diff"]
+            if staged:
+                diff_args.append("--staged")
+            diff_args.extend(["--", file_path])
+
+            diff_result = self._run_git(working_dir, diff_args, timeout=15)
+            if diff_result.returncode == 0:
+                diff_text = diff_result.stdout
+                if len(diff_text) > max_chars:
+                    diff_text = diff_text[:max_chars] + "\n\n[... diff truncated ...]"
+                    result_data["truncated"] = True
+                result_data["diff"] = diff_text
+
+        except Exception as e:
+            logger.error(f"Error getting file diff for {file_path}: {e}")
+            result_data["diff"] = f"Error: {e}"
+
+        return result_data
+
+    def get_per_file_diff_stats(self, working_dir: str) -> List[Dict[str, Any]]:
+        """
+        Get per-file diff statistics (additions/deletions per file).
+
+        Returns separate entries for staged and unstaged changes.
+        Cached with the same TTL as aggregate diff stats.
+
+        Args:
+            working_dir: Repository directory
+
+        Returns:
+            List of dicts with: file, additions, deletions, is_binary, staged
+        """
+        cache_key = f"per_file_diff:{working_dir}"
+        cached = _git_cache.get(cache_key, _DIFF_STATS_CACHE_TTL)
+        if cached is not None:
+            return cached
+
+        files: List[Dict[str, Any]] = []
+
+        try:
+            # Staged changes
+            result = self._run_git(
+                working_dir, ["diff", "--staged", "--numstat"], timeout=10
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    if not line:
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 3:
+                        is_binary = parts[0] == "-" and parts[1] == "-"
+                        files.append({
+                            "file": parts[2],
+                            "additions": 0 if is_binary else int(parts[0]),
+                            "deletions": 0 if is_binary else int(parts[1]),
+                            "is_binary": is_binary,
+                            "staged": True,
+                        })
+
+            # Unstaged changes
+            result = self._run_git(
+                working_dir, ["diff", "--numstat"], timeout=10
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    if not line:
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 3:
+                        is_binary = parts[0] == "-" and parts[1] == "-"
+                        files.append({
+                            "file": parts[2],
+                            "additions": 0 if is_binary else int(parts[0]),
+                            "deletions": 0 if is_binary else int(parts[1]),
+                            "is_binary": is_binary,
+                            "staged": False,
+                        })
+
+            _git_cache.put(cache_key, files)
+        except Exception as e:
+            logger.error(f"Error getting per-file diff stats: {e}")
+
+        return files
+
     def commit(
         self,
         working_dir: str,
@@ -1073,6 +1372,7 @@ class GitService:
         """
         _git_cache.invalidate(f"status:{working_dir}")
         _git_cache.invalidate_prefix(f"diff_stats:{working_dir}:")
+        _git_cache.invalidate_prefix(f"per_file_diff:{working_dir}")
         _git_cache.invalidate_prefix(f"ahead_behind:{working_dir}:")
 
     def get_status(self, working_dir: str) -> Dict[str, Any]:

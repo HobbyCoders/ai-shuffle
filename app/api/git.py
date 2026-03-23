@@ -294,6 +294,60 @@ class GeneratePRDescriptionResponse(BaseModel):
 
 
 # =============================================================================
+# Changed Files / Diff Models
+# =============================================================================
+
+class FileChangeInfo(BaseModel):
+    """Per-file change information for the changed files panel."""
+    file: str
+    status: str  # A=added, M=modified, D=deleted, R=renamed, C=copied, ?=untracked
+    category: str  # 'staged', 'modified', 'untracked', 'conflict'
+    additions: int = 0
+    deletions: int = 0
+    is_binary: bool = False
+
+
+class ChangedFilesResponse(BaseModel):
+    """All changed files with per-file stats."""
+    files: List[FileChangeInfo]
+    total_additions: int = 0
+    total_deletions: int = 0
+
+
+class FileDiffRequest(BaseModel):
+    """Request for per-file diff."""
+    file_path: str = Field(..., min_length=1, max_length=1000)
+    staged: bool = False
+
+
+class FileDiffResponse(BaseModel):
+    """Response with unified diff content for a single file."""
+    file: str
+    diff: str
+    is_binary: bool = False
+    truncated: bool = False
+
+
+class StageRequest(BaseModel):
+    """Request to stage files."""
+    files: List[str] = Field(..., min_length=1)
+
+
+class UnstageRequest(BaseModel):
+    """Request to unstage files."""
+    files: List[str] = Field(..., min_length=1)
+
+
+class DiscardRequest(BaseModel):
+    """Request to discard changes."""
+    files: List[str] = Field(..., min_length=1)
+    file_statuses: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of file path to category (modified/staged/untracked)"
+    )
+
+
+# =============================================================================
 # Worktree Models
 # =============================================================================
 
@@ -1070,6 +1124,251 @@ async def get_diff_stats(
         additions=stats.get("additions", 0),
         deletions=stats.get("deletions", 0),
         files_changed=stats.get("files_changed", 0),
+    )
+
+
+# =============================================================================
+# Changed Files & File-Level Operations
+# =============================================================================
+
+@router.get("/changed-files", response_model=ChangedFilesResponse)
+async def get_changed_files(
+    request: Request,
+    project_id: str,
+    worktree_id: Optional[str] = None,
+    token: str = Depends(require_auth),
+):
+    """
+    Get all changed files with per-file diff stats.
+
+    Returns files grouped by category (staged, modified, untracked, conflict)
+    with per-file addition/deletion counts for display in the changed files panel.
+    """
+    check_project_access(request, project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
+
+    # Fetch status and per-file stats in parallel via the thread pool
+    git_status, per_file_stats = await asyncio.gather(
+        _coalescer.get_or_run(
+            f"status:{working_dir}",
+            git_service.get_status, working_dir,
+        ),
+        _coalescer.get_or_run(
+            f"per_file_diff:{working_dir}",
+            git_service.get_per_file_diff_stats, working_dir,
+        ),
+    )
+
+    if not git_status.get("is_git_repo"):
+        return ChangedFilesResponse(files=[])
+
+    # Build a lookup from per-file stats: file -> {additions, deletions, is_binary}
+    stats_by_file: Dict[str, Dict[str, Any]] = {}
+    for entry in per_file_stats:
+        fname = entry["file"]
+        # Merge staged and unstaged stats for the same file
+        if fname in stats_by_file:
+            stats_by_file[fname]["additions"] += entry["additions"]
+            stats_by_file[fname]["deletions"] += entry["deletions"]
+            stats_by_file[fname]["is_binary"] = (
+                stats_by_file[fname]["is_binary"] or entry["is_binary"]
+            )
+        else:
+            stats_by_file[fname] = {
+                "additions": entry["additions"],
+                "deletions": entry["deletions"],
+                "is_binary": entry["is_binary"],
+            }
+
+    files: List[FileChangeInfo] = []
+    total_add = 0
+    total_del = 0
+
+    # Conflicts
+    for fname in git_status.get("conflicts", []):
+        fstats = stats_by_file.get(fname, {})
+        add = fstats.get("additions", 0)
+        dele = fstats.get("deletions", 0)
+        total_add += add
+        total_del += dele
+        files.append(FileChangeInfo(
+            file=fname, status="U", category="conflict",
+            additions=add, deletions=dele,
+            is_binary=fstats.get("is_binary", False),
+        ))
+
+    # Staged files
+    for entry in git_status.get("staged", []):
+        fname = entry["file"] if isinstance(entry, dict) else entry
+        file_status = entry.get("status", "M") if isinstance(entry, dict) else "M"
+        fstats = stats_by_file.get(fname, {})
+        add = fstats.get("additions", 0)
+        dele = fstats.get("deletions", 0)
+        total_add += add
+        total_del += dele
+        files.append(FileChangeInfo(
+            file=fname, status=file_status, category="staged",
+            additions=add, deletions=dele,
+            is_binary=fstats.get("is_binary", False),
+        ))
+
+    # Modified (unstaged)
+    for fname in git_status.get("modified", []):
+        fstats = stats_by_file.get(fname, {})
+        add = fstats.get("additions", 0)
+        dele = fstats.get("deletions", 0)
+        total_add += add
+        total_del += dele
+        files.append(FileChangeInfo(
+            file=fname, status="M", category="modified",
+            additions=add, deletions=dele,
+            is_binary=fstats.get("is_binary", False),
+        ))
+
+    # Untracked
+    for fname in git_status.get("untracked", []):
+        files.append(FileChangeInfo(
+            file=fname, status="?", category="untracked",
+            additions=0, deletions=0, is_binary=False,
+        ))
+
+    return ChangedFilesResponse(
+        files=files,
+        total_additions=total_add,
+        total_deletions=total_del,
+    )
+
+
+@router.post("/file-diff", response_model=FileDiffResponse)
+async def get_file_diff(
+    request: Request,
+    project_id: str,
+    body: FileDiffRequest,
+    worktree_id: Optional[str] = None,
+    token: str = Depends(require_auth),
+):
+    """
+    Get unified diff for a single file.
+
+    Uses POST to avoid URL-encoding issues with file paths.
+    Fetches lazily (on user click), not pre-loaded.
+    """
+    check_project_access(request, project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
+
+    result = await run_git(
+        git_service.get_file_diff,
+        working_dir, body.file_path, body.staged,
+    )
+
+    return FileDiffResponse(
+        file=result["file"],
+        diff=result["diff"],
+        is_binary=result.get("is_binary", False),
+        truncated=result.get("truncated", False),
+    )
+
+
+@router.post("/stage", response_model=OperationResponse)
+async def stage_files(
+    request: Request,
+    project_id: str,
+    body: StageRequest,
+    worktree_id: Optional[str] = None,
+    token: str = Depends(require_auth),
+):
+    """Stage specific files for commit."""
+    check_project_access(request, project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
+
+    success = await run_git(git_service.stage_files, working_dir, body.files)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to stage files",
+        )
+
+    # Return fresh status + diff stats for instant UI update
+    new_status = await run_git(git_service.get_status, working_dir)
+    new_diff_stats = await run_git(git_service.get_diff_stats, working_dir)
+
+    return OperationResponse(
+        success=True,
+        message=f"Staged {len(body.files)} file(s)",
+        status=new_status,
+        diff_stats=new_diff_stats,
+    )
+
+
+@router.post("/unstage", response_model=OperationResponse)
+async def unstage_files(
+    request: Request,
+    project_id: str,
+    body: UnstageRequest,
+    worktree_id: Optional[str] = None,
+    token: str = Depends(require_auth),
+):
+    """Unstage specific files (remove from index, keep working tree changes)."""
+    check_project_access(request, project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
+
+    success = await run_git(git_service.unstage_files, working_dir, body.files)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to unstage files",
+        )
+
+    new_status = await run_git(git_service.get_status, working_dir)
+    new_diff_stats = await run_git(git_service.get_diff_stats, working_dir)
+
+    return OperationResponse(
+        success=True,
+        message=f"Unstaged {len(body.files)} file(s)",
+        status=new_status,
+        diff_stats=new_diff_stats,
+    )
+
+
+@router.post("/discard", response_model=OperationResponse)
+async def discard_changes(
+    request: Request,
+    project_id: str,
+    body: DiscardRequest,
+    worktree_id: Optional[str] = None,
+    token: str = Depends(require_auth),
+):
+    """
+    Discard changes for specific files.
+
+    Routes to appropriate git command based on file status:
+    - modified: git checkout -- <file>
+    - staged: git reset + git checkout
+    - untracked: delete from disk
+    """
+    check_project_access(request, project_id)
+    working_dir = get_working_dir(project_id, worktree_id)
+
+    success, failed = await run_git(
+        git_service.discard_changes,
+        working_dir, body.files, body.file_statuses,
+    )
+
+    if not success:
+        msg = f"Failed to discard some files: {', '.join(failed)}"
+    else:
+        msg = f"Discarded changes in {len(body.files)} file(s)"
+
+    new_status = await run_git(git_service.get_status, working_dir)
+    new_diff_stats = await run_git(git_service.get_diff_stats, working_dir)
+
+    return OperationResponse(
+        success=success,
+        message=msg,
+        status=new_status,
+        diff_stats=new_diff_stats,
     )
 
 

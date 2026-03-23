@@ -19,7 +19,11 @@ export type {
 	GitStatus,
 	CreateWorktreeRequest,
 	DiffStats,
-	PullResponse
+	PullResponse,
+	FileChangeInfo,
+	ChangedFilesResponse,
+	FileDiffResponse,
+	OperationResponse
 } from '$lib/api/git';
 
 // ============================================================================
@@ -37,6 +41,8 @@ interface GitState {
 	commits: gitApi.CommitNode[];
 	worktrees: gitApi.Worktree[];
 	diffStats: gitApi.DiffStats | null;
+	changedFiles: gitApi.FileChangeInfo[] | null;
+	changedFilesLoading: boolean;
 	loading: boolean;
 	error: string | null;
 }
@@ -48,6 +54,7 @@ interface CachedState {
 	commits: gitApi.CommitNode[];
 	worktrees: gitApi.Worktree[];
 	diffStats: gitApi.DiffStats | null;
+	changedFiles: gitApi.FileChangeInfo[] | null;
 }
 
 const EMPTY_STATE: GitState = {
@@ -59,6 +66,8 @@ const EMPTY_STATE: GitState = {
 	commits: [],
 	worktrees: [],
 	diffStats: null,
+	changedFiles: null,
+	changedFilesLoading: false,
 	loading: false,
 	error: null
 };
@@ -108,6 +117,7 @@ let _bgFetchRunning = false;
 let _statusInFlight = false;
 let _diffStatsInFlight = false;
 let _branchesInFlight = false;
+let _changedFilesInFlight = false;
 
 // Flag to pause polling during commit/push/PR operations.
 // Operations set this to true at start and false at end, so the poller
@@ -174,7 +184,8 @@ async function _loadCore(
 				branches,
 				commits: graphResponse.commits,
 				worktrees,
-				diffStats: diffStats ?? null
+				diffStats: diffStats ?? null,
+				changedFiles: null
 			};
 
 			_update((s) => ({
@@ -285,6 +296,7 @@ export const git = {
 				worktreeId: worktreeId ?? null,
 				mode,
 				...cached,
+				changedFilesLoading: false,
 				loading: true,
 				error: null
 			});
@@ -639,6 +651,98 @@ export const git = {
 		}
 	},
 
+	async refreshChangedFiles() {
+		if (!_state.projectId) return;
+		if (_changedFilesInFlight) return;
+		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
+
+		_changedFilesInFlight = true;
+		_update((s) => ({ ...s, changedFilesLoading: true }));
+		try {
+			const response = await gitApi.getChangedFiles(
+				_state.projectId,
+				_state.worktreeId ?? undefined
+			);
+			if (_loadedKey !== key) return;
+			_update((s) => ({ ...s, changedFiles: response.files, changedFilesLoading: false }));
+
+			// Update cache
+			const cached = _cache.get(key);
+			if (cached) cached.changedFiles = response.files;
+		} catch (e) {
+			if (_loadedKey !== key) return;
+			console.debug('Failed to refresh changed files:', e);
+			_update((s) => ({ ...s, changedFilesLoading: false }));
+		} finally {
+			_changedFilesInFlight = false;
+		}
+	},
+
+	async stageFiles(files: string[]) {
+		if (!_state.projectId) return;
+
+		try {
+			await gitApi.stageFiles(
+				_state.projectId,
+				files,
+				_state.worktreeId ?? undefined
+			);
+			// Refresh all related state in parallel
+			await Promise.all([
+				git.refreshChangedFiles(),
+				git.refreshStatus(),
+				git.refreshDiffStats()
+			]);
+		} catch (e) {
+			const error = e as { detail?: string };
+			_update((s) => ({ ...s, error: error.detail || 'Failed to stage files' }));
+			throw e;
+		}
+	},
+
+	async unstageFiles(files: string[]) {
+		if (!_state.projectId) return;
+
+		try {
+			await gitApi.unstageFiles(
+				_state.projectId,
+				files,
+				_state.worktreeId ?? undefined
+			);
+			await Promise.all([
+				git.refreshChangedFiles(),
+				git.refreshStatus(),
+				git.refreshDiffStats()
+			]);
+		} catch (e) {
+			const error = e as { detail?: string };
+			_update((s) => ({ ...s, error: error.detail || 'Failed to unstage files' }));
+			throw e;
+		}
+	},
+
+	async discardChanges(files: string[], fileStatuses: Record<string, string>) {
+		if (!_state.projectId) return;
+
+		try {
+			await gitApi.discardChanges(
+				_state.projectId,
+				files,
+				fileStatuses,
+				_state.worktreeId ?? undefined
+			);
+			await Promise.all([
+				git.refreshChangedFiles(),
+				git.refreshStatus(),
+				git.refreshDiffStats()
+			]);
+		} catch (e) {
+			const error = e as { detail?: string };
+			_update((s) => ({ ...s, error: error.detail || 'Failed to discard changes' }));
+			throw e;
+		}
+	},
+
 	clearError() {
 		_update((s) => ({ ...s, error: null }));
 	},
@@ -703,3 +807,6 @@ export const currentBranch = createDerived(
 export const localBranches = createDerived(() => _state.branches.filter((b) => !b.remote));
 
 export const remoteBranches = createDerived(() => _state.branches.filter((b) => b.remote));
+
+export const changedFiles = createDerived(() => _state.changedFiles);
+export const changedFilesLoading = createDerived(() => _state.changedFilesLoading);

@@ -411,6 +411,103 @@ export async function getWorktreeFiles(
 }
 
 // ============================================================================
+// Changed Files & File-Level Operations API
+// ============================================================================
+
+export interface FileChangeInfo {
+    file: string;
+    status: string;       // A=added, M=modified, D=deleted, R=renamed, ?=untracked, U=conflict
+    category: string;     // 'staged' | 'modified' | 'untracked' | 'conflict'
+    additions: number;
+    deletions: number;
+    is_binary: boolean;
+}
+
+export interface ChangedFilesResponse {
+    files: FileChangeInfo[];
+    total_additions: number;
+    total_deletions: number;
+}
+
+export interface FileDiffResponse {
+    file: string;
+    diff: string;
+    is_binary: boolean;
+    truncated: boolean;
+}
+
+export interface OperationResponse {
+    success: boolean;
+    message: string;
+    status?: Record<string, unknown>;
+    diff_stats?: DiffStats;
+}
+
+/**
+ * Get all changed files with per-file diff stats
+ */
+export async function getChangedFiles(projectId: string, worktreeId?: string): Promise<ChangedFilesResponse> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+    return api.get<ChangedFilesResponse>(`${BASE}/${projectId}/git/changed-files${params}`);
+}
+
+/**
+ * Get unified diff for a single file (lazy, on-demand)
+ */
+export async function getFileDiff(
+    projectId: string,
+    filePath: string,
+    staged: boolean = false,
+    worktreeId?: string
+): Promise<FileDiffResponse> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+    return api.post<FileDiffResponse>(`${BASE}/${projectId}/git/file-diff${params}`, {
+        file_path: filePath,
+        staged,
+    });
+}
+
+/**
+ * Stage specific files
+ */
+export async function stageFiles(
+    projectId: string,
+    files: string[],
+    worktreeId?: string
+): Promise<OperationResponse> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+    return api.post<OperationResponse>(`${BASE}/${projectId}/git/stage${params}`, { files });
+}
+
+/**
+ * Unstage specific files (remove from index, keep working tree changes)
+ */
+export async function unstageFiles(
+    projectId: string,
+    files: string[],
+    worktreeId?: string
+): Promise<OperationResponse> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+    return api.post<OperationResponse>(`${BASE}/${projectId}/git/unstage${params}`, { files });
+}
+
+/**
+ * Discard changes for specific files
+ */
+export async function discardChanges(
+    projectId: string,
+    files: string[],
+    fileStatuses: Record<string, string>,
+    worktreeId?: string
+): Promise<OperationResponse> {
+    const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
+    return api.post<OperationResponse>(`${BASE}/${projectId}/git/discard${params}`, {
+        files,
+        file_statuses: fileStatuses,
+    });
+}
+
+// ============================================================================
 // Diff Stats API
 // ============================================================================
 
