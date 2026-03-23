@@ -146,6 +146,15 @@ function _restoreFromCache(key: string): CachedState | null {
 	return cached;
 }
 
+/** Sync a subset of current UI state back into the cache for the active key.
+ *  Call this after any refresh operation so restoreCacheImmediate() never
+ *  serves stale pre-operation data. */
+function _syncToCache(fields: Partial<CachedState>) {
+	if (!_loadedKey) return;
+	const cached = _cache.get(_loadedKey);
+	if (cached) Object.assign(cached, fields);
+}
+
 /**
  * Core load logic shared by loadRepository and loadForWorktree.
  */
@@ -330,6 +339,7 @@ export const git = {
 			);
 			if (_loadedKey !== key) return;
 			_update((s) => ({ ...s, status }));
+			_syncToCache({ status });
 		} catch (e) {
 			if (_loadedKey !== key) return;
 			const error = e as { detail?: string };
@@ -353,6 +363,7 @@ export const git = {
 			);
 			if (_loadedKey !== key) return;
 			_update((s) => ({ ...s, branches }));
+			_syncToCache({ branches });
 		} catch (e) {
 			if (_loadedKey !== key) return;
 			const error = e as { detail?: string };
@@ -370,6 +381,7 @@ export const git = {
 			const graphResponse = await gitApi.getCommitGraph(_state.projectId, limit);
 			if (_loadedKey !== key) return;
 			_update((s) => ({ ...s, commits: graphResponse.commits }));
+			_syncToCache({ commits: graphResponse.commits });
 		} catch (e) {
 			if (_loadedKey !== key) return;
 			const error = e as { detail?: string };
@@ -385,6 +397,7 @@ export const git = {
 			const worktrees = await gitApi.getWorktrees(_state.projectId);
 			if (_loadedKey !== key) return;
 			_update((s) => ({ ...s, worktrees }));
+			_syncToCache({ worktrees });
 		} catch (e) {
 			if (_loadedKey !== key) return;
 			const error = e as { detail?: string };
@@ -574,6 +587,7 @@ export const git = {
 			);
 			if (_loadedKey !== key) return;
 			_update((s) => ({ ...s, diffStats }));
+			_syncToCache({ diffStats });
 		} catch (e) {
 			if (_loadedKey !== key) return;
 			console.debug('Failed to refresh diff stats:', e);
