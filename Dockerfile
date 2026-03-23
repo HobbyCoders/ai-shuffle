@@ -10,7 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     NODE_VERSION=20.x
 
-# ── Layer 1: System deps + Playwright runtime libs (rarely changes) ──
+# ── Layer 1: System deps (rarely changes) ──
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
@@ -18,26 +18,6 @@ RUN apt-get update && \
     gnupg \
     git \
     gosu \
-    # Playwright Chromium runtime dependencies
-    libglib2.0-0 \
-    libnss3 \
-    libnspr4 \
-    libdbus-1-3 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxkbcommon0 \
-    libatspi2.0-0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxrandr2 \
-    libgbm1 \
-    libpango-1.0-0 \
-    libcairo2 \
-    libasound2 \
-    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Layer 2: Node.js (changes only when NODE_VERSION changes) ──
@@ -76,12 +56,7 @@ RUN groupadd -g 1000 appuser && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ── Layer 5: Playwright browser (changes when playwright version changes) ──
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
-RUN playwright install chromium && \
-    chmod -R 755 $PLAYWRIGHT_BROWSERS_PATH
-
-# ── Layer 6: Frontend deps (changes when package-lock.json changes) ──
+# ── Layer 5: Frontend deps (changes when package-lock.json changes) ──
 COPY --chown=appuser:appuser frontend/package.json frontend/package-lock.json ./frontend/
 WORKDIR /app/frontend
 RUN npm ci

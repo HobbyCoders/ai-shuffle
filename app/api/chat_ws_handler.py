@@ -201,14 +201,6 @@ class ChatWebSocketHandler:
                         # Clear streaming state in sync engine (no need to broadcast - no devices left)
                         await sync_engine.clear_streaming_state(self.current_session_id)
 
-                        # Cleanup browser session if one exists
-                        try:
-                            from app.mcp.chrome_session import chrome_session_manager as browser_session_manager
-                            if browser_session_manager.has_session(self.current_session_id):
-                                await browser_session_manager.close_session(self.current_session_id)
-                                logger.info(f"Cleaned up browser session for {self.current_session_id}")
-                        except Exception:
-                            pass
                     elif remaining_devices > 0:
                         logger.debug(f"Session {self.current_session_id} still has {remaining_devices} device(s) connected")
                     elif not is_task_done:

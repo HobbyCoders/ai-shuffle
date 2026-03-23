@@ -41,9 +41,6 @@ export interface SessionSwitcherDeps {
 		get: (sessionId: string) => Promise<ChatMessage[] | null>;
 		delete: (sessionId: string) => Promise<void>;
 	};
-	browserState: {
-		switchSession: (fromSessionId: string | null, toSessionId: string | null) => void;
-	};
 	sessionPoller: {
 		stop: (sessionId: string) => void;
 		loadSession: (sessionId: string) => Promise<PollAppliedData | null>;
@@ -118,7 +115,7 @@ export async function loadSelectionFromBackend(): Promise<{ selectedProfile: str
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitcher {
-	const { update, getState, wsSend, internal, sessionEphemeralCache, messageCache, browserState, sessionPoller, onPersistTimerChanged } = deps;
+	const { update, getState, wsSend, internal, sessionEphemeralCache, messageCache, sessionPoller, onPersistTimerChanged } = deps;
 
 	let persistTimer: ReturnType<typeof setTimeout> | null = null;
 	let pendingSelection: { profile: string; project: string } | null = null;
@@ -312,9 +309,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			queuedMessages: [],  // Populated from backend via history/queue_updated
 		}));
 
-		// Switch browser panel
-		browserState.switchSession(state.sessionId, sessionId);
-
 		// Load full session state via HTTP — sole authority for session data.
 		// This replaces the old WS load_session → history flow.
 		const pollData = await sessionPoller.loadSession(sessionId);
@@ -379,9 +373,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		internal.pendingTools.clear();
 		internal.interruptPending = false;
 		internal.awaitingNewSession = false;
-
-		// Save current browser state
-		browserState.switchSession(state.sessionId, null);
 
 		// Restore new chat draft if one was saved earlier
 		const newChatEphemeral = sessionEphemeralCache.restore('__new_chat__');

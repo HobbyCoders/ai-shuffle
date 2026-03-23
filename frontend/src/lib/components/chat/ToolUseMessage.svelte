@@ -94,13 +94,6 @@
 		Bash: 'terminal',
 		// Web
 		WebFetch: 'globe', WebSearch: 'globe',
-		// Browser automation
-		browser_navigate: 'globe', browser_screenshot: 'globe', browser_click: 'globe',
-		browser_type: 'globe', browser_scroll: 'globe', browser_get_content: 'globe',
-		browser_get_elements: 'globe', browser_back: 'globe', browser_forward: 'globe',
-		browser_evaluate: 'globe', browser_fill: 'globe', browser_select: 'globe',
-		browser_wait: 'globe', browser_tab_new: 'globe', browser_tab_list: 'globe',
-		browser_tab_switch: 'globe', browser_close: 'globe',
 		// Agent / Skills
 		Task: 'bot', Skill: 'bot',
 		// Todo

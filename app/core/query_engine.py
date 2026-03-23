@@ -371,7 +371,6 @@ def resolve_note_references(prompt: str) -> str:
 
 def _build_mcp_servers_dict(
     project_dir: Optional[Path] = None,
-    browser_session_id: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Build the mcp_servers dict for ClaudeAgentOptions from registered MCP servers.
@@ -382,7 +381,6 @@ def _build_mcp_servers_dict(
 
     Args:
         project_dir: Optional project directory for project-scoped servers.
-        browser_session_id: Optional session ID to inject into browser-tools env.
 
     Returns:
         Dictionary mapping server names to SDK MCP server configs, or None if empty.
@@ -406,11 +404,6 @@ def _build_mcp_servers_dict(
                 continue
             if server.name in mcp_servers:
                 continue
-            # Skip browser-tools from .mcp.json — it's now added as an
-            # in-process SDK MCP server below (no subprocess needed)
-            if server.name == "browser-tools":
-                continue
-
             if server.type == McpServerType.STDIO or server.type == "stdio":
                 config: dict = {"command": server.command}
                 if server.args:
@@ -434,29 +427,6 @@ def _build_mcp_servers_dict(
     # just like the CLI does. Manually adding them would create duplicates
     # (e.g. mcp__context7__* AND mcp__plugin_context7_context7__*).
 
-    # Add browser-tools as an in-process SDK MCP server (replaces the old
-    # stdio subprocess).  The server proxies tool calls to the FastAPI
-    # browser REST API so agent and user share the same Playwright browser.
-    # Skip if user has globally disabled browser-tools via settings.json.
-    if browser_session_id:
-        disabled_servers = service.get_disabled_servers() if service else []
-        if "browser-tools" not in disabled_servers:
-            try:
-                from app.mcp.browser_sdk_tools import create_browser_tools_server
-                from app.core.config import INTERNAL_BROWSER_TOKEN
-
-                browser_server = create_browser_tools_server(
-                    base_url=f"http://127.0.0.1:{settings.port}",
-                    session_id=browser_session_id,
-                    auth_token=INTERNAL_BROWSER_TOKEN,
-                )
-                mcp_servers["browser-tools"] = browser_server
-                logger.debug("Added in-process SDK MCP server for browser-tools")
-            except Exception as e:
-                logger.warning(f"Failed to create browser-tools SDK MCP server: {e}")
-        else:
-            logger.info("browser-tools is globally disabled, skipping")
-
     if mcp_servers:
         logger.info(f"Passing {len(mcp_servers)} MCP server(s) to SDK: {list(mcp_servers.keys())}")
         return mcp_servers
@@ -466,7 +436,6 @@ def _build_mcp_servers_dict(
 
 def _build_mcp_servers_dict_with_ai_tools(
     project_dir: Optional[Path] = None,
-    browser_session_id: Optional[str] = None,
     ai_tools_config: Optional[Dict[str, Any]] = None,
     tool_env: Optional[Dict[str, str]] = None,
 ) -> Optional[dict]:
@@ -478,7 +447,6 @@ def _build_mcp_servers_dict_with_ai_tools(
 
     Args:
         project_dir: Optional project directory for project-scoped servers.
-        browser_session_id: Optional session ID to inject into browser-tools env.
         ai_tools_config: Optional dict with individual AI tool toggles.
         tool_env: Environment variables (API keys, provider settings) to inject
             into AI tool Node.js subprocesses.
@@ -488,7 +456,6 @@ def _build_mcp_servers_dict_with_ai_tools(
     """
     mcp_servers = _build_mcp_servers_dict(
         project_dir=project_dir,
-        browser_session_id=browser_session_id,
     ) or {}
 
     # Add AI tools SDK MCP server if any AI tools are enabled
@@ -1113,7 +1080,6 @@ def build_options_from_profile(
     hooks: Optional[Dict[str, list]] = None,
     api_user_id: Optional[str] = None,
     session_id: Optional[str] = None,
-    browser_session_id: Optional[str] = _UNSET,
 ) -> tuple[ClaudeAgentOptions, Optional[Dict[str, AgentDefinition]]]:
     """
     Convert a profile to ClaudeAgentOptions with all available options.
@@ -1386,14 +1352,11 @@ def build_options_from_profile(
         setting_sources=config.get("setting_sources"),
 
         # MCP servers - pass all registered MCP servers directly to the SDK
-        # This ensures tools from MCP servers (e.g., browser-tools) are available
-        # regardless of whether the CLI discovers them from .mcp.json files
+        # This ensures tools from MCP servers are available regardless of
+        # whether the CLI discovers them from .mcp.json files
         # Note: ai_tool_env is passed so Node.js tool subprocesses get API keys
-        # browser_session_id defaults to session_id (WebSocket queries) but can
-        # be set to None for connector/API queries that have no browser.
         mcp_servers=_build_mcp_servers_dict_with_ai_tools(
             project_dir=Path(working_dir) if working_dir else None,
-            browser_session_id=session_id if browser_session_id is _UNSET else browser_session_id,
             ai_tools_config=ai_tools_config,
             tool_env=ai_tool_env,
         ) or {},
@@ -1473,15 +1436,8 @@ async def execute_query(
     overrides: Optional[Dict[str, Any]] = None,
     session_id: Optional[str] = None,
     api_user_id: Optional[str] = None,
-    browser_session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Execute a non-streaming query.
-
-    Args:
-        browser_session_id: Optional browser session ID for browser-tools MCP.
-            If None, browser-tools is not included (appropriate for connector
-            and API queries that have no interactive browser).
-    """
+    """Execute a non-streaming query."""
 
     # Get profile
     profile = get_profile(profile_id)
@@ -1535,7 +1491,6 @@ async def execute_query(
     )
 
     # Build options with user-scoped credential resolution
-    # browser_session_id=None for connector/API queries (no interactive browser)
     options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
@@ -1543,7 +1498,6 @@ async def execute_query(
         resume_session_id=resume_id,
         api_user_id=api_user_id,
         session_id=session_id,
-        browser_session_id=browser_session_id,
     )
 
     # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)

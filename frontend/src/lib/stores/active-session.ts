@@ -29,7 +29,6 @@ import { messageCache } from './message-cache';
 import { sessionEphemeralCache } from './session-cache';
 import { appData } from './app-data';
 import { git } from './git.svelte';
-import { browserState } from './browser';
 import { untrack } from 'svelte';
 
 // Shared types
@@ -429,7 +428,6 @@ const switcher = createSessionSwitcher({
 	internal,
 	sessionEphemeralCache,
 	messageCache,
-	browserState,
 	sessionPoller,
 	sessionState,
 	onPersistTimerChanged: (timer) => { persistTimer = timer; },

@@ -541,9 +541,8 @@ class McpService:
         """
         result = {}
 
-        # Always include USER scope (with built-in servers like browser-tools)
-        user_servers = list(self.get_servers_for_scope(McpScope.USER))
-        result["user"] = self._inject_browser_tools_builtin(user_servers)
+        # Always include USER scope
+        result["user"] = list(self.get_servers_for_scope(McpScope.USER))
 
         # Include project scopes if available
         if self.project_dir:
@@ -696,41 +695,14 @@ class McpService:
     # Utility Methods
     # =========================================================================
 
-    def _inject_browser_tools_builtin(self, servers: List[McpServerConfig]) -> List[McpServerConfig]:
-        """
-        Ensure browser-tools is present and marked as built-in in a server list.
-
-        If browser-tools already exists (e.g. from a config file), marks it as
-        builtin=True. Otherwise inserts a synthetic built-in entry.
-        """
-        disabled = self.get_disabled_servers()
-
-        for s in servers:
-            if s.name == "browser-tools":
-                s.builtin = True
-                return servers
-
-        # Not found — inject a synthetic built-in entry
-        browser_server = McpServerConfig(
-            name="browser-tools",
-            type=McpServerType.STDIO,
-            description="Built-in browser automation tools (provided by AI Shuffle SDK)",
-            scope="user",
-            enabled="browser-tools" not in disabled,
-            builtin=True,
-        )
-        servers.insert(0, browser_server)
-        return servers
-
     def get_all_servers_with_builtins(self) -> List[McpServerConfig]:
         """
-        Get all USER scope servers plus built-in servers (like browser-tools).
+        Get all USER scope servers.
 
         Returns:
-            List of all globally available MCP servers including builtins.
+            List of all globally available MCP servers.
         """
-        servers = list(self.get_servers_for_scope(McpScope.USER))
-        return self._inject_browser_tools_builtin(servers)
+        return list(self.get_servers_for_scope(McpScope.USER))
 
     def get_server_count(self) -> int:
         """Get total count of MCP servers across all scopes"""

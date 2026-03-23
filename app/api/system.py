@@ -43,10 +43,6 @@ TOOL_CATEGORIES = {
         "name": "MCP tools",
         "description": "Tools from MCP servers"
     },
-    "browser": {
-        "name": "Browser tools",
-        "description": "Web browser automation tools for navigating, clicking, and extracting content"
-    },
     "other": {
         "name": "Other tools",
         "description": "Utility and miscellaneous tools"
@@ -73,25 +69,6 @@ BUILTIN_TOOLS = [
     {"name": "Task", "category": "execution", "description": "Launch subagent tasks"},
     {"name": "Agent", "category": "execution", "description": "Launch subagent tasks"},
     {"name": "KillShell", "category": "execution", "description": "Kill background shell"},
-
-    # Browser tools (in-process SDK MCP server — names match mcp__browser-tools__<tool>)
-    {"name": "mcp__browser-tools__browser_navigate", "category": "browser", "description": "Navigate to a URL in the browser"},
-    {"name": "mcp__browser-tools__browser_screenshot", "category": "browser", "description": "Take a screenshot of the current page"},
-    {"name": "mcp__browser-tools__browser_click", "category": "browser", "description": "Click an element on the page"},
-    {"name": "mcp__browser-tools__browser_type", "category": "browser", "description": "Type text into an input field"},
-    {"name": "mcp__browser-tools__browser_scroll", "category": "browser", "description": "Scroll the page up or down"},
-    {"name": "mcp__browser-tools__browser_get_content", "category": "browser", "description": "Get readable text content from the page"},
-    {"name": "mcp__browser-tools__browser_get_elements", "category": "browser", "description": "List interactive elements on the page"},
-    {"name": "mcp__browser-tools__browser_back", "category": "browser", "description": "Navigate back in browser history"},
-    {"name": "mcp__browser-tools__browser_forward", "category": "browser", "description": "Navigate forward in browser history"},
-    {"name": "mcp__browser-tools__browser_evaluate", "category": "browser", "description": "Execute JavaScript in the browser"},
-    {"name": "mcp__browser-tools__browser_fill", "category": "browser", "description": "Fill a form field by label"},
-    {"name": "mcp__browser-tools__browser_select", "category": "browser", "description": "Select a dropdown option"},
-    {"name": "mcp__browser-tools__browser_wait", "category": "browser", "description": "Wait for a condition on the page"},
-    {"name": "mcp__browser-tools__browser_tab_new", "category": "browser", "description": "Open a new browser tab"},
-    {"name": "mcp__browser-tools__browser_tab_list", "category": "browser", "description": "List open browser tabs"},
-    {"name": "mcp__browser-tools__browser_tab_switch", "category": "browser", "description": "Switch to a browser tab"},
-    {"name": "mcp__browser-tools__browser_close", "category": "browser", "description": "Close the browser session"},
 
     # Other tools
     {"name": "TodoWrite", "category": "other", "description": "Manage task lists"},
@@ -268,9 +245,6 @@ def categorize_tool(tool_name: str) -> str:
     """
     # Check if it's an MCP tool
     if tool_name.startswith("mcp__"):
-        # Browser tools MCP server → "browser" category
-        if tool_name.startswith("mcp__browser-tools__"):
-            return "browser"
         return "mcp"
 
     # Check predefined categories
@@ -782,21 +756,6 @@ async def list_available_tools(
                 tools_by_category[category] = []
             tools_by_category[category].append(tool_info)
 
-        # Merge in-process SDK MCP tools that the CLI can't discover.
-        # Browser tools are always available as an in-process SDK MCP server.
-        discovered_names = set(discovered_tools)
-        for builtin in BUILTIN_TOOLS:
-            if builtin["category"] == "browser" and builtin["name"] not in discovered_names:
-                tool_info = ToolInfo(
-                    name=builtin["name"],
-                    category="browser",
-                    description=builtin["description"],
-                    mcp_server="browser-tools"
-                )
-                all_tools.append(tool_info)
-                if "browser" not in tools_by_category:
-                    tools_by_category["browser"] = []
-                tools_by_category["browser"].append(tool_info)
     else:
         # Fall back to hardcoded tools
         logger.info("Using hardcoded tool list (CLI discovery unavailable)")

@@ -180,11 +180,12 @@ async function _loadCore(
 		if (_loadInFlight !== key) return;
 
 		if (status.is_git_repo) {
-			const [branches, graphResponse, worktrees, diffStats] = await Promise.all([
+			const [branches, graphResponse, worktrees, diffStats, changedFilesResp] = await Promise.all([
 				gitApi.getBranches(projectId, true, worktreeId),
 				gitApi.getCommitGraph(projectId, 50),
 				gitApi.getWorktrees(projectId),
-				gitApi.getDiffStats(projectId, true, worktreeId).catch(() => null)
+				gitApi.getDiffStats(projectId, true, worktreeId).catch(() => null),
+				gitApi.getChangedFiles(projectId, worktreeId).catch(() => null)
 			]);
 			if (_loadInFlight !== key) return;
 
@@ -194,7 +195,7 @@ async function _loadCore(
 				commits: graphResponse.commits,
 				worktrees,
 				diffStats: diffStats ?? null,
-				changedFiles: null
+				changedFiles: changedFilesResp?.files ?? null
 			};
 
 			_update((s) => ({

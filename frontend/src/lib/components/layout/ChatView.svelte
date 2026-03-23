@@ -11,19 +11,15 @@
 	 */
 	import { untrack } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { MessageArea, ChatInput, QueuedMessages, BrowserPanel } from '$lib/components/chat';
+	import { MessageArea, ChatInput, QueuedMessages } from '$lib/components/chat';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth';
-	import { browserState } from '$lib/stores/browser';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
 	import ExecutionModeBar from './ExecutionModeBar.svelte';
 
 	// Check if this is an empty state (no messages yet)
 	const isEmptyState = $derived($activeSession.messages.length === 0);
-
-	// Browser panel visibility — show whenever user opens it
-	const showBrowser = $derived($browserState.isOpen);
 
 	// Animation: Track transition from empty → active state
 	let transitioningFromEmpty = $state(false);
@@ -78,88 +74,77 @@
 	}
 </script>
 
-<div class="chat-view" class:transitioning-from-empty={transitioningFromEmpty} class:has-browser={showBrowser}>
+<div class="chat-view" class:transitioning-from-empty={transitioningFromEmpty}>
 	{#if isEmptyState}
 		<!-- Empty state: Workspace selector + centered input -->
-		<div class="chat-with-browser">
-			<div class="empty-state">
-				{#if $activeSession.error}
-					<div class="error-banner">
-						<span>{$activeSession.error}</span>
-						<button onclick={() => activeSession.clearError()}>&times;</button>
-					</div>
-				{/if}
-
-				<div class="empty-state-content">
-					<WorkspaceSelector
-						selectedProject={$activeSession.project}
-						onSelectProject={handleProjectSelect}
-					/>
-					<div class="empty-input-wrapper">
-						<ChatInput />
-					</div>
-					{#if $githubAuthenticated}
-						<ExecutionModeBar />
-					{/if}
+		<div class="empty-state">
+			{#if $activeSession.error}
+				<div class="error-banner">
+					<span>{$activeSession.error}</span>
+					<button onclick={() => activeSession.clearError()}>&times;</button>
 				</div>
-			</div>
-			{#if showBrowser}
-				<BrowserPanel />
 			{/if}
+
+			<div class="empty-state-content">
+				<WorkspaceSelector
+					selectedProject={$activeSession.project}
+					onSelectProject={handleProjectSelect}
+				/>
+				<div class="empty-input-wrapper">
+					<ChatInput />
+				</div>
+				{#if $githubAuthenticated}
+					<ExecutionModeBar />
+				{/if}
+			</div>
 		</div>
 	{:else}
-		<!-- Active chat: Messages + input + optional browser panel side by side -->
-		<div class="chat-with-browser">
-			<div class="chat-column">
-				<div class="message-area-wrapper">
-					<!-- MessageArea handles session-switch scroll save/restore internally
-					     via $effect watching sessionId. No {#key} needed — avoiding
-					     component destruction prevents a Svelte 5 reactivity edge case
-					     where the recreated component loses reactive updates during
-					     new session creation (sessionId: undefined → new ID). -->
-					<MessageArea />
-				</div>
-
-				<!-- Queued Messages Bar (Send Later) -->
-				{#if $activeSession.queuedMessages && $activeSession.queuedMessages.length > 0}
-					<QueuedMessages />
-				{/if}
-
-				<div class="input-wrapper">
-					<ChatInput compact />
-				</div>
-
-				<!-- Modal Overlay for Permission/Question Queues -->
-				{#if ($activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0) || ($activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0)}
-					<div class="modal-overlay">
-						<div class="modal-backdrop"></div>
-						<div class="modal-content">
-							{#if $activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0}
-								<div class="modal-card-wrapper">
-									<PermissionQueue
-										requests={$activeSession.pendingPermissions}
-										onRespond={handlePermissionResponse}
-									/>
-								</div>
-							{/if}
-
-							{#if $activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0}
-								<div class="modal-card-wrapper space-y-3">
-									{#each $activeSession.pendingQuestions as question (question.request_id)}
-										<UserQuestion
-											data={question}
-											onRespond={handleQuestionResponse}
-										/>
-									{/each}
-								</div>
-							{/if}
-						</div>
-					</div>
-				{/if}
+		<!-- Active chat: Messages + input -->
+		<div class="chat-column">
+			<div class="message-area-wrapper">
+				<!-- MessageArea handles session-switch scroll save/restore internally
+				     via $effect watching sessionId. No {#key} needed — avoiding
+				     component destruction prevents a Svelte 5 reactivity edge case
+				     where the recreated component loses reactive updates during
+				     new session creation (sessionId: undefined → new ID). -->
+				<MessageArea />
 			</div>
 
-			{#if showBrowser}
-				<BrowserPanel />
+			<!-- Queued Messages Bar (Send Later) -->
+			{#if $activeSession.queuedMessages && $activeSession.queuedMessages.length > 0}
+				<QueuedMessages />
+			{/if}
+
+			<div class="input-wrapper">
+				<ChatInput compact />
+			</div>
+
+			<!-- Modal Overlay for Permission/Question Queues -->
+			{#if ($activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0) || ($activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0)}
+				<div class="modal-overlay">
+					<div class="modal-backdrop"></div>
+					<div class="modal-content">
+						{#if $activeSession.pendingPermissions && $activeSession.pendingPermissions.length > 0}
+							<div class="modal-card-wrapper">
+								<PermissionQueue
+									requests={$activeSession.pendingPermissions}
+									onRespond={handlePermissionResponse}
+								/>
+							</div>
+						{/if}
+
+						{#if $activeSession.pendingQuestions && $activeSession.pendingQuestions.length > 0}
+							<div class="modal-card-wrapper space-y-3">
+								{#each $activeSession.pendingQuestions as question (question.request_id)}
+									<UserQuestion
+										data={question}
+										onRespond={handleQuestionResponse}
+									/>
+								{/each}
+							</div>
+						{/if}
+					</div>
+				</div>
 			{/if}
 		</div>
 	{/if}
@@ -178,18 +163,6 @@
 		-webkit-font-smoothing: antialiased;
 		-moz-osx-font-smoothing: grayscale;
 		text-rendering: optimizeLegibility;
-	}
-
-	/* ========================================
-	   CHAT + BROWSER PANEL LAYOUT
-	   ======================================== */
-
-	.chat-with-browser {
-		display: flex;
-		flex-direction: row;
-		flex: 1;
-		min-height: 0;
-		overflow: hidden;
 	}
 
 	.chat-column {

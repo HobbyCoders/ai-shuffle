@@ -22,7 +22,7 @@ from app.core.auth import auth_service
 from app.core import encryption
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, mobile, internal, workspace_files, connectors, automations, browser, browser_ws, api_users, documentation, catalog
+from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -177,10 +177,6 @@ async def lifespan(app: FastAPI):
     from app.services.fal_catalog import catalog_service
     catalog_service.load_from_db()
 
-    # Browser tools are now served in-process via SDK MCP server
-    # (browser_sdk_tools.py), no startup registration needed.
-    logger.info("Browser MCP server: In-process SDK mode (no subprocess)")
-
     # Start periodic cleanup of expired auth sessions, lockouts, and old login attempts.
     # Runs every hour to prevent unbounded DB growth from dead tokens.
     async def _periodic_session_cleanup():
@@ -235,14 +231,6 @@ async def lifespan(app: FastAPI):
         from app.core.session_pool import get_session_pool
         await get_session_pool().shutdown()
         logger.info("SDK session pool shut down")
-    except Exception:
-        pass
-
-    # Cleanup browser sessions on shutdown
-    try:
-        from app.mcp.chrome_session import chrome_session_manager
-        await chrome_session_manager.close_all()
-        logger.info("Browser sessions cleaned up")
     except Exception:
         pass
 
@@ -431,8 +419,6 @@ app.include_router(mcp.router)
 app.include_router(mobile.router)
 app.include_router(internal.router)
 app.include_router(workspace_files.router)
-app.include_router(browser.router)
-app.include_router(browser_ws.router)
 app.include_router(documentation.router)
 app.include_router(catalog.router)
 
@@ -443,6 +429,11 @@ if static_dir.exists():
     app_assets = static_dir / "_app"
     if app_assets.exists():
         app.mount("/_app", StaticFiles(directory=str(app_assets)), name="app_assets")
+
+    # Serve icons
+    icons_dir = static_dir / "icons"
+    if icons_dir.exists():
+        app.mount("/icons", StaticFiles(directory=str(icons_dir)), name="icons")
 
     # Serve other static files
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static_files")

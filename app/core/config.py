@@ -8,7 +8,6 @@ Supports both Docker and Local deployment modes:
 Set LOCAL_MODE=true environment variable to force local mode.
 """
 
-import secrets
 from pathlib import Path
 from typing import Optional
 from pydantic_settings import BaseSettings
@@ -83,9 +82,6 @@ class Settings(BaseSettings):
     # Timeouts (milliseconds)
     db_busy_timeout_ms: int = 30_000
     hook_timeout_ms: int = 30_000
-    browser_action_timeout_ms: int = 5_000
-    browser_fill_timeout_ms: int = 3_000
-
     # Size limits
     max_tool_output_chars: int = 500_000  # ~500KB, well under 1MB WS buffer
     max_display_output_chars: int = 2_000  # What we show in the UI
@@ -180,11 +176,6 @@ settings = Settings()
 # Mutable runtime overrides (separate from frozen Pydantic settings)
 # These take priority over settings fields when set.
 _runtime_overrides: dict[str, Path] = {}
-
-# Internal token for MCP subprocess → REST API browser calls.
-# Generated once at module load; the MCP browser server receives it via env var.
-INTERNAL_BROWSER_TOKEN = secrets.token_hex(32)
-
 
 # Ensure directories exist
 def ensure_directories():

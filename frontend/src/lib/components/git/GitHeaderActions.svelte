@@ -8,7 +8,7 @@
 	 * Branch selector is locked during streaming.
 	 */
 	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2 } from 'lucide-svelte';
-	import { git, diffStats, gitStatus, branches as branchStore, gitMode } from '$lib/stores/git';
+	import { git, diffStats, gitStatus, branches as branchStore, gitMode, changedFiles } from '$lib/stores/git';
 	import { githubRepoInfo } from '$lib/stores/github';
 
 	interface Props {
@@ -56,7 +56,7 @@
 	);
 	const additions = $derived($diffStats?.additions ?? 0);
 	const deletions = $derived($diffStats?.deletions ?? 0);
-	const filesChanged = $derived($diffStats?.files_changed ?? 0);
+	const filesChanged = $derived($changedFiles?.length ?? $diffStats?.files_changed ?? 0);
 	const commitsAhead = $derived($gitStatus?.ahead ?? 0);
 	const defaultBranch = $derived($githubRepoInfo?.default_branch ?? 'main');
 	const isOnDefaultBranch = $derived(currentBranch === defaultBranch);
