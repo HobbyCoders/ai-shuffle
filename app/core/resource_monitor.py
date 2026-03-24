@@ -193,6 +193,46 @@ def _check_warnings(metrics: dict) -> list[str]:
     return warnings
 
 
+async def _periodic_cleanup() -> dict:
+    """Run periodic cleanup sweeps to prevent resource accumulation.
+
+    Returns a dict of cleanup actions taken (for logging).
+    """
+    cleaned = {}
+
+    # Sweep orphaned session locks
+    try:
+        from app.core.live_session_store import live_session_store
+        count = await live_session_store.sweep_orphaned_locks()
+        if count:
+            cleaned["orphaned_locks"] = count
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to sweep orphaned locks: {e}")
+
+    # Sweep stale sync engine maps
+    try:
+        from app.core.sync_engine import sync_engine
+        count = await sync_engine.sweep_stale_maps()
+        if count:
+            cleaned["stale_sync_maps"] = count
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to sweep sync engine maps: {e}")
+
+    # Clean up done tasks from _active_chat_sessions
+    try:
+        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
+        async with _active_sessions_lock:
+            done_ids = [sid for sid, task in _active_chat_sessions.items() if task.done()]
+            for sid in done_ids:
+                del _active_chat_sessions[sid]
+            if done_ids:
+                cleaned["done_chat_tasks"] = len(done_ids)
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to clean up done chat tasks: {e}")
+
+    return cleaned
+
+
 async def _monitor_loop(interval_seconds: int):
     """Main monitoring loop."""
     global _snapshot_count, _start_time
@@ -212,6 +252,11 @@ async def _monitor_loop(interval_seconds: int):
             warnings = _check_warnings(metrics)
             for warning in warnings:
                 logger.warning(f"{_PREFIX} {warning}")
+
+            # Run periodic cleanup sweeps
+            cleaned = await _periodic_cleanup()
+            if cleaned:
+                logger.info(f"{_PREFIX} Periodic cleanup: {cleaned}")
 
         except asyncio.CancelledError:
             logger.info(f"{_PREFIX} Monitor stopped after {_snapshot_count} snapshots")

@@ -125,14 +125,11 @@ export const messageCache = {
 		}
 
 		await new Promise<void>((resolve, reject) => {
-			tx.oncomplete = () => {
-				db.close();
-				resolve();
-			};
-			tx.onerror = () => {
-				db.close();
-				reject(tx.error);
-			};
+			tx.oncomplete = () => resolve();
+			tx.onerror = () => reject(tx.error);
+			// NOTE: Don't close the DB here — it's cached in _cachedDB for
+			// reuse. Closing it invalidates the cache, causing subsequent
+			// operations to silently fail until a new connection is opened.
 		});
 	}
 };

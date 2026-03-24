@@ -972,6 +972,31 @@ class LiveSessionStore:
                     logger.warning(f"Cleaned up orphaned lock for session {session_id} (no session in store). Remaining locks={len(self._session_locks)}")
             return False
 
+    async def sweep_orphaned_locks(self) -> int:
+        """
+        Remove locks that have no corresponding session.
+
+        Called periodically by the resource monitor to prevent unbounded
+        growth of _session_locks when sessions end abnormally (crash,
+        disconnect before stream_end).
+
+        Returns:
+            Number of orphaned locks removed.
+        """
+        async with self._lock:
+            orphaned_ids = [
+                sid for sid in self._session_locks
+                if sid not in self._sessions
+            ]
+            for sid in orphaned_ids:
+                del self._session_locks[sid]
+            if orphaned_ids:
+                logger.info(
+                    f"Swept {len(orphaned_ids)} orphaned session locks. "
+                    f"Remaining: sessions={len(self._sessions)} locks={len(self._session_locks)}"
+                )
+            return len(orphaned_ids)
+
     def get_session(self, session_id: str) -> Optional[LiveSession]:
         """
         Get current session state.

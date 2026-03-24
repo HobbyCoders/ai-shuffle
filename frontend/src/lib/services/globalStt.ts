@@ -125,12 +125,15 @@ async function initAudioMonitoring(stream: MediaStream): Promise<() => void> {
 			audioLevel: s.audioLevel * 0.7 + rms * 0.3
 		}));
 
-		audioLevelAnimationId = requestAnimationFrame(updateLevel);
+		// Don't start the loop here — return a starter function so the
+		// caller controls when visualization begins (after UI state is set).
 	}
 
-	// Return function to start the loop
+	// Return function to start the visualization loop (call exactly once)
 	return () => {
-		updateLevel();
+		if (audioLevelAnimationId === null) {
+			audioLevelAnimationId = requestAnimationFrame(updateLevel);
+		}
 	};
 }
 

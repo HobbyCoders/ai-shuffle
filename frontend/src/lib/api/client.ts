@@ -46,11 +46,17 @@ async function extractErrorDetail(response: Response): Promise<string> {
 	return statusMessages[response.status] || `Server error (HTTP ${response.status}: ${response.statusText || 'no details'})`;
 }
 
+export interface RequestOptions {
+	/** AbortSignal for cancelling the request (e.g., timeout or component unmount) */
+	signal?: AbortSignal;
+}
+
 export class ApiClient {
 	private async request<T>(
 		method: string,
 		path: string,
-		body?: unknown
+		body?: unknown,
+		options?: RequestOptions
 	): Promise<T> {
 		const response = await fetch(`${API_BASE}${path}`, {
 			method,
@@ -58,7 +64,8 @@ export class ApiClient {
 				'Content-Type': 'application/json'
 			},
 			credentials: 'include',
-			body: body ? JSON.stringify(body) : undefined
+			body: body ? JSON.stringify(body) : undefined,
+			signal: options?.signal
 		});
 
 		if (!response.ok) {
@@ -77,20 +84,20 @@ export class ApiClient {
 		return response.json();
 	}
 
-	async get<T>(path: string): Promise<T> {
-		return this.request<T>('GET', path);
+	async get<T>(path: string, options?: RequestOptions): Promise<T> {
+		return this.request<T>('GET', path, undefined, options);
 	}
 
-	async post<T>(path: string, body?: unknown): Promise<T> {
-		return this.request<T>('POST', path, body);
+	async post<T>(path: string, body?: unknown, options?: RequestOptions): Promise<T> {
+		return this.request<T>('POST', path, body, options);
 	}
 
-	async put<T>(path: string, body?: unknown): Promise<T> {
-		return this.request<T>('PUT', path, body);
+	async put<T>(path: string, body?: unknown, options?: RequestOptions): Promise<T> {
+		return this.request<T>('PUT', path, body, options);
 	}
 
-	async patch<T>(path: string, body?: unknown): Promise<T> {
-		return this.request<T>('PATCH', path, body);
+	async patch<T>(path: string, body?: unknown, options?: RequestOptions): Promise<T> {
+		return this.request<T>('PATCH', path, body, options);
 	}
 
 	async delete<T>(path: string): Promise<T | void> {

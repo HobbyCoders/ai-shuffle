@@ -2,7 +2,7 @@
  * Git API client for AI Hub
  */
 
-import { api } from './client';
+import { api, type RequestOptions } from './client';
 
 const BASE = '/projects';
 
@@ -216,9 +216,9 @@ export interface CreateWorktreeResponse {
 /**
  * Get the git status for a project or worktree
  */
-export async function getGitStatus(projectId: string, worktreeId?: string): Promise<GitStatus> {
+export async function getGitStatus(projectId: string, worktreeId?: string, options?: RequestOptions): Promise<GitStatus> {
     const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
-    return api.get<GitStatus>(`${BASE}/${projectId}/git/status${params}`);
+    return api.get<GitStatus>(`${BASE}/${projectId}/git/status${params}`, options);
 }
 
 // ============================================================================
@@ -240,12 +240,12 @@ export interface BranchListResponse {
  * @param projectId - The project ID
  * @param includeRemote - Whether to include remote tracking branches (default: false for cleaner UI)
  */
-export async function getBranches(projectId: string, includeRemote: boolean = false, worktreeId?: string): Promise<Branch[]> {
+export async function getBranches(projectId: string, includeRemote: boolean = false, worktreeId?: string, options?: RequestOptions): Promise<Branch[]> {
     const searchParams = new URLSearchParams();
     if (!includeRemote) searchParams.set('include_remote', 'false');
     if (worktreeId) searchParams.set('worktree_id', worktreeId);
     const qs = searchParams.toString();
-    const response = await api.get<RawBranchListResponse>(`${BASE}/${projectId}/git/branches${qs ? `?${qs}` : ''}`);
+    const response = await api.get<RawBranchListResponse>(`${BASE}/${projectId}/git/branches${qs ? `?${qs}` : ''}`, options);
     return deduplicateBranches(response.branches.map(transformBranch));
 }
 
@@ -520,12 +520,12 @@ export interface DiffStats {
 /**
  * Get diff statistics (lines added/removed)
  */
-export async function getDiffStats(projectId: string, includeUnstaged: boolean = true, worktreeId?: string): Promise<DiffStats> {
+export async function getDiffStats(projectId: string, includeUnstaged: boolean = true, worktreeId?: string, options?: RequestOptions): Promise<DiffStats> {
     const searchParams = new URLSearchParams();
     if (!includeUnstaged) searchParams.set('include_unstaged', 'false');
     if (worktreeId) searchParams.set('worktree_id', worktreeId);
     const qs = searchParams.toString();
-    return api.get<DiffStats>(`${BASE}/${projectId}/git/diff-stats${qs ? `?${qs}` : ''}`);
+    return api.get<DiffStats>(`${BASE}/${projectId}/git/diff-stats${qs ? `?${qs}` : ''}`, options);
 }
 
 // ============================================================================

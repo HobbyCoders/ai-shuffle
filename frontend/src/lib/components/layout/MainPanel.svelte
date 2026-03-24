@@ -271,6 +271,34 @@
 	}
 
 	/**
+	 * Suspend the git poll timer entirely for the duration of a git operation
+	 * (commit/push/PR/pull). Unlike the `operationInProgress` guard (which
+	 * lets the timer fire and skip), this cancels the timer so no HTTP
+	 * connections are attempted at all, leaving the full browser connection
+	 * pool available for the operation itself.
+	 */
+	let _gitPollPausedProject: string | null = null;
+
+	function pauseGitPoll() {
+		if (_gitPollTimer) {
+			clearTimeout(_gitPollTimer);
+			_gitPollTimer = null;
+		}
+		// Remember the project so we can resume after the operation
+		_gitPollPausedProject = _gitPollProject;
+	}
+
+	function resumeGitPoll() {
+		const project = _gitPollPausedProject;
+		_gitPollPausedProject = null;
+		if (project && _gitPollProject) {
+			// Restart the timer — the operation's own refreshes already
+			// fetched fresh data, so schedule the next poll at idle interval.
+			scheduleGitPoll();
+		}
+	}
+
+	/**
 	 * Check for open PRs matching the current branch.
 	 * Only called when the branch changes (event-driven), not on a timer.
 	 */
@@ -408,6 +436,8 @@
 
 		// Pause git polling while the operation runs to prevent
 		// HTTP request accumulation that saturates the connection pool.
+		// Both cancels the poll timer AND aborts in-flight poll fetches.
+		pauseGitPoll();
 		git.setOperationInProgress(true);
 		try {
 			let finalMessage = message;
@@ -450,6 +480,7 @@
 			progressError = e?.detail || e?.message || 'An error occurred';
 		} finally {
 			git.setOperationInProgress(false);
+			resumeGitPoll();
 		}
 	}
 
@@ -474,6 +505,7 @@
 
 		const worktreeId = activeTab?.worktreeId ?? undefined;
 
+		pauseGitPoll();
 		git.setOperationInProgress(true);
 		try {
 			let prTitle = title;
@@ -518,6 +550,7 @@
 			progressError = e?.detail || e?.message || 'An error occurred';
 		} finally {
 			git.setOperationInProgress(false);
+			resumeGitPoll();
 		}
 	}
 
@@ -557,6 +590,7 @@
 		// Track for post-cleanup worktree state update
 		_finishedWorktreeCleanup = !!(cleanup && isWorktreeMode && worktreeId);
 
+		pauseGitPoll();
 		git.setOperationInProgress(true);
 		try {
 			// Step 1: Merge pull request
@@ -591,6 +625,7 @@
 			progressError = e?.detail || e?.message || 'An error occurred';
 		} finally {
 			git.setOperationInProgress(false);
+			resumeGitPoll();
 		}
 	}
 
@@ -622,6 +657,7 @@
 		progressHasCleanup = false;
 		showProgressModal = true;
 
+		pauseGitPoll();
 		git.setOperationInProgress(true);
 		try {
 			const branch = $gitStatus?.current_branch ?? undefined;
@@ -631,6 +667,7 @@
 			progressError = e?.detail || e?.message || 'Failed to push';
 		} finally {
 			git.setOperationInProgress(false);
+			resumeGitPoll();
 		}
 	}
 
@@ -687,6 +724,7 @@
 			return;
 		}
 
+		pauseGitPoll();
 		git.setOperationInProgress(true);
 		try {
 			const result = await git.pull(strategy, autoStash);
@@ -707,6 +745,7 @@
 			progressError = e?.detail || e?.message || 'Failed to pull';
 		} finally {
 			git.setOperationInProgress(false);
+			resumeGitPoll();
 		}
 	}
 </script>

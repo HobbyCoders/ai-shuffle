@@ -109,8 +109,9 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	let securityInstructionsSuccess = $state('');
 	let securityInstructionsError = $state('');
 
-	// Load data on mount
-	$effect(() => {
+	// Load data on mount — use onMount for one-time setup to avoid
+	// subscription accumulation from $effect re-runs.
+	onMount(() => {
 		if ($isAdmin) {
 			loadAllData();
 		}

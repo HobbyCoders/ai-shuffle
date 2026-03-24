@@ -199,6 +199,45 @@ class SyncEngine:
             self._session_project_map.pop(session_id, None)
             self._session_worktree_map.pop(session_id, None)
 
+    async def sweep_stale_maps(self) -> int:
+        """Remove session map entries that are no longer in _streaming_sessions.
+
+        Handles cases where a stream ended abnormally (SDK crash, forced
+        disconnect) and broadcast_stream_end was never called, leaving
+        stale entries in _session_user_map, _session_project_map, and
+        _session_worktree_map.
+
+        Returns:
+            Number of stale entries removed.
+        """
+        async with self._lock:
+            stale_ids = set()
+            for sid in self._session_user_map:
+                if sid not in self._streaming_sessions:
+                    stale_ids.add(sid)
+            for sid in self._session_project_map:
+                if sid not in self._streaming_sessions:
+                    stale_ids.add(sid)
+            for sid in self._session_worktree_map:
+                if sid not in self._streaming_sessions:
+                    stale_ids.add(sid)
+
+            for sid in stale_ids:
+                self._session_user_map.pop(sid, None)
+                self._session_project_map.pop(sid, None)
+                self._session_worktree_map.pop(sid, None)
+
+            if stale_ids:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(
+                    f"Swept {len(stale_ids)} stale session map entries. "
+                    f"Remaining: user_map={len(self._session_user_map)} "
+                    f"project_map={len(self._session_project_map)} "
+                    f"worktree_map={len(self._session_worktree_map)}"
+                )
+            return len(stale_ids)
+
     async def acquire_session_lock(self, session_id: str, device_id: str) -> tuple[bool, Optional[str]]:
         """Acquire exclusive lock on a session for a device.
 

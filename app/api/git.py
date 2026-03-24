@@ -43,7 +43,7 @@ router = APIRouter(prefix="/api/v1/projects/{project_id}/git", tags=["Git"])
 # prevents concurrent git calls from competing for the same index.lock.
 
 _git_executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=2,
+    max_workers=4,
     thread_name_prefix="git-worker",
 )
 

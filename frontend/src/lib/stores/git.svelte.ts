@@ -119,6 +119,17 @@ let _diffStatsInFlight = false;
 let _branchesInFlight = false;
 let _changedFilesInFlight = false;
 
+// AbortControllers for poll-triggered fetches so they can be cancelled when
+// an operation starts or the component unmounts, freeing browser connections.
+let _statusAbort: AbortController | null = null;
+let _diffStatsAbort: AbortController | null = null;
+let _branchesAbort: AbortController | null = null;
+
+// Timeout (ms) for poll-triggered git fetches. If a git status/diff call takes
+// longer than this, abort it to free the browser connection for higher-priority
+// requests (commits, pushes). The next poll cycle will retry.
+const GIT_POLL_FETCH_TIMEOUT_MS = 8_000;
+
 // Flag to pause polling during commit/push/PR operations.
 // Operations set this to true at start and false at end, so the poller
 // knows not to fire competing HTTP requests.
@@ -332,21 +343,30 @@ export const git = {
 		if (_statusInFlight) return; // Prevent overlapping requests
 		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
 
+		_statusAbort?.abort();
+		const controller = new AbortController();
+		_statusAbort = controller;
+		const timeout = setTimeout(() => controller.abort(), GIT_POLL_FETCH_TIMEOUT_MS);
+
 		_statusInFlight = true;
 		try {
 			const status = await gitApi.getGitStatus(
 				_state.projectId,
-				_state.worktreeId ?? undefined
+				_state.worktreeId ?? undefined,
+				{ signal: controller.signal }
 			);
 			if (_loadedKey !== key) return;
 			_update((s) => ({ ...s, status }));
 			_syncToCache({ status });
 		} catch (e) {
+			if (controller.signal.aborted) return; // Timeout or manual abort — silently skip
 			if (_loadedKey !== key) return;
 			const error = e as { detail?: string };
 			_update((s) => ({ ...s, error: error.detail || 'Failed to refresh status' }));
 		} finally {
+			clearTimeout(timeout);
 			_statusInFlight = false;
+			if (_statusAbort === controller) _statusAbort = null;
 		}
 	},
 
@@ -355,22 +375,31 @@ export const git = {
 		if (_branchesInFlight) return; // Prevent overlapping requests
 		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
 
+		_branchesAbort?.abort();
+		const controller = new AbortController();
+		_branchesAbort = controller;
+		const timeout = setTimeout(() => controller.abort(), GIT_POLL_FETCH_TIMEOUT_MS);
+
 		_branchesInFlight = true;
 		try {
 			const branches = await gitApi.getBranches(
 				_state.projectId,
 				true,
-				_state.worktreeId ?? undefined
+				_state.worktreeId ?? undefined,
+				{ signal: controller.signal }
 			);
 			if (_loadedKey !== key) return;
 			_update((s) => ({ ...s, branches }));
 			_syncToCache({ branches });
 		} catch (e) {
+			if (controller.signal.aborted) return; // Timeout or manual abort — silently skip
 			if (_loadedKey !== key) return;
 			const error = e as { detail?: string };
 			_update((s) => ({ ...s, error: error.detail || 'Failed to load branches' }));
 		} finally {
+			clearTimeout(timeout);
 			_branchesInFlight = false;
+			if (_branchesAbort === controller) _branchesAbort = null;
 		}
 	},
 
@@ -579,21 +608,30 @@ export const git = {
 		if (_diffStatsInFlight) return; // Prevent overlapping requests
 		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
 
+		_diffStatsAbort?.abort();
+		const controller = new AbortController();
+		_diffStatsAbort = controller;
+		const timeout = setTimeout(() => controller.abort(), GIT_POLL_FETCH_TIMEOUT_MS);
+
 		_diffStatsInFlight = true;
 		try {
 			const diffStats = await gitApi.getDiffStats(
 				_state.projectId,
 				true,
-				_state.worktreeId ?? undefined
+				_state.worktreeId ?? undefined,
+				{ signal: controller.signal }
 			);
 			if (_loadedKey !== key) return;
 			_update((s) => ({ ...s, diffStats }));
 			_syncToCache({ diffStats });
 		} catch (e) {
+			if (controller.signal.aborted) return; // Timeout or manual abort — silently skip
 			if (_loadedKey !== key) return;
 			console.debug('Failed to refresh diff stats:', e);
 		} finally {
+			clearTimeout(timeout);
 			_diffStatsInFlight = false;
+			if (_diffStatsAbort === controller) _diffStatsAbort = null;
 		}
 	},
 
@@ -780,9 +818,25 @@ export const git = {
 	/**
 	 * Set the operation-in-progress flag. Call with `true` before starting
 	 * a commit/push/PR/pull operation, and `false` when it completes or fails.
+	 *
+	 * When set to true, aborts any in-flight poll fetches to immediately free
+	 * browser connections for the operation's own HTTP requests.
 	 */
 	setOperationInProgress(value: boolean) {
 		_operationInProgress = value;
+		if (value) {
+			// Abort in-flight poll fetches to free browser connections
+			_statusAbort?.abort();
+			_diffStatsAbort?.abort();
+			_branchesAbort?.abort();
+			_statusAbort = null;
+			_diffStatsAbort = null;
+			_branchesAbort = null;
+			// Reset in-flight guards so post-operation refreshes aren't blocked
+			_statusInFlight = false;
+			_diffStatsInFlight = false;
+			_branchesInFlight = false;
+		}
 	}
 };
 
