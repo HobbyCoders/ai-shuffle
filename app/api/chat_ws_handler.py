@@ -53,6 +53,12 @@ class ChatWebSocketHandler:
         # ping_loop, heartbeat, and the main message handler racing each other
         self.send_lock = asyncio.Lock()
 
+        # Monotonically increasing sequence number for every outbound message.
+        # Frontend can track gaps to measure how often WebSocket delivery fails
+        # (polling recovers the data, but this gives us observability).
+        self._ws_seq: int = 0
+        self._ws_drops: int = 0
+
         # Message-type dispatch table
         self._handlers: Dict[str, Callable[[dict], Any]] = {
             "query": self.handle_query,
@@ -84,6 +90,9 @@ class ChatWebSocketHandler:
 
         Uses a lock to make the state-check + send atomic, preventing
         TOCTOU races where a close frame arrives between the check and send.
+
+        Every outbound message gets a monotonic ``_seq`` number so the frontend
+        can detect delivery gaps (for diagnostics — polling handles recovery).
         """
         # Fast path: skip lock acquisition if already known dead
         if not self.connection_healthy:
@@ -99,11 +108,18 @@ class ChatWebSocketHandler:
                 return False
 
             try:
+                self._ws_seq += 1
+                data["_seq"] = self._ws_seq
                 await self.websocket.send_json(data)
                 return True
             except Exception as e:
+                self._ws_drops += 1
                 self.connection_healthy = False
-                logger.warning(f"Failed to send WebSocket message (type={data.get('type')}): {e}")
+                msg_type = data.get("type") or data.get("event_type", "unknown")
+                logger.warning(
+                    f"WebSocket send failed [seq={self._ws_seq}, type={msg_type}, "
+                    f"device={self.device_id}, total_drops={self._ws_drops}]: {e}"
+                )
                 return False
 
     # ------------------------------------------------------------------

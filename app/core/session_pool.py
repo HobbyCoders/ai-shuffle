@@ -1,14 +1,14 @@
 """
-LRU Session Pool for Claude SDK clients.
+LRU Session Pool for AI provider sessions.
 
-Keeps SDK clients alive between queries to avoid spawning a new Node.js
+Keeps provider adapters alive between queries to avoid spawning a new
 subprocess for every message. Bounded by max_size to limit memory usage.
 Eviction happens lazily: only when the pool is full and a new session
 needs to enter.
 
-The SDK lifecycle is: connect() -> [query() -> receive_response()]* -> disconnect()
-This module keeps clients in the [query -> receive_response]* phase between user messages,
-avoiding repeated subprocess spawns and JSONL history replays.
+The lifecycle is: connect() -> [query() -> receive_response()]* -> disconnect()
+This module keeps adapters in the [query -> receive_response]* phase between
+user messages, avoiding repeated subprocess spawns and JSONL history replays.
 """
 
 import asyncio
@@ -19,29 +19,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
+from claude_agent_sdk import ClaudeAgentOptions
+
+from app.core.provider.claude_adapter import ClaudeAgentAdapter
 
 logger = logging.getLogger(__name__)
-
-# Grace period (seconds) for the SDK subprocess to flush JSONL writes before SIGTERM.
-# The Claude Code subprocess writes to JSONL and stdout independently. After sending
-# the ResultMessage to us, it may still be flushing the final JSONL entry. If we
-# terminate immediately, that write is lost and the session history is incomplete.
-_SUBPROCESS_EXIT_GRACE_SECONDS = 5.0
 
 
 @dataclass
 class SessionState:
-    """Track state for an active SDK session.
+    """Track state for an active provider session.
 
-    Extended from the original query_engine.SessionState with:
+    The adapter field holds the provider-agnostic interface. The `client`
+    property provides backward-compatible access to the underlying SDK client
+    during the migration period.
+
     - callback_refs: Mutable dict for indirect callback references (broadcast_func, etc.)
       These are updated at the start of each query so the can_use_tool callback
       (bound at connect() time) always references the current WebSocket.
     - connect_options: The ClaudeAgentOptions used at connect() time, for detecting
       whether a reconnect is needed when options change between queries.
     """
-    client: ClaudeSDKClient
+    adapter: ClaudeAgentAdapter
     sdk_session_id: Optional[str] = None
     is_connected: bool = False
     is_streaming: bool = False
@@ -65,91 +64,33 @@ class SessionState:
     # Options snapshot from connect() time — for reconnect detection
     connect_options: Optional[ClaudeAgentOptions] = None
 
+    @property
+    def client(self) -> Optional["ClaudeSDKClient"]:
+        """Backward-compatible access to the underlying SDK client.
+
+        TRANSITIONAL — streaming loops still call state.client.query(),
+        state.client.receive_response(), etc. Will be removed once they
+        migrate to adapter methods.
+        """
+        return self.adapter.sdk_client
+
 
 def is_subprocess_alive(state: SessionState) -> bool:
-    """Check if the subprocess for a session state is still running.
-
-    WARNING: Accesses private SDK internals (_query, transport, _process).
-    Tested against claude-agent-sdk 0.x — may break if SDK internals change.
-    The try/except ensures graceful degradation if the internal structure changes.
-    """
-    if not state.client:
-        return False
-    try:
-        query_obj = getattr(state.client, '_query', None)
-        transport = getattr(query_obj, 'transport', None) if query_obj else None
-        process = getattr(transport, '_process', None) if transport else None
-        return process is not None and process.returncode is None
-    except Exception:
-        # SDK internals may have changed — assume process is not alive
-        return False
+    """Check if the subprocess for a session state is still running."""
+    return state.adapter.is_alive()
 
 
-async def graceful_disconnect(client: ClaudeSDKClient, session_id: str) -> None:
-    """Disconnect the SDK client, giving the subprocess time to flush JSONL writes.
+async def graceful_disconnect(adapter: ClaudeAgentAdapter, session_id: str) -> None:
+    """Disconnect the provider adapter, giving the subprocess time to flush JSONL writes.
 
-    The SDK's disconnect() immediately sends SIGTERM to the subprocess. But the
-    Claude Code subprocess writes to stdout (messages to us) and to JSONL (persistent
-    history) independently. After sending the result message, the subprocess may still
-    be flushing the final assistant message to JSONL. Terminating immediately causes
-    that write to be lost, resulting in sessions with missing final messages.
-
-    This function waits for the subprocess to exit naturally (with a timeout) before
-    calling disconnect(). If the process has already exited, disconnect() is a no-op.
+    The adapter's disconnect() handles the full grace period logic:
+    waiting for natural exit, SIGTERM, then SIGKILL if needed.
     """
     try:
-        # Access the underlying anyio Process via the SDK's internal structure.
-        # This is necessary because the SDK's disconnect() offers no grace period.
-        query = getattr(client, '_query', None)
-        transport = getattr(query, 'transport', None) if query else None
-        process = getattr(transport, '_process', None) if transport else None
-
-        if process and process.returncode is None:
-            try:
-                await asyncio.wait_for(process.wait(), timeout=_SUBPROCESS_EXIT_GRACE_SECONDS)
-                logger.debug(f"[Pool] Subprocess exited naturally for session {session_id} (rc={process.returncode})")
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"[Pool] Subprocess for session {session_id} didn't exit in "
-                    f"{_SUBPROCESS_EXIT_GRACE_SECONDS}s, force-killing"
-                )
-                # Force kill the subprocess to prevent zombie processes
-                try:
-                    process.terminate()
-                    # Give it 2s to respond to SIGTERM, then SIGKILL
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=2.0)
-                    except asyncio.TimeoutError:
-                        process.kill()
-                        logger.warning(f"[Pool] Sent SIGKILL to subprocess for session {session_id}")
-                except Exception as kill_err:
-                    logger.error(f"[Pool] Failed to kill subprocess for session {session_id}: {kill_err}")
+        await adapter.disconnect()
+        logger.debug(f"[Pool] Disconnected adapter for session {session_id}")
     except Exception as e:
-        # Don't let introspection errors prevent disconnect
-        logger.debug(f"[Pool] Could not wait for subprocess for session {session_id}: {e}")
-
-    # Now disconnect (terminates the process if still running, no-op if already exited).
-    # NOTE: When called from asyncio.shield() during task cancellation, the shield
-    # creates a new internal task. client.disconnect() will fail because anyio's
-    # cancel scope was entered in the original task. In that case, fall back to
-    # directly terminating the subprocess.
-    try:
-        await client.disconnect()
-        logger.debug(f"[Pool] Disconnected SDK client for session {session_id}")
-    except RuntimeError as e:
-        if "cancel scope" in str(e):
-            logger.debug(f"[Pool] Cannot disconnect from shielded task for session {session_id}, terminating subprocess directly")
-            # Fall back to direct process termination
-            try:
-                query_obj = getattr(client, '_query', None)
-                transport = getattr(query_obj, 'transport', None) if query_obj else None
-                proc = getattr(transport, '_process', None) if transport else None
-                if proc and proc.returncode is None:
-                    proc.terminate()
-            except Exception:
-                pass
-        else:
-            raise
+        logger.warning(f"[Pool] Error during graceful disconnect for {session_id}: {e}")
 
 
 class SessionPool:
@@ -254,7 +195,7 @@ class SessionPool:
         del self._pool[session_id]
         if state.is_connected and is_subprocess_alive(state):
             try:
-                await graceful_disconnect(state.client, session_id)
+                await graceful_disconnect(state.adapter, session_id)
             except Exception as e:
                 logger.warning(f"[Pool] Error during eviction disconnect for {session_id}: {e}")
         # Cleanup agent files
@@ -274,7 +215,7 @@ class SessionPool:
             return None
         if state.is_connected and is_subprocess_alive(state):
             try:
-                await graceful_disconnect(state.client, session_id)
+                await graceful_disconnect(state.adapter, session_id)
             except Exception as e:
                 logger.warning(f"[Pool] Error disconnecting session {session_id}: {e}")
         if state.agents_dir and state.written_agent_ids:

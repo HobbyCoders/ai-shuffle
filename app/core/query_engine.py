@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any, AsyncGenerator
 from datetime import datetime, timezone
 
-from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient, AgentDefinition
+from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition
+from app.core.provider.claude_adapter import ClaudeAgentAdapter
 from claude_agent_sdk import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage,
@@ -1818,11 +1819,11 @@ async def stream_query(
                 original_stderr(line)
         options.stderr = capturing_stderr
 
-        client = ClaudeSDKClient(options=options)
+        adapter = ClaudeAgentAdapter()
 
         try:
             # Timeout prevents hanging if MCP servers are unreachable
-            await asyncio.wait_for(client.connect(), timeout=60.0)
+            await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             logger.debug(f"Connected to Claude SDK for session {session_id}")
         except asyncio.TimeoutError:
             logger.error(f"Timed out connecting to Claude SDK for session {session_id} (60s)")
@@ -1842,7 +1843,7 @@ async def stream_query(
             return
 
         state = SessionState(
-            client=client,
+            adapter=adapter,
             sdk_session_id=resume_id,
             is_connected=True,
             written_agent_ids=written_agent_ids,
@@ -2290,10 +2291,10 @@ async def _run_background_query(
                 original_stderr(line)
         options.stderr = capturing_stderr
 
-        client = ClaudeSDKClient(options=options)
+        adapter = ClaudeAgentAdapter()
 
         try:
-            await asyncio.wait_for(client.connect(), timeout=60.0)
+            await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             logger.debug(f"[Background] Connected to Claude SDK for session {session_id}")
         except asyncio.TimeoutError:
             logger.error(f"[Background] Timed out connecting to Claude SDK for session {session_id} (60s)")
@@ -2319,7 +2320,7 @@ async def _run_background_query(
             return
 
         state = SessionState(
-            client=client,
+            adapter=adapter,
             sdk_session_id=resume_id,
             is_connected=True,
             written_agent_ids=written_agent_ids,
@@ -3128,12 +3129,12 @@ async def stream_to_websocket(
                 original_stderr(line)
         options.stderr = capturing_stderr
 
-        client = ClaudeSDKClient(options=options)
-        logger.debug("[WS] ClaudeSDKClient created, attempting connect...")
+        adapter = ClaudeAgentAdapter()
+        logger.debug("[WS] ClaudeAgentAdapter created, attempting connect...")
 
         try:
             _connect_start = time.monotonic()
-            await asyncio.wait_for(client.connect(), timeout=60.0)
+            await asyncio.wait_for(adapter.connect_with_sdk_options(options), timeout=60.0)
             _connect_elapsed = time.monotonic() - _connect_start
             logger.info(f"[WS] SDK connect for session {session_id}: {_connect_elapsed:.1f}s (reuse=False)")
         except Exception as e:
@@ -3142,13 +3143,13 @@ async def stream_to_websocket(
             logger.error(f"[WS] Exception type: {type(e).__name__}")
             logger.error(f"[WS] Full traceback:\n{traceback.format_exc()}")
             # Check if the CLI subprocess is still alive
-            if hasattr(client, '_transport') and hasattr(client._transport, '_process') and client._transport._process:
-                proc = client._transport._process
-                exit_code = proc.returncode
-                if exit_code is not None:
-                    logger.error(f"[WS] CLI process exited with code {exit_code} during initialization")
-                else:
-                    logger.error("[WS] CLI process is still running (hung during initialization)")
+            if adapter.is_alive():
+                logger.error("[WS] CLI process is still running (hung during initialization)")
+            elif adapter.sdk_client:
+                from app.core.sdk_process_handle import SdkProcessHandle
+                handle = SdkProcessHandle(adapter.sdk_client)
+                if handle.available and handle.returncode is not None:
+                    logger.error(f"[WS] CLI process exited with code {handle.returncode} during initialization")
             if cli_stderr_lines:
                 stderr_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
                 logger.error(f"[WS] CLI stderr: {stderr_msg}")
@@ -3158,7 +3159,7 @@ async def stream_to_websocket(
             return
 
         state = SessionState(
-            client=client,
+            adapter=adapter,
             sdk_session_id=resume_id,
             is_connected=True,
             written_agent_ids=written_agent_ids,

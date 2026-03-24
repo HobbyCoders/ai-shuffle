@@ -81,6 +81,10 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 	let lastMessageTime = 0;
 	let destroyed = false;
 
+	// Server-side sequence tracking for delivery gap diagnostics
+	let lastSeq = 0;
+	let totalGaps = 0;
+
 	// Visibility change handler reference (for cleanup)
 	let visibilityHandler: (() => void) | null = null;
 
@@ -147,6 +151,7 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 
 		ws.onopen = () => {
 			reconnectAttempts = 0;
+			lastSeq = 0; // Reset sequence tracking for new connection
 			config.onConnected();
 			startPing();
 		};
@@ -192,7 +197,22 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		ws.onmessage = (event) => {
 			lastMessageTime = Date.now();
 			try {
-				config.onMessage(JSON.parse(event.data));
+				const data = JSON.parse(event.data);
+
+				// Track server-assigned sequence numbers for gap detection
+				const seq = data._seq;
+				if (typeof seq === 'number') {
+					if (lastSeq > 0 && seq > lastSeq + 1) {
+						const gap = seq - lastSeq - 1;
+						totalGaps += gap;
+						console.warn(
+							`[WsConnection] Sequence gap: expected ${lastSeq + 1}, got ${seq} (${gap} missed, ${totalGaps} total)`
+						);
+					}
+					lastSeq = seq;
+				}
+
+				config.onMessage(data);
 			} catch (e) {
 				console.error('[WsConnection] Failed to parse message:', e);
 			}
