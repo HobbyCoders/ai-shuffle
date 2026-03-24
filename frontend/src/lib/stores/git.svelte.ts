@@ -220,8 +220,22 @@ async function _loadCore(
 
 			_backgroundFetch(key, projectId, worktreeId);
 		} else {
-			_update((s) => ({ ...s, status, loading: false }));
+			// Not a git repo — clear ALL git state so stale cached values
+			// (diffStats, branches, etc.) from a previous load don't persist.
+			_update((s) => ({
+				...s,
+				status,
+				branches: [],
+				commits: [],
+				worktrees: [],
+				diffStats: null,
+				changedFiles: null,
+				loading: false
+			}));
 			_loadedKey = key;
+			// Evict any stale cache entry for this project so
+			// restoreCacheImmediate() won't resurrect old data.
+			_cache.delete(key);
 		}
 	} catch (e) {
 		if (_loadInFlight !== key) return;

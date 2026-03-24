@@ -111,10 +111,21 @@ class GitService:
     # =========================================================================
 
     def is_git_repo(self, working_dir: str) -> bool:
-        """Check if the working directory is a git repository."""
+        """Check if the working directory is a git repository root.
+
+        Uses --show-toplevel to verify that the directory IS the repo root,
+        not merely a subdirectory inside a parent repo.  Without this check,
+        a project directory sitting inside another repo (e.g. ai-shuffle)
+        would incorrectly report as a git repo and show the parent's diff stats.
+        """
         try:
-            result = self._run_git(working_dir, ["rev-parse", "--git-dir"], timeout=5)
-            return result.returncode == 0
+            result = self._run_git(working_dir, ["rev-parse", "--show-toplevel"], timeout=5)
+            if result.returncode != 0:
+                return False
+            # Compare resolved paths so symlinks / trailing slashes don't cause mismatches
+            toplevel = os.path.realpath(result.stdout.strip())
+            target = os.path.realpath(working_dir)
+            return toplevel == target
         except (subprocess.SubprocessError, OSError) as e:
             logger.warning(f"is_git_repo check failed for '{working_dir}': {e}")
             return False

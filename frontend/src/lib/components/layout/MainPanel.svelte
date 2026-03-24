@@ -223,18 +223,26 @@
 	let _gitLastActivity = 0; // timestamp of last git_hint or streaming event
 	let _lastHintPoll = 0; // timestamp of last hint-triggered immediate poll
 
+	let _lastIdleDiffStatsPoll = 0;
+
 	function gitPollNow() {
 		// Skip polling while a commit/push/PR/pull operation is in progress.
 		// These operations make their own API calls; polling concurrently
 		// would saturate the browser's connection pool (6 per host) and
 		// cause progressive slowdown / eventual UI hang.
 		if (git.operationInProgress) return;
-		const isActive = (Date.now() - _gitLastActivity) < GIT_IDLE_THRESHOLD_MS;
+		const now = Date.now();
+		const isActive = (now - _gitLastActivity) < GIT_IDLE_THRESHOLD_MS;
 		git.refreshStatus();
-		// Only poll diff stats during active periods — it's a second HTTP
-		// request and another set of git subprocess calls on the backend.
 		if (isActive) {
+			// Active period — poll diff stats on every cycle (5s).
 			git.refreshDiffStats();
+			_lastIdleDiffStatsPoll = now;
+		} else if (now - _lastIdleDiffStatsPoll >= GIT_POLL_IDLE_MS) {
+			// Idle period — still poll diff stats once per idle interval (30s)
+			// so stale values don't persist indefinitely after streaming ends.
+			git.refreshDiffStats();
+			_lastIdleDiffStatsPoll = now;
 		}
 	}
 
