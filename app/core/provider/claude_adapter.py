@@ -23,7 +23,7 @@ from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
 from app.core.provider.protocol import ProviderAdapter
-from app.core.provider.types import ProviderEvent, SessionOptions
+from app.core.provider.types import ProviderEvent, SessionOptions, mcp_servers_equivalent
 from app.core.sdk_process_handle import SdkProcessHandle
 
 logger = logging.getLogger(__name__)
@@ -212,7 +212,7 @@ class ClaudeAgentAdapter(ProviderAdapter):
             return True
         if old.cwd != (new_options.cwd or old.cwd):
             return True
-        if (old.mcp_servers or {}) != (new_options.mcp_servers or {}):
+        if not mcp_servers_equivalent(old.mcp_servers, new_options.mcp_servers):
             return True
         if (old.plugins or []) != (new_options.plugins or []):
             return True
@@ -234,7 +234,7 @@ class ClaudeAgentAdapter(ProviderAdapter):
             return True
         if old.cwd != new_sdk_options.cwd:
             return True
-        if (old.mcp_servers or {}) != (new_sdk_options.mcp_servers or {}):
+        if not mcp_servers_equivalent(old.mcp_servers, new_sdk_options.mcp_servers):
             return True
         if (old.plugins or []) != (new_sdk_options.plugins or []):
             return True

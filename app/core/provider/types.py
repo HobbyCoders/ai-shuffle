@@ -218,3 +218,45 @@ class InterruptedEvent(ProviderEvent):
 class ErrorEvent(ProviderEvent):
     """An error occurred during the query."""
     message: str
+
+
+# ─── MCP Server Comparison ──────────────────────────────────────────────────
+
+def mcp_servers_equivalent(old: Optional[Dict[str, Any]], new: Optional[Dict[str, Any]]) -> bool:
+    """Compare MCP server configs by logical identity, not object identity.
+
+    SDK MCP servers (type="sdk") contain an ``instance`` field pointing to a
+    fresh ``mcp.Server`` object every time they're created.  ``mcp.Server``
+    has no ``__eq__``, so dict comparison always fails even when the server
+    is logically identical (same name and tool set).
+
+    This helper compares:
+    - External servers (stdio/sse/http): full dict equality (all values are
+      serializable primitives).
+    - SDK servers: by (type, name) since the instance is functionally
+      equivalent when those match.  Tool definitions come from the same code
+      path each time, so name equality is sufficient.
+    """
+    old = old or {}
+    new = new or {}
+
+    if old.keys() != new.keys():
+        return False
+
+    for key in old:
+        old_cfg = old[key]
+        new_cfg = new[key]
+
+        # SDK MCP servers: compare by type + name (skip instance)
+        if isinstance(old_cfg, dict) and old_cfg.get("type") == "sdk":
+            if not isinstance(new_cfg, dict) or new_cfg.get("type") != "sdk":
+                return False
+            if old_cfg.get("name") != new_cfg.get("name"):
+                return False
+            continue
+
+        # External servers (stdio/sse/http): plain dict equality
+        if old_cfg != new_cfg:
+            return False
+
+    return True

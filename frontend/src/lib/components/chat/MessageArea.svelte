@@ -461,7 +461,12 @@
 		const hasMetadataChange = currentMetadata !== prevLastMetadata;
 
 		if ((hasNewMessage || hasContentChange || hasMetadataChange) && shouldAutoScroll && containerRef) {
-			tick().then(scrollToBottom);
+			// Use tick() to wait for Svelte DOM updates, then requestAnimationFrame
+			// to ensure the browser has computed layout (correct scrollHeight).
+			// This is critical for the first message: the DOM transitions from the
+			// empty state to the message list, and scrollHeight isn't accurate until
+			// after layout.
+			tick().then(() => requestAnimationFrame(scrollToBottom));
 		}
 
 		// Update previous values

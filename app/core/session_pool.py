@@ -22,6 +22,7 @@ from typing import Optional, Dict, Any
 from claude_agent_sdk import ClaudeAgentOptions
 
 from app.core.provider.claude_adapter import ClaudeAgentAdapter
+from app.core.provider.types import mcp_servers_equivalent
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +286,7 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
         return True
     if old.cwd != new_options.cwd:
         return True
-    if (old.mcp_servers or {}) != (new_options.mcp_servers or {}):
+    if not mcp_servers_equivalent(old.mcp_servers, new_options.mcp_servers):
         return True
     if (old.plugins or []) != (new_options.plugins or []):
         return True
