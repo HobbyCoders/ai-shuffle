@@ -7,10 +7,12 @@
 		!$claudeStatus.status.ok
 	);
 
-	let indicator = $derived($claudeStatus.status?.indicator ?? 'minor');
 	let description = $derived($claudeStatus.status?.description ?? '');
 	let incidents = $derived($claudeStatus.status?.incidents ?? []);
 	let firstIncident = $derived(incidents.length > 0 ? incidents[0] : null);
+
+	// Use the highest-severity incident's impact for banner color (incidents are pre-sorted by severity)
+	let indicator = $derived(firstIncident?.impact ?? $claudeStatus.status?.indicator ?? 'minor');
 
 	function dismiss() {
 		claudeStatus.dismiss();

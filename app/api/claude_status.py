@@ -100,6 +100,10 @@ def _parse_status(raw: dict) -> ClaudeStatusResponse:
             latest_update=latest_update,
         ))
 
+    # Sort incidents by severity (critical > major > minor > none) so the worst shows first
+    _impact_order = {"critical": 0, "major": 1, "minor": 2, "none": 3}
+    incidents.sort(key=lambda i: _impact_order.get(i.impact, 3))
+
     ok = indicator == "none" and len(incidents) == 0
 
     return ClaudeStatusResponse(
