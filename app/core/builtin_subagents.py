@@ -457,7 +457,7 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
         "description": "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. \"src/components/**/*.tsx\"), search code for keywords (eg. \"API endpoints\"), or answer questions about the codebase (eg. \"how do API endpoints work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions.",
         "prompt": EXPLORE_PROMPT,
         "tools": ["Read", "Grep", "Glob", "Bash", "Skill"],
-        "model": None,
+        "model": "haiku",
     },
     {
         "id": "Plan",
@@ -481,7 +481,7 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
         "description": "Use this agent for ALL frontend, UI, UX, and design tasks. Invoke whenever creating new frontend components, pages, or layouts; modifying existing UI/UX; implementing responsive designs; adding animations/transitions; choosing typography, color palettes, or design systems; building forms, dashboards, landing pages, or any visual interface; converting mockups to code; or improving the look and feel of any user-facing element. This is the default agent for anything visual or design-related.",
         "prompt": FRONTEND_DESIGNER_PROMPT,
         "tools": None,  # All tools
-        "model": None,
+        "model": "opus",
     },
     {
         "id": "chat-history-summarizer",
@@ -548,24 +548,31 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
 
         else:
             # Check if code definition changed since last seed
-            old_default = existing.get("default_prompt", "")
+            old_default_prompt = existing.get("default_prompt", "")
+            old_default_model = existing.get("default_model")
             new_prompt = definition["prompt"]
-            if old_default and old_default != new_prompt:
+            new_model = definition.get("model")
+            prompt_changed = old_default_prompt and old_default_prompt != new_prompt
+            model_changed = old_default_model != new_model
+            if prompt_changed or model_changed:
                 # Code definition changed — update defaults
                 _update_builtin_defaults(subagent_id, definition)
-                # If user hasn't customized (active prompt == old default),
-                # also update the active prompt so the change takes effect
-                if existing.get("prompt") == old_default:
-                    database.update_subagent(
-                        subagent_id=subagent_id,
-                        prompt=new_prompt,
-                        name=definition["name"],
-                        description=definition["description"],
-                    )
+                # If user hasn't customized, also update active values
+                prompt_uncustomized = existing.get("prompt") == old_default_prompt
+                model_uncustomized = existing.get("model") == old_default_model
+                update_kwargs: Dict[str, Any] = {}
+                if prompt_changed and prompt_uncustomized:
+                    update_kwargs["prompt"] = new_prompt
+                    update_kwargs["name"] = definition["name"]
+                    update_kwargs["description"] = definition["description"]
+                if model_changed and model_uncustomized:
+                    update_kwargs["model"] = new_model
+                if update_kwargs:
+                    database.update_subagent(subagent_id=subagent_id, **update_kwargs)
                     logger.info(f"Auto-updated built-in subagent from new code: {subagent_id}")
                     results[subagent_id] = "auto_updated"
                 else:
-                    logger.debug(f"Updated defaults for {subagent_id} (active prompt customized, not overwritten)")
+                    logger.debug(f"Updated defaults for {subagent_id} (active config customized, not overwritten)")
                     results[subagent_id] = "defaults_updated"
             else:
                 results[subagent_id] = "exists"
