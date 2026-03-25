@@ -79,6 +79,35 @@
 		$branchStore.filter(b => !b.remote)
 	);
 
+	// Remote branches that don't have a local counterpart
+	const remoteBranches = $derived(() => {
+		const localNames = new Set(localBranches.map(b => b.name));
+		return $branchStore
+			.filter(b => b.remote)
+			.map(b => ({
+				...b,
+				// Strip "origin/" prefix for display and checkout
+				shortName: b.name.replace(/^[^/]+\//, '')
+			}))
+			// Exclude remotes that already have a local branch (e.g. origin/main when main exists)
+			.filter(b => !localNames.has(b.shortName));
+	});
+
+	// Search filter for branch dropdown
+	let branchSearch = $state('');
+	let searchInputRef = $state<HTMLInputElement | null>(null);
+	const filteredLocalBranches = $derived(
+		branchSearch
+			? localBranches.filter(b => b.name.toLowerCase().includes(branchSearch.toLowerCase()))
+			: localBranches
+	);
+	const filteredRemoteBranches = $derived(
+		branchSearch
+			? remoteBranches().filter(b => b.shortName.toLowerCase().includes(branchSearch.toLowerCase()) || b.name.toLowerCase().includes(branchSearch.toLowerCase()))
+			: remoteBranches()
+	);
+	const showSearch = $derived(localBranches.length + remoteBranches().length > 5);
+
 	// Can the user interact with the branch selector?
 	// In worktree mode, branch is always locked (read-only display)
 	const branchLocked = $derived(isWorktreeMode || isStreaming || checkingOut);
@@ -87,8 +116,11 @@
 		if (branchLocked) return;
 		showDropdown = !showDropdown;
 		if (showDropdown) {
+			branchSearch = '';
 			// Refresh branches when opening
 			git.loadBranches();
+			// Focus search input after render
+			requestAnimationFrame(() => searchInputRef?.focus());
 		}
 	}
 
@@ -160,9 +192,23 @@
 
 		{#if showDropdown}
 			<div class="branch-dropdown">
-				{#if localBranches.length > 0}
+				{#if showSearch}
+					<div class="dropdown-search">
+						<input
+							bind:this={searchInputRef}
+							bind:value={branchSearch}
+							type="text"
+							class="branch-search-input"
+							placeholder="Filter branches..."
+							onclick={(e) => e.stopPropagation()}
+							onkeydown={(e) => { if (e.key === 'Escape' && branchSearch) { branchSearch = ''; e.stopPropagation(); }}}
+						/>
+					</div>
+				{/if}
+
+				{#if filteredLocalBranches.length > 0}
 					<div class="dropdown-section-label">Branches</div>
-					{#each localBranches as branch (branch.name)}
+					{#each filteredLocalBranches as branch (branch.name)}
 						<button
 							class="dropdown-item"
 							class:active={branch.name === currentBranch}
@@ -175,8 +221,27 @@
 							{/if}
 						</button>
 					{/each}
-				{:else}
+				{:else if !branchSearch}
 					<p class="dropdown-empty">No local branches</p>
+				{/if}
+
+				{#if filteredRemoteBranches.length > 0}
+					<div class="dropdown-section-label">Remote</div>
+					{#each filteredRemoteBranches as branch (branch.name)}
+						<button
+							class="dropdown-item remote-item"
+							onclick={() => checkoutBranch(branch.shortName)}
+							title={branch.name}
+						>
+							<GitBranch size={13} strokeWidth={1.5} />
+							<span class="dropdown-item-name">{branch.shortName}</span>
+							<span class="remote-tag">origin</span>
+						</button>
+					{/each}
+				{/if}
+
+				{#if branchSearch && filteredLocalBranches.length === 0 && filteredRemoteBranches.length === 0}
+					<p class="dropdown-empty">No matching branches</p>
 				{/if}
 
 				<div class="dropdown-divider"></div>
@@ -549,6 +614,50 @@
 
 	.new-branch-item :global(svg) {
 		color: var(--primary) !important;
+	}
+
+	/* Search input */
+	.dropdown-search {
+		padding: 4px;
+	}
+
+	.branch-search-input {
+		width: 100%;
+		height: 28px;
+		padding: 0 8px;
+		background: var(--input);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		color: var(--foreground);
+		font-size: 0.75rem;
+		outline: none;
+		transition: border-color 150ms ease;
+	}
+
+	.branch-search-input:focus {
+		border-color: var(--primary);
+	}
+
+	.branch-search-input::placeholder {
+		color: var(--muted-foreground);
+	}
+
+	/* Remote branch items */
+	.remote-item :global(svg) {
+		color: var(--muted-foreground);
+		opacity: 0.6;
+	}
+
+	.remote-tag {
+		font-size: 0.5625rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.03em;
+		color: var(--muted-foreground);
+		background: color-mix(in oklch, var(--muted-foreground) 12%, transparent);
+		padding: 1px 5px;
+		border-radius: 4px;
+		flex-shrink: 0;
 	}
 
 	/* Diff stats */
