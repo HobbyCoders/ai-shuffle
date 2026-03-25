@@ -78,6 +78,42 @@
 	let isScrollingProgrammatically = $state(false);
 	let isMounted = $state(false);
 	let scrollRafPending = false; // Throttle scroll handler to one per frame
+	// Set on session switch — ensures scroll-to-bottom fires after messages load,
+	// even if intermediate DOM changes set shouldAutoScroll to false.
+	let pendingScrollToBottom = false;
+	let pendingScrollTimer: ReturnType<typeof setInterval> | null = null;
+
+	/**
+	 * Aggressively scroll to bottom over multiple frames until stable.
+	 * Large messages (tables, code blocks) may take several frames to fully render,
+	 * so a single scrollToBottom() call isn't enough.
+	 */
+	function scrollToBottomUntilStable() {
+		if (pendingScrollTimer) clearInterval(pendingScrollTimer);
+		let lastScrollHeight = 0;
+		let stableCount = 0;
+		pendingScrollTimer = setInterval(() => {
+			if (!containerRef) {
+				if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
+				return;
+			}
+			scrollToBottom();
+			if (containerRef.scrollHeight === lastScrollHeight) {
+				stableCount++;
+				if (stableCount >= 3) {
+					// scrollHeight stable for 3 consecutive checks — done
+					if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
+				}
+			} else {
+				stableCount = 0;
+				lastScrollHeight = containerRef.scrollHeight;
+			}
+		}, 50);
+		// Safety: stop after 1s regardless
+		setTimeout(() => {
+			if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
+		}, 1000);
+	}
 
 	// Current profile for message settings (uses current UI selection)
 	const currentProfile = $derived($profiles.find(p => p.id === $activeSession.profile));
@@ -306,6 +342,7 @@
 	});
 
 	onDestroy(() => {
+		if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
 		const cacheKey = $activeSession.sessionId ?? 'new';
 
 		if (containerRef) {
@@ -353,35 +390,25 @@
 		// (bottom) from onMount, and restoring would fight the initial render.
 		if (!prevId) return;
 
-		// Restore scroll state for the new session
-		const cacheKey = currentId ?? 'new';
-		const wasAutoScrolling = autoScrollCache.get(cacheKey);
-		const userScrolledUp = wasAutoScrolling === false;
+		// Always scroll to bottom on session switch. The autoScrollCache can
+		// have stale false entries from race conditions (DOM shifts during async
+		// message loading caused handleScroll to wrongly set shouldAutoScroll=false).
+		// Users expect to see the latest messages when switching sessions.
+		pendingScrollToBottom = true;
+		shouldAutoScroll = true;
+		// Reset message tracking so the message-change effect fires even if
+		// the new session has the same message count as the previous one.
+		prevMessagesLength = -1;
+		prevLastContent = '';
+		prevLastMetadata = null;
 
-		// Wait for DOM to update with new messages before restoring scroll
+		// Immediate scroll attempt — may run on empty/partial container.
+		// pendingScrollToBottom ensures another scroll after messages load.
+		// Use scrollToBottomUntilStable to handle large content that takes
+		// multiple frames to render (tables, code blocks, etc).
 		tick().then(() => {
 			if (!containerRef) return;
-
-			if (userScrolledUp) {
-				const cachedPosition = scrollPositionCache.get(cacheKey);
-				const storedPosition = cachedPosition ?? $activeSession.scrollTop;
-
-				if (storedPosition > 0) {
-					isScrollingProgrammatically = true;
-					containerRef.scrollTop = storedPosition;
-					shouldAutoScroll = false;
-					requestAnimationFrame(() => {
-						isScrollingProgrammatically = false;
-					});
-				} else {
-					shouldAutoScroll = true;
-					scrollToBottom();
-				}
-			} else {
-				// Default: scroll to bottom for the new session
-				shouldAutoScroll = true;
-				scrollToBottom();
-			}
+			scrollToBottomUntilStable();
 		});
 	});
 
@@ -460,13 +487,23 @@
 		const hasContentChange = currentContent !== prevLastContent;
 		const hasMetadataChange = currentMetadata !== prevLastMetadata;
 
-		if ((hasNewMessage || hasContentChange || hasMetadataChange) && shouldAutoScroll && containerRef) {
-			// Use tick() to wait for Svelte DOM updates, then requestAnimationFrame
-			// to ensure the browser has computed layout (correct scrollHeight).
-			// This is critical for the first message: the DOM transitions from the
-			// empty state to the message list, and scrollHeight isn't accurate until
-			// after layout.
-			tick().then(() => requestAnimationFrame(scrollToBottom));
+		// Scroll to bottom on content changes if auto-scroll is active,
+		// OR if a session switch is pending scroll-to-bottom (messages just loaded).
+		const shouldScroll = shouldAutoScroll || pendingScrollToBottom;
+		if ((hasNewMessage || hasContentChange || hasMetadataChange) && shouldScroll && containerRef) {
+			const wasPending = pendingScrollToBottom;
+			if (pendingScrollToBottom) {
+				pendingScrollToBottom = false;
+				shouldAutoScroll = true;
+			}
+			if (wasPending) {
+				// Session switch: use aggressive scroll that retries until DOM is stable.
+				// Large content (tables, code blocks) may take multiple frames to render.
+				tick().then(() => scrollToBottomUntilStable());
+			} else {
+				// Normal streaming: single scroll is enough.
+				tick().then(() => requestAnimationFrame(scrollToBottom));
+			}
 		}
 
 		// Update previous values

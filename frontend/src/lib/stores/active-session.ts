@@ -463,8 +463,15 @@ function setupPollCallback() {
 			return;
 		}
 
-		// Build usage delta
+		// Build usage delta — don't overwrite a valid contextUsed with 0.
+		// During the brief window between sending a message and the first
+		// stream_start event, the server may return 0 usage. Slash commands
+		// may never trigger a stream_start at all. In both cases, preserve
+		// the last known context usage rather than flashing to 0%.
 		const usageDelta = usageStoreUpdate(data.usage);
+		if (usageDelta.contextUsed === 0 && _state.contextUsed && _state.contextUsed > 0) {
+			usageDelta.contextUsed = _state.contextUsed;
+		}
 		const usageHasUpdate = usageDelta.contextUsed !== _state.contextUsed;
 		const todosHaveUpdate = data.todos.length > 0;
 		const streamingChanged = _state.isStreaming !== data.isStreaming;
