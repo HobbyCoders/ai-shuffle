@@ -17,6 +17,8 @@
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 	import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
 	import OfflineBanner from '$lib/components/OfflineBanner.svelte';
+	import ClaudeStatusBanner from '$lib/components/ClaudeStatusBanner.svelte';
+	import { claudeStatus } from '$lib/stores/claude-status';
 
 	let { children }: { children: Snippet } = $props();
 
@@ -103,10 +105,16 @@
 		// Start visibility-aware auth polling
 		startAuthPoll();
 		document.addEventListener('visibilitychange', handleAuthVisibility);
+
+		// Start Claude status polling (only when authenticated)
+		if ($isAuthenticated) {
+			claudeStatus.start();
+		}
 	});
 
 	onDestroy(() => {
 		stopAuthPoll();
+		claudeStatus.stop();
 		document.removeEventListener('visibilitychange', handleAuthVisibility);
 	});
 </script>
@@ -143,6 +151,7 @@
 	</div>
 {:else}
 	<!-- PWA Components -->
+	<ClaudeStatusBanner />
 	{#if !$isOnline}
 		<OfflineBanner />
 	{/if}
