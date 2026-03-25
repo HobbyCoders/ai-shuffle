@@ -3632,7 +3632,10 @@ def update_subagent(
     description: Optional[str] = ...,  # type: ignore[assignment]
     prompt: Optional[str] = ...,  # type: ignore[assignment]
     tools: Optional[List[str]] = ...,  # type: ignore[assignment]
-    model: Optional[str] = ...  # type: ignore[assignment]
+    model: Optional[str] = ...,  # type: ignore[assignment]
+    skills: Optional[List[str]] = ...,  # type: ignore[assignment]
+    memory: Optional[str] = ...,  # type: ignore[assignment]
+    mcp_servers: Optional[List[Any]] = ...,  # type: ignore[assignment]
 ) -> Optional[Dict[str, Any]]:
     """
     Update a subagent.
@@ -3661,6 +3664,15 @@ def update_subagent(
     if model is not ...:
         updates.append("model = ?")
         values.append(model)
+    if skills is not ...:
+        updates.append("skills = ?")
+        values.append(json.dumps(skills) if skills else None)
+    if memory is not ...:
+        updates.append("memory = ?")
+        values.append(memory)
+    if mcp_servers is not ...:
+        updates.append("mcp_servers = ?")
+        values.append(json.dumps(mcp_servers) if mcp_servers else None)
 
     if updates:
         updates.append("updated_at = ?")
