@@ -1264,16 +1264,18 @@ def build_options_from_profile(
     def stderr_callback(line: str):
         logger.debug("[Claude CLI stderr] %s", line)
 
-    # Process model selection - handle special 1M context models
-    # Models ending in "-1m" use the base model with 1M context beta header
+    # Process model selection
+    # Models like "opus[1m]" are native CLI aliases — pass them through as-is.
+    # Only map custom shorthand names (e.g., "sonnet-1m") that the CLI doesn't
+    # natively recognize to base model + beta headers.
     raw_model = overrides.get("model") or config.get("model")
     model_to_use = raw_model
     betas_to_use = []
 
-    # Map special model names to base model + beta headers
+    # Map custom shorthand names to base model + beta headers.
+    # Do NOT map CLI-native aliases like "opus[1m]" — the CLI handles those directly.
     MODEL_1M_MAPPING = {
         "sonnet-1m": ("sonnet", ["context-1m-2025-08-07"]),
-        "opus[1m]": ("opus", ["context-1m-2025-08-07"]),
         "claude-sonnet-4-5-1m": ("claude-sonnet-4-5-20250514", ["context-1m-2025-08-07"]),
         "claude-sonnet-4-1m": ("claude-sonnet-4-20250514", ["context-1m-2025-08-07"]),
     }
