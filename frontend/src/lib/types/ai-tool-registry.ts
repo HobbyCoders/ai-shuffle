@@ -365,23 +365,8 @@ export const AI_TOOL_CATEGORIES: ToolCategory[] = [
 // ============================================================================
 
 /** Get a flat list of all tool definitions */
-export function getAllTools(): ToolDefinition[] {
+function getAllTools(): ToolDefinition[] {
 	return AI_TOOL_CATEGORIES.flatMap(c => c.tools);
-}
-
-/** Find a tool definition by its ID */
-export function getToolById(toolId: string): ToolDefinition | undefined {
-	return getAllTools().find(t => t.id === toolId);
-}
-
-/** Find a category by its ID */
-export function getCategoryById(categoryId: string): ToolCategory | undefined {
-	return AI_TOOL_CATEGORIES.find(c => c.id === categoryId);
-}
-
-/** Get the total count of available models across all tools */
-export function getTotalModelCount(): number {
-	return getAllTools().reduce((sum, tool) => sum + tool.getModels().length, 0);
 }
 
 /** Build the default model selections map from registry defaults */
@@ -391,9 +376,4 @@ export function getDefaultModelSelections(): Record<string, string> {
 		defaults[tool.modelSettingKey] = tool.defaultModel;
 	}
 	return defaults;
-}
-
-/** Maps backend setting key names to the registry tool IDs for reverse lookup */
-export function getToolIdBySettingKey(settingKey: string): string | undefined {
-	return getAllTools().find(t => t.modelSettingKey === settingKey)?.id;
 }

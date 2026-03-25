@@ -219,7 +219,3 @@ export async function approveRun(approvalId: string): Promise<AutomationApproval
 export async function denyRun(approvalId: string): Promise<AutomationApproval> {
 	return api.post<AutomationApproval>(`/automations/approvals/${approvalId}/deny`);
 }
-
-export async function getTriggerTypes(): Promise<string[]> {
-	return api.get<string[]>('/automations/trigger-types');
-}

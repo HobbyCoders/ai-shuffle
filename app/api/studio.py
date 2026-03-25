@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/studio", tags=["Studio"])
 
-# In-memory storage for MVP
+# TODO: Replace in-memory storage with database persistence.
+# All generation/asset data is lost on server restart.
 generations_db: Dict[str, Dict[str, Any]] = {}
 assets_db: Dict[str, Dict[str, Any]] = {}
 

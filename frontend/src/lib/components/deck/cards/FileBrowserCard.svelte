@@ -7,7 +7,7 @@
 	 */
 
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
-	import { FilesView } from '../files';
+	import FilesView from '../files/FilesView.svelte';
 	import { FolderTree } from 'lucide-svelte';
 
 	interface Props {

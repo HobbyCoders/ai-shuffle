@@ -53,7 +53,7 @@ const DEFAULT_OPTIONS: Required<AudioServiceOptions> = {
 // Audio Service Class
 // ============================================================================
 
-export class AudioService {
+class AudioService {
 	private options: Required<AudioServiceOptions>;
 	private audioContext: AudioContext | null = null;
 	private mediaStream: MediaStream | null = null;
@@ -547,9 +547,3 @@ export function getAudioService(options?: AudioServiceOptions): AudioService {
 	return audioServiceInstance;
 }
 
-export function resetAudioService(): void {
-	if (audioServiceInstance) {
-		audioServiceInstance.stop();
-		audioServiceInstance = null;
-	}
-}

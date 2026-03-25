@@ -164,6 +164,7 @@ export async function deactivateConnector(id: string): Promise<Connector> {
 
 /**
  * Restart a connector
+ * TODO: Wire up to ConnectorManager UI (restart button)
  */
 export async function restartConnector(id: string): Promise<Connector> {
 	return api.post<Connector>(`/connectors/${id}/restart`);
@@ -192,6 +193,7 @@ export async function getConnectorLogs(id: string): Promise<ConnectorEventLog[]>
 
 /**
  * Get current status for a connector
+ * TODO: Wire up to ConnectorManager UI (status display)
  */
 export async function getConnectorStatus(id: string): Promise<any> {
 	return api.get<any>(`/connectors/${id}/status`);
@@ -199,6 +201,7 @@ export async function getConnectorStatus(id: string): Promise<any> {
 
 // ============================================================================
 // Variant API Functions (Triggers, Actions, Tools)
+// TODO: Wire up to ConnectorManager UI — backend endpoints exist and are functional
 // ============================================================================
 
 /**
@@ -224,6 +227,7 @@ export async function getConnectorTools(id: string): Promise<ConnectorToolInfo[]
 
 /**
  * Execute a connector action directly
+ * TODO: Wire up to ConnectorManager UI (action executor)
  */
 export async function executeConnectorAction(
 	id: string,

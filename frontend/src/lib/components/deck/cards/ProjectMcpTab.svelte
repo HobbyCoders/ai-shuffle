@@ -10,7 +10,7 @@
 	 */
 	import { mcp, projectMcpServers, mcpLoading } from '$lib/stores/mcp';
 	import type { McpServerInfo } from '$lib/api/mcp';
-	import { McpServerForm } from '$lib/components/mcp';
+	import McpServerForm from '$lib/components/mcp/McpServerForm.svelte';
 	import { Search, Server, Globe, Terminal, Zap, FolderGit2, FolderLock, Download, Trash2, ToggleLeft, ToggleRight } from 'lucide-svelte';
 	import './card-design-system.css';
 

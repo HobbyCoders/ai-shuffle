@@ -11,7 +11,9 @@
 	 */
 	import { untrack } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { MessageArea, ChatInput, QueuedMessages } from '$lib/components/chat';
+	import MessageArea from '$lib/components/chat/MessageArea.svelte';
+	import ChatInput from '$lib/components/chat/ChatInput.svelte';
+	import QueuedMessages from '$lib/components/chat/QueuedMessages.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth';

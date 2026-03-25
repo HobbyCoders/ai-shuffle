@@ -31,11 +31,3 @@ export function formatDateTime(dateStr: string | null): string {
 	return date.toLocaleString(undefined, { timeZone: tz });
 }
 
-/**
- * Format a date string as time-only respecting the timezone preference.
- */
-export function formatTime(dateStr: string): string {
-	const date = parseUTC(dateStr);
-	const tz = timezonePreference.resolveTimezone();
-	return date.toLocaleTimeString(undefined, { timeZone: tz });
-}

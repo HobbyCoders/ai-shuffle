@@ -10,12 +10,13 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.db import database
 from app.core.rate_limiter import rate_limiter
 from app.core.queue_manager import request_queue
+from app.api.auth import require_admin as _require_admin
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,12 @@ class QueueStatusResponse(BaseModel):
 # Authentication Helpers
 # =============================================================================
 
+# Admin auth uses the centralized require_admin from app.api.auth
+require_admin = _require_admin
+
+
+# TODO: Consolidate with centralized auth. This local helper resolves user/api_key
+# identity for rate limit lookups, which require_auth doesn't provide.
 async def get_current_user(
     session: Optional[str] = Cookie(None),
     authorization: Optional[str] = Header(None)
@@ -138,26 +145,6 @@ async def get_current_user(
                     user_id = api_user.get("username") or api_user["name"]
 
     return user_id, api_key_id, is_admin
-
-
-async def require_admin(
-    session: Optional[str] = Cookie(None)
-) -> bool:
-    """Require admin authentication"""
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required"
-        )
-
-    auth_session = database.get_auth_session(session)
-    if not auth_session:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid session"
-        )
-
-    return True
 
 
 # =============================================================================

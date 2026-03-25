@@ -21,7 +21,7 @@
 	import type { Command } from '$lib/api/commands';
 
 	// Layout components
-	import { AppLayout } from '$lib/components/layout';
+	import AppLayout from '$lib/components/layout/AppLayout.svelte';
 
 	// Modals
 	import KeyboardShortcutsModal from '$lib/components/KeyboardShortcutsModal.svelte';

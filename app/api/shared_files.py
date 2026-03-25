@@ -6,6 +6,10 @@ available for download, displaying them in the chat UI with download cards.
 
 Security: Files must be within the workspace directory. The API validates
 that requested file paths don't escape the workspace boundary.
+
+TODO: Add authentication to GET endpoints — currently any request with a
+valid path can download files without auth. Consider adding sharing tokens
+or requiring session auth.
 """
 
 from pathlib import Path
