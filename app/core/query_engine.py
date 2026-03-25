@@ -1214,16 +1214,15 @@ def build_options_from_profile(
     # Build agents dict from profile's enabled_agents
     # Profile stores a list of subagent IDs that reference global subagents in the database
     # The SDK expects AgentDefinition dataclass instances, not raw dicts
+    # All enabled agents are always sent — our definitions supersede CLI built-ins
     enabled_agent_ids = config.get("enabled_agents", [])
     agents_dict = None
     logger.debug(f"Building agents from enabled_agent_ids: {enabled_agent_ids}")
     if enabled_agent_ids:
         agents_dict = {}
         for agent_id in enabled_agent_ids:
-            # Look up subagent from global database
             subagent = database.get_subagent(agent_id)
             if subagent:
-                # Create AgentDefinition dataclass instance
                 agent_def = AgentDefinition(
                     description=subagent.get("description", ""),
                     prompt=subagent.get("prompt", ""),
@@ -1237,6 +1236,8 @@ def build_options_from_profile(
                 logger.debug(f"Loaded subagent '{agent_id}': description='{agent_def.description[:50]}...', tools={agent_def.tools}, model={agent_def.model}")
             else:
                 logger.warning(f"Subagent not found in database: {agent_id}")
+        if not agents_dict:
+            agents_dict = None
         logger.debug(f"Final agents_dict keys: {list(agents_dict.keys()) if agents_dict else 'None'}")
 
     # Inject built-in agent instructions into system prompt (only for enabled built-in agents)

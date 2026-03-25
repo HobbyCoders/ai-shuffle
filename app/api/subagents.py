@@ -30,7 +30,7 @@ class SubagentResponse(BaseModel):
     memory: Optional[str] = None
     mcp_servers: Optional[list] = None
     is_builtin: bool = False
-    is_modified: bool = False  # Only relevant for built-in subagents
+    is_modified: bool = False  # Whether built-in subagent has been modified from defaults
     created_at: datetime
     updated_at: datetime
 

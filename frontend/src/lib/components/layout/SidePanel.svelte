@@ -319,6 +319,25 @@
 		return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 	}
 
+	function formatCost(cost: number): string {
+		if (cost < 0.01) return '<$0.01';
+		return `$${cost.toFixed(2)}`;
+	}
+
+	function formatSessionDuration(createdAt: string, updatedAt: string): string {
+		const start = new Date(createdAt);
+		const end = new Date(updatedAt);
+		const diffMs = end.getTime() - start.getTime();
+		if (diffMs < 60000) return '<1m';
+		const mins = Math.floor(diffMs / 60000);
+		if (mins < 60) return `${mins}m`;
+		const hrs = Math.floor(mins / 60);
+		const remainMins = mins % 60;
+		if (hrs < 24) return remainMins > 0 ? `${hrs}h ${remainMins}m` : `${hrs}h`;
+		const days = Math.floor(hrs / 24);
+		return `${days}d`;
+	}
+
 	// Check if this view is active
 	function isActiveView(type: ViewType, sessionId?: string): boolean {
 		const view = $activeView;
@@ -435,7 +454,14 @@
 									{:else if needsAttention(session.id)}
 										<div class="attention-dot"></div>
 									{/if}
-									<span class="session-title">{session.title || 'Untitled'}</span>
+									<div class="session-info">
+										<span class="session-title">{session.title || 'Untitled'}</span>
+										{#if session.total_cost_usd > 0}
+											<span class="session-meta">
+												{formatCost(session.total_cost_usd)} · {formatSessionDuration(session.created_at, session.updated_at || session.created_at)}{#if session.turn_count > 0} · {session.turn_count} {session.turn_count === 1 ? 'turn' : 'turns'}{/if}
+											</span>
+										{/if}
+									</div>
 									<span class="session-time">{formatRelativeTime(session.updated_at || session.created_at)}</span>
 									<span
 										class="favorite-btn"
@@ -560,7 +586,14 @@
 												{#if isStreaming(session.id)}
 													<div class="streaming-dot"></div>
 												{/if}
-												<span class="session-title">{session.title || 'Untitled'}</span>
+												<div class="session-info">
+													<span class="session-title">{session.title || 'Untitled'}</span>
+													{#if session.total_cost_usd > 0}
+														<span class="session-meta">
+															{formatCost(session.total_cost_usd)} · {formatSessionDuration(session.created_at, session.updated_at || session.created_at)}{#if session.turn_count > 0} · {session.turn_count} {session.turn_count === 1 ? 'turn' : 'turns'}{/if}
+														</span>
+													{/if}
+												</div>
 												<span class="session-time">{formatRelativeTime(session.updated_at || session.created_at)}</span>
 												<span
 													class="favorite-btn"
@@ -640,7 +673,14 @@
 													{#if isStreaming(session.id)}
 														<div class="streaming-dot"></div>
 													{/if}
-													<span class="session-title">{session.title || 'Untitled'}</span>
+													<div class="session-info">
+														<span class="session-title">{session.title || 'Untitled'}</span>
+														{#if session.total_cost_usd > 0}
+															<span class="session-meta">
+																{formatCost(session.total_cost_usd)} · {formatSessionDuration(session.created_at, session.updated_at || session.created_at)}{#if session.turn_count > 0} · {session.turn_count} {session.turn_count === 1 ? 'turn' : 'turns'}{/if}
+															</span>
+														{/if}
+													</div>
 													<span class="session-time">{formatRelativeTime(session.updated_at || session.created_at)}</span>
 												</button>
 											{/each}
@@ -1211,12 +1251,28 @@
 		opacity: 0.6;
 	}
 
-	.session-title {
+	.session-info {
 		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+	}
+
+	.session-title {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		font-weight: 400;
+	}
+
+	.session-meta {
+		font-size: 0.625rem;
+		color: var(--muted-foreground);
+		opacity: 0.55;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.session-time {
