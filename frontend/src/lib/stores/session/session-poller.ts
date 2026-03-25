@@ -408,8 +408,7 @@ class SessionPoller {
 			cacheReadTokens: usageRaw.cache_read_tokens || 0,
 			contextUsed:
 				(usageRaw.input_tokens || 0) +
-				(usageRaw.cache_creation_tokens || 0) +
-				(usageRaw.cache_read_tokens || 0),
+				(usageRaw.cache_creation_tokens || 0),
 		};
 
 		// Apply to store — ONLY place state gets written

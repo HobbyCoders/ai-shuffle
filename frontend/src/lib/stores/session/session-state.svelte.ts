@@ -20,7 +20,7 @@ export interface SessionUsage {
 	outputTokens: number;
 	cacheCreationTokens: number;
 	cacheReadTokens: number;
-	/** Computed: inputTokens + cacheCreationTokens + cacheReadTokens */
+	/** Computed: inputTokens + cacheCreationTokens (cache_read is already included in input_tokens) */
 	contextUsed: number;
 }
 
