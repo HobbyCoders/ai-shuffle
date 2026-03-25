@@ -755,7 +755,7 @@ def _parse_session_history_uncached(
         if entry_type in ("queue-operation", "file-history-snapshot"):
             continue
 
-        # Accumulate usage data from all assistant entries (before meta/sidechain skip)
+        # Accumulate usage data from all assistant entries
         if entry_type == "assistant":
             message_data_for_usage = entry.get("message", {})
             usage = message_data_for_usage.get("usage", {})
@@ -763,7 +763,10 @@ def _parse_session_history_uncached(
                 usage_model = message_data_for_usage.get("model")
             total_input_tokens += usage.get("input_tokens", 0)
             total_output_tokens += usage.get("output_tokens", 0)
-            if usage:
+            # Only track last_usage from main conversation turns (not subagents/sidechain).
+            # last_usage represents the current context window size, so it must come from
+            # the main conversation — subagent usage reflects a different context window.
+            if usage and not entry.get("isMeta") and not entry.get("isSidechain"):
                 last_usage = usage
 
         # Skip meta messages (slash commands, system prompts, etc.)
