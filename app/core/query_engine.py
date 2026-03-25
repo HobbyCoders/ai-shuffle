@@ -1272,6 +1272,7 @@ def build_options_from_profile(
     # Map special model names to base model + beta headers
     MODEL_1M_MAPPING = {
         "sonnet-1m": ("sonnet", ["context-1m-2025-08-07"]),
+        "opus[1m]": ("opus", ["context-1m-2025-08-07"]),
         "claude-sonnet-4-5-1m": ("claude-sonnet-4-5-20250514", ["context-1m-2025-08-07"]),
         "claude-sonnet-4-1m": ("claude-sonnet-4-20250514", ["context-1m-2025-08-07"]),
     }
@@ -3477,21 +3478,28 @@ async def stream_to_websocket(
 
                         # Check if this is a subagent invocation (SDK ≤0.1.30 "Task", SDK ≥0.1.48 "Agent")
                         if block.name in ("Task", "Agent"):
+                            # Derive agent_type: prefer subagent_type, fall back to description
+                            agent_type = (
+                                tool_input.get("subagent_type")
+                                or tool_input.get("description")
+                                or "Agent"
+                            )
+
                             # Track this Task tool use
                             task_tool_uses[tool_id] = {
-                                "agent_type": tool_input.get("subagent_type", "unknown"),
+                                "agent_type": agent_type,
                                 "description": tool_input.get("description", ""),
                                 "prompt": tool_input.get("prompt", "")
                             }
 
-                            # Yield subagent_start event instead of regular tool_use
+                            # Yield subagent_start event
                             yield {
                                 "type": "subagent_start",
                                 "tool_id": tool_id,
-                                "agent_type": tool_input.get("subagent_type", "unknown"),
+                                "agent_type": agent_type,
                                 "description": tool_input.get("description", ""),
                                 "prompt": tool_input.get("prompt", ""),
-                                "agent_id": tool_id  # Use tool_id as agent_id for tracking
+                                "agent_id": tool_id
                             }
                         # Check if this tool use is from a subagent
                         elif parent_tool_id and parent_tool_id in task_tool_uses:

@@ -1697,7 +1697,7 @@ async def import_session(
                     elif msg_type == 'subagent':
                         # Subagent message - write as tool use
                         tool_id = msg.get('toolId') or str(uuid.uuid4())
-                        agent_type = msg.get('agentType', 'unknown')
+                        agent_type = msg.get('agentType') or msg.get('agentDescription') or 'Agent'
                         description = msg.get('agentDescription', '')
 
                         content_blocks = [{

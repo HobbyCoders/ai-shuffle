@@ -358,7 +358,7 @@
 			toolSelectionMode = 'all';
 		}
 
-		const presetModels = ['haiku', 'sonnet', 'opus'];
+		const presetModels = ['haiku', 'sonnet', 'opus', 'opus[1m]'];
 		customModelMode = !presetModels.includes(config.model || 'sonnet');
 
 		profileForm = {
@@ -544,6 +544,7 @@
 			case 'sonnet':
 				return 'card-badge--sonnet';
 			case 'opus':
+			case 'opus[1m]':
 				return 'card-badge--opus';
 			default:
 				return 'card-badge--muted';
@@ -747,7 +748,7 @@
 			spAppend = agent.system_prompt_append || '';
 		}
 
-		const presetModelsAgent = ['haiku', 'sonnet', 'opus'];
+		const presetModelsAgent = ['haiku', 'sonnet', 'opus', 'opus[1m]'];
 		customModelMode = !presetModelsAgent.includes(agent.model || 'sonnet');
 
 		profileForm = {
@@ -945,6 +946,7 @@
 									<option value="haiku">Haiku</option>
 									<option value="sonnet">Sonnet</option>
 									<option value="opus">Opus</option>
+									<option value="opus[1m]">Opus 1M</option>
 									<option value="__custom__">Custom...</option>
 								</select>
 								{#if customModelMode}

@@ -303,9 +303,12 @@ class GitService:
             - behind: Commits behind tracking branch (local only)
         """
         try:
-            # Use for-each-ref for structured output
-            # Include %(refname) to reliably determine local vs remote
-            format_str = "%(refname)|%(refname:short)|%(objectname:short)|%(subject)|%(HEAD)|%(upstream:short)|%(upstream:track)"
+            # Use for-each-ref for structured output.
+            # Include %(refname) to reliably determine local vs remote.
+            # IMPORTANT: %(subject) is placed LAST because commit messages
+            # can contain the | delimiter. Using maxsplit ensures the subject
+            # (which may contain pipes) is captured as a single trailing field.
+            format_str = "%(refname)|%(refname:short)|%(objectname:short)|%(HEAD)|%(upstream:short)|%(upstream:track)|%(subject)"
             args = [
                 "for-each-ref",
                 f"--format={format_str}",
@@ -324,17 +327,20 @@ class GitService:
                 if not line:
                     continue
 
+                # Split into exactly 7 parts (6 splits). The 7th part
+                # (subject) captures everything after the 6th pipe,
+                # including any pipes within the commit message itself.
                 parts = line.split("|", 6)
-                if len(parts) < 5:
+                if len(parts) < 6:
                     continue
 
                 refname = parts[0]
                 name = parts[1]
                 commit = parts[2]
-                message = parts[3] if len(parts) > 3 else ""
-                is_current = parts[4] == "*" if len(parts) > 4 else False
-                upstream = parts[5] if len(parts) > 5 else ""
-                track_info = parts[6] if len(parts) > 6 else ""
+                is_current = parts[3] == "*"
+                upstream = parts[4]
+                track_info = parts[5]
+                message = parts[6] if len(parts) > 6 else ""
 
                 # Skip HEAD reference and bare remote names
                 if name == "origin/HEAD" or name == "origin":
@@ -358,13 +364,56 @@ class GitService:
                         except (IndexError, ValueError):
                             pass
 
+                # Determine the effective upstream for pull/push operations.
+                # If a branch's configured upstream points to a DIFFERENT branch
+                # (e.g., feature tracking origin/main), use the branch's own
+                # remote counterpart (origin/feature) for ahead/behind instead.
+                # This prevents "Pull 1" showing on feature when main gets a
+                # new commit — the pull button should only reflect changes to
+                # the branch's own remote counterpart.
+                effective_upstream = upstream if upstream else None
+                if not is_remote and upstream and not upstream.endswith(f"/{name}"):
+                    # Upstream points to a different branch (e.g., origin/main
+                    # for a branch named "feature"). Extract the remote name
+                    # and check if the branch's own remote counterpart exists.
+                    remote_name = upstream.split("/")[0] if "/" in upstream else "origin"
+                    own_remote_ref = f"{remote_name}/{name}"
+                    check = self._run_git(
+                        working_dir,
+                        ["rev-parse", "--verify", "--quiet", f"refs/remotes/{own_remote_ref}"],
+                        timeout=3
+                    )
+                    if check.returncode == 0:
+                        # Own remote counterpart exists — compute ahead/behind
+                        # against it instead of the configured upstream.
+                        effective_upstream = own_remote_ref
+                        ab_result = self._run_git(
+                            working_dir,
+                            ["rev-list", "--left-right", "--count",
+                             f"{name}...{own_remote_ref}"],
+                            timeout=5
+                        )
+                        if ab_result.returncode == 0:
+                            ab_parts = ab_result.stdout.strip().split()
+                            if len(ab_parts) >= 2:
+                                ahead = int(ab_parts[0])
+                                behind = int(ab_parts[1])
+                    else:
+                        # No remote counterpart — branch hasn't been pushed yet.
+                        # Reset ahead/behind to 0 since there's nothing to
+                        # pull from; the upstream (e.g., origin/main) comparison
+                        # is misleading for pull/push UI.
+                        ahead = 0
+                        behind = 0
+                        effective_upstream = None
+
                 branches.append({
                     "name": name,
                     "is_current": is_current,
                     "is_remote": is_remote,
                     "commit": commit,
                     "commit_message": message[:100],
-                    "upstream": upstream if upstream else None,
+                    "upstream": effective_upstream,
                     "ahead": ahead,
                     "behind": behind
                 })

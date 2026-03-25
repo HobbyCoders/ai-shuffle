@@ -35,15 +35,38 @@
 		isError: message.agentStatus === 'error'
 	});
 
-	// Get model display name
+	// Map known SDK agent types to display labels
+	const KNOWN_AGENT_LABELS: Record<string, string> = {
+		'general-purpose': 'General',
+		'explore': 'Explore',
+		'plan': 'Plan',
+		'code-simplifier': 'Simplify',
+		'frontend-designer': 'Frontend',
+		'chat-history-summarizer': 'Summarizer',
+		'statusline-setup': 'Status Line',
+		'plugin-dev:create-plugin': 'Plugin',
+		'plugin-dev:agent-creator': 'Agent Creator',
+		'plugin-dev:plugin-validator': 'Validator',
+		'plugin-dev:skill-reviewer': 'Skill Review',
+		'plugin-dev:hook-development': 'Hook Dev',
+		'plugin-dev:mcp-integration': 'MCP',
+		'plugin-dev:plugin-structure': 'Plugin',
+		'plugin-dev:skill-development': 'Skill Dev',
+		'plugin-dev:command-development': 'Command Dev',
+		'plugin-dev:plugin-settings': 'Settings',
+		'skill-creator:skill-creator': 'Skill Creator',
+	};
+
 	function getModelBadge(agentType?: string): { label: string; color: string } {
-		switch (agentType?.toLowerCase()) {
-			case 'explore':
-			case 'plan':
-				return { label: 'Fast', color: 'bg-primary/20 text-primary' };
-			default:
-				return { label: agentType || 'Agent', color: 'bg-primary/20 text-primary' };
+		if (!agentType || agentType === 'unknown') {
+			return { label: 'Agent', color: 'bg-primary/20 text-primary' };
 		}
+		const key = agentType.toLowerCase();
+		const knownLabel = KNOWN_AGENT_LABELS[key];
+		if (knownLabel) {
+			return { label: knownLabel, color: 'bg-primary/20 text-primary' };
+		}
+		return { label: agentType, color: 'bg-primary/20 text-primary' };
 	}
 
 	// Format usage stats from task_progress updates

@@ -1108,7 +1108,11 @@ def _parse_session_history_uncached(
                             # Check if this is a subagent tool - create subagent message instead
                             # SDK ≤0.1.30 uses "Task", SDK ≥0.1.48 uses "Agent"
                             if tool_name in ("Task", "Agent"):
-                                agent_type = tool_input.get("subagent_type", "unknown")
+                                agent_type = (
+                                    tool_input.get("subagent_type")
+                                    or tool_input.get("description")
+                                    or "Agent"
+                                )
                                 description = tool_input.get("description", "")
                                 prompt = tool_input.get("prompt", "")
 

@@ -53,11 +53,13 @@
 		{ value: '', label: 'Inherit' },
 		{ value: 'haiku', label: 'Haiku' },
 		{ value: 'sonnet', label: 'Sonnet' },
-		{ value: 'opus', label: 'Opus' }
+		{ value: 'opus', label: 'Opus' },
+		{ value: 'opus[1m]', label: 'Opus 1M' }
 	];
 
 	function getModelBadgeClass(model?: string | null): string {
 		if (!model || model === '') return 'card-badge--inherit';
+		if (model.startsWith('opus')) return 'card-badge--opus';
 		return `card-badge--${model}`;
 	}
 
