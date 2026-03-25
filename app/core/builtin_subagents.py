@@ -547,7 +547,28 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
             results[subagent_id] = "promoted"
 
         else:
-            results[subagent_id] = "exists"
+            # Check if code definition changed since last seed
+            old_default = existing.get("default_prompt", "")
+            new_prompt = definition["prompt"]
+            if old_default and old_default != new_prompt:
+                # Code definition changed — update defaults
+                _update_builtin_defaults(subagent_id, definition)
+                # If user hasn't customized (active prompt == old default),
+                # also update the active prompt so the change takes effect
+                if existing.get("prompt") == old_default:
+                    database.update_subagent(
+                        subagent_id=subagent_id,
+                        prompt=new_prompt,
+                        name=definition["name"],
+                        description=definition["description"],
+                    )
+                    logger.info(f"Auto-updated built-in subagent from new code: {subagent_id}")
+                    results[subagent_id] = "auto_updated"
+                else:
+                    logger.debug(f"Updated defaults for {subagent_id} (active prompt customized, not overwritten)")
+                    results[subagent_id] = "defaults_updated"
+            else:
+                results[subagent_id] = "exists"
 
     return results
 
