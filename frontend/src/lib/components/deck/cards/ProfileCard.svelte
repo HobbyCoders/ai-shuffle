@@ -56,6 +56,7 @@
 		name: string;
 		description: string;
 		model?: string;
+		is_builtin: boolean;
 	}
 
 	interface GroupState {
@@ -507,8 +508,13 @@
 		return 'some';
 	}
 
-	// Agent helpers
+	// Agent helpers — built-in agents are always enabled and cannot be toggled
+	const builtinAgentIds = $derived(allSubagents.filter(a => a.is_builtin).map(a => a.id));
+	const customAgents = $derived(allSubagents.filter(a => !a.is_builtin));
+
 	function toggleAgent(agentId: string) {
+		// Built-in agents cannot be toggled
+		if (builtinAgentIds.includes(agentId)) return;
 		if (profileForm.enabled_agents.includes(agentId)) {
 			profileForm.enabled_agents = profileForm.enabled_agents.filter((id) => id !== agentId);
 		} else {
@@ -532,6 +538,8 @@
 				return 'Sonnet';
 			case 'opus':
 				return 'Opus';
+			case 'opus[1m]':
+				return 'Opus 1M';
 			default:
 				return model || 'Default';
 		}
@@ -577,9 +585,9 @@
 		} else if (toolSelectionMode === 'disallow' && profileForm.disallowed_tools.length > 0) {
 			config.disallowed_tools = profileForm.disallowed_tools;
 		}
-		if (profileForm.enabled_agents.length > 0) {
-			config.enabled_agents = profileForm.enabled_agents;
-		}
+		// Always include built-in agents + any user-selected custom agents
+		const allEnabledAgents = [...new Set([...builtinAgentIds, ...profileForm.enabled_agents])];
+		config.enabled_agents = allEnabledAgents;
 		if (profileForm.setting_sources.length > 0) {
 			config.setting_sources = profileForm.setting_sources;
 		}
@@ -1190,26 +1198,27 @@
 						<div class="pf-section-header">
 							<Bot size={16} />
 							<h3>Sub-Agents</h3>
-							{#if allSubagents.length > 0}
+							{#if customAgents.length > 0}
 								<div class="pf-section-actions">
-									<button type="button" class="text-btn primary" onclick={() => (profileForm.enabled_agents = allSubagents.map((a) => a.id))}>Select All</button>
-									<button type="button" class="text-btn muted" onclick={() => (profileForm.enabled_agents = [])}>Clear All</button>
+									<button type="button" class="text-btn primary" onclick={() => (profileForm.enabled_agents = [...builtinAgentIds, ...customAgents.map((a) => a.id)])}>Select All</button>
+									<button type="button" class="text-btn muted" onclick={() => (profileForm.enabled_agents = [...builtinAgentIds])}>Clear Custom</button>
 								</div>
 							{/if}
 						</div>
-						<p class="pf-desc">Choose which sub-agents this profile can delegate tasks to.</p>
+						<p class="pf-desc">Built-in agents are always available. Choose which custom agents to enable.</p>
 					</div>
 
 					{#if allSubagents.length === 0}
-						<div class="card-empty-state"><p class="card-empty-description">No database subagents configured</p></div>
+						<div class="card-empty-state"><p class="card-empty-description">No agents configured</p></div>
 					{:else}
 						<div class="pf-agent-list">
 							{#each allSubagents as agent (agent.id)}
-								{@const isSelected = profileForm.enabled_agents.includes(agent.id)}
-								<label class="pf-agent-card" class:selected={isSelected}>
-									<input type="checkbox" checked={isSelected} onchange={() => toggleAgent(agent.id)} class="pf-agent-checkbox" />
+								{@const isBuiltin = agent.is_builtin}
+								{@const isSelected = isBuiltin || profileForm.enabled_agents.includes(agent.id)}
+								<label class="pf-agent-card" class:selected={isSelected} class:builtin={isBuiltin}>
+									<input type="checkbox" checked={isSelected} disabled={isBuiltin} onchange={() => toggleAgent(agent.id)} class="pf-agent-checkbox" />
 									<div class="pf-agent-icon" class:active={isSelected}>
-										{#if agent.model === 'opus'}
+										{#if agent.model === 'opus' || agent.model === 'opus[1m]'}
 											<Bot size={18} />
 										{:else if agent.model === 'haiku'}
 											<Sparkles size={18} />
@@ -1220,6 +1229,9 @@
 									<div class="pf-agent-info">
 										<div class="pf-agent-header">
 											<span class="pf-agent-name">{agent.name}</span>
+											{#if isBuiltin}
+												<span class="card-badge card-badge--muted">Always on</span>
+											{/if}
 											<span class="card-badge {getModelBadgeClass(agent.model)}">{getModelDisplay(agent.model)}</span>
 										</div>
 										<p class="pf-agent-desc">{agent.description}</p>
@@ -1232,7 +1244,7 @@
 						<div class="pf-summary-bar">
 							<div class="pf-summary-left">
 								<Bot size={14} />
-								<span>{profileForm.enabled_agents.length} of {allSubagents.length} agents enabled</span>
+								<span>{builtinAgentIds.length} built-in{#if customAgents.length > 0} + {profileForm.enabled_agents.filter(id => !builtinAgentIds.includes(id)).length} of {customAgents.length} custom{/if}</span>
 							</div>
 							<span class="pf-summary-link">Configure agents →</span>
 						</div>
@@ -1479,7 +1491,7 @@
 										<span class="fp-meta-dot"></span>
 										<span class="fp-meta-chip"><Wrench size={12} /> {getProfileToolCount(profile)} tools</span>
 										<span class="fp-meta-dot"></span>
-										<span class="fp-meta-chip"><Bot size={12} /> {profile.config?.enabled_agents?.length || 0} agents</span>
+										<span class="fp-meta-chip"><Bot size={12} /> {Math.max(profile.config?.enabled_agents?.length || 0, builtinAgentIds.length)} agents</span>
 										<span class="fp-meta-dot"></span>
 										<span class="fp-meta-chip"><MessageSquare size={12} /> {profile.session_count || 0}</span>
 										{#if profile.is_builtin}
@@ -1951,11 +1963,25 @@
 		background: color-mix(in oklch, var(--primary) 5%, transparent);
 	}
 
+	.pf-agent-card.builtin {
+		cursor: default;
+		opacity: 0.85;
+	}
+
+	.pf-agent-card.builtin:hover {
+		border-color: color-mix(in oklch, var(--primary) 40%, transparent);
+	}
+
 	.pf-agent-checkbox {
 		width: 18px;
 		height: 18px;
 		flex-shrink: 0;
 		accent-color: var(--primary);
+	}
+
+	.pf-agent-checkbox:disabled {
+		opacity: 0.5;
+		cursor: default;
 	}
 
 	.pf-agent-icon {

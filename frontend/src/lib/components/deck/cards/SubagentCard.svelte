@@ -229,10 +229,13 @@
 				prompt: formPrompt,
 			};
 
+			// Always include tools — null means "all tools" (inherit)
 			if (toolSelectionMode === 'select' && formTools.length > 0) {
 				body.tools = formTools;
+			} else {
+				body.tools = null;
 			}
-			// Always include model - use null to clear/inherit
+			// Always include model — null means "inherit from session"
 			body.model = formModel || null;
 
 			if (isEditMode && editingSubagent) {
