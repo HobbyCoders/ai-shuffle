@@ -78,7 +78,8 @@ async def _delayed_session_cleanup(session_id: str, delay_seconds: int = 30) -> 
     try:
         await asyncio.sleep(delay_seconds)
         cleaned = await live_session_store.cleanup_ended_session(session_id)
-        logger.info(f"Delayed cleanup for session {session_id}: {'removed' if cleaned else 'skipped (still streaming or not found)'}. Pending cleanups remaining: {len(_pending_cleanup_tasks) - 1}")
+        # Note: pop happens in the finally block below; count after pop is accurate there
+        logger.info(f"Delayed cleanup for session {session_id}: {'removed' if cleaned else 'skipped (still streaming or not found)'}")
     except asyncio.CancelledError:
         logger.debug(f"Delayed cleanup cancelled for session {session_id} (new query started)")
     finally:
@@ -617,6 +618,54 @@ async def chat_websocket(
                     await live_session_store.cleanup_session(session_id)
                     ctx.debug(logger, "Cleaned up stuck streaming session")
 
+            # Auto-process next queued message (server-side, no browser needed).
+            # Skip if another task already took over for this session (e.g.,
+            # interrupt_and_query stored a new task while we were finishing up).
+            async with _active_sessions_lock:
+                successor = _active_chat_sessions.get(session_id)
+            if successor is None or (isinstance(successor, asyncio.Task) and successor.done()):
+                await asyncio.sleep(0.5)
+                try:
+                    msg = await run_sync(database.pop_next_queued_message, session_id)
+                    if msg:
+                        q_content = msg["content"]
+                        q_profile = msg.get("profile_id") or "claude-code"
+                        q_project = msg.get("project_id")
+                        logger.info(f"[Queue] Auto-processing queued message for {session_id}: {q_content[:80]}...")
+
+                        # Broadcast updated queue
+                        queue = await run_sync(database.get_queued_messages, session_id)
+                        await sync_engine.broadcast_queue_updated(session_id, queue)
+
+                        # Store user message in DB
+                        await run_sync(
+                            database.add_session_message,
+                            session_id=session_id,
+                            role="user",
+                            content=q_content,
+                            profile_id=q_profile,
+                        )
+
+                        # Broadcast user message to all devices
+                        await sync_engine.broadcast_message_added(
+                            session_id=session_id,
+                            message={"role": "user", "content": q_content, "profile_id": q_profile},
+                            source_device_id=None,
+                        )
+
+                        # Look up worktree_id from session
+                        q_session = await run_sync(database.get_session, session_id)
+                        q_worktree = q_session.get("worktree_id") if q_session else None
+
+                        # Start the queued query
+                        q_task = asyncio.create_task(
+                            run_query(q_content, session_id, q_profile, q_project, None, q_worktree)
+                        )
+                        async with _active_sessions_lock:
+                            _active_chat_sessions[session_id] = q_task
+                except Exception as queue_err:
+                    logger.warning(f"[Queue] Failed to auto-process next queued message: {queue_err}")
+
     try:
         # Start ping task
         ping_task = asyncio.create_task(ping_loop(websocket, "chat", send_fn=send_json))
@@ -798,19 +847,29 @@ async def chat_websocket(
                         interrupted = await interrupt_session(session_id)
                         logger.debug(f"Interrupt session {session_id} before new query: {interrupted}")
 
-                        # Step 2: Cancel the asyncio task
-                        # Timeout must exceed _SUBPROCESS_EXIT_GRACE_SECONDS (5s) to allow
-                        # the subprocess to flush JSONL writes before the new query reads it.
-                        # Without sufficient time, the new subprocess reads incomplete JSONL
-                        # and loses conversation context.
+                        # Step 2: Wait for the streaming task to finish naturally.
+                        # The SDK interrupt() causes receive_response() to end with a
+                        # ResultMessage.  We MUST let receive_response() drain fully
+                        # before sending a new query — cancelling the task prematurely
+                        # leaves unread messages in the subprocess pipe, and the next
+                        # receive_response() reads the stale ResultMessage and completes
+                        # instantly (0 events / empty response).
+                        #
+                        # Use asyncio.wait() (not wait_for/cancel) because wait_for
+                        # cancels the inner task on timeout, which is exactly what we
+                        # want to avoid until we're sure the drain didn't happen.
                         async with _active_sessions_lock:
                             task = _active_chat_sessions.get(session_id)
                         if task and not task.done():
-                            task.cancel()
-                            try:
-                                await asyncio.wait_for(task, timeout=8.0)
-                            except (asyncio.CancelledError, asyncio.TimeoutError):
-                                pass
+                            done, pending = await asyncio.wait({task}, timeout=8.0)
+                            if pending:
+                                # Interrupt didn't cause natural completion — force cancel
+                                logger.warning(f"Interrupt drain timed out for {session_id}, force cancelling")
+                                task.cancel()
+                                try:
+                                    await task
+                                except (asyncio.CancelledError, Exception):
+                                    pass
 
                         # Step 3: Store user message with profile_id for per-query tracking
                         await run_sync(
@@ -1200,6 +1259,65 @@ async def chat_websocket(
 
                     elif msg_type == "pong":
                         pass  # Keep-alive response
+
+                    elif msg_type == "queue_message":
+                        # Queue a message to send after the current stream completes
+                        content = (data.get("content") or "").strip()
+                        sid = data.get("session_id") or current_session_id
+                        qp_profile = data.get("profile")
+                        qp_project = data.get("project")
+
+                        if not content:
+                            await send_json({"type": "error", "message": "Empty queue content"})
+                            continue
+                        if not sid:
+                            await send_json({"type": "error", "message": "No session for queue"})
+                            continue
+
+                        await run_sync(
+                            database.add_queued_message,
+                            session_id=sid,
+                            content=content,
+                            profile_id=qp_profile,
+                            project_id=qp_project,
+                        )
+                        queue = await run_sync(database.get_queued_messages, sid)
+                        # Broadcast to other devices via SyncEngine
+                        await sync_engine.broadcast_queue_updated(sid, queue)
+                        # Direct send to this device (unregistered from SyncEngine during streaming)
+                        await send_json({
+                            "type": "sync",
+                            "event_type": "queue_updated",
+                            "session_id": sid,
+                            "data": {"queued_messages": queue},
+                        })
+
+                    elif msg_type == "remove_queued_message":
+                        qm_id = data.get("message_id")
+                        sid = data.get("session_id") or current_session_id
+                        if qm_id:
+                            await run_sync(database.remove_queued_message, qm_id)
+                            if sid:
+                                queue = await run_sync(database.get_queued_messages, sid)
+                                await sync_engine.broadcast_queue_updated(sid, queue)
+                                await send_json({
+                                    "type": "sync",
+                                    "event_type": "queue_updated",
+                                    "session_id": sid,
+                                    "data": {"queued_messages": queue},
+                                })
+
+                    elif msg_type == "clear_queued_messages":
+                        sid = data.get("session_id") or current_session_id
+                        if sid:
+                            await run_sync(database.clear_queued_messages, sid)
+                            await sync_engine.broadcast_queue_updated(sid, [])
+                            await send_json({
+                                "type": "sync",
+                                "event_type": "queue_updated",
+                                "session_id": sid,
+                                "data": {"queued_messages": []},
+                            })
 
                     elif msg_type == "tabs_update":
                         # Broadcast tab state update to other devices for this user
