@@ -371,6 +371,14 @@ const wsConn: WsConnection = createWsConnection({
 					console.debug(`[ActiveSession] onConnected loadSession result: streaming=${pollData?.isStreaming}, msgs=${pollData?.messages?.length ?? 0}`);
 					if (pollData && pollData.isStreaming) {
 						sessionPoller.startStreaming(sessionId);
+					} else if (!pollData && _state.sessionId === sessionId && _state.messages.length === 0) {
+						// loadSession failed and we have no cached messages —
+						// show error instead of leaving the UI in a frozen limbo state.
+						_update(s => ({
+							...s,
+							error: 'Failed to load session. Try starting a new chat.',
+							contextUsed: 0,
+						}));
 					}
 				});
 			} else {

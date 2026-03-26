@@ -333,6 +333,15 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 				wsSend({ type: 'get_pending_permissions' });
 				wsSend({ type: 'get_pending_questions' });
 			}
+		} else {
+			// loadSession failed (HTTP error, timeout, network error).
+			// Set error state so the UI shows an error banner instead of
+			// appearing frozen in a loading limbo.
+			update(s => ({
+				...s,
+				error: 'Failed to load session. Try starting a new chat.',
+				contextUsed: 0,
+			}));
 		}
 
 		persistSession();

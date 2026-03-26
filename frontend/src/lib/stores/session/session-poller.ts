@@ -263,10 +263,16 @@ class SessionPoller {
 		}
 
 		try {
+			// Timeout prevents UI freeze when backend is slow or hung
+			// (e.g., parsing large/corrupt JSONL, resource exhaustion)
+			const controller = new AbortController();
+			const timeoutId = setTimeout(() => controller.abort(), 15000);
+
 			const response = await fetch(
 				`/api/v1/sessions/${sessionId}/live?since_update_id=0`,
-				{ credentials: 'include' }
+				{ credentials: 'include', signal: controller.signal }
 			);
+			clearTimeout(timeoutId);
 
 			if (!response.ok) {
 				console.error(`[Poller] loadSession(${sessionId}): HTTP ${response.status}`);
@@ -293,7 +299,11 @@ class SessionPoller {
 			}
 			return null;
 		} catch (e) {
-			console.error('[Poller] loadSession error:', e);
+			if (e instanceof DOMException && e.name === 'AbortError') {
+				console.error(`[Poller] loadSession(${sessionId}): timed out after 15s`);
+			} else {
+				console.error('[Poller] loadSession error:', e);
+			}
 			return null;
 		}
 	}

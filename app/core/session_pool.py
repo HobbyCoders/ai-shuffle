@@ -239,6 +239,63 @@ class SessionPool:
         logger.info(f"[Pool] Removed dead session {session_id} (pool size: {len(self._pool)})")
         return state
 
+    async def evict_idle(self, max_idle_seconds: int = 600) -> list[str]:
+        """Evict sessions that have been idle (not streaming) for too long.
+
+        This prevents idle SDK subprocesses from consuming server resources
+        indefinitely. Called by the resource monitor's periodic cleanup.
+
+        Args:
+            max_idle_seconds: Maximum idle time before eviction (default: 10 minutes).
+
+        Returns:
+            List of evicted session IDs.
+        """
+        now = datetime.now(timezone.utc)
+        evicted = []
+        # Snapshot keys to avoid mutation during iteration
+        for session_id in list(self._pool.keys()):
+            state = self._pool.get(session_id)
+            if state is None:
+                continue
+            # Never evict sessions that are currently streaming
+            if state.is_streaming:
+                continue
+            idle_seconds = (now - state.last_activity).total_seconds()
+            if idle_seconds >= max_idle_seconds:
+                await self._do_evict(session_id, state)
+                evicted.append(session_id)
+                logger.info(
+                    f"[Pool] Idle-evicted session {session_id} "
+                    f"(idle {idle_seconds:.0f}s > {max_idle_seconds}s)"
+                )
+        return evicted
+
+    async def evict_dead(self) -> list[str]:
+        """Evict sessions whose subprocess has died silently.
+
+        SDK subprocesses can die without the pool being notified (e.g., OOM kill,
+        signal). This method checks each session and removes dead ones.
+
+        Returns:
+            List of evicted session IDs.
+        """
+        evicted = []
+        for session_id in list(self._pool.keys()):
+            state = self._pool.get(session_id)
+            if state is None:
+                continue
+            if state.is_streaming:
+                continue
+            if state.is_connected and not is_subprocess_alive(state):
+                del self._pool[session_id]
+                logger.warning(
+                    f"[Pool] Removed dead subprocess for session {session_id} "
+                    f"(pool size: {len(self._pool)})"
+                )
+                evicted.append(session_id)
+        return evicted
+
     async def shutdown(self) -> None:
         """Disconnect all sessions. Called during server shutdown."""
         session_ids = list(self._pool.keys())
