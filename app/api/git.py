@@ -945,9 +945,14 @@ async def checkout_branch(
             detail="Project is not a git repository"
         )
 
-    # Check for uncommitted changes
+    # Check for uncommitted changes (untracked files don't block checkout)
     status_data = await run_git(git_service.get_status, working_dir)
-    if not status_data["is_clean"]:
+    has_uncommitted = (
+        status_data.get("staged") or
+        status_data.get("modified") or
+        status_data.get("conflicts")
+    )
+    if has_uncommitted:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot checkout: you have uncommitted changes. Commit or stash them first."
