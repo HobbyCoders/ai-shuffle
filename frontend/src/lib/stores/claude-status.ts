@@ -4,27 +4,66 @@
  * Polls the backend every 3 minutes for Claude's service status.
  * Uses plain .ts (NOT .svelte.ts) to avoid dual module evaluation issues.
  * See KNOWN_ISSUES.md Root Cause 10.
+ *
+ * Dismiss state is persisted to localStorage using an incident fingerprint.
+ * The banner only reappears when new or changed incidents are detected,
+ * NOT on every page refresh.
  */
 
 import { getClaudeStatus, type ClaudeStatusResponse } from '$lib/api/claude-status';
 
 const POLL_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
-const DISMISS_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes before showing again after dismiss
+const STORAGE_KEY = 'claude-status-dismissed-fingerprint';
 
 export interface ClaudeStatusState {
 	status: ClaudeStatusResponse | null;
 	loading: boolean;
 	dismissed: boolean;
-	dismissedAt: number | null;
 }
 
 type Subscriber = (state: ClaudeStatusState) => void;
+
+/**
+ * Build a stable fingerprint from current incidents.
+ * Uses incident name + started_at to uniquely identify each incident,
+ * plus the latest_update to detect meaningful changes to existing incidents.
+ */
+function _buildFingerprint(status: ClaudeStatusResponse): string {
+	if (status.ok || status.incidents.length === 0) return '';
+	return status.incidents
+		.map((i) => `${i.name}|${i.started_at}|${i.latest_update ?? ''}`)
+		.sort()
+		.join(';;');
+}
+
+function _getSavedFingerprint(): string | null {
+	try {
+		return localStorage.getItem(STORAGE_KEY);
+	} catch {
+		return null;
+	}
+}
+
+function _saveFingerprint(fp: string) {
+	try {
+		localStorage.setItem(STORAGE_KEY, fp);
+	} catch {
+		// localStorage unavailable — dismiss won't persist
+	}
+}
+
+function _clearFingerprint() {
+	try {
+		localStorage.removeItem(STORAGE_KEY);
+	} catch {
+		// ignore
+	}
+}
 
 let _state: ClaudeStatusState = {
 	status: null,
 	loading: false,
 	dismissed: false,
-	dismissedAt: null,
 };
 
 const _subscribers = new Set<Subscriber>();
@@ -51,23 +90,20 @@ async function _fetchStatus() {
 	try {
 		_setState({ loading: true });
 		const status = await getClaudeStatus();
+		const fingerprint = _buildFingerprint(status);
 
-		// If status changed from not-ok to ok, auto-clear dismiss
-		if (status.ok && _state.dismissed) {
-			_setState({ status, loading: false, dismissed: false, dismissedAt: null });
+		// Status is ok — clear any saved dismiss and show as not-dismissed
+		if (status.ok) {
+			_clearFingerprint();
+			_setState({ status, loading: false, dismissed: false });
 			return;
 		}
 
-		// If dismissed but cooldown expired, un-dismiss so the user sees new updates
-		if (_state.dismissed && _state.dismissedAt) {
-			const elapsed = Date.now() - _state.dismissedAt;
-			if (elapsed >= DISMISS_COOLDOWN_MS) {
-				_setState({ status, loading: false, dismissed: false, dismissedAt: null });
-				return;
-			}
-		}
+		// Status is NOT ok — check if user already dismissed this exact set of incidents
+		const savedFp = _getSavedFingerprint();
+		const isDismissed = savedFp !== null && savedFp === fingerprint;
 
-		_setState({ status, loading: false });
+		_setState({ status, loading: false, dismissed: isDismissed });
 	} catch {
 		_setState({ loading: false });
 	}
@@ -121,9 +157,14 @@ export const claudeStatus = {
 		document.removeEventListener('visibilitychange', _handleVisibility);
 	},
 
-	/** Dismiss the banner. It will reappear after 30 minutes or when status changes. */
+	/** Dismiss the banner. Persists to localStorage so it survives page refreshes.
+	 *  Banner reappears only when incidents change (new incident or updated status). */
 	dismiss() {
-		_setState({ dismissed: true, dismissedAt: Date.now() });
+		if (_state.status) {
+			const fp = _buildFingerprint(_state.status);
+			if (fp) _saveFingerprint(fp);
+		}
+		_setState({ dismissed: true });
 	},
 
 	/** Force a refresh right now. */
