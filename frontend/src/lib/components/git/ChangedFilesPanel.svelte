@@ -227,12 +227,12 @@
 
 	function statusColor(status: string): string {
 		switch (status) {
-			case 'A': return 'text-green-400';
-			case 'M': return 'text-amber-400';
-			case 'D': return 'text-red-400';
-			case 'R': return 'text-blue-400';
-			case 'U': return 'text-red-400';
-			default:  return 'text-zinc-500';
+			case 'A': return 'text-success';
+			case 'M': return 'text-warning';
+			case 'D': return 'text-destructive';
+			case 'R': return 'text-info';
+			case 'U': return 'text-destructive';
+			default:  return 'text-muted-foreground';
 		}
 	}
 
@@ -371,10 +371,10 @@
 			{#if group !== 'untracked' && !file.is_binary}
 				<span class="diff-stats">
 					{#if file.additions > 0}
-						<span class="text-green-400">+{file.additions}</span>
+						<span class="text-success">+{file.additions}</span>
 					{/if}
 					{#if file.deletions > 0}
-						<span class="text-red-400">-{file.deletions}</span>
+						<span class="text-destructive">-{file.deletions}</span>
 					{/if}
 				</span>
 			{/if}
@@ -595,7 +595,7 @@
 		</div>
 	{:else}
 		{#if conflicts.length > 0}
-			{@render sectionHeader('conflicts', 'Merge Conflicts', conflicts.length, 'text-red-400', AlertTriangle)}
+			{@render sectionHeader('conflicts', 'Merge Conflicts', conflicts.length, 'text-destructive', AlertTriangle)}
 			{#if !isSectionCollapsed('conflicts')}
 				<div class="section-files">
 					{#each conflicts as file (file.file)}
@@ -610,7 +610,7 @@
 		{/if}
 
 		{#if staged.length > 0}
-			{@render sectionHeader('staged', 'Staged Changes', staged.length, 'text-green-400', Check, { files: staged, type: 'staged' })}
+			{@render sectionHeader('staged', 'Staged Changes', staged.length, 'text-success', Check, { files: staged, type: 'staged' })}
 			{#if !isSectionCollapsed('staged')}
 				<div class="section-files">
 					{#each staged as file (file.file)}
@@ -625,7 +625,7 @@
 		{/if}
 
 		{#if modified.length > 0}
-			{@render sectionHeader('modified', 'Changes', modified.length, 'text-amber-400', Circle, { files: modified, type: 'modified' })}
+			{@render sectionHeader('modified', 'Changes', modified.length, 'text-warning', Circle, { files: modified, type: 'modified' })}
 			{#if !isSectionCollapsed('modified')}
 				<div class="section-files">
 					{#each modified as file (file.file)}
@@ -640,7 +640,7 @@
 		{/if}
 
 		{#if untracked.length > 0}
-			{@render sectionHeader('untracked', 'Untracked Files', untracked.length, 'text-zinc-500', Plus, { files: untracked, type: 'untracked' })}
+			{@render sectionHeader('untracked', 'Untracked Files', untracked.length, 'text-muted-foreground', Plus, { files: untracked, type: 'untracked' })}
 			{#if !isSectionCollapsed('untracked')}
 				<div class="section-files">
 					{#each untracked as file (file.file)}
@@ -804,11 +804,11 @@
 		position: fixed;
 		inset: 0;
 		z-index: 90;
-		background: rgba(0, 0, 0, 0.4);
+		background: var(--modal-overlay);
 	}
 
 	.review-backdrop {
-		background: rgba(0, 0, 0, 0.55);
+		background: oklch(0 0 0 / 0.55);
 	}
 
 	/* ── Panel ───────────────────────────────────────────────────────── */
@@ -821,9 +821,9 @@
 		z-index: 95;
 		display: flex;
 		flex-direction: column;
-		background: rgb(24 24 27 / 0.95);
+		background: color-mix(in oklch, var(--popover) 95%, transparent);
 		backdrop-filter: blur(8px);
-		border-left: 1px solid rgb(63 63 70 / 0.5);
+		border-left: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
 		box-shadow:
 			-8px 0 24px rgb(0 0 0 / 0.3),
 			-2px 0 8px rgb(0 0 0 / 0.15);
@@ -868,12 +868,12 @@
 		width: 3px;
 		height: 48px;
 		border-radius: 2px;
-		background: rgb(63 63 70 / 0.4);
+		background: color-mix(in oklch, var(--border) 40%, transparent);
 		transition: background 150ms ease, height 150ms ease;
 	}
 
 	.resize-handle:hover .resize-handle-bar {
-		background: rgb(147 197 253 / 0.6);
+		background: color-mix(in oklch, var(--ring) 60%, transparent);
 		height: 64px;
 	}
 
@@ -890,7 +890,7 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 16px 16px 12px;
-		border-bottom: 1px solid rgb(63 63 70 / 0.4);
+		border-bottom: 1px solid color-mix(in oklch, var(--border) 40%, transparent);
 		flex-shrink: 0;
 	}
 
@@ -903,7 +903,7 @@
 	.panel-title {
 		font-size: 0.875rem;
 		font-weight: 600;
-		color: rgb(244 244 245);
+		color: var(--foreground);
 		margin: 0;
 		letter-spacing: -0.01em;
 	}
@@ -917,9 +917,9 @@
 		padding: 0 6px;
 		font-size: 0.6875rem;
 		font-weight: 600;
-		color: rgb(161 161 170);
-		background: rgb(63 63 70 / 0.5);
-		border-radius: 10px;
+		color: var(--muted-foreground);
+		background: color-mix(in oklch, var(--border) 50%, transparent);
+		border-radius: var(--radius);
 	}
 
 	.close-btn {
@@ -930,20 +930,20 @@
 		justify-content: center;
 		background: transparent;
 		border: none;
-		border-radius: 6px;
-		color: rgb(161 161 170);
+		border-radius: calc(var(--radius) - 2px);
+		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: all 150ms ease;
 		flex-shrink: 0;
 	}
 
 	.close-btn:hover {
-		background: rgb(63 63 70 / 0.5);
-		color: rgb(244 244 245);
+		background: color-mix(in oklch, var(--border) 50%, transparent);
+		color: var(--foreground);
 	}
 
 	.close-btn:focus-visible {
-		outline: 2px solid rgb(161 161 170 / 0.5);
+		outline: 2px solid color-mix(in oklch, var(--ring) 50%, transparent);
 		outline-offset: -2px;
 	}
 
@@ -958,8 +958,8 @@
 	/* Custom scrollbar */
 	.panel-content::-webkit-scrollbar { width: 6px; }
 	.panel-content::-webkit-scrollbar-track { background: transparent; }
-	.panel-content::-webkit-scrollbar-thumb { background: rgb(63 63 70 / 0.6); border-radius: 3px; }
-	.panel-content::-webkit-scrollbar-thumb:hover { background: rgb(82 82 91 / 0.8); }
+	.panel-content::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: calc(var(--radius) - 6px); }
+	.panel-content::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
 	/* ═══════════════════════════════════════════════════════════════════
 	   REVIEW MODE LAYOUT
@@ -980,13 +980,13 @@
 		overflow-y: auto;
 		overflow-x: hidden;
 		overscroll-behavior: contain;
-		border-right: 1px solid rgb(63 63 70 / 0.3);
-		background: rgb(24 24 27 / 0.6);
+		border-right: 1px solid color-mix(in oklch, var(--border) 30%, transparent);
+		background: color-mix(in oklch, var(--popover) 60%, transparent);
 	}
 
 	.review-sidebar::-webkit-scrollbar { width: 4px; }
 	.review-sidebar::-webkit-scrollbar-track { background: transparent; }
-	.review-sidebar::-webkit-scrollbar-thumb { background: rgb(63 63 70 / 0.5); border-radius: 2px; }
+	.review-sidebar::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
 
 	@media (max-width: 639px) {
 		.review-body { flex-direction: column; }
@@ -995,7 +995,7 @@
 			min-width: 0;
 			max-height: 30vh;
 			border-right: none;
-			border-bottom: 1px solid rgb(63 63 70 / 0.3);
+			border-bottom: 1px solid color-mix(in oklch, var(--border) 30%, transparent);
 			flex-shrink: 0;
 		}
 	}
@@ -1016,16 +1016,16 @@
 	}
 
 	.review-file-item:hover {
-		background: rgb(63 63 70 / 0.3);
+		background: color-mix(in oklch, var(--border) 30%, transparent);
 	}
 
 	.review-file-active {
-		background: rgb(63 63 70 / 0.5);
-		box-shadow: inset 2px 0 0 rgb(147 197 253 / 0.6);
+		background: var(--selection-bg);
+		box-shadow: inset 2px 0 0 color-mix(in oklch, var(--selection) 60%, transparent);
 	}
 
 	.review-file-active:hover {
-		background: rgb(63 63 70 / 0.6);
+		background: color-mix(in oklch, var(--border) 60%, transparent);
 	}
 
 	@media (pointer: coarse) {
@@ -1046,12 +1046,12 @@
 		min-width: 0;
 		min-height: 0;
 		overflow: auto;
-		background: rgb(9 9 11);
+		background: var(--background);
 	}
 
 	.review-viewport::-webkit-scrollbar { width: 6px; height: 6px; }
 	.review-viewport::-webkit-scrollbar-track { background: transparent; }
-	.review-viewport::-webkit-scrollbar-thumb { background: rgb(63 63 70 / 0.5); border-radius: 3px; }
+	.review-viewport::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: calc(var(--radius) - 6px); }
 	.review-viewport::-webkit-scrollbar-corner { background: transparent; }
 
 	.review-viewport-empty {
@@ -1064,12 +1064,12 @@
 		min-height: 200px;
 		padding: 2rem;
 		text-align: center;
-		color: rgb(63 63 70);
+		color: var(--border);
 	}
 
 	.review-viewport-empty span {
 		font-size: 0.8125rem;
-		color: rgb(113 113 122);
+		color: color-mix(in oklch, var(--muted-foreground) 70%, transparent);
 	}
 
 	/* ─── Review footer (Accept / Decline) ─────────────────────────── */
@@ -1079,8 +1079,8 @@
 		justify-content: space-between;
 		gap: 12px;
 		padding: 8px 16px;
-		border-top: 1px solid rgb(63 63 70 / 0.5);
-		background: rgb(39 39 42 / 0.95);
+		border-top: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+		background: color-mix(in oklch, var(--muted) 95%, transparent);
 		backdrop-filter: blur(4px);
 		flex-shrink: 0;
 	}
@@ -1096,11 +1096,11 @@
 	.review-footer-filename {
 		font-size: 0.75rem;
 		font-weight: 500;
-		color: rgb(228 228 231);
+		color: var(--foreground);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+		font-family: var(--font-mono);
 	}
 
 	.review-footer-category {
@@ -1111,10 +1111,10 @@
 		flex-shrink: 0;
 	}
 
-	.review-cat-staged { color: rgb(74 222 128); }
-	.review-cat-modified { color: rgb(251 191 36); }
-	.review-cat-untracked { color: rgb(56 189 248); }
-	.review-cat-conflict { color: rgb(248 113 113); }
+	.review-cat-staged { color: var(--success); }
+	.review-cat-modified { color: var(--warning); }
+	.review-cat-untracked { color: var(--info); }
+	.review-cat-conflict { color: var(--destructive); }
 
 	.review-footer-actions {
 		display: flex;
@@ -1125,7 +1125,7 @@
 
 	.review-confirm-text {
 		font-size: 0.75rem;
-		color: rgb(250 204 21);
+		color: var(--warning);
 		font-weight: 500;
 		white-space: nowrap;
 	}
@@ -1138,7 +1138,7 @@
 		font-size: 0.75rem;
 		font-weight: 600;
 		border: 1px solid transparent;
-		border-radius: 6px;
+		border-radius: calc(var(--radius) - 2px);
 		cursor: pointer;
 		transition: all 120ms ease;
 		white-space: nowrap;
@@ -1151,57 +1151,57 @@
 	}
 
 	.review-btn:focus-visible {
-		outline: 2px solid rgb(161 161 170 / 0.5);
+		outline: 2px solid color-mix(in oklch, var(--ring) 50%, transparent);
 		outline-offset: 1px;
 	}
 
 	.review-btn-accept {
-		background: rgb(22 163 74 / 0.2);
-		border-color: rgb(22 163 74 / 0.4);
-		color: rgb(74 222 128);
+		background: color-mix(in oklch, var(--success) 20%, transparent);
+		border-color: color-mix(in oklch, var(--success) 40%, transparent);
+		color: var(--success);
 	}
 	.review-btn-accept:hover:not(:disabled) {
-		background: rgb(22 163 74 / 0.35);
-		border-color: rgb(22 163 74 / 0.6);
+		background: color-mix(in oklch, var(--success) 35%, transparent);
+		border-color: color-mix(in oklch, var(--success) 60%, transparent);
 	}
 
 	.review-btn-unstage {
-		background: rgb(217 119 6 / 0.15);
-		border-color: rgb(217 119 6 / 0.3);
-		color: rgb(251 191 36);
+		background: color-mix(in oklch, var(--warning) 15%, transparent);
+		border-color: color-mix(in oklch, var(--warning) 30%, transparent);
+		color: var(--warning);
 	}
 	.review-btn-unstage:hover:not(:disabled) {
-		background: rgb(217 119 6 / 0.25);
-		border-color: rgb(217 119 6 / 0.5);
+		background: color-mix(in oklch, var(--warning) 25%, transparent);
+		border-color: color-mix(in oklch, var(--warning) 50%, transparent);
 	}
 
 	.review-btn-decline {
-		background: rgb(220 38 38 / 0.12);
-		border-color: rgb(220 38 38 / 0.3);
-		color: rgb(248 113 113);
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
+		border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
+		color: var(--destructive);
 	}
 	.review-btn-decline:hover:not(:disabled) {
-		background: rgb(220 38 38 / 0.22);
-		border-color: rgb(220 38 38 / 0.5);
+		background: color-mix(in oklch, var(--destructive) 22%, transparent);
+		border-color: color-mix(in oklch, var(--destructive) 50%, transparent);
 	}
 
 	.review-btn-danger {
-		background: rgb(220 38 38 / 0.5);
-		border-color: rgb(220 38 38 / 0.6);
-		color: rgb(254 226 226);
+		background: color-mix(in oklch, var(--destructive) 50%, transparent);
+		border-color: color-mix(in oklch, var(--destructive) 60%, transparent);
+		color: var(--destructive-foreground);
 	}
 	.review-btn-danger:hover:not(:disabled) {
-		background: rgb(220 38 38 / 0.7);
+		background: color-mix(in oklch, var(--destructive) 70%, transparent);
 	}
 
 	.review-btn-neutral {
-		background: rgb(63 63 70 / 0.4);
-		border-color: rgb(63 63 70 / 0.5);
-		color: rgb(161 161 170);
+		background: color-mix(in oklch, var(--border) 40%, transparent);
+		border-color: color-mix(in oklch, var(--border) 50%, transparent);
+		color: var(--muted-foreground);
 	}
 	.review-btn-neutral:hover:not(:disabled) {
-		background: rgb(63 63 70 / 0.7);
-		color: rgb(228 228 231);
+		background: color-mix(in oklch, var(--border) 70%, transparent);
+		color: var(--foreground);
 	}
 
 	@media (max-width: 639px) {
@@ -1230,13 +1230,13 @@
 		align-items: center;
 		gap: 0;
 		width: 100%;
-		background: rgb(39 39 42 / 0.5);
-		border-bottom: 1px solid rgb(63 63 70 / 0.25);
+		background: color-mix(in oklch, var(--muted) 50%, transparent);
+		border-bottom: 1px solid color-mix(in oklch, var(--border) 25%, transparent);
 		transition: background 150ms ease;
 	}
 
 	.section-header:hover {
-		background: rgb(39 39 42 / 0.8);
+		background: color-mix(in oklch, var(--muted) 80%, transparent);
 	}
 
 	.section-toggle {
@@ -1253,12 +1253,12 @@
 	}
 
 	.section-toggle:focus-visible {
-		outline: 2px solid rgb(161 161 170 / 0.5);
+		outline: 2px solid color-mix(in oklch, var(--ring) 50%, transparent);
 		outline-offset: -2px;
 	}
 
 	.section-chevron {
-		color: rgb(113 113 122);
+		color: color-mix(in oklch, var(--muted-foreground) 70%, transparent);
 		flex-shrink: 0;
 		display: flex;
 	}
@@ -1271,7 +1271,7 @@
 	.section-label {
 		font-size: 0.75rem;
 		font-weight: 600;
-		color: rgb(161 161 170);
+		color: var(--muted-foreground);
 		letter-spacing: 0.02em;
 		text-transform: uppercase;
 		flex: 1;
@@ -1309,33 +1309,33 @@
 		padding: 2px 8px;
 		font-size: 0.625rem;
 		font-weight: 500;
-		color: rgb(161 161 170);
-		background: rgb(63 63 70 / 0.5);
-		border: 1px solid rgb(63 63 70 / 0.5);
-		border-radius: 4px;
+		color: var(--muted-foreground);
+		background: color-mix(in oklch, var(--border) 50%, transparent);
+		border: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+		border-radius: calc(var(--radius) - 4px);
 		cursor: pointer;
 		transition: all 120ms ease;
 		white-space: nowrap;
 	}
 
 	.group-action-btn:hover {
-		background: rgb(63 63 70 / 0.8);
-		color: rgb(228 228 231);
+		background: color-mix(in oklch, var(--border) 80%, transparent);
+		color: var(--foreground);
 	}
 
 	.group-action-danger {
-		color: rgb(248 113 113);
-		border-color: rgb(248 113 113 / 0.3);
+		color: var(--destructive);
+		border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
 	}
 
 	.group-action-danger:hover {
-		background: rgb(248 113 113 / 0.15);
-		color: rgb(252 165 165);
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
+		color: var(--destructive);
 	}
 
 	/* ── Section files ───────────────────────────────────────────────── */
 	.section-files {
-		border-bottom: 1px solid rgb(63 63 70 / 0.2);
+		border-bottom: 1px solid color-mix(in oklch, var(--border) 20%, transparent);
 	}
 
 	/* ── File row ────────────────────────────────────────────────────── */
@@ -1349,7 +1349,7 @@
 	}
 
 	.file-row:hover {
-		background: rgb(39 39 42 / 0.5);
+		background: color-mix(in oklch, var(--muted) 50%, transparent);
 	}
 
 	@media (max-width: 639px) {
@@ -1376,7 +1376,7 @@
 	.file-basename {
 		font-size: 0.8125rem;
 		font-weight: 500;
-		color: rgb(228 228 231);
+		color: var(--foreground);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1389,7 +1389,7 @@
 
 	.file-dirname {
 		font-size: 0.6875rem;
-		color: rgb(113 113 122);
+		color: color-mix(in oklch, var(--muted-foreground) 70%, transparent);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1435,20 +1435,20 @@
 		justify-content: center;
 		background: transparent;
 		border: none;
-		border-radius: 5px;
-		color: rgb(161 161 170);
+		border-radius: calc(var(--radius) - 4px);
+		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: all 120ms ease;
 		flex-shrink: 0;
 	}
 
 	.action-btn:hover {
-		background: rgb(63 63 70 / 0.6);
-		color: rgb(228 228 231);
+		background: color-mix(in oklch, var(--border) 60%, transparent);
+		color: var(--foreground);
 	}
 
 	.action-btn:focus-visible {
-		outline: 2px solid rgb(161 161 170 / 0.5);
+		outline: 2px solid color-mix(in oklch, var(--ring) 50%, transparent);
 		outline-offset: -2px;
 	}
 
@@ -1458,8 +1458,8 @@
 	}
 
 	.action-btn-danger:hover {
-		background: rgb(248 113 113 / 0.15);
-		color: rgb(248 113 113);
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
+		color: var(--destructive);
 	}
 
 	/* ── Inline confirm bar ──────────────────────────────────────────── */
@@ -1472,7 +1472,7 @@
 
 	.confirm-text {
 		font-size: 0.75rem;
-		color: rgb(250 204 21);
+		color: var(--warning);
 		font-weight: 500;
 		flex: 1;
 	}
@@ -1481,31 +1481,31 @@
 		padding: 3px 12px;
 		font-size: 0.6875rem;
 		font-weight: 600;
-		color: rgb(254 226 226);
-		background: rgb(220 38 38 / 0.5);
-		border: 1px solid rgb(220 38 38 / 0.6);
-		border-radius: 5px;
+		color: var(--destructive-foreground);
+		background: color-mix(in oklch, var(--destructive) 50%, transparent);
+		border: 1px solid color-mix(in oklch, var(--destructive) 60%, transparent);
+		border-radius: calc(var(--radius) - 4px);
 		cursor: pointer;
 		transition: all 120ms ease;
 	}
 
-	.confirm-yes:hover { background: rgb(220 38 38 / 0.7); }
+	.confirm-yes:hover { background: color-mix(in oklch, var(--destructive) 70%, transparent); }
 
 	.confirm-no {
 		padding: 3px 12px;
 		font-size: 0.6875rem;
 		font-weight: 600;
-		color: rgb(161 161 170);
-		background: rgb(63 63 70 / 0.4);
-		border: 1px solid rgb(63 63 70 / 0.5);
-		border-radius: 5px;
+		color: var(--muted-foreground);
+		background: color-mix(in oklch, var(--border) 40%, transparent);
+		border: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+		border-radius: calc(var(--radius) - 4px);
 		cursor: pointer;
 		transition: all 120ms ease;
 	}
 
 	.confirm-no:hover {
-		background: rgb(63 63 70 / 0.7);
-		color: rgb(228 228 231);
+		background: color-mix(in oklch, var(--border) 70%, transparent);
+		color: var(--foreground);
 	}
 
 	/* ── Empty state ─────────────────────────────────────────────────── */
@@ -1522,8 +1522,8 @@
 		width: 48px;
 		height: 48px;
 		border-radius: 50%;
-		background: rgb(34 197 94 / 0.1);
-		color: rgb(74 222 128);
+		background: color-mix(in oklch, var(--success) 10%, transparent);
+		color: var(--success);
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -1531,7 +1531,7 @@
 
 	.empty-text {
 		font-size: 0.8125rem;
-		color: rgb(113 113 122);
+		color: color-mix(in oklch, var(--muted-foreground) 70%, transparent);
 		font-weight: 500;
 	}
 
@@ -1553,15 +1553,15 @@
 	.skeleton-icon {
 		width: 14px;
 		height: 14px;
-		border-radius: 3px;
-		background: rgb(63 63 70 / 0.4);
+		border-radius: calc(var(--radius) - 6px);
+		background: color-mix(in oklch, var(--border) 40%, transparent);
 		animation: pulse 1.5s ease-in-out infinite;
 	}
 
 	.skeleton-text {
 		height: 12px;
-		border-radius: 3px;
-		background: rgb(63 63 70 / 0.3);
+		border-radius: calc(var(--radius) - 6px);
+		background: color-mix(in oklch, var(--border) 30%, transparent);
 		animation: pulse 1.5s ease-in-out infinite;
 		animation-delay: 75ms;
 	}

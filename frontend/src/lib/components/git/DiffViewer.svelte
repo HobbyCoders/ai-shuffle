@@ -105,13 +105,13 @@
 
 	function getStatusColor(status: string): string {
 		switch (status) {
-			case 'A': return 'bg-emerald-500/20 text-emerald-400 ring-emerald-500/30';
-			case 'M': return 'bg-amber-500/20 text-amber-400 ring-amber-500/30';
-			case 'D': return 'bg-red-500/20 text-red-400 ring-red-500/30';
-			case 'R': return 'bg-violet-500/20 text-violet-400 ring-violet-500/30';
-			case '?': return 'bg-sky-500/20 text-sky-400 ring-sky-500/30';
-			case 'U': return 'bg-orange-500/20 text-orange-400 ring-orange-500/30';
-			default: return 'bg-zinc-500/20 text-zinc-400 ring-zinc-500/30';
+			case 'A': return 'bg-[var(--status-success-bg)] text-success ring-[var(--status-success-border)]';
+			case 'M': return 'bg-[var(--status-warning-bg)] text-warning ring-[var(--status-warning-border)]';
+			case 'D': return 'bg-[var(--status-error-bg)] text-destructive ring-[var(--status-error-border)]';
+			case 'R': return 'bg-[var(--status-info-bg)] text-info ring-[var(--status-info-border)]';
+			case '?': return 'bg-[var(--status-info-bg)] text-info ring-[var(--status-info-border)]';
+			case 'U': return 'bg-[var(--status-warning-bg)] text-warning ring-[var(--status-warning-border)]';
+			default: return 'bg-[var(--status-pending-bg)] text-muted-foreground ring-[var(--status-pending-border)]';
 		}
 	}
 
@@ -150,35 +150,35 @@
 
 <svelte:window onresize={() => { viewportWidth = window.innerWidth; }} />
 
-<div class="flex flex-col h-full bg-zinc-900 text-zinc-100">
+<div class="flex flex-col h-full bg-background text-foreground">
 	<!-- Sticky Header (hidden when embedded) -->
 	{#if !embedded}
-		<header class="sticky top-0 z-10 flex items-center gap-3 px-4 py-3 bg-zinc-900/95 backdrop-blur-sm border-b border-zinc-800 min-h-[52px]">
+		<header class="sticky top-0 z-10 flex items-center gap-3 px-4 py-3 bg-[var(--background)]/95 backdrop-blur-sm border-b border-border min-h-[52px]">
 			<button
 				onclick={onClose}
-				class="flex items-center justify-center w-8 h-8 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors shrink-0 focus:outline-none focus:ring-2 focus:ring-zinc-500"
+				class="flex items-center justify-center w-8 h-8 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shrink-0 focus:outline-none focus:ring-2 focus:ring-ring"
 				aria-label="Back to file list"
 			>
 				<ArrowLeft size={18} />
 			</button>
 
-			<FileText size={16} class="text-zinc-500 shrink-0" />
+			<FileText size={16} class="text-muted-foreground shrink-0" />
 
-			<span class="font-mono text-sm text-zinc-200 truncate min-w-0" title={file.file}>
+			<span class="font-mono text-sm text-foreground truncate min-w-0" title={file.file}>
 				{file.file}
 			</span>
 
-			<span class="inline-flex items-center px-2 py-0.5 text-xs font-medium rounded ring-1 ring-inset shrink-0 {statusColor}">
+			<span class="inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-sm ring-1 ring-inset shrink-0 {statusColor}">
 				{statusLabel}
 			</span>
 
 			{#if totalChanges().additions > 0 || totalChanges().deletions > 0}
 				<span class="text-xs font-mono shrink-0 ml-auto flex items-center gap-1.5">
 					{#if totalChanges().additions > 0}
-						<span class="text-green-400">+{totalChanges().additions}</span>
+						<span class="text-success">+{totalChanges().additions}</span>
 					{/if}
 					{#if totalChanges().deletions > 0}
-						<span class="text-red-400">-{totalChanges().deletions}</span>
+						<span class="text-destructive">-{totalChanges().deletions}</span>
 					{/if}
 				</span>
 			{/if}
@@ -189,25 +189,25 @@
 	<div class="flex-1 overflow-y-auto overflow-x-hidden">
 		{#if loading}
 			<div class="flex flex-col items-center justify-center py-20 gap-3">
-				<Loader2 size={24} class="text-zinc-500 animate-spin" />
-				<span class="text-sm text-zinc-500">Loading diff...</span>
+				<Loader2 size={24} class="text-muted-foreground animate-spin" />
+				<span class="text-sm text-muted-foreground">Loading diff...</span>
 			</div>
 		{:else if error}
 			<div class="flex flex-col items-center justify-center py-20 gap-2 px-4">
-				<div class="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3 max-w-md text-center">
+				<div class="text-sm text-destructive bg-[var(--status-error-bg)] border border-[var(--status-error-border)] rounded-lg px-4 py-3 max-w-md text-center">
 					{error}
 				</div>
 			</div>
 		{:else if diffResponse?.is_binary}
 			<div class="flex flex-col items-center justify-center py-20 gap-2">
-				<span class="text-sm text-zinc-500">Binary file — cannot display diff</span>
+				<span class="text-sm text-muted-foreground">Binary file — cannot display diff</span>
 			</div>
 		{:else if !parsedDiff || parsedDiff.hunks.length === 0}
 			<div class="flex flex-col items-center justify-center py-20 gap-2">
-				<span class="text-sm text-zinc-500">No changes to display</span>
+				<span class="text-sm text-muted-foreground">No changes to display</span>
 			</div>
 		{:else if resolvedMode === 'side-by-side'}
-			<!-- ═══ Side-by-Side Diff ═══ -->
+			<!-- Side-by-Side Diff -->
 			<div class="sbs-diff">
 				<div class="sbs-table">
 					{#each sideBySidePairs as pair}
@@ -241,12 +241,12 @@
 			</div>
 
 			{#if diffResponse?.truncated}
-				<div class="sticky bottom-0 flex items-center justify-center gap-2 px-4 py-2.5 bg-amber-500/10 border-t border-amber-500/20 text-amber-400 text-xs font-medium">
+				<div class="sticky bottom-0 flex items-center justify-center gap-2 px-4 py-2.5 bg-[var(--status-warning-bg)] border-t border-[var(--status-warning-border)] text-warning text-xs font-medium">
 					Diff output was truncated — only showing partial changes
 				</div>
 			{/if}
 		{:else}
-			<!-- ═══ Unified Diff ═══ -->
+			<!-- Unified Diff -->
 			<div class="diff-content">
 				{#each compactLines as line}
 					{#if line.type === 'collapse'}
@@ -255,35 +255,35 @@
 							<div class="collapse-line"></div>
 						</div>
 					{:else if line.type === 'header'}
-						<div class="flex bg-blue-900/10">
-							<div class="gutter-col text-blue-900/40 text-[10px]">···</div>
-							<div class="gutter-col text-blue-900/40 text-[10px]">···</div>
-							<div class="flex-1 px-3 font-mono text-[11px] text-blue-400/60 whitespace-pre select-none overflow-x-auto leading-[1.375rem]">
+						<div class="flex diff-line-header">
+							<div class="gutter-col diff-header-gutter">···</div>
+							<div class="gutter-col diff-header-gutter">···</div>
+							<div class="flex-1 px-3 font-mono text-[11px] diff-header-text whitespace-pre select-none overflow-x-auto leading-[1.375rem]">
 								{line.content}
 							</div>
 						</div>
 					{:else if line.type === 'addition'}
-						<div class="flex bg-green-900/15 hover:bg-green-900/25 transition-colors duration-75">
-							<div class="gutter-col text-zinc-700"></div>
-							<div class="gutter-col text-green-700">{line.newLineNumber}</div>
-							<div class="flex-1 px-3 font-mono text-sm text-green-300 whitespace-pre overflow-x-auto">
-								<span class="text-green-600 select-none mr-1">+</span>{line.content}
+						<div class="flex diff-line-add transition-colors duration-75">
+							<div class="gutter-col diff-gutter-blank"></div>
+							<div class="gutter-col diff-gutter-add">{line.newLineNumber}</div>
+							<div class="flex-1 px-3 font-mono text-sm diff-text-add whitespace-pre overflow-x-auto">
+								<span class="diff-prefix-add select-none mr-1">+</span>{line.content}
 							</div>
 						</div>
 					{:else if line.type === 'deletion'}
-						<div class="flex bg-red-900/15 hover:bg-red-900/25 transition-colors duration-75">
-							<div class="gutter-col text-red-700">{line.oldLineNumber}</div>
-							<div class="gutter-col text-zinc-700"></div>
-							<div class="flex-1 px-3 font-mono text-sm text-red-300 whitespace-pre overflow-x-auto">
-								<span class="text-red-600 select-none mr-1">-</span>{line.content}
+						<div class="flex diff-line-del transition-colors duration-75">
+							<div class="gutter-col diff-gutter-del">{line.oldLineNumber}</div>
+							<div class="gutter-col diff-gutter-blank"></div>
+							<div class="flex-1 px-3 font-mono text-sm diff-text-del whitespace-pre overflow-x-auto">
+								<span class="diff-prefix-del select-none mr-1">-</span>{line.content}
 							</div>
 						</div>
 					{:else}
-						<div class="flex hover:bg-zinc-800/30 transition-colors duration-75">
-							<div class="gutter-col text-zinc-700">{line.oldLineNumber}</div>
-							<div class="gutter-col text-zinc-700">{line.newLineNumber}</div>
-							<div class="flex-1 px-3 font-mono text-sm text-zinc-400 whitespace-pre overflow-x-auto">
-								<span class="text-zinc-700 select-none mr-1">&nbsp;</span>{line.content}
+						<div class="flex diff-line-ctx transition-colors duration-75">
+							<div class="gutter-col diff-gutter-ctx">{line.oldLineNumber}</div>
+							<div class="gutter-col diff-gutter-ctx">{line.newLineNumber}</div>
+							<div class="flex-1 px-3 font-mono text-sm text-muted-foreground whitespace-pre overflow-x-auto">
+								<span class="diff-gutter-ctx select-none mr-1">&nbsp;</span>{line.content}
 							</div>
 						</div>
 					{/if}
@@ -291,7 +291,7 @@
 			</div>
 
 			{#if diffResponse?.truncated}
-				<div class="sticky bottom-0 flex items-center justify-center gap-2 px-4 py-2.5 bg-amber-500/10 border-t border-amber-500/20 text-amber-400 text-xs font-medium">
+				<div class="sticky bottom-0 flex items-center justify-center gap-2 px-4 py-2.5 bg-[var(--status-warning-bg)] border-t border-[var(--status-warning-border)] text-warning text-xs font-medium">
 					Diff output was truncated — only showing partial changes
 				</div>
 			{/if}
@@ -306,12 +306,78 @@
 		min-width: 3.5rem;
 		padding: 0 0.5rem;
 		text-align: right;
-		font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+		font-family: var(--font-mono);
 		font-size: 0.75rem;
 		line-height: 1.5rem;
 		user-select: none;
 		color: inherit;
-		border-right: 1px solid rgb(39, 39, 42, 0.5);
+		border-right: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+	}
+
+	/* ─── Unified diff line backgrounds ──────────────────────────── */
+	.diff-line-header {
+		background: color-mix(in oklch, var(--info) 10%, transparent);
+	}
+
+	.diff-header-gutter {
+		color: color-mix(in oklch, var(--info) 40%, transparent);
+		font-size: 10px;
+	}
+
+	.diff-header-text {
+		color: color-mix(in oklch, var(--info) 60%, transparent);
+	}
+
+	.diff-line-add {
+		background: color-mix(in oklch, var(--success) 15%, transparent);
+	}
+
+	.diff-line-add:hover {
+		background: color-mix(in oklch, var(--success) 25%, transparent);
+	}
+
+	.diff-gutter-blank {
+		color: color-mix(in oklch, var(--muted-foreground) 30%, transparent);
+	}
+
+	.diff-gutter-add {
+		color: color-mix(in oklch, var(--success) 60%, transparent);
+	}
+
+	.diff-text-add {
+		color: color-mix(in oklch, var(--success) 85%, white);
+	}
+
+	.diff-prefix-add {
+		color: color-mix(in oklch, var(--success) 60%, transparent);
+	}
+
+	.diff-line-del {
+		background: color-mix(in oklch, var(--destructive) 15%, transparent);
+	}
+
+	.diff-line-del:hover {
+		background: color-mix(in oklch, var(--destructive) 25%, transparent);
+	}
+
+	.diff-gutter-del {
+		color: color-mix(in oklch, var(--destructive) 60%, transparent);
+	}
+
+	.diff-text-del {
+		color: color-mix(in oklch, var(--destructive) 85%, white);
+	}
+
+	.diff-prefix-del {
+		color: color-mix(in oklch, var(--destructive) 60%, transparent);
+	}
+
+	.diff-line-ctx:hover {
+		background: color-mix(in oklch, var(--muted) 20%, transparent);
+	}
+
+	.diff-gutter-ctx {
+		color: color-mix(in oklch, var(--muted-foreground) 30%, transparent);
 	}
 
 	/* ─── Collapsed context rows ──────────────────────────────────── */
@@ -321,21 +387,21 @@
 	}
 
 	.collapse-gutter {
-		width: 7rem; /* 2 × 3.5rem gutters */
+		width: 7rem; /* 2 x 3.5rem gutters */
 		min-width: 7rem;
-		background: rgb(39 39 42 / 0.15);
+		background: color-mix(in oklch, var(--muted) 15%, transparent);
 	}
 
 	.collapse-line {
 		flex: 1;
-		background: rgb(39 39 42 / 0.08);
-		border-top: 1px dashed rgb(63 63 70 / 0.3);
-		border-bottom: 1px dashed rgb(63 63 70 / 0.3);
+		background: color-mix(in oklch, var(--muted) 8%, transparent);
+		border-top: 1px dashed color-mix(in oklch, var(--border) 30%, transparent);
+		border-bottom: 1px dashed color-mix(in oklch, var(--border) 30%, transparent);
 	}
 
 	.diff-content :global(.overflow-x-auto) {
 		scrollbar-width: thin;
-		scrollbar-color: rgb(63, 63, 70) transparent;
+		scrollbar-color: var(--scrollbar-thumb) transparent;
 	}
 
 	.diff-content :global(.overflow-x-auto::-webkit-scrollbar) {
@@ -347,8 +413,8 @@
 	}
 
 	.diff-content :global(.overflow-x-auto::-webkit-scrollbar-thumb) {
-		background: rgb(63, 63, 70);
-		border-radius: 2px;
+		background: var(--scrollbar-thumb);
+		border-radius: calc(var(--radius) * 0.33);
 	}
 
 	/* ─── Side-by-Side mode ────────────────────────────────────────── */
@@ -357,7 +423,7 @@
 	}
 
 	.sbs-table {
-		font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+		font-family: var(--font-mono);
 		font-size: 0.75rem;
 		line-height: 1.375rem;
 	}
@@ -373,10 +439,10 @@
 
 	.sbs-header-cell {
 		padding: 3px 12px;
-		background: rgb(30 58 138 / 0.15);
-		border-bottom: 1px solid rgb(59 130 246 / 0.1);
-		border-top: 1px solid rgb(59 130 246 / 0.05);
-		color: rgb(147 197 253 / 0.7);
+		background: color-mix(in oklch, var(--info) 15%, transparent);
+		border-bottom: 1px solid color-mix(in oklch, var(--info) 10%, transparent);
+		border-top: 1px solid color-mix(in oklch, var(--info) 5%, transparent);
+		color: color-mix(in oklch, var(--info) 70%, transparent);
 		font-size: 0.6875rem;
 		user-select: none;
 		white-space: nowrap;
@@ -388,16 +454,16 @@
 		padding: 0 6px;
 		text-align: right;
 		user-select: none;
-		color: rgb(63 63 70);
+		color: var(--border);
 		font-size: 0.6875rem;
 		line-height: 1.375rem;
 	}
 
-	.sbs-gutter-del { color: rgb(127 29 29 / 0.8); }
-	.sbs-gutter-add { color: rgb(20 83 45 / 0.8); }
+	.sbs-gutter-del { color: color-mix(in oklch, var(--destructive) 80%, transparent); }
+	.sbs-gutter-add { color: color-mix(in oklch, var(--success) 80%, transparent); }
 
 	.sbs-divider {
-		background: rgb(63 63 70 / 0.25);
+		background: color-mix(in oklch, var(--border) 25%, transparent);
 	}
 
 	.sbs-cell {
@@ -408,19 +474,19 @@
 	}
 
 	.sbs-cell-ctx {
-		color: rgb(161 161 170);
+		color: var(--muted-foreground);
 	}
 
 	.sbs-cell-del {
-		background: rgb(127 29 29 / 0.12);
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
 	}
 
 	.sbs-cell-add {
-		background: rgb(20 83 45 / 0.12);
+		background: color-mix(in oklch, var(--success) 12%, transparent);
 	}
 
 	.sbs-cell-blank {
-		background: rgb(24 24 27 / 0.5);
+		background: color-mix(in oklch, var(--background) 50%, transparent);
 	}
 
 	.sbs-prefix {
@@ -428,20 +494,20 @@
 		margin-right: 4px;
 	}
 
-	.del-prefix { color: rgb(248 113 113 / 0.5); }
-	.add-prefix { color: rgb(74 222 128 / 0.5); }
+	.del-prefix { color: color-mix(in oklch, var(--destructive) 50%, transparent); }
+	.add-prefix { color: color-mix(in oklch, var(--success) 50%, transparent); }
 
-	.sbs-del-text { color: rgb(252 165 165); }
-	.sbs-add-text { color: rgb(134 239 172); }
+	.sbs-del-text { color: color-mix(in oklch, var(--destructive) 85%, white); }
+	.sbs-add-text { color: color-mix(in oklch, var(--success) 85%, white); }
 
 	/* Hover highlight */
-	.sbs-row:hover .sbs-cell-del { background: rgb(127 29 29 / 0.2); }
-	.sbs-row:hover .sbs-cell-add { background: rgb(20 83 45 / 0.2); }
-	.sbs-row:hover .sbs-cell-ctx { background: rgb(39 39 42 / 0.2); }
+	.sbs-row:hover .sbs-cell-del { background: color-mix(in oklch, var(--destructive) 20%, transparent); }
+	.sbs-row:hover .sbs-cell-add { background: color-mix(in oklch, var(--success) 20%, transparent); }
+	.sbs-row:hover .sbs-cell-ctx { background: color-mix(in oklch, var(--muted) 20%, transparent); }
 
 	/* Scrollbar for sbs */
 	.sbs-diff {
 		scrollbar-width: thin;
-		scrollbar-color: rgb(63 63 70) transparent;
+		scrollbar-color: var(--scrollbar-thumb) transparent;
 	}
 </style>
