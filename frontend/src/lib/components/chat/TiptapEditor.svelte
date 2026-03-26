@@ -74,6 +74,18 @@
 		editor?.destroy();
 	});
 
+	// Update TipTap's placeholder when the prop changes (e.g. when profile changes)
+	$effect(() => {
+		const newPlaceholder = placeholder;
+		if (!editor) return;
+		const ext = editor.extensionManager.extensions.find(e => e.name === 'placeholder');
+		if (ext) {
+			ext.options.placeholder = newPlaceholder;
+		}
+		// Force decorations to re-run so the new placeholder text is visible
+		editor.view.dispatch(editor.state.tr);
+	});
+
 	function handleEditorKeyDown(event: KeyboardEvent) {
 		// Let parent component handle first (for autocomplete, etc.)
 		if (onKeyDown) {

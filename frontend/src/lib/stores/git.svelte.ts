@@ -497,6 +497,16 @@ export const git = {
 
 		try {
 			await gitApi.checkout(_state.projectId, ref);
+			// Abort any in-flight poll requests so the post-checkout refreshes
+			// below aren't blocked by stale _branchesInFlight / _statusInFlight guards.
+			// The poller can fire during the checkout API call, setting these flags
+			// and causing loadBranches/refreshStatus to return early with stale data.
+			_statusAbort?.abort();
+			_branchesAbort?.abort();
+			_statusAbort = null;
+			_branchesAbort = null;
+			_statusInFlight = false;
+			_branchesInFlight = false;
 			await git.loadBranches();
 			await git.refreshStatus();
 			await git.loadGraph();
