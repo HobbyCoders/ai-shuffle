@@ -756,6 +756,16 @@ async def get_live_session(
             if live_data:
                 if session_meta:
                     live_data["session_meta"] = session_meta
+                # ── DEBUG: Log live store usage for streaming sessions ──
+                usage = live_data.get("usage", {})
+                logger.warning(
+                    f"[ContextUsage:DEBUG] /live STREAMING session={session_id} "
+                    f"| input_tokens={usage.get('input_tokens', 0)} "
+                    f"| cache_creation={usage.get('cache_creation_tokens', 0)} "
+                    f"| cache_read={usage.get('cache_read_tokens', 0)} "
+                    f"| output_tokens={usage.get('output_tokens', 0)} "
+                    f"| is_streaming={live_data.get('is_streaming')}"
+                )
                 return live_data
 
     # Not streaming - load from JSONL (same as get_session but simpler response)
@@ -859,6 +869,15 @@ async def get_live_session(
     # Default to 0 — we want per-turn, not cumulative
     input_tokens = 0
 
+    # ── DEBUG: Log DB fallback values before JSONL override ──
+    db_context = cache_creation + cache_read  # input_tokens is 0 at this point
+    logger.warning(
+        f"[ContextUsage:DEBUG] /live NON-STREAMING DB defaults session={session_id} "
+        f"| db cache_creation={cache_creation} db cache_read={cache_read} "
+        f"| db total_tokens_out={output_tokens} "
+        f"| has_sdk_session={bool(sdk_session_id)} has_usage_data={bool(usage_data)}"
+    )
+
     # Override with JSONL data if available
     if sdk_session_id and usage_data:
         # Use last_input_tokens (per-turn) for context window calculation,
@@ -882,6 +901,26 @@ async def get_live_session(
     }
     if session_meta:
         result["session_meta"] = session_meta
+
+    # ── DEBUG: Log non-streaming usage returned to frontend ──
+    context_used = input_tokens + cache_creation + cache_read
+    usage_source = "jsonl" if (sdk_session_id and usage_data) else "db"
+    logger.warning(
+        f"[ContextUsage:DEBUG] /live NON-STREAMING session={session_id} "
+        f"| context_used={context_used} "
+        f"| input_tokens={input_tokens} "
+        f"| cache_creation={cache_creation} "
+        f"| cache_read={cache_read} "
+        f"| output_tokens={output_tokens} "
+        f"| source={usage_source} "
+        f"| since_update_id={since_update_id} "
+        f"| msg_count={len(messages)}"
+    )
+    if usage_data:
+        logger.warning(
+            f"[ContextUsage:DEBUG] /live NON-STREAMING raw JSONL usage_data: {usage_data}"
+        )
+
     return result
 
 

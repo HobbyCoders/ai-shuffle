@@ -78,6 +78,16 @@ async def handle_stream_start(
         if isinstance(message_data, dict):
             usage_data = message_data.get("usage")
             if usage_data:
+                context_used = (
+                    usage_data.get("input_tokens", 0)
+                    + usage_data.get("cache_creation_input_tokens", 0)
+                    + usage_data.get("cache_read_input_tokens", 0)
+                )
+                logger.warning(
+                    f"[ContextUsage:DEBUG] stream_start (first) session={ectx.session_id} "
+                    f"| context_used={context_used} "
+                    f"| raw usage={usage_data}"
+                )
                 await live_session_store.update_usage(
                     ectx.session_id,
                     input_tokens=usage_data.get("input_tokens", 0),
@@ -102,6 +112,16 @@ async def handle_stream_start(
         if isinstance(message_data, dict):
             usage_data = message_data.get("usage")
             if usage_data:
+                context_used = (
+                    usage_data.get("input_tokens", 0)
+                    + usage_data.get("cache_creation_input_tokens", 0)
+                    + usage_data.get("cache_read_input_tokens", 0)
+                )
+                logger.warning(
+                    f"[ContextUsage:DEBUG] stream_start (subsequent) session={ectx.session_id} "
+                    f"| context_used={context_used} "
+                    f"| raw usage={usage_data}"
+                )
                 await live_session_store.update_usage(
                     ectx.session_id,
                     input_tokens=usage_data.get("input_tokens", 0),

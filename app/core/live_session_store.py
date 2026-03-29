@@ -866,6 +866,24 @@ class LiveSessionStore:
                 logger.warning(f"update_usage: session {session_id} not found")
                 return
 
+            # ── DEBUG: Log usage updates, especially when session is NOT streaming ──
+            if not session.is_streaming:
+                logger.warning(
+                    f"[ContextUsage:DEBUG] update_usage called on NON-STREAMING session={session_id} "
+                    f"| input_tokens: {session.input_tokens} → {input_tokens} "
+                    f"| cache_creation: {session.cache_creation_tokens} → {cache_creation_tokens} "
+                    f"| cache_read: {session.cache_read_tokens} → {cache_read_tokens}"
+                )
+            else:
+                prev_context = session.input_tokens + session.cache_creation_tokens + session.cache_read_tokens
+                new_context = input_tokens + cache_creation_tokens + cache_read_tokens
+                if new_context != prev_context:
+                    logger.warning(
+                        f"[ContextUsage:DEBUG] update_usage STREAMING session={session_id} "
+                        f"| context: {prev_context} → {new_context} "
+                        f"| input={input_tokens} cache_create={cache_creation_tokens} cache_read={cache_read_tokens}"
+                    )
+
             session.input_tokens = input_tokens
             session.output_tokens = output_tokens
             session.cache_creation_tokens = cache_creation_tokens
@@ -932,6 +950,14 @@ class LiveSessionStore:
             session.is_streaming = False
             session.active_block_type = None
             self._increment_update_id(session)
+            context_used = session.input_tokens + session.cache_creation_tokens + session.cache_read_tokens
+            logger.warning(
+                f"[ContextUsage:DEBUG] end_streaming session={session_id} "
+                f"| final context_used={context_used} "
+                f"| input={session.input_tokens} cache_create={session.cache_creation_tokens} cache_read={session.cache_read_tokens} "
+                f"| output={session.output_tokens} "
+                f"| msgs={len(session.messages)} interrupted={interrupted}"
+            )
             logger.info(f"Ended streaming for session {session_id}: {len(session.messages)} messages kept in memory (interrupted={interrupted}). Total in store: sessions={len(self._sessions)} locks={len(self._session_locks)}")
 
             return [m.to_dict() for m in session.messages]

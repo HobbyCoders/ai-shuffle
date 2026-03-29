@@ -64,7 +64,6 @@
 	const contextUsed = $derived($activeSession.contextUsed ?? 0);
 	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
-
 	// Input state - use draft for persistence across session switches
 	let inputValue = $state($activeSession.draft || '');
 	let plainTextValue = $state(''); // Plain text without chip serialization, for autocomplete

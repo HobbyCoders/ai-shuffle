@@ -481,6 +481,7 @@ function setupPollCallback() {
 			usageDelta.contextUsed = _state.contextUsed;
 		}
 		const usageHasUpdate = usageDelta.contextUsed !== _state.contextUsed;
+
 		const todosHaveUpdate = data.todos.length > 0;
 		const streamingChanged = _state.isStreaming !== data.isStreaming;
 

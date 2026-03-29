@@ -46,27 +46,131 @@
 		}
 	}
 
-	// Simple markdown to HTML (very basic)
+	// Markdown to HTML renderer
 	function renderMarkdown(text: string): string {
 		if (!text) return '';
 
-		return text
+		// Step 1: Extract fenced code blocks before any other processing
+		const codeBlocks: string[] = [];
+		let processed = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang, code) => {
+			const escaped = code
+				.replace(/&/g, '&amp;')
+				.replace(/</g, '&lt;')
+				.replace(/>/g, '&gt;');
+			const langAttr = lang ? ` data-lang="${lang}"` : '';
+			const placeholder = `\x00CODEBLOCK_${codeBlocks.length}\x00`;
+			codeBlocks.push(`<pre class="detail-md-pre"${langAttr}><code>${escaped.trimEnd()}</code></pre>`);
+			return placeholder;
+		});
+
+		// Step 2: Process line by line to handle block elements
+		const lines = processed.split('\n');
+		const outputBlocks: string[] = [];
+		let currentParagraph: string[] = [];
+		let i = 0;
+
+		function flushParagraph() {
+			if (currentParagraph.length > 0) {
+				const text = currentParagraph.join('\n');
+				outputBlocks.push(`<p class="detail-md-p">${applyInline(text)}</p>`);
+				currentParagraph = [];
+			}
+		}
+
+		function applyInline(str: string): string {
+			return str
+				// Bold (must come before italic)
+				.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+				// Italic — only single * not preceded/followed by *
+				.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>')
+				// Inline code
+				.replace(/`([^`]+)`/g, '<code class="detail-md-code">$1</code>')
+				// Links
+				.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" class="detail-md-link">$1</a>');
+		}
+
+		while (i < lines.length) {
+			const line = lines[i];
+
+			// Code block placeholder
+			if (line.match(/^\x00CODEBLOCK_\d+\x00$/)) {
+				flushParagraph();
+				const idx = parseInt(line.replace(/\x00CODEBLOCK_(\d+)\x00/, '$1'));
+				outputBlocks.push(codeBlocks[idx]);
+				i++;
+				continue;
+			}
+
+			// Blank line — flush paragraph
+			if (line.trim() === '') {
+				flushParagraph();
+				i++;
+				continue;
+			}
+
 			// Headers
-			.replace(/^### (.+)$/gm, '<h3 class="detail-md-h3">$1</h3>')
-			.replace(/^## (.+)$/gm, '<h2 class="detail-md-h2">$1</h2>')
-			.replace(/^# (.+)$/gm, '<h1 class="detail-md-h1">$1</h1>')
-			// Bold
-			.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-			// Italic
-			.replace(/\*(.+?)\*/g, '<em>$1</em>')
-			// Inline code
-			.replace(/`([^`]+)`/g, '<code class="detail-md-code">$1</code>')
-			// Links
-			.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" class="detail-md-link">$1</a>')
-			// Line breaks
-			.replace(/\n\n/g, '</p><p class="detail-md-p">')
-			// Wrap in paragraph
-			.replace(/^(.+)$/, '<p class="detail-md-p">$1</p>');
+			const h3 = line.match(/^### (.+)$/);
+			if (h3) {
+				flushParagraph();
+				outputBlocks.push(`<h3 class="detail-md-h3">${applyInline(h3[1])}</h3>`);
+				i++;
+				continue;
+			}
+			const h2 = line.match(/^## (.+)$/);
+			if (h2) {
+				flushParagraph();
+				outputBlocks.push(`<h2 class="detail-md-h2">${applyInline(h2[1])}</h2>`);
+				i++;
+				continue;
+			}
+			const h1 = line.match(/^# (.+)$/);
+			if (h1) {
+				flushParagraph();
+				outputBlocks.push(`<h1 class="detail-md-h1">${applyInline(h1[1])}</h1>`);
+				i++;
+				continue;
+			}
+
+			// Horizontal rule
+			if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
+				flushParagraph();
+				outputBlocks.push('<hr class="detail-md-hr">');
+				i++;
+				continue;
+			}
+
+			// Unordered list
+			if (/^[\-\*] /.test(line.trim())) {
+				flushParagraph();
+				const items: string[] = [];
+				while (i < lines.length && /^[\-\*] /.test(lines[i].trim())) {
+					items.push(`<li>${applyInline(lines[i].trim().replace(/^[\-\*] /, ''))}</li>`);
+					i++;
+				}
+				outputBlocks.push(`<ul class="detail-md-ul">${items.join('')}</ul>`);
+				continue;
+			}
+
+			// Ordered list
+			if (/^\d+\. /.test(line.trim())) {
+				flushParagraph();
+				const items: string[] = [];
+				while (i < lines.length && /^\d+\. /.test(lines[i].trim())) {
+					items.push(`<li>${applyInline(lines[i].trim().replace(/^\d+\. /, ''))}</li>`);
+					i++;
+				}
+				outputBlocks.push(`<ol class="detail-md-ol">${items.join('')}</ol>`);
+				continue;
+			}
+
+			// Regular text — accumulate into paragraph
+			currentParagraph.push(line);
+			i++;
+		}
+
+		flushParagraph();
+
+		return outputBlocks.join('\n');
 	}
 </script>
 
@@ -473,49 +577,128 @@
 
 	/* README markdown styles */
 	.plugin-detail-readme {
-		color: var(--text-primary, var(--foreground));
-		line-height: 1.6;
+		color: var(--text-secondary, var(--muted-foreground));
+		line-height: 1.7;
+		font-size: var(--text-base, 0.8125rem);
 	}
 
 	.plugin-detail-readme :global(.detail-md-h1) {
 		font-size: var(--text-xl, 1.125rem);
 		font-weight: 700;
 		color: var(--text-primary, var(--foreground));
-		margin-top: var(--space-4, 16px);
-		margin-bottom: var(--space-2, 8px);
+		margin: var(--space-6, 24px) 0 var(--space-3, 12px) 0;
+		padding-bottom: var(--space-2, 8px);
+		border-bottom: 1px solid var(--border-subtle, var(--border));
+		letter-spacing: var(--tracking-tight, -0.01em);
+	}
+
+	.plugin-detail-readme :global(.detail-md-h1:first-child) {
+		margin-top: 0;
 	}
 
 	.plugin-detail-readme :global(.detail-md-h2) {
 		font-size: var(--text-lg, 1rem);
-		font-weight: 600;
+		font-weight: 650;
 		color: var(--text-primary, var(--foreground));
-		margin-top: var(--space-4, 16px);
-		margin-bottom: var(--space-2, 8px);
+		margin: var(--space-5, 20px) 0 var(--space-2, 8px) 0;
+		letter-spacing: var(--tracking-tight, -0.01em);
 	}
 
 	.plugin-detail-readme :global(.detail-md-h3) {
 		font-size: var(--text-md, 0.875rem);
 		font-weight: 600;
 		color: var(--text-primary, var(--foreground));
-		margin-top: var(--space-4, 16px);
-		margin-bottom: var(--space-2, 8px);
+		margin: var(--space-4, 16px) 0 var(--space-2, 8px) 0;
 	}
 
 	.plugin-detail-readme :global(.detail-md-p) {
-		margin: var(--space-2, 8px) 0;
+		margin: var(--space-2, 8px) 0 var(--space-3, 12px) 0;
+		color: var(--text-secondary, var(--muted-foreground));
+	}
+
+	.plugin-detail-readme :global(strong) {
+		color: var(--text-primary, var(--foreground));
+		font-weight: 600;
+	}
+
+	.plugin-detail-readme :global(em) {
+		font-style: italic;
+		color: var(--text-secondary, var(--muted-foreground));
 	}
 
 	.plugin-detail-readme :global(.detail-md-code) {
 		padding: 2px 6px;
 		border-radius: var(--radius-sm, 4px);
 		background: var(--surface-1, var(--muted));
+		font-size: 0.9em;
+		font-family: var(--card-font-mono, 'JetBrains Mono', monospace);
+		color: var(--primary);
+		border: 1px solid var(--border-subtle, var(--border));
+	}
+
+	.plugin-detail-readme :global(.detail-md-pre) {
+		margin: var(--space-3, 12px) 0;
+		padding: var(--space-3, 12px) var(--space-4, 16px);
+		border-radius: var(--radius-md, 8px);
+		background: var(--surface-1, var(--muted));
+		border: 1px solid var(--border-subtle, var(--border));
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
+	}
+
+	.plugin-detail-readme :global(.detail-md-pre code) {
 		font-size: var(--text-sm, 0.75rem);
 		font-family: var(--card-font-mono, 'JetBrains Mono', monospace);
+		color: var(--text-primary, var(--foreground));
+		background: none;
+		padding: 0;
+		border: none;
+		border-radius: 0;
+		white-space: pre;
+		line-height: 1.6;
+	}
+
+	.plugin-detail-readme :global(.detail-md-ul),
+	.plugin-detail-readme :global(.detail-md-ol) {
+		margin: var(--space-2, 8px) 0 var(--space-3, 12px) 0;
+		padding-left: var(--space-5, 20px);
+		color: var(--text-secondary, var(--muted-foreground));
+	}
+
+	.plugin-detail-readme :global(.detail-md-ul) {
+		list-style-type: disc;
+	}
+
+	.plugin-detail-readme :global(.detail-md-ol) {
+		list-style-type: decimal;
+	}
+
+	.plugin-detail-readme :global(.detail-md-ul li),
+	.plugin-detail-readme :global(.detail-md-ol li) {
+		padding: var(--space-1, 4px) 0;
+		line-height: 1.6;
+	}
+
+	.plugin-detail-readme :global(.detail-md-ul li::marker) {
+		color: var(--primary);
+	}
+
+	.plugin-detail-readme :global(.detail-md-ol li::marker) {
+		color: var(--primary);
+		font-weight: 600;
+		font-size: var(--text-sm, 0.75rem);
+	}
+
+	.plugin-detail-readme :global(.detail-md-hr) {
+		border: none;
+		border-top: 1px solid var(--border-subtle, var(--border));
+		margin: var(--space-5, 20px) 0;
 	}
 
 	.plugin-detail-readme :global(.detail-md-link) {
 		color: var(--primary);
 		text-decoration: none;
+		font-weight: 500;
 	}
 
 	.plugin-detail-readme :global(.detail-md-link:hover) {
