@@ -1162,6 +1162,30 @@ class ChatWebSocketHandler:
                 # Dispatch to handler — updates live_session_store and broadcasts via sync_engine
                 await dispatch_event(event, event_ctx, stream_state)
 
+                # --- Turn-boundary queue check ---
+                # When a turn ends with stop_reason "tool_use", the SDK is about
+                # to execute tools and start another API call.  If there are
+                # queued messages waiting, interrupt now so the queued message is
+                # sent at the turn boundary (matching Claude Code behaviour)
+                # instead of waiting for the entire multi-turn query to finish.
+                if event_type == "stream_message_delta":
+                    stop_reason = event.get("delta", {}).get("stop_reason")
+                    if stop_reason and stop_reason != "end_turn":
+                        queued = await run_sync(database.get_queued_messages, session_id)
+                        if queued:
+                            from app.core.query_engine import interrupt_session
+                            ctx.debug(
+                                logger,
+                                f"Interrupting at turn boundary — "
+                                f"{len(queued)} queued message(s) waiting, "
+                                f"stop_reason={stop_reason}"
+                            )
+                            await interrupt_session(session_id)
+                            # Don't break — let the streaming loop drain the
+                            # remaining events (the SDK will emit a ResultMessage
+                            # after interrupt, which stream_to_websocket yields
+                            # as an "interrupted" event).
+
             ctx.debug(logger, "Query completed")
 
             # Dispatch notifications for session completion (non-blocking)
