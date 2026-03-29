@@ -72,12 +72,28 @@ def get_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     # Use WAL mode for better concurrent access and crash recovery
     conn.execute("PRAGMA journal_mode = WAL")
+    # Explicitly set WAL auto-checkpoint threshold (default 1000 pages ≈ 4 MB).
+    conn.execute("PRAGMA wal_autocheckpoint = 1000")
     # Set busy timeout to wait up to 30 seconds if database is locked
     # This is critical on Windows where file locking is more aggressive.
     # PRAGMA does not support parameterized queries, so coerce to int for safety.
     timeout_ms = int(settings.db_busy_timeout_ms)
     conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
     return conn
+
+
+def _close_connection(conn: sqlite3.Connection):
+    """Close a connection with lightweight maintenance.
+
+    Runs PRAGMA optimize before closing — per SQLite docs, this should be
+    called on every connection close.  Near-instant no-op most of the time;
+    only runs ANALYZE when stats are stale.
+    """
+    try:
+        conn.execute("PRAGMA optimize")
+    except Exception:
+        pass
+    conn.close()
 
 
 @contextmanager
@@ -91,7 +107,7 @@ def get_db():
         conn.rollback()
         raise
     finally:
-        conn.close()
+        _close_connection(conn)
 
 
 def column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:

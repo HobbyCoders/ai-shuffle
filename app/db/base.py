@@ -60,11 +60,31 @@ def get_connection() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    # Explicitly set WAL auto-checkpoint threshold (default 1000 pages ≈ 4 MB).
+    # This ensures WAL is checkpointed continuously during normal operation
+    # rather than growing unbounded between periodic maintenance runs.
+    conn.execute("PRAGMA wal_autocheckpoint = 1000")
     # Set busy timeout from config (default 30s) — critical on Windows where file locking is more aggressive.
     # PRAGMA does not support parameterized queries, so validate the value is a safe integer.
     timeout_ms = int(settings.db_busy_timeout_ms)  # Coerce to int — prevents injection
     conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
     return conn
+
+
+def _close_connection(conn: sqlite3.Connection):
+    """Close a connection with lightweight maintenance.
+
+    Runs PRAGMA optimize before closing — per SQLite docs, this should be
+    called on every connection close.  It's a near-instant no-op most of the
+    time; it only runs ANALYZE on tables whose stats have become stale since
+    the last call, keeping the query planner accurate continuously rather than
+    letting it degrade between periodic maintenance runs.
+    """
+    try:
+        conn.execute("PRAGMA optimize")
+    except Exception:
+        pass  # Best-effort; don't let maintenance failure break the caller
+    conn.close()
 
 
 @contextmanager
@@ -78,7 +98,7 @@ def get_db():
         conn.rollback()
         raise
     finally:
-        conn.close()
+        _close_connection(conn)
 
 
 @contextmanager
@@ -110,7 +130,7 @@ def transaction():
         conn.rollback()
         raise
     finally:
-        conn.close()
+        _close_connection(conn)
 
 
 def column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
