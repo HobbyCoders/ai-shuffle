@@ -27,6 +27,16 @@ try:
 except ImportError:
     sdk_get_session_info = None
 
+try:
+    from claude_agent_sdk import delete_session as sdk_delete_session
+except ImportError:
+    sdk_delete_session = None
+
+try:
+    from claude_agent_sdk import fork_session as sdk_fork_session
+except ImportError:
+    sdk_fork_session = None
+
 from app.core.models import (
     Session,
     SessionWithMessages,
@@ -1037,6 +1047,19 @@ async def delete_session(request: Request, session_id: str, token: str = Depends
     # Evict from session pool before deleting — terminates subprocess if alive
     from app.core.session_pool import get_session_pool
     await get_session_pool().remove(session_id)
+
+    # Delete SDK session JSONL files if available (SDK 0.1.51+)
+    sdk_sid = existing.get("sdk_session_id")
+    if sdk_sid and sdk_delete_session:
+        try:
+            # Resolve working directory for JSONL file location
+            project = await run_sync(database.get_project, existing.get("project_id")) if existing.get("project_id") else None
+            working_dir = get_project_working_dir(project) if project else None
+            await run_sync(sdk_delete_session, session_id=sdk_sid, directory=working_dir)
+            logger.debug(f"Deleted SDK session JSONL for {sdk_sid}")
+        except Exception as e:
+            # Non-fatal — DB record is the primary source of truth
+            logger.warning(f"Failed to delete SDK session JSONL for {sdk_sid}: {e}")
 
     await run_sync(database.delete_session, session_id)
 

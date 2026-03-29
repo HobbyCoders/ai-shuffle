@@ -305,6 +305,15 @@ def write_agents_to_filesystem(agents_dict: Dict[str, AgentDefinition], cwd: str
                 mcp_str = ", ".join(mcp_items)
                 frontmatter_lines.append(f"mcpServers: {_yaml_quote(mcp_str)}")
 
+        # New AgentDefinition fields (SDK 0.1.51+)
+        if getattr(agent_def, 'disallowedTools', None):
+            dt_str = ", ".join(agent_def.disallowedTools)
+            frontmatter_lines.append(f"disallowedTools: {_yaml_quote(dt_str)}")
+        if getattr(agent_def, 'maxTurns', None) is not None:
+            frontmatter_lines.append(f"maxTurns: {agent_def.maxTurns}")
+        if getattr(agent_def, 'initialPrompt', None):
+            frontmatter_lines.append(f"initialPrompt: {_yaml_quote(agent_def.initialPrompt)}")
+
         frontmatter_lines.append("---")
         frontmatter_lines.append("")  # Empty line after frontmatter
 
@@ -1223,15 +1232,23 @@ def build_options_from_profile(
         for agent_id in enabled_agent_ids:
             subagent = database.get_subagent(agent_id)
             if subagent:
-                agent_def = AgentDefinition(
-                    description=subagent.get("description", ""),
-                    prompt=subagent.get("prompt", ""),
-                    tools=subagent.get("tools"),
-                    model=subagent.get("model"),
-                    skills=subagent.get("skills"),
-                    memory=subagent.get("memory"),
-                    mcpServers=subagent.get("mcp_servers"),
-                )
+                agent_kwargs = {
+                    "description": subagent.get("description", ""),
+                    "prompt": subagent.get("prompt", ""),
+                    "tools": subagent.get("tools"),
+                    "model": subagent.get("model"),
+                    "skills": subagent.get("skills"),
+                    "memory": subagent.get("memory"),
+                    "mcpServers": subagent.get("mcp_servers"),
+                }
+                # New AgentDefinition fields (SDK 0.1.51+)
+                if subagent.get("disallowed_tools"):
+                    agent_kwargs["disallowedTools"] = subagent["disallowed_tools"]
+                if subagent.get("max_turns") is not None:
+                    agent_kwargs["maxTurns"] = subagent["max_turns"]
+                if subagent.get("initial_prompt"):
+                    agent_kwargs["initialPrompt"] = subagent["initial_prompt"]
+                agent_def = AgentDefinition(**agent_kwargs)
                 agents_dict[agent_id] = agent_def
                 logger.debug(f"Loaded subagent '{agent_id}': description='{agent_def.description[:50]}...', tools={agent_def.tools}, model={agent_def.model}")
             else:
@@ -1378,6 +1395,9 @@ def build_options_from_profile(
 
         # User identification
         user=config.get("user"),
+
+        # Token budget management (SDK 0.1.51+)
+        **({"task_budget": config["task_budget"]} if config.get("task_budget") else {}),
 
         # Subagents - On Docker/Linux, pass via --agents (works correctly)
         # On Windows, agents=None because --agents CLI flag has a bug - must write to filesystem instead
@@ -1584,6 +1604,11 @@ async def execute_query(
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
                 metadata["stop_reason"] = getattr(message, 'stop_reason', None)
+                # Surface SDK-reported errors (added in SDK 0.1.51)
+                result_errors = getattr(message, 'errors', None)
+                if result_errors:
+                    metadata["errors"] = result_errors
+                    logger.warning(f"ResultMessage contains errors: {result_errors}")
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -2051,6 +2076,11 @@ async def stream_query(
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
                 metadata["stop_reason"] = getattr(message, 'stop_reason', None)
+                # Surface SDK-reported errors (added in SDK 0.1.51)
+                result_errors = getattr(message, 'errors', None)
+                if result_errors:
+                    metadata["errors"] = result_errors
+                    logger.warning(f"ResultMessage contains errors: {result_errors}")
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -2512,6 +2542,11 @@ async def _run_background_query(
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
                 metadata["stop_reason"] = getattr(message, 'stop_reason', None)
+                # Surface SDK-reported errors (added in SDK 0.1.51)
+                result_errors = getattr(message, 'errors', None)
+                if result_errors:
+                    metadata["errors"] = result_errors
+                    logger.warning(f"[Background] ResultMessage contains errors: {result_errors}")
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -3010,6 +3045,11 @@ async def stream_to_websocket(
                 _config = refs["config"]
                 _sid = refs["session_id"]
 
+                # Extract tool_use_id and agent_id from context (SDK 0.1.52+)
+                # These enable disambiguating parallel permission requests
+                _ctx_tool_use_id = getattr(context, 'tool_use_id', None)
+                _ctx_agent_id = getattr(context, 'agent_id', None)
+
                 # Check profile-level tool restrictions FIRST
                 if _disallowed and tool_name in _disallowed:
                     logger.debug(f"[WS] Tool {tool_name} blocked by profile disallowed_tools")
@@ -3025,11 +3065,11 @@ async def stream_to_websocket(
                         return PermissionResultAllow(updated_input=tool_input)
 
                     request_id = f"question-{_sid}-{uuid.uuid4().hex[:8]}"
-                    logger.debug(f"[WS] AskUserQuestion canUseTool triggered: {request_id} with {len(questions)} questions")
+                    logger.debug(f"[WS] AskUserQuestion canUseTool triggered: {request_id} with {len(questions)} questions (tool_use_id={_ctx_tool_use_id}, agent_id={_ctx_agent_id})")
 
                     answers = await user_question_handler.request_answers(
                         request_id=request_id,
-                        tool_use_id=request_id,
+                        tool_use_id=_ctx_tool_use_id or request_id,
                         session_id=_sid,
                         questions=questions,
                         broadcast_func=_broadcast
@@ -3052,7 +3092,9 @@ async def stream_to_websocket(
                             profile_id=_profile_id,
                             tool_name=tool_name,
                             tool_input=tool_input,
-                            broadcast_func=_broadcast
+                            broadcast_func=_broadcast,
+                            tool_use_id=_ctx_tool_use_id,
+                            agent_id=_ctx_agent_id,
                         )
                         if result.behavior == "deny":
                             return result
@@ -3070,7 +3112,9 @@ async def stream_to_websocket(
                         profile_id=_profile_id,
                         tool_name=tool_name,
                         tool_input=tool_input,
-                        broadcast_func=_broadcast
+                        broadcast_func=_broadcast,
+                        tool_use_id=_ctx_tool_use_id,
+                        agent_id=_ctx_agent_id,
                     )
                     return result
                 else:
@@ -3736,6 +3780,11 @@ async def stream_to_websocket(
                 metadata["total_cost_usd"] = message.total_cost_usd
                 metadata["is_error"] = message.is_error
                 metadata["stop_reason"] = getattr(message, 'stop_reason', None)
+                # Surface SDK-reported errors (added in SDK 0.1.51)
+                result_errors = getattr(message, 'errors', None)
+                if result_errors:
+                    metadata["errors"] = result_errors
+                    logger.warning(f"[WS] ResultMessage contains errors: {result_errors}")
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)

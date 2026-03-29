@@ -188,6 +188,23 @@ class ClaudeAgentAdapter(ProviderAdapter):
             raise RuntimeError("Adapter not connected")
         await self._client.set_permission_mode(mode)
 
+    async def get_context_usage(self) -> Optional[Dict[str, Any]]:
+        """Get context window usage by category (SDK 0.1.52+).
+
+        Returns a dict with context usage breakdown, or None if the
+        client is not connected or the method is not available.
+        """
+        if not self._client:
+            return None
+        get_usage = getattr(self._client, 'get_context_usage', None)
+        if get_usage is None:
+            return None
+        try:
+            return await get_usage()
+        except Exception as e:
+            logger.warning(f"[Adapter] get_context_usage() failed: {e}")
+            return None
+
     # ─── Session Identity ─────────────────────────────────────────────
 
     @property
@@ -300,6 +317,10 @@ class ClaudeAgentAdapter(ProviderAdapter):
             kwargs["max_buffer_size"] = options.max_buffer_size
         if options.user is not None:
             kwargs["user"] = options.user
+        if options.session_id is not None:
+            kwargs["session_id"] = options.session_id
+        if options.task_budget is not None:
+            kwargs["task_budget"] = options.task_budget
 
         # Forward any extra options for forward-compatibility
         kwargs.update(options.extra)

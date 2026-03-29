@@ -86,6 +86,12 @@ class SessionOptions:
     # User identifier
     user: Optional[str] = None
 
+    # Custom session ID (SDK 0.1.52+) — allows specifying session ID at creation time
+    session_id: Optional[str] = None
+
+    # Token budget management (SDK 0.1.51+)
+    task_budget: Optional[int] = None
+
     # Arbitrary extra options (for forward-compatibility with new SDK fields)
     extra: Dict[str, Any] = field(default_factory=dict)
 

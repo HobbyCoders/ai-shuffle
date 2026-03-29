@@ -44,6 +44,10 @@ class PermissionRequest:
     tool_input: Dict[str, Any]
     created_at: datetime = field(default_factory=datetime.now)
 
+    # SDK context fields (SDK 0.1.52+) — enables disambiguating parallel requests
+    tool_use_id: Optional[str] = None
+    agent_id: Optional[str] = None
+
     # Async event for waiting on response
     response_event: asyncio.Event = field(default_factory=asyncio.Event)
     response: Optional[Dict[str, Any]] = None
@@ -129,7 +133,9 @@ class PermissionHandler:
         profile_id: str,
         tool_name: str,
         tool_input: Dict[str, Any],
-        broadcast_func: callable
+        broadcast_func: callable,
+        tool_use_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> Union[PermissionResultAllow, PermissionResultDeny]:
         """
         Request permission for a tool use.
@@ -146,6 +152,8 @@ class PermissionHandler:
             tool_name: Name of the tool being requested
             tool_input: Tool input parameters
             broadcast_func: Async function to broadcast to WebSocket
+            tool_use_id: SDK tool_use_id from ToolPermissionContext (SDK 0.1.52+)
+            agent_id: SDK agent_id from ToolPermissionContext (SDK 0.1.52+)
 
         Returns:
             PermissionResultAllow or PermissionResultDeny
@@ -165,7 +173,9 @@ class PermissionHandler:
             session_id=session_id,
             profile_id=profile_id,
             tool_name=tool_name,
-            tool_input=tool_input
+            tool_input=tool_input,
+            tool_use_id=tool_use_id,
+            agent_id=agent_id,
         )
 
         async with self._lock:
@@ -177,14 +187,20 @@ class PermissionHandler:
         queue_position = len(self._pending_requests.get(session_id, {}))
 
         # Broadcast permission request to frontend
-        await broadcast_func({
+        permission_event = {
             "type": "permission_request",
             "request_id": request_id,
             "tool_name": tool_name,
             "tool_input": tool_input,
             "queue_position": queue_position,
-            "queue_total": queue_position
-        })
+            "queue_total": queue_position,
+        }
+        # Include SDK context fields when available (SDK 0.1.52+)
+        if tool_use_id:
+            permission_event["tool_use_id"] = tool_use_id
+        if agent_id:
+            permission_event["agent_id"] = agent_id
+        await broadcast_func(permission_event)
 
         logger.debug(f"Permission request queued: {request_id} for {tool_name}")
 
@@ -378,7 +394,9 @@ class PermissionHandler:
                 "request_id": req.request_id,
                 "tool_name": req.tool_name,
                 "tool_input": req.tool_input,
-                "created_at": req.created_at.isoformat()
+                "created_at": req.created_at.isoformat(),
+                **({"tool_use_id": req.tool_use_id} if req.tool_use_id else {}),
+                **({"agent_id": req.agent_id} if req.agent_id else {}),
             }
             for req in self._pending_requests[session_id].values()
         ]
