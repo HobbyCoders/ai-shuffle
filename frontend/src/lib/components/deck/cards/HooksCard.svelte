@@ -323,8 +323,9 @@
 									</button>
 								</div>
 							{:else}
-								<div class="hook-items">
-									{#each appHooks() as hook (hook.id)}
+								<div class="fp-list">
+									{#each appHooks() as hook, index (hook.id)}
+										{#if index > 0}<div class="fp-list-divider"></div>{/if}
 										<HookListItem
 											{hook}
 											testing={$hookTesting[hook.id] || false}
@@ -356,8 +357,9 @@
 									</button>
 								</div>
 							{:else}
-								<div class="hook-items">
-									{#each filteredProjectHooks() as hook (hook.id)}
+								<div class="fp-list">
+									{#each filteredProjectHooks() as hook, index (hook.id)}
+										{#if index > 0}<div class="fp-list-divider"></div>{/if}
 										<HookListItem
 											{hook}
 											testing={$hookTesting[hook.id] || false}
@@ -381,8 +383,9 @@
 									<p class="empty-hint">Install plugins with hooks to see them here</p>
 								</div>
 							{:else}
-								<div class="hook-items">
-									{#each filteredPluginHooks() as hook (hook.plugin_id + hook.event)}
+								<div class="fp-list">
+									{#each filteredPluginHooks() as hook, index (hook.plugin_id + hook.event)}
+										{#if index > 0}<div class="fp-list-divider"></div>{/if}
 										<PluginHookItem {hook} />
 									{/each}
 								</div>
@@ -495,13 +498,7 @@
 	}
 
 	.hooks-list {
-		padding: 16px;
-	}
-
-	.hook-items {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
+		padding: 8px 0;
 	}
 
 	.empty-state {

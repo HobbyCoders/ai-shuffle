@@ -17,7 +17,7 @@
 	} from '$lib/stores/mcp';
 	import type { McpServerInfo, McpServerType } from '$lib/api/mcp';
 	import { getServerTypeLabel, validateMcpServerConfig } from '$lib/api/mcp';
-	import { Server, AlertCircle, X, Plus, Search, Trash2, Check, Globe, Terminal, Zap, Info } from 'lucide-svelte';
+	import { Server, AlertCircle, X, Plus, Search, Trash2, Check, Globe, Terminal, Zap, Info, ChevronRight } from 'lucide-svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -410,13 +410,11 @@
 			</div>
 		{:else}
 			<div class="fp-list">
-				{#each filteredServers as server (server.name)}
+				{#each filteredServers as server, index (server.name)}
+					{#if index > 0}<div class="fp-list-divider"></div>{/if}
 					{#if deletingName === server.name}
 						<!-- Inline delete confirmation -->
 						<div class="fp-list-item fp-list-item--deleting">
-							<div class="fp-item-icon fp-item-icon--destructive">
-								<Trash2 size={18} />
-							</div>
 							<div class="fp-item-content">
 								<p class="delete-confirm-text">
 									Delete <strong>{server.name}</strong>? This cannot be undone.
@@ -438,37 +436,28 @@
 							tabindex="0"
 							onkeydown={(e) => e.key === 'Enter' && !server.builtin && openEditForm(server)}
 						>
-							<div class="fp-item-icon fp-item-icon--primary">
-								{#if server.type === 'stdio'}
-									<Terminal size={18} />
-								{:else if server.type === 'sse'}
-									<Zap size={18} />
-								{:else if server.type === 'http'}
-									<Globe size={18} />
-								{:else}
-									<Server size={18} />
-								{/if}
-							</div>
+							<div class="fp-item-indicator"></div>
 							<div class="fp-item-content">
 								<div class="fp-item-header">
 									<span class="fp-item-name">{server.name}</span>
-									<span class="mcp-type-badge {getTypeBadgeClass(server.type)}">
+									<span class="fp-item-badge mcp-type-badge {getTypeBadgeClass(server.type)}">
 										{getServerTypeLabel(server.type)}
 									</span>
 									{#if server.builtin}
-										<span class="mcp-builtin-badge">Built-in</span>
+										<span class="fp-item-badge mcp-builtin-badge">Built-in</span>
 									{/if}
 								</div>
-								{#if server.description}
-									<span class="fp-item-description">{server.description}</span>
-								{/if}
 								<div class="fp-item-meta">
+									<span class="fp-meta-chip fp-meta-model">{getServerTypeLabel(server.type)}</span>
 									{#if server.type === 'stdio' && server.command}
-										<span class="fp-meta-chip"><Terminal size={12} /> <code>{server.command}{server.args ? ' ' + server.args.join(' ') : ''}</code></span>
+										<span class="fp-meta-sep">&middot;</span>
+										<span class="fp-meta-chip"><code>{server.command}{server.args ? ' ' + server.args.join(' ') : ''}</code></span>
 									{:else if (server.type === 'sse' || server.type === 'http') && server.url}
-										<span class="fp-meta-chip"><Globe size={12} /> {server.url}</span>
+										<span class="fp-meta-sep">&middot;</span>
+										<span class="fp-meta-chip">{server.url}</span>
 									{:else if server.builtin}
-										<span class="fp-meta-chip"><Server size={12} /> In-process SDK server</span>
+										<span class="fp-meta-sep">&middot;</span>
+										<span class="fp-meta-chip">In-process SDK server</span>
 									{/if}
 								</div>
 							</div>
@@ -484,6 +473,7 @@
 									</button>
 								</div>
 							{/if}
+							<div class="fp-item-chevron"><ChevronRight size={16} /></div>
 						</div>
 					{/if}
 				{/each}

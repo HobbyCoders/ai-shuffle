@@ -14,7 +14,7 @@
 		projectAgentsError,
 		projectAgentCount
 	} from '$lib/stores/projectAgents';
-	import { Search, Bot, Trash2, X } from 'lucide-svelte';
+	import { Search, Bot, Trash2, X, ChevronRight } from 'lucide-svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -134,14 +134,12 @@
 						{/if}
 					</div>
 				{:else}
-					{#each filteredAgents() as agent (agent.name)}
+					{#each filteredAgents() as agent, index (agent.name)}
+						{#if index > 0}<div class="fp-list-divider"></div>{/if}
 						{#if deletingAgent === agent.name}
 							<!-- Inline delete confirmation -->
-							<div class="card-list-item card-list-item--deleting">
-								<div class="card-item-icon card-item-icon--destructive">
-									<Trash2 />
-								</div>
-								<div class="card-item-content">
+							<div class="fp-list-item fp-list-item--deleting">
+								<div class="fp-item-content">
 									<p class="delete-confirm-text">
 										Delete <strong>{agent.name}</strong>? This cannot be undone.
 									</p>
@@ -167,25 +165,24 @@
 								</div>
 							</div>
 						{:else}
-							<div class="card-list-item">
-								<div class="card-item-icon">
-									<Bot />
-								</div>
-								<div class="card-item-content">
-									<div class="card-item-header">
-										<span class="card-item-name">{agent.name}</span>
-										<span class="card-badge {getModelBadgeClass(agent.model)}">
+							<div class="fp-list-item">
+								<div class="fp-item-indicator"></div>
+								<div class="fp-item-content">
+									<div class="fp-item-header">
+										<span class="fp-item-name">{agent.name}</span>
+										<span class="fp-item-badge">
 											{getModelDisplay(agent.model)}
 										</span>
+									</div>
+									<div class="fp-item-meta">
+										<span class="fp-meta-model">{getModelDisplay(agent.model)}</span>
 										{#if agent.tools && agent.tools.length > 0}
-											<span class="card-badge card-badge--tools">
-												{agent.tools.length} tools
-											</span>
+											<span class="fp-meta-sep">&middot;</span>
+											<span class="fp-meta-chip">{agent.tools.length} tools</span>
 										{/if}
 									</div>
-									<p class="card-item-description">{agent.description || 'No description'}</p>
 								</div>
-								<div class="card-item-actions">
+								<div class="fp-item-actions">
 									<button
 										onclick={(e) => { e.stopPropagation(); deletingAgent = agent.name; }}
 										class="card-action-btn card-action-btn--destructive"
@@ -193,6 +190,9 @@
 									>
 										<Trash2 />
 									</button>
+								</div>
+								<div class="fp-item-chevron">
+									<ChevronRight size={16} />
 								</div>
 							</div>
 						{/if}
@@ -208,7 +208,6 @@
 		display: flex;
 		flex-direction: column;
 		height: 100%;
-		background: var(--card);
 		overflow: hidden;
 	}
 
@@ -236,15 +235,9 @@
 		padding: var(--space-8);
 	}
 
-	/* Always show delete button on desktop, vertically centered */
-	.agents-tab :global(.card-item-actions) {
-		opacity: 1;
-		align-self: center;
-	}
-
 	/* Center actions on mobile */
 	@media (max-width: 639px) {
-		.agents-tab :global(.card-item-actions) {
+		.agents-tab :global(.fp-item-actions) {
 			justify-content: center;
 		}
 	}

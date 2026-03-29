@@ -215,8 +215,8 @@
 											<FolderOpen size={16} />
 											{marketplace}
 										</h3>
-										<div class="plugin-grid">
-											{#each filtered as plugin (plugin.id)}
+										{#each filtered as plugin, index (plugin.id)}
+												{#if index > 0}<div class="fp-list-divider"></div>{/if}
 												<PluginListItem
 													{plugin}
 													installing={$pluginInstalling[plugin.id] || false}
@@ -235,7 +235,6 @@
 													mode="available"
 												/>
 											{/each}
-										</div>
 									</div>
 								{/if}
 							{/each}
@@ -257,18 +256,17 @@
 								</button>
 							</div>
 						{:else}
-							<div class="plugin-grid">
-								{#each filteredInstalled() as plugin (plugin.id)}
-									<PluginListItem
-										{plugin}
-										installing={$pluginInstalling[plugin.id] || false}
-										onToggle={() => plugins.togglePlugin(plugin.id)}
-										onUninstall={() => plugins.uninstallPlugin(plugin.id)}
-										onDetails={() => handleSelectPlugin(plugin.id)}
-										mode="installed"
-									/>
-								{/each}
-							</div>
+							{#each filteredInstalled() as plugin, index (plugin.id)}
+								{#if index > 0}<div class="fp-list-divider"></div>{/if}
+								<PluginListItem
+									{plugin}
+									installing={$pluginInstalling[plugin.id] || false}
+									onToggle={() => plugins.togglePlugin(plugin.id)}
+									onUninstall={() => plugins.uninstallPlugin(plugin.id)}
+									onDetails={() => handleSelectPlugin(plugin.id)}
+									mode="installed"
+								/>
+							{/each}
 						{/if}
 					</div>
 				{:else if activeTab === 'details' && $selectedPlugin}

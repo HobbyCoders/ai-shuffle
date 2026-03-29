@@ -1211,30 +1211,24 @@
 					{#if allSubagents.length === 0}
 						<div class="card-empty-state"><p class="card-empty-description">No agents configured</p></div>
 					{:else}
-						<div class="pf-agent-list">
-							{#each allSubagents as agent (agent.id)}
+						<div class="fp-list" style="padding: 0 20px;">
+							{#each allSubagents as agent, index (agent.id)}
 								{@const isBuiltin = agent.is_builtin}
 								{@const isSelected = isBuiltin || profileForm.enabled_agents.includes(agent.id)}
-								<label class="pf-agent-card" class:selected={isSelected} class:builtin={isBuiltin}>
+								{#if index > 0}<div class="fp-list-divider"></div>{/if}
+								<label class="fp-list-item pf-agent-row" class:pf-agent-row--selected={isSelected} class:pf-agent-row--builtin={isBuiltin}>
 									<input type="checkbox" checked={isSelected} disabled={isBuiltin} onchange={() => toggleAgent(agent.id)} class="pf-agent-checkbox" />
-									<div class="pf-agent-icon" class:active={isSelected}>
-										{#if agent.model === 'opus' || agent.model === 'opus[1m]'}
-											<Bot size={18} />
-										{:else if agent.model === 'haiku'}
-											<Sparkles size={18} />
-										{:else}
-											<MessageSquare size={18} />
-										{/if}
-									</div>
-									<div class="pf-agent-info">
-										<div class="pf-agent-header">
-											<span class="pf-agent-name">{agent.name}</span>
+									<div class="fp-item-indicator" style={isSelected ? 'background: var(--primary)' : 'background: var(--text-tertiary); opacity: 0.3'}></div>
+									<div class="fp-item-content">
+										<div class="fp-item-header">
+											<span class="fp-item-name">{agent.name}</span>
 											{#if isBuiltin}
-												<span class="card-badge card-badge--muted">Always on</span>
+												<span class="fp-item-badge">Always on</span>
 											{/if}
-											<span class="card-badge {getModelBadgeClass(agent.model)}">{getModelDisplay(agent.model)}</span>
 										</div>
-										<p class="pf-agent-desc">{agent.description}</p>
+										<div class="fp-item-meta">
+											<span class="fp-meta-model">{getModelDisplay(agent.model)}</span>
+										</div>
 									</div>
 								</label>
 							{/each}
@@ -1448,13 +1442,11 @@
 				</div>
 			{:else}
 				<div class="fp-list">
-					{#each filteredProfiles as profile}
+					{#each filteredProfiles as profile, index}
+						{#if index > 0}<div class="fp-list-divider"></div>{/if}
 						{#if deletingId === profile.id}
 							<!-- Inline delete confirmation -->
 							<div class="fp-list-item fp-list-item--deleting">
-								<div class="fp-item-icon fp-item-icon--destructive">
-									<Trash2 size={18} />
-								</div>
 								<div class="fp-item-content">
 									<p class="delete-confirm-text">
 										Delete <strong>{profile.name}</strong>? This cannot be undone.
@@ -1476,35 +1468,27 @@
 								tabindex="0"
 								onkeydown={(e) => e.key === 'Enter' && openEditForm(profile)}
 							>
-								<div class="fp-item-icon fp-item-icon--primary">
-									<Users size={18} />
-								</div>
+								<div class="fp-item-indicator"></div>
 								<div class="fp-item-content">
 									<div class="fp-item-header">
 										<span class="fp-item-name">{profile.name}</span>
-									</div>
-									{#if profile.description}
-										<span class="fp-item-description">{profile.description}</span>
-									{/if}
-									<div class="fp-item-meta">
-										<span class="fp-meta-chip"><Cpu size={12} /> {getModelDisplay(profile.config?.model)}</span>
-										<span class="fp-meta-dot"></span>
-										<span class="fp-meta-chip"><Wrench size={12} /> {getProfileToolCount(profile)} tools</span>
-										<span class="fp-meta-dot"></span>
-										<span class="fp-meta-chip"><Bot size={12} /> {Math.max(profile.config?.enabled_agents?.length || 0, builtinAgentIds.length)} agents</span>
-										<span class="fp-meta-dot"></span>
-										<span class="fp-meta-chip"><MessageSquare size={12} /> {profile.session_count || 0}</span>
 										{#if profile.is_builtin}
-											<span class="fp-meta-dot"></span>
-											<span class="fp-meta-chip"><Lock size={12} /> Built-in</span>
+											<span class="fp-item-badge">Built-in</span>
 										{/if}
 										{#if groups?.profiles?.assignments?.[profile.id]}
-											<span class="fp-meta-dot"></span>
-											<span class="fp-meta-chip" style="color: var(--primary);">{groups.profiles.assignments[profile.id]}</span>
+											<span class="fp-item-badge fp-item-badge--accent">{groups.profiles.assignments[profile.id]}</span>
 										{/if}
 									</div>
+									<div class="fp-item-meta">
+										<span class="fp-meta-model">{getModelDisplay(profile.config?.model)}</span>
+										<span class="fp-meta-sep">·</span>
+										<span class="fp-meta-chip">{getProfileToolCount(profile)} tools</span>
+										<span class="fp-meta-sep">·</span>
+										<span class="fp-meta-chip">{Math.max(profile.config?.enabled_agents?.length || 0, builtinAgentIds.length)} agents</span>
+										<span class="fp-meta-sep">·</span>
+										<span class="fp-meta-chip">{profile.session_count || 0} sessions</span>
+									</div>
 								</div>
-								<!-- Item actions -->
 								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
 									<button
 										class="card-action-btn"
@@ -1523,6 +1507,7 @@
 										</button>
 									{/if}
 								</div>
+								<div class="fp-item-chevron"><ChevronRight size={16} /></div>
 							</div>
 						{/if}
 					{/each}
@@ -1935,41 +1920,13 @@
 	}
 
 	/* ─── Agent Cards ─── */
-	.pf-agent-list {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		padding: 0 20px;
-	}
-
-	.pf-agent-card {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		padding: 14px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
+	.pf-agent-row {
 		cursor: pointer;
-		transition: all 200ms;
 	}
 
-	.pf-agent-card:hover {
-		border-color: var(--border-emphasis);
-	}
-
-	.pf-agent-card.selected {
-		border-color: color-mix(in oklch, var(--primary) 40%, transparent);
-		background: color-mix(in oklch, var(--primary) 5%, transparent);
-	}
-
-	.pf-agent-card.builtin {
+	.pf-agent-row--builtin {
 		cursor: default;
 		opacity: 0.85;
-	}
-
-	.pf-agent-card.builtin:hover {
-		border-color: color-mix(in oklch, var(--primary) 40%, transparent);
 	}
 
 	.pf-agent-checkbox {
@@ -1982,48 +1939,6 @@
 	.pf-agent-checkbox:disabled {
 		opacity: 0.5;
 		cursor: default;
-	}
-
-	.pf-agent-icon {
-		width: 36px;
-		height: 36px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: var(--surface-0);
-		border-radius: 8px;
-		color: var(--text-secondary);
-		flex-shrink: 0;
-		border: 1px solid var(--border-subtle);
-	}
-
-	.pf-agent-icon.active {
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		color: var(--primary);
-		border-color: color-mix(in oklch, var(--primary) 30%, transparent);
-	}
-
-	.pf-agent-info {
-		flex: 1;
-		min-width: 0;
-	}
-
-	.pf-agent-header {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-
-	.pf-agent-name {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 500;
-		color: var(--text-primary);
-	}
-
-	.pf-agent-desc {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-		margin-top: 2px;
 	}
 
 	/* ─── Environment Variables ─── */
@@ -2585,7 +2500,6 @@
 
 	/* Scrollbar styling */
 	.tools-list,
-	.pf-agent-list,
 	.plugin-agents-list {
 		scrollbar-width: thin;
 		scrollbar-color: var(--border-default) transparent;

@@ -1,8 +1,9 @@
 <script lang="ts">
 	/**
 	 * HookListItem - Individual hook item in the hooks list
+	 * Uses fp-list-item design system classes from card-design-system.css
 	 */
-	import { Terminal, Globe, MessageSquare, Play, Settings, Trash2, ToggleLeft, ToggleRight, Loader2, AlertCircle, CheckCircle } from 'lucide-svelte';
+	import { Play, Trash2, ToggleLeft, ToggleRight, Loader2, AlertCircle, ChevronRight } from 'lucide-svelte';
 	import type { Hook } from '$lib/api/client';
 
 	interface Props {
@@ -29,60 +30,66 @@
 		Notification: 'var(--warning)'
 	};
 
+	const typeColors: Record<string, string> = {
+		bash: 'var(--primary)',
+		webhook: 'var(--info)',
+		message: 'var(--success)'
+	};
+
 	const eventColor = $derived(eventColors[hook.event] || 'var(--muted-foreground)');
+	const indicatorColor = $derived(typeColors[hook.hook_type] || 'var(--primary)');
 </script>
 
 <div
-	class="hook-item"
-	class:disabled={!hook.enabled}
+	class="fp-list-item"
+	class:hook-disabled={!hook.enabled}
 	role="button"
 	tabindex="0"
 	onclick={onEdit}
 	onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onEdit(); } }}
 >
-	<div class="hook-icon" class:bash={hook.hook_type === 'bash'} class:webhook={hook.hook_type === 'webhook'} class:message={hook.hook_type === 'message'}>
-		{#if hook.hook_type === 'bash'}
-			<Terminal size={16} />
-		{:else if hook.hook_type === 'message'}
-			<MessageSquare size={16} />
-		{:else}
-			<Globe size={16} />
-		{/if}
-	</div>
+	<div class="fp-item-indicator" style="background: {indicatorColor};"></div>
 
-	<div class="hook-info">
-		<div class="hook-header">
-			<span class="hook-name">{hook.name}</span>
-			<span class="hook-event" style="--event-color: {eventColor}">
+	<div class="fp-item-content">
+		<div class="fp-item-header">
+			<span class="fp-item-name">{hook.name}</span>
+			<span class="fp-item-badge" style="background: color-mix(in oklch, {eventColor} 15%, transparent); color: {eventColor};">
 				{hook.event}
 			</span>
 			{#if hook.tool_matcher}
-				<span class="hook-matcher" title="Tool matcher pattern">
+				<span class="fp-item-badge hook-matcher-badge" title="Tool matcher pattern">
 					{hook.tool_matcher}
 				</span>
 			{/if}
 		</div>
-		<div class="hook-detail">
+		<div class="fp-item-meta">
+			<span class="fp-meta-chip">{hook.hook_type}</span>
 			{#if hook.hook_type === 'bash' && hook.command}
-				<code class="hook-command">{hook.command.substring(0, 60)}{hook.command.length > 60 ? '...' : ''}</code>
+				<span class="fp-meta-sep">/</span>
+				<span class="fp-meta-chip hook-command-chip">
+					<code>{hook.command.substring(0, 50)}{hook.command.length > 50 ? '...' : ''}</code>
+				</span>
 			{:else if hook.hook_type === 'webhook' && hook.url}
-				<span class="hook-url">{hook.url.substring(0, 60)}{hook.url.length > 60 ? '...' : ''}</span>
+				<span class="fp-meta-sep">/</span>
+				<span class="fp-meta-chip">{hook.url.substring(0, 50)}{hook.url.length > 50 ? '...' : ''}</span>
 			{:else if hook.hook_type === 'message' && hook.message_template}
-				<span class="hook-message">{hook.message_template.substring(0, 60)}{hook.message_template.length > 60 ? '...' : ''}</span>
+				<span class="fp-meta-sep">/</span>
+				<span class="fp-meta-chip">{hook.message_template.substring(0, 50)}{hook.message_template.length > 50 ? '...' : ''}</span>
+			{/if}
+			{#if hook.failure_count > 0}
+				<span class="fp-meta-sep">/</span>
+				<span class="fp-meta-chip hook-failure-chip">
+					<AlertCircle size={11} />
+					{hook.failure_count} failure{hook.failure_count > 1 ? 's' : ''}
+				</span>
 			{/if}
 		</div>
-		{#if hook.failure_count > 0}
-			<div class="hook-warning">
-				<AlertCircle size={12} />
-				<span>{hook.failure_count} recent failure{hook.failure_count > 1 ? 's' : ''}</span>
-			</div>
-		{/if}
 	</div>
 
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="hook-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+	<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
 		<button
-			class="action-btn"
+			class="fp-action-btn"
 			title="Test hook"
 			onclick={onTest}
 			disabled={testing || saving}
@@ -94,7 +101,7 @@
 			{/if}
 		</button>
 		<button
-			class="action-btn delete"
+			class="fp-action-btn fp-action-btn--destructive"
 			title="Delete hook"
 			onclick={onDelete}
 			disabled={saving}
@@ -102,7 +109,7 @@
 			<Trash2 size={14} />
 		</button>
 		<button
-			class="toggle-btn"
+			class="hook-toggle-btn"
 			title={hook.enabled ? 'Disable hook' : 'Enable hook'}
 			onclick={onToggle}
 			disabled={saving}
@@ -116,176 +123,59 @@
 			{/if}
 		</button>
 	</div>
+
+	<div class="fp-item-chevron"><ChevronRight size={16} /></div>
 </div>
 
 <style>
-	.hook-item {
-		display: flex;
-		align-items: flex-start;
-		gap: 12px;
-		padding: 12px;
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
-		transition: all 150ms ease;
-		cursor: pointer;
+	.hook-disabled {
+		opacity: 0.55;
 	}
 
-	.hook-item:hover {
-		border-color: var(--ring);
+	/* Matcher badge uses mono font */
+	.hook-matcher-badge {
+		font-family: var(--font-mono);
 	}
 
-	.hook-item.disabled {
-		opacity: 0.6;
+	/* Command chip inherits mono */
+	.hook-command-chip code {
+		font-family: var(--font-mono);
+		font-size: inherit;
 	}
 
-	.hook-icon {
-		width: 32px;
-		height: 32px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+	/* Failure chip warning color */
+	.hook-failure-chip {
+		color: var(--warning) !important;
+	}
+
+	.hook-failure-chip :global(svg) {
 		flex-shrink: 0;
 	}
 
-	.hook-icon.bash {
-		background: color-mix(in oklch, var(--primary) 20%, transparent);
-		color: var(--primary);
-	}
-
-	.hook-icon.webhook {
-		background: color-mix(in oklch, var(--info) 20%, transparent);
-		color: var(--info);
-	}
-
-	.hook-icon.message {
-		background: color-mix(in oklch, var(--success) 20%, transparent);
-		color: var(--success);
-	}
-
-	.hook-info {
-		flex: 1;
-		min-width: 0;
-	}
-
-	.hook-header {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex-wrap: wrap;
-		margin-bottom: 4px;
-	}
-
-	.hook-name {
-		font-weight: 500;
-		color: var(--foreground);
-		font-size: 0.875rem;
-	}
-
-	.hook-event {
-		padding: 2px 6px;
-		font-size: 0.6875rem;
-		font-weight: 500;
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		background: color-mix(in oklch, var(--event-color) 15%, transparent);
-		color: var(--event-color);
-	}
-
-	.hook-matcher {
-		padding: 2px 6px;
-		font-size: 0.6875rem;
-		font-family: var(--font-mono);
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		background: var(--muted);
-		color: var(--muted-foreground);
-	}
-
-	.hook-detail {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-	}
-
-	.hook-command {
-		font-family: var(--font-mono);
-		font-size: 0.6875rem;
-		padding: 2px 4px;
-		background: var(--muted);
-		border-radius: calc(var(--radius, 0.75rem) * 0.25);
-	}
-
-	.hook-url {
-		word-break: break-all;
-	}
-
-	.hook-warning {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		margin-top: 6px;
-		font-size: 0.6875rem;
-		color: var(--warning);
-	}
-
-	.hook-actions {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		flex-shrink: 0;
-	}
-
-	.action-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 28px;
-		height: 28px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		background: transparent;
-		border: none;
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-
-	.action-btn:hover:not(:disabled) {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-
-	.action-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.action-btn.delete:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--destructive) 15%, transparent);
-		color: var(--destructive);
-	}
-
-	.toggle-btn {
+	/* Toggle button — special wider action */
+	.hook-toggle-btn {
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		width: 36px;
 		height: 28px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		border-radius: var(--radius-sm, calc(var(--radius, 0.75rem) * 0.5));
 		background: transparent;
 		border: none;
 		cursor: pointer;
 		transition: all 150ms ease;
 	}
 
-	.toggle-btn:disabled {
+	.hook-toggle-btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
 	}
 
-	.toggle-btn :global(.enabled) {
+	.hook-toggle-btn :global(.enabled) {
 		color: var(--success);
 	}
 
-	.toggle-btn :global(.disabled) {
+	.hook-toggle-btn :global(.disabled) {
 		color: var(--muted-foreground);
 	}
 

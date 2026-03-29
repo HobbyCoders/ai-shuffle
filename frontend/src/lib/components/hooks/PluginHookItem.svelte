@@ -1,8 +1,9 @@
 <script lang="ts">
 	/**
 	 * PluginHookItem - Read-only display of plugin-contributed hooks
+	 * Uses fp-list-item design system classes from card-design-system.css
 	 */
-	import { Puzzle, FileCode } from 'lucide-svelte';
+	import { FileCode, ChevronRight } from 'lucide-svelte';
 	import type { PluginHookInfo } from '$lib/api/client';
 
 	interface Props {
@@ -26,128 +27,48 @@
 	const eventColor = $derived(eventColors[hook.event] || 'var(--muted-foreground)');
 </script>
 
-<div class="plugin-hook-item">
-	<div class="hook-icon">
-		<Puzzle size={16} />
-	</div>
+<div class="fp-list-item plugin-hook-row">
+	<div class="fp-item-indicator" style="background: var(--muted-foreground);"></div>
 
-	<div class="hook-info">
-		<div class="hook-header">
-			<span class="plugin-name">{hook.plugin_name}</span>
-			<span class="hook-event" style="--event-color: {eventColor}">
+	<div class="fp-item-content">
+		<div class="fp-item-header">
+			<span class="fp-item-name">{hook.plugin_name}</span>
+			<span class="fp-item-badge" style="background: color-mix(in oklch, {eventColor} 15%, transparent); color: {eventColor};">
 				{hook.event}
 			</span>
 			{#if hook.tool_matcher}
-				<span class="hook-matcher" title="Tool matcher pattern">
+				<span class="fp-item-badge plugin-matcher-badge" title="Tool matcher pattern">
 					{hook.tool_matcher}
 				</span>
 			{/if}
+			<span class="fp-item-badge">Plugin</span>
 		</div>
-		{#if hook.description}
-			<div class="hook-description">
-				{hook.description}
-			</div>
-		{/if}
-		<div class="hook-meta">
-			<span class="hook-type">
-				<FileCode size={12} />
+		<div class="fp-item-meta">
+			<span class="fp-meta-chip">
+				<FileCode size={11} />
 				{hook.hook_type}
 			</span>
+			{#if hook.description}
+				<span class="fp-meta-sep">/</span>
+				<span class="fp-meta-chip">{hook.description}</span>
+			{/if}
 		</div>
 	</div>
 
-	<div class="read-only-badge">
-		Plugin
-	</div>
+	<div class="fp-item-chevron"><ChevronRight size={16} /></div>
 </div>
 
 <style>
-	.plugin-hook-item {
-		display: flex;
-		align-items: flex-start;
-		gap: 12px;
-		padding: 12px;
-		background: var(--secondary);
-		border: 1px dashed var(--border);
-		border-radius: var(--radius, 0.75rem);
+	/* Plugin rows are non-interactive — reduce cursor and hover */
+	.plugin-hook-row {
+		cursor: default;
 	}
 
-	.hook-icon {
-		width: 32px;
-		height: 32px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
-		color: var(--muted-foreground);
-		flex-shrink: 0;
+	.plugin-hook-row:hover {
+		background: transparent;
 	}
 
-	.hook-info {
-		flex: 1;
-		min-width: 0;
-	}
-
-	.hook-header {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex-wrap: wrap;
-		margin-bottom: 4px;
-	}
-
-	.plugin-name {
-		font-weight: 500;
-		color: var(--foreground);
-		font-size: 0.875rem;
-	}
-
-	.hook-event {
-		padding: 2px 6px;
-		font-size: 0.6875rem;
-		font-weight: 500;
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		background: color-mix(in oklch, var(--event-color) 15%, transparent);
-		color: var(--event-color);
-	}
-
-	.hook-matcher {
-		padding: 2px 6px;
-		font-size: 0.6875rem;
+	.plugin-matcher-badge {
 		font-family: var(--font-mono);
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		background: var(--muted);
-		color: var(--muted-foreground);
-	}
-
-	.hook-description {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		margin-bottom: 6px;
-	}
-
-	.hook-meta {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-
-	.hook-type {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		font-size: 0.6875rem;
-		color: var(--muted-foreground);
-	}
-
-	.read-only-badge {
-		padding: 2px 8px;
-		font-size: 0.6875rem;
-		font-weight: 500;
-		border-radius: calc(var(--radius, 0.75rem) * 0.33);
-		background: var(--muted);
-		color: var(--muted-foreground);
-		flex-shrink: 0;
 	}
 </style>

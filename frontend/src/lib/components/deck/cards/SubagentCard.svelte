@@ -571,12 +571,10 @@
 			</div>
 		{:else}
 			<div class="fp-list">
-				{#each filteredSubagents() as agent (agent.id)}
+				{#each filteredSubagents() as agent, index (agent.id)}
+					{#if index > 0}<div class="fp-list-divider"></div>{/if}
 					{#if deletingId === agent.id}
 						<div class="fp-list-item" style="border-color: color-mix(in oklch, var(--destructive) 40%, transparent);">
-							<div class="fp-item-icon" style="background: color-mix(in oklch, var(--destructive) 12%, transparent); color: var(--destructive);">
-								<Trash2 />
-							</div>
 							<div class="fp-item-content">
 								<p class="fp-item-name">
 									Delete <strong>{agent.name}</strong>? This cannot be undone.
@@ -605,9 +603,6 @@
 						</div>
 					{:else if revertingId === agent.id}
 						<div class="fp-list-item" style="border-color: color-mix(in oklch, var(--warning) 40%, transparent);">
-							<div class="fp-item-icon" style="background: color-mix(in oklch, var(--warning) 12%, transparent); color: var(--warning);">
-								<RotateCcw />
-							</div>
 							<div class="fp-item-content">
 								<p class="fp-item-name">
 									Revert <strong>{agent.name}</strong> to original defaults? Your customizations will be lost.
@@ -641,31 +636,25 @@
 							tabindex="0"
 							onkeydown={(e) => e.key === 'Enter' && handleEdit(agent)}
 						>
-							<div class="fp-item-icon fp-item-icon--primary">
-								<Bot />
-							</div>
+							<div class="fp-item-indicator"></div>
 							<div class="fp-item-content">
 								<div class="fp-item-header">
 									<span class="fp-item-name">{agent.name}</span>
-								</div>
-								<p class="fp-item-description">{agent.description}</p>
-								<div class="fp-item-meta">
-									<span class="fp-meta-chip"><Cpu size={12} /> {getModelDisplay(agent.model)}</span>
-									{#if agent.tools && agent.tools.length > 0}
-										<span class="fp-meta-dot"></span>
-										<span class="fp-meta-chip"><Wrench size={12} /> {agent.tools.length} tools</span>
-									{/if}
 									{#if agent.is_builtin}
-										<span class="fp-meta-dot"></span>
-										<span class="fp-meta-chip"><Lock size={12} /> Built-in</span>
+										<span class="fp-item-badge">Built-in</span>
 										{#if agent.is_modified}
-											<span class="fp-meta-dot"></span>
-											<span class="fp-meta-chip" style="color: var(--warning);">Modified</span>
+											<span class="fp-item-badge" style="color: var(--warning);">Modified</span>
 										{/if}
 									{/if}
 									{#if $groups.subagents.assignments[agent.id]}
-										<span class="fp-meta-dot"></span>
-										<span class="fp-meta-chip" style="color: var(--primary);">{$groups.subagents.assignments[agent.id]}</span>
+										<span class="fp-item-badge fp-item-badge--accent">{$groups.subagents.assignments[agent.id]}</span>
+									{/if}
+								</div>
+								<div class="fp-item-meta">
+									<span class="fp-meta-model">{getModelDisplay(agent.model)}</span>
+									{#if agent.tools && agent.tools.length > 0}
+										<span class="fp-meta-sep">·</span>
+										<span class="fp-meta-chip">{agent.tools.length} tools</span>
 									{/if}
 								</div>
 							</div>
@@ -696,6 +685,7 @@
 									</button>
 								{/if}
 							</div>
+							<div class="fp-item-chevron"><ChevronRight size={16} /></div>
 						</div>
 					{/if}
 				{/each}

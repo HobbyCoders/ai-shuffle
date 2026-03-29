@@ -188,7 +188,8 @@
 						</p>
 					</div>
 				{:else}
-					{#each filteredHooks() as hook (hook.id)}
+					{#each filteredHooks() as hook, index (hook.id)}
+						{#if index > 0}<div class="fp-list-divider"></div>{/if}
 						<HookListItem
 							{hook}
 							testing={$hookTesting[hook.id] || false}
@@ -210,7 +211,8 @@
 						</p>
 					</div>
 				{:else}
-					{#each filteredPluginHooks() as hook (hook.plugin_id + hook.event)}
+					{#each filteredPluginHooks() as hook, index (hook.plugin_id + hook.event)}
+						{#if index > 0}<div class="fp-list-divider"></div>{/if}
 						<PluginHookItem {hook} />
 					{/each}
 				{/if}

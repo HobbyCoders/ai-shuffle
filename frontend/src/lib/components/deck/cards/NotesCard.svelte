@@ -7,7 +7,7 @@
 
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import './card-design-system.css';
-	import { StickyNote, Search as SearchIcon, Plus, Pin, Trash2 } from 'lucide-svelte';
+	import { StickyNote, Search as SearchIcon, Plus, Pin, Trash2, ChevronRight } from 'lucide-svelte';
 	import {
 		getNotes,
 		createNote,
@@ -342,25 +342,16 @@
 					<button class="create-first-btn" onclick={startNewNote}>Create your first note</button>
 				</div>
 			{:else}
-				{#each notes as note}
+				{#each notes as note, index}
+					{#if index > 0}<div class="fp-list-divider"></div>{/if}
 					<div class="note-item fp-list-item" onclick={() => openNote(note)} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && openNote(note)}>
-						<div class="note-item-icon fp-item-icon fp-item-icon--primary">
-							<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-								<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-								<polyline points="14 2 14 8 20 8"/>
-								<line x1="16" y1="13" x2="8" y2="13"/>
-								<line x1="16" y1="17" x2="8" y2="17"/>
-								<polyline points="10 9 9 9 8 9"/>
-							</svg>
-						</div>
+						<div class="fp-item-indicator"></div>
 						<div class="note-item-content fp-item-content">
 							<div class="note-header fp-item-header">
-								{#if note.is_pinned}
-									<span class="pin-icon">
-										<Pin size={14} />
-									</span>
-								{/if}
 								<span class="note-title fp-item-name">{note.title}</span>
+								{#if note.is_pinned}
+									<span class="fp-item-badge">Pinned</span>
+								{/if}
 							</div>
 							<div class="note-meta fp-item-meta">
 							{#if note.tags.length > 0}
@@ -373,6 +364,9 @@
 									{/if}
 								</span>
 							{/if}
+							{#if note.tags.length > 0}
+								<span class="fp-meta-sep">&middot;</span>
+							{/if}
 							<span class="note-date">{formatRelativeTime(note.updated_at)}</span>
 							</div>
 						</div>
@@ -384,6 +378,7 @@
 								<Trash2 size={16} />
 							</button>
 						</div>
+						<div class="fp-item-chevron"><ChevronRight size={16} /></div>
 					</div>
 				{/each}
 			{/if}
@@ -551,17 +546,11 @@
 	.notes-scroll {
 		flex: 1;
 		overflow-y: auto;
-		padding: var(--space-2);
+		padding: var(--space-1) var(--space-2);
 	}
 
 	.note-item {
-		margin-bottom: var(--space-2);
 		text-align: left;
-	}
-
-	.pin-icon {
-		color: var(--text-accent);
-		flex-shrink: 0;
 	}
 
 	.note-title {

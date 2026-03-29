@@ -17,7 +17,7 @@
 	 */
 	import { appData as tabs, projects } from '$lib/stores/app-data';
 	import { groups } from '$lib/stores/groups';
-	import { Search, Plus, Trash2, FolderOpen, X, Settings, Server, Bot, Zap, MessageSquare, Brain } from 'lucide-svelte';
+	import { Search, Plus, Trash2, FolderOpen, X, Settings, Server, Bot, Zap, MessageSquare, Brain, ChevronRight } from 'lucide-svelte';
 	import type ProjectMcpTabType from './ProjectMcpTab.svelte';
 	import ProjectGeneralTab from './ProjectGeneralTab.svelte';
 	import ProjectMcpTab from './ProjectMcpTab.svelte';
@@ -112,9 +112,6 @@
 
 {#snippet deleteConfirmation(project: typeof $projects[0])}
 	<div class="card-list-item card-list-item--deleting fp-list-item fp-list-item--deleting">
-		<div class="card-item-icon card-item-icon--destructive fp-item-icon fp-item-icon--destructive">
-			<Trash2 />
-		</div>
 		<div class="card-item-content fp-item-content">
 			{#if project.session_count && project.session_count > 0}
 				<div class="delete-warning">
@@ -256,7 +253,8 @@
 				</div>
 			{:else}
 				<div class="fp-list">
-					{#each filteredProjects() as project (project.id)}
+					{#each filteredProjects() as project, index (project.id)}
+						{#if index > 0}<div class="fp-list-divider"></div>{/if}
 						{#if deletingId === project.id}
 							{@render deleteConfirmation(project)}
 						{:else}
@@ -267,20 +265,17 @@
 								tabindex="0"
 								onkeydown={(e) => e.key === 'Enter' && handleProjectClick(project.id)}
 							>
-								<div class="fp-item-icon fp-item-icon--primary">
-									<FolderOpen size={18} />
-								</div>
+								<div class="fp-item-indicator"></div>
 								<div class="fp-item-content">
 									<div class="fp-item-header">
 										<span class="fp-item-name">{project.name}</span>
+										{#if $groups.projects.assignments[project.id]}
+											<span class="fp-item-badge">{$groups.projects.assignments[project.id]}</span>
+										{/if}
 									</div>
 									<span class="fp-item-id">{project.path}</span>
 									<div class="fp-item-meta">
-										<span class="fp-meta-chip"><MessageSquare size={12} /> {project.session_count || 0} sessions</span>
-										{#if $groups.projects.assignments[project.id]}
-											<span class="fp-meta-dot"></span>
-											<span class="fp-meta-chip" style="color: var(--primary);">{$groups.projects.assignments[project.id]}</span>
-										{/if}
+										<span class="fp-meta-chip fp-meta-model">{project.session_count || 0} sessions</span>
 									</div>
 								</div>
 								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
@@ -292,6 +287,7 @@
 										<Trash2 size={14} />
 									</button>
 								</div>
+								<div class="fp-item-chevron"><ChevronRight size={16} /></div>
 							</div>
 						{/if}
 					{/each}

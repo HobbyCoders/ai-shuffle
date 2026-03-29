@@ -851,47 +851,44 @@
 			{/if}
 		</div>
 	{:else}
-		<div class="auto-list">
-			{#each filteredAutomations() as automation (automation.id)}
-				<div class="auto-list-item" transition:slide={{ duration: 150 }}>
-					<!-- Status dot + name row -->
-					<button class="auto-item-main" onclick={() => openDetail(automation)}>
-						<span
-							class="auto-status-dot"
-							style="background: {getStatusColor(automation.status)}"
-							title={automation.status}
-						></span>
-						<div class="auto-item-info">
-							<div class="auto-item-header">
-								<span class="auto-item-name">{automation.name}</span>
-								{#each (automation.triggers || [{ type: automation.trigger_type }]).slice(0, 3) as trig}
-									<span class="card-badge card-badge--muted">{triggerTypeLabel(trig.type)}</span>
-								{/each}
-								{#if (automation.triggers || []).length > 3}
-									<span class="card-badge card-badge--muted">+{(automation.triggers || []).length - 3}</span>
-								{/if}
-								{#if !automation.is_enabled}
-									<span class="card-badge card-badge--warning">Disabled</span>
-								{/if}
-							</div>
-							{#if automation.description}
-								<span class="auto-item-desc">{automation.description}</span>
+		<div class="fp-list">
+			{#each filteredAutomations() as automation, idx (automation.id)}
+				{#if idx > 0}
+					<div class="fp-list-divider"></div>
+				{/if}
+				<div class="fp-list-item" transition:slide={{ duration: 150 }}>
+					<div class="fp-item-indicator" style="background: {getStatusColor(automation.status)}" title={automation.status}></div>
+
+					<button class="fp-item-content" style="background:none;border:none;cursor:pointer;text-align:left;padding:0;color:inherit;" onclick={() => openDetail(automation)}>
+						<div class="fp-item-header">
+							<span class="fp-item-name">{automation.name}</span>
+							{#each (automation.triggers || [{ type: automation.trigger_type }]).slice(0, 3) as trig}
+								<span class="fp-item-badge">{triggerTypeLabel(trig.type)}</span>
+							{/each}
+							{#if (automation.triggers || []).length > 3}
+								<span class="fp-item-badge">+{(automation.triggers || []).length - 3}</span>
 							{/if}
-							<div class="auto-item-meta">
-								<span class="fp-meta-chip">
-									<Clock size={11} />
-									{formatTime(automation.last_run_at)}
-								</span>
-								<span class="fp-meta-dot"></span>
-								<span class="fp-meta-chip">{formatCost(automation.total_cost_used)}</span>
-								<span class="fp-meta-dot"></span>
-								<span class="fp-meta-chip">{automation.run_count} runs</span>
-							</div>
+							{#if !automation.is_enabled}
+								<span class="card-badge card-badge--warning">Disabled</span>
+							{/if}
+						</div>
+						{#if automation.description}
+							<span class="fp-item-description">{automation.description}</span>
+						{/if}
+						<div class="fp-item-meta">
+							<span class="fp-meta-chip">
+								<Clock size={11} />
+								{formatTime(automation.last_run_at)}
+							</span>
+							<span class="fp-meta-sep">|</span>
+							<span class="fp-meta-chip">{formatCost(automation.total_cost_used)}</span>
+							<span class="fp-meta-sep">|</span>
+							<span class="fp-meta-chip">{automation.run_count} runs</span>
 						</div>
 					</button>
 
-					<!-- Actions -->
-					<div class="auto-item-actions">
+					<!-- Actions (hidden until hover via fp-item-actions) -->
+					<div class="fp-item-actions">
 						<button
 							class="card-action-btn"
 							title={automation.is_enabled ? 'Disable' : 'Enable'}
@@ -929,6 +926,10 @@
 						>
 							<Trash2 size={16} />
 						</button>
+					</div>
+
+					<div class="fp-item-chevron">
+						<ChevronRight size={16} />
 					</div>
 				</div>
 			{/each}
@@ -2132,98 +2133,7 @@
 	}
 
 	/* ═══════════════════ List View ═══════════════════ */
-	.auto-list {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		padding: 16px;
-	}
-
-	.auto-list-item {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 12px 16px;
-		background: var(--surface-0);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, calc(var(--radius, 0.75rem) * 0.833));
-		transition: border-color 150ms, box-shadow 150ms, transform 150ms;
-	}
-
-	.auto-list-item:hover {
-		border-color: var(--border-emphasis);
-		box-shadow: var(--shadow-sm);
-		transform: translateY(-1px);
-	}
-
-	.auto-item-main {
-		flex: 1;
-		min-width: 0;
-		display: flex;
-		align-items: flex-start;
-		gap: 10px;
-		background: none;
-		border: none;
-		color: inherit;
-		cursor: pointer;
-		text-align: left;
-		padding: 0;
-	}
-
-	.auto-status-dot {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		flex-shrink: 0;
-		margin-top: 5px;
-	}
-
-	.auto-item-info {
-		flex: 1;
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.auto-item-header {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		flex-wrap: wrap;
-	}
-
-	.auto-item-name {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 600;
-		color: var(--text-primary, var(--foreground));
-	}
-
-	.auto-item-desc {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary, var(--muted-foreground));
-		display: -webkit-box;
-		-webkit-line-clamp: 1;
-		line-clamp: 1;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-	}
-
-	.auto-item-meta {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		flex-wrap: wrap;
-		margin-top: 2px;
-	}
-
-	.auto-item-actions {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 2px;
-		flex-shrink: 0;
-	}
+	/* Automation list — uses fp-list, fp-list-item, etc. from card-design-system.css */
 
 	/* ═══════════════════ Form View ═══════════════════ */
 	.auto-form {
@@ -2993,17 +2903,6 @@
 	}
 
 	@media (max-width: 639px) {
-		.auto-list-item {
-			flex-wrap: wrap;
-		}
-
-		.auto-item-actions {
-			flex: 1 0 100%;
-			justify-content: center;
-			padding-top: 8px;
-			border-top: 1px solid var(--border-subtle, var(--border));
-		}
-
 		.cron-builder-grid {
 			grid-template-columns: 1fr;
 		}
