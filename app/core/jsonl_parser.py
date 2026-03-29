@@ -1215,18 +1215,6 @@ def _parse_session_history_uncached(
             "model": usage_model
         }
 
-    # ── DEBUG: Log parsed usage for context tracking ──
-    if usage_data:
-        logger.warning(
-            f"[ContextUsage:DEBUG] JSONL parsed usage for sdk_session={sdk_session_id} "
-            f"| last_input_tokens={usage_data.get('last_input_tokens', 0)} "
-            f"| cache_creation={usage_data.get('cache_creation_tokens', 0)} "
-            f"| cache_read={usage_data.get('cache_read_tokens', 0)} "
-            f"| total_in={usage_data.get('total_tokens_in', 0)} "
-            f"| total_out={usage_data.get('total_tokens_out', 0)} "
-            f"| raw last_usage keys={list(last_usage.keys()) if last_usage else 'empty'}"
-        )
-
     return messages, usage_data
 
 

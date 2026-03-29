@@ -78,16 +78,6 @@ async def handle_stream_start(
         if isinstance(message_data, dict):
             usage_data = message_data.get("usage")
             if usage_data:
-                context_used = (
-                    usage_data.get("input_tokens", 0)
-                    + usage_data.get("cache_creation_input_tokens", 0)
-                    + usage_data.get("cache_read_input_tokens", 0)
-                )
-                logger.warning(
-                    f"[ContextUsage:DEBUG] stream_start (first) session={ectx.session_id} "
-                    f"| context_used={context_used} "
-                    f"| raw usage={usage_data}"
-                )
                 await live_session_store.update_usage(
                     ectx.session_id,
                     input_tokens=usage_data.get("input_tokens", 0),
@@ -112,16 +102,6 @@ async def handle_stream_start(
         if isinstance(message_data, dict):
             usage_data = message_data.get("usage")
             if usage_data:
-                context_used = (
-                    usage_data.get("input_tokens", 0)
-                    + usage_data.get("cache_creation_input_tokens", 0)
-                    + usage_data.get("cache_read_input_tokens", 0)
-                )
-                logger.warning(
-                    f"[ContextUsage:DEBUG] stream_start (subsequent) session={ectx.session_id} "
-                    f"| context_used={context_used} "
-                    f"| raw usage={usage_data}"
-                )
                 await live_session_store.update_usage(
                     ectx.session_id,
                     input_tokens=usage_data.get("input_tokens", 0),
@@ -637,20 +617,35 @@ async def handle_done(
                 if seed_project:
                     seed_working_dir = get_project_working_dir(seed_project)
 
+            # Build usage data matching the format parse_session_history returns.
+            # IMPORTANT: Use live store per-turn values, NOT final_metadata cumulative totals.
+            # The live store tracks per-API-call values (input_tokens, cache_creation_tokens,
+            # cache_read_tokens) which represent the current context window size.
+            # final_metadata contains SESSION-WIDE cumulative totals (tokens_in, cache_creation_tokens,
+            # cache_read_tokens) which would massively overcount context usage.
+            # Bug: Previously used final_metadata cumulative values → 9x context inflation on session switch.
             live_usage = live_data.get("usage", {})
             seed_usage = {
                 "total_tokens_in": live_usage.get("input_tokens", 0),
                 "total_tokens_out": live_usage.get("output_tokens", 0),
-                "cache_creation_tokens": state.final_metadata.get(
-                    "cache_creation_tokens", live_usage.get("cache_creation_tokens", 0)
-                ),
-                "cache_read_tokens": state.final_metadata.get(
-                    "cache_read_tokens", live_usage.get("cache_read_tokens", 0)
-                ),
-                "last_input_tokens": state.final_metadata.get("tokens_in", 0),
+                "cache_creation_tokens": live_usage.get("cache_creation_tokens", 0),
+                "cache_read_tokens": live_usage.get("cache_read_tokens", 0),
+                "last_input_tokens": live_usage.get("input_tokens", 0),
                 "model": state.final_metadata.get("model"),
             }
 
+            context_used = (
+                seed_usage["last_input_tokens"]
+                + seed_usage["cache_creation_tokens"]
+                + seed_usage["cache_read_tokens"]
+            )
+            logger.warning(
+                f"[ContextUsage:DEBUG] pre_seed_parse_cache session={ectx.session_id} "
+                f"| context_used={context_used} "
+                f"| last_input={seed_usage['last_input_tokens']} "
+                f"| cache_create={seed_usage['cache_creation_tokens']} "
+                f"| cache_read={seed_usage['cache_read_tokens']}"
+            )
             pre_seed_parse_cache(sdk_sid, live_data["messages"], seed_usage, seed_working_dir)
         else:
             invalidate_parse_cache(sdk_sid)

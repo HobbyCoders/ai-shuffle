@@ -866,24 +866,6 @@ class LiveSessionStore:
                 logger.warning(f"update_usage: session {session_id} not found")
                 return
 
-            # ── DEBUG: Log usage updates, especially when session is NOT streaming ──
-            if not session.is_streaming:
-                logger.warning(
-                    f"[ContextUsage:DEBUG] update_usage called on NON-STREAMING session={session_id} "
-                    f"| input_tokens: {session.input_tokens} → {input_tokens} "
-                    f"| cache_creation: {session.cache_creation_tokens} → {cache_creation_tokens} "
-                    f"| cache_read: {session.cache_read_tokens} → {cache_read_tokens}"
-                )
-            else:
-                prev_context = session.input_tokens + session.cache_creation_tokens + session.cache_read_tokens
-                new_context = input_tokens + cache_creation_tokens + cache_read_tokens
-                if new_context != prev_context:
-                    logger.warning(
-                        f"[ContextUsage:DEBUG] update_usage STREAMING session={session_id} "
-                        f"| context: {prev_context} → {new_context} "
-                        f"| input={input_tokens} cache_create={cache_creation_tokens} cache_read={cache_read_tokens}"
-                    )
-
             session.input_tokens = input_tokens
             session.output_tokens = output_tokens
             session.cache_creation_tokens = cache_creation_tokens
