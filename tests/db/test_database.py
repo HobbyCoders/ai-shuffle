@@ -2151,3 +2151,190 @@ class TestSessionsByTag:
 
         assert len(result) == 1
         assert result[0]["id"] == "session-1"
+
+
+# =============================================================================
+# Database Maintenance Tests
+# =============================================================================
+
+class TestRunDatabaseMaintenance:
+    """Test run_database_maintenance cleanup and results."""
+
+    @pytest.fixture
+    def setup_log_tables(self, mock_db, setup_profile):
+        """Add missing log tables and seed old + recent rows for maintenance tests."""
+        cursor = mock_db.cursor()
+
+        # Create a session for FK references
+        db.create_session("s1", setup_profile)
+
+        # connector_event_log requires connectors table for FK
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS connectors (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                connector_type TEXT NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS connector_event_log (
+                id TEXT PRIMARY KEY,
+                connector_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                direction TEXT NOT NULL DEFAULT 'outbound',
+                payload JSON,
+                status TEXT DEFAULT 'pending',
+                error TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE
+            )
+        """)
+        # Insert a connector for FK reference
+        cursor.execute(
+            "INSERT INTO connectors (id, name, connector_type) VALUES (?, ?, ?)",
+            ("conn-1", "Test Connector", "slack"),
+        )
+        mock_db.commit()
+
+        now = datetime.now(timezone.utc)
+        old_ts = (now - timedelta(days=10)).isoformat()
+        recent_ts = (now - timedelta(days=1)).isoformat()
+
+        # usage_log: old + recent
+        cursor.execute(
+            "INSERT INTO usage_log (session_id, model, tokens_in, tokens_out, cost_usd, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("s1", "claude-3", 100, 200, 0.01, 500, old_ts),
+        )
+        cursor.execute(
+            "INSERT INTO usage_log (session_id, model, tokens_in, tokens_out, cost_usd, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("s1", "claude-3", 150, 250, 0.02, 600, recent_ts),
+        )
+
+        # audit_log: old + recent
+        cursor.execute(
+            "INSERT INTO audit_log (id, event_type, created_at) VALUES (?, ?, ?)",
+            ("audit-old", "login", old_ts),
+        )
+        cursor.execute(
+            "INSERT INTO audit_log (id, event_type, created_at) VALUES (?, ?, ?)",
+            ("audit-new", "login", recent_ts),
+        )
+
+        # sync_log: old + recent (needs a session FK)
+        cursor.execute(
+            "INSERT INTO sync_log (session_id, event_type, entity_type, created_at) VALUES (?, ?, ?, ?)",
+            ("s1", "create", "message", old_ts),
+        )
+        cursor.execute(
+            "INSERT INTO sync_log (session_id, event_type, entity_type, created_at) VALUES (?, ?, ?, ?)",
+            ("s1", "create", "message", recent_ts),
+        )
+
+        # connector_event_log: old + recent
+        cursor.execute(
+            "INSERT INTO connector_event_log (id, connector_id, event_type, created_at) VALUES (?, ?, ?, ?)",
+            ("evt-old", "conn-1", "message", old_ts),
+        )
+        cursor.execute(
+            "INSERT INTO connector_event_log (id, connector_id, event_type, created_at) VALUES (?, ?, ?, ?)",
+            ("evt-new", "conn-1", "message", recent_ts),
+        )
+
+        # request_log uses 'timestamp' column, not 'created_at', so the
+        # maintenance function's DELETE WHERE created_at < ? will error
+        # (handled gracefully). Insert rows to confirm they are untouched.
+        cursor.execute(
+            "INSERT INTO request_log (id, endpoint, timestamp) VALUES (?, ?, ?)",
+            ("req-old", "/api/test", old_ts),
+        )
+        cursor.execute(
+            "INSERT INTO request_log (id, endpoint, timestamp) VALUES (?, ?, ?)",
+            ("req-new", "/api/test", recent_ts),
+        )
+
+        mock_db.commit()
+        return mock_db
+
+    def test_maintenance_cleans_old_rows_keeps_recent(self, setup_log_tables):
+        """run_database_maintenance should delete rows older than 7 days and keep recent ones."""
+        conn = setup_log_tables
+
+        # Verify precondition: 2 rows in each table before maintenance
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM usage_log")
+        assert cursor.fetchone()[0] == 2
+        cursor.execute("SELECT COUNT(*) FROM audit_log")
+        assert cursor.fetchone()[0] == 2
+
+        results = db.run_database_maintenance()
+
+        # Note: after maintenance, the test connection may be closed by VACUUM's
+        # conn.close() since mock_get_connection returns the same connection.
+        # We verify behavior via the results dict instead.
+
+        # Should return a dict with keys for each step
+        assert isinstance(results, dict)
+        assert "wal_checkpoint" in results
+        assert "optimize" in results
+        assert "vacuum" in results
+
+        # usage_log: 1 old deleted, 1 recent kept
+        assert results["cleaned_usage_log"] == 1
+
+        # audit_log: 1 old deleted, 1 recent kept
+        assert results["cleaned_audit_log"] == 1
+
+        # sync_log: 1 old deleted, 1 recent kept
+        assert results["cleaned_sync_log"] == 1
+
+        # connector_event_log: 1 old deleted, 1 recent kept
+        assert results["cleaned_connector_event_log"] == 1
+
+        # request_log: uses 'timestamp' column, 1 old deleted, 1 recent kept
+        assert results["cleaned_request_log"] == 1
+
+    def test_maintenance_returns_wal_checkpoint_info(self, setup_log_tables):
+        """run_database_maintenance should return WAL checkpoint details."""
+        results = db.run_database_maintenance()
+
+        wal = results["wal_checkpoint"]
+        # In-memory DB won't use WAL mode, but the PRAGMA still returns a row
+        assert isinstance(wal, dict)
+        assert "busy" in wal
+        assert "log_pages" in wal
+        assert "checkpointed_pages" in wal
+
+    def test_maintenance_with_no_old_rows(self, mock_db):
+        """run_database_maintenance should report 0 cleaned when no old rows exist."""
+        # Add tables that are missing from test schema
+        cursor = mock_db.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS connectors (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                connector_type TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS connector_event_log (
+                id TEXT PRIMARY KEY,
+                connector_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE
+            )
+        """)
+        mock_db.commit()
+
+        results = db.run_database_maintenance()
+
+        assert results["cleaned_usage_log"] == 0
+        assert results["cleaned_audit_log"] == 0
+        assert results["cleaned_sync_log"] == 0
+        assert results["cleaned_connector_event_log"] == 0
+        assert results["optimize"] == "ok"
+        assert results["vacuum"] == "ok"

@@ -364,6 +364,9 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_event ON project_hooks(event)")
         migrations_applied.append("project_hooks.project_id_nullable")
 
+    # Ensure performance-critical indexes exist (idempotent, no version gate).
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -860,6 +863,7 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(worktree_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_active ON webhooks(is_active)")
 
     # Rate limit configurations
@@ -1644,6 +1648,79 @@ def cleanup_expired_sessions() -> dict:
     else:
         logger.debug("Session cleanup: nothing to remove")
 
+    return results
+
+
+def run_database_maintenance() -> dict:
+    """Run periodic SQLite maintenance to prevent progressive slowdown.
+
+    Should be called every few hours. Handles:
+    - WAL checkpoint (keeps WAL file small, prevents read amplification)
+    - PRAGMA optimize (updates query planner statistics)
+    - Cleanup of unbounded log tables (older than 7 days)
+    - VACUUM (reclaims disk space from deleted rows)
+
+    Returns:
+        dict with maintenance results.
+    """
+    from datetime import timedelta
+    results = {}
+    cutoff_7d = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # 1. WAL checkpoint — moves WAL data back to main DB, resets WAL file.
+        # TRUNCATE mode is the most thorough: checkpoint + truncate WAL to zero bytes.
+        try:
+            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            wal_result = cursor.fetchone()
+            results["wal_checkpoint"] = {
+                "busy": wal_result[0] if wal_result else -1,
+                "log_pages": wal_result[1] if wal_result else -1,
+                "checkpointed_pages": wal_result[2] if wal_result else -1,
+            }
+        except Exception as e:
+            results["wal_checkpoint"] = f"error: {e}"
+            logger.warning(f"WAL checkpoint failed: {e}")
+
+        # 2. Update query planner statistics.
+        # PRAGMA optimize runs ANALYZE on tables whose stats are stale.
+        try:
+            cursor.execute("PRAGMA optimize")
+            results["optimize"] = "ok"
+        except Exception as e:
+            results["optimize"] = f"error: {e}"
+
+        # 3. Cleanup unbounded log tables (older than 7 days).
+        # request_log uses 'timestamp' column; all others use 'created_at'.
+        log_tables = {
+            "usage_log": "created_at",
+            "audit_log": "created_at",
+            "request_log": "timestamp",
+            "sync_log": "created_at",
+            "connector_event_log": "created_at",
+        }
+        for table, ts_col in log_tables.items():
+            try:
+                cursor.execute(f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff_7d,))
+                results[f"cleaned_{table}"] = cursor.rowcount
+            except Exception as e:
+                results[f"cleaned_{table}"] = f"error: {e}"
+
+    # 4. VACUUM — reclaims disk space. Must run outside a transaction.
+    try:
+        conn = get_connection()
+        try:
+            conn.execute("VACUUM")
+            results["vacuum"] = "ok"
+        finally:
+            conn.close()
+    except Exception as e:
+        results["vacuum"] = f"error: {e}"
+        logger.warning(f"VACUUM failed: {e}")
+
+    logger.info(f"Database maintenance completed: {results}")
     return results
 
 

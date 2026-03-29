@@ -840,3 +840,13 @@ async def discover_tools(token: str = Depends(require_admin)):
         mcp_servers=mcp_servers,
         cached=False
     )
+
+
+@router.post("/api/v1/system/db-maintenance")
+async def run_db_maintenance(token: str = Depends(require_admin)):
+    """Run database maintenance on-demand: WAL checkpoint, OPTIMIZE, log cleanup, VACUUM."""
+    import time
+    start = time.monotonic()
+    result = await asyncio.to_thread(database.run_database_maintenance)
+    elapsed = time.monotonic() - start
+    return {"elapsed_seconds": round(elapsed, 2), **result}

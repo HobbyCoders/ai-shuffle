@@ -196,6 +196,28 @@ async def lifespan(app: FastAPI):
     _cleanup_task = asyncio.create_task(_periodic_session_cleanup())
     logger.info("Periodic session cleanup task started (every 1 hour)")
 
+    # Start periodic database maintenance: WAL checkpoint, OPTIMIZE, log cleanup, VACUUM.
+    # Runs every 4 hours to prevent progressive SQLite degradation from WAL bloat,
+    # stale query planner stats, and unbounded log table growth.
+    async def _periodic_db_maintenance():
+        """Background task: SQLite maintenance every 4 hours."""
+        # Run once on startup after a short delay (catch up after long uptime).
+        await asyncio.sleep(30)
+        while True:
+            try:
+                _maint_start = time.monotonic()
+                result = await asyncio.to_thread(database.run_database_maintenance)
+                _maint_elapsed = time.monotonic() - _maint_start
+                logger.info(f"Database maintenance completed in {_maint_elapsed:.2f}s: {result}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Database maintenance failed: {e}")
+            await asyncio.sleep(4 * 3600)  # 4 hours
+
+    _maintenance_task = asyncio.create_task(_periodic_db_maintenance())
+    logger.info("Database maintenance task started (every 4 hours, first run in 30s)")
+
     # Start resource monitor for diagnosing progressive slowdown.
     # Logs dict sizes, connection counts, pool sizes, memory usage every 5 minutes.
     from app.core.resource_monitor import start_resource_monitor, stop_resource_monitor
@@ -210,6 +232,13 @@ async def lifespan(app: FastAPI):
     _cleanup_task.cancel()
     try:
         await _cleanup_task
+    except asyncio.CancelledError:
+        pass
+
+    # Cancel the database maintenance task
+    _maintenance_task.cancel()
+    try:
+        await _maintenance_task
     except asyncio.CancelledError:
         pass
 
