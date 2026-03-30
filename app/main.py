@@ -223,6 +223,11 @@ async def lifespan(app: FastAPI):
     from app.core.resource_monitor import start_resource_monitor, stop_resource_monitor
     _monitor_task = await start_resource_monitor(interval_seconds=300)
 
+    # Start plugin auto-update background task.
+    # Periodically syncs marketplaces and updates installed plugins.
+    from app.core.plugin_auto_update import start_plugin_auto_update, stop_plugin_auto_update
+    _plugin_update_task = start_plugin_auto_update()
+
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
@@ -241,6 +246,9 @@ async def lifespan(app: FastAPI):
         await _maintenance_task
     except asyncio.CancelledError:
         pass
+
+    # Stop plugin auto-update
+    await stop_plugin_auto_update(_plugin_update_task)
 
     # Stop resource monitor
     await stop_resource_monitor(_monitor_task)

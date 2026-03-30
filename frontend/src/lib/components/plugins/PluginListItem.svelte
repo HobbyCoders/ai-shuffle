@@ -4,34 +4,40 @@
 	 *
 	 * Displays plugin information with different modes:
 	 * - available: Shows install button, selection for batch install
-	 * - installed: Shows enable/disable toggle, uninstall button
+	 * - installed: Shows enable/disable toggle, uninstall button, update indicator
 	 */
 	import type { AvailablePlugin, PluginInfo } from '$lib/api/plugins';
-	import { ToggleLeft, ToggleRight, ChevronRight } from 'lucide-svelte';
+	import { ToggleLeft, ToggleRight, ChevronRight, ArrowUpCircle } from 'lucide-svelte';
 	import '$lib/components/deck/cards/card-design-system.css';
 
 	interface Props {
 		plugin: AvailablePlugin | PluginInfo;
 		installing?: boolean;
 		selected?: boolean;
+		updateAvailable?: boolean;
+		updating?: boolean;
 		mode: 'available' | 'installed';
 		onInstall?: () => void;
 		onUninstall?: () => void;
 		onToggle?: () => void;
 		onSelect?: () => void;
 		onDetails?: () => void;
+		onUpdate?: () => void;
 	}
 
 	let {
 		plugin,
 		installing = false,
 		selected = false,
+		updateAvailable = false,
+		updating = false,
 		mode,
 		onInstall,
 		onUninstall,
 		onToggle,
 		onSelect,
-		onDetails
+		onDetails,
+		onUpdate
 	}: Props = $props();
 
 	// Check if this is an installed plugin
@@ -69,6 +75,9 @@
 				<span class="fp-item-badge {installedPlugin.enabled ? 'fp-item-badge--accent' : ''}">
 					{installedPlugin.enabled ? 'Enabled' : 'Disabled'}
 				</span>
+				{#if updateAvailable}
+					<span class="fp-item-badge fp-item-badge--update">Update</span>
+				{/if}
 			{:else if mode === 'available' && availablePlugin?.installed}
 				<span class="fp-item-badge fp-item-badge--accent">Installed</span>
 			{/if}
@@ -123,6 +132,21 @@
 				</button>
 			{/if}
 		{:else if mode === 'installed' && installedPlugin}
+			{#if updateAvailable}
+				<button
+					onclick={onUpdate}
+					disabled={updating}
+					class="fp-action-btn fp-action-btn--update"
+					title="Update plugin"
+				>
+					{#if updating}
+						<span class="card-spinner card-spinner--small"></span>
+					{:else}
+						<ArrowUpCircle size={16} />
+					{/if}
+				</button>
+			{/if}
+
 			<button
 				onclick={onToggle}
 				class="fp-action-btn"
@@ -196,6 +220,25 @@
 		font-size: var(--text-xs, 0.6875rem);
 		color: var(--muted-foreground);
 		padding: 0 8px;
+	}
+
+	/* Update available badge — amber tint to distinguish from primary */
+	:global(.fp-item-badge).fp-item-badge--update {
+		background: color-mix(in oklch, #f59e0b 14%, transparent);
+		color: #f59e0b;
+		font-size: 0.625rem;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+	}
+
+	/* Update action button — amber accent on hover */
+	:global(.fp-action-btn).fp-action-btn--update:hover {
+		background: color-mix(in oklch, #f59e0b 14%, transparent);
+		color: #f59e0b;
+	}
+
+	:global(.fp-action-btn).fp-action-btn--update {
+		color: #f59e0b;
 	}
 
 </style>

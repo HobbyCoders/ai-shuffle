@@ -125,6 +125,46 @@ class PluginDetails(PluginInfo):
 
 
 @dataclass
+class PluginUpdateInfo:
+    """Information about an available plugin update"""
+    plugin_id: str
+    name: str
+    marketplace: str
+    installed_version: str
+    available_version: str
+    is_local: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "plugin_id": self.plugin_id,
+            "name": self.name,
+            "marketplace": self.marketplace,
+            "installed_version": self.installed_version,
+            "available_version": self.available_version,
+            "is_local": self.is_local
+        }
+
+
+@dataclass
+class AutoUpdateSettings:
+    """Settings for plugin auto-update"""
+    enabled: bool = True
+    interval_hours: int = 6
+    auto_sync_marketplaces: bool = True
+    auto_update_plugins: bool = True
+    last_check: Optional[str] = None  # ISO timestamp
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "interval_hours": self.interval_hours,
+            "auto_sync_marketplaces": self.auto_sync_marketplaces,
+            "auto_update_plugins": self.auto_update_plugins,
+            "last_check": self.last_check
+        }
+
+
+@dataclass
 class AvailablePlugin:
     """A plugin available in a marketplace (not necessarily installed)"""
     id: str
@@ -186,6 +226,7 @@ class PluginService:
         self.INSTALLED_FILE = self.PLUGINS_DIR / "installed_plugins.json"
         self.CACHE_DIR = self.PLUGINS_DIR / "cache"
         self.MARKETPLACES_DIR = self.PLUGINS_DIR / "marketplaces"
+        self.AUTO_UPDATE_FILE = self.PLUGINS_DIR / "auto_update_settings.json"
 
         # Project scope paths (optional)
         self.project_dir = project_dir
@@ -424,21 +465,49 @@ class PluginService:
 
         install_location = data[marketplace_id].get("installLocation")
 
-        if not install_location or not Path(install_location).exists():
+        if not install_location:
             raise RuntimeError(f"Marketplace directory not found: {install_location}")
 
-        # Git pull
-        try:
-            subprocess.run(
-                ["git", "-C", install_location, "pull", "--ff-only"],
-                check=True,
-                capture_output=True,
-                timeout=120
-            )
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to sync marketplace: {e.stderr.decode()}")
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("Marketplace sync timed out")
+        install_path = Path(install_location)
+        git_dir = install_path / ".git"
+
+        # If directory exists but isn't a git repo, re-clone it
+        if install_path.exists() and not git_dir.exists():
+            logger.warning(f"Marketplace directory exists but is not a git repo: {install_location}. Re-cloning...")
+            source_data = data[marketplace_id].get("source", {})
+            source_url = source_data.get("url") or source_data.get("repo", "")
+            # Handle GitHub shorthand (org/repo) vs full URL
+            if source_url and not source_url.startswith(("http://", "https://", "git@")):
+                source_url = f"https://github.com/{source_url}"
+            if not source_url:
+                raise RuntimeError(f"Cannot re-clone marketplace: no source URL found for {marketplace_id}")
+            shutil.rmtree(install_path, ignore_errors=True)
+            try:
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", source_url, install_location],
+                    check=True,
+                    capture_output=True,
+                    timeout=120
+                )
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"Failed to re-clone marketplace: {e.stderr.decode()}")
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("Marketplace re-clone timed out")
+        elif not install_path.exists():
+            raise RuntimeError(f"Marketplace directory not found: {install_location}")
+        else:
+            # Git pull
+            try:
+                subprocess.run(
+                    ["git", "-C", install_location, "pull", "--ff-only"],
+                    check=True,
+                    capture_output=True,
+                    timeout=120
+                )
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"Failed to sync marketplace: {e.stderr.decode()}")
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("Marketplace sync timed out")
 
         # Update lastUpdated
         data[marketplace_id]["lastUpdated"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1580,6 +1649,249 @@ class PluginService:
         result["prompt"] = "\n".join(lines[end_idx + 1:]).strip()
 
         return result
+
+    # =========================================================================
+    # Auto-Update Settings & Update Methods
+    # =========================================================================
+
+    def get_auto_update_settings(self) -> AutoUpdateSettings:
+        """Get auto-update settings"""
+        data = self._read_json_file(self.AUTO_UPDATE_FILE, {})
+        return AutoUpdateSettings(
+            enabled=data.get("enabled", True),
+            interval_hours=data.get("intervalHours", 6),
+            auto_sync_marketplaces=data.get("autoSyncMarketplaces", True),
+            auto_update_plugins=data.get("autoUpdatePlugins", True),
+            last_check=data.get("lastCheck")
+        )
+
+    def save_auto_update_settings(self, settings: AutoUpdateSettings) -> bool:
+        """Save auto-update settings"""
+        data = {
+            "enabled": settings.enabled,
+            "intervalHours": settings.interval_hours,
+            "autoSyncMarketplaces": settings.auto_sync_marketplaces,
+            "autoUpdatePlugins": settings.auto_update_plugins,
+            "lastCheck": settings.last_check
+        }
+        return self._write_json_file(self.AUTO_UPDATE_FILE, data)
+
+    def _get_marketplace_head_version(self, marketplace_id: str) -> Optional[str]:
+        """Get the current git HEAD short hash for a marketplace repo."""
+        marketplaces = self._read_json_file(self.MARKETPLACES_FILE, {})
+        mp_data = marketplaces.get(marketplace_id, {})
+        install_location = mp_data.get("installLocation")
+        if not install_location:
+            return None
+        try:
+            result = subprocess.run(
+                ["git", "-C", install_location, "rev-parse", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+        return None
+
+    def check_for_updates(self) -> List[PluginUpdateInfo]:
+        """
+        Check all installed plugins for available updates.
+
+        Compares the installed version (git hash or semver) against the
+        current marketplace HEAD. For local-source plugins, a version
+        mismatch means the marketplace has been updated since install.
+
+        Returns:
+            List of plugins with available updates
+        """
+        installed_data = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}})
+        file_version = installed_data.get("version", 1)
+        updates: List[PluginUpdateInfo] = []
+
+        # Cache marketplace HEAD versions to avoid repeated git calls
+        mp_head_cache: Dict[str, Optional[str]] = {}
+
+        for plugin_id, installation_data in installed_data.get("plugins", {}).items():
+            if not installation_data:
+                continue
+
+            # Handle both version 1 (single object) and version 2 (array) formats
+            if file_version == 1 or isinstance(installation_data, dict):
+                install = installation_data
+            else:
+                install = installation_data[0] if installation_data else None
+                if not install:
+                    continue
+
+            parts = plugin_id.rsplit("@", 1)
+            if len(parts) != 2:
+                continue
+
+            plugin_name, marketplace_id = parts
+            installed_version = install.get("version", "unknown")
+            is_local = install.get("isLocal", True)
+
+            # For local-source plugins: compare git hash
+            if is_local:
+                if marketplace_id not in mp_head_cache:
+                    mp_head_cache[marketplace_id] = self._get_marketplace_head_version(marketplace_id)
+
+                available_version = mp_head_cache[marketplace_id]
+                if not available_version:
+                    continue
+
+                if installed_version != available_version:
+                    updates.append(PluginUpdateInfo(
+                        plugin_id=plugin_id,
+                        name=plugin_name,
+                        marketplace=marketplace_id,
+                        installed_version=installed_version,
+                        available_version=available_version,
+                        is_local=True
+                    ))
+            else:
+                # For external plugins: check if marketplace entry has a newer version
+                entry = self._find_plugin_in_manifest(marketplace_id, plugin_name)
+                if entry:
+                    entry_version = entry.get("version", "")
+                    if entry_version and entry_version != installed_version:
+                        updates.append(PluginUpdateInfo(
+                            plugin_id=plugin_id,
+                            name=plugin_name,
+                            marketplace=marketplace_id,
+                            installed_version=installed_version,
+                            available_version=entry_version,
+                            is_local=False
+                        ))
+
+        return updates
+
+    def update_plugin(self, plugin_id: str) -> PluginInfo:
+        """
+        Update a single installed plugin to the latest version.
+
+        Preserves the plugin's enabled state across the re-install.
+
+        Args:
+            plugin_id: Plugin ID in format "name@marketplace"
+
+        Returns:
+            Updated PluginInfo
+        """
+        installed_data = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}})
+        if plugin_id not in installed_data.get("plugins", {}):
+            raise ValueError(f"Plugin not installed: {plugin_id}")
+
+        # Get current scope and enabled state
+        installation_data = installed_data["plugins"][plugin_id]
+        if isinstance(installation_data, list):
+            install = installation_data[0] if installation_data else {}
+        else:
+            install = installation_data
+        scope = install.get("scope", "user")
+
+        settings = self._read_json_file(self.SETTINGS_FILE, {})
+        was_enabled = settings.get("enabledPlugins", {}).get(plugin_id, False)
+
+        # Re-install (this overwrites the cache and updates installed_plugins.json)
+        result = self.install_plugin(plugin_id, scope)
+
+        # Restore enabled state
+        if was_enabled:
+            self.enable_plugin(plugin_id)
+        else:
+            self.disable_plugin(plugin_id)
+
+        logger.info(f"Updated plugin: {plugin_id} -> {result.version}")
+        return result
+
+    def update_all_plugins(self) -> List[PluginInfo]:
+        """
+        Update all installed plugins that have available updates.
+
+        Returns:
+            List of updated PluginInfo objects
+        """
+        updates = self.check_for_updates()
+        results: List[PluginInfo] = []
+
+        for update in updates:
+            try:
+                result = self.update_plugin(update.plugin_id)
+                results.append(result)
+            except Exception as e:
+                logger.error(f"Failed to update plugin {update.plugin_id}: {e}")
+
+        return results
+
+    def sync_all_marketplaces(self) -> Dict[str, bool]:
+        """
+        Sync all registered marketplaces.
+
+        Returns:
+            Dict of marketplace_id -> success status
+        """
+        results: Dict[str, bool] = {}
+        for mp in self.get_marketplaces():
+            try:
+                self.sync_marketplace(mp.id)
+                results[mp.id] = True
+            except Exception as e:
+                logger.error(f"Failed to sync marketplace {mp.id}: {e}")
+                results[mp.id] = False
+        return results
+
+    def run_auto_update(self) -> Dict[str, Any]:
+        """
+        Run the full auto-update cycle:
+        1. Sync all marketplaces (if enabled)
+        2. Check for updates
+        3. Update plugins (if enabled)
+        4. Update last_check timestamp
+
+        Returns:
+            Summary of actions taken
+        """
+        au_settings = self.get_auto_update_settings()
+        summary: Dict[str, Any] = {
+            "synced_marketplaces": {},
+            "updates_available": [],
+            "updated_plugins": [],
+            "errors": []
+        }
+
+        # 1. Sync marketplaces
+        if au_settings.auto_sync_marketplaces:
+            summary["synced_marketplaces"] = self.sync_all_marketplaces()
+
+        # 2. Check for updates
+        try:
+            updates = self.check_for_updates()
+            summary["updates_available"] = [u.to_dict() for u in updates]
+        except Exception as e:
+            logger.error(f"Failed to check for updates: {e}")
+            summary["errors"].append(f"Update check failed: {e}")
+            updates = []
+
+        # 3. Auto-update plugins
+        if au_settings.auto_update_plugins and updates:
+            for update in updates:
+                try:
+                    result = self.update_plugin(update.plugin_id)
+                    summary["updated_plugins"].append(result.to_dict())
+                except Exception as e:
+                    error_msg = f"Failed to update {update.plugin_id}: {e}"
+                    logger.error(error_msg)
+                    summary["errors"].append(error_msg)
+
+        # 4. Update last check timestamp
+        au_settings.last_check = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        self.save_auto_update_settings(au_settings)
+
+        return summary
 
 
 # Global service instance cache (keyed by project_dir)

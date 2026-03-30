@@ -88,6 +88,30 @@ export interface AddMarketplaceRequest {
 	name: string;
 }
 
+export interface PluginUpdateInfo {
+	plugin_id: string;
+	name: string;
+	marketplace: string;
+	installed_version: string;
+	available_version: string;
+	is_local: boolean;
+}
+
+export interface AutoUpdateSettings {
+	enabled: boolean;
+	interval_hours: number;
+	auto_sync_marketplaces: boolean;
+	auto_update_plugins: boolean;
+	last_check: string | null;
+}
+
+export interface AutoUpdateRunResult {
+	synced_marketplaces: Record<string, boolean>;
+	updates_available: PluginUpdateInfo[];
+	updated_plugins: PluginInfo[];
+	errors: string[];
+}
+
 // ============================================================================
 // Marketplace API
 // ============================================================================
@@ -198,4 +222,56 @@ export async function disablePlugin(pluginId: string): Promise<void> {
  */
 export async function getFileBasedAgents(): Promise<FileBasedAgent[]> {
 	return api.get<FileBasedAgent[]>('/plugins/agents/file-based');
+}
+
+// ============================================================================
+// Plugin Update API
+// ============================================================================
+
+/**
+ * Check all installed plugins for available updates
+ */
+export async function checkForUpdates(): Promise<PluginUpdateInfo[]> {
+	return api.get<PluginUpdateInfo[]>('/plugins/updates');
+}
+
+/**
+ * Update a specific plugin to the latest version
+ */
+export async function updatePlugin(pluginId: string): Promise<PluginInfo> {
+	return api.post<PluginInfo>('/plugins/update', { plugin_id: pluginId });
+}
+
+/**
+ * Update all plugins that have available updates
+ */
+export async function updateAllPlugins(): Promise<PluginInfo[]> {
+	return api.post<PluginInfo[]>('/plugins/update/all');
+}
+
+// ============================================================================
+// Auto-Update Settings API
+// ============================================================================
+
+/**
+ * Get auto-update settings
+ */
+export async function getAutoUpdateSettings(): Promise<AutoUpdateSettings> {
+	return api.get<AutoUpdateSettings>('/plugins/auto-update/settings');
+}
+
+/**
+ * Update auto-update settings
+ */
+export async function updateAutoUpdateSettings(
+	settings: Partial<AutoUpdateSettings>
+): Promise<AutoUpdateSettings> {
+	return api.put<AutoUpdateSettings>('/plugins/auto-update/settings', settings);
+}
+
+/**
+ * Manually trigger an auto-update cycle
+ */
+export async function runAutoUpdate(): Promise<AutoUpdateRunResult> {
+	return api.post<AutoUpdateRunResult>('/plugins/auto-update/run');
 }

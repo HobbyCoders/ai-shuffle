@@ -116,6 +116,46 @@ class PluginEnableStateResponse(BaseModel):
     enabled_plugins: dict
 
 
+class PluginUpdateInfoResponse(BaseModel):
+    """Response model for a plugin update"""
+    plugin_id: str
+    name: str
+    marketplace: str
+    installed_version: str
+    available_version: str
+    is_local: bool
+
+
+class PluginUpdateRequest(BaseModel):
+    """Request to update a specific plugin"""
+    plugin_id: str = Field(..., description="Plugin ID in format 'name@marketplace'")
+
+
+class AutoUpdateSettingsResponse(BaseModel):
+    """Response model for auto-update settings"""
+    enabled: bool
+    interval_hours: int
+    auto_sync_marketplaces: bool
+    auto_update_plugins: bool
+    last_check: Optional[str] = None
+
+
+class AutoUpdateSettingsRequest(BaseModel):
+    """Request to update auto-update settings"""
+    enabled: Optional[bool] = None
+    interval_hours: Optional[int] = Field(None, ge=1, le=168)  # 1h to 1 week
+    auto_sync_marketplaces: Optional[bool] = None
+    auto_update_plugins: Optional[bool] = None
+
+
+class AutoUpdateRunResponse(BaseModel):
+    """Response from running auto-update"""
+    synced_marketplaces: dict
+    updates_available: list
+    updated_plugins: list
+    errors: list
+
+
 # ============================================================================
 # Marketplace Endpoints
 # ============================================================================
@@ -318,6 +358,180 @@ async def list_file_based_agents(token: str = Depends(require_auth)):
             detail="Failed to load file-based agents"
         )
 
+
+# ============================================================================
+# Plugin Update Endpoints
+# NOTE: These MUST be defined BEFORE the catch-all /{plugin_id:path} route
+# ============================================================================
+
+@router.get("/updates", response_model=List[PluginUpdateInfoResponse])
+async def check_for_updates(token: str = Depends(require_auth)):
+    """Check all installed plugins for available updates"""
+    service = get_plugin_service()
+    try:
+        updates = service.check_for_updates()
+        return [
+            PluginUpdateInfoResponse(
+                plugin_id=u.plugin_id,
+                name=u.name,
+                marketplace=u.marketplace,
+                installed_version=u.installed_version,
+                available_version=u.available_version,
+                is_local=u.is_local
+            )
+            for u in updates
+        ]
+    except Exception as e:
+        logger.exception("Failed to check for updates")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to check for updates"
+        )
+
+
+@router.post("/update", response_model=PluginResponse, status_code=status.HTTP_200_OK)
+async def update_plugin(
+    request: PluginUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """Update a specific plugin to the latest version - Admin only"""
+    service = get_plugin_service()
+    try:
+        plugin = service.update_plugin(request.plugin_id)
+        return PluginResponse(
+            id=plugin.id,
+            name=plugin.name,
+            marketplace=plugin.marketplace,
+            description=plugin.description,
+            version=plugin.version,
+            scope=plugin.scope,
+            install_path=plugin.install_path,
+            installed_at=plugin.installed_at,
+            enabled=plugin.enabled,
+            has_commands=plugin.has_commands,
+            has_agents=plugin.has_agents,
+            has_skills=plugin.has_skills,
+            has_hooks=plugin.has_hooks,
+            has_mcp=plugin.has_mcp
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.exception(f"Failed to update plugin: {request.plugin_id}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update plugin"
+        )
+
+
+@router.post("/update/all", response_model=List[PluginResponse], status_code=status.HTTP_200_OK)
+async def update_all_plugins(token: str = Depends(require_admin)):
+    """Update all plugins that have available updates - Admin only"""
+    service = get_plugin_service()
+    try:
+        plugins = service.update_all_plugins()
+        return [
+            PluginResponse(
+                id=p.id,
+                name=p.name,
+                marketplace=p.marketplace,
+                description=p.description,
+                version=p.version,
+                scope=p.scope,
+                install_path=p.install_path,
+                installed_at=p.installed_at,
+                enabled=p.enabled,
+                has_commands=p.has_commands,
+                has_agents=p.has_agents,
+                has_skills=p.has_skills,
+                has_hooks=p.has_hooks,
+                has_mcp=p.has_mcp
+            )
+            for p in plugins
+        ]
+    except Exception as e:
+        logger.exception("Failed to update all plugins")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update plugins"
+        )
+
+
+# ============================================================================
+# Auto-Update Settings Endpoints
+# NOTE: These MUST be defined BEFORE the catch-all /{plugin_id:path} route
+# ============================================================================
+
+@router.get("/auto-update/settings", response_model=AutoUpdateSettingsResponse)
+async def get_auto_update_settings(token: str = Depends(require_auth)):
+    """Get auto-update settings"""
+    service = get_plugin_service()
+    au_settings = service.get_auto_update_settings()
+    return AutoUpdateSettingsResponse(
+        enabled=au_settings.enabled,
+        interval_hours=au_settings.interval_hours,
+        auto_sync_marketplaces=au_settings.auto_sync_marketplaces,
+        auto_update_plugins=au_settings.auto_update_plugins,
+        last_check=au_settings.last_check
+    )
+
+
+@router.put("/auto-update/settings", response_model=AutoUpdateSettingsResponse)
+async def update_auto_update_settings(
+    request: AutoUpdateSettingsRequest,
+    token: str = Depends(require_admin)
+):
+    """Update auto-update settings - Admin only"""
+    service = get_plugin_service()
+    current = service.get_auto_update_settings()
+
+    # Merge provided fields
+    if request.enabled is not None:
+        current.enabled = request.enabled
+    if request.interval_hours is not None:
+        current.interval_hours = request.interval_hours
+    if request.auto_sync_marketplaces is not None:
+        current.auto_sync_marketplaces = request.auto_sync_marketplaces
+    if request.auto_update_plugins is not None:
+        current.auto_update_plugins = request.auto_update_plugins
+
+    service.save_auto_update_settings(current)
+
+    # Signal the background task to reschedule if needed
+    from app.core.plugin_auto_update import reschedule_auto_update
+    reschedule_auto_update()
+
+    return AutoUpdateSettingsResponse(
+        enabled=current.enabled,
+        interval_hours=current.interval_hours,
+        auto_sync_marketplaces=current.auto_sync_marketplaces,
+        auto_update_plugins=current.auto_update_plugins,
+        last_check=current.last_check
+    )
+
+
+@router.post("/auto-update/run", response_model=AutoUpdateRunResponse)
+async def run_auto_update(token: str = Depends(require_admin)):
+    """Manually trigger an auto-update cycle - Admin only"""
+    import asyncio
+    service = get_plugin_service()
+    try:
+        summary = await asyncio.to_thread(service.run_auto_update)
+        return AutoUpdateRunResponse(**summary)
+    except Exception as e:
+        logger.exception("Failed to run auto-update")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to run auto-update"
+        )
+
+
+# ============================================================================
+# Plugin Details (catch-all - MUST be last among GET routes)
+# ============================================================================
 
 @router.get("/{plugin_id:path}", response_model=PluginDetailsResponse)
 async def get_plugin_details(

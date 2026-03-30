@@ -219,9 +219,9 @@
 		--chart-7: oklch(0.55 0.22 25);
 
 		/* Typography - font families (can be overridden by theme presets) */
-		--font-sans: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-		--font-serif: Georgia, Cambria, 'Times New Roman', Times, serif;
-		--font-mono: ui-monospace, 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+		--font-sans: Courier New, monospace;
+		--font-serif: Courier New, monospace;
+		--font-mono: Courier New, monospace;
 	}
 
 	/* ========================================

@@ -17,7 +17,9 @@ import type {
 	PluginInfo,
 	AvailablePlugin,
 	PluginDetails,
-	FileBasedAgent
+	FileBasedAgent,
+	PluginUpdateInfo,
+	AutoUpdateSettings
 } from '$lib/api/plugins';
 import * as pluginsApi from '$lib/api/plugins';
 import { untrack } from 'svelte';
@@ -35,6 +37,10 @@ export interface PluginsState {
 	loading: boolean;
 	syncing: Record<string, boolean>; // marketplace id -> syncing state
 	installing: Record<string, boolean>; // plugin id -> installing state
+	updating: Record<string, boolean>; // plugin id -> updating state
+	updatesAvailable: PluginUpdateInfo[];
+	autoUpdateSettings: AutoUpdateSettings | null;
+	checkingUpdates: boolean;
 	error: string | null;
 }
 
@@ -51,6 +57,10 @@ const initialState: PluginsState = {
 	loading: false,
 	syncing: {},
 	installing: {},
+	updating: {},
+	updatesAvailable: [],
+	autoUpdateSettings: null,
+	checkingUpdates: false,
 	error: null
 };
 
@@ -229,11 +239,13 @@ export const plugins = {
 		_update((state) => ({ ...state, loading: true, error: null }));
 
 		try {
-			const [marketplaces, available, installed, fileBasedAgents] = await Promise.all([
+			const [marketplaces, available, installed, fileBasedAgents, updatesAvailable, autoUpdateSettings] = await Promise.all([
 				pluginsApi.getMarketplaces(),
 				pluginsApi.getAvailablePlugins(),
 				pluginsApi.getInstalledPlugins(),
-				pluginsApi.getFileBasedAgents()
+				pluginsApi.getFileBasedAgents(),
+				pluginsApi.checkForUpdates().catch(() => [] as PluginUpdateInfo[]),
+				pluginsApi.getAutoUpdateSettings().catch(() => null as AutoUpdateSettings | null)
 			]);
 
 			_update((state) => ({
@@ -242,6 +254,8 @@ export const plugins = {
 				available,
 				installed,
 				fileBasedAgents,
+				updatesAvailable,
+				autoUpdateSettings,
 				loading: false
 			}));
 		} catch (e) {
@@ -462,6 +476,162 @@ export const plugins = {
 	},
 
 	// ========================================================================
+	// Plugin Updates
+	// ========================================================================
+
+	/**
+	 * Check for available plugin updates
+	 */
+	async checkForUpdates(): Promise<PluginUpdateInfo[]> {
+		_update((state) => ({ ...state, checkingUpdates: true, error: null }));
+
+		try {
+			const updatesAvailable = await pluginsApi.checkForUpdates();
+			_update((state) => ({ ...state, updatesAvailable, checkingUpdates: false }));
+			return updatesAvailable;
+		} catch (e) {
+			const error = e instanceof Error ? e.message : 'Failed to check for updates';
+			_update((state) => ({ ...state, checkingUpdates: false, error }));
+			throw e;
+		}
+	},
+
+	/**
+	 * Update a specific plugin
+	 */
+	async updatePlugin(pluginId: string): Promise<PluginInfo> {
+		_update((state) => ({
+			...state,
+			updating: { ...state.updating, [pluginId]: true },
+			error: null
+		}));
+
+		try {
+			const updated = await pluginsApi.updatePlugin(pluginId);
+			_update((state) => ({
+				...state,
+				installed: state.installed.map((p) =>
+					p.id === pluginId ? updated : p
+				),
+				updatesAvailable: state.updatesAvailable.filter((u) => u.plugin_id !== pluginId),
+				updating: { ...state.updating, [pluginId]: false }
+			}));
+			return updated;
+		} catch (e) {
+			const error = e instanceof Error ? e.message : 'Failed to update plugin';
+			_update((state) => ({
+				...state,
+				updating: { ...state.updating, [pluginId]: false },
+				error
+			}));
+			throw e;
+		}
+	},
+
+	/**
+	 * Update all plugins with available updates
+	 */
+	async updateAllPlugins(): Promise<PluginInfo[]> {
+		const updateIds = _state.updatesAvailable.map((u) => u.plugin_id);
+		_update((state) => ({
+			...state,
+			updating: {
+				...state.updating,
+				...updateIds.reduce((acc, id) => ({ ...acc, [id]: true }), {})
+			},
+			error: null
+		}));
+
+		try {
+			const updatedPlugins = await pluginsApi.updateAllPlugins();
+			const updatedIds = new Set(updatedPlugins.map((p) => p.id));
+
+			_update((state) => ({
+				...state,
+				installed: state.installed.map((p) => {
+					const updated = updatedPlugins.find((up) => up.id === p.id);
+					return updated || p;
+				}),
+				updatesAvailable: state.updatesAvailable.filter((u) => !updatedIds.has(u.plugin_id)),
+				updating: {
+					...state.updating,
+					...updateIds.reduce((acc, id) => ({ ...acc, [id]: false }), {})
+				}
+			}));
+			return updatedPlugins;
+		} catch (e) {
+			const error = e instanceof Error ? e.message : 'Failed to update plugins';
+			_update((state) => ({
+				...state,
+				updating: {
+					...state.updating,
+					...updateIds.reduce((acc, id) => ({ ...acc, [id]: false }), {})
+				},
+				error
+			}));
+			throw e;
+		}
+	},
+
+	// ========================================================================
+	// Auto-Update Settings
+	// ========================================================================
+
+	/**
+	 * Load auto-update settings
+	 */
+	async loadAutoUpdateSettings(): Promise<void> {
+		try {
+			const autoUpdateSettings = await pluginsApi.getAutoUpdateSettings();
+			_update((state) => ({ ...state, autoUpdateSettings }));
+		} catch (e) {
+			const error = e instanceof Error ? e.message : 'Failed to load auto-update settings';
+			_update((state) => ({ ...state, error }));
+			throw e;
+		}
+	},
+
+	/**
+	 * Update auto-update settings
+	 */
+	async updateAutoUpdateSettings(settings: Partial<AutoUpdateSettings>): Promise<void> {
+		try {
+			const autoUpdateSettings = await pluginsApi.updateAutoUpdateSettings(settings);
+			_update((state) => ({ ...state, autoUpdateSettings }));
+		} catch (e) {
+			const error = e instanceof Error ? e.message : 'Failed to update auto-update settings';
+			_update((state) => ({ ...state, error }));
+			throw e;
+		}
+	},
+
+	/**
+	 * Manually trigger auto-update cycle
+	 */
+	async runAutoUpdate(): Promise<void> {
+		_update((state) => ({ ...state, checkingUpdates: true, error: null }));
+
+		try {
+			const result = await pluginsApi.runAutoUpdate();
+			// Reload installed plugins to reflect any updates
+			const [installed, updatesAvailable] = await Promise.all([
+				pluginsApi.getInstalledPlugins(),
+				pluginsApi.checkForUpdates()
+			]);
+			_update((state) => ({
+				...state,
+				installed,
+				updatesAvailable,
+				checkingUpdates: false
+			}));
+		} catch (e) {
+			const error = e instanceof Error ? e.message : 'Failed to run auto-update';
+			_update((state) => ({ ...state, checkingUpdates: false, error }));
+			throw e;
+		}
+	},
+
+	// ========================================================================
 	// Utility
 	// ========================================================================
 
@@ -485,6 +655,10 @@ export const plugins = {
 			loading: false,
 			syncing: {},
 			installing: {},
+			updating: {},
+			updatesAvailable: [],
+			autoUpdateSettings: null,
+			checkingUpdates: false,
 			error: null
 		};
 		_notifySubscribers();
@@ -567,6 +741,21 @@ export const marketplaceSyncing = createDerived(() => _state.syncing);
 
 // Installing state for plugins
 export const pluginInstalling = createDerived(() => _state.installing);
+
+// Updating state for plugins
+export const pluginUpdating = createDerived(() => _state.updating);
+
+// Available updates
+export const updatesAvailable = createDerived(() => _state.updatesAvailable);
+
+// Number of available updates (for badges)
+export const updatesCount = createDerived(() => _state.updatesAvailable.length);
+
+// Auto-update settings
+export const autoUpdateSettings = createDerived(() => _state.autoUpdateSettings);
+
+// Checking for updates state
+export const checkingUpdates = createDerived(() => _state.checkingUpdates);
 
 // Grouped by marketplace (all available)
 export const pluginsByMarketplace = createDerived(() => {
