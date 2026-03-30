@@ -312,7 +312,7 @@
 
 	.panel-scroll::-webkit-scrollbar-thumb {
 		background: var(--scrollbar-thumb);
-		border-radius: 3px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.25);
 	}
 
 	.panel-scroll::-webkit-scrollbar-thumb:hover {
@@ -328,7 +328,7 @@
 		padding: 10px 12px;
 		background: transparent;
 		border: none;
-		border-radius: 8px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.67);
 		color: var(--foreground);
 		font-size: 0.875rem;
 		cursor: pointer;
@@ -373,7 +373,7 @@
 		font-size: 0.75rem;
 		color: var(--muted-foreground);
 		background: var(--muted);
-		border-radius: 10px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.83);
 		padding: 1px 8px;
 		min-width: 22px;
 		text-align: center;
@@ -393,7 +393,7 @@
 		padding: 8px 12px;
 		background: transparent;
 		border: none;
-		border-radius: 8px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.67);
 		color: var(--muted-foreground);
 		font-size: 0.8125rem;
 		font-weight: 500;

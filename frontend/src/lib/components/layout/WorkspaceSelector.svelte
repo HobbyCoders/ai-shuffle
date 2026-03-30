@@ -184,7 +184,7 @@
 		min-width: 280px;
 		background: var(--card);
 		border: 1px solid var(--border);
-		border-radius: 12px;
+		border-radius: var(--radius, 0.75rem);
 		box-shadow: var(--shadow-l);
 		padding: 8px;
 		z-index: 100;

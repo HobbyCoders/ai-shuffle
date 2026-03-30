@@ -118,7 +118,7 @@
   --radius-md: calc(var(--radius, 0.75rem) * 0.833);
   --radius-lg: calc(var(--radius, 0.75rem) * 1.167);
   --radius-xl: calc(var(--radius, 0.75rem) * 1.5);
-  --radius-full: 9999px;
+  --radius-full: calc(var(--radius, 0.75rem) * 2);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════

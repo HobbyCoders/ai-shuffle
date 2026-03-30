@@ -134,7 +134,7 @@
 		flex-shrink: 0;
 		background: transparent;
 		border: none;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: background-color 150ms ease, color 150ms ease;
@@ -173,7 +173,7 @@
 		height: 26px;
 		padding: 0 8px;
 		border: 1px solid var(--border);
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		color: var(--muted-foreground);
 		font-size: 0.6875rem;
 		font-weight: 500;
@@ -209,7 +209,7 @@
 		height: 28px;
 		background: transparent;
 		border: none;
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: background-color 150ms ease, color 150ms ease;

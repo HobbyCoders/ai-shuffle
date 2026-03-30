@@ -420,7 +420,7 @@
 		padding: 0 8px;
 		background: transparent;
 		border: 1px solid var(--border);
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		color: var(--muted-foreground);
 		font-size: 0.6875rem;
 		font-weight: 500;
@@ -498,7 +498,7 @@
 		min-width: 16px;
 		height: 16px;
 		padding: 0 4px;
-		border-radius: 8px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.67);
 		background: color-mix(in oklch, var(--primary) 15%, transparent);
 		color: var(--primary);
 		font-size: 0.625rem;
@@ -533,7 +533,7 @@
 		overflow-y: auto;
 		background: var(--card);
 		border: 1px solid var(--border);
-		border-radius: 10px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.83);
 		box-shadow: var(--shadow-l);
 		padding: 4px;
 		z-index: 100;
@@ -562,7 +562,7 @@
 		padding: 7px 10px;
 		background: transparent;
 		border: none;
-		border-radius: 7px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.58);
 		color: var(--foreground);
 		font-size: 0.8125rem;
 		cursor: pointer;
@@ -627,7 +627,7 @@
 		padding: 0 8px;
 		background: var(--input);
 		border: 1px solid var(--border);
-		border-radius: 6px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
 		color: var(--foreground);
 		font-size: 0.75rem;
 		outline: none;
@@ -656,7 +656,7 @@
 		color: var(--muted-foreground);
 		background: color-mix(in oklch, var(--muted-foreground) 12%, transparent);
 		padding: 1px 5px;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		flex-shrink: 0;
 	}
 
@@ -668,7 +668,7 @@
 		padding: 2px 8px;
 		background: none;
 		border: 1px solid transparent;
-		border-radius: 4px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
 		cursor: pointer;
 		transition: all 0.15s ease;
 	}

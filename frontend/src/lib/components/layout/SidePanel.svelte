@@ -1098,7 +1098,7 @@
 		color: var(--primary);
 		background: color-mix(in oklch, var(--primary) 12%, transparent);
 		padding: 1px 7px;
-		border-radius: 9999px;
+		border-radius: calc(var(--radius, 0.75rem) * 0.67);
 	}
 
 	/* Project delete button */
