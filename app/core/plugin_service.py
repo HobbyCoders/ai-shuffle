@@ -470,9 +470,28 @@ class PluginService:
 
         install_path = Path(install_location)
         git_dir = install_path / ".git"
+        gcs_sha_file = install_path / ".gcs-sha"
 
-        # If directory exists but isn't a git repo, re-clone it
-        if install_path.exists() and not git_dir.exists():
+        if not install_path.exists():
+            raise RuntimeError(f"Marketplace directory not found: {install_location}")
+
+        # GCS-distributed marketplace (installed by Claude Code CLI, not git).
+        # These have a .gcs-sha file and no .git directory. The CLI manages
+        # updates, so we just verify the content is intact and skip re-clone.
+        if gcs_sha_file.exists():
+            manifest = self._get_marketplace_manifest(install_path)
+            if manifest:
+                logger.info(
+                    f"Marketplace {marketplace_id} is GCS-distributed (managed by Claude CLI). "
+                    f"Skipping git sync."
+                )
+            else:
+                logger.warning(
+                    f"GCS marketplace {marketplace_id} exists but has no valid manifest. "
+                    f"It may need to be reinstalled via Claude CLI."
+                )
+        elif not git_dir.exists():
+            # Non-git, non-GCS directory — attempt re-clone from source
             logger.warning(f"Marketplace directory exists but is not a git repo: {install_location}. Re-cloning...")
             source_data = data[marketplace_id].get("source", {})
             source_url = source_data.get("url") or source_data.get("repo", "")
@@ -493,10 +512,8 @@ class PluginService:
                 raise RuntimeError(f"Failed to re-clone marketplace: {e.stderr.decode()}")
             except subprocess.TimeoutExpired:
                 raise RuntimeError("Marketplace re-clone timed out")
-        elif not install_path.exists():
-            raise RuntimeError(f"Marketplace directory not found: {install_location}")
         else:
-            # Git pull
+            # Git-based marketplace — pull latest
             try:
                 subprocess.run(
                     ["git", "-C", install_location, "pull", "--ff-only"],
@@ -1031,9 +1048,19 @@ class PluginService:
         return None
 
     def _clone_plugin_source(self, source: Dict[str, Any], dest: Path) -> None:
-        """Clone an external plugin source (github or url) to a destination directory."""
+        """Clone an external plugin source to a destination directory.
+
+        Supported source types:
+        - "github": Clone from GitHub using org/repo shorthand
+        - "url": Clone from a full git URL
+        - "git-subdir": Clone a repo and extract a specific subdirectory
+        """
         source_type = source.get("source", "")
         ref = source.get("ref")
+
+        if source_type == "git-subdir":
+            self._clone_git_subdir_source(source, dest)
+            return
 
         if source_type == "github":
             repo = source.get("repo", "")
@@ -1059,6 +1086,63 @@ class PluginService:
         )
         if result.returncode != 0:
             raise RuntimeError(f"Failed to clone plugin: {result.stderr.strip()}")
+
+    def _clone_git_subdir_source(self, source: Dict[str, Any], dest: Path) -> None:
+        """Clone a git repo and extract a specific subdirectory.
+
+        Handles the "git-subdir" source type from marketplace.json:
+            {"source": "git-subdir", "url": "org/repo", "path": "plugins/foo", "ref": "main"}
+
+        Uses git sparse-checkout to avoid downloading the entire repo when possible,
+        falling back to full shallow clone + subdir extraction.
+        """
+        url = source.get("url", "")
+        subdir_path = source.get("path", "")
+        ref = source.get("ref")
+
+        if not url:
+            raise ValueError("git-subdir source: URL is empty")
+        if not subdir_path:
+            raise ValueError("git-subdir source: path is empty")
+
+        # Normalize URL: GitHub shorthand (org/repo) → full URL
+        if not url.startswith(("http://", "https://", "git@")):
+            url = f"https://github.com/{url}.git"
+        elif not url.endswith(".git"):
+            url = f"{url}.git"
+
+        import tempfile
+        tmp_dir = Path(tempfile.mkdtemp(prefix="plugin-clone-"))
+        try:
+            # Shallow clone the repo
+            cmd = ["git", "clone", "--depth", "1", "--filter=blob:none"]
+            if ref:
+                cmd.extend(["--branch", ref])
+            cmd.extend([url, str(tmp_dir)])
+
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to clone git-subdir repo: {result.stderr.strip()}"
+                )
+
+            # Extract the target subdirectory
+            extracted = tmp_dir / subdir_path.strip("/")
+            if not extracted.exists() or not extracted.is_dir():
+                raise ValueError(
+                    f"Subdirectory '{subdir_path}' not found in cloned repo"
+                )
+
+            # Copy subdirectory to destination
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(extracted, dest)
+
+        finally:
+            # Clean up the full clone
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def install_plugin(self, plugin_id: str, scope: str = "user") -> PluginInfo:
         """
@@ -1094,7 +1178,10 @@ class PluginService:
             raise ValueError(f"Plugin not found in marketplace: {plugin_name}")
 
         source = entry.get("source", "")
+        # Version priority: entry.version > source.sha (short) > "1.0.0"
         version = entry.get("version", "1.0.0")
+        if version == "1.0.0" and isinstance(source, dict) and source.get("sha"):
+            version = source["sha"][:7]
         manifest = self._get_marketplace_manifest(mp_path)
         plugin_root = manifest.get("metadata", {}).get("pluginRoot") if manifest and isinstance(manifest.get("metadata"), dict) else None
 
@@ -1102,19 +1189,11 @@ class PluginService:
         local_dir = self._resolve_plugin_source(source, mp_path, plugin_root)
 
         if local_dir:
-            # Local source - get version from git if not in entry
+            # Local source - get version from git or .gcs-sha if not in entry
             if not entry.get("version"):
-                try:
-                    result = subprocess.run(
-                        ["git", "-C", mp_location, "rev-parse", "--short", "HEAD"],
-                        capture_output=True,
-                        text=True,
-                        timeout=10
-                    )
-                    if result.returncode == 0:
-                        version = result.stdout.strip()
-                except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                    pass
+                resolved_version = self._get_marketplace_head_version(marketplace_id)
+                if resolved_version:
+                    version = resolved_version
 
             # Create cache directory and copy plugin
             cache_path = self.CACHE_DIR / marketplace_id / plugin_name / version
@@ -1677,12 +1756,22 @@ class PluginService:
         return self._write_json_file(self.AUTO_UPDATE_FILE, data)
 
     def _get_marketplace_head_version(self, marketplace_id: str) -> Optional[str]:
-        """Get the current git HEAD short hash for a marketplace repo."""
+        """Get the current version identifier for a marketplace.
+
+        Checks in order:
+        1. Git HEAD short hash (git-based marketplaces)
+        2. .gcs-sha file content (GCS-distributed marketplaces)
+        3. None if neither is available
+        """
         marketplaces = self._read_json_file(self.MARKETPLACES_FILE, {})
         mp_data = marketplaces.get(marketplace_id, {})
         install_location = mp_data.get("installLocation")
         if not install_location:
             return None
+
+        install_path = Path(install_location)
+
+        # Try git first
         try:
             result = subprocess.run(
                 ["git", "-C", install_location, "rev-parse", "--short", "HEAD"],
@@ -1694,6 +1783,17 @@ class PluginService:
                 return result.stdout.strip()
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             pass
+
+        # Fall back to .gcs-sha for GCS-distributed marketplaces
+        gcs_sha_file = install_path / ".gcs-sha"
+        if gcs_sha_file.exists():
+            try:
+                sha = gcs_sha_file.read_text(encoding="utf-8").strip()
+                if sha:
+                    return sha[:7]  # Short hash, consistent with git --short
+            except (IOError, UnicodeDecodeError):
+                pass
+
         return None
 
     def check_for_updates(self) -> List[PluginUpdateInfo]:

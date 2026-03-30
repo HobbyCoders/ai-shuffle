@@ -604,8 +604,15 @@ async def install_plugin(
             has_mcp=plugin.has_mcp
         )
     except ValueError as e:
+        logger.warning(f"Plugin install failed for {request.plugin_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except RuntimeError as e:
+        logger.exception(f"Plugin install error for {request.plugin_id}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
 
