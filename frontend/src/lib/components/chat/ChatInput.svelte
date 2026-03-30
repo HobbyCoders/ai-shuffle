@@ -1604,11 +1604,6 @@
 		cursor: not-allowed;
 	}
 
-	.dock-action-btn.active {
-		color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-	}
-
 	@keyframes pulse {
 		0%, 100% { opacity: 1; }
 		50% { opacity: 0.6; }
