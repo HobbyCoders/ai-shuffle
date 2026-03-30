@@ -36,6 +36,8 @@ describe('AI Generation API', () => {
 			description: 'A Python development profile',
 			model: 'sonnet',
 			permission_mode: 'default',
+			thinking_mode: 'default',
+			effort: null,
 			system_prompt_type: 'preset',
 			system_prompt_preset: 'claude_code',
 			system_prompt_content: null,
@@ -51,6 +53,7 @@ describe('AI Generation API', () => {
 			continue_conversation: false,
 			fork_session: false,
 			setting_sources: null,
+			enable_file_checkpointing: false,
 			env: null
 		}
 	};

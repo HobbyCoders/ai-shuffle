@@ -22,6 +22,8 @@ from app.core.project_utils import get_project_working_dir_as_path, get_worktree
 from app.core.project_agent_service import get_project_agent_service
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/v1/profiles", tags=["Profiles"])
 
 
@@ -742,6 +744,8 @@ async def export_profile(
         description=profile.get("description"),
         model=config.get("model", "sonnet"),
         permission_mode=config.get("permission_mode", "default"),
+        thinking_mode=config.get("thinking_mode", "default"),
+        effort=config.get("effort"),
         system_prompt_type=system_prompt.get("type", "preset"),
         system_prompt_preset=system_prompt.get("preset", "claude_code"),
         system_prompt_content=system_prompt.get("content"),
@@ -757,6 +761,7 @@ async def export_profile(
         continue_conversation=config.get("continue_conversation", False),
         fork_session=config.get("fork_session", False),
         setting_sources=config.get("setting_sources"),
+        enable_file_checkpointing=config.get("enable_file_checkpointing", False),
         env=config.get("env"),  # Environment variables are exported
         # Note: We intentionally exclude some data:
         # - cwd (working directory path - system-specific)
@@ -846,10 +851,16 @@ async def import_profile(
     config = {
         "model": agent_data.model or "sonnet",
         "permission_mode": agent_data.permission_mode or "default",
+        "thinking_mode": agent_data.thinking_mode or "default",
         "include_partial_messages": agent_data.include_partial_messages if agent_data.include_partial_messages is not None else True,
         "continue_conversation": agent_data.continue_conversation or False,
         "fork_session": agent_data.fork_session or False,
+        "enable_file_checkpointing": agent_data.enable_file_checkpointing or False,
     }
+
+    # Effort level (Opus 4.6+)
+    if agent_data.effort:
+        config["effort"] = agent_data.effort
 
     # System prompt
     if agent_data.system_prompt_type == "custom" and agent_data.system_prompt_content:
@@ -872,8 +883,19 @@ async def import_profile(
     if agent_data.disallowed_tools:
         config["disallowed_tools"] = agent_data.disallowed_tools
     if agent_data.enabled_agents:
-        # Note: Subagent IDs are preserved but may not exist in target system
-        config["enabled_agents"] = agent_data.enabled_agents
+        # Filter out subagent IDs that don't exist in the current environment
+        # to prevent ghost agents from inflating the count
+        all_subagents = database.get_all_subagents()
+        valid_agent_ids = {s["id"] for s in all_subagents}
+        valid_enabled = [aid for aid in agent_data.enabled_agents if aid in valid_agent_ids]
+        skipped = [aid for aid in agent_data.enabled_agents if aid not in valid_agent_ids]
+        if skipped:
+            logger.warning(
+                "Import: skipped %d subagent(s) not found in environment: %s",
+                len(skipped), ", ".join(skipped)
+            )
+        if valid_enabled:
+            config["enabled_agents"] = valid_enabled
     if agent_data.ai_tools:
         config["ai_tools"] = agent_data.ai_tools.model_dump()
     if agent_data.max_turns:

@@ -697,6 +697,8 @@ class AgentExportData(BaseModel):
     description: Optional[str] = None
     model: Optional[str] = "sonnet"
     permission_mode: Optional[str] = "default"
+    thinking_mode: Optional[str] = "default"
+    effort: Optional[str] = None
     system_prompt_type: Optional[str] = "preset"
     system_prompt_preset: Optional[str] = "claude_code"
     system_prompt_content: Optional[str] = None
@@ -712,6 +714,7 @@ class AgentExportData(BaseModel):
     continue_conversation: Optional[bool] = False
     fork_session: Optional[bool] = False
     setting_sources: Optional[List[str]] = None
+    enable_file_checkpointing: Optional[bool] = False
     # Environment variables (exported with profile)
     env: Optional[Dict[str, str]] = None
 

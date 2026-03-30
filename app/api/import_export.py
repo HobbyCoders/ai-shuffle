@@ -281,6 +281,10 @@ async def import_data(
                 result.errors.append(f"Failed to import subagent '{subagent_data.get('id', 'unknown')}': {str(e)}")
 
     # Import profiles
+    # Build set of valid subagent IDs (including any just-imported ones)
+    all_subagents = database.get_all_subagents()
+    valid_agent_ids = {s["id"] for s in all_subagents}
+
     profiles = data.get("profiles", [])
     if profiles:
         for profile_data in profiles:
@@ -293,6 +297,18 @@ async def import_data(
                 # Check if exists
                 existing = database.get_profile(profile_id)
                 config = profile_data.get("config", {})
+
+                # Filter out ghost subagent references
+                enabled_agents = config.get("enabled_agents")
+                if enabled_agents and isinstance(enabled_agents, list):
+                    valid_enabled = [aid for aid in enabled_agents if aid in valid_agent_ids]
+                    skipped_agents = [aid for aid in enabled_agents if aid not in valid_agent_ids]
+                    if skipped_agents:
+                        result.warnings.append(
+                            f"Profile '{profile_id}': removed {len(skipped_agents)} "
+                            f"subagent(s) not found in environment: {', '.join(skipped_agents)}"
+                        )
+                    config["enabled_agents"] = valid_enabled
 
                 if existing:
                     if overwrite_existing:
@@ -374,12 +390,28 @@ async def import_data_json(
                 result.errors.append(f"Failed to import subagent '{subagent.id}': {str(e)}")
 
     # Import profiles
+    # Build set of valid subagent IDs (including any just-imported ones)
+    all_subagents_json = database.get_all_subagents()
+    valid_agent_ids_json = {s["id"] for s in all_subagents_json}
+
     if data.profiles:
         for profile in data.profiles:
             try:
                 existing = database.get_profile(profile.id)
                 # config is already a Dict[str, Any], no conversion needed
                 config = profile.config
+
+                # Filter out ghost subagent references
+                enabled_agents = config.get("enabled_agents")
+                if enabled_agents and isinstance(enabled_agents, list):
+                    valid_enabled = [aid for aid in enabled_agents if aid in valid_agent_ids_json]
+                    skipped_agents = [aid for aid in enabled_agents if aid not in valid_agent_ids_json]
+                    if skipped_agents:
+                        result.warnings.append(
+                            f"Profile '{profile.id}': removed {len(skipped_agents)} "
+                            f"subagent(s) not found in environment: {', '.join(skipped_agents)}"
+                        )
+                    config["enabled_agents"] = valid_enabled
 
                 if existing:
                     if overwrite_existing:

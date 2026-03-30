@@ -371,7 +371,7 @@
 			max_turns: config.max_turns || null,
 			allowed_tools: allowedTools,
 			disallowed_tools: disallowedTools,
-			enabled_agents: (config as any).enabled_agents || [],
+			enabled_agents: ((config as any).enabled_agents || []).filter((id: string) => allSubagents.some(a => a.id === id)),
 			include_partial_messages: config.include_partial_messages !== false,
 			thinking_mode: (config as any).thinking_mode || 'default',
 			effort: (config as any).effort || null,
@@ -1238,7 +1238,7 @@
 						<div class="pf-summary-bar">
 							<div class="pf-summary-left">
 								<Bot size={14} />
-								<span>{builtinAgentIds.length} built-in{#if customAgents.length > 0} + {profileForm.enabled_agents.filter(id => !builtinAgentIds.includes(id)).length} of {customAgents.length} custom{/if}</span>
+									<span>{builtinAgentIds.length} built-in{#if customAgents.length > 0} + {profileForm.enabled_agents.filter(id => !builtinAgentIds.includes(id) && customAgents.some(a => a.id === id)).length} of {customAgents.length} custom{/if}</span>
 							</div>
 							<span class="pf-summary-link">Configure agents →</span>
 						</div>
@@ -1484,7 +1484,7 @@
 										<span class="fp-meta-sep">·</span>
 										<span class="fp-meta-chip">{getProfileToolCount(profile)} tools</span>
 										<span class="fp-meta-sep">·</span>
-										<span class="fp-meta-chip">{Math.max(profile.config?.enabled_agents?.length || 0, builtinAgentIds.length)} agents</span>
+										<span class="fp-meta-chip">{Math.max((profile.config?.enabled_agents?.filter((id: string) => allSubagents.some(a => a.id === id))?.length) || 0, builtinAgentIds.length)} agents</span>
 										<span class="fp-meta-sep">·</span>
 										<span class="fp-meta-chip">{profile.session_count || 0} sessions</span>
 									</div>

@@ -949,6 +949,8 @@ export interface AgentExportData {
 	description: string | null;
 	model: string | null;
 	permission_mode: string | null;
+	thinking_mode: string | null;
+	effort: string | null;
 	system_prompt_type: string | null;
 	system_prompt_preset: string | null;
 	system_prompt_content: string | null;
@@ -964,6 +966,7 @@ export interface AgentExportData {
 	continue_conversation: boolean | null;
 	fork_session: boolean | null;
 	setting_sources: string[] | null;
+	enable_file_checkpointing: boolean | null;
 	env: Record<string, string> | null;
 }
 
