@@ -31,18 +31,19 @@
 		return profile?.config?.model || 'sonnet';
 	});
 
-	const contextWindowMax = $derived(getContextMaxForModel(effectiveModel));
-
-	// Available context = total window minus the ~33k autocompact reserve
-	// (system prompt, tool definitions, output buffer). This shows users when
-	// they're approaching the autocompaction threshold, not the raw model limit.
-	const contextMax = $derived(contextWindowMax - AUTO_COMPACTION_BASE);
+	// Full context window (200k or 1M) — shown as the bar maximum so users
+	// understand their position within the real model limit.
+	const contextMax = $derived(getContextMaxForModel(effectiveModel));
 
 	// Context usage from activeSession — set by onPollApplied callback after each
 	// successful poll. This is the sole reliable path: poller → activeSession._update().
 	// Uses per-turn context window tokens (input + cache_creation + cache_read),
 	// NOT cumulative totalTokensIn which would massively overcount.
-	const contextUsed = $derived($activeSession.contextUsed ?? 0);
+	const rawContextUsed = $derived($activeSession.contextUsed ?? 0);
+
+	// Display usage = system overhead (33k) + actual conversation tokens.
+	// This reflects the true footprint inside the context window.
+	const contextUsed = $derived(AUTO_COMPACTION_BASE + rawContextUsed);
 	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
 	// Context color - always themed (no usage-based color changes)
