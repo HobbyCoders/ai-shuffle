@@ -48,7 +48,7 @@ export function extractAtMentionQuery(input: string): { query: string; atIndex: 
  * Regular text is preserved as-is.
  *
  * Example:
- *   Editor: "Check this file [chip:api.ts] and fix it"
+ *   Editor: "Check this file [chip api.ts] and fix it"
  *   Output: "Check this file @src/lib/api.ts and fix it"
  */
 export function serializeToMessage(editor: Editor): string {
