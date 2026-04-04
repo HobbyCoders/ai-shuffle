@@ -12,7 +12,12 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from mcp.types import ToolAnnotations
+
 logger = logging.getLogger(__name__)
+
+# Prevent SDK from silently truncating large connector tool results (>50K default).
+_CONNECTOR_ANNOTATIONS = ToolAnnotations(maxResultSizeChars=200_000)
 
 
 def _tool_result(result: dict) -> dict:
@@ -70,7 +75,7 @@ def create_connector_tools_server() -> Optional[Any]:
                 "properties": {},
             }
 
-            @tool(tool_name, description, _schema)
+            @tool(tool_name, description, _schema, annotations=_CONNECTOR_ANNOTATIONS)
             async def tool_fn(
                 args: dict,
                 __cid: str = _cid,

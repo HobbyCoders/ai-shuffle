@@ -6,7 +6,7 @@ python-dotenv==1.0.1
 httpx==0.27.2
 bcrypt==4.2.1
 cryptography>=42.0.0
-claude-agent-sdk==0.1.52
+claude-agent-sdk==0.1.56
 # Mobile support dependencies
 firebase-admin>=6.4.0  # FCM push notifications
 apscheduler>=3.10.4  # Proactive scheduling

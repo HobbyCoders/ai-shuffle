@@ -14,6 +14,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
+from mcp.types import ToolAnnotations
 
 from app.mcp.node_worker import NodeWorker
 
@@ -27,6 +28,11 @@ logger = logging.getLogger(__name__)
 def _tool_result(result: dict) -> dict:
     """Wrap a result dict in the MCP tool response format."""
     return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+
+
+# Annotation for tools that may return large results (base64 previews, lengthy metadata).
+# Prevents the SDK from silently truncating results beyond the default 50K char limit.
+_LARGE_RESULT_ANNOTATIONS = ToolAnnotations(maxResultSizeChars=200_000)
 
 
 # ============================================================================
@@ -46,7 +52,7 @@ def _create_image_tools(worker: NodeWorker) -> list:
             "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/flux-pro/v1.1-ultra, fal-ai/flux/dev, fal-ai/flux/schnell, fal-ai/nano-banana-2, fal-ai/recraft-v4)"}
         },
         "required": ["prompt"]
-    })
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def generate_image(args: dict) -> dict:
         result = await worker.call("generateImage", args)
         return _tool_result(result)
@@ -61,7 +67,7 @@ def _create_image_tools(worker: NodeWorker) -> list:
             "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/nano-banana-2, fal-ai/flux-pro/kontext, fal-ai/nano-banana-pro)"}
         },
         "required": ["prompt", "image_path"]
-    })
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def edit_image(args: dict) -> dict:
         result = await worker.call("editImage", args)
         return _tool_result(result)
@@ -79,7 +85,7 @@ def _create_image_tools(worker: NodeWorker) -> list:
             }
         },
         "required": ["prompt", "reference_images"]
-    })
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def generate_with_reference(args: dict) -> dict:
         result = await worker.call("generateWithReference", args)
         return _tool_result(result)
@@ -103,7 +109,7 @@ def _create_video_tools(worker: NodeWorker) -> list:
             "model": {"type": "string", "description": "Model variant to use"}
         },
         "required": ["prompt"]
-    })
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def generate_video(args: dict) -> dict:
         result = await worker.call("generateVideo", args)
         return _tool_result(result)
@@ -118,7 +124,7 @@ def _create_video_tools(worker: NodeWorker) -> list:
             "provider": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/kling-video/v2.1/master, fal-ai/veo3, fal-ai/sora-v2)"}
         },
         "required": ["image_path", "prompt"]
-    })
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def image_to_video(args: dict) -> dict:
         result = await worker.call("imageToVideo", args)
         return _tool_result(result)
@@ -133,7 +139,7 @@ def _create_video_tools(worker: NodeWorker) -> list:
             "model": {"type": "string", "description": "fal.ai model ID for extension (e.g., fal-ai/kling-video/o3/standard/extend)"}
         },
         "required": ["video_path"]
-    })
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def extend_video(args: dict) -> dict:
         result = await worker.call("extendVideo", args)
         return _tool_result(result)
@@ -158,7 +164,7 @@ def _create_3d_tools(worker: NodeWorker) -> list:
             "wait_for_completion": {"type": "boolean", "description": "Wait for completion (true) or return task ID immediately"}
         },
         "required": ["prompt"]
-    })
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def text_to_3d(args: dict) -> dict:
         result = await worker.call("textTo3D", args)
         return _tool_result(result)
@@ -176,7 +182,7 @@ def _create_3d_tools(worker: NodeWorker) -> list:
             "wait_for_completion": {"type": "boolean", "description": "Wait for completion (true) or return task ID immediately"}
         },
         "required": ["image_path"]
-    })
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def image_to_3d(args: dict) -> dict:
         result = await worker.call("imageTo3D", args)
         return _tool_result(result)
@@ -211,7 +217,7 @@ def _create_generic_tools(worker: NodeWorker) -> list:
             }
         },
         "required": ["endpoint_id", "input"]
-    })
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
     async def run_fal_model(args: dict) -> dict:
         result = await worker.call("runFalModel", args)
         return _tool_result(result)
