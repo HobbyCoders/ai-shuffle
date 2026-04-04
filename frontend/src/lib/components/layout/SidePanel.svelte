@@ -1097,8 +1097,11 @@
 		font-weight: 600;
 		color: var(--primary);
 		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		padding: 1px 7px;
+		min-width: 1.5rem;
+		padding: 1px 4px;
 		border-radius: calc(var(--radius, 0.75rem) * 0.67);
+		text-align: center;
+		box-sizing: border-box;
 	}
 
 	/* Project delete button */

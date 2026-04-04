@@ -40,7 +40,7 @@
 </script>
 
 <header class="page-header">
-	<div class="header-left">
+	<div class="header-left" class:has-toggle={showToggle}>
 		{#if showToggle || isMobile}
 			<button
 				class="sidebar-toggle"
@@ -268,9 +268,17 @@
 			justify-content: center;
 		}
 
+		.header-left.has-toggle {
+			justify-content: flex-start;
+		}
+
 		.header-title {
 			text-align: center;
 			max-width: 100%;
+		}
+
+		.has-toggle .header-title {
+			text-align: left;
 		}
 
 		.header-right {
