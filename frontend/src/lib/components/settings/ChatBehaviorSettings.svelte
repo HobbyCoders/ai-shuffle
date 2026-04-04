@@ -177,6 +177,26 @@
 						<span class="toggle-knob"></span>
 					</button>
 				</div>
+
+				<hr class="divider" />
+
+				<!-- Fast Mode -->
+				<div class="setting-row">
+					<div class="setting-info">
+						<span>Fast Mode ↯</span>
+						<span class="setting-desc">Faster output with Opus 4.6 (requires Opus model)</span>
+					</div>
+					<button
+						onclick={() => chatPreferences.setFastMode(!chatPrefs?.fastMode)}
+						class="toggle"
+						class:active={chatPrefs.fastMode}
+						role="switch"
+						aria-checked={chatPrefs.fastMode}
+						aria-label="Fast Mode"
+					>
+						<span class="toggle-knob"></span>
+					</button>
+				</div>
 			{:else}
 				<div class="loading-text">Loading preferences...</div>
 			{/if}

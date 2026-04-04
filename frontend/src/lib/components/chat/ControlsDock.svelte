@@ -4,8 +4,11 @@
 	 * context usage, profile selector, override dropdowns,
 	 * and file attach button.
 	 */
+	import { onMount } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { claudeAuthenticated } from '$lib/stores/auth';
+	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
+	import { profiles } from '$lib/stores/app-data';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';
@@ -17,6 +20,26 @@
 
 	let { isUploading, onAttachClick }: Props = $props();
 
+	let chatPrefs = $state<ChatPreferences | null>(null);
+
+	onMount(() => {
+		const unsubscribe = chatPreferences.subscribe((prefs: ChatPreferences) => {
+			chatPrefs = prefs;
+		});
+		return () => { unsubscribe(); };
+	});
+
+	// Resolve the effective model to determine if fast mode is applicable
+	const effectiveModel = $derived.by(() => {
+		if ($activeSession.modelOverride) return $activeSession.modelOverride;
+		const profile = $profiles.find(p => p.id === $activeSession.profile);
+		return profile?.config?.model || 'sonnet';
+	});
+
+	// Fast mode is only meaningful with Opus models
+	const isOpusModel = $derived(/opus/i.test(effectiveModel));
+	const fastModeActive = $derived(!!(chatPrefs?.fastMode && isOpusModel));
+
 	const permissionModes = [
 		{ value: null, label: 'Default', description: 'Use profile setting' },
 		{ value: 'default', label: 'Ask', description: 'Confirm before tools' },
@@ -27,9 +50,21 @@
 </script>
 
 <div class="controls-dock">
-	<!-- Left: Usage Indicator -->
+	<!-- Left: Usage Indicator + Fast Mode Badge -->
 	<div class="controls-left">
 		<ContextUsageBar />
+		{#if chatPrefs?.fastMode}
+			<button
+				class="fast-mode-badge"
+				class:active={fastModeActive}
+				class:inactive={!isOpusModel}
+				title={isOpusModel ? 'Fast mode active (Opus 4.6)' : 'Fast mode enabled but requires Opus model'}
+				onclick={() => chatPreferences.setFastMode(false)}
+			>
+				<span class="fast-icon">↯</span>
+				<span class="fast-label">FAST</span>
+			</button>
+		{/if}
 	</div>
 
 	<!-- Center: Profile selector -->
@@ -144,10 +179,62 @@
 		cursor: not-allowed;
 	}
 
+	/* ===== FAST MODE BADGE ===== */
+	.fast-mode-badge {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 3px 8px;
+		border: 1px solid var(--border-subtle);
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		cursor: pointer;
+		font-family: var(--font-mono);
+		font-size: 10px;
+		font-weight: 600;
+		letter-spacing: 0.05em;
+		transition: all 0.15s ease;
+		background: transparent;
+		line-height: 1;
+	}
+
+	.fast-mode-badge.active {
+		background: color-mix(in oklch, var(--warning) 15%, transparent);
+		border-color: color-mix(in oklch, var(--warning) 40%, transparent);
+		color: var(--warning);
+	}
+
+	.fast-mode-badge.inactive {
+		background: color-mix(in oklch, var(--muted) 30%, transparent);
+		border-color: var(--border-subtle);
+		color: var(--muted-foreground);
+		opacity: 0.6;
+	}
+
+	.fast-mode-badge:hover {
+		opacity: 0.8;
+	}
+
+	.fast-icon {
+		font-size: 12px;
+		line-height: 1;
+	}
+
+	.fast-label {
+		line-height: 1;
+	}
+
 	/* Responsive: mobile tighter center gap */
 	@media (max-width: 639px) {
 		.controls-center {
 			gap: 4px;
+		}
+
+		.fast-label {
+			display: none;
+		}
+
+		.fast-mode-badge {
+			padding: 3px 5px;
 		}
 	}
 </style>

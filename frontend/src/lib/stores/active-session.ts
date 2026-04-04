@@ -30,6 +30,7 @@ import { sessionEphemeralCache } from './session-cache';
 import { appData } from './app-data';
 import { git } from './git.svelte';
 import { untrack } from 'svelte';
+import { chatPreferences } from './chatPreferences.svelte';
 
 // Shared types
 import type {
@@ -333,6 +334,11 @@ function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
 
 let stopTimeout: ReturnType<typeof setTimeout> | null = null;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Track fast mode preference — updated by chatPreferences subscription.
+// Read at message-send time to include the fast_mode override in WS queries.
+let _fastModeEnabled = false;
+chatPreferences.subscribe(prefs => { _fastModeEnabled = prefs.fastMode; });
 
 // Shared mutable state — passed by reference to ws-message-handlers and session-switcher.
 // Simplified: removed waitingForHistory, expectedSessionId, streamEndCleanedUp,
@@ -910,6 +916,7 @@ export const activeSession = {
 		const overrides: Record<string, string> = {};
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
 		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
+		if (_fastModeEnabled) overrides.fast_mode = 'true';
 
 		wsConn.resetLastMessageTime();
 		wsConn.send({

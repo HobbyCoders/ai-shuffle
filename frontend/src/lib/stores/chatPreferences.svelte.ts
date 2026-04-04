@@ -36,6 +36,9 @@ export interface ChatPreferences {
 	// Message display
 	showMessageTimestamps: boolean;     // Show timestamps on messages
 	compactMessageView: boolean;        // Use compact message spacing
+
+	// Fast mode
+	fastMode: boolean;                  // Enable fast mode (Opus 4.6 only — faster output via beta header)
 }
 
 const DEFAULT_PREFERENCES: ChatPreferences = {
@@ -47,6 +50,7 @@ const DEFAULT_PREFERENCES: ChatPreferences = {
 	autoScrollOnNewMessage: true,
 	showMessageTimestamps: false,       // Off by default - cleaner look
 	compactMessageView: false,
+	fastMode: false,                    // Off by default - only works with Opus 4.6
 };
 
 // ============================================
@@ -328,6 +332,7 @@ export const chatPreferences = {
 	setAutoScrollOnNewMessage: (value: boolean) => updatePreference('autoScrollOnNewMessage', value),
 	setShowMessageTimestamps: (value: boolean) => updatePreference('showMessageTimestamps', value),
 	setCompactMessageView: (value: boolean) => updatePreference('compactMessageView', value),
+	setFastMode: (value: boolean) => updatePreference('fastMode', value),
 };
 
 // Also export defaults for reference

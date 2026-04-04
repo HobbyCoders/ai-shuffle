@@ -10,6 +10,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles } from '$lib/stores/app-data';
 	import { claudeAuthenticated } from '$lib/stores/auth';
+	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
@@ -331,6 +332,22 @@
 		const finalPrompt = editorRef?.getMessage() ?? '';
 
 		if (!finalPrompt.trim() || isUploading || $activeSession.worktreeDeleted || ($activeSession.executionMode === 'worktree' && !$activeSession.worktreeId)) return;
+
+		// Client-side slash command: /fast [on|off]
+		const fastMatch = finalPrompt.trim().match(/^\/fast(?:\s+(on|off|enable|disable|true|false))?$/i);
+		if (fastMatch) {
+			const arg = fastMatch[1]?.toLowerCase();
+			const currentlyOn = chatPreferences.getValue('fastMode');
+			const enable = arg === 'on' || arg === 'enable' || arg === 'true'
+				? true
+				: arg === 'off' || arg === 'disable' || arg === 'false'
+				? false
+				: !currentlyOn;
+			chatPreferences.setFastMode(enable);
+			inputValue = '';
+			editorRef?.clear();
+			return;
+		}
 
 		// Require profile and project to be selected
 		if (!$activeSession.profile) {

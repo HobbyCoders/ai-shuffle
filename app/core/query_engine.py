@@ -1280,6 +1280,16 @@ def build_options_from_profile(
         model_to_use, betas_to_use = MODEL_1M_MAPPING[raw_model]
         logger.debug(f"1M context model selected: {raw_model} -> model={model_to_use}, betas={betas_to_use}")
 
+    # Fast mode: add beta header when enabled and using an Opus model.
+    # Fast mode (internally "Penguin Mode") uses the fast-mode-2026-02-01 beta header
+    # to enable faster output. Only applicable to Opus 4.6+ models.
+    FAST_MODE_BETA_HEADER = "fast-mode-2026-02-01"
+    fast_mode_requested = overrides.get("fast_mode") == "true"
+    if fast_mode_requested and model_to_use and "opus" in str(model_to_use).lower():
+        if FAST_MODE_BETA_HEADER not in betas_to_use:
+            betas_to_use.append(FAST_MODE_BETA_HEADER)
+            logger.debug(f"Fast mode enabled for model={model_to_use}, added beta={FAST_MODE_BETA_HEADER}")
+
     # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
     # Priority: tools > tools_preset > allowed_tools (legacy)
     tools_config = config.get("tools")  # Explicit list of tools
