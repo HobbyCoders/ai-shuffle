@@ -861,6 +861,29 @@ export const git = {
 			_diffStatsInFlight = false;
 			_branchesInFlight = false;
 		}
+	},
+
+	/**
+	 * Abort any in-flight git poll requests and clear their guards,
+	 * then immediately refresh status, diff stats, and branches.
+	 *
+	 * Used when streaming ends — a concurrent poll may have started
+	 * before the session's final git operations completed, and its
+	 * _inFlight guard would silently block the post-streaming refresh.
+	 */
+	forceRefresh() {
+		_statusAbort?.abort();
+		_diffStatsAbort?.abort();
+		_branchesAbort?.abort();
+		_statusAbort = null;
+		_diffStatsAbort = null;
+		_branchesAbort = null;
+		_statusInFlight = false;
+		_diffStatsInFlight = false;
+		_branchesInFlight = false;
+		git.refreshStatus();
+		git.refreshDiffStats();
+		git.loadBranches();
 	}
 };
 

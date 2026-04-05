@@ -406,7 +406,8 @@
 	});
 
 	// When streaming ends, do an immediate refresh so buttons update promptly.
-	// Mark as active so gitPollNow() also refreshes diff stats (not just status).
+	// Uses forceRefresh() to abort any in-flight poll requests whose responses
+	// may predate the session's final git operations (race with git_hint polls).
 	let _wasStreaming = false;
 	$effect(() => {
 		const streaming = $gitControlsStreaming;
@@ -417,7 +418,7 @@
 			if (activeProject) {
 				untrack(() => {
 					_gitLastActivity = Date.now();
-					gitPollNow();
+					git.forceRefresh();
 					scheduleGitPoll(); // Reset to active interval for post-streaming cool-down
 				});
 			}
