@@ -731,7 +731,7 @@
 		min-width: 0;
 	}
 
-	/* Mobile: actions on centered bottom row */
+	/* Mobile: actions wrap below, but chevron stays inline */
 	@media (max-width: 639px) {
 		:global(.fp-list-item) {
 			flex-wrap: wrap;

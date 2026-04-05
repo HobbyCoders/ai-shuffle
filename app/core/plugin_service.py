@@ -1214,6 +1214,17 @@ class PluginService:
             self._clone_plugin_source(source, cache_path)
 
         else:
+            # Better error: include resolved path for relative sources
+            if isinstance(source, str) and (source.startswith("./") or source.startswith(".\\")):
+                if plugin_root:
+                    tried_path = mp_path / plugin_root / source.lstrip("./").lstrip(".\\")
+                else:
+                    tried_path = mp_path / source.lstrip("./").lstrip(".\\")
+                raise ValueError(
+                    f"Plugin source directory not found for '{plugin_name}': "
+                    f"{tried_path} does not exist. The marketplace manifest references "
+                    f"this plugin but its files are missing from the local marketplace repo."
+                )
             raise ValueError(f"Plugin source not found or unsupported: {plugin_name}")
 
         # Ensure scripts have execute permissions
@@ -1240,8 +1251,12 @@ class PluginService:
         # Enable by default
         self.enable_plugin(plugin_id)
 
-        # Return plugin info
-        return self.get_installed_plugins()[-1]  # Get the one we just added
+        # Return plugin info for the installed/updated plugin
+        for p in self.get_installed_plugins():
+            if p.id == plugin_id:
+                return p
+        # Fallback: shouldn't happen, but return last if not found
+        return self.get_installed_plugins()[-1]
 
     def install_plugins_batch(self, plugin_ids: List[str], scope: str = "user") -> List[PluginInfo]:
         """

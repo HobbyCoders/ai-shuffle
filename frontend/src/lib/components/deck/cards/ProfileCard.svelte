@@ -8,6 +8,7 @@
 	 */
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import { layout } from '$lib/stores/layout';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
 	import { Users, Search, Upload, Sparkles, Plus, Download, Trash2, Wrench, Bot, MessageSquare, Settings, FileText, SlidersHorizontal, ChevronRight, Check, Info, Lock, Cpu } from 'lucide-svelte';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data';
@@ -1240,7 +1241,7 @@
 								<Bot size={14} />
 									<span>{builtinAgentIds.length} built-in{#if customAgents.length > 0} + {profileForm.enabled_agents.filter(id => !builtinAgentIds.includes(id) && customAgents.some(a => a.id === id)).length} of {customAgents.length} custom{/if}</span>
 							</div>
-							<span class="pf-summary-link">Configure agents →</span>
+							<button type="button" class="pf-summary-link" onclick={() => layout.openFeaturePage('subagent')}>Configure agents →</button>
 						</div>
 					{/if}
 
@@ -1894,6 +1895,15 @@
 		font-size: var(--text-xs, 0.6875rem);
 		font-weight: 500;
 		color: var(--text-secondary);
+		background: none;
+		border: none;
+		padding: 0;
+		cursor: pointer;
+		transition: color 120ms;
+	}
+
+	.pf-summary-link:hover {
+		color: var(--primary);
 	}
 
 	/* ─── Agent Cards ─── */

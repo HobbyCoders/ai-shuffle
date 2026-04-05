@@ -4,10 +4,10 @@
 
 /**
  * Auto-compaction reserve in tokens.
- * Claude Code reserves approximately 33k tokens for auto-compaction overhead
+ * Claude Code reserves approximately 21k tokens for auto-compaction overhead
  * (system prompt, tool definitions, output buffer, etc.).
  */
-export const AUTO_COMPACTION_BASE = 33000;
+export const AUTO_COMPACTION_BASE = 21000;
 
 /**
  * Default context window size in tokens (standard Claude models).
