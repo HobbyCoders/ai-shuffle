@@ -22,6 +22,7 @@
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import ToolUseMessage from './ToolUseMessage.svelte';
+	import ToolUseGroup from './ToolUseGroup.svelte';
 	import ThinkingBlock from './ThinkingBlock.svelte';
 	import CommandMessage from './CommandMessage.svelte';
 	// Note: ToolResultMessage is intentionally not imported - tool_result messages are
@@ -151,6 +152,54 @@
 			}
 		}
 		return -1;
+	});
+
+	// --- Tool call grouping ---
+	// Groups 2+ consecutive "regular" tool_use messages into a single display item.
+	// TodoWrite, Task, and Agent tools are excluded from grouping.
+	type DisplayItem =
+		| { kind: 'message'; message: ChatMessage; index: number }
+		| { kind: 'tool_group'; tools: ChatMessage[]; indices: number[] };
+
+	function isGroupableTool(msg: ChatMessage): boolean {
+		return msg.type === 'tool_use'
+			&& msg.toolName !== 'TodoWrite'
+			&& msg.toolName !== 'Task'
+			&& msg.toolName !== 'Agent';
+	}
+
+	const displayItems: DisplayItem[] = $derived.by(() => {
+		const messages = $activeSession.messages;
+		const items: DisplayItem[] = [];
+		let i = 0;
+
+		while (i < messages.length) {
+			const msg = messages[i];
+
+			if (isGroupableTool(msg)) {
+				// Collect consecutive groupable tool_use messages
+				const tools: ChatMessage[] = [msg];
+				const indices: number[] = [i];
+				let j = i + 1;
+				while (j < messages.length && isGroupableTool(messages[j])) {
+					tools.push(messages[j]);
+					indices.push(j);
+					j++;
+				}
+
+				if (tools.length >= 2) {
+					items.push({ kind: 'tool_group', tools, indices });
+				} else {
+					items.push({ kind: 'message', message: msg, index: i });
+				}
+				i = j;
+			} else {
+				items.push({ kind: 'message', message: msg, index: i });
+				i++;
+			}
+		}
+
+		return items;
 	});
 
 	/**
@@ -556,59 +605,75 @@
 	{:else}
 		<!-- Messages -->
 		<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
-			{#each $activeSession.messages as message, messageIndex (message.id)}
+			{#each displayItems as item (item.kind === 'tool_group' ? 'tg-' + item.tools[0].id : item.message.id)}
 				<!-- content-visibility: auto lets the browser skip paint/layout for off-screen messages -->
 				<div class="msg-virtualized">
-				{#if message.type === 'command'}
-					<!-- Slash command invocation (e.g., /commit, /ralph-loop) -->
-					<CommandMessage
-						commandName={message.commandName || message.content}
-						commandArgs={message.commandArgs}
-					/>
-				{:else if message.role === 'user'}
-					<UserMessage
-						content={message.content}
-						sessionId={$activeSession.sessionId}
-						messageUuid={message.jsonlUuid}
-						{fileCheckpointingEnabled}
-						onRewindComplete={handleRewindComplete}
-					/>
-				{:else if message.type === 'thinking' && chatPrefs?.showThinkingBlocks !== false}
-					<!-- Thinking block - shown based on user preference -->
-					<ThinkingBlock
-						content={message.content}
-						streaming={message.streaming}
-						profileName={getProfileName(message)}
-					/>
-				{:else if message.type === 'text' || !message.type}
-					<AssistantMessage
-						content={message.content}
-						messageIndex={messageIndex}
-						messageId={message.id}
-						messageUuid={message.jsonlUuid}
-						sessionId={$activeSession.sessionId}
-						streaming={message.streaming && messageIndex === lastStreamingMessageIndex}
-						{hasPartialMessages}
-						{fileCheckpointingEnabled}
-						metadata={message.metadata}
-						onRewindComplete={handleRewindComplete}
-						profileName={getProfileName(message)}
-					/>
-				{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
-					<!-- TodoWrite - Render as TodoList component (also handles streaming partial input) -->
-					{@const todos = extractTodosFromMessage(message)}
-					{#if todos && todos.length > 0}
-						<div class="w-full">
-							<div class="min-w-0">
-								<TodoList {todos} />
+				{#if item.kind === 'tool_group'}
+					<!-- Grouped tool calls (2+ consecutive regular tools from the same turn) -->
+					<ToolUseGroup tools={item.tools} />
+				{:else}
+					{@const message = item.message}
+					{@const messageIndex = item.index}
+					{#if message.type === 'command'}
+						<!-- Slash command invocation (e.g., /commit, /ralph-loop) -->
+						<CommandMessage
+							commandName={message.commandName || message.content}
+							commandArgs={message.commandArgs}
+						/>
+					{:else if message.role === 'user'}
+						<UserMessage
+							content={message.content}
+							sessionId={$activeSession.sessionId}
+							messageUuid={message.jsonlUuid}
+							{fileCheckpointingEnabled}
+							onRewindComplete={handleRewindComplete}
+						/>
+					{:else if message.type === 'thinking' && chatPrefs?.showThinkingBlocks !== false}
+						<!-- Thinking block - shown based on user preference -->
+						<ThinkingBlock
+							content={message.content}
+							streaming={message.streaming}
+							profileName={getProfileName(message)}
+						/>
+					{:else if message.type === 'text' || !message.type}
+						<AssistantMessage
+							content={message.content}
+							messageIndex={messageIndex}
+							messageId={message.id}
+							messageUuid={message.jsonlUuid}
+							sessionId={$activeSession.sessionId}
+							streaming={message.streaming && messageIndex === lastStreamingMessageIndex}
+							{hasPartialMessages}
+							{fileCheckpointingEnabled}
+							metadata={message.metadata}
+							onRewindComplete={handleRewindComplete}
+							profileName={getProfileName(message)}
+						/>
+					{:else if message.type === 'tool_use' && message.toolName === 'TodoWrite'}
+						<!-- TodoWrite - Render as TodoList component (also handles streaming partial input) -->
+						{@const todos = extractTodosFromMessage(message)}
+						{#if todos && todos.length > 0}
+							<div class="w-full">
+								<div class="min-w-0">
+									<TodoList {todos} />
+								</div>
 							</div>
-						</div>
-					{/if}
-				{:else if message.type === 'tool_use' && (message.toolName === 'Task' || message.toolName === 'Agent')}
-					<!-- Subagent tool_use (SDK "Task" or "Agent") - Skip if a linked SubagentMessage exists -->
-					<!-- The SubagentMessage component handles displaying the agent's work -->
-					{@const hasLinkedSubagent = $activeSession.messages.some(m => m.type === 'subagent' && m.toolId === message.toolId)}
-					{#if !hasLinkedSubagent}
+						{/if}
+					{:else if message.type === 'tool_use' && (message.toolName === 'Task' || message.toolName === 'Agent')}
+						<!-- Subagent tool_use (SDK "Task" or "Agent") - Skip if a linked SubagentMessage exists -->
+						<!-- The SubagentMessage component handles displaying the agent's work -->
+						{@const hasLinkedSubagent = $activeSession.messages.some(m => m.type === 'subagent' && m.toolId === message.toolId)}
+						{#if !hasLinkedSubagent}
+							<ToolUseMessage
+								name={message.toolName || 'Tool'}
+								input={message.toolInput}
+								partialInput={message.partialToolInput}
+								result={message.toolResult}
+								status={message.toolStatus || 'running'}
+								streaming={message.streaming}
+							/>
+						{/if}
+					{:else if message.type === 'tool_use'}
 						<ToolUseMessage
 							name={message.toolName || 'Tool'}
 							input={message.toolInput}
@@ -617,31 +682,22 @@
 							status={message.toolStatus || 'running'}
 							streaming={message.streaming}
 						/>
+					{:else if message.type === 'tool_result'}
+						<!-- Skip standalone tool_result messages - they should be merged into tool_use -->
+						<!-- This prevents flickering where result briefly appears separately -->
+					{:else if message.type === 'system'}
+						<div class="w-full">
+							<div class="min-w-0">
+								<SystemMessage {message} />
+							</div>
+						</div>
+					{:else if message.type === 'subagent'}
+						<div class="w-full">
+							<div class="min-w-0">
+								<SubagentMessage {message} />
+							</div>
+						</div>
 					{/if}
-				{:else if message.type === 'tool_use'}
-					<ToolUseMessage
-						name={message.toolName || 'Tool'}
-						input={message.toolInput}
-						partialInput={message.partialToolInput}
-						result={message.toolResult}
-						status={message.toolStatus || 'running'}
-						streaming={message.streaming}
-					/>
-				{:else if message.type === 'tool_result'}
-					<!-- Skip standalone tool_result messages - they should be merged into tool_use -->
-					<!-- This prevents flickering where result briefly appears separately -->
-				{:else if message.type === 'system'}
-					<div class="w-full">
-						<div class="min-w-0">
-							<SystemMessage {message} />
-						</div>
-					</div>
-				{:else if message.type === 'subagent'}
-					<div class="w-full">
-						<div class="min-w-0">
-							<SubagentMessage {message} />
-						</div>
-					</div>
 				{/if}
 			</div>
 			{/each}
