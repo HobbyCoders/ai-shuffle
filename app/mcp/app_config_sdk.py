@@ -1822,8 +1822,9 @@ def create_app_config_server(
         len(all_tools), is_admin, project_id,
     )
 
-    return create_sdk_mcp_server(
+    from app.mcp.sdk_compat import patch_sdk_server
+    return patch_sdk_server(create_sdk_mcp_server(
         name="app-config",
         version="1.0.0",
         tools=all_tools,
-    )
+    ), all_tools)

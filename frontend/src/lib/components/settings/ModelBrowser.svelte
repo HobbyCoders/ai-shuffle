@@ -217,20 +217,26 @@
 					onclick={() => selectModel(model)}
 					title={model.endpoint_id}
 				>
-					{#if model.thumbnail_url}
-						<div class="model-thumb">
+					<div class="model-thumb" class:placeholder={!model.thumbnail_url}>
+						{#if model.thumbnail_url}
 							<img
 								src={model.thumbnail_url}
 								alt={model.display_name}
 								loading="lazy"
-								onerror={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+								referrerpolicy="no-referrer"
+								crossorigin="anonymous"
+								onerror={(e) => {
+									const img = e.target as HTMLImageElement;
+									img.style.display = 'none';
+									img.parentElement?.classList.add('placeholder');
+								}}
 							/>
-						</div>
-					{:else}
-						<div class="model-thumb placeholder">
+						{/if}
+						<div class="thumb-gradient"></div>
+						{#if !model.thumbnail_url}
 							<span class="thumb-icon">{getOutputIcon(model)}</span>
-						</div>
-					{/if}
+						{/if}
+					</div>
 					<div class="model-info">
 						<div class="model-name">{model.display_name}</div>
 						<div class="model-category">{getCategoryLabel(model.category)}</div>
@@ -428,7 +434,8 @@
 
 	.model-card:hover {
 		border-color: var(--ring);
-		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+		transform: translateY(-1px);
 	}
 
 	.model-card.selected {
@@ -440,25 +447,59 @@
 		width: 100%;
 		height: 100px;
 		overflow: hidden;
-		background: var(--muted);
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		position: relative;
+		background: var(--muted);
 	}
 
 	.model-thumb img {
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
+		transition: transform 300ms ease;
+	}
+
+	.model-card:hover .model-thumb img {
+		transform: scale(1.05);
+	}
+
+	.thumb-gradient {
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(to top, rgba(0, 0, 0, 0.45) 0%, transparent 50%);
+		pointer-events: none;
+		z-index: 1;
 	}
 
 	.model-thumb.placeholder {
-		background: var(--input);
+		background: linear-gradient(
+			135deg,
+			var(--muted) 0%,
+			color-mix(in srgb, var(--primary) 15%, var(--muted)) 25%,
+			var(--muted) 50%,
+			color-mix(in srgb, var(--primary) 10%, var(--muted)) 75%,
+			var(--muted) 100%
+		);
+		background-size: 400% 400%;
+		animation: shimmer-banner 8s ease infinite;
+	}
+
+	.model-thumb.placeholder .thumb-gradient {
+		display: none;
+	}
+
+	@keyframes shimmer-banner {
+		0% { background-position: 0% 50%; }
+		50% { background-position: 100% 50%; }
+		100% { background-position: 0% 50%; }
 	}
 
 	.thumb-icon {
 		font-size: 2rem;
 		opacity: 0.4;
+		z-index: 2;
 	}
 
 	.model-info {
@@ -547,6 +588,29 @@
 
 	.error-state p {
 		color: var(--destructive);
+	}
+
+	/* Reduced motion */
+	@media (prefers-reduced-motion: reduce) {
+		.model-thumb.placeholder {
+			animation: none;
+		}
+
+		.model-card {
+			transition: none;
+		}
+
+		.model-card:hover {
+			transform: none;
+		}
+
+		.model-thumb img {
+			transition: none;
+		}
+
+		.model-card:hover .model-thumb img {
+			transform: none;
+		}
 	}
 
 	/* Mobile */

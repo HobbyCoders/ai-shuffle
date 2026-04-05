@@ -115,7 +115,8 @@ def create_connector_tools_server() -> Optional[Any]:
         len(tools), tool_names,
     )
 
-    return create_sdk_mcp_server("connector-tools", tools)
+    from app.mcp.sdk_compat import patch_sdk_server
+    return patch_sdk_server(create_sdk_mcp_server("connector-tools", tools), tools)
 
 
 def get_connector_tool_names() -> List[str]:

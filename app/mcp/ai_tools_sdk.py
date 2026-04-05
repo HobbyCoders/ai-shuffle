@@ -17,6 +17,7 @@ from claude_agent_sdk import tool, create_sdk_mcp_server
 from mcp.types import ToolAnnotations
 
 from app.mcp.node_worker import NodeWorker
+from app.mcp.sdk_compat import patch_sdk_server
 
 logger = logging.getLogger(__name__)
 
@@ -377,8 +378,8 @@ def create_ai_tools_server(
 
     logger.info(f"Creating AI tools MCP server with {len(enabled_tools)} tools: {[t.name for t in enabled_tools]}")
 
-    return create_sdk_mcp_server(
+    return patch_sdk_server(create_sdk_mcp_server(
         name="ai-tools",
         version="1.0.0",
         tools=enabled_tools,
-    )
+    ), enabled_tools)
