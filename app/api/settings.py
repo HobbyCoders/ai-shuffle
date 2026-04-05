@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from app.db import database
@@ -261,15 +261,23 @@ TTS_MODELS = {
         "name": "MiniMax Speech 2.8 HD",
         "description": "High-definition speech generation with multiple voices",
         "price_display": "~$0.03/1K chars",
-        "voices": [],
-        "supports_speed": False
+        "voices": [
+            "Wise_Woman", "English_Trustworthy_Female", "English_Trustworthy_Male",
+            "English_Gentle_Female", "English_Friendly_Male", "English_Lively_Female"
+        ],
+        "supports_speed": True,
+        "speed_range": [0.5, 2.0]
     },
     "fal-ai/minimax/speech-02-hd": {
         "name": "MiniMax Speech 02 HD",
         "description": "Advanced text-to-speech with natural prosody",
         "price_display": "~$0.02/1K chars",
-        "voices": [],
-        "supports_speed": False
+        "voices": [
+            "Wise_Woman", "English_Trustworthy_Female", "English_Trustworthy_Male",
+            "English_Gentle_Female", "English_Friendly_Male", "English_Lively_Female"
+        ],
+        "supports_speed": True,
+        "speed_range": [0.5, 2.0]
     },
     "fal-ai/chatterbox/text-to-speech": {
         "name": "Chatterbox",
@@ -290,9 +298,9 @@ TTS_MODELS = {
         "description": "ElevenLabs flagship v3 — 29+ languages, streaming, 21 voices",
         "price_display": "~$0.10/1K chars",
         "voices": [
-            "aria", "sarah", "laura", "charlotte", "alice", "matilda", "jessica",
-            "lily", "rachel", "river", "roger", "charlie", "george", "callum",
-            "liam", "will", "eric", "chris", "brian", "daniel", "bill"
+            "Aria", "Sarah", "Laura", "Charlotte", "Alice", "Matilda", "Jessica",
+            "Lily", "Rachel", "River", "Roger", "Charlie", "George", "Callum",
+            "Liam", "Will", "Eric", "Chris", "Brian", "Daniel", "Bill"
         ],
         "supports_speed": True,
         "speed_range": [0.7, 1.2]
@@ -302,9 +310,9 @@ TTS_MODELS = {
         "description": "ElevenLabs 29-language TTS — best accent accuracy and stability",
         "price_display": "~$0.10/1K chars",
         "voices": [
-            "aria", "sarah", "laura", "charlotte", "alice", "matilda", "jessica",
-            "lily", "rachel", "river", "roger", "charlie", "george", "callum",
-            "liam", "will", "eric", "chris", "brian", "daniel", "bill"
+            "Aria", "Sarah", "Laura", "Charlotte", "Alice", "Matilda", "Jessica",
+            "Lily", "Rachel", "River", "Roger", "Charlie", "George", "Callum",
+            "Liam", "Will", "Eric", "Chris", "Brian", "Daniel", "Bill"
         ],
         "supports_speed": True,
         "speed_range": [0.7, 1.2]
@@ -314,9 +322,9 @@ TTS_MODELS = {
         "description": "ElevenLabs low-latency TTS — 32 languages, ideal for real-time apps",
         "price_display": "~$0.05/1K chars",
         "voices": [
-            "aria", "sarah", "laura", "charlotte", "alice", "matilda", "jessica",
-            "lily", "rachel", "river", "roger", "charlie", "george", "callum",
-            "liam", "will", "eric", "chris", "brian", "daniel", "bill"
+            "Aria", "Sarah", "Laura", "Charlotte", "Alice", "Matilda", "Jessica",
+            "Lily", "Rachel", "River", "Roger", "Charlie", "George", "Callum",
+            "Liam", "Will", "Eric", "Chris", "Brian", "Daniel", "Bill"
         ],
         "supports_speed": True,
         "speed_range": [0.7, 1.2]
@@ -334,6 +342,15 @@ TTS_MODELS = {
         "price_display": "~$0.05/1K chars",
         "voices": [
             "tara", "leah", "jess", "mia", "zoe", "leo", "dan", "zac"
+        ],
+        "supports_speed": False
+    },
+    "fal-ai/vibevoice": {
+        "name": "VibeVoice 1.5B",
+        "description": "Microsoft VibeVoice — multi-speaker, long-form, expressive TTS",
+        "price_display": "~$0.04/min",
+        "voices": [
+            "Frank [EN]", "Carter [EN]", "Luna [EN]", "Sage [EN]"
         ],
         "supports_speed": False
     },
@@ -723,6 +740,90 @@ def get_generated_audio_dir() -> Path:
     return audio_dir
 
 
+def _build_tts_payload(model_id: str, text: str, voice: str, speed: float, model_info: dict) -> dict:
+    """Build the correct fal.ai payload for each TTS model's API contract."""
+
+    # Kokoro: uses "prompt" for text
+    if model_id.startswith("fal-ai/kokoro"):
+        payload = {"prompt": text, "voice": voice}
+        if model_info.get("supports_speed") and speed != 1.0:
+            payload["speed"] = speed
+        return payload
+
+    # MiniMax 2.8: uses "prompt" + voice_setting object
+    if model_id == "fal-ai/minimax/speech-2.8-hd":
+        payload: dict = {"prompt": text, "output_format": "url"}
+        voice_setting: dict = {"voice_id": voice or "Wise_Woman"}
+        if model_info.get("supports_speed") and speed != 1.0:
+            voice_setting["speed"] = speed
+        payload["voice_setting"] = voice_setting
+        return payload
+
+    # MiniMax 02: uses "text" + voice_setting object
+    if model_id == "fal-ai/minimax/speech-02-hd":
+        payload = {"text": text, "output_format": "url"}
+        voice_setting = {"voice_id": voice or "Wise_Woman"}
+        if model_info.get("supports_speed") and speed != 1.0:
+            voice_setting["speed"] = speed
+        payload["voice_setting"] = voice_setting
+        return payload
+
+    # Chatterbox: text only, no voice param
+    if model_id == "fal-ai/chatterbox/text-to-speech":
+        return {"text": text}
+
+    # Dia TTS: text only
+    if model_id == "fal-ai/dia-tts/voice-clone":
+        return {"text": text}
+
+    # ElevenLabs: uses "text" + capitalized "voice"
+    if model_id.startswith("fal-ai/elevenlabs/tts"):
+        payload = {"text": text}
+        if voice:
+            payload["voice"] = voice.capitalize()
+        return payload
+
+    # Orpheus: uses "text" + "voice"
+    if model_id == "fal-ai/orpheus-tts":
+        payload = {"text": text}
+        if voice:
+            payload["voice"] = voice
+        return payload
+
+    # F5-TTS: uses "gen_text"
+    if model_id == "fal-ai/f5-tts":
+        return {"gen_text": text}
+
+    # VibeVoice: uses "script" + "speakers" array
+    if model_id.startswith("fal-ai/vibevoice"):
+        return {
+            "script": f"Speaker 0: {text}",
+            "speakers": [{"preset": voice or "Frank [EN]"}]
+        }
+
+    # Fallback: generic text + voice
+    payload = {"text": text}
+    if voice:
+        payload["voice"] = voice
+    if model_info.get("supports_speed") and speed != 1.0:
+        payload["speed"] = speed
+    return payload
+
+
+def _extract_audio_url(result: dict) -> Optional[str]:
+    """Extract audio URL from fal.ai response (varies by model)."""
+    # Most models: {audio: {url: "..."}}
+    audio = result.get("audio")
+    if isinstance(audio, dict):
+        url = audio.get("url")
+        if url:
+            return url
+    elif isinstance(audio, str) and audio.startswith("http"):
+        return audio
+    # Some models: {audio_url: "..."}
+    return result.get("audio_url")
+
+
 @router.post("/tts/generate", response_model=TTSGenerateResponse)
 async def generate_tts(
     request: TTSGenerateRequest,
@@ -764,20 +865,17 @@ async def generate_tts(
     if len(text) > 4096:
         raise HTTPException(status_code=400, detail="Text too long. Maximum 4096 characters.")
 
-    # Validate speed
-    speed_range = model_info.get("speed_range", [0.1, 5.0])
-    if speed < speed_range[0] or speed > speed_range[1]:
-        raise HTTPException(status_code=400, detail=f"Speed must be between {speed_range[0]} and {speed_range[1]}")
+    # Validate speed if model supports it
+    if model_info.get("supports_speed"):
+        speed_range = model_info.get("speed_range", [0.5, 2.0])
+        if speed < speed_range[0] or speed > speed_range[1]:
+            raise HTTPException(status_code=400, detail=f"Speed must be between {speed_range[0]} and {speed_range[1]}")
 
-    # Build the fal.ai request payload
-    payload = {"text": text}
-    if voice:
-        payload["voice"] = voice
-    if model_info.get("supports_speed", False) and speed != 1.0:
-        payload["speed"] = speed
+    # Build model-specific payload
+    payload = _build_tts_payload(tts_model, text, voice, speed, model_info)
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
                 f"https://fal.run/{tts_model}",
                 headers={
@@ -806,15 +904,14 @@ async def generate_tts(
                 )
 
             result = response.json()
-
-            # fal.ai TTS returns audio_url in the response
-            audio_url_from_fal = result.get("audio", {}).get("url") or result.get("audio_url")
+            audio_url_from_fal = _extract_audio_url(result)
 
             if not audio_url_from_fal:
+                logger.error(f"No audio URL in fal.ai response for {tts_model}: {result}")
                 raise HTTPException(status_code=500, detail="No audio URL in fal.ai response")
 
             # Download the audio and save locally
-            audio_response = await client.get(audio_url_from_fal, timeout=30.0)
+            audio_response = await client.get(audio_url_from_fal, timeout=60.0)
             if audio_response.status_code != 200:
                 raise HTTPException(status_code=500, detail="Failed to download generated audio")
 
@@ -857,39 +954,89 @@ async def stream_tts(
     token: str = Depends(require_auth)
 ):
     """
-    Stream TTS audio. Since fal.ai TTS endpoints return full audio,
-    this generates the audio and streams the result file in chunks.
+    Stream TTS audio directly from fal.ai without saving to disk.
     """
-    # Generate the full audio first
-    result = await generate_tts(request, token)
-    if not result.success:
-        raise HTTPException(status_code=500, detail=result.error or "TTS generation failed")
-
-    if result.file_path:
-        async def stream_file():
-            with open(result.file_path, "rb") as f:
-                while chunk := f.read(8192):
-                    yield chunk
-
-        output_format = request.output_format or "mp3"
-        mime_types = {
-            "mp3": "audio/mpeg",
-            "opus": "audio/opus",
-            "aac": "audio/aac",
-            "flac": "audio/flac",
-            "wav": "audio/wav",
-            "pcm": "audio/pcm"
-        }
-        return StreamingResponse(
-            stream_file(),
-            media_type=mime_types.get(output_format, "audio/mpeg"),
-            headers={
-                "Cache-Control": "no-cache",
-                "Transfer-Encoding": "chunked"
-            }
+    fal_key = get_decrypted_api_key("fal_api_key")
+    if not fal_key:
+        raise HTTPException(
+            status_code=400,
+            detail="fal.ai API key not configured. Go to Settings > Integrations to add your key."
         )
 
-    raise HTTPException(status_code=500, detail="TTS generation failed - no file produced")
+    tts_model = request.model or database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
+    model_info = TTS_MODELS.get(tts_model)
+    if not model_info:
+        raise HTTPException(status_code=400, detail=f"Invalid TTS model: {tts_model}")
+
+    voice = request.voice or database.get_system_setting("tts_voice") or "af_heart"
+    speed = request.speed
+    if speed is None:
+        speed_str = database.get_system_setting("tts_speed")
+        speed = float(speed_str) if speed_str else 1.0
+
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    if len(text) > 4096:
+        raise HTTPException(status_code=400, detail="Text too long. Maximum 4096 characters.")
+
+    payload = _build_tts_payload(tts_model, text, voice, speed, model_info)
+
+    output_format = request.output_format or "mp3"
+    mime_types = {
+        "mp3": "audio/mpeg",
+        "opus": "audio/opus",
+        "aac": "audio/aac",
+        "flac": "audio/flac",
+        "wav": "audio/wav",
+        "pcm": "audio/pcm"
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            # Call fal.ai to generate audio
+            response = await client.post(
+                f"https://fal.run/{tts_model}",
+                headers={
+                    "Authorization": f"Key {fal_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+
+            if response.status_code == 401:
+                raise HTTPException(status_code=400, detail="fal.ai API key is invalid.")
+            elif response.status_code == 429:
+                raise HTTPException(status_code=429, detail="Rate limit exceeded.")
+            elif response.status_code != 200:
+                logger.error(f"fal.ai TTS failed: {response.status_code} - {response.text}")
+                raise HTTPException(status_code=500, detail=f"TTS generation failed: {response.text}")
+
+            result = response.json()
+            audio_url_from_fal = _extract_audio_url(result)
+
+            if not audio_url_from_fal:
+                logger.error(f"No audio URL in fal.ai response for {tts_model}: {result}")
+                raise HTTPException(status_code=500, detail="No audio URL in fal.ai response")
+
+            # Stream directly from fal.ai CDN to the client (no disk round-trip)
+            audio_response = await client.get(audio_url_from_fal, timeout=60.0)
+            if audio_response.status_code != 200:
+                raise HTTPException(status_code=500, detail="Failed to download generated audio")
+
+            return Response(
+                content=audio_response.content,
+                media_type=mime_types.get(output_format, "audio/mpeg"),
+                headers={"Cache-Control": "no-cache"}
+            )
+
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="TTS generation timed out. Try shorter text.")
+    except Exception:
+        logger.exception("fal.ai TTS streaming failed")
+        raise HTTPException(status_code=500, detail="TTS generation failed")
 
 
 # ============================================================================

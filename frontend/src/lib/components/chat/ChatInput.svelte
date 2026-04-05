@@ -13,7 +13,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles } from '$lib/stores/app-data';
 	import { claudeAuthenticated } from '$lib/stores/auth';
-	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
+
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
@@ -201,17 +201,17 @@
 
 		if (!finalPrompt.trim() || isUploading || $activeSession.worktreeDeleted || ($activeSession.executionMode === 'worktree' && !$activeSession.worktreeId)) return;
 
-		// Client-side slash command: /fast [on|off]
+		// Client-side slash command: /fast [on|off] — per-session toggle
 		const fastMatch = finalPrompt.trim().match(/^\/fast(?:\s+(on|off|enable|disable|true|false))?$/i);
 		if (fastMatch) {
 			const arg = fastMatch[1]?.toLowerCase();
-			const currentlyOn = chatPreferences.getValue('fastMode');
+			const currentlyOn = $activeSession.fastMode;
 			const enable = arg === 'on' || arg === 'enable' || arg === 'true'
 				? true
 				: arg === 'off' || arg === 'disable' || arg === 'false'
 				? false
 				: !currentlyOn;
-			chatPreferences.setFastMode(enable);
+			activeSession.setFastMode(enable);
 			inputValue = '';
 			editorRef?.clear();
 			return;

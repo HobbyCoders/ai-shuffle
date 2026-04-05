@@ -4,10 +4,8 @@
 	 * context usage, profile selector, override dropdowns,
 	 * and file attach button.
 	 */
-	import { onMount } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { claudeAuthenticated } from '$lib/stores/auth';
-	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
 	import { profiles } from '$lib/stores/app-data';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
@@ -20,15 +18,6 @@
 
 	let { isUploading, onAttachClick }: Props = $props();
 
-	let chatPrefs = $state<ChatPreferences | null>(null);
-
-	onMount(() => {
-		const unsubscribe = chatPreferences.subscribe((prefs: ChatPreferences) => {
-			chatPrefs = prefs;
-		});
-		return () => { unsubscribe(); };
-	});
-
 	// Resolve the effective model to determine if fast mode is applicable
 	const effectiveModel = $derived.by(() => {
 		if ($activeSession.modelOverride) return $activeSession.modelOverride;
@@ -36,9 +25,9 @@
 		return profile?.config?.model || 'sonnet';
 	});
 
-	// Fast mode is only meaningful with Opus models
+	// Fast mode is only meaningful with Opus models (per-session state)
 	const isOpusModel = $derived(/opus/i.test(effectiveModel));
-	const fastModeActive = $derived(!!(chatPrefs?.fastMode && isOpusModel));
+	const fastModeActive = $derived(!!($activeSession.fastMode && isOpusModel));
 
 	const permissionModes = [
 		{ value: null, label: 'Default', description: 'Use profile setting' },
@@ -53,13 +42,13 @@
 	<!-- Left: Usage Indicator + Fast Mode Badge -->
 	<div class="controls-left">
 		<ContextUsageBar />
-		{#if chatPrefs?.fastMode}
+		{#if $activeSession.fastMode}
 			<button
 				class="fast-mode-badge"
 				class:active={fastModeActive}
 				class:inactive={!isOpusModel}
 				title={isOpusModel ? 'Fast mode active (Opus 4.6)' : 'Fast mode enabled but requires Opus model'}
-				onclick={() => chatPreferences.setFastMode(false)}
+				onclick={() => activeSession.setFastMode(false)}
 			>
 				<span class="fast-icon">↯</span>
 				<span class="fast-label">FAST</span>

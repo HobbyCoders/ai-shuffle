@@ -30,8 +30,6 @@ import { sessionEphemeralCache } from './session-cache';
 import { appData } from './app-data';
 import { git } from './git.svelte';
 import { untrack } from 'svelte';
-import { chatPreferences } from './chatPreferences.svelte';
-
 // Shared types
 import type {
 	ChatMessage, MessageType, TodoItem,
@@ -143,6 +141,7 @@ export interface ActiveSessionState {
 	isCreatingWorktree: boolean;
 	worktreeError: string | null;
 	worktreeDeleted: boolean;
+	fastMode: boolean;
 	sessionLocked: boolean;
 	sessionLockedBy: string | undefined;
 }
@@ -308,6 +307,7 @@ function defaultState(): ActiveSessionState {
 		isCreatingWorktree: false,
 		worktreeError: null,
 		worktreeDeleted: false,
+		fastMode: false,
 		sessionLocked: false,
 		sessionLockedBy: undefined,
 	};
@@ -335,10 +335,7 @@ function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
 let stopTimeout: ReturnType<typeof setTimeout> | null = null;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
-// Track fast mode preference — updated by chatPreferences subscription.
-// Read at message-send time to include the fast_mode override in WS queries.
-let _fastModeEnabled = false;
-chatPreferences.subscribe(prefs => { _fastModeEnabled = prefs.fastMode; });
+// Fast mode is per-session — stored in _state.fastMode, not global preferences.
 
 // Shared mutable state — passed by reference to ws-message-handlers and session-switcher.
 // Simplified: removed waitingForHistory, expectedSessionId, streamEndCleanedUp,
@@ -897,6 +894,11 @@ export const activeSession = {
 		// flag is true (or when the event matches the current sessionId).
 		// This prevents unsolicited streaming events from hijacking the chat.
 		internal.awaitingNewSession = true;
+		// If sending from new chat, clear the cached ephemeral so that the
+		// next "new session" click doesn't resurrect the draft we just sent.
+		if (!_state.sessionId) {
+			sessionEphemeralCache.remove('__new_chat__');
+		}
 		console.debug(`[ActiveSession] sendMessage: sessionId=${_state.sessionId}, awaitingNewSession=true, wsConnected=${wsConn.isConnected()}`);
 
 		_update(s => ({
@@ -916,7 +918,7 @@ export const activeSession = {
 		const overrides: Record<string, string> = {};
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
 		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
-		if (_fastModeEnabled) overrides.fast_mode = 'true';
+		if (_state.fastMode) overrides.fast_mode = 'true';
 
 		wsConn.resetLastMessageTime();
 		wsConn.send({
@@ -1006,6 +1008,7 @@ export const activeSession = {
 
 	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model })); persistSession(); },
 	setPermissionModeOverride(mode: string | null) { _update(s => ({ ...s, permissionModeOverride: mode })); persistSession(); },
+	setFastMode(enabled: boolean) { _update(s => ({ ...s, fastMode: enabled })); },
 
 	// ── Ephemeral UI State ──────────────────────────────────────────
 

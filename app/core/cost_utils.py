@@ -212,6 +212,7 @@ def attach_cost_metadata(messages: List[Dict[str, Any]], session_id: str) -> Non
                 **existing_metadata,
                 "cost_usd": usage["cost_usd"],
                 "duration_ms": usage["duration_ms"],
+                "tokens_out": usage.get("tokens_out", 0),
                 "is_final_message": is_absolute_final
             }
             # Only add cumulative cost to the absolute final message

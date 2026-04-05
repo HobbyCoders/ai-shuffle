@@ -869,6 +869,7 @@ const KOKORO_VOICES: TTSVoice[] = [
 ];
 
 const MINIMAX_VOICES: TTSVoice[] = [
+	{ id: 'Wise_Woman', name: 'Wise Woman', language: 'en', gender: 'female', description: 'Default voice' },
 	{ id: 'English_Trustworthy_Female', name: 'Trustworthy Female', language: 'en', gender: 'female' },
 	{ id: 'English_Trustworthy_Male', name: 'Trustworthy Male', language: 'en', gender: 'male' },
 	{ id: 'English_Gentle_Female', name: 'Gentle Female', language: 'en', gender: 'female' },
@@ -877,27 +878,27 @@ const MINIMAX_VOICES: TTSVoice[] = [
 ];
 
 const ELEVENLABS_VOICES: TTSVoice[] = [
-	{ id: 'aria', name: 'Aria', language: 'en', gender: 'female' },
-	{ id: 'sarah', name: 'Sarah', language: 'en', gender: 'female' },
-	{ id: 'laura', name: 'Laura', language: 'en', gender: 'female' },
-	{ id: 'charlotte', name: 'Charlotte', language: 'en', gender: 'female' },
-	{ id: 'alice', name: 'Alice', language: 'en', gender: 'female' },
-	{ id: 'matilda', name: 'Matilda', language: 'en', gender: 'female' },
-	{ id: 'jessica', name: 'Jessica', language: 'en', gender: 'female' },
-	{ id: 'lily', name: 'Lily', language: 'en', gender: 'female' },
-	{ id: 'rachel', name: 'Rachel', language: 'en', gender: 'female', description: 'Default voice' },
-	{ id: 'river', name: 'River', language: 'en', gender: 'female' },
-	{ id: 'roger', name: 'Roger', language: 'en', gender: 'male' },
-	{ id: 'charlie', name: 'Charlie', language: 'en', gender: 'male' },
-	{ id: 'george', name: 'George', language: 'en', gender: 'male' },
-	{ id: 'callum', name: 'Callum', language: 'en', gender: 'male' },
-	{ id: 'liam', name: 'Liam', language: 'en', gender: 'male' },
-	{ id: 'will', name: 'Will', language: 'en', gender: 'male' },
-	{ id: 'eric', name: 'Eric', language: 'en', gender: 'male' },
-	{ id: 'chris', name: 'Chris', language: 'en', gender: 'male' },
-	{ id: 'brian', name: 'Brian', language: 'en', gender: 'male' },
-	{ id: 'daniel', name: 'Daniel', language: 'en', gender: 'male' },
-	{ id: 'bill', name: 'Bill', language: 'en', gender: 'male' }
+	{ id: 'Aria', name: 'Aria', language: 'en', gender: 'female' },
+	{ id: 'Sarah', name: 'Sarah', language: 'en', gender: 'female' },
+	{ id: 'Laura', name: 'Laura', language: 'en', gender: 'female' },
+	{ id: 'Charlotte', name: 'Charlotte', language: 'en', gender: 'female' },
+	{ id: 'Alice', name: 'Alice', language: 'en', gender: 'female' },
+	{ id: 'Matilda', name: 'Matilda', language: 'en', gender: 'female' },
+	{ id: 'Jessica', name: 'Jessica', language: 'en', gender: 'female' },
+	{ id: 'Lily', name: 'Lily', language: 'en', gender: 'female' },
+	{ id: 'Rachel', name: 'Rachel', language: 'en', gender: 'female', description: 'Default voice' },
+	{ id: 'River', name: 'River', language: 'en', gender: 'female' },
+	{ id: 'Roger', name: 'Roger', language: 'en', gender: 'male' },
+	{ id: 'Charlie', name: 'Charlie', language: 'en', gender: 'male' },
+	{ id: 'George', name: 'George', language: 'en', gender: 'male' },
+	{ id: 'Callum', name: 'Callum', language: 'en', gender: 'male' },
+	{ id: 'Liam', name: 'Liam', language: 'en', gender: 'male' },
+	{ id: 'Will', name: 'Will', language: 'en', gender: 'male' },
+	{ id: 'Eric', name: 'Eric', language: 'en', gender: 'male' },
+	{ id: 'Chris', name: 'Chris', language: 'en', gender: 'male' },
+	{ id: 'Brian', name: 'Brian', language: 'en', gender: 'male' },
+	{ id: 'Daniel', name: 'Daniel', language: 'en', gender: 'male' },
+	{ id: 'Bill', name: 'Bill', language: 'en', gender: 'male' }
 ];
 
 const ORPHEUS_VOICES: TTSVoice[] = [
@@ -909,6 +910,13 @@ const ORPHEUS_VOICES: TTSVoice[] = [
 	{ id: 'leo', name: 'Leo', language: 'en', gender: 'male' },
 	{ id: 'dan', name: 'Dan', language: 'en', gender: 'male' },
 	{ id: 'zac', name: 'Zac', language: 'en', gender: 'male' }
+];
+
+const VIBEVOICE_VOICES: TTSVoice[] = [
+	{ id: 'Frank [EN]', name: 'Frank', language: 'en', gender: 'male', description: 'Default voice' },
+	{ id: 'Carter [EN]', name: 'Carter', language: 'en', gender: 'male' },
+	{ id: 'Luna [EN]', name: 'Luna', language: 'en', gender: 'female' },
+	{ id: 'Sage [EN]', name: 'Sage', language: 'en', gender: 'neutral' }
 ];
 
 export const FAL_TTS_MODELS: TTSModel[] = [
@@ -1118,6 +1126,26 @@ export const FAL_TTS_MODELS: TTSModel[] = [
 		speedRange: { min: 0.5, max: 2.0 },
 		maxInputLength: 10000,
 		pricePerMillion: 50.0
+	},
+	{
+		id: 'fal-ai/vibevoice',
+		name: 'vibevoice',
+		displayName: 'VibeVoice 1.5B',
+		provider: 'fal-ai',
+		description: 'Microsoft VibeVoice — multi-speaker, long-form, expressive TTS',
+		capabilities: {
+			streaming: false,
+			ssml: false,
+			customVoices: false,
+			steerability: false,
+			multiSpeaker: true,
+			emotionControl: false
+		},
+		voices: VIBEVOICE_VOICES,
+		outputFormats: ['wav'],
+		speedRange: { min: 0.5, max: 2.0 },
+		maxInputLength: 10000,
+		pricePerMillion: 40.0
 	}
 ];
 

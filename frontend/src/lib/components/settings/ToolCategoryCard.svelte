@@ -101,19 +101,24 @@
 			await api.patch<{ success: boolean }>(tool.modelEndpoint, { model: modelId });
 			onchange(tool.modelSettingKey, modelId);
 
-			// Reset per-model settings when model changes
+			// Reset per-model settings when model changes (keep sliders at current value)
 			for (const setting of tool.settings) {
-				onchange(setting.settingKey, '');
+				if (setting.type !== 'slider') {
+					onchange(setting.settingKey, '');
+				}
 			}
 			if (tool.settingsEndpoint && tool.settings.length > 0) {
 				const resetPayload: Record<string, string | number> = {};
 				for (const setting of tool.settings) {
-					resetPayload[setting.key] = setting.type === 'slider' ? (setting.sliderConfig?.min ?? 0) : '';
+					if (setting.type === 'slider') continue; // Don't reset sliders on model change
+					resetPayload[setting.key] = '';
 				}
-				try {
-					await api.patch(tool.settingsEndpoint, resetPayload);
-				} catch {
-					// Non-critical: settings reset failed
+				if (Object.keys(resetPayload).length > 0) {
+					try {
+						await api.patch(tool.settingsEndpoint, resetPayload);
+					} catch {
+						// Non-critical: settings reset failed
+					}
 				}
 			}
 
