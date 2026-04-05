@@ -29,7 +29,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio pytest-cov
+          pip install pytest pytest-asyncio pytest-cov pytest-timeout
 
       - name: Run tests
         run: pytest tests/ -v --tb=short -q --timeout=60

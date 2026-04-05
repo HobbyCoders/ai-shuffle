@@ -419,6 +419,7 @@ describe('ws-message-handlers', () => {
 		it('should forward sync events to session notifier', () => {
 			const state = mockState();
 			state.sessionId = 'session-1';
+			state.isStreaming = true;
 
 			deps = createMockDeps({ getState: vi.fn(() => state) });
 			handlers = createMessageHandlers(deps);
