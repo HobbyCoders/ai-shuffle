@@ -29,10 +29,15 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio pytest-cov pytest-timeout freezegun
+          pip install pytest pytest-asyncio pytest-timeout freezegun
 
-      - name: Run tests
-        run: pytest tests/ -x --tb=short --timeout=60 -o "addopts=" --no-header -q
+      - name: Run unit tests
+        run: pytest tests/core tests/db tests/mcp tests/middleware tests/services -x --tb=short --timeout=60 -o "addopts=" --no-header -q -p no:cacheprovider
+        env:
+          PYTHONDONTWRITEBYTECODE: 1
+
+      - name: Run API tests
+        run: pytest tests/api -x --tb=short --timeout=60 -o "addopts=" --no-header -q -p no:cacheprovider
         env:
           PYTHONDONTWRITEBYTECODE: 1
 
