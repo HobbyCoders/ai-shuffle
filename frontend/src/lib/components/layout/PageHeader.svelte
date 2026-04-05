@@ -266,19 +266,17 @@
 			flex: 1 1 0%;
 			min-width: 0;
 			justify-content: center;
+			position: relative;
 		}
 
-		.header-left.has-toggle {
-			justify-content: flex-start;
+		.header-left .sidebar-toggle {
+			position: absolute;
+			left: 0;
 		}
 
 		.header-title {
 			text-align: center;
 			max-width: 100%;
-		}
-
-		.has-toggle .header-title {
-			text-align: left;
 		}
 
 		.header-right {
