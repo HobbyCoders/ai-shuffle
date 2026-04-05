@@ -311,6 +311,13 @@
 	 * Only called when the branch changes (event-driven), not on a timer.
 	 */
 	async function checkPullRequests(projectId: string, branch: string | null) {
+		// Don't look for PRs to finish when on the default branch — PRs with the default
+		// branch as head are fork PRs, not feature branches you'd "finish" locally.
+		const defaultBranch = $githubRepoInfo?.default_branch ?? 'main';
+		if (branch && branch === defaultBranch) {
+			branchPR = null;
+			return;
+		}
 		if (branch && $githubAuthenticated) {
 			try {
 				const prs = await getPullRequests(projectId, 'open', 10);
