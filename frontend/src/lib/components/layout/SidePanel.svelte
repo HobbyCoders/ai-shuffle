@@ -508,6 +508,7 @@
 						<input
 							bind:this={searchInputRef}
 							type="text"
+							autocomplete="off"
 							placeholder="Search sessions..."
 							bind:value={searchQuery}
 							class="search-input"

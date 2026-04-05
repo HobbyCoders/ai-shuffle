@@ -595,18 +595,21 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 										<div class="password-form">
 											<input
 												type="password"
+												autocomplete="off"
 												bind:value={currentPassword}
 												placeholder="Current password"
 												class="input"
 											/>
 											<input
 												type="password"
+												autocomplete="new-password"
 												bind:value={newPassword}
 												placeholder="New password (8+ chars)"
 												class="input"
 											/>
 											<input
 												type="password"
+												autocomplete="new-password"
 												bind:value={confirmPassword}
 												placeholder="Confirm password"
 												class="input"
@@ -709,6 +712,7 @@ import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 												<div class="oauth-flow">
 													<input
 														type="password"
+														autocomplete="off"
 														bind:value={githubToken}
 														placeholder="Personal access token"
 														class="input compact"

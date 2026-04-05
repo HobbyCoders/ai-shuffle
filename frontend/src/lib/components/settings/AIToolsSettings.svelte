@@ -247,6 +247,7 @@
 				<div class="api-key-input-row">
 					<input
 						type="password"
+						autocomplete="off"
 						bind:value={falApiKey}
 						placeholder={falApiKeySet ? 'Enter new key to replace...' : 'Enter your fal.ai API key'}
 						class="input"
