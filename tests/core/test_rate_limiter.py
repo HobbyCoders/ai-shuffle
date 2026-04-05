@@ -718,7 +718,7 @@ class TestRateLimiter:
         mock_database.cleanup_old_request_logs.return_value = 100
 
         import logging
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.DEBUG):
             limiter.cleanup()
 
         assert "100" in caplog.text

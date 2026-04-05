@@ -800,8 +800,8 @@ class TestLogging:
                 request_data={},
             )
 
-            mock_logger.info.assert_called()
-            call_args = str(mock_logger.info.call_args)
+            mock_logger.debug.assert_called()
+            call_args = str(mock_logger.debug.call_args)
             assert "Queued request" in call_args
             assert "user:user-123" in call_args
 
@@ -842,8 +842,8 @@ class TestLogging:
         with patch("app.core.queue_manager.logger") as mock_logger:
             await queue.dequeue()
 
-            mock_logger.info.assert_called()
-            call_args = str(mock_logger.info.call_args)
+            mock_logger.debug.assert_called()
+            call_args = str(mock_logger.debug.call_args)
             assert "Dequeued request" in call_args
 
     @pytest.mark.asyncio
@@ -859,8 +859,8 @@ class TestLogging:
         with patch("app.core.queue_manager.logger") as mock_logger:
             await queue.remove(request_id)
 
-            mock_logger.info.assert_called()
-            call_args = str(mock_logger.info.call_args)
+            mock_logger.debug.assert_called()
+            call_args = str(mock_logger.debug.call_args)
             assert "Removed request" in call_args
 
     @pytest.mark.asyncio
@@ -876,8 +876,8 @@ class TestLogging:
         with patch("app.core.queue_manager.logger") as mock_logger:
             await queue.clear()
 
-            mock_logger.info.assert_called()
-            call_args = str(mock_logger.info.call_args)
+            mock_logger.debug.assert_called()
+            call_args = str(mock_logger.debug.call_args)
             assert "Cleared" in call_args
 
     @pytest.mark.asyncio

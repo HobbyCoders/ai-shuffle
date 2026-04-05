@@ -301,9 +301,9 @@ class TestLogEvent:
             assert "Database connection failed" in result["error"]
 
     def test_log_event_logs_info_on_success(self, mock_db_create_audit_log, caplog):
-        """Should log info message on successful audit."""
+        """Should log debug message on successful audit."""
         import logging
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.DEBUG):
             log_event(
                 event_type=AuditEventType.LOGIN_SUCCESS,
                 user_id="test-user",

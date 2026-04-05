@@ -745,9 +745,9 @@ class TestLogging(TestUserQuestionHandler):
                 broadcast_func=mock_broadcast
             )
 
-            # Check info was logged
-            mock_logger.info.assert_called()
-            calls = [str(c) for c in mock_logger.info.call_args_list]
+            # Check debug was logged
+            mock_logger.debug.assert_called()
+            calls = [str(c) for c in mock_logger.debug.call_args_list]
             assert any("req-123" in c for c in calls)
 
     @pytest.mark.asyncio
@@ -783,8 +783,8 @@ class TestLogging(TestUserQuestionHandler):
         with patch("app.core.user_question_handler.logger") as mock_logger:
             await handler.respond("req-123", "session-1", {"answer": "yes"})
 
-            mock_logger.info.assert_called()
-            calls = [str(c) for c in mock_logger.info.call_args_list]
+            mock_logger.debug.assert_called()
+            calls = [str(c) for c in mock_logger.debug.call_args_list]
             assert any("answered" in c for c in calls)
 
         await task
@@ -813,8 +813,8 @@ class TestLogging(TestUserQuestionHandler):
         with patch("app.core.user_question_handler.logger") as mock_logger:
             await handler.cancel_all("session-1")
 
-            mock_logger.info.assert_called()
-            calls = [str(c) for c in mock_logger.info.call_args_list]
+            mock_logger.debug.assert_called()
+            calls = [str(c) for c in mock_logger.debug.call_args_list]
             assert any("Cancelled" in c for c in calls)
 
         await task

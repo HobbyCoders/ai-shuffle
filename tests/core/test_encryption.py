@@ -518,7 +518,7 @@ class TestReEncryptAllSecrets:
 
         mock_db.get_system_setting = mock_get_setting
         mock_db.set_system_setting = MagicMock()
-        with patch.object(encryption.logger, "info") as mock_log:
+        with patch.object(encryption.logger, "debug") as mock_log:
             encryption.re_encrypt_all_secrets("old_pass", "new_pass", mock_db)
             calls = [str(c) for c in mock_log.call_args_list]
             assert any("Re-encrypted openai_api_key" in c for c in calls)
@@ -633,7 +633,7 @@ class TestEncryptExistingPlaintextKeys:
 
         mock_db.get_system_setting = mock_get_setting
         mock_db.set_system_setting = MagicMock()
-        with patch.object(encryption.logger, "info") as mock_log:
+        with patch.object(encryption.logger, "debug") as mock_log:
             encryption.encrypt_existing_plaintext_keys(mock_db)
             calls = [str(c) for c in mock_log.call_args_list]
             assert any("Encrypted existing plaintext key" in c for c in calls)

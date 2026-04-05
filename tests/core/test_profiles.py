@@ -33,7 +33,7 @@ class TestDefaultProfileConfig:
     def test_default_profile_config_has_permission_mode(self):
         """Should have permission_mode set to bypassPermissions."""
         from app.core.profiles import DEFAULT_PROFILE_CONFIG
-        assert DEFAULT_PROFILE_CONFIG["permission_mode"] == "bypassPermissions"
+        assert DEFAULT_PROFILE_CONFIG["permission_mode"] == "default"
 
     def test_default_profile_config_has_system_prompt(self):
         """Should have system_prompt with preset type."""
