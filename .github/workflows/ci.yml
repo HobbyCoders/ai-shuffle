@@ -32,7 +32,7 @@ jobs:
           pip install pytest pytest-asyncio pytest-cov pytest-timeout freezegun
 
       - name: Run tests
-        run: pytest tests/ -v --tb=short -q --timeout=60
+        run: pytest tests/ -x --tb=short --timeout=60 -o "addopts=" --no-header -q
         env:
           PYTHONDONTWRITEBYTECODE: 1
 
