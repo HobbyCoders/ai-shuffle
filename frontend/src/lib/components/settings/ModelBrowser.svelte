@@ -224,7 +224,6 @@
 								alt={model.display_name}
 								loading="lazy"
 								referrerpolicy="no-referrer"
-								crossorigin="anonymous"
 								onerror={(e) => {
 									const img = e.target as HTMLImageElement;
 									img.style.display = 'none';
