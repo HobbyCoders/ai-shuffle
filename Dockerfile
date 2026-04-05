@@ -1,16 +1,43 @@
-# Use official Python runtime as base image
+# ============================================================================
+# Stage 1: Frontend Builder — builds the SvelteKit static assets
+# ============================================================================
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /build
+
+# Install dependencies first (cached unless package-lock changes)
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+# Build frontend
+ARG CACHEBUST=0
+COPY frontend/ ./
+RUN npm run build
+
+
+# ============================================================================
+# Stage 2: AI Tools — install Node.js deps for AI tools
+# ============================================================================
+FROM node:20-slim AS tools-builder
+
+WORKDIR /tools
+COPY tools/package.json tools/package-lock.json* ./
+RUN npm install --omit=dev --ignore-scripts
+COPY tools/ ./
+
+
+# ============================================================================
+# Stage 3: Runtime — lean Python image with only what's needed
+# ============================================================================
 FROM python:3.11-slim
 
-# Set working directory in container
 WORKDIR /app
 
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    NODE_VERSION=20.x
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# ── Layer 1: System deps (rarely changes) ──
+# ── System deps (git, curl for health check, gosu for UID/GID, gh CLI) ──
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     curl \
@@ -20,16 +47,7 @@ RUN apt-get update && \
     gosu \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Layer 2: Node.js (changes only when NODE_VERSION changes) ──
-RUN mkdir -p /etc/apt/keyrings \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
-       | tee /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
-# ── Layer 3: GitHub CLI (changes rarely) ──
+# ── GitHub CLI ──
 RUN mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -38,63 +56,50 @@ RUN mkdir -p /etc/apt/keyrings \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Verify installations
+# ── Node.js runtime (needed by Claude Agent SDK subprocess) ──
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+       | tee /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN node --version && npm --version && gh --version
 
-# Note: Claude Code CLI is bundled with claude-agent-sdk Python package
-# No need to install separately via npm
-
-# ── Create non-root user EARLY so COPY --chown works without duplicate layers ──
-# Default UID/GID 1000, entrypoint.sh adjusts at runtime via PUID/PGID env vars
+# ── Create non-root user ──
 RUN groupadd -g 1000 appuser && \
     useradd -m -u 1000 -g 1000 appuser && \
     mkdir -p /home/appuser/.config/claude /home/appuser/.claude && \
     mkdir -p /data /workspace && \
     chown -R appuser:appuser /home/appuser /data /workspace
 
-# ── Layer 4: Python dependencies (changes when requirements.txt changes) ──
+# ── Python dependencies ──
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ── Layer 5: Frontend deps (changes when package-lock.json changes) ──
-COPY --chown=appuser:appuser frontend/package.json frontend/package-lock.json ./frontend/
-WORKDIR /app/frontend
-RUN npm ci
-
-# ── Layer 7: Frontend build (changes when frontend source changes) ──
-# CACHEBUST arg invalidates Docker layer cache for this step and all below.
-# Usage: docker compose build --build-arg CACHEBUST=$(date +%s)
-ARG CACHEBUST=0
-COPY --chown=appuser:appuser frontend/ ./
-RUN npm run build
-
-WORKDIR /app
-
-# ── Layer 8: Backend code + static assets (changes most frequently) ──
+# ── Backend code ──
 COPY --chown=appuser:appuser app/ ./app/
-RUN mkdir -p /app/app/static && cp -r /app/frontend/build/* /app/app/static/ && \
-    # Remove frontend source and node_modules — only the built static assets are needed at runtime
-    rm -rf /app/frontend
+
+# ── Copy pre-built frontend assets from builder stage ──
+RUN mkdir -p /app/app/static
+COPY --from=frontend-builder --chown=appuser:appuser /build/build/ /app/app/static/
+
+# ── Copy pre-built AI tools from builder stage ──
+COPY --from=tools-builder --chown=appuser:appuser /tools/ /opt/ai-tools/
 
 COPY --chown=appuser:appuser .env.example .
-
-# Copy AI tools to /opt/ai-tools (accessible by Claude agent)
-COPY --chown=appuser:appuser tools/ /opt/ai-tools/
-RUN cd /opt/ai-tools && npm install --omit=dev --ignore-scripts && rm -rf /root/.npm
 
 # Copy entrypoint script
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Ensure /app is owned by appuser (pip/system installs stay as root, that's fine)
+# Ensure /app is owned by appuser
 RUN chown appuser:appuser /app
 
-# Expose port
 EXPOSE 8000
 
-# Health check
 HEALTHCHECK --interval=120s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Use entrypoint script to handle runtime UID/GID changes
 ENTRYPOINT ["/entrypoint.sh"]

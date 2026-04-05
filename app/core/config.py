@@ -34,7 +34,7 @@ class Settings(BaseSettings):
 
     # Service info
     service_name: str = "ai-shuffle"
-    version: str = "0.8.2"
+    version: str = "1.2.1"
 
     # Deployment mode (auto-detected if not set)
     local_mode: Optional[bool] = None  # None = auto-detect, True = local, False = docker
@@ -74,6 +74,10 @@ class Settings(BaseSettings):
 
     # Security - Request limits
     max_request_body_mb: int = 50  # Maximum request body size in MB
+
+    # Security - WebSocket rate limiting (per connection)
+    ws_rate_limit_messages: int = 30  # Max messages per sliding window
+    ws_rate_limit_window_seconds: float = 10.0  # Sliding window duration in seconds
 
     # Admin password - used for encryption key derivation on startup
     # Set via ADMIN_PASSWORD env var or .env file to survive server restarts

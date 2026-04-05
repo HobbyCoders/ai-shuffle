@@ -3,7 +3,7 @@
 > A self-hosted web UI for Claude Code — run locally on your desktop or deploy via Docker for remote access from any device.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.8.2-green.svg)](https://github.com/HobbyCoders/ai-shuffle/releases)
+[![Version](https://img.shields.io/badge/version-1.2.1-green.svg)](https://github.com/HobbyCoders/ai-shuffle/releases)
 
 > **⚠️ Personal Project Disclaimer:** I built AI Shuffle as a learning project — to dig deeper into Claude Code and try my hand at building my own coding application from scratch. This is a personal project. I've been developing and testing it for the past 6 months and it's been mostly stable for the last month, so I figured it's time to put it out there and get some feedback. Expect bugs, and some features may not behave exactly as Claude Code's CLI does. If you run into issues, I'd love help identifying and fixing them — contributions and bug reports are very welcome!
 

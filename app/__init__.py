@@ -2,4 +2,4 @@
 AI Hub - Claude Code Web Interface and API
 """
 
-__version__ = "0.8.2"
+__version__ = "1.2.1"

@@ -4,6 +4,9 @@
 	 *
 	 * Layer 1: Minimal - textarea + essential buttons
 	 * Layer 2: Context Bar - inline profile/project dropdown selectors
+	 *
+	 * Delegates voice recording to VoiceRecorder, controls dock to ControlsDock,
+	 * and drag-and-drop to DragDropOverlay.
 	 */
 	import { tick, onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
@@ -11,12 +14,12 @@
 	import { profiles } from '$lib/stores/app-data';
 	import { claudeAuthenticated } from '$lib/stores/auth';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
-	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
-	import { getContextMaxForModel } from '$lib/constants/chat';
 	import TiptapEditor from './TiptapEditor.svelte';
+	import VoiceRecorder from './VoiceRecorder.svelte';
+	import ControlsDock from './ControlsDock.svelte';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery } from './tiptap/serialization';
 
 	interface Command {
@@ -34,36 +37,6 @@
 	}
 
 	let { compact = false }: Props = $props();
-
-	// Context usage calculation
-	function formatTokenCount(count: number): string {
-		if (count >= 1000000) {
-			return `${(count / 1000000).toFixed(1)}M`;
-		}
-		if (count >= 1000) {
-			return `${(count / 1000).toFixed(1)}k`;
-		}
-		return count.toString();
-	}
-
-
-	// Resolve effective model: override → profile config → default
-	const effectiveModel = $derived.by(() => {
-		if ($activeSession.modelOverride) return $activeSession.modelOverride;
-		const profile = $profiles.find(p => p.id === $activeSession.profile);
-		return profile?.config?.model || 'sonnet';
-	});
-
-	const contextMax = $derived(getContextMaxForModel(effectiveModel));
-
-	// Context usage from activeSession — set by onPollApplied callback after each
-	// successful poll. Do NOT import sessionStateManager from session-state.svelte.ts
-	// directly — that .svelte.ts file suffers from dual module evaluation
-	// (see KNOWN_ISSUES Root Cause 10).
-	// SDK token values already include everything in the context window.
-	// No additive constant or floor — they caused double-counting and phantom values.
-	const contextUsed = $derived($activeSession.contextUsed ?? 0);
-	const contextPercent = $derived(Math.min((contextUsed / contextMax) * 100, 100));
 
 	// Input state - use draft for persistence across session switches
 	let inputValue = $state($activeSession.draft || '');
@@ -118,30 +91,12 @@
 	// was already cleared and we don't want to overwrite it with stale text.
 	// Check the store imperatively (get()) since $effects don't run during teardown.
 	onDestroy(() => {
-		// Clean up voice recording resources to prevent media leaks
-		if (animationFrameId) {
-			cancelAnimationFrame(animationFrameId);
-			animationFrameId = null;
-		}
-		if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-			try {
-				mediaRecorder.stop();
-				mediaRecorder.stream.getTracks().forEach(track => track.stop());
-			} catch {
-				// Ignore errors during cleanup
-			}
-		}
-		if (audioContext) {
-			audioContext.close().catch(() => {});
-			audioContext = null;
-		}
-		analyserNode = null;
-
 		if (messageSent) return;
 		const currentSessionId = get(activeSession).sessionId;
 		if (currentSessionId !== initialSessionId) return; // session switched
 		saveDraftImmediately();
 	});
+
 	let editorRef = $state<TiptapEditor | null>(null);
 	let prevSessionId = $state($activeSession.sessionId);
 
@@ -159,26 +114,13 @@
 
 	let fileInputRef = $state<HTMLInputElement | null>(null);
 	let isUploading = $state(false);
-	let isDragging = $state(false);
 
-	// Voice recording state
+	// Voice recording state (bindable from VoiceRecorder)
 	let isRecording = $state(false);
 	let isTranscribing = $state(false);
-	let isPreparing = $state(false); // New: getting mic access
-	let mediaRecorder = $state<MediaRecorder | null>(null);
-	let recordingError = $state('');
-	let recordingStartTime = $state<number>(0);
-	let audioLevel = $state(0); // For audio level visualization (0-1)
-	let analyserNode = $state<AnalyserNode | null>(null);
-	let audioContext = $state<AudioContext | null>(null);
-	let animationFrameId = $state<number | null>(null);
 
-	// Use a non-reactive array for audio chunks to avoid Svelte 5 reactivity issues
-	// with rapid MediaRecorder ondataavailable events
-	let audioChunksRef: Blob[] = [];
-
-	// Recording is always available for admins (they control the API keys)
-	const canRecord = $derived(true);
+	// Error display — shared between file upload errors and voice recording errors
+	let errorMessage = $state('');
 
 	// Autocomplete state
 	let showCommandAutocomplete = $state(false);
@@ -189,81 +131,8 @@
 	// Island ref
 	let islandRef = $state<HTMLDivElement | null>(null);
 
-	// Dropdown state for profile/project selection
-	let showProfileDropdown = $state(false);
-	let profileDropdownRef = $state<HTMLDivElement | null>(null);
-	let profileGroupedSelector = $state<ReturnType<typeof GroupedSelector> | null>(null);
-
-	// Override dropdown state
-	let showPermissionDropdown = $state(false);
-	let permissionDropdownRef = $state<HTMLDivElement | null>(null);
-
-	// Permission mode options
-	const permissionModes = [
-		{ value: null, label: 'Default', description: 'Use profile setting' },
-		{ value: 'default', label: 'Ask', description: 'Confirm before tools' },
-		{ value: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve edits' },
-		{ value: 'plan', label: 'Plan Only', description: 'Plan without executing' },
-		{ value: 'bypassPermissions', label: 'Bypass', description: 'Execute all tools' }
-	];
-
-	// Get display labels for current overrides
-	const currentPermissionLabel = $derived(
-		permissionModes.find(m => m.value === $activeSession.permissionModeOverride)?.label || 'Default'
-	);
-
-	// Get selected profile/project names for display
+	// Get selected profile name for display in placeholder
 	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Profile');
-
-	// Mobile-optimized names: show only first word to save space
-	const selectedProfileNameMobile = $derived(selectedProfileName.split(' ')[0]);
-
-	// Toggle profile dropdown
-	function handleProfileClick(e: MouseEvent) {
-		e.stopPropagation();
-		showProfileDropdown = !showProfileDropdown;
-		if (showProfileDropdown) {
-			profileGroupedSelector?.reset();
-		}
-	}
-
-	// Select a profile
-	function selectProfile(profileId: string) {
-		activeSession.setProfile(profileId);
-		showProfileDropdown = false;
-	}
-
-	// Toggle override dropdowns
-	function handlePermissionClick(e: MouseEvent) {
-		e.stopPropagation();
-		showProfileDropdown = false;
-		showPermissionDropdown = !showPermissionDropdown;
-	}
-
-	// Select override values
-	function selectPermissionMode(value: string | null) {
-		activeSession.setPermissionModeOverride(value);
-		showPermissionDropdown = false;
-	}
-
-	// Close dropdowns when clicking outside
-	function handleClickOutside(e: MouseEvent) {
-		const target = e.target as Node;
-		if (profileDropdownRef && !profileDropdownRef.contains(target)) {
-			showProfileDropdown = false;
-		}
-		if (permissionDropdownRef && !permissionDropdownRef.contains(target)) {
-			showPermissionDropdown = false;
-		}
-	}
-
-	// Close dropdowns on escape
-	function handleEscape(e: KeyboardEvent) {
-		if (e.key === 'Escape') {
-			showProfileDropdown = false;
-			showPermissionDropdown = false;
-		}
-	}
 
 	// Handle queued message edit events from QueuedMessages component
 	function handleQueuedMessageEdit(e: Event) {
@@ -276,12 +145,8 @@
 	}
 
 	onMount(() => {
-		document.addEventListener('click', handleClickOutside);
-		document.addEventListener('keydown', handleEscape);
 		window.addEventListener('queued-message-edit', handleQueuedMessageEdit);
 		return () => {
-			document.removeEventListener('click', handleClickOutside);
-			document.removeEventListener('keydown', handleEscape);
 			window.removeEventListener('queued-message-edit', handleQueuedMessageEdit);
 		};
 	});
@@ -472,11 +337,10 @@
 		tick().then(() => editorRef?.focus());
 	}
 
-
 	// File upload
 	function triggerFileUpload() {
 		if (!$activeSession.project) {
-			recordingError = 'Please select a project first to upload files.';
+			errorMessage = 'Please select a project first to upload files.';
 			return;
 		}
 		fileInputRef?.click();
@@ -515,18 +379,24 @@
 		} catch (error: unknown) {
 			console.error('Upload failed:', error);
 			const err = error as { detail?: string };
-			recordingError = `Upload failed: ${err.detail || 'Unknown error'}`;
+			errorMessage = `Upload failed: ${err.detail || 'Unknown error'}`;
 		} finally {
 			isUploading = false;
 			input.value = '';
 		}
 	}
 
-	function removeUploadedFile(index: number) {
-		uploadedFiles = uploadedFiles.filter((_, i) => i !== index);
+	// Handle transcription result from VoiceRecorder
+	async function handleTranscription(text: string) {
+		editorRef?.appendText(text);
+		inputValue = editorRef?.getText() ?? '';
+		await tick();
+		editorRef?.focus();
 	}
 
-	// Drag and drop file upload
+	// Drag and drop file upload (inline since DragDropOverlay uses alert() for errors)
+	let isDragging = $state(false);
+
 	function handleDragEnter(e: DragEvent) {
 		e.preventDefault();
 		e.stopPropagation();
@@ -560,7 +430,7 @@
 		if (!e.dataTransfer?.files?.length) return;
 
 		if (!$activeSession.project) {
-			recordingError = 'Please select a project first to upload files.';
+			errorMessage = 'Please select a project first to upload files.';
 			return;
 		}
 
@@ -585,270 +455,11 @@
 		} catch (error: unknown) {
 			console.error('Upload failed:', error);
 			const err = error as { detail?: string };
-			recordingError = `Upload failed: ${err.detail || 'Unknown error'}`;
+			errorMessage = `Upload failed: ${err.detail || 'Unknown error'}`;
 		} finally {
 			isUploading = false;
 		}
 	}
-
-	// Voice recording
-	// Minimum recording duration in milliseconds to avoid empty/too-short recordings
-	const MIN_RECORDING_DURATION = 500;
-
-	// Audio level monitoring for visualization
-	// Returns a promise that resolves when the audio system is ready to capture
-	// The returned function starts the visualization loop (call after isRecording = true)
-	async function initAudioMonitoring(stream: MediaStream): Promise<(() => void) | null> {
-		try {
-			audioContext = new AudioContext();
-
-			// If AudioContext is suspended (common on some browsers), resume it
-			if (audioContext.state === 'suspended') {
-				await audioContext.resume();
-			}
-
-			const source = audioContext.createMediaStreamSource(stream);
-			analyserNode = audioContext.createAnalyser();
-			analyserNode.fftSize = 256;
-			analyserNode.smoothingTimeConstant = 0.5;
-			source.connect(analyserNode);
-
-			const dataArray = new Uint8Array(analyserNode.frequencyBinCount);
-
-			// Wait for AudioContext to be in 'running' state
-			// This is the proper API signal that the audio system is ready
-			if (audioContext.state !== 'running') {
-				const ctx = audioContext; // Capture reference for closure
-				await new Promise<void>((resolve) => {
-					const handleStateChange = () => {
-						if (ctx.state === 'running') {
-							ctx.removeEventListener('statechange', handleStateChange);
-							resolve();
-						}
-					};
-					ctx.addEventListener('statechange', handleStateChange);
-
-					// Safety timeout - resolve after 1s even if state never changes
-					// (shouldn't happen in practice, but prevents infinite hang)
-					setTimeout(() => {
-						ctx.removeEventListener('statechange', handleStateChange);
-						resolve();
-					}, 1000);
-				});
-			}
-
-			// Return a function to start the visualization loop
-			// This should be called AFTER isRecording is set to true
-			return function startVisualization() {
-				function updateLevel() {
-					if (!analyserNode || !isRecording) {
-						audioLevel = 0;
-						return;
-					}
-					analyserNode.getByteFrequencyData(dataArray);
-					// Calculate average level
-					const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-					// Normalize to 0-1 range with some amplification for better visual feedback
-					audioLevel = Math.min(1, average / 128);
-					animationFrameId = requestAnimationFrame(updateLevel);
-				}
-				updateLevel();
-			};
-		} catch (e) {
-			console.warn('Audio level monitoring not available:', e);
-			return null;
-		}
-	}
-
-	function stopAudioLevelMonitoring() {
-		if (animationFrameId) {
-			cancelAnimationFrame(animationFrameId);
-			animationFrameId = null;
-		}
-		if (audioContext) {
-			audioContext.close().catch(() => {});
-			audioContext = null;
-		}
-		analyserNode = null;
-		audioLevel = 0;
-	}
-
-	async function startRecording() {
-		recordingError = '';
-		audioChunksRef = []; // Reset chunks array
-		isPreparing = true; // Show preparing state while getting mic and initializing audio
-
-		try {
-			if (!navigator.mediaDevices) {
-				throw new Error(
-					'Microphone requires a secure context (HTTPS or localhost). In Chrome, you can allow this origin at chrome://flags/#unsafely-treat-insecure-origin-as-secure'
-				);
-			}
-			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-			// Determine best supported mime type
-			const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-				? 'audio/webm;codecs=opus'
-				: MediaRecorder.isTypeSupported('audio/webm')
-					? 'audio/webm'
-					: 'audio/mp4';
-
-			const recorder = new MediaRecorder(stream, { mimeType });
-
-			// Collect audio chunks - use non-reactive array to avoid issues
-			recorder.ondataavailable = (event) => {
-				if (event.data.size > 0) {
-					audioChunksRef.push(event.data);
-				}
-			};
-
-			// Start recording with timeslice for chunked data collection
-			// This improves reliability by not buffering all audio at once
-			recorder.start(1000); // 1 second chunks
-			mediaRecorder = recorder;
-			recordingStartTime = Date.now();
-
-			// Initialize audio monitoring and wait for the audio system to be ready
-			// This ensures the microphone is actively capturing before showing the recording UI
-			// Prevents the issue where users start speaking before the system is ready
-			const startVisualization = await initAudioMonitoring(stream);
-
-			// Only now show the recording UI - system is ready to capture speech
-			isPreparing = false;
-			isRecording = true;
-
-			// Start the visualization loop now that isRecording is true
-			if (startVisualization) {
-				startVisualization();
-			}
-		} catch (error: unknown) {
-			isPreparing = false;
-			console.error('Failed to start recording:', error);
-			const err = error as { name?: string; message?: string };
-			if (err.name === 'NotAllowedError') {
-				recordingError = 'Microphone access denied. Please allow microphone access in your browser settings.';
-			} else if (err.name === 'NotFoundError') {
-				recordingError = 'No microphone found. Please connect a microphone and try again.';
-			} else {
-				recordingError = `Failed to start recording: ${err.message || 'Unknown error'}`;
-			}
-		}
-	}
-
-	async function stopRecording() {
-		// Stop audio level monitoring first
-		stopAudioLevelMonitoring();
-
-		if (!mediaRecorder || mediaRecorder.state === 'inactive') {
-			isRecording = false;
-			return;
-		}
-
-		const recorder = mediaRecorder;
-		const stream = recorder.stream;
-		const mimeType = recorder.mimeType;
-
-		// Check minimum recording duration
-		const recordingDuration = Date.now() - recordingStartTime;
-		if (recordingDuration < MIN_RECORDING_DURATION) {
-			recordingError = 'Recording too short. Please hold the button longer.';
-			recorder.stop();
-			stream.getTracks().forEach(track => track.stop());
-			isRecording = false;
-			return;
-		}
-
-		isRecording = false;
-
-		// Use a Promise-based approach to ensure all data is collected before processing
-		// This fixes the race condition between ondataavailable and onstop
-		try {
-			const audioBlob = await new Promise<Blob>((resolve, reject) => {
-				const handleDataAvailable = (event: BlobEvent) => {
-					if (event.data.size > 0) {
-						audioChunksRef.push(event.data);
-					}
-				};
-
-				const handleStop = () => {
-					// Clean up
-					recorder.removeEventListener('dataavailable', handleDataAvailable);
-					recorder.removeEventListener('stop', handleStop);
-					stream.getTracks().forEach(track => track.stop());
-
-					// Check if we got any audio
-					if (audioChunksRef.length === 0) {
-						reject(new Error('No audio recorded'));
-						return;
-					}
-
-					// Create blob from all collected chunks
-					resolve(new Blob(audioChunksRef, { type: mimeType }));
-				};
-
-				// Add listeners before stopping to catch final data
-				recorder.addEventListener('dataavailable', handleDataAvailable);
-				recorder.addEventListener('stop', handleStop);
-
-				// Request final data and stop - this ensures ondataavailable fires
-				// for any remaining buffered audio before onstop
-				recorder.requestData();
-				recorder.stop();
-			});
-
-			await transcribeAudio(audioBlob);
-		} catch (error: unknown) {
-			const err = error as { message?: string };
-			recordingError = err.message || 'Failed to process recording';
-		}
-	}
-
-	async function transcribeAudio(audioBlob: Blob) {
-		isTranscribing = true;
-		recordingError = '';
-
-		try {
-			const formData = new FormData();
-			formData.append('file', audioBlob, 'recording.webm');
-
-			const response = await fetch('/api/v1/settings/transcribe', {
-				method: 'POST',
-				credentials: 'include',
-				body: formData
-			});
-
-			if (!response.ok) {
-				const error = await response.json().catch(() => ({ detail: 'Transcription failed' }));
-				throw new Error(error.detail || 'Transcription failed');
-			}
-
-			const result = await response.json();
-			const transcribedText = result.text?.trim();
-
-			if (transcribedText) {
-				// Append transcribed text to editor
-				editorRef?.appendText(transcribedText);
-				inputValue = editorRef?.getText() ?? '';
-				await tick();
-				editorRef?.focus();
-			}
-		} catch (error: unknown) {
-			console.error('Transcription failed:', error);
-			const err = error as { message?: string };
-			recordingError = err.message || 'Failed to transcribe audio';
-		} finally {
-			isTranscribing = false;
-		}
-	}
-
-	async function toggleRecording() {
-		if (isRecording) {
-			await stopRecording();
-		} else {
-			await startRecording();
-		}
-	}
-
 </script>
 
 <div
@@ -883,11 +494,11 @@
 			accept="*/*"
 		/>
 
-		<!-- Recording Error Message -->
-		{#if recordingError}
+		<!-- Error Message (upload errors, voice recording errors) -->
+		{#if errorMessage}
 			<div class="error-banner">
-				<span>{recordingError}</span>
-				<button type="button" onclick={() => recordingError = ''} class="error-close">&times;</button>
+				<span>{errorMessage}</span>
+				<button type="button" onclick={() => errorMessage = ''} class="error-close">&times;</button>
 			</div>
 		{/if}
 
@@ -961,53 +572,13 @@
 
 						<!-- Voice + Send buttons -->
 						<div class="send-button-wrapper">
-							<!-- Voice Input Button -->
-							<div class="voice-btn-wrapper">
-								<button
-									type="button"
-									onclick={toggleRecording}
-									disabled={!$claudeAuthenticated || isUploading || isTranscribing || isPreparing || !canRecord || $activeSession.worktreeDeleted}
-									class="voice-btn"
-									class:preparing={isPreparing}
-									class:recording={isRecording}
-									class:transcribing={isTranscribing}
-									title={!canRecord ? 'Configure OpenAI API key in Settings to use voice input' : isPreparing ? 'Preparing...' : isRecording ? 'Tap to stop' : isTranscribing ? 'Transcribing...' : 'Voice input'}
-									style="--audio-level: {audioLevel}"
-								>
-									{#if isRecording}
-										<div class="voice-rings">
-											<div class="voice-ring voice-ring-1" style="transform: scale({1 + audioLevel * 0.3}); opacity: {0.3 + audioLevel * 0.4}"></div>
-											<div class="voice-ring voice-ring-2" style="transform: scale({1 + audioLevel * 0.5}); opacity: {0.2 + audioLevel * 0.3}"></div>
-											<div class="voice-ring voice-ring-3" style="transform: scale({1 + audioLevel * 0.7}); opacity: {0.1 + audioLevel * 0.2}"></div>
-										</div>
-									{/if}
-									<div class="voice-btn-content">
-										{#if isTranscribing}
-											<div class="voice-processing">
-												<span class="processing-dot"></span>
-												<span class="processing-dot"></span>
-												<span class="processing-dot"></span>
-											</div>
-										{:else if isPreparing}
-											<svg class="voice-icon voice-icon-preparing" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-											</svg>
-										{:else if isRecording}
-											<div class="voice-waveform">
-												<span class="waveform-bar" style="height: {20 + audioLevel * 60}%"></span>
-												<span class="waveform-bar" style="height: {40 + audioLevel * 50}%"></span>
-												<span class="waveform-bar" style="height: {30 + audioLevel * 70}%"></span>
-												<span class="waveform-bar" style="height: {50 + audioLevel * 40}%"></span>
-												<span class="waveform-bar" style="height: {25 + audioLevel * 55}%"></span>
-											</div>
-										{:else}
-											<svg class="voice-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-												<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-											</svg>
-										{/if}
-									</div>
-								</button>
-							</div>
+							<!-- Voice Input (delegated to VoiceRecorder component) -->
+							<VoiceRecorder
+								onTranscription={handleTranscription}
+								disabled={!$claudeAuthenticated || isUploading || $activeSession.worktreeDeleted}
+								bind:isRecording
+								bind:isTranscribing
+							/>
 
 							{#if $activeSession.isCreatingWorktree}
 								<!-- Creating worktree - show spinner -->
@@ -1061,118 +632,11 @@
 					</div>
 				</div>
 
-				<!-- Controls Dock - Three column layout -->
-				<div class="controls-dock">
-					<!-- Left: Usage Indicator -->
-					<div class="controls-left">
-						<div class="usage-indicator" title="{formatTokenCount(contextUsed)} / {formatTokenCount(contextMax)} tokens">
-							<div class="usage-bar">
-								<div class="usage-fill" style="width: {Math.min(contextPercent, 100)}%"></div>
-							</div>
-							<span class="usage-text">{Math.round(contextPercent)}%</span>
-						</div>
-					</div>
-
-					<!-- Center: Profile selector -->
-					<div class="controls-center">
-						<!-- Profile Selector - always visible -->
-						<div class="selector-wrapper" bind:this={profileDropdownRef}>
-							<button
-								type="button"
-								class="context-selector-btn {$activeSession.profile ? '' : 'unset'}"
-								onclick={handleProfileClick}
-								title="Change profile"
-							>
-								<div class="selector-icon">
-									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-									</svg>
-								</div>
-								<span class="selector-text">{selectedProfileName}</span>
-								<svg class="w-3 h-3 opacity-50 chevron" class:open={showProfileDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-								</svg>
-							</button>
-
-							{#if showProfileDropdown}
-								<div class="selector-dropdown">
-									<GroupedSelector
-										bind:this={profileGroupedSelector}
-										items={$profiles}
-										entityType="profiles"
-										selectedId={$activeSession.profile}
-										onSelect={selectProfile}
-										emptyMessage="No profiles available"
-									/>
-								</div>
-							{/if}
-						</div>
-					</div>
-
-					<!-- Right: Override buttons, Attach & Mic buttons -->
-					<div class="controls-right">
-						<!-- Permission Mode Override -->
-						<div class="override-wrapper" bind:this={permissionDropdownRef}>
-							<button
-								type="button"
-								class="override-btn"
-								class:active={$activeSession.permissionModeOverride !== null}
-								onclick={handlePermissionClick}
-								title="Permission mode override (session only)"
-							>
-								<!-- Shield icon -->
-								<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-								</svg>
-								{#if $activeSession.permissionModeOverride !== null}
-									<span class="override-indicator"></span>
-								{/if}
-							</button>
-
-							{#if showPermissionDropdown}
-								<div class="override-dropdown">
-									<div class="override-dropdown-header">Permission Mode</div>
-									{#each permissionModes as mode}
-										<button
-											type="button"
-											class="override-dropdown-item"
-											class:selected={$activeSession.permissionModeOverride === mode.value}
-											onclick={() => selectPermissionMode(mode.value)}
-										>
-											<span class="override-item-label">{mode.label}</span>
-											{#if $activeSession.permissionModeOverride === mode.value}
-												<svg class="w-3.5 h-3.5 check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-												</svg>
-											{/if}
-										</button>
-									{/each}
-								</div>
-							{/if}
-						</div>
-
-						<!-- Attach File Button -->
-						<button
-							type="button"
-							onclick={triggerFileUpload}
-							disabled={$activeSession.isStreaming || !$claudeAuthenticated || isUploading || ($activeSession.executionMode === 'worktree' && !$activeSession.worktreeId) || $activeSession.worktreeDeleted}
-							class="dock-action-btn"
-							title={isUploading ? 'Uploading...' : ($activeSession.executionMode === 'worktree' && !$activeSession.worktreeId) ? 'Select a branch first to attach files' : $activeSession.project ? 'Attach file' : 'Select a project to attach files'}
-						>
-							{#if isUploading}
-								<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-									<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-								</svg>
-							{:else}
-								<svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-								</svg>
-							{/if}
-						</button>
-
-					</div>
-				</div>
+				<!-- Controls Dock (delegated to ControlsDock component) -->
+				<ControlsDock
+					{isUploading}
+					onAttachClick={triggerFileUpload}
+				/>
 			</div>
 		</form>
 	</div>
@@ -1440,587 +904,6 @@
 
 	.stop-btn:hover {
 		background: color-mix(in oklch, var(--destructive) 25%, transparent);
-	}
-
-	/* ===== CONTROLS DOCK ===== */
-	.controls-dock {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		background: color-mix(in oklch, var(--card) 60%, transparent);
-		backdrop-filter: blur(20px);
-		-webkit-backdrop-filter: blur(20px);
-		border: 1px solid var(--border-subtle);
-		border-top: none;
-		border-radius: 0 0 calc(var(--radius, 0.75rem) * 1.33) calc(var(--radius, 0.75rem) * 1.33);
-		padding: 8px 12px;
-		/* Allow dropdowns to overflow - voice button wrapper handles its own clipping */
-		overflow: visible;
-	}
-
-	.controls-left {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex: 1;
-	}
-
-	.controls-center {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		justify-content: center;
-		flex: 2;
-	}
-
-	.controls-right {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		justify-content: flex-end;
-		flex: 1;
-	}
-
-	/* ===== USAGE INDICATOR - Glass styling to match desktop ===== */
-	.usage-indicator {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 4px 8px;
-		background: var(--glass-bg);
-		backdrop-filter: blur(var(--glass-blur, 12px));
-		-webkit-backdrop-filter: blur(var(--glass-blur, 12px));
-		border: 1px solid var(--glass-border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-	}
-
-	.usage-bar {
-		width: 40px;
-		height: 4px;
-		background: color-mix(in oklch, var(--muted) 50%, var(--background));
-		border-radius: calc(var(--radius, 0.75rem) * 0.17);
-		overflow: hidden;
-	}
-
-	.usage-fill {
-		height: 100%;
-		background: var(--primary);
-		border-radius: calc(var(--radius, 0.75rem) * 0.17);
-		transition: width 0.3s ease;
-	}
-
-	.usage-text {
-		font-family: var(--font-mono);
-		font-size: 11px;
-		font-weight: 500;
-		color: var(--muted-foreground);
-		letter-spacing: 0.02em;
-	}
-
-	/* ===== SELECTORS (Agent/Project) ===== */
-	.selector-wrapper {
-		position: relative;
-	}
-
-	.context-selector-btn {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 4px 10px 4px 8px;
-		background: transparent;
-		border: 1px solid transparent;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-
-	.context-selector-btn:hover {
-		background: var(--hover-overlay);
-		border-color: var(--border-subtle);
-	}
-
-	.context-selector-btn.unset {
-		color: var(--warning);
-	}
-
-	.context-selector-btn.unset:hover {
-		background: var(--status-warning-bg);
-		border-color: var(--status-warning-border);
-	}
-
-	.selector-icon {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 20px;
-		height: 20px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.42);
-		background: var(--muted);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.selector-icon svg {
-		color: var(--muted-foreground);
-	}
-
-	.selector-text {
-		font-size: 12px;
-		font-weight: 500;
-		color: var(--muted-foreground);
-		letter-spacing: 0.01em;
-		max-width: 80px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	/* Desktop: allow wider name */
-	@media (min-width: 640px) {
-		.selector-text {
-			max-width: 120px;
-		}
-	}
-
-	/* Chevron */
-	.chevron {
-		color: var(--muted-foreground);
-		transition: transform 0.2s ease;
-	}
-
-	.chevron.open {
-		transform: rotate(180deg);
-	}
-
-	/* ===== ACTION BUTTONS ===== */
-	.dock-action-btn {
-		position: relative;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 32px;
-		height: 32px;
-		background: transparent;
-		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.67);
-		cursor: pointer;
-		color: var(--muted-foreground);
-		transition: all 0.15s ease;
-	}
-
-	.dock-action-btn:hover:not(:disabled) {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-
-	.dock-action-btn:active:not(:disabled) {
-		transform: scale(0.94);
-	}
-
-	.dock-action-btn:disabled {
-		opacity: 0.3;
-		cursor: not-allowed;
-	}
-
-	@keyframes pulse {
-		0%, 100% { opacity: 1; }
-		50% { opacity: 0.6; }
-	}
-
-	/* ===== DROPDOWN MENU ===== */
-	.selector-dropdown {
-		position: absolute;
-		bottom: calc(100% + 4px);
-		left: 50%;
-		transform: translateX(-50%);
-		min-width: 180px;
-		max-width: 280px;
-		max-height: 240px;
-		overflow-y: auto;
-		background: var(--popover);
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
-		box-shadow: var(--shadow-l);
-		z-index: 50;
-		padding: 6px;
-		animation: dropdown-fade-in 0.15s ease;
-	}
-
-	@keyframes dropdown-fade-in {
-		from {
-			opacity: 0;
-			transform: translateX(-50%) translateY(4px);
-		}
-		to {
-			opacity: 1;
-			transform: translateX(-50%) translateY(0);
-		}
-	}
-
-	/* Scrollbar styling for dropdown */
-	.selector-dropdown::-webkit-scrollbar {
-		width: 6px;
-	}
-
-	.selector-dropdown::-webkit-scrollbar-track {
-		background: transparent;
-	}
-
-	.selector-dropdown::-webkit-scrollbar-thumb {
-		background: var(--scrollbar-thumb);
-		border-radius: calc(var(--radius, 0.75rem) * 0.25);
-	}
-
-	.selector-dropdown::-webkit-scrollbar-thumb:hover {
-		background: var(--scrollbar-thumb-hover);
-	}
-
-	/* Responsive: mobile layout adjustments */
-	@media (max-width: 639px) {
-		/* Hide the usage bar on mobile, only show percentage */
-		.usage-bar {
-			display: none;
-		}
-
-		/* Make usage indicator more compact */
-		.usage-indicator {
-			padding: 4px 6px;
-			gap: 0;
-		}
-
-		/* Slightly smaller text on mobile */
-		.selector-text {
-			font-size: 11px;
-		}
-
-		/* Make selectors more compact */
-		.context-selector-btn {
-			padding: 4px 6px 4px 4px;
-			gap: 4px;
-		}
-
-		/* Smaller selector icon */
-		.selector-icon {
-			width: 18px;
-			height: 18px;
-		}
-
-		/* Hide chevron on mobile to save space */
-		.context-selector-btn .chevron {
-			display: none;
-		}
-
-		/* Tighter gap in center */
-		.controls-center {
-			gap: 4px;
-		}
-	}
-
-	/* ===== VOICE BUTTON WITH RICH VISUAL FEEDBACK ===== */
-	/* Wrapper clips animation rings without affecting sibling dropdown menus */
-	.voice-btn-wrapper {
-		position: relative;
-		/* Clip voice animation rings within this wrapper only */
-		overflow: hidden;
-		/* Match voice button size plus a bit of padding for the glow */
-		/* Use theme radius with max 50% for circular, 0 for square themes */
-		border-radius: min(50%, calc(var(--radius, 0.75rem) * 2.67));
-		/* Ensure the wrapper doesn't add extra size */
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.voice-btn {
-		position: relative;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 28px;
-		height: 28px;
-		background: transparent;
-		border: none;
-		/* Use theme radius with max 50% for circular, 0 for square themes */
-		border-radius: min(50%, calc(var(--radius, 0.75rem) * 2.67));
-		cursor: pointer;
-		color: var(--muted-foreground);
-		transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-		overflow: visible;
-	}
-
-	.voice-btn:hover:not(:disabled) {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-
-	.voice-btn:disabled {
-		opacity: 0.3;
-		cursor: not-allowed;
-	}
-
-	/* Preparing state: pulsing animation */
-	.voice-btn.preparing {
-		background: var(--status-warning-bg);
-		color: var(--warning);
-	}
-
-	.voice-btn.preparing .voice-icon-preparing {
-		animation: voice-pulse 1s ease-in-out infinite;
-	}
-
-	@keyframes voice-pulse {
-		0%, 100% {
-			transform: scale(1);
-			opacity: 0.7;
-		}
-		50% {
-			transform: scale(1.1);
-			opacity: 1;
-		}
-	}
-
-	/* Recording state: vibrant red glow */
-	.voice-btn.recording {
-		background: var(--status-error-bg);
-		color: var(--destructive);
-		box-shadow: 0 0 0 2px var(--status-error-border);
-	}
-
-	/* Transcribing state: teal processing */
-	.voice-btn.transcribing {
-		background: var(--chip-primary-bg);
-		color: var(--primary);
-	}
-
-	/* Voice button content container */
-	.voice-btn-content {
-		position: relative;
-		z-index: 2;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 100%;
-		height: 100%;
-	}
-
-	/* Mic icon */
-	.voice-icon {
-		width: 15px;
-		height: 15px;
-		transition: transform 0.2s ease;
-	}
-
-	/* Audio level rings (expand outward when speaking) */
-	.voice-rings {
-		position: absolute;
-		inset: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		pointer-events: none;
-		z-index: 1;
-		/* Contain rings within visible area */
-		overflow: visible;
-	}
-
-	.voice-ring {
-		position: absolute;
-		/* Smaller base size so expanded rings stay more contained */
-		width: 80%;
-		height: 80%;
-		/* Use theme radius with max 50% for circular, 0 for square themes */
-		border-radius: min(50%, calc(var(--radius, 0.75rem) * 2.67));
-		border: 2px solid var(--status-error-border);
-		transition: transform 0.1s ease-out, opacity 0.1s ease-out;
-	}
-
-	.voice-ring-1 { animation-delay: 0s; }
-	.voice-ring-2 { animation-delay: 0.1s; }
-	.voice-ring-3 { animation-delay: 0.2s; }
-
-	/* Waveform visualization */
-	.voice-waveform {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 2px;
-		height: 15px;
-	}
-
-	.waveform-bar {
-		width: 3px;
-		min-height: 4px;
-		background: currentColor;
-		border-radius: 1.5px;
-		transition: height 0.08s ease-out;
-	}
-
-	/* Processing dots animation */
-	.voice-processing {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 4px;
-	}
-
-	.processing-dot {
-		width: 4px;
-		height: 4px;
-		background: currentColor;
-		border-radius: 50%;
-		animation: processing-bounce 1.2s infinite ease-in-out;
-	}
-
-	.processing-dot:nth-child(1) { animation-delay: 0s; }
-	.processing-dot:nth-child(2) { animation-delay: 0.2s; }
-	.processing-dot:nth-child(3) { animation-delay: 0.4s; }
-
-	@keyframes processing-bounce {
-		0%, 80%, 100% {
-			transform: scale(0.8);
-			opacity: 0.5;
-		}
-		40% {
-			transform: scale(1.2);
-			opacity: 1;
-		}
-	}
-
-	/* Active/pressed state */
-	.voice-btn:active:not(:disabled) {
-		transform: scale(0.95);
-	}
-
-	/* ===== OVERRIDE BUTTONS ===== */
-	.override-wrapper {
-		position: relative;
-	}
-
-	.override-btn {
-		position: relative;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 28px;
-		height: 28px;
-		background: transparent;
-		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		cursor: pointer;
-		color: var(--muted-foreground);
-		transition: all 0.15s ease;
-	}
-
-	.override-btn:hover {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-
-	.override-btn.active {
-		background: var(--selection-bg);
-		color: var(--selection-text);
-	}
-
-	.override-btn.active:hover {
-		background: var(--selection-bg-emphasis);
-	}
-
-	/* Active indicator dot */
-	.override-indicator {
-		position: absolute;
-		top: 2px;
-		right: 2px;
-		width: 6px;
-		height: 6px;
-		background: var(--primary);
-		border-radius: 50%;
-		border: 1px solid var(--background);
-	}
-
-	/* Override dropdown */
-	.override-dropdown {
-		position: absolute;
-		bottom: calc(100% + 6px);
-		right: 0;
-		min-width: 140px;
-		background: var(--popover);
-		border: 1px solid var(--border);
-		border-radius: var(--radius, 0.75rem);
-		box-shadow: var(--shadow-l);
-		z-index: 50;
-		padding: 4px;
-		animation: override-dropdown-fade-in 0.15s ease;
-	}
-
-	@keyframes override-dropdown-fade-in {
-		from {
-			opacity: 0;
-			transform: translateY(4px);
-		}
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
-	}
-
-	.override-dropdown-header {
-		padding: 6px 10px 4px;
-		font-size: 10px;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: var(--muted-foreground);
-	}
-
-	.override-dropdown-item {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		width: 100%;
-		padding: 8px 10px;
-		font-size: 13px;
-		color: var(--popover-foreground);
-		background: transparent;
-		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		cursor: pointer;
-		transition: background-color 0.15s;
-		text-align: left;
-	}
-
-	.override-dropdown-item:hover {
-		background: var(--hover-overlay);
-	}
-
-	.override-dropdown-item.selected {
-		background: var(--selection-bg);
-	}
-
-	.override-item-label {
-		font-weight: 500;
-		flex: 1;
-	}
-
-	.override-dropdown-item .check-icon {
-		flex-shrink: 0;
-		color: var(--primary);
-		margin-left: auto;
-	}
-
-	/* Mobile: slightly more compact */
-	@media (max-width: 639px) {
-		.override-btn {
-			width: 26px;
-			height: 26px;
-		}
-
-		.override-btn svg {
-			width: 14px;
-			height: 14px;
-		}
-
-		.override-dropdown {
-			min-width: 120px;
-		}
 	}
 
 	@keyframes fadeIn {

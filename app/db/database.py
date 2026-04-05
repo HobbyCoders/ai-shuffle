@@ -2,34 +2,30 @@
 SQLite database setup and operations
 """
 
-import re
 import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
-from contextlib import contextmanager
 
 from app.core.config import settings
 
+# Import shared database utilities from base module.
+# Re-exported here so existing ``from app.db.database import get_db`` still works.
+from app.db.base import (  # noqa: F401
+    get_connection,
+    _close_connection,
+    get_db,
+    _validate_identifier,
+    WorktreeStatus,
+    column_exists,
+    table_exists,
+    column_is_not_null,
+    row_to_dict,
+    rows_to_list,
+)
+
 logger = logging.getLogger(__name__)
-
-# Regex for valid SQLite identifiers: alphanumeric + underscores, must start with letter/underscore.
-_VALID_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
-
-
-def _validate_identifier(value: str, kind: str = "identifier") -> str:
-    """Validate that a string is a safe SQL identifier (table name, column name).
-
-    SQLite PRAGMA and ALTER TABLE statements do not support parameterized queries
-    for table/column names, so we must validate these values ourselves.
-    """
-    if not value or not _VALID_IDENTIFIER_RE.match(value):
-        raise ValueError(
-            f"Invalid SQL {kind}: {value!r}. "
-            f"Identifiers must match [a-zA-Z_][a-zA-Z0-9_]*"
-        )
-    return value
 
 
 # Schema version for migrations
@@ -52,96 +48,6 @@ def _validate_identifier(value: str, kind: str = "identifier") -> str:
 # v38: Add message_template to project_hooks, make project_id nullable
 # v39: Add queued_messages table for server-side message queueing
 SCHEMA_VERSION = 39
-
-
-# =============================================================================
-# Worktree Status Constants
-# =============================================================================
-# Use these constants instead of string literals for consistency
-class WorktreeStatus:
-    """Worktree status values - use these constants for consistency"""
-    ACTIVE = "active"       # Worktree exists and is usable
-    DELETED = "deleted"     # Worktree was intentionally deleted
-    ORPHANED = "orphaned"   # Worktree path no longer exists on disk (cleanup needed)
-
-
-def get_connection() -> sqlite3.Connection:
-    """Get a database connection with row factory"""
-    conn = sqlite3.connect(str(settings.db_path), check_same_thread=False, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    # Use WAL mode for better concurrent access and crash recovery
-    conn.execute("PRAGMA journal_mode = WAL")
-    # Explicitly set WAL auto-checkpoint threshold (default 1000 pages ≈ 4 MB).
-    conn.execute("PRAGMA wal_autocheckpoint = 1000")
-    # Set busy timeout to wait up to 30 seconds if database is locked
-    # This is critical on Windows where file locking is more aggressive.
-    # PRAGMA does not support parameterized queries, so coerce to int for safety.
-    timeout_ms = int(settings.db_busy_timeout_ms)
-    conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
-    return conn
-
-
-def _close_connection(conn: sqlite3.Connection):
-    """Close a connection with lightweight maintenance.
-
-    Runs PRAGMA optimize before closing — per SQLite docs, this should be
-    called on every connection close.  Near-instant no-op most of the time;
-    only runs ANALYZE when stats are stale.
-    """
-    try:
-        conn.execute("PRAGMA optimize")
-    except Exception:
-        pass
-    conn.close()
-
-
-@contextmanager
-def get_db():
-    """Context manager for database connections"""
-    conn = get_connection()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        _close_connection(conn)
-
-
-def column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
-    """Check if a column exists in a table using PRAGMA table_info"""
-    _validate_identifier(table, "table name")
-    _validate_identifier(column, "column name")
-    cursor.execute(f"PRAGMA table_info({table})")
-    columns = [row["name"] for row in cursor.fetchall()]
-    return column in columns
-
-
-def table_exists(cursor: sqlite3.Cursor, table: str) -> bool:
-    """Check if a table exists in the database"""
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (table,)
-    )
-    return cursor.fetchone() is not None
-
-
-def column_is_not_null(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
-    """Check if a column has a NOT NULL constraint using PRAGMA table_info.
-
-    Returns True if the column exists and has NOT NULL constraint.
-    Returns False if column doesn't exist or is nullable.
-    """
-    _validate_identifier(table, "table name")
-    _validate_identifier(column, "column name")
-    cursor.execute(f"PRAGMA table_info({table})")
-    for row in cursor.fetchall():
-        if row["name"] == column:
-            # notnull column is 1 if NOT NULL constraint exists, 0 otherwise
-            return row["notnull"] == 1
-    return False
 
 
 def _run_column_migrations(cursor: sqlite3.Cursor):
@@ -1357,18 +1263,6 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_category ON fal_model_catalog(category)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_tool_type ON fal_model_catalog(tool_type)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_output_type ON fal_model_catalog(output_type)")
-
-
-def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
-    """Convert a sqlite3.Row to a dictionary"""
-    if row is None:
-        return None
-    return dict(row)
-
-
-def rows_to_list(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
-    """Convert a list of sqlite3.Row to a list of dictionaries"""
-    return [dict(row) for row in rows]
 
 
 # ============================================================================

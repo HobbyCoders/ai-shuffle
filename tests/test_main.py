@@ -12,7 +12,7 @@ Tests cover:
 
 import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 
 # =============================================================================
@@ -215,90 +215,59 @@ class TestLifespan:
 
     @pytest.mark.asyncio
     async def test_lifespan_startup_runs_initialization(self):
-        """Lifespan should run startup initialization."""
+        """Lifespan should run the startup orchestrator phases."""
         from app.main import lifespan
+        # Pre-import so patch can resolve the module attributes
+        import app.core.startup  # noqa: F401
 
         mock_app = MagicMock()
 
-        with patch("app.main.ensure_directories") as mock_ensure_dirs, \
-             patch("app.main.init_database") as mock_init_db, \
-             patch("app.main.run_migrations") as mock_migrations, \
-             patch("app.main.encryption") as mock_encryption, \
-             patch("app.main.database") as mock_database, \
-             patch("app.main.load_workspace_from_database") as mock_load_workspace, \
-             patch("app.main.settings") as mock_settings, \
-             patch("app.main.auth_service") as mock_auth:
+        # After the lifespan refactor, startup logic lives in app.core.startup.
+        # Mock the phase functions directly to verify they're called.
+        with patch("app.core.startup.init_core") as mock_init_core, \
+             patch("app.core.startup.init_encryption_and_sessions") as mock_enc, \
+             patch("app.core.startup.init_workspace") as mock_ws, \
+             patch("app.core.startup.check_prerequisites") as mock_prereqs, \
+             patch("app.core.startup.start_services", new_callable=AsyncMock) as mock_services, \
+             patch("app.core.startup.start_background_tasks", return_value=[]) as mock_bg, \
+             patch("app.main.settings") as mock_settings:
 
-            mock_settings.version = "0.8.2"
+            mock_settings.version = "1.2.1"
             mock_settings.port = 8000
-            mock_settings.effective_workspace_dir = MagicMock()
-            mock_settings.effective_workspace_dir.mkdir = MagicMock()
-            mock_encryption.init_encryption_from_env.return_value = True
-            mock_auth.is_claude_authenticated.return_value = True
-            mock_auth.is_setup_required.return_value = False
-            mock_auth.get_admin_username.return_value = "admin"
 
             async with lifespan(mock_app):
-                # Verify startup was called
-                mock_ensure_dirs.assert_called_once()
-                mock_init_db.assert_called_once()
-                mock_migrations.assert_called_once()
+                mock_init_core.assert_called_once()
+                mock_enc.assert_called_once()
+                mock_ws.assert_called_once()
+                mock_prereqs.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_lifespan_clears_sessions_when_no_env_password(self):
-        """Lifespan should clear sessions when ADMIN_PASSWORD not set."""
-        from app.main import lifespan
+        """init_encryption_and_sessions should clear sessions when ADMIN_PASSWORD not set."""
+        import app.core.startup  # noqa: F401
+        from app.core.startup import init_encryption_and_sessions
 
-        mock_app = MagicMock()
+        with patch("app.core.startup.encryption") as mock_encryption, \
+             patch("app.core.startup.database") as mock_database:
 
-        with patch("app.main.ensure_directories"), \
-             patch("app.main.init_database"), \
-             patch("app.main.run_migrations"), \
-             patch("app.main.encryption") as mock_encryption, \
-             patch("app.main.database") as mock_database, \
-             patch("app.main.load_workspace_from_database"), \
-             patch("app.main.settings") as mock_settings, \
-             patch("app.main.auth_service") as mock_auth:
-
-            mock_settings.version = "0.8.2"
-            mock_settings.port = 8000
-            mock_settings.effective_workspace_dir = MagicMock()
-            mock_settings.effective_workspace_dir.mkdir = MagicMock()
             mock_encryption.init_encryption_from_env.return_value = False
             mock_database.clear_all_sessions.return_value = (5, 3)
-            mock_auth.is_claude_authenticated.return_value = True
-            mock_auth.is_setup_required.return_value = False
-            mock_auth.get_admin_username.return_value = "admin"
 
-            async with lifespan(mock_app):
-                mock_database.clear_all_sessions.assert_called_once()
+            init_encryption_and_sessions()
+            mock_database.clear_all_sessions.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_lifespan_handles_setup_required(self):
-        """Lifespan should handle setup required state."""
-        from app.main import lifespan
+        """check_prerequisites should handle setup required state."""
+        import app.core.startup  # noqa: F401
+        from app.core.startup import check_prerequisites
 
-        mock_app = MagicMock()
-
-        with patch("app.main.ensure_directories"), \
-             patch("app.main.init_database"), \
-             patch("app.main.run_migrations"), \
-             patch("app.main.encryption") as mock_encryption, \
-             patch("app.main.database") as mock_database, \
-             patch("app.main.load_workspace_from_database"), \
-             patch("app.main.settings") as mock_settings, \
-             patch("app.main.auth_service") as mock_auth:
-
-            mock_settings.version = "0.8.2"
-            mock_settings.port = 8000
-            mock_settings.effective_workspace_dir = MagicMock()
-            mock_settings.effective_workspace_dir.mkdir = MagicMock()
-            mock_encryption.init_encryption_from_env.return_value = True
+        with patch("app.core.startup.auth_service") as mock_auth:
             mock_auth.is_claude_authenticated.return_value = False
             mock_auth.is_setup_required.return_value = True
 
-            async with lifespan(mock_app):
-                mock_auth.is_setup_required.assert_called()
+            check_prerequisites()
+            mock_auth.is_setup_required.assert_called()
 
 
 # =============================================================================
@@ -411,12 +380,12 @@ class TestHealthCheckEndpointStructure:
             mock_auth.is_setup_required.return_value = False
             mock_auth.is_claude_authenticated.return_value = True
             mock_settings.service_name = "ai-shuffle"
-            mock_settings.version = "0.8.2"
+            mock_settings.version = "1.2.1"
 
             result = await health_check()
             assert result["status"] == "healthy"
             assert result["service"] == "ai-shuffle"
-            assert result["version"] == "0.8.2"
+            assert result["version"] == "1.2.1"
 
     @pytest.mark.asyncio
     async def test_api_health_check_function_exists(self):

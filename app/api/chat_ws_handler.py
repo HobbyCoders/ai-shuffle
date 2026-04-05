@@ -8,6 +8,7 @@ become methods.  Behaviour is identical to the original implementation.
 
 import asyncio
 import logging
+import time
 import uuid
 from typing import Any, Awaitable, Callable, Dict, Optional
 
@@ -27,6 +28,31 @@ from app.db import database
 from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
+
+
+class WebSocketRateLimiter:
+    """Sliding-window rate limiter for WebSocket messages per connection.
+
+    Uses a simple timestamp list to enforce a maximum number of messages
+    within a rolling time window.  One instance should be created per
+    WebSocket connection (not shared globally).
+    """
+
+    def __init__(self, max_messages: int = 30, window_seconds: float = 10.0):
+        self._timestamps: list[float] = []
+        self._max_messages = max_messages
+        self._window_seconds = window_seconds
+
+    def check(self) -> bool:
+        """Return ``True`` if the message is allowed, ``False`` if rate-limited."""
+        now = time.monotonic()
+        # Prune timestamps outside the current window
+        cutoff = now - self._window_seconds
+        self._timestamps = [t for t in self._timestamps if t > cutoff]
+        if len(self._timestamps) >= self._max_messages:
+            return False
+        self._timestamps.append(now)
+        return True
 
 
 class ChatWebSocketHandler:
@@ -53,6 +79,12 @@ class ChatWebSocketHandler:
         # Checked by run_query's finally block to skip _process_next_queued
         # when a new query is about to start (prevents race condition).
         self._interrupt_pending_sessions: set[str] = set()
+
+        # Per-connection rate limiter for inbound messages
+        self.rate_limiter = WebSocketRateLimiter(
+            max_messages=settings.ws_rate_limit_messages,
+            window_seconds=settings.ws_rate_limit_window_seconds,
+        )
 
         # Lock to serialize WebSocket sends — prevents concurrent sends from
         # ping_loop, heartbeat, and the main message handler racing each other
@@ -162,6 +194,19 @@ class ChatWebSocketHandler:
                         )
 
                         msg_type = data.get("type")
+
+                        # Rate-limit user-initiated messages (skip keepalive pongs)
+                        if msg_type != "pong" and not self.rate_limiter.check():
+                            logger.warning(
+                                f"WebSocket rate limited: device={self.device_id}, "
+                                f"msg_type={msg_type}"
+                            )
+                            await self.send_json({
+                                "type": "error",
+                                "error": "Rate limited: too many messages. Please slow down.",
+                            })
+                            continue
+
                         handler = self._handlers.get(msg_type)
                         if handler is not None:
                             await handler(data)

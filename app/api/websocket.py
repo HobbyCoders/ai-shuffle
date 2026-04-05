@@ -31,6 +31,7 @@ from app.core.cli_bridge import CLIBridge, RewindParser
 from app.core.project_utils import get_project_working_dir
 from app.core.permission_handler import permission_handler
 from app.core.user_question_handler import user_question_handler
+from app.api.chat_ws_handler import WebSocketRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +286,12 @@ async def chat_websocket(
 
     current_session_id: Optional[str] = None
     query_task: Optional[asyncio.Task] = None
+
+    # Per-connection rate limiter for inbound messages
+    rate_limiter = WebSocketRateLimiter(
+        max_messages=settings.ws_rate_limit_messages,
+        window_seconds=settings.ws_rate_limit_window_seconds,
+    )
 
     async def run_query(prompt: str, session_id: str, profile_id: str, project_id: Optional[str], overrides: Optional[Dict[str, Any]] = None, worktree_id: Optional[str] = None):
         """Execute query and stream results directly to WebSocket"""
@@ -699,6 +706,18 @@ async def chat_websocket(
                     )
 
                     msg_type = data.get("type")
+
+                    # Rate-limit user-initiated messages (skip keepalive pongs)
+                    if msg_type != "pong" and not rate_limiter.check():
+                        logger.warning(
+                            f"WebSocket rate limited: device={device_id}, "
+                            f"msg_type={msg_type}"
+                        )
+                        await send_json({
+                            "type": "error",
+                            "error": "Rate limited: too many messages. Please slow down.",
+                        })
+                        continue
 
                     if msg_type == "query":
                         # Start a new query
