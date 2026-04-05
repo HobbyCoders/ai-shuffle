@@ -527,7 +527,7 @@
 						{#each groupedSessions as group (group.key)}
 							<div class="project-group">
 								<!-- Project group header -->
-								<div class="project-group-header" role="group">
+								<div class="project-group-header" class:no-actions={!group.project} role="group">
 									<button
 										class="project-group-toggle"
 										onclick={() => toggleProjectGroup(group.key)}
@@ -1102,6 +1102,10 @@
 		border-radius: calc(var(--radius, 0.75rem) * 0.67);
 		text-align: center;
 		box-sizing: border-box;
+	}
+
+	.project-group-header.no-actions {
+		padding-right: 28px;
 	}
 
 	/* Project delete button */
