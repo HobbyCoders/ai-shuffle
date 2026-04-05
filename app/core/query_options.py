@@ -1104,6 +1104,15 @@ def build_options_from_profile(
                 # Append to string system prompt
                 final_system_prompt += builtin_instructions
 
+    # Inject app-config system prompt instructions when tools are enabled (admin only)
+    if config.get("app_config_tools") and not api_user_id:
+        from app.mcp.app_config_sdk import APP_CONFIG_SYSTEM_PROMPT
+        if isinstance(final_system_prompt, dict):
+            current_append = final_system_prompt.get("append", "")
+            final_system_prompt["append"] = current_append + "\n\n" + APP_CONFIG_SYSTEM_PROMPT
+        else:
+            final_system_prompt += "\n\n" + APP_CONFIG_SYSTEM_PROMPT
+
     # Determine permission mode
     permission_mode = overrides.get("permission_mode") or config.get("permission_mode", "default")
 
@@ -1178,6 +1187,12 @@ def build_options_from_profile(
         if mcp_allowed_tools:
             logger.debug(f"AI MCP tools to allow: {mcp_allowed_tools}")
 
+    # Add app-config tool names when enabled (admin sessions only)
+    if config.get("app_config_tools") and not api_user_id:
+        from app.mcp.app_config_sdk import get_app_config_tool_names
+        mcp_allowed_tools.extend(get_app_config_tool_names())
+        logger.debug("App-config MCP tools added to allowed_tools")
+
     # Build final allowed_tools list:
     # - When sdk_tools is set (preset), built-in tools are handled by the preset.
     #   Only MCP tool names need to go in allowed_tools.
@@ -1192,6 +1207,27 @@ def build_options_from_profile(
     # 2. ClaudeAgentOptions env (so the Claude CLI subprocess also gets them)
     full_env = _build_env_with_ai_tools(config.get("env"), ai_tools_config, api_user_id)
     ai_tool_env = full_env if full_env else None
+
+    # Build MCP servers dict (pre-compute so we can add app-config server)
+    mcp_servers_dict = _build_mcp_servers_dict_with_ai_tools(
+        project_dir=Path(working_dir) if working_dir else None,
+        ai_tools_config=ai_tools_config,
+        tool_env=ai_tool_env,
+    ) or {}
+
+    # Add app-config MCP server for admin sessions with the toggle enabled
+    if config.get("app_config_tools") and not api_user_id:
+        try:
+            from app.mcp.app_config_sdk import create_app_config_server
+            app_config_srv = create_app_config_server(
+                is_admin=True,
+                project_id=project.get("id") if project else None,
+            )
+            if app_config_srv:
+                mcp_servers_dict["app-config"] = app_config_srv
+                logger.debug("App-config MCP server registered for admin session")
+        except Exception:
+            logger.exception("Failed to create app-config MCP server")
 
     # Build options with all ClaudeAgentOptions fields
     # Note: We don't set cli_path - let the SDK use its bundled CLI or find system CLI automatically
@@ -1228,11 +1264,7 @@ def build_options_from_profile(
         # This ensures tools from MCP servers are available regardless of
         # whether the CLI discovers them from .mcp.json files
         # Note: ai_tool_env is passed so Node.js tool subprocesses get API keys
-        mcp_servers=_build_mcp_servers_dict_with_ai_tools(
-            project_dir=Path(working_dir) if working_dir else None,
-            ai_tools_config=ai_tools_config,
-            tool_env=ai_tool_env,
-        ) or {},
+        mcp_servers=mcp_servers_dict,
 
         # Environment and arguments - inject AI tool credentials if enabled
         # Pass api_user_id for policy-based credential resolution

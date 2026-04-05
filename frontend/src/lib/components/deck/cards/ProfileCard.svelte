@@ -148,7 +148,9 @@
 		max_buffer_size: null as number | null,
 		env_vars: [] as { key: string; value: string }[],
 		// SDK 0.1.15+ file checkpointing for rewind
-		enable_file_checkpointing: false
+		enable_file_checkpointing: false,
+		// App configuration tools — allow AI to manage hooks, automations, MCP, profiles via chat
+		app_config_tools: false
 	});
 
 	// Common environment variable presets with valid ranges
@@ -313,7 +315,8 @@
 			user: '',
 			max_buffer_size: null,
 			env_vars: [],
-			enable_file_checkpointing: false
+			enable_file_checkpointing: false,
+			app_config_tools: false
 		};
 		toolSelectionMode = 'all';
 		aiToolSelectionMode = 'custom';
@@ -388,7 +391,8 @@
 			user: (config as any).user || '',
 			max_buffer_size: (config as any).max_buffer_size || null,
 			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string })),
-			enable_file_checkpointing: (config as any).enable_file_checkpointing || false
+			enable_file_checkpointing: (config as any).enable_file_checkpointing || false,
+			app_config_tools: (config as any).app_config_tools || false
 		};
 
 		viewMode = 'form';
@@ -569,7 +573,9 @@
 			permission_mode: profileForm.permission_mode,
 			include_partial_messages: profileForm.include_partial_messages,
 			// SDK 0.1.15+ file checkpointing for rewind
-			enable_file_checkpointing: profileForm.enable_file_checkpointing
+			enable_file_checkpointing: profileForm.enable_file_checkpointing,
+			// App configuration tools
+			app_config_tools: profileForm.app_config_tools
 		};
 
 		// Thinking and effort are independent controls
@@ -785,7 +791,8 @@
 			user: '',
 			max_buffer_size: agent.max_buffer_size || null,
 			env_vars: agent.env ? Object.entries(agent.env).map(([key, value]) => ({ key, value: value as string })) : [],
-			enable_file_checkpointing: false
+			enable_file_checkpointing: false,
+			app_config_tools: false
 		};
 
 		viewMode = 'form';
@@ -1036,6 +1043,23 @@
 								aria-checked={profileForm.enable_file_checkpointing}
 								aria-label="Toggle file checkpointing"
 								onclick={() => profileForm.enable_file_checkpointing = !profileForm.enable_file_checkpointing}
+							>
+								<span class="pf-toggle-knob"></span>
+							</button>
+						</div>
+						<div class="pf-toggle-row">
+							<div class="pf-toggle-info">
+								<span class="pf-toggle-title">App Config via Chat</span>
+								<span class="pf-toggle-desc">Allow AI to manage hooks, automations, MCP servers, and profiles through conversation. Admin only.</span>
+							</div>
+							<button
+								type="button"
+								class="pf-toggle"
+								class:active={profileForm.app_config_tools}
+								role="switch"
+								aria-checked={profileForm.app_config_tools}
+								aria-label="Toggle app configuration tools"
+								onclick={() => profileForm.app_config_tools = !profileForm.app_config_tools}
 							>
 								<span class="pf-toggle-knob"></span>
 							</button>

@@ -133,6 +133,11 @@ class ProfileConfig(BaseModel):
     # File checkpointing for rewind (SDK 0.1.15+)
     enable_file_checkpointing: bool = False  # Enable file snapshots for rewind
 
+    # App configuration tools - allows the agent to manage hooks, automations,
+    # MCP servers, and profiles through conversation. Only effective for admin
+    # sessions (never exposed to API users regardless of this setting).
+    app_config_tools: bool = False
+
 
 
 class ProfileBase(BaseModel):

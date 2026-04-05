@@ -37,6 +37,7 @@ export interface ProfileConfig {
 	user?: string;  // User identifier override
 	max_buffer_size?: number;  // Maximum buffer size for output
 	env?: Record<string, string>;  // Environment variables to set
+	app_config_tools?: boolean;  // Allow AI to configure hooks, automations, MCP, profiles via chat
 	system_prompt?: {
 		type: string;
 		preset?: string;
