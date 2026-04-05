@@ -14,7 +14,7 @@
     inputValue: string;
     projectId?: string;
     worktreeId?: string;
-    onSelect: (command: Command) => void;
+    onSelect: (command: Command, andSubmit?: boolean) => void;
     onClose: () => void;
     visible: boolean;
   }
@@ -191,9 +191,12 @@
         return false;
 
       case 'Enter':
-        // Don't capture Enter — let it fall through to ChatInput's submit handler.
-        // Tab is the intended key for selecting autocomplete items (see hint text).
-        // Enter should send the command as a message.
+        // Select the highlighted command and submit it
+        if (filteredCommands[selectedIndex]) {
+          event.preventDefault();
+          onSelect(filteredCommands[selectedIndex], true);
+          return true;
+        }
         onClose();
         return false;
 
@@ -269,6 +272,7 @@
     <div class="autocomplete-footer">
       <span><kbd class="autocomplete-kbd">↑↓</kbd> <span class="autocomplete-hint-text">navigate</span></span>
       <span><kbd class="autocomplete-kbd">Tab</kbd> <span class="autocomplete-hint-text">select</span></span>
+      <span><kbd class="autocomplete-kbd">Enter</kbd> <span class="autocomplete-hint-text">send</span></span>
       <span><kbd class="autocomplete-kbd">Esc</kbd> <span class="autocomplete-hint-text">close</span></span>
     </div>
   </div>

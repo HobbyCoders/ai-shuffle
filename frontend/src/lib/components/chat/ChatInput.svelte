@@ -125,6 +125,7 @@
 	// Autocomplete state
 	let showCommandAutocomplete = $state(false);
 	let showFileAutocomplete = $state(false);
+	let commandJustSelected = false;
 	let commandAutocompleteRef = $state<CommandAutocomplete | null>(null);
 	let fileAutocompleteRef = $state<FileAutocomplete | null>(null);
 
@@ -154,7 +155,9 @@
 	// Handle input changes for autocomplete
 	function handleInputChange() {
 		// Slash command autocomplete
-		if (inputValue.startsWith('/')) {
+		if (commandJustSelected) {
+			commandJustSelected = false;
+		} else if (inputValue.startsWith('/')) {
 			const slashContent = inputValue.slice(1);
 			const spaceIndex = slashContent.indexOf(' ');
 			// Dismiss once user types text after a space (they've moved past command selection)
@@ -291,14 +294,20 @@
 	}
 
 	// Handle command selection
-	async function handleCommandSelect(command: Command) {
+	async function handleCommandSelect(command: Command, andSubmit?: boolean) {
 		showCommandAutocomplete = false;
+		commandJustSelected = true;
 
 		// Insert the command into the input
 		inputValue = `/${command.name} `;
 		editorRef?.setContent(`/${command.name} `);
 		await tick();
-		editorRef?.focus();
+
+		if (andSubmit) {
+			handleSubmit(false);
+		} else {
+			editorRef?.focus();
+		}
 	}
 
 	// Handle file selection (including chat history and note items)
