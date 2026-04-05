@@ -82,18 +82,18 @@ class TestAIToolsRegistry:
         assert "image_generation" in AI_TOOLS
         tool = AI_TOOLS["image_generation"]
         assert tool["category"] == "image"
-        assert "google-gemini" in tool["providers"]
+        assert "fal-ai" in tool["providers"]
 
     def test_video_generation_tool_exists(self):
         """Video generation tool should be defined."""
         assert "video_generation" in AI_TOOLS
         tool = AI_TOOLS["video_generation"]
         assert tool["category"] == "video"
-        assert "google-veo" in tool["providers"]
+        assert "fal-ai" in tool["providers"]
 
     def test_3d_tools_exist(self):
         """3D tools should be defined."""
-        expected_3d_tools = {"text_to_3d", "image_to_3d", "retexture_3d", "rig_3d", "animate_3d"}
+        expected_3d_tools = {"text_to_3d", "image_to_3d"}
         actual_3d_tools = {tool_id for tool_id, info in AI_TOOLS.items() if info["category"] == "3d"}
         assert expected_3d_tools == actual_3d_tools
 
@@ -111,32 +111,18 @@ class TestProviderKeyMap:
 
     def test_all_values_are_api_key_strings(self):
         """All values should be API key field names (or None for local providers)."""
-        valid_key_types = {"image_api_key", "openai_api_key", "meshy_api_key", "fal_api_key"}
+        valid_key_types = {"fal_api_key"}
 
         for provider, key_field in PROVIDER_KEY_MAP.items():
             if key_field is None:
-                continue  # Local providers (e.g., playwright) don't need API keys
+                continue  # Local providers don't need API keys
             assert isinstance(key_field, str), f"Key field for {provider} should be string"
             assert key_field in valid_key_types, f"Unknown key type {key_field} for {provider}"
 
-    def test_google_providers_use_image_api_key(self):
-        """Google providers should use image_api_key."""
-        google_providers = ["google-gemini", "google-imagen", "google-veo", "google-gemini-video"]
-        for provider in google_providers:
-            assert provider in PROVIDER_KEY_MAP, f"Missing mapping for {provider}"
-            assert PROVIDER_KEY_MAP[provider] == "image_api_key"
-
-    def test_openai_providers_use_openai_api_key(self):
-        """OpenAI providers should use openai_api_key."""
-        openai_providers = ["openai-gpt-image", "openai-sora"]
-        for provider in openai_providers:
-            assert provider in PROVIDER_KEY_MAP, f"Missing mapping for {provider}"
-            assert PROVIDER_KEY_MAP[provider] == "openai_api_key"
-
-    def test_meshy_provider_uses_meshy_api_key(self):
-        """Meshy provider should use meshy_api_key."""
-        assert "meshy" in PROVIDER_KEY_MAP
-        assert PROVIDER_KEY_MAP["meshy"] == "meshy_api_key"
+    def test_fal_provider_uses_fal_api_key(self):
+        """fal-ai provider should use fal_api_key."""
+        assert "fal-ai" in PROVIDER_KEY_MAP
+        assert PROVIDER_KEY_MAP["fal-ai"] == "fal_api_key"
 
     def test_all_tool_providers_have_key_mapping(self):
         """Every provider used in AI_TOOLS should have a key mapping."""
