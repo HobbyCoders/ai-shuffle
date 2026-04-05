@@ -6,6 +6,7 @@ configure MCP servers, build tool/permission configurations, and manage
 subagent definitions.
 """
 
+import json
 import logging
 import platform
 import re
@@ -1134,15 +1135,21 @@ def build_options_from_profile(
         model_to_use, betas_to_use = MODEL_1M_MAPPING[raw_model]
         logger.debug(f"1M context model selected: {raw_model} -> model={model_to_use}, betas={betas_to_use}")
 
-    # Fast mode: add beta header when enabled and using an Opus model.
-    # Fast mode (internally "Penguin Mode") uses the fast-mode-2026-02-01 beta header
-    # to enable faster output. Only applicable to Opus 4.6+ models.
-    FAST_MODE_BETA_HEADER = "fast-mode-2026-02-01"
+    # Fast mode: inject fastMode setting when enabled and using an Opus model.
+    # Fast mode is a Claude CLI setting (fastMode: true in settings.json),
+    # NOT a beta header. The SDK picks it up via the --settings CLI flag.
     fast_mode_requested = overrides.get("fast_mode") == "true"
+    fast_mode_settings: Optional[str] = None
     if fast_mode_requested and model_to_use and "opus" in str(model_to_use).lower():
-        if FAST_MODE_BETA_HEADER not in betas_to_use:
-            betas_to_use.append(FAST_MODE_BETA_HEADER)
-            logger.debug(f"Fast mode enabled for model={model_to_use}, added beta={FAST_MODE_BETA_HEADER}")
+        fast_mode_settings = json.dumps({"fastMode": True})
+        logger.debug(f"Fast mode enabled for model={model_to_use}, injecting settings: {fast_mode_settings}")
+        # Inject fast mode awareness into system prompt
+        fast_mode_note = "\n\nFast mode is enabled. You are running with faster output using the same model. When asked about your speed or mode, you can confirm fast mode is active."
+        if isinstance(final_system_prompt, dict):
+            current_append = final_system_prompt.get("append", "")
+            final_system_prompt["append"] = current_append + fast_mode_note
+        else:
+            final_system_prompt += fast_mode_note
 
     # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
     # Priority: tools > tools_preset > allowed_tools (legacy)
@@ -1215,6 +1222,7 @@ def build_options_from_profile(
 
         # Settings loading
         setting_sources=config.get("setting_sources"),
+        settings=fast_mode_settings,
 
         # MCP servers - pass all registered MCP servers directly to the SDK
         # This ensures tools from MCP servers are available regardless of
@@ -1276,7 +1284,7 @@ def build_options_from_profile(
     )
 
     deployment_mode = detect_deployment_mode()
-    logger.debug(f"Built options with model={model_to_use}, betas={betas_to_use}, permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
+    logger.debug(f"Built options with model={model_to_use}, betas={betas_to_use}, settings={fast_mode_settings}, permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
     if deployment_mode == DeploymentMode.LOCAL:
         logger.debug(f"Windows local mode: Agents to write to filesystem: {list(agents_dict.keys()) if agents_dict else 'None'}")
     else:

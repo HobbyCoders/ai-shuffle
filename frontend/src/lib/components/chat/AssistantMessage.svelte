@@ -458,6 +458,9 @@
 				{#if metadata.duration_ms}
 					<span>{((metadata.duration_ms as number) / 1000).toFixed(1)}s</span>
 				{/if}
+				{#if metadata.tokens_out && metadata.duration_ms && (metadata.duration_ms as number) > 0}
+					<span>{((metadata.tokens_out as number) / ((metadata.duration_ms as number) / 1000)).toFixed(1)} t/s</span>
+				{/if}
 			</div>
 		{/if}
 	</div>
