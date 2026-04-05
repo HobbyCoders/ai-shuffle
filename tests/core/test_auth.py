@@ -288,7 +288,15 @@ class TestAuthServiceSession:
         """Invalid token should not validate."""
         service = auth.AuthService()
 
-        with patch.object(auth.database, 'get_auth_session', return_value=None):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = None
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch.object(auth.database, 'get_auth_session', return_value=None), \
+             patch.object(auth.database, 'get_db', return_value=mock_conn):
             assert service.validate_session("invalid_token") is False
 
     def test_logout_calls_delete(self):
