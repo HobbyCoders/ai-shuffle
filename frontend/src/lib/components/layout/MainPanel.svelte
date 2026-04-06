@@ -98,6 +98,11 @@
 	const headerProjectName = $derived(
 		activeTab ? $projects.find(p => p.id === activeTab.project)?.name : undefined
 	);
+	// When GitHub CLI is authenticated, GitHeaderActions shows the project name in its combined badge,
+	// so we hide the separate PageHeader badge to avoid redundancy.
+	const headerProjectNameForBadge = $derived(
+		$githubAuthenticated ? undefined : headerProjectName
+	);
 
 	// Worktree branch for header context.
 	// When GitHub CLI is authenticated, the GitHeaderActions branch selector shows this instead,
@@ -772,7 +777,7 @@
 		{#if $activeView.type === 'chat' || !embeddedViews.has($activeView.type)}
 			<PageHeader
 				title={headerTitle}
-				projectName={headerProjectName}
+				projectName={headerProjectNameForBadge}
 				worktreeBranch={headerWorktreeBranch}
 				showSidebarToggle={$sidebarCollapsed}
 				{isMobile}
@@ -784,6 +789,7 @@
 							projectId={activeTab.project}
 							isStreaming={$gitControlsStreaming}
 							isGitRepo={$gitStatus?.is_git_repo !== false}
+							projectName={headerProjectName}
 							worktreeBranch={activeWorktreeBranch}
 							openPR={branchPR}
 							onClickCommit={handleQuickCommit}

@@ -7,7 +7,7 @@
 	 * chevron opens the modal for customization.
 	 * Branch selector is locked during streaming.
 	 */
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2 } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed } from 'lucide-svelte';
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode, changedFiles } from '$lib/stores/git';
 	import { githubRepoInfo } from '$lib/stores/github';
 
@@ -15,6 +15,8 @@
 		projectId: string;
 		isStreaming?: boolean;
 		isGitRepo?: boolean;
+		/** Project name to display alongside the branch (combined badge) */
+		projectName?: string | null;
 		/** When set, forces worktree read-only mode and uses this as the branch display.
 		 *  This ensures the correct branch shows immediately without waiting for the store to load. */
 		worktreeBranch?: string | null;
@@ -37,7 +39,7 @@
 		onOpenDiffReview?: () => void;
 	}
 
-	let { projectId, isStreaming = false, isGitRepo = true, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onOpenCommitModal, onOpenCreatePRModal, onOpenFinishModal, onOpenPullModal, onOpenDiffReview }: Props = $props();
+	let { projectId, isStreaming = false, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onOpenCommitModal, onOpenCreatePRModal, onOpenFinishModal, onOpenPullModal, onOpenDiffReview }: Props = $props();
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
@@ -173,9 +175,15 @@
 			class:locked={branchLocked}
 			onclick={toggleDropdown}
 			disabled={branchLocked}
-			title={isWorktreeMode ? `Worktree branch: ${currentBranch}` : isStreaming ? 'Branch locked during streaming' : (currentBranch ? `Branch: ${currentBranch}` : 'Select branch')}
+			title={isWorktreeMode ? `${projectName ? projectName + ' · ' : ''}Worktree branch: ${currentBranch}` : isStreaming ? 'Branch locked during streaming' : (currentBranch ? `${projectName ? projectName + ' · ' : ''}Branch: ${currentBranch}` : 'Select branch')}
 		>
-			<GitBranch size={14} strokeWidth={1.5} />
+			<GitBranch size={13} strokeWidth={1.5} />
+			{#if projectName}
+				<span class="btn-label project-name">{projectName}</span>
+				{#if currentBranch}
+					<span class="branch-separator">/</span>
+				{/if}
+			{/if}
 			{#if currentBranch}
 				<span class="btn-label branch-name">{currentBranch}</span>
 			{/if}
@@ -389,7 +397,13 @@
 	{/if}
 
 	{:else}
-		<!-- No git repo: show Init button -->
+		<!-- No git repo: show project name + Init button -->
+		{#if projectName}
+			<span class="git-btn project-only-badge" title="Project: {projectName}">
+				<FolderClosed size={13} strokeWidth={1.5} />
+				<span class="btn-label project-name">{projectName}</span>
+			</span>
+		{/if}
 		<button
 			class="git-btn init-btn"
 			onclick={onClickInitRepo}
@@ -482,6 +496,21 @@
 
 	.btn-label {
 		line-height: 1;
+	}
+
+	.project-name {
+		max-width: 120px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.branch-separator {
+		color: var(--muted-foreground);
+		opacity: 0.4;
+		font-size: 0.75rem;
+		line-height: 1;
+		flex-shrink: 0;
+		margin: 0 -1px;
 	}
 
 	.branch-name {
@@ -733,6 +762,10 @@
 		}
 
 		.branch-name {
+			max-width: 80px;
+		}
+
+		.project-name {
 			max-width: 80px;
 		}
 
