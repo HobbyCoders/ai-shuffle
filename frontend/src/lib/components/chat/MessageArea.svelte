@@ -171,10 +171,15 @@
 	const displayItems: DisplayItem[] = $derived.by(() => {
 		const messages = $activeSession.messages;
 		const items: DisplayItem[] = [];
+		// Deduplicate by message ID to prevent Svelte 5 each_key_duplicate crashes.
+		// Duplicates can originate from delta merge edge cases or corrupted caches.
+		const seenIds = new Set<string>();
 		let i = 0;
 
 		while (i < messages.length) {
 			const msg = messages[i];
+			if (msg.id && seenIds.has(msg.id)) { i++; continue; }
+			if (msg.id) seenIds.add(msg.id);
 
 			if (isGroupableTool(msg)) {
 				// Collect consecutive groupable tool_use messages
@@ -182,7 +187,10 @@
 				const indices: number[] = [i];
 				let j = i + 1;
 				while (j < messages.length && isGroupableTool(messages[j])) {
-					tools.push(messages[j]);
+					const toolMsg = messages[j];
+					if (toolMsg.id && seenIds.has(toolMsg.id)) { j++; continue; }
+					if (toolMsg.id) seenIds.add(toolMsg.id);
+					tools.push(toolMsg);
 					indices.push(j);
 					j++;
 				}

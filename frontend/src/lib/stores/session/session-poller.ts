@@ -395,7 +395,13 @@ class SessionPoller {
 			const historyMessages = existingMessages.slice(0, initialMessageCount);
 			messages = [...historyMessages, ...streamingMessages];
 		} else if (initialMessageCount > 0 && existingMessages && existingMessages.length > 0) {
-			messages = [...existingMessages, ...streamingMessages];
+			// existingMessages may already contain streaming messages from a
+			// previous poll. Concatenating blindly would duplicate them.
+			// Deduplicate by collecting IDs from streaming messages and only
+			// keeping existing messages that don't overlap.
+			const streamingIds = new Set(streamingMessages.map(m => m.id));
+			const safeExisting = existingMessages.filter(m => !streamingIds.has(m.id));
+			messages = [...safeExisting, ...streamingMessages];
 		} else {
 			messages = streamingMessages;
 		}

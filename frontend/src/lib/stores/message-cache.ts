@@ -80,7 +80,17 @@ export const messageCache = {
 			const entry = await withStore<CacheEntry | undefined>('readonly', (store) =>
 				store.get(sessionId)
 			);
-			return entry?.messages ?? null;
+			if (!entry?.messages) return null;
+			// Deduplicate by message ID — corrupted caches from interrupted
+			// sessions can contain duplicate IDs, which crash Svelte 5's
+			// keyed {#each} blocks with each_key_duplicate.
+			const seen = new Set<string>();
+			const deduped = entry.messages.filter(m => {
+				if (!m.id || seen.has(m.id)) return false;
+				seen.add(m.id);
+				return true;
+			});
+			return deduped;
 		} catch {
 			return null;
 		}
