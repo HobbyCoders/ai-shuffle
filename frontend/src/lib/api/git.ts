@@ -378,11 +378,13 @@ export interface GenerateBranchNameResponse {
 export async function generateBranchName(
     projectId: string,
     message: string,
-    prefix: string = 'feat'
+    prefix?: string
 ): Promise<GenerateBranchNameResponse> {
+    const body: Record<string, string> = { message };
+    if (prefix) body.prefix = prefix;
     return api.post<GenerateBranchNameResponse>(
         `${BASE}/${projectId}/git/generate-branch-name`,
-        { message, prefix }
+        body
     );
 }
 
@@ -402,7 +404,26 @@ const STOP_WORDS = new Set([
     'hi', 'hello', 'hey', 'thanks', 'thank',
 ]);
 
-export function generateBranchNameLocal(message: string, prefix: string = 'feat'): string {
+const FIX_WORDS = new Set(['fix', 'bug', 'broken', 'crash', 'error', 'issue', 'wrong', 'fail', 'failing', 'regression', 'hotfix', 'patch']);
+const REFACTOR_WORDS = new Set(['refactor', 'restructure', 'reorganize', 'simplify', 'extract', 'rename', 'move', 'split']);
+const CHORE_WORDS = new Set(['chore', 'deps', 'dependency', 'upgrade', 'bump', 'ci', 'lint', 'format', 'cleanup', 'clean']);
+const DOCS_WORDS = new Set(['docs', 'documentation', 'readme', 'comment', 'comments', 'jsdoc', 'docstring']);
+const TEST_WORDS = new Set(['test', 'tests', 'testing', 'spec', 'coverage']);
+
+function inferPrefix(message: string): string {
+    const words = new Set(message.toLowerCase().split(/\s+/));
+    for (const w of words) {
+        if (FIX_WORDS.has(w)) return 'fix';
+        if (REFACTOR_WORDS.has(w)) return 'refactor';
+        if (CHORE_WORDS.has(w)) return 'chore';
+        if (DOCS_WORDS.has(w)) return 'docs';
+        if (TEST_WORDS.has(w)) return 'test';
+    }
+    return 'feat';
+}
+
+export function generateBranchNameLocal(message: string, prefix?: string): string {
+    const resolvedPrefix = prefix || inferPrefix(message);
     const slug = message
         .toLowerCase()
         .trim()
@@ -412,7 +433,7 @@ export function generateBranchNameLocal(message: string, prefix: string = 'feat'
         .slice(0, 5)               // Take first 5 meaningful words
         .join('-');
     const clean = slug.slice(0, 50).replace(/-+$/, '');
-    return clean ? `${prefix}/${clean}` : `${prefix}/auto-${Date.now().toString(36)}`;
+    return clean ? `${resolvedPrefix}/${clean}` : `${resolvedPrefix}/auto-${Date.now().toString(36)}`;
 }
 
 // ============================================================================

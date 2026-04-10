@@ -1704,7 +1704,7 @@ Return ONLY the JSON object, no markdown code blocks or explanation."""
 class GenerateBranchNameRequest(BaseModel):
     """Request to generate a branch name from a user message"""
     message: str = Field(..., min_length=1, max_length=2000)
-    prefix: str = Field(default="feat", description="Branch name prefix (feat, fix, chore, etc.)")
+    prefix: Optional[str] = Field(default=None, description="Force a specific branch prefix (feat, fix, chore, etc.). If omitted, AI chooses the prefix based on message intent.")
 
 class GenerateBranchNameResponse(BaseModel):
     """Generated branch name"""
@@ -1739,6 +1739,30 @@ async def generate_branch_name(
         'hi', 'hello', 'hey', 'thanks', 'thank',
     }
 
+    # Keyword hints for inferring prefix from the message when no explicit prefix is given
+    FIX_KEYWORDS = {'fix', 'bug', 'broken', 'crash', 'error', 'issue', 'wrong', 'fail', 'failing', 'regression', 'hotfix', 'patch'}
+    CHORE_KEYWORDS = {'chore', 'deps', 'dependency', 'upgrade', 'bump', 'ci', 'lint', 'format', 'cleanup', 'clean'}
+    DOCS_KEYWORDS = {'docs', 'documentation', 'readme', 'comment', 'comments', 'jsdoc', 'docstring'}
+    REFACTOR_KEYWORDS = {'refactor', 'restructure', 'reorganize', 'simplify', 'extract', 'rename', 'move', 'split'}
+    TEST_KEYWORDS = {'test', 'tests', 'testing', 'spec', 'coverage'}
+
+    def infer_prefix(msg: str) -> str:
+        """Infer a conventional branch prefix from message keywords."""
+        words = set(msg.lower().split())
+        if words & FIX_KEYWORDS:
+            return 'fix'
+        if words & REFACTOR_KEYWORDS:
+            return 'refactor'
+        if words & CHORE_KEYWORDS:
+            return 'chore'
+        if words & DOCS_KEYWORDS:
+            return 'docs'
+        if words & TEST_KEYWORDS:
+            return 'test'
+        return 'feat'
+
+    fallback_prefix = body.prefix if body.prefix else infer_prefix(body.message)
+
     def slugify_branch(msg: str, prefix: str) -> str:
         """Fallback: extract meaningful words from message into a branch name."""
         import re
@@ -1756,15 +1780,28 @@ async def generate_branch_name(
         return f"{prefix}/{slug}" if slug else f"{prefix}/auto-{int(time.time())}"
 
     try:
+        prefix_instruction = (
+            f'Use the prefix "{body.prefix}/".'
+            if body.prefix
+            else 'Choose the most appropriate conventional prefix: feat/, fix/, refactor/, chore/, docs/, or test/.'
+        )
+
         prompt = f"""Extract the core task from this chat message and generate a git branch name.
 
-Prefix: "{body.prefix}/"
-Format: lowercase-with-hyphens (e.g., feat/fix-login-timeout, feat/add-dark-mode)
+{prefix_instruction}
+Format: prefix/lowercase-with-hyphens (e.g., feat/add-dark-mode, fix/login-timeout, refactor/extract-auth-service)
 Rules:
 - 3-5 descriptive words AFTER the prefix slash — focus on the technical task, not conversational filler
 - Max 50 characters total
 - Only lowercase letters, digits, hyphens, and one forward slash after prefix
 - Use action verbs: fix, add, update, refactor, remove, improve, etc.
+- Pick the prefix that best matches the intent:
+  feat/ = new feature or enhancement
+  fix/ = bug fix or correction
+  refactor/ = code restructuring without behavior change
+  chore/ = maintenance, deps, CI, formatting
+  docs/ = documentation changes
+  test/ = adding or updating tests
 
 Message: "{body.message[:500]}"
 
@@ -1776,10 +1813,10 @@ Return ONLY the branch name, nothing else."""
         # Validate the generated name
         import re
         if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9/_-]*$', branch_name) or len(branch_name) > 60:
-            branch_name = slugify_branch(body.message, body.prefix)
+            branch_name = slugify_branch(body.message, fallback_prefix)
 
-        # Ensure prefix is correct
-        if not branch_name.startswith(f"{body.prefix}/"):
+        # If caller forced a prefix, ensure it's used
+        if body.prefix and not branch_name.startswith(f"{body.prefix}/"):
             branch_name = f"{body.prefix}/{branch_name.split('/', 1)[-1] if '/' in branch_name else branch_name}"
 
         display_name = branch_name.split('/', 1)[-1].replace('-', ' ').title() if '/' in branch_name else branch_name
@@ -1788,7 +1825,7 @@ Return ONLY the branch name, nothing else."""
 
     except Exception as e:
         logger.warning(f"AI branch name generation failed, using fallback: {e}")
-        branch_name = slugify_branch(body.message, body.prefix)
+        branch_name = slugify_branch(body.message, fallback_prefix)
         display_name = branch_name.split('/', 1)[-1].replace('-', ' ').title()
         return GenerateBranchNameResponse(branch_name=branch_name, display_name=display_name)
 
