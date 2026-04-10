@@ -39,16 +39,19 @@
 				{#each $activeSession.queuedMessages as msg (msg.id)}
 					<button class="queued-chip" onclick={() => editMessage(msg)} title="Click to edit message">
 						<span class="chip-text">{truncate(msg.content)}</span>
-						<button
+						<span
 							class="chip-remove"
+							role="button"
+							tabindex="0"
 							aria-label="Remove from queue"
 							title="Remove from queue"
 							onclick={(e) => { e.stopPropagation(); removeMessage(msg.id); }}
+							onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); removeMessage(msg.id); } }}
 						>
 							<svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12" />
 							</svg>
-						</button>
+						</span>
 					</button>
 				{/each}
 			</div>
