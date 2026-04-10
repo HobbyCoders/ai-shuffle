@@ -686,19 +686,25 @@ select option {
 .prose :where(ul):not(:where([class~="not-prose"] *)) {
 	padding-left: 1.5rem;
 	list-style-type: disc;
-	list-style-position: inside;
+	list-style-position: outside;
 }
 
 .prose :where(ol):not(:where([class~="not-prose"] *)) {
-	padding-left: 1.25rem;
+	padding-left: 1.5rem;
 	list-style-type: decimal;
-	list-style-position: inside;
+	list-style-position: outside;
 }
 
 .prose :where(li):not(:where([class~="not-prose"] *)) {
 	margin-top: 0.25rem;
 	margin-bottom: 0.25rem;
 	display: list-item;
+}
+
+.prose :where(li > p):not(:where([class~="not-prose"] *)) {
+	margin-top: 0;
+	margin-bottom: 0;
+	display: inline;
 }
 
 .prose :where(h1):not(:where([class~="not-prose"] *)) {
