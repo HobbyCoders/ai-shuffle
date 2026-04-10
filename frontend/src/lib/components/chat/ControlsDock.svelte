@@ -81,9 +81,9 @@
 		<button
 			type="button"
 			onclick={onAttachClick}
-			disabled={$activeSession.isStreaming || !$claudeAuthenticated || isUploading || ($activeSession.executionMode === 'worktree' && !$activeSession.worktreeId) || $activeSession.worktreeDeleted}
+			disabled={$activeSession.isStreaming || !$claudeAuthenticated || isUploading || $activeSession.worktreeDeleted}
 			class="dock-action-btn"
-			title={isUploading ? 'Uploading...' : ($activeSession.executionMode === 'worktree' && !$activeSession.worktreeId) ? 'Select a branch first to attach files' : $activeSession.project ? 'Attach file' : 'Select a project to attach files'}
+			title={isUploading ? 'Uploading...' : $activeSession.project ? 'Attach file' : 'Select a project to attach files'}
 		>
 			{#if isUploading}
 				<svg class="w-[18px] h-[18px] animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
