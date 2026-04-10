@@ -103,6 +103,23 @@ function _set(newState: GitState) {
 }
 
 // ============================================================================
+// Shallow equality helpers — prevent no-op poll updates from triggering
+// subscriber cascades and Svelte re-renders when data hasn't changed.
+// ============================================================================
+
+function _shallowEqual<T extends Record<string, unknown>>(a: T | null, b: T | null): boolean {
+	if (a === b) return true;
+	if (!a || !b) return false;
+	const keysA = Object.keys(a);
+	const keysB = Object.keys(b);
+	if (keysA.length !== keysB.length) return false;
+	for (const key of keysA) {
+		if (a[key] !== b[key]) return false;
+	}
+	return true;
+}
+
+// ============================================================================
 // Internal state (non-reactive)
 // ============================================================================
 
@@ -370,6 +387,9 @@ export const git = {
 				{ signal: controller.signal }
 			);
 			if (_loadedKey !== key) return;
+			// Skip update if status hasn't changed — prevents no-op reactive cascades
+			// that cause progressive slowdown from GC pressure during idle polling.
+			if (_shallowEqual(status as unknown as Record<string, unknown>, _state.status as unknown as Record<string, unknown>)) return;
 			_update((s) => ({ ...s, status }));
 			_syncToCache({ status });
 		} catch (e) {
@@ -646,6 +666,8 @@ export const git = {
 				{ signal: controller.signal }
 			);
 			if (_loadedKey !== key) return;
+			// Skip update if diff stats haven't changed — prevents no-op reactive cascades
+			if (_shallowEqual(diffStats as unknown as Record<string, unknown>, _state.diffStats as unknown as Record<string, unknown>)) return;
 			_update((s) => ({ ...s, diffStats }));
 			_syncToCache({ diffStats });
 		} catch (e) {

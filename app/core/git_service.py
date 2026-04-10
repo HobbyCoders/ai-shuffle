@@ -55,6 +55,15 @@ class _GitResultCache:
             for k in to_remove:
                 del self._data[k]
 
+    def purge_expired(self, max_ttl: float = 300.0) -> int:
+        """Remove all entries older than max_ttl seconds. Returns count removed."""
+        now = time.monotonic()
+        with self._lock:
+            expired = [k for k, (_, ts) in self._data.items() if (now - ts) > max_ttl]
+            for k in expired:
+                del self._data[k]
+            return len(expired)
+
 _git_cache = _GitResultCache()
 
 

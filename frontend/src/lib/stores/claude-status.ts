@@ -86,6 +86,16 @@ function _setState(partial: Partial<ClaudeStatusState>) {
 	_notify();
 }
 
+/** Compare two status responses to avoid no-op reactive cascades during polling. */
+function _statusUnchanged(a: ClaudeStatusResponse | null, b: ClaudeStatusResponse | null): boolean {
+	if (a === b) return true;
+	if (!a || !b) return false;
+	if (a.ok !== b.ok) return false;
+	if (a.incidents.length !== b.incidents.length) return false;
+	// Compare fingerprints — captures name + started_at + latest_update
+	return _buildFingerprint(a) === _buildFingerprint(b);
+}
+
 async function _fetchStatus() {
 	try {
 		_setState({ loading: true });
@@ -94,6 +104,11 @@ async function _fetchStatus() {
 
 		// Status is ok — clear any saved dismiss and show as not-dismissed
 		if (status.ok) {
+			// Skip update if status hasn't changed — prevents idle GC pressure
+			if (_statusUnchanged(status, _state.status)) {
+				_setState({ loading: false });
+				return;
+			}
 			_clearFingerprint();
 			_setState({ status, loading: false, dismissed: false });
 			return;
@@ -102,6 +117,12 @@ async function _fetchStatus() {
 		// Status is NOT ok — check if user already dismissed this exact set of incidents
 		const savedFp = _getSavedFingerprint();
 		const isDismissed = savedFp !== null && savedFp === fingerprint;
+
+		// Skip update if nothing meaningful changed
+		if (_statusUnchanged(status, _state.status) && _state.dismissed === isDismissed) {
+			_setState({ loading: false });
+			return;
+		}
 
 		_setState({ status, loading: false, dismissed: isDismissed });
 	} catch {

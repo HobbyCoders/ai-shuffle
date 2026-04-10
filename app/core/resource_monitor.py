@@ -252,6 +252,15 @@ async def _periodic_cleanup() -> dict:
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to evict idle pool sessions: {e}")
 
+    # Clean up expired rate limiter windows and stale config cache
+    try:
+        from app.core.rate_limiter import rate_limiter
+        rate_limiter.cleanup()
+        rate_limiter.clear_cache()
+        cleaned["rate_limiter_cleanup"] = True
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to clean rate limiter: {e}")
+
     return cleaned
 
 
