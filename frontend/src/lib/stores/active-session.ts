@@ -334,7 +334,9 @@ function _notifySubscribers() {
 }
 
 function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
-	_state = fn(untrack(() => _state));
+	const next = fn(untrack(() => _state));
+	if (next === _state) return; // Identity check — skip notification when nothing changed
+	_state = next;
 	_notifySubscribers();
 }
 
@@ -533,14 +535,38 @@ function setupPollCallback() {
 		console.debug(`[PollCB] applying: ${data.messages.length} msgs, streaming=${data.isStreaming}, msgsChanged=${!msgsMatch}, streamingChanged=${streamingChanged}`);
 
 		// Single authoritative update — poller is the sole writer of session state.
-		// When WS stream buffer is ahead of the poller's content, merge it into
-		// the last streaming assistant message to prevent text "jumping back".
-		// When the poller hasn't caught up to the synthetic streaming message yet,
-		// preserve it so the streaming indicator stays visible.
+		// Three-phase merge:
+		// 1. Preserve client-side-only messages (hooks, worktree notifications)
+		// 2. Merge WS stream buffer when ahead of poller content
+		// 3. Stabilize message identity to prevent DOM recreation flicker
 		_update(s => {
 			let finalMessages = data.messages;
 			let finalWsContent = s.wsStreamContent;
 
+			// ── Phase 1: Preserve client-side-only messages ─────────────
+			// System messages (worktree_created, hooks, etc.) are injected
+			// by the frontend and don't exist in the server's live session
+			// store. Without preservation, the poller wipes them every cycle.
+			const serverIdSet = new Set(finalMessages.map(m => m.id));
+			const clientOnlyMsgs = s.messages.filter(m =>
+				m.type === 'system' && !serverIdSet.has(m.id)
+			);
+			if (clientOnlyMsgs.length > 0) {
+				// Insert before the first streaming message to maintain
+				// chronological ordering (client msgs were added pre-stream).
+				const firstStreamIdx = finalMessages.findIndex(m => m.streaming);
+				if (firstStreamIdx >= 0) {
+					finalMessages = [
+						...finalMessages.slice(0, firstStreamIdx),
+						...clientOnlyMsgs,
+						...finalMessages.slice(firstStreamIdx),
+					];
+				} else {
+					finalMessages = [...finalMessages, ...clientOnlyMsgs];
+				}
+			}
+
+			// ── Phase 2: WS stream buffer merge ────────────────────────
 			if (data.isStreaming) {
 				// Find a streaming assistant text message in the poller's data
 				let pollerStreamIdx = -1;
@@ -583,9 +609,56 @@ function setupPollCallback() {
 				finalWsContent = '';
 			}
 
+			// ── Phase 3: Stabilize message identity ────────────────────
+			// When IDs transition from client-side (user-*, ws-stream-*)
+			// to server-side (live-*), Svelte's keyed {#each} destroys and
+			// recreates DOM elements, causing scroll-position jumps that
+			// manifest as brief flashes of earlier messages. Position-based
+			// comparison preserves the existing object reference (or at
+			// minimum the existing ID) when the logical message is the same.
+			if (s.messages.length > 0 && finalMessages.length > 0) {
+				let needsStabilization = false;
+				const stabilized = finalMessages.map((msg, i) => {
+					const existing = s.messages[i];
+					if (!existing || existing.role !== msg.role || existing.type !== msg.type) return msg;
+					// Identical content — reuse exact same object to skip re-render
+					if (
+						existing.content === msg.content &&
+						existing.streaming === msg.streaming &&
+						existing.toolResult === msg.toolResult &&
+						existing.toolStatus === msg.toolStatus
+					) {
+						if (existing !== msg) needsStabilization = true;
+						return existing;
+					}
+					// Content changed but same logical message — preserve ID for key stability
+					if (existing.id !== msg.id) {
+						needsStabilization = true;
+						return { ...msg, id: existing.id };
+					}
+					return msg;
+				});
+				if (needsStabilization) finalMessages = stabilized;
+			}
+
+			// ── No-op detection ────────────────────────────────────────
+			// If nothing visibly changed, return same state reference so
+			// _update's identity check skips subscriber notification.
+			const msgsUnchanged = finalMessages === s.messages ||
+				(finalMessages.length === s.messages.length &&
+				 finalMessages.every((m, i) => m === s.messages[i]));
+			if (
+				msgsUnchanged &&
+				finalWsContent === s.wsStreamContent &&
+				data.isStreaming === s.isStreaming &&
+				!todosHaveUpdate && !usageHasUpdate && !streamingChanged && !metaHasUpdate
+			) {
+				return s;
+			}
+
 			return {
 				...s,
-				messages: finalMessages,
+				messages: msgsUnchanged ? s.messages : finalMessages,
 				isStreaming: data.isStreaming,
 				todos: todosHaveUpdate ? data.todos : s.todos,
 				streamStartTime: data.isStreaming ? s.streamStartTime : null,
