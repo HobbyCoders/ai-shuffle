@@ -536,7 +536,7 @@ function setupPollCallback() {
 
 		// Single authoritative update — poller is the sole writer of session state.
 		// Three-phase merge:
-		// 1. Preserve client-side-only messages (hooks, worktree notifications)
+		// 1. Preserve client-side-only messages (hooks, status notifications)
 		// 2. Merge WS stream buffer when ahead of poller content
 		// 3. Stabilize message identity to prevent DOM recreation flicker
 		_update(s => {
@@ -544,9 +544,9 @@ function setupPollCallback() {
 			let finalWsContent = s.wsStreamContent;
 
 			// ── Phase 1: Preserve client-side-only messages ─────────────
-			// System messages (worktree_created, hooks, etc.) are injected
-			// by the frontend and don't exist in the server's live session
-			// store. Without preservation, the poller wipes them every cycle.
+			// System messages (hooks, status, etc.) are injected by the
+			// frontend and don't exist in the server's live session store.
+			// Without preservation, the poller wipes them every cycle.
 			const serverIdSet = new Set(finalMessages.map(m => m.id));
 			const clientOnlyMsgs = s.messages.filter(m =>
 				m.type === 'system' && !serverIdSet.has(m.id)
@@ -742,25 +742,9 @@ async function startSessionOnExistingWorktree(prompt: string) {
 	if (!_state.project) { _update(s => ({ ...s, error: 'Please select a project' })); return; }
 	if (!_state.worktreeId) { _update(s => ({ ...s, error: 'Please select an existing worktree' })); return; }
 
-	// Add the worktree system message, then delegate to sendMessage() for
-	// the actual query. This ensures session lifecycle flags (awaitingNewSession)
-	// are managed by a single code path — the same one used by local sessions.
-	const branchDisplay = _state.selectedWorktreeBranch || 'existing branch';
-	_update(s => ({
-		...s,
-		messages: [
-			...s.messages,
-			{
-				id: `system-${Date.now()}`,
-				role: 'system' as const,
-				content: `Using existing worktree on branch \`${branchDisplay}\``,
-				type: 'system' as MessageType,
-				systemSubtype: 'worktree_selected',
-				systemData: { branch_name: branchDisplay, worktree_id: _state.worktreeId },
-			},
-		],
-	}));
-
+	// Delegate to sendMessage() for the actual query. This ensures session
+	// lifecycle flags (awaitingNewSession) are managed by a single code path
+	// — the same one used by local sessions.
 	await activeSession.sendMessage(prompt, { skipWorktreeSetup: true });
 }
 
@@ -1227,14 +1211,6 @@ export const activeSession = {
 				sessionId: response.session_id,
 				worktreeId: response.worktree_id,
 				isCreatingWorktree: false,
-				messages: [...s.messages, {
-					id: `system-${Date.now()}`,
-					role: 'system' as const,
-					content: `Branch: \`${response.branch_name}\` (based on \`${response.base_branch}\`)\n\nPath: \`${response.worktree_path}\``,
-					type: 'system' as MessageType,
-					systemSubtype: 'worktree_created',
-					systemData: { branch_name: response.branch_name, base_branch: response.base_branch, worktree_path: response.worktree_path, worktree_id: response.worktree_id },
-				}],
 			}));
 
 			// Refresh sidebar — session was created via REST, not WS
@@ -1341,14 +1317,6 @@ export const activeSession = {
 				worktreeId: response.worktree_id,
 				selectedWorktreeBranch: response.branch_name,
 				isCreatingWorktree: false,
-				messages: [...s.messages, {
-					id: `system-${Date.now()}`,
-					role: 'system' as const,
-					content: `Auto-created branch: \`${response.branch_name}\` (based on \`${response.base_branch}\`)\n\nPath: \`${response.worktree_path}\``,
-					type: 'system' as MessageType,
-					systemSubtype: 'worktree_created',
-					systemData: { branch_name: response.branch_name, base_branch: response.base_branch, worktree_path: response.worktree_path, worktree_id: response.worktree_id },
-				}],
 			}));
 
 			// Issue 4 fix: Session was created via REST, not WS, so no
