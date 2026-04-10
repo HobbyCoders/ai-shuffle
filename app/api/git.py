@@ -1711,7 +1711,7 @@ class GenerateBranchNameResponse(BaseModel):
     branch_name: str
     display_name: str  # Human-readable version
 
-@router.post("/{project_id}/git/generate-branch-name")
+@router.post("/generate-branch-name")
 async def generate_branch_name(
     request: Request,
     project_id: str,
@@ -1794,7 +1794,7 @@ class MigrateUploadsResponse(BaseModel):
     migrated: List[Dict[str, str]]  # List of {original_path, new_path, relative_path}
     errors: List[str]
 
-@router.post("/{project_id}/git/migrate-uploads")
+@router.post("/migrate-uploads")
 async def migrate_uploads_to_worktree(
     request: Request,
     project_id: str,
