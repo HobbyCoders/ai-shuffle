@@ -124,8 +124,8 @@
 	let showCommitModal = $state(false);
 	let showCommitModalMode = $state<'commit' | 'pr-only'>('commit');
 	let showProgressModal = $state(false);
-	let progressAction = $state<'commit' | 'push' | 'pr' | 'finish' | 'pull'>('commit');
-	let progressMode = $state<'commit' | 'pr-only' | 'finish' | 'pull' | 'push'>('commit');
+	let progressAction = $state<'commit' | 'push' | 'pr' | 'finish' | 'pull' | 'pipeline'>('commit');
+	let progressMode = $state<'commit' | 'pr-only' | 'finish' | 'pull' | 'push' | 'pipeline'>('commit');
 	let progressStep = $state(1);
 	let progressCompleted = $state(false);
 	let progressError = $state<string | null>(null);
@@ -729,6 +729,179 @@
 		handleFinish(prefs.mergeMethod, prefs.cleanupAfterMerge);
 	}
 
+	// =========================================================================
+	// Ship It pipeline (commit → push → PR → merge → cleanup)
+	// =========================================================================
+
+	/** Pipeline step descriptors, built dynamically based on current state */
+	let pipelineSteps = $state<{ id: string; label: string; sublabel?: string }[]>([]);
+
+	/**
+	 * Ship It — one-click pipeline using all saved preferences.
+	 *
+	 * Dynamically determines which steps are needed:
+	 * - Skip commit if no uncommitted changes
+	 * - Skip push if already up-to-date with remote
+	 * - Skip PR creation if PR already exists
+	 * - Always merge + cleanup (per user prefs)
+	 */
+	async function handleShipIt() {
+		const projectId = activeTab?.project;
+		if (!projectId) return;
+
+		const prefs = gitActionPreferences.current;
+		const worktreeId = activeTab?.worktreeId ?? undefined;
+		const branch = $gitStatus?.current_branch ?? undefined;
+		const defaultBranch = $githubRepoInfo?.default_branch ?? 'main';
+
+		// Build the pipeline steps based on current state
+		const steps: { id: string; label: string; sublabel?: string }[] = [];
+
+		const hasUncommittedChanges = ($diffStats?.files_changed ?? 0) > 0 ||
+			($diffStats?.additions ?? 0) > 0 ||
+			($diffStats?.deletions ?? 0) > 0;
+
+		if (hasUncommittedChanges) {
+			steps.push({ id: 'generate-commit', label: 'Generating commit message' });
+			steps.push({ id: 'commit', label: 'Committing changes' });
+		}
+
+		steps.push({ id: 'push', label: branch ? `Pushing to ${branch}` : 'Pushing to remote' });
+
+		// Check if PR already exists for this branch
+		const existingPR = branchPR;
+		if (!existingPR) {
+			steps.push({ id: 'generate-pr', label: 'Generating PR description' });
+			steps.push({ id: 'create-pr', label: 'Creating pull request' });
+		}
+
+		steps.push({ id: 'merge', label: `Merging pull request (${prefs.mergeMethod})` });
+
+		if (prefs.cleanupAfterMerge) {
+			steps.push({
+				id: 'cleanup',
+				label: isWorktreeMode ? 'Cleaning up worktree and branch' : 'Cleaning up branch'
+			});
+		}
+
+		pipelineSteps = steps;
+
+		// Initialize progress modal in pipeline mode
+		progressAction = 'pipeline';
+		progressMode = 'pipeline';
+		progressStep = 1;
+		progressCompleted = false;
+		progressError = null;
+		progressIsGenerating = false;
+		progressHasCleanup = prefs.cleanupAfterMerge;
+		showProgressModal = true;
+
+		// Track for post-cleanup worktree state update
+		_finishedWorktreeCleanup = !!(prefs.cleanupAfterMerge && isWorktreeMode && worktreeId);
+
+		let currentStepIndex = 0;
+
+		function advanceStep() {
+			currentStepIndex++;
+			progressStep = currentStepIndex;
+		}
+
+		pauseGitPoll();
+		git.setOperationInProgress(true);
+
+		try {
+			// --- Step: Commit (if needed) ---
+			if (hasUncommittedChanges) {
+				// Generate commit message
+				advanceStep(); // generate-commit
+				let commitMessage: string;
+				try {
+					const generated = await generateCommitMessage(projectId, {
+						include_unstaged: prefs.includeUnstaged
+					}, worktreeId);
+					commitMessage = generated.message;
+				} catch (e: any) {
+					progressError = e?.detail || e?.message || 'Failed to generate commit message';
+					return;
+				}
+
+				// Commit
+				advanceStep(); // commit
+				await git.commitChanges(commitMessage, prefs.includeUnstaged);
+			}
+
+			// --- Step: Push ---
+			advanceStep(); // push
+			await git.pushCommits(branch, true);
+
+			// --- Step: Create PR (if none exists) ---
+			let prNumber: number;
+
+			if (!existingPR) {
+				// Generate PR description
+				advanceStep(); // generate-pr
+				let prTitle: string;
+				let prBody: string;
+				try {
+					const generated = await generatePRDescription(projectId, {
+						base_branch: defaultBranch
+					}, worktreeId);
+					prTitle = generated.title;
+					prBody = generated.body;
+				} catch {
+					prTitle = branch || 'Update';
+					prBody = '';
+				}
+
+				// Create PR
+				advanceStep(); // create-pr
+				if (branch) {
+					const pr = await createPullRequest(projectId, {
+						title: prTitle,
+						body: prBody,
+						head: branch,
+						base: defaultBranch
+					});
+					prNumber = pr.number;
+					// Update branchPR state so Finish logic works
+					await checkPullRequests(projectId, branch);
+				} else {
+					progressError = 'No branch detected';
+					return;
+				}
+			} else {
+				prNumber = existingPR.number;
+			}
+
+			// --- Step: Merge ---
+			advanceStep(); // merge
+			await mergePullRequest(projectId, prNumber, prefs.mergeMethod);
+
+			// --- Step: Cleanup (if enabled) ---
+			if (prefs.cleanupAfterMerge) {
+				advanceStep(); // cleanup
+				if (isWorktreeMode && worktreeId) {
+					await deleteWorktree(projectId, worktreeId, false);
+				} else if (branch && branch !== defaultBranch) {
+					await git.checkout(defaultBranch);
+					await git.deleteBranch(branch);
+				}
+			}
+
+			progressCompleted = true;
+			branchPR = null;
+
+			// Refresh git status
+			await git.refreshStatus();
+			await git.refreshDiffStats();
+		} catch (e: any) {
+			progressError = e?.detail || e?.message || 'An error occurred during the pipeline';
+		} finally {
+			git.setOperationInProgress(false);
+			resumeGitPoll();
+		}
+	}
+
 	async function handlePull(strategy: 'merge' | 'rebase', autoStash: boolean = false) {
 		progressAction = 'pull';
 		progressMode = 'pull';
@@ -799,6 +972,7 @@
 							onClickPush={() => handlePush(false)}
 							onClickPull={handleQuickPull}
 							onClickInitRepo={() => showInitRepoModal = true}
+							onClickShipIt={handleShipIt}
 							onOpenCommitModal={() => { showCommitModalMode = 'commit'; showCommitModal = true; }}
 							onOpenCreatePRModal={() => { showCommitModalMode = 'pr-only'; showCommitModal = true; }}
 							onOpenFinishModal={() => showFinishModal = true}
@@ -924,10 +1098,12 @@
 		branchName={$gitStatus?.current_branch ?? ''}
 		isGenerating={progressIsGenerating}
 		hasCleanup={progressHasCleanup}
+		{pipelineSteps}
 		onClose={() => {
 			showProgressModal = false;
 			progressHasCleanup = false;
-			if (progressCompleted && progressMode === 'finish' && _finishedWorktreeCleanup) {
+			pipelineSteps = [];
+			if (progressCompleted && (progressMode === 'finish' || progressMode === 'pipeline') && _finishedWorktreeCleanup) {
 				activeSession.markWorktreeDeleted();
 				_finishedWorktreeCleanup = false;
 			}

@@ -7,7 +7,7 @@
 	 * chevron opens the modal for customization.
 	 * Branch selector is locked during streaming.
 	 */
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket } from 'lucide-svelte';
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode, changedFiles } from '$lib/stores/git';
 	import { githubRepoInfo } from '$lib/stores/github';
 
@@ -30,6 +30,8 @@
 		onClickPull: () => void;
 		onClickNewBranch: () => void;
 		onClickInitRepo?: () => void;
+		/** Ship It: one-click commit → push → PR → merge → cleanup pipeline */
+		onClickShipIt?: () => void;
 		/** Open modal for customization */
 		onOpenCommitModal: () => void;
 		onOpenCreatePRModal: () => void;
@@ -39,7 +41,7 @@
 		onOpenDiffReview?: () => void;
 	}
 
-	let { projectId, isStreaming = false, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onOpenCommitModal, onOpenCreatePRModal, onOpenFinishModal, onOpenPullModal, onOpenDiffReview }: Props = $props();
+	let { projectId, isStreaming = false, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenCommitModal, onOpenCreatePRModal, onOpenFinishModal, onOpenPullModal, onOpenDiffReview }: Props = $props();
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
@@ -379,6 +381,20 @@
 		</button>
 	{/if}
 
+	<!-- Ship It: one-click pipeline (commit → push → PR → merge → cleanup) -->
+	<!-- Shows when there are changes on a feature branch, not behind upstream -->
+	{#if hasChanges && !isOnDefaultBranch && !needsPull && onClickShipIt}
+		<button
+			class="git-btn ship-it-btn"
+			onclick={onClickShipIt}
+			disabled={isStreaming}
+			title={isStreaming ? 'Cannot ship during streaming' : 'Ship It — commit, push, create PR, merge, and clean up in one shot'}
+		>
+			<Rocket size={13} strokeWidth={1.5} />
+			<span class="btn-label">Ship It</span>
+		</button>
+	{/if}
+
 	<!-- Diff stats (clickable to open review panel) -->
 	{#if hasChanges}
 		<button
@@ -492,6 +508,17 @@
 
 	.init-btn:hover:not(:disabled) {
 		background: color-mix(in oklch, var(--primary) 10%, transparent);
+	}
+
+	/* Ship It button */
+	.ship-it-btn {
+		border-color: var(--success);
+		color: var(--success);
+	}
+
+	.ship-it-btn:hover:not(:disabled) {
+		background: color-mix(in oklch, var(--success) 12%, transparent);
+		color: var(--success);
 	}
 
 	.btn-label {
