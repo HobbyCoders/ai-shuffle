@@ -284,6 +284,13 @@ export interface PaginatedSessions {
 	has_more: boolean;
 }
 
+export interface CursorPaginatedSessions {
+	items: Session[];
+	next_cursor: string | null;
+	next_cursor_id: string | null;
+	has_more: boolean;
+}
+
 export interface PaginatedSessionSearchResults {
 	items: SessionSearchResult[];
 	total: number;

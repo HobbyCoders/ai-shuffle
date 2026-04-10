@@ -166,3 +166,10 @@ async def shutdown_services() -> None:
         logger.info("SDK session pool shut down")
     except Exception:
         pass
+
+    # Shutdown database connection pool (close all idle connections)
+    try:
+        from app.db.base import _pool as db_pool
+        db_pool.shutdown()
+    except Exception:
+        pass

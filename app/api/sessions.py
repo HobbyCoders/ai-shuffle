@@ -42,6 +42,7 @@ from app.core.models import (
     SessionWithMessages,
     SessionSearchResult,
     PaginatedSessions,
+    CursorPaginatedSessions,
     PaginatedSessionSearchResults
 )
 import time
@@ -388,6 +389,56 @@ async def list_sessions_paginated(
         offset=offset,
         limit=limit,
         has_more=has_more
+    )
+
+
+@router.get("/cursor", response_model=CursorPaginatedSessions)
+async def list_sessions_cursor(
+    request: Request,
+    project_id: Optional[str] = Query(None, description="Filter by project"),
+    profile_id: Optional[str] = Query(None, description="Filter by profile"),
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by status"),
+    api_user_id: Optional[str] = Query(None, description="Filter by API user ID (admin only)"),
+    admin_only: bool = Query(False, description="Show only admin sessions (no API user)"),
+    api_users_only: bool = Query(False, description="Show only API user sessions (exclude admin sessions)"),
+    favorites_only: bool = Query(False, description="Show only favorited sessions"),
+    tag_id: Optional[str] = Query(None, description="Filter by tag ID"),
+    sync_claude_sessions: bool = Query(True, description="Auto-import Claude Code sessions for project"),
+    limit: int = Query(50, ge=1, le=100),
+    cursor: Optional[str] = Query(None, description="Cursor from previous response (updated_at timestamp)"),
+    cursor_id: Optional[str] = Query(None, description="Cursor ID from previous response (session ID tiebreaker)"),
+    token: str = Depends(require_auth)
+):
+    """
+    List sessions with cursor-based pagination (keyset pagination).
+    More efficient than offset-based pagination for deep scrolling — O(1) seek
+    instead of O(n) scan-and-discard.
+    """
+    project_id, profile_id, filter_api_user_id, filter_api_users_only = _apply_session_filters(
+        request, project_id, profile_id, api_user_id, admin_only, api_users_only, sync_claude_sessions
+    )
+
+    sessions, next_cursor, next_cursor_id, has_more = await run_sync(
+        database.get_sessions_cursor,
+        project_id=project_id,
+        profile_id=profile_id,
+        status=status_filter,
+        api_user_id=filter_api_user_id,
+        api_users_only=filter_api_users_only,
+        favorites_only=favorites_only,
+        tag_id=tag_id,
+        limit=limit,
+        cursor=cursor,
+        cursor_id=cursor_id,
+    )
+
+    enriched = enrich_sessions_with_tags(sessions)
+
+    return CursorPaginatedSessions(
+        items=enriched,
+        next_cursor=next_cursor,
+        next_cursor_id=next_cursor_id,
+        has_more=has_more,
     )
 
 

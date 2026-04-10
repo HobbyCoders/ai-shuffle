@@ -7,6 +7,8 @@ All domain modules import from here. Do NOT import domain modules from this file
 import re
 import sqlite3
 import logging
+import threading
+import time
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
@@ -54,19 +56,169 @@ class WorktreeStatus:
     ORPHANED = "orphaned"
 
 
+# =============================================================================
+# Connection Pool
+# =============================================================================
+class ConnectionPool:
+    """Thread-safe SQLite connection pool with lazy initialization and idle eviction.
+
+    Connections are created on demand up to ``max_size``.  PRAGMAs are executed
+    once at creation time, not on every checkout.  Idle connections older than
+    ``max_idle_time`` seconds are evicted on the next pool access.
+    """
+
+    def __init__(self, max_size: int = 8, max_idle_time: float = 300.0):
+        self._max_size = max_size
+        self._max_idle_time = max_idle_time
+        self._lock = threading.Lock()
+        # Pool of idle connections: list of (conn, last_returned_timestamp)
+        self._idle: list[tuple[sqlite3.Connection, float]] = []
+        # Total connections currently alive (idle + checked-out)
+        self._total: int = 0
+
+    # ----- internal helpers ------------------------------------------------
+
+    @staticmethod
+    def _create_connection() -> sqlite3.Connection:
+        """Create a new SQLite connection with PRAGMAs applied once."""
+        conn = sqlite3.connect(
+            str(settings.db_path), check_same_thread=False, timeout=30.0
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA wal_autocheckpoint = 1000")
+        timeout_ms = int(settings.db_busy_timeout_ms)
+        conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
+        return conn
+
+    def _evict_idle(self) -> None:
+        """Close connections that have been idle longer than max_idle_time.
+
+        Must be called while holding ``self._lock``.
+        """
+        now = time.monotonic()
+        surviving: list[tuple[sqlite3.Connection, float]] = []
+        for conn, returned_at in self._idle:
+            if now - returned_at > self._max_idle_time:
+                self._total -= 1
+                try:
+                    conn.execute("PRAGMA optimize")
+                except Exception:
+                    pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            else:
+                surviving.append((conn, returned_at))
+        self._idle = surviving
+
+    @staticmethod
+    def _health_check(conn: sqlite3.Connection) -> bool:
+        """Return True if the connection is still usable."""
+        try:
+            conn.execute("SELECT 1")
+            return True
+        except Exception:
+            return False
+
+    # ----- public API ------------------------------------------------------
+
+    def checkout(self) -> sqlite3.Connection:
+        """Acquire a connection from the pool.
+
+        Returns an idle connection if one is available and healthy, otherwise
+        creates a new one (if the pool has capacity).  Evicts stale idle
+        connections on every access.
+        """
+        with self._lock:
+            self._evict_idle()
+
+            # Try to reuse an idle connection
+            while self._idle:
+                conn, _returned_at = self._idle.pop()
+                if self._health_check(conn):
+                    return conn
+                # Dead connection — discard it
+                self._total -= 1
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+            # No idle connection available — create a new one if under limit
+            if self._total < self._max_size:
+                self._total += 1
+            else:
+                # Pool exhausted — log a warning but still create a connection
+                # so callers don't deadlock.  The extra connection will be
+                # discarded on return if the pool is full.
+                logger.warning(
+                    "Connection pool exhausted (max_size=%d, total=%d). "
+                    "Creating overflow connection.",
+                    self._max_size,
+                    self._total,
+                )
+                self._total += 1
+
+        # Create outside the lock to avoid holding it during I/O
+        return self._create_connection()
+
+    def checkin(self, conn: sqlite3.Connection) -> None:
+        """Return a connection to the pool.
+
+        If the pool is already at capacity the connection is closed instead.
+        """
+        with self._lock:
+            if len(self._idle) < self._max_size:
+                self._idle.append((conn, time.monotonic()))
+            else:
+                # Overflow connection — close it
+                self._total -= 1
+                try:
+                    conn.execute("PRAGMA optimize")
+                except Exception:
+                    pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def shutdown(self) -> None:
+        """Close all pooled connections.  Call during application shutdown."""
+        with self._lock:
+            for conn, _returned_at in self._idle:
+                try:
+                    conn.execute("PRAGMA optimize")
+                except Exception:
+                    pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._idle.clear()
+            self._total = 0
+            logger.info("Connection pool shut down.")
+
+
+# Module-level singleton pool
+_pool = ConnectionPool()
+
+
 def get_connection() -> sqlite3.Connection:
-    """Get a database connection with row factory."""
+    """Get a one-off database connection with row factory.
+
+    This does NOT use the pool — it creates a fresh connection every time.
+    Use this for one-off operations like ``init_database`` that need a
+    dedicated connection with a deterministic lifecycle.
+    """
     conn = sqlite3.connect(str(settings.db_path), check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
-    # Explicitly set WAL auto-checkpoint threshold (default 1000 pages ≈ 4 MB).
-    # This ensures WAL is checkpointed continuously during normal operation
-    # rather than growing unbounded between periodic maintenance runs.
     conn.execute("PRAGMA wal_autocheckpoint = 1000")
-    # Set busy timeout from config (default 30s) — critical on Windows where file locking is more aggressive.
-    # PRAGMA does not support parameterized queries, so validate the value is a safe integer.
-    timeout_ms = int(settings.db_busy_timeout_ms)  # Coerce to int — prevents injection
+    timeout_ms = int(settings.db_busy_timeout_ms)
     conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
     return conn
 
@@ -89,8 +241,12 @@ def _close_connection(conn: sqlite3.Connection):
 
 @contextmanager
 def get_db():
-    """Context manager for database connections."""
-    conn = get_connection()
+    """Context manager for database connections.
+
+    Checks out a connection from the pool, yields it, and returns it to the
+    pool on exit.  Commits on success, rolls back on exception.
+    """
+    conn = _pool.checkout()
     try:
         yield conn
         conn.commit()
@@ -98,7 +254,7 @@ def get_db():
         conn.rollback()
         raise
     finally:
-        _close_connection(conn)
+        _pool.checkin(conn)
 
 
 @contextmanager
@@ -122,7 +278,7 @@ def transaction():
     Domain functions that accept ``_conn`` should use it instead of opening
     their own ``get_db()`` connection when provided.
     """
-    conn = get_connection()
+    conn = _pool.checkout()
     try:
         yield conn
         conn.commit()
@@ -130,7 +286,7 @@ def transaction():
         conn.rollback()
         raise
     finally:
-        _close_connection(conn)
+        _pool.checkin(conn)
 
 
 def column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:

@@ -8,7 +8,7 @@
  * compatibility with $storeName auto-subscription in .svelte files.
  */
 
-import type { Session, Profile, PaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
+import type { Session, Profile, PaginatedSessions, CursorPaginatedSessions, SessionSearchResult, PaginatedSessionSearchResults } from '$lib/api/client';
 import { api, searchSessionsPaginated } from '$lib/api/client';
 import type { Project } from './types';
 import { messageCache } from './message-cache';
@@ -35,6 +35,9 @@ interface AppDataState {
 	sessionsOffset: number;
 	sessionsHasMore: boolean;
 	sessionsLoadingMore: boolean;
+	// Cursor-based pagination state
+	sessionsCursor: string | null;
+	sessionsCursorId: string | null;
 	// Search state
 	searchQuery: string;
 	searchResults: SessionSearchResult[];
@@ -67,6 +70,8 @@ let _state = $state<AppDataState>({
 	sessionsOffset: 0,
 	sessionsHasMore: false,
 	sessionsLoadingMore: false,
+	sessionsCursor: null,
+	sessionsCursorId: null,
 	searchQuery: '',
 	searchResults: [],
 	searchTotal: 0,
@@ -98,19 +103,21 @@ function _update(fn: (s: AppDataState) => AppDataState) {
 async function loadSessionsInternal(tagId?: string | null) {
 	_update(s => ({ ...s, sessionsLoading: true }));
 	try {
-		let url = `/sessions/paginated?limit=${SESSIONS_PAGE_SIZE}&offset=0&admin_only=true`;
+		let url = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true`;
 		if (tagId) {
 			url += `&tag_id=${encodeURIComponent(tagId)}`;
 		}
-		const result = await api.get<PaginatedSessions>(url);
+		const result = await api.get<CursorPaginatedSessions>(url);
 		_update(s => ({
 			...s,
 			sessions: result.items,
-			sessionsTotal: result.total,
+			sessionsTotal: result.items.length,
 			sessionsOffset: 0,
 			sessionsHasMore: result.has_more,
 			sessionsLoading: false,
 			sessionsTagFilter: tagId ?? null,
+			sessionsCursor: result.next_cursor,
+			sessionsCursorId: result.next_cursor_id,
 		}));
 	} catch (e) {
 		console.error('Failed to load sessions:', e);
@@ -121,25 +128,31 @@ async function loadSessionsInternal(tagId?: string | null) {
 async function loadMoreSessionsInternal() {
 	if (_state.sessionsLoadingMore || !_state.sessionsHasMore) return;
 
-	// Capture offset and tag filter before the async fetch so we can
+	// Capture cursor and tag filter before the async fetch so we can
 	// detect if a concurrent reset (e.g. tag change, reload) invalidated
 	// this request while it was in flight.
-	const capturedOffset = _state.sessionsOffset;
+	const capturedCursor = _state.sessionsCursor;
+	const capturedCursorId = _state.sessionsCursorId;
 	const capturedTagFilter = _state.sessionsTagFilter;
-	const newOffset = capturedOffset + SESSIONS_PAGE_SIZE;
 
 	_update(s => ({ ...s, sessionsLoadingMore: true }));
 	try {
-		let url = `/sessions/paginated?limit=${SESSIONS_PAGE_SIZE}&offset=${newOffset}&admin_only=true`;
+		let url = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true`;
+		if (capturedCursor) {
+			url += `&cursor=${encodeURIComponent(capturedCursor)}`;
+		}
+		if (capturedCursorId) {
+			url += `&cursor_id=${encodeURIComponent(capturedCursorId)}`;
+		}
 		if (capturedTagFilter) {
 			url += `&tag_id=${encodeURIComponent(capturedTagFilter)}`;
 		}
-		const result = await api.get<PaginatedSessions>(url);
+		const result = await api.get<CursorPaginatedSessions>(url);
 
-		// Verify offset and tag filter haven't changed while we were fetching.
+		// Verify cursor and tag filter haven't changed while we were fetching.
 		// If they changed (e.g. user switched tag filter, or sessions were
 		// reloaded), discard this stale response to avoid duplicates.
-		if (_state.sessionsOffset !== capturedOffset || _state.sessionsTagFilter !== capturedTagFilter) {
+		if (_state.sessionsCursor !== capturedCursor || _state.sessionsCursorId !== capturedCursorId || _state.sessionsTagFilter !== capturedTagFilter) {
 			_update(s => ({ ...s, sessionsLoadingMore: false }));
 			return;
 		}
@@ -147,9 +160,12 @@ async function loadMoreSessionsInternal() {
 		_update(s => ({
 			...s,
 			sessions: [...s.sessions, ...result.items],
-			sessionsOffset: newOffset,
+			sessionsOffset: s.sessionsOffset + result.items.length,
+			sessionsTotal: s.sessionsOffset + result.items.length + (result.has_more ? 1 : 0),
 			sessionsHasMore: result.has_more,
 			sessionsLoadingMore: false,
+			sessionsCursor: result.next_cursor,
+			sessionsCursorId: result.next_cursor_id,
 		}));
 	} catch (e) {
 		console.error('Failed to load more sessions:', e);

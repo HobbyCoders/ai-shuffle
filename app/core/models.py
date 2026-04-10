@@ -325,6 +325,14 @@ class PaginatedSessions(BaseModel):
     has_more: bool
 
 
+class CursorPaginatedSessions(BaseModel):
+    """Cursor-based paginated sessions response for efficient infinite scroll"""
+    items: List[Session]
+    next_cursor: Optional[str] = None  # updated_at of last item
+    next_cursor_id: Optional[str] = None  # id of last item (tiebreaker)
+    has_more: bool
+
+
 class PaginatedSessionSearchResults(BaseModel):
     """Paginated session search results with total count"""
     items: List[SessionSearchResult]

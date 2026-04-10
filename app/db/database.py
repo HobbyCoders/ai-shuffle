@@ -212,6 +212,13 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
             except sqlite3.OperationalError:
                 pass  # worktrees table may not exist yet
 
+    # Performance: composite indexes for session list queries (always ensure they exist)
+    if table_exists(cursor, "sessions"):
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_updated ON sessions(project_id, updated_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_apiuser_updated ON sessions(project_id, api_user_id, updated_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_profile_updated ON sessions(project_id, profile_id, updated_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(title COLLATE NOCASE)")
+
     # Add action_steps column to automations for multi-step connector actions (v36)
     if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "action_steps"):
         cursor.execute("ALTER TABLE automations ADD COLUMN action_steps TEXT DEFAULT NULL")
@@ -898,6 +905,15 @@ def _create_schema(cursor: sqlite3.Cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(worktree_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
+    # Composite indexes for session list queries (most common access pattern)
+    # Covers: WHERE project_id = ? AND api_user_id IS NULL ORDER BY updated_at DESC
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_updated ON sessions(project_id, updated_at DESC)")
+    # Covers: WHERE project_id = ? AND api_user_id = ? ORDER BY updated_at DESC
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_apiuser_updated ON sessions(project_id, api_user_id, updated_at DESC)")
+    # Covers: WHERE project_id = ? AND profile_id = ? ORDER BY updated_at DESC
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_profile_updated ON sessions(project_id, profile_id, updated_at DESC)")
+    # Title search optimization (LIKE prefix match can use this)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(title COLLATE NOCASE)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_active ON webhooks(is_active)")
 
     # Rate limit configurations
@@ -2202,6 +2218,87 @@ def get_sessions_paginated(
         sessions = rows_to_list(cursor.fetchall())
 
         return sessions, total
+
+
+def get_sessions_cursor(
+    project_id: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    status: Optional[str] = None,
+    api_user_id: Optional[str] = None,
+    api_users_only: bool = False,
+    favorites_only: bool = False,
+    tag_id: Optional[str] = None,
+    limit: int = 50,
+    cursor: Optional[str] = None,
+    cursor_id: Optional[str] = None,
+) -> tuple[List[Dict[str, Any]], Optional[str], Optional[str], bool]:
+    """Get sessions using cursor-based pagination (keyset pagination).
+
+    Uses (updated_at, id) as the cursor key for deterministic ordering.
+
+    Returns:
+        Tuple of (sessions, next_cursor, next_cursor_id, has_more)
+    """
+    if tag_id:
+        base_query = """FROM sessions s
+                       INNER JOIN session_tags st ON s.id = st.session_id
+                       WHERE st.tag_id = ?"""
+        params: List[Any] = [tag_id]
+        col_prefix = "s."
+    else:
+        base_query = "FROM sessions WHERE 1=1"
+        params = []
+        col_prefix = ""
+
+    if project_id:
+        base_query += f" AND {col_prefix}project_id = ?"
+        params.append(project_id)
+    if profile_id:
+        base_query += f" AND {col_prefix}profile_id = ?"
+        params.append(profile_id)
+    if status:
+        base_query += f" AND {col_prefix}status = ?"
+        params.append(status)
+    if favorites_only:
+        base_query += f" AND {col_prefix}is_favorite = TRUE"
+    if api_users_only:
+        base_query += f" AND {col_prefix}api_user_id IS NOT NULL"
+    elif api_user_id is not None:
+        if api_user_id:
+            base_query += f" AND {col_prefix}api_user_id = ?"
+            params.append(api_user_id)
+        else:
+            base_query += f" AND {col_prefix}api_user_id IS NULL"
+
+    # Cursor condition: seek past the last seen (updated_at, id)
+    if cursor and cursor_id:
+        base_query += f" AND ({col_prefix}updated_at < ? OR ({col_prefix}updated_at = ? AND {col_prefix}id < ?))"
+        params.extend([cursor, cursor, cursor_id])
+
+    with get_db() as conn:
+        db_cursor = conn.cursor()
+
+        # Request limit+1 to detect has_more without a COUNT query
+        fetch_limit = limit + 1
+        if tag_id:
+            data_query = f"SELECT DISTINCT s.* {base_query} ORDER BY s.updated_at DESC, s.id DESC LIMIT ?"
+        else:
+            data_query = f"SELECT * {base_query} ORDER BY updated_at DESC, id DESC LIMIT ?"
+        db_cursor.execute(data_query, params + [fetch_limit])
+        rows = rows_to_list(db_cursor.fetchall())
+
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+
+        next_cursor: Optional[str] = None
+        next_cursor_id: Optional[str] = None
+        if rows and has_more:
+            last = rows[-1]
+            next_cursor = last["updated_at"]
+            next_cursor_id = last["id"]
+
+        return rows, next_cursor, next_cursor_id, has_more
 
 
 def create_session(

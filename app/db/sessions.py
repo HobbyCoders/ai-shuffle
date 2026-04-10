@@ -237,22 +237,28 @@ def get_sessions_paginated(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # Get total count
+        # Single query with window function for count + data
         if tag_id:
-            count_query = f"SELECT COUNT(DISTINCT s.id) {base_query}"
+            # Subquery to get distinct sessions first, then count via window
+            data_query = f"""
+                WITH filtered AS (
+                    SELECT DISTINCT s.* {base_query}
+                )
+                SELECT *, COUNT(*) OVER() as _total FROM filtered
+                ORDER BY updated_at DESC LIMIT ? OFFSET ?
+            """
         else:
-            count_query = f"SELECT COUNT(*) {base_query}"
-        cursor.execute(count_query, params)
-        total = cursor.fetchone()[0]
+            data_query = f"""SELECT *, COUNT(*) OVER() as _total
+                {base_query} ORDER BY updated_at DESC LIMIT ? OFFSET ?"""
 
-        # Get paginated data
-        if tag_id:
-            data_query = f"SELECT DISTINCT s.* {base_query} ORDER BY s.updated_at DESC LIMIT ? OFFSET ?"
-        else:
-            data_query = f"SELECT * {base_query} ORDER BY updated_at DESC LIMIT ? OFFSET ?"
         cursor.execute(data_query, params + [limit, offset])
-        sessions = rows_to_list(cursor.fetchall())
+        rows = cursor.fetchall()
 
+        if not rows:
+            return [], 0
+
+        total = rows[0]["_total"]
+        sessions = [{k: v for k, v in dict(row).items() if k != "_total"} for row in rows]
         return sessions, total
 
 
