@@ -61,8 +61,10 @@
 		});
 	});
 
-	// Current branch display name
-	const currentBranch = $derived($activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch || 'Select branch');
+	// Current branch display name — shows "Auto" when no branch is selected
+	// to indicate that a branch will be auto-generated from the user's message
+	const currentBranch = $derived($activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch || 'Auto');
+	const isAutoMode = $derived(!$activeSession.selectedWorktreeBranch && !$activeSession.worktreeBranch && !$activeSession.worktreeId);
 
 	// Combined worktree error from store or local eager-creation
 	const worktreeError = $derived($activeSession.worktreeError || localWorktreeError);
@@ -265,8 +267,10 @@
 			<div class="branch-selector" bind:this={dropdownRef}>
 			<button
 				class="branch-trigger"
+				class:auto-mode={isAutoMode}
 				onclick={toggleDropdown}
 				disabled={creatingWorktree}
+				title={isAutoMode ? 'Branch will be auto-generated from your message. Click to select a specific branch.' : `Current branch: ${currentBranch}`}
 			>
 				{#if creatingWorktree}
 					<Loader2 size={12} strokeWidth={1.5} class="animate-spin" />
@@ -285,6 +289,18 @@
 							<span>Loading...</span>
 						</div>
 					{:else}
+						<!-- Auto mode option -->
+						<button
+							class="branch-item auto-item"
+							class:active={isAutoMode}
+							onclick={() => { activeSession.setWorktreeBranch(''); activeSession.setWorktreeMode('new'); activeSession.clearWorktreeSelection(); showBranchDropdown = false; }}
+						>
+							<GitFork size={13} strokeWidth={1.5} />
+							<span class="branch-item-name">Auto</span>
+							<span class="auto-hint">from message</span>
+						</button>
+						<div class="branch-divider"></div>
+
 						<!-- Active Worktrees -->
 						{#if filteredWorktrees.length > 0}
 							<div class="branch-section-label">Worktrees</div>
@@ -454,6 +470,16 @@
 	.branch-trigger:hover {
 		border-color: var(--primary);
 		color: var(--foreground);
+	}
+
+	.branch-trigger.auto-mode {
+		border-style: dashed;
+		color: var(--muted-foreground);
+		opacity: 0.8;
+	}
+
+	.branch-trigger.auto-mode:hover {
+		opacity: 1;
 	}
 
 	.branch-name {
@@ -644,6 +670,20 @@
 		height: 1px;
 		background: var(--border);
 		margin: 4px 0;
+	}
+
+	/* Auto mode item */
+	.auto-item :global(svg) {
+		color: var(--primary);
+	}
+
+	.auto-hint {
+		font-size: 0.5625rem;
+		font-weight: 500;
+		padding: 1px 5px;
+		border-radius: 4px;
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		color: var(--primary);
 	}
 
 	/* Create branch item */

@@ -363,6 +363,70 @@ export async function syncWorktrees(projectId: string): Promise<WorktreeSyncResu
 }
 
 // ============================================================================
+// Branch Name Generation
+// ============================================================================
+
+export interface GenerateBranchNameResponse {
+    branch_name: string;
+    display_name: string;
+}
+
+/**
+ * Generate a branch name from a user message using AI.
+ * Falls back to slugification on the backend if AI fails.
+ */
+export async function generateBranchName(
+    projectId: string,
+    message: string,
+    prefix: string = 'feat'
+): Promise<GenerateBranchNameResponse> {
+    return api.post<GenerateBranchNameResponse>(
+        `${BASE}/${projectId}/git/generate-branch-name`,
+        { message, prefix }
+    );
+}
+
+/**
+ * Client-side fallback for branch name generation (no API call).
+ * Used when the backend is unreachable or as instant fallback.
+ */
+export function generateBranchNameLocal(message: string, prefix: string = 'feat'): string {
+    const slug = message
+        .toLowerCase()
+        .trim()
+        .replace(/[^\w\s-]/g, '')  // Remove special chars
+        .split(/\s+/)              // Split on whitespace
+        .filter(w => w.length > 1) // Skip single chars
+        .slice(0, 5)               // Take first 5 words
+        .join('-');
+    const clean = slug.slice(0, 50).replace(/-+$/, '');
+    return clean ? `${prefix}/${clean}` : `${prefix}/auto-${Date.now().toString(36)}`;
+}
+
+// ============================================================================
+// Upload Migration
+// ============================================================================
+
+export interface MigrateUploadsResponse {
+    migrated: Array<{ original_path: string; new_path: string; relative_path: string }>;
+    errors: string[];
+}
+
+/**
+ * Copy pending uploads from main project to a worktree directory.
+ */
+export async function migrateUploadsToWorktree(
+    projectId: string,
+    worktreeId: string,
+    filePaths: string[]
+): Promise<MigrateUploadsResponse> {
+    return api.post<MigrateUploadsResponse>(
+        `${BASE}/${projectId}/git/migrate-uploads`,
+        { worktree_id: worktreeId, file_paths: filePaths }
+    );
+}
+
+// ============================================================================
 // Worktree File Browsing API
 // ============================================================================
 

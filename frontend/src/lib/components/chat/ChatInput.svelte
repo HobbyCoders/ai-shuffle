@@ -20,7 +20,7 @@
 	import TiptapEditor from './TiptapEditor.svelte';
 	import VoiceRecorder from './VoiceRecorder.svelte';
 	import ControlsDock from './ControlsDock.svelte';
-	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery } from './tiptap/serialization';
+	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips } from './tiptap/serialization';
 
 	interface Command {
 		name: string;
@@ -199,7 +199,7 @@
 		// Get serialized message from editor (includes inline @path references)
 		const finalPrompt = editorRef?.getMessage() ?? '';
 
-		if (!finalPrompt.trim() || isUploading || $activeSession.worktreeDeleted || ($activeSession.executionMode === 'worktree' && !$activeSession.worktreeId)) return;
+		if (!finalPrompt.trim() || isUploading || $activeSession.worktreeDeleted) return;
 
 		// Client-side slash command: /fast [on|off] — per-session toggle
 		const fastMatch = finalPrompt.trim().match(/^\/fast(?:\s+(on|off|enable|disable|true|false))?$/i);
@@ -243,6 +243,19 @@
 		// This is critical for the first message when the component gets destroyed/recreated
 		messageSent = true;
 
+		// Collect pending upload paths before clearing state — needed for auto-worktree
+		// to migrate files from main project to the new worktree directory.
+		// Extract from both uploadedFiles (legacy) and inline file chips in the editor.
+		let pendingPaths: string[] | undefined;
+		if ($activeSession.executionMode === 'worktree' && !$activeSession.worktreeId) {
+			const chipPaths = editorRef?.getEditor()
+				? extractFileChips(editorRef.getEditor()!).map(c => c.fullPath).filter(Boolean)
+				: [];
+			const legacyPaths = uploadedFiles.map(f => f.full_path);
+			const allPaths = [...new Set([...chipPaths, ...legacyPaths])];
+			pendingPaths = allPaths.length ? allPaths : undefined;
+		}
+
 		inputValue = '';
 		uploadedFiles = [];
 
@@ -258,7 +271,7 @@
 			activeSession.queueMessage(finalPrompt);
 		} else {
 			// Send immediately (interrupt_and_query if streaming, normal query if not)
-			activeSession.sendMessage(finalPrompt);
+			activeSession.sendMessage(finalPrompt, pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : undefined);
 		}
 	}
 
@@ -629,8 +642,8 @@
 								<button
 									type="submit"
 									class="send-btn"
-									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing || $activeSession.worktreeDeleted || ($activeSession.executionMode === "worktree" && !$activeSession.worktreeId)}
-									title={$activeSession.worktreeDeleted ? "This worktree session has been completed" : ($activeSession.executionMode === "worktree" && !$activeSession.worktreeId) ? "Select a branch first" : isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : "Send message"}
+									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing || $activeSession.worktreeDeleted}
+									title={$activeSession.worktreeDeleted ? "This worktree session has been completed" : isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.executionMode === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
 								>
 									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />

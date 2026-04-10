@@ -11,6 +11,7 @@
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import { api } from '$lib/api/client';
+import { generateBranchName, generateBranchNameLocal, migrateUploadsToWorktree } from '$lib/api/git';
 import { notifySessionComplete, notifyWaitingForResponse } from '$lib/services/notifications';
 
 // Session infrastructure
@@ -858,17 +859,19 @@ export const activeSession = {
 
 	// ── Messaging ───────────────────────────────────────────────────
 
-	async sendMessage(prompt: string, options?: { skipWorktreeSetup?: boolean }) {
+	async sendMessage(prompt: string, options?: { skipWorktreeSetup?: boolean; pendingUploadPaths?: string[] }) {
 		// Worktree setup on first message
 		if (!options?.skipWorktreeSetup && _state.executionMode === 'worktree' && !_state.sessionId && _state.messages.length === 0) {
-			if (_state.worktreeMode === 'new') {
-				await activeSession.createWorktree(prompt);
-				return;
-			} else if (_state.worktreeMode === 'existing' && _state.worktreeId) {
+			if (_state.worktreeMode === 'existing' && _state.worktreeId) {
 				await startSessionOnExistingWorktree(prompt);
 				return;
+			} else if (_state.worktreeBranch) {
+				// Branch already selected (manually or from dropdown) — create worktree
+				await activeSession.createWorktree(prompt, options?.pendingUploadPaths);
+				return;
 			} else {
-				_update(s => ({ ...s, error: 'Please select an existing worktree or create a new one' }));
+				// Auto-worktree: no branch selected — generate branch name from message
+				await activeSession.autoCreateWorktree(prompt, options?.pendingUploadPaths);
 				return;
 			}
 		}
@@ -1099,11 +1102,16 @@ export const activeSession = {
 		_update(s => ({ ...s, worktreeId, selectedWorktreeBranch: branch, worktreeMode: 'existing' as const }));
 	},
 
+	/** Reset worktree selection to auto mode (no branch selected) */
+	clearWorktreeSelection() {
+		_update(s => ({ ...s, worktreeId: null, selectedWorktreeBranch: null, worktreeBranch: '', worktreeMode: 'new' as const }));
+	},
+
 	markWorktreeDeleted() {
 		_update(s => ({ ...s, worktreeDeleted: true, worktreeId: null }));
 	},
 
-	async createWorktree(prompt?: string) {
+	async createWorktree(prompt?: string, pendingUploadPaths?: string[]) {
 		if (!_state.profile) { _update(s => ({ ...s, worktreeError: 'Please select a profile' })); return; }
 		if (!_state.project) { _update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
 		if (!_state.worktreeBranch) { _update(s => ({ ...s, worktreeError: 'Please select a branch' })); return; }
@@ -1137,6 +1145,15 @@ export const activeSession = {
 				}],
 			}));
 
+			// Migrate pending uploads to the new worktree
+			if (pendingUploadPaths?.length && _state.project) {
+				try {
+					await migrateUploadsToWorktree(_state.project, response.worktree_id, pendingUploadPaths);
+				} catch (e) {
+					console.warn('[Worktree] Failed to migrate uploads:', e);
+				}
+			}
+
 			// Reconnect WS to register the new session
 			disconnect();
 			wsConn.connect();
@@ -1150,6 +1167,92 @@ export const activeSession = {
 			const formatted = rawError
 				? formatWorktreeError(rawError, _state.worktreeBranch)
 				: `Failed to create worktree session for '${_state.worktreeBranch}'. Check the backend logs for details.`;
+			_update(s => ({
+				...s,
+				isCreatingWorktree: false,
+				worktreeError: formatted,
+			}));
+		}
+	},
+
+	/**
+	 * Auto-worktree: Generate a branch name from the user's message and create a worktree.
+	 * Used when user sends a message in worktree mode without selecting a branch.
+	 */
+	async autoCreateWorktree(prompt: string, pendingUploadPaths?: string[]) {
+		if (!_state.profile) { _update(s => ({ ...s, worktreeError: 'Please select a profile' })); return; }
+		if (!_state.project) { _update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
+
+		_update(s => ({ ...s, isCreatingWorktree: true, worktreeError: null }));
+
+		try {
+			// Generate branch name from the message
+			let branchName: string;
+			try {
+				const result = await generateBranchName(_state.project, prompt);
+				branchName = result.branch_name;
+			} catch {
+				// Fallback to client-side generation
+				branchName = generateBranchNameLocal(prompt);
+			}
+
+			// Set the generated branch name and create the worktree
+			_update(s => ({
+				...s,
+				worktreeBranch: branchName,
+				worktreeCreateNewBranch: true,
+			}));
+
+			// Now create the worktree with the generated branch name
+			const response = await api.post<{
+				session_id: string; worktree_id: string; branch_name: string;
+				base_branch: string; worktree_path: string; status: string;
+			}>('/sessions/with-worktree', {
+				project_id: _state.project,
+				branch_name: branchName,
+				base_branch: _state.worktreeBaseBranch || 'main',
+				profile_id: _state.profile,
+				create_new_branch: true,
+			});
+
+			_update(s => ({
+				...s,
+				sessionId: response.session_id,
+				worktreeId: response.worktree_id,
+				selectedWorktreeBranch: response.branch_name,
+				isCreatingWorktree: false,
+				messages: [...s.messages, {
+					id: `system-${Date.now()}`,
+					role: 'system' as const,
+					content: `Auto-created branch: \`${response.branch_name}\` (based on \`${response.base_branch}\`)\n\nPath: \`${response.worktree_path}\``,
+					type: 'system' as MessageType,
+					systemSubtype: 'worktree_created',
+					systemData: { branch_name: response.branch_name, base_branch: response.base_branch, worktree_path: response.worktree_path, worktree_id: response.worktree_id },
+				}],
+			}));
+
+			// Migrate pending uploads to the new worktree
+			if (pendingUploadPaths?.length && _state.project) {
+				try {
+					await migrateUploadsToWorktree(_state.project, response.worktree_id, pendingUploadPaths);
+				} catch (e) {
+					console.warn('[Worktree] Failed to migrate uploads:', e);
+				}
+			}
+
+			// Reconnect WS to register the new session
+			disconnect();
+			wsConn.connect();
+
+			// Send the user's message after worktree creation
+			setTimeout(() => activeSession.sendMessage(prompt, { skipWorktreeSetup: true }), 500);
+		} catch (error) {
+			const err = error as { detail?: string; message?: string; status?: number };
+			const rawError = err.detail || err.message || '';
+			const branchDisplay = _state.worktreeBranch || 'auto-generated branch';
+			const formatted = rawError
+				? formatWorktreeError(rawError, branchDisplay)
+				: `Failed to auto-create worktree. Check the backend logs for details.`;
 			_update(s => ({
 				...s,
 				isCreatingWorktree: false,
