@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -39,7 +38,7 @@ def get_hook(hook_id: str) -> Optional[HookRow]:
     """Get a project hook by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM project_hooks WHERE id = ?", (hook_id,))
+        cursor.execute("SELECT * FROM project_hooks WHERE id = %s", (hook_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -48,7 +47,7 @@ def get_hooks_for_project(project_id: str) -> List[HookRow]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM project_hooks WHERE project_id = ? ORDER BY created_at DESC",
+            "SELECT * FROM project_hooks WHERE project_id = %s ORDER BY created_at DESC",
             (project_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -69,7 +68,7 @@ def get_all_hooks_for_project(project_id: str) -> List[HookRow]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM project_hooks WHERE (project_id = ? OR project_id IS NULL) ORDER BY created_at DESC",
+            "SELECT * FROM project_hooks WHERE (project_id = %s OR project_id IS NULL) ORDER BY created_at DESC",
             (project_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -80,7 +79,7 @@ def get_enabled_hooks_for_project(project_id: str) -> List[HookRow]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM project_hooks WHERE project_id = ? AND enabled = TRUE ORDER BY created_at DESC",
+            "SELECT * FROM project_hooks WHERE project_id = %s AND enabled = TRUE ORDER BY created_at DESC",
             (project_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -91,7 +90,7 @@ def get_hooks_for_project_and_event(project_id: str, event: str) -> List[HookRow
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM project_hooks WHERE (project_id = ? OR project_id IS NULL) AND event = ? AND enabled = TRUE ORDER BY created_at",
+            "SELECT * FROM project_hooks WHERE (project_id = %s OR project_id IS NULL) AND event = %s AND enabled = TRUE ORDER BY created_at",
             (project_id, event)
         )
         return rows_to_list(cursor.fetchall())
@@ -102,7 +101,7 @@ def get_app_hooks_for_event(event: str) -> List[HookRow]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM project_hooks WHERE project_id IS NULL AND event = ? AND enabled = TRUE ORDER BY created_at",
+            "SELECT * FROM project_hooks WHERE project_id IS NULL AND event = %s AND enabled = TRUE ORDER BY created_at",
             (event,)
         )
         return rows_to_list(cursor.fetchall())
@@ -129,7 +128,7 @@ def create_hook(
         cursor.execute(
             """INSERT INTO project_hooks
                (id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, message_template, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (hook_id, project_id, name, event, hook_type, command, timeout, url, secret, enabled, tool_matcher, message_template, now, now)
         )
     return get_hook(hook_id)
@@ -157,44 +156,44 @@ def update_hook(
     values = []
 
     if name is not None:
-        updates.append("name = ?")
+        updates.append("name = %s")
         values.append(name)
     if event is not None:
-        updates.append("event = ?")
+        updates.append("event = %s")
         values.append(event)
     if hook_type is not None:
-        updates.append("hook_type = ?")
+        updates.append("hook_type = %s")
         values.append(hook_type)
     if command is not None:
-        updates.append("command = ?")
+        updates.append("command = %s")
         values.append(command if command else None)
     if timeout is not None:
-        updates.append("timeout = ?")
+        updates.append("timeout = %s")
         values.append(timeout)
     if url is not None:
-        updates.append("url = ?")
+        updates.append("url = %s")
         values.append(url if url else None)
     if secret is not None:
-        updates.append("secret = ?")
+        updates.append("secret = %s")
         values.append(secret if secret else None)
     if enabled is not None:
-        updates.append("enabled = ?")
+        updates.append("enabled = %s")
         values.append(enabled)
     if tool_matcher is not None:
-        updates.append("tool_matcher = ?")
+        updates.append("tool_matcher = %s")
         values.append(tool_matcher if tool_matcher else None)
     if message_template is not None:
-        updates.append("message_template = ?")
+        updates.append("message_template = %s")
         values.append(message_template if message_template else None)
 
     if updates:
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         values.append(datetime.now(timezone.utc).isoformat())
         values.append(hook_id)
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE project_hooks SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE project_hooks SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -205,7 +204,7 @@ def delete_hook(hook_id: str) -> bool:
     """Delete a hook"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM project_hooks WHERE id = ?", (hook_id,))
+        cursor.execute("DELETE FROM project_hooks WHERE id = %s", (hook_id,))
         return cursor.rowcount > 0
 
 
@@ -217,12 +216,12 @@ def update_hook_triggered(hook_id: str, success: bool) -> None:
         if success:
             # Reset failure count on success
             cursor.execute(
-                "UPDATE project_hooks SET last_triggered_at = ?, failure_count = 0 WHERE id = ?",
+                "UPDATE project_hooks SET last_triggered_at = %s, failure_count = 0 WHERE id = %s",
                 (now, hook_id)
             )
         else:
             # Increment failure count
             cursor.execute(
-                "UPDATE project_hooks SET last_triggered_at = ?, failure_count = failure_count + 1 WHERE id = ?",
+                "UPDATE project_hooks SET last_triggered_at = %s, failure_count = failure_count + 1 WHERE id = %s",
                 (now, hook_id)
             )

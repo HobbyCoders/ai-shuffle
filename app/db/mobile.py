@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -64,6 +63,20 @@ class MobileScheduleRow(TypedDict):
     last_triggered_at: Optional[str]
 
 
+def _parse_capabilities(raw: Any) -> Dict[str, Any]:
+    """Parse capabilities field, handling both str and dict (JSONB)."""
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw if raw else {}
+
+
+def _parse_params(raw: Any) -> Dict[str, Any]:
+    """Parse params field, handling both str and dict (JSONB)."""
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw if raw else {}
+
+
 # ============================================================================
 # Mobile Device Operations
 # ============================================================================
@@ -84,7 +97,7 @@ def create_mobile_device(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO mobile_devices (id, device_id, device_name, platform, api_key_hash, capabilities, created_at, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (record_id, device_id, device_name, platform, api_key_hash, json.dumps(capabilities), now, now))
 
     return get_mobile_device(device_id)
@@ -94,12 +107,12 @@ def get_mobile_device(device_id: str) -> Optional[MobileDeviceRow]:
     """Get a mobile device by device_id"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM mobile_devices WHERE device_id = ?", (device_id,))
+        cursor.execute("SELECT * FROM mobile_devices WHERE device_id = %s", (device_id,))
         row = cursor.fetchone()
         if row:
             result = dict(row)
             if result.get("capabilities"):
-                result["capabilities"] = json.loads(result["capabilities"])
+                result["capabilities"] = _parse_capabilities(result["capabilities"])
             return result
         return None
 
@@ -108,12 +121,12 @@ def get_mobile_device_by_api_key_hash(api_key_hash: str) -> Optional[MobileDevic
     """Get a mobile device by API key hash"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM mobile_devices WHERE api_key_hash = ?", (api_key_hash,))
+        cursor.execute("SELECT * FROM mobile_devices WHERE api_key_hash = %s", (api_key_hash,))
         row = cursor.fetchone()
         if row:
             result = dict(row)
             if result.get("capabilities"):
-                result["capabilities"] = json.loads(result["capabilities"])
+                result["capabilities"] = _parse_capabilities(result["capabilities"])
             return result
         return None
 
@@ -128,7 +141,7 @@ def get_all_mobile_devices() -> List[MobileDeviceRow]:
         for row in rows:
             result = dict(row)
             if result.get("capabilities"):
-                result["capabilities"] = json.loads(result["capabilities"])
+                result["capabilities"] = _parse_capabilities(result["capabilities"])
             results.append(result)
         return results
 
@@ -139,7 +152,7 @@ def update_mobile_device_capabilities(device_id: str, capabilities: Dict[str, An
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            UPDATE mobile_devices SET capabilities = ?, last_seen = ? WHERE device_id = ?
+            UPDATE mobile_devices SET capabilities = %s, last_seen = %s WHERE device_id = %s
         """, (json.dumps(capabilities), now, device_id))
         if cursor.rowcount == 0:
             return None
@@ -152,7 +165,7 @@ def update_mobile_device_fcm_token(device_id: str, fcm_token: str) -> Optional[M
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            UPDATE mobile_devices SET fcm_token = ?, last_seen = ? WHERE device_id = ?
+            UPDATE mobile_devices SET fcm_token = %s, last_seen = %s WHERE device_id = %s
         """, (fcm_token, now, device_id))
         if cursor.rowcount == 0:
             return None
@@ -164,14 +177,14 @@ def update_mobile_device_last_seen(device_id: str) -> None:
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE mobile_devices SET last_seen = ? WHERE device_id = ?", (now, device_id))
+        cursor.execute("UPDATE mobile_devices SET last_seen = %s WHERE device_id = %s", (now, device_id))
 
 
 def delete_mobile_device(device_id: str) -> bool:
     """Delete a mobile device"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM mobile_devices WHERE device_id = ?", (device_id,))
+        cursor.execute("DELETE FROM mobile_devices WHERE device_id = %s", (device_id,))
         return cursor.rowcount > 0
 
 
@@ -195,7 +208,7 @@ def create_pending_action(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO pending_actions (id, device_id, action_type, params, security_level, created_at, expires_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
         """, (action_id, device_id, action_type, json.dumps(params), security_level, now, expires_at))
 
     return get_pending_action(action_id)
@@ -205,12 +218,12 @@ def get_pending_action(action_id: str) -> Optional[PendingActionRow]:
     """Get a pending action by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM pending_actions WHERE id = ?", (action_id,))
+        cursor.execute("SELECT * FROM pending_actions WHERE id = %s", (action_id,))
         row = cursor.fetchone()
         if row:
             result = dict(row)
             if result.get("params"):
-                result["params"] = json.loads(result["params"])
+                result["params"] = _parse_params(result["params"])
             return result
         return None
 
@@ -222,7 +235,7 @@ def get_pending_actions_for_device(device_id: str) -> List[PendingActionRow]:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT * FROM pending_actions
-            WHERE device_id = ? AND status = 'pending' AND expires_at > ?
+            WHERE device_id = %s AND status = 'pending' AND expires_at > %s
             ORDER BY created_at DESC
         """, (device_id, now))
         rows = cursor.fetchall()
@@ -230,7 +243,7 @@ def get_pending_actions_for_device(device_id: str) -> List[PendingActionRow]:
         for row in rows:
             result = dict(row)
             if result.get("params"):
-                result["params"] = json.loads(result["params"])
+                result["params"] = _parse_params(result["params"])
             results.append(result)
         return results
 
@@ -240,7 +253,7 @@ def update_pending_action_status(action_id: str, status: str) -> Optional[Pendin
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE pending_actions SET status = ? WHERE id = ?",
+            "UPDATE pending_actions SET status = %s WHERE id = %s",
             (status, action_id)
         )
         if cursor.rowcount == 0:
@@ -255,7 +268,7 @@ def cleanup_expired_actions() -> int:
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE pending_actions SET status = 'expired'
-            WHERE status = 'pending' AND expires_at <= ?
+            WHERE status = 'pending' AND expires_at <= %s
         """, (now,))
         return cursor.rowcount
 
@@ -279,7 +292,7 @@ def create_trusted_action(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO trusted_actions (id, device_id, action_pattern, auto_approve, require_preview, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """, (trusted_id, device_id, action_pattern, auto_approve, require_preview, now))
 
     return get_trusted_action(trusted_id)
@@ -289,7 +302,7 @@ def get_trusted_action(trusted_id: str) -> Optional[TrustedActionRow]:
     """Get a trusted action by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM trusted_actions WHERE id = ?", (trusted_id,))
+        cursor.execute("SELECT * FROM trusted_actions WHERE id = %s", (trusted_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -298,7 +311,7 @@ def get_trusted_actions_for_device(device_id: str) -> List[TrustedActionRow]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM trusted_actions WHERE device_id = ? ORDER BY created_at DESC",
+            "SELECT * FROM trusted_actions WHERE device_id = %s ORDER BY created_at DESC",
             (device_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -308,7 +321,7 @@ def delete_trusted_action(trusted_id: str) -> bool:
     """Delete a trusted action"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM trusted_actions WHERE id = ?", (trusted_id,))
+        cursor.execute("DELETE FROM trusted_actions WHERE id = %s", (trusted_id,))
         return cursor.rowcount > 0
 
 
@@ -328,7 +341,7 @@ def get_mobile_schedule(schedule_id: str) -> Optional[MobileScheduleRow]:
     """Get a mobile schedule by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM mobile_schedules WHERE id = ?", (schedule_id,))
+        cursor.execute("SELECT * FROM mobile_schedules WHERE id = %s", (schedule_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -349,16 +362,16 @@ def save_mobile_schedule(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO mobile_schedules (id, device_id, schedule_type, trigger_time, hour, minute, params, enabled, created_at, last_triggered_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
-                device_id = excluded.device_id,
-                schedule_type = excluded.schedule_type,
-                trigger_time = excluded.trigger_time,
-                hour = excluded.hour,
-                minute = excluded.minute,
-                params = excluded.params,
-                enabled = excluded.enabled,
-                last_triggered_at = excluded.last_triggered_at
+                device_id = EXCLUDED.device_id,
+                schedule_type = EXCLUDED.schedule_type,
+                trigger_time = EXCLUDED.trigger_time,
+                hour = EXCLUDED.hour,
+                minute = EXCLUDED.minute,
+                params = EXCLUDED.params,
+                enabled = EXCLUDED.enabled,
+                last_triggered_at = EXCLUDED.last_triggered_at
         """, (schedule_id, device_id, schedule_type, trigger_time, hour, minute, params, enabled, now, last_triggered_at))
     return get_mobile_schedule(schedule_id)
 
@@ -367,7 +380,7 @@ def delete_mobile_schedule(schedule_id: str) -> bool:
     """Delete a mobile schedule"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM mobile_schedules WHERE id = ?", (schedule_id,))
+        cursor.execute("DELETE FROM mobile_schedules WHERE id = %s", (schedule_id,))
         return cursor.rowcount > 0
 
 
@@ -385,7 +398,7 @@ def get_mobile_actions() -> List[PendingActionRow]:
         for row in rows:
             result = dict(row)
             if result.get("params"):
-                result["params"] = json.loads(result["params"])
+                result["params"] = _parse_params(result["params"])
             results.append(result)
         return results
 
@@ -409,14 +422,14 @@ def save_mobile_action(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO pending_actions (id, device_id, action_type, params, security_level, status, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
-                device_id = excluded.device_id,
-                action_type = excluded.action_type,
-                params = excluded.params,
-                security_level = excluded.security_level,
-                status = excluded.status,
-                expires_at = excluded.expires_at
+                device_id = EXCLUDED.device_id,
+                action_type = EXCLUDED.action_type,
+                params = EXCLUDED.params,
+                security_level = EXCLUDED.security_level,
+                status = EXCLUDED.status,
+                expires_at = EXCLUDED.expires_at
         """, (action_id, device_id, action_type, params, security_level, status, now, expires_at))
     return get_pending_action(action_id)
 
@@ -425,7 +438,7 @@ def delete_mobile_action(action_id: str) -> bool:
     """Delete a mobile action"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM pending_actions WHERE id = ?", (action_id,))
+        cursor.execute("DELETE FROM pending_actions WHERE id = %s", (action_id,))
         return cursor.rowcount > 0
 
 
@@ -456,26 +469,26 @@ def save_mobile_device(
     with get_db() as conn:
         cursor = conn.cursor()
         # Check if device exists
-        cursor.execute("SELECT id FROM mobile_devices WHERE device_id = ?", (device_id,))
+        cursor.execute("SELECT id FROM mobile_devices WHERE device_id = %s", (device_id,))
         existing = cursor.fetchone()
 
         if existing:
             cursor.execute("""
                 UPDATE mobile_devices SET
-                    device_name = ?,
-                    platform = ?,
-                    fcm_token = ?,
-                    api_key_hash = COALESCE(?, api_key_hash),
-                    capabilities = ?,
-                    last_seen = ?
-                WHERE device_id = ?
+                    device_name = %s,
+                    platform = %s,
+                    fcm_token = %s,
+                    api_key_hash = COALESCE(%s, api_key_hash),
+                    capabilities = %s,
+                    last_seen = %s
+                WHERE device_id = %s
             """, (name, platform, fcm_token, api_key_hash, capabilities, last_seen_at or now, device_id))
         else:
             import uuid
             record_id = str(uuid.uuid4())[:8]
             cursor.execute("""
                 INSERT INTO mobile_devices (id, device_id, device_name, platform, api_key_hash, fcm_token, capabilities, created_at, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (record_id, device_id, name, platform, api_key_hash, fcm_token, capabilities, now, last_seen_at or now))
 
     return get_mobile_device(device_id)

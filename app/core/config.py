@@ -45,8 +45,10 @@ class Settings(BaseSettings):
     claude_projects_dir: Optional[Path] = None  # Override for Claude SDK projects dir (defaults to ~/.claude/projects)
     tools_dir: Optional[Path] = None  # Path to AI tools directory (defaults to /workspace/ai-shuffle/tools in Docker)
 
-    # Database
+    # Database (required — PostgreSQL connection string)
     database_url: Optional[str] = None
+    db_pool_min: int = 2  # Min connections in PostgreSQL pool
+    db_pool_max: int = 10  # Max connections in PostgreSQL pool
 
     # Session
     session_secret: Optional[str] = None
@@ -84,7 +86,6 @@ class Settings(BaseSettings):
     admin_password: Optional[str] = None
 
     # Timeouts (milliseconds)
-    db_busy_timeout_ms: int = 30_000
     hook_timeout_ms: int = 30_000
     # Size limits
     max_tool_output_chars: int = 500_000  # ~500KB, well under 1MB WS buffer
@@ -129,7 +130,7 @@ class Settings(BaseSettings):
 
     @property
     def db_path(self) -> Path:
-        """Get the SQLite database path"""
+        """Get the old SQLite database path (used for auto-migration detection)."""
         return self.effective_data_dir / "db.sqlite"
 
     @property
@@ -151,10 +152,13 @@ class Settings(BaseSettings):
         return Path(__file__).parent.parent.parent / "tools"
 
     def get_database_url(self) -> str:
-        """Get database URL, defaulting to SQLite"""
+        """Get the PostgreSQL database URL."""
         if self.database_url:
             return self.database_url
-        return f"sqlite:///{self.db_path}"
+        raise ValueError(
+            "DATABASE_URL is required. Set it to a PostgreSQL connection string, e.g.: "
+            "DATABASE_URL=postgresql://REDACTED@localhost:5432/dbname"
+        )
 
     def is_local_mode(self) -> bool:
         """Check if running in local mode"""

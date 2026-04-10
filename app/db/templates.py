@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -37,7 +36,7 @@ def get_template(template_id: str) -> Optional[TemplateRow]:
     """Get a template by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM templates WHERE id = ?", (template_id,))
+        cursor.execute("SELECT * FROM templates WHERE id = %s", (template_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -51,11 +50,11 @@ def get_all_templates(
 
     if profile_id:
         # Return templates for this profile OR templates with no profile (global)
-        query += " AND (profile_id = ? OR profile_id IS NULL)"
+        query += " AND (profile_id = %s OR profile_id IS NULL)"
         params.append(profile_id)
 
     if category:
-        query += " AND category = ?"
+        query += " AND category = %s"
         params.append(category)
 
     query += " ORDER BY is_builtin DESC, category ASC, name ASC"
@@ -82,7 +81,7 @@ def create_template(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO templates (id, name, description, prompt, profile_id, icon, category, is_builtin, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (template_id, name, description, prompt, profile_id, icon, category, is_builtin, now, now)
         )
     return get_template(template_id)
@@ -110,33 +109,33 @@ def update_template(
     values = []
 
     if name is not None:
-        updates.append("name = ?")
+        updates.append("name = %s")
         values.append(name)
     if description is not None:
-        updates.append("description = ?")
+        updates.append("description = %s")
         values.append(description if description else None)
     if prompt is not None:
-        updates.append("prompt = ?")
+        updates.append("prompt = %s")
         values.append(prompt)
     if profile_id is not None:
-        updates.append("profile_id = ?")
+        updates.append("profile_id = %s")
         values.append(profile_id if profile_id else None)
     if icon is not None:
-        updates.append("icon = ?")
+        updates.append("icon = %s")
         values.append(icon if icon else None)
     if category is not None:
-        updates.append("category = ?")
+        updates.append("category = %s")
         values.append(category if category else None)
 
     if updates:
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         values.append(datetime.now(timezone.utc).isoformat())
         values.append(template_id)
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE templates SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE templates SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -155,7 +154,7 @@ def delete_template(template_id: str) -> bool:
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+        cursor.execute("DELETE FROM templates WHERE id = %s", (template_id,))
         return cursor.rowcount > 0
 
 
@@ -174,7 +173,7 @@ def set_template_builtin(template_id: str, is_builtin: bool) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE templates SET is_builtin = ?, updated_at = ? WHERE id = ?",
+            "UPDATE templates SET is_builtin = %s, updated_at = %s WHERE id = %s",
             (is_builtin, datetime.now(timezone.utc).isoformat(), template_id)
         )
         return cursor.rowcount > 0

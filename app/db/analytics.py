@@ -2,26 +2,27 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.compat import sql_date, sql_strftime
 
 # Whitelisted values for dynamic query parameters to prevent SQL injection.
 # These are the ONLY allowed values for group_by and interval parameters.
 _ALLOWED_GROUP_BY = frozenset({"profile", "user", "date"})
 _ALLOWED_INTERVALS = frozenset({"day", "week", "month"})
 
-# Mapping of interval names to safe SQLite date expressions.
-# Used instead of trusting user input directly in SQL.
-_INTERVAL_DATE_EXPR = {
-    "day": "DATE(u.created_at)",
-    "week": "strftime('%Y-W%W', u.created_at)",
-    "month": "strftime('%Y-%m', u.created_at)",
-}
+
+def _interval_date_expressions() -> Dict[str, str]:
+    """Return interval-to-SQL-expression mapping for the active backend."""
+    return {
+        "day": sql_date("u.created_at"),
+        "week": sql_strftime("%Y-W%W", "u.created_at"),
+        "month": sql_strftime("%Y-%m", "u.created_at"),
+    }
 
 
 # ============================================================================
@@ -115,7 +116,7 @@ def log_usage(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO usage_log (session_id, profile_id, model, tokens_in, tokens_out, cost_usd, duration_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (session_id, profile_id, model, tokens_in, tokens_out, cost_usd, duration_ms)
         )
 
@@ -141,7 +142,7 @@ def get_last_session_usage(session_id: str) -> Optional[LastSessionUsage]:
         cursor.execute("""
             SELECT cost_usd, duration_ms, tokens_in, tokens_out, model
             FROM usage_log
-            WHERE session_id = ?
+            WHERE session_id = %s
             ORDER BY id DESC
             LIMIT 1
         """, (session_id,))
@@ -176,7 +177,7 @@ def get_all_session_usage(session_id: str) -> List[SessionUsageEntry]:
         cursor.execute("""
             SELECT cost_usd, duration_ms, tokens_in, tokens_out, model
             FROM usage_log
-            WHERE session_id = ?
+            WHERE session_id = %s
             ORDER BY id ASC
         """, (session_id,))
         rows = cursor.fetchall()
@@ -244,6 +245,7 @@ def get_analytics_usage_stats(
     Returns:
         Dictionary with total_tokens_in, total_tokens_out, total_cost_usd, session_count, query_count
     """
+    _date_expr = sql_date("ul.created_at")
     with get_db() as conn:
         cursor = conn.cursor()
 
@@ -251,16 +253,16 @@ def get_analytics_usage_stats(
         date_filter = ""
         params = []
         if start_date:
-            date_filter += " AND DATE(ul.created_at) >= ?"
+            date_filter += f" AND {_date_expr} >= %s"
             params.append(start_date)
         if end_date:
-            date_filter += " AND DATE(ul.created_at) <= ?"
+            date_filter += f" AND {_date_expr} <= %s"
             params.append(end_date)
 
         # Add user filter if specified
         user_filter = ""
         if api_user_id:
-            user_filter = " AND s.api_user_id = ?"
+            user_filter = " AND s.api_user_id = %s"
             params.append(api_user_id)
 
         # Get usage log aggregates (join with sessions for user filtering)
@@ -312,6 +314,7 @@ def get_analytics_cost_breakdown(
     Returns:
         List of dictionaries with key, name, total_cost_usd, total_tokens_in, total_tokens_out, query_count
     """
+    _date_expr = sql_date("ul.created_at")
     with get_db() as conn:
         cursor = conn.cursor()
 
@@ -319,16 +322,16 @@ def get_analytics_cost_breakdown(
         date_filter = ""
         params = []
         if start_date:
-            date_filter += " AND DATE(ul.created_at) >= ?"
+            date_filter += f" AND {_date_expr} >= %s"
             params.append(start_date)
         if end_date:
-            date_filter += " AND DATE(ul.created_at) <= ?"
+            date_filter += f" AND {_date_expr} <= %s"
             params.append(end_date)
 
         # Add user filter if specified
         user_filter = ""
         if api_user_id:
-            user_filter = " AND s.api_user_id = ?"
+            user_filter = " AND s.api_user_id = %s"
             params.append(api_user_id)
 
         # Validate group_by against whitelist (defense-in-depth against SQL injection)
@@ -375,10 +378,11 @@ def get_analytics_cost_breakdown(
             """, params)
 
         elif group_by == "date":
+            _group_date_expr = sql_date("ul.created_at")
             cursor.execute(f"""
                 SELECT
-                    DATE(ul.created_at) as key,
-                    DATE(ul.created_at) as name,
+                    {_group_date_expr} as key,
+                    {_group_date_expr} as name,
                     COALESCE(SUM(ul.tokens_in), 0) as total_tokens_in,
                     COALESCE(SUM(ul.tokens_out), 0) as total_tokens_out,
                     COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
@@ -386,8 +390,8 @@ def get_analytics_cost_breakdown(
                 FROM usage_log ul
                 LEFT JOIN sessions s ON ul.session_id = s.id
                 WHERE 1=1 {date_filter} {user_filter}
-                GROUP BY DATE(ul.created_at)
-                ORDER BY DATE(ul.created_at) DESC
+                GROUP BY {_group_date_expr}
+                ORDER BY {_group_date_expr} DESC
             """, params)
 
         else:
@@ -425,6 +429,7 @@ def get_analytics_usage_trends(
     Returns:
         List of dictionaries with date, tokens_in, tokens_out, cost_usd, query_count
     """
+    _date_expr = sql_date("u.created_at")
     with get_db() as conn:
         cursor = conn.cursor()
 
@@ -432,16 +437,16 @@ def get_analytics_usage_trends(
         date_filter = ""
         params = []
         if start_date:
-            date_filter += " AND DATE(u.created_at) >= ?"
+            date_filter += f" AND {_date_expr} >= %s"
             params.append(start_date)
         if end_date:
-            date_filter += " AND DATE(u.created_at) <= ?"
+            date_filter += f" AND {_date_expr} <= %s"
             params.append(end_date)
 
         # User filter for API users (join with sessions to get api_user_id)
         user_filter = ""
         if api_user_id:
-            user_filter = " AND s.api_user_id = ?"
+            user_filter = " AND s.api_user_id = %s"
             params.append(api_user_id)
 
         # Choose date grouping based on interval — looked up from a safe whitelist.
@@ -449,7 +454,7 @@ def get_analytics_usage_trends(
         if interval not in _ALLOWED_INTERVALS:
             logger.warning(f"Invalid interval value rejected: {interval!r}")
             return []
-        date_expr = _INTERVAL_DATE_EXPR[interval]
+        date_expr = _interval_date_expressions()[interval]
 
         cursor.execute(f"""
             SELECT
@@ -496,6 +501,7 @@ def get_analytics_top_sessions(
     Returns:
         List of dictionaries with session_id, title, profile_id, profile_name, total_cost_usd, etc.
     """
+    _date_expr = sql_date("s.created_at")
     with get_db() as conn:
         cursor = conn.cursor()
 
@@ -503,16 +509,16 @@ def get_analytics_top_sessions(
         date_filter = ""
         params = []
         if start_date:
-            date_filter += " AND DATE(s.created_at) >= ?"
+            date_filter += f" AND {_date_expr} >= %s"
             params.append(start_date)
         if end_date:
-            date_filter += " AND DATE(s.created_at) <= ?"
+            date_filter += f" AND {_date_expr} <= %s"
             params.append(end_date)
 
         # User filter for API users
         user_filter = ""
         if api_user_id:
-            user_filter = " AND s.api_user_id = ?"
+            user_filter = " AND s.api_user_id = %s"
             params.append(api_user_id)
 
         params.append(limit)
@@ -531,7 +537,7 @@ def get_analytics_top_sessions(
             LEFT JOIN profiles p ON s.profile_id = p.id
             WHERE s.total_cost_usd > 0 {date_filter} {user_filter}
             ORDER BY s.total_cost_usd DESC
-            LIMIT ?
+            LIMIT %s
         """, params)
 
         rows = cursor.fetchall()

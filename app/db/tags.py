@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -39,7 +38,7 @@ def get_tag(tag_id: str) -> Optional[TagRow]:
     """Get a tag by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM tags WHERE id = ?", (tag_id,))
+        cursor.execute("SELECT * FROM tags WHERE id = %s", (tag_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -62,7 +61,7 @@ def create_tag(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO tags (id, name, color, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s)""",
             (tag_id, name, color, now, now)
         )
     return get_tag(tag_id)
@@ -81,21 +80,21 @@ def update_tag(
     updates = []
     values = []
     if name is not None:
-        updates.append("name = ?")
+        updates.append("name = %s")
         values.append(name)
     if color is not None:
-        updates.append("color = ?")
+        updates.append("color = %s")
         values.append(color)
 
     if updates:
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         values.append(datetime.now(timezone.utc).isoformat())
         values.append(tag_id)
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE tags SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE tags SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -106,7 +105,7 @@ def delete_tag(tag_id: str) -> bool:
     """Delete a tag (session_tags will cascade delete)"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+        cursor.execute("DELETE FROM tags WHERE id = %s", (tag_id,))
         return cursor.rowcount > 0
 
 
@@ -121,7 +120,7 @@ def get_session_tags(session_id: str) -> List[TagRow]:
         cursor.execute(
             """SELECT t.* FROM tags t
                INNER JOIN session_tags st ON t.id = st.tag_id
-               WHERE st.session_id = ?
+               WHERE st.session_id = %s
                ORDER BY t.name ASC""",
             (session_id,)
         )
@@ -135,8 +134,8 @@ def add_session_tag(session_id: str, tag_id: str) -> bool:
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """INSERT OR IGNORE INTO session_tags (session_id, tag_id, created_at)
-                   VALUES (?, ?, ?)""",
+                """INSERT INTO session_tags (session_id, tag_id, created_at)
+                   VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
                 (session_id, tag_id, now)
             )
             return cursor.rowcount > 0
@@ -150,7 +149,7 @@ def remove_session_tag(session_id: str, tag_id: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM session_tags WHERE session_id = ? AND tag_id = ?",
+            "DELETE FROM session_tags WHERE session_id = %s AND tag_id = %s",
             (session_id, tag_id)
         )
         return cursor.rowcount > 0
@@ -162,12 +161,12 @@ def set_session_tags(session_id: str, tag_ids: List[str]) -> List[TagRow]:
     with get_db() as conn:
         cursor = conn.cursor()
         # Remove existing tags
-        cursor.execute("DELETE FROM session_tags WHERE session_id = ?", (session_id,))
+        cursor.execute("DELETE FROM session_tags WHERE session_id = %s", (session_id,))
         # Add new tags
         for tag_id in tag_ids:
             cursor.execute(
-                """INSERT OR IGNORE INTO session_tags (session_id, tag_id, created_at)
-                   VALUES (?, ?, ?)""",
+                """INSERT INTO session_tags (session_id, tag_id, created_at)
+                   VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
                 (session_id, tag_id, now)
             )
     return get_session_tags(session_id)
@@ -181,7 +180,7 @@ def get_tags_for_sessions(session_ids: list[str]) -> dict[str, list[TagSummary]]
     """
     if not session_ids:
         return {}
-    placeholders = ','.join('?' * len(session_ids))
+    placeholders = ','.join('%s' for _ in session_ids)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -208,9 +207,9 @@ def get_sessions_by_tag(tag_id: str, limit: int = 50, offset: int = 0) -> list[d
         cursor.execute(
             """SELECT s.* FROM sessions s
                INNER JOIN session_tags st ON s.id = st.session_id
-               WHERE st.tag_id = ?
+               WHERE st.tag_id = %s
                ORDER BY s.updated_at DESC
-               LIMIT ? OFFSET ?""",
+               LIMIT %s OFFSET %s""",
             (tag_id, limit, offset)
         )
         return rows_to_list(cursor.fetchall())

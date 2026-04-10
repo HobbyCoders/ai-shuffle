@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -69,7 +68,7 @@ def get_git_repository(repository_id: str) -> Optional[GitRepositoryRow]:
     """Get a git repository by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM git_repositories WHERE id = ?", (repository_id,))
+        cursor.execute("SELECT * FROM git_repositories WHERE id = %s", (repository_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -77,7 +76,7 @@ def get_git_repository_by_project(project_id: str) -> Optional[GitRepositoryRow]
     """Get a git repository by project ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM git_repositories WHERE project_id = ?", (project_id,))
+        cursor.execute("SELECT * FROM git_repositories WHERE project_id = %s", (project_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -102,7 +101,7 @@ def create_git_repository(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO git_repositories (id, project_id, remote_url, default_branch, github_repo_name, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s)""",
             (repository_id, project_id, remote_url, default_branch, github_repo_name, now)
         )
     return get_git_repository(repository_id)
@@ -124,16 +123,16 @@ def update_git_repository(
     values = []
 
     if remote_url is not None:
-        updates.append("remote_url = ?")
+        updates.append("remote_url = %s")
         values.append(remote_url if remote_url else None)
     if default_branch is not None:
-        updates.append("default_branch = ?")
+        updates.append("default_branch = %s")
         values.append(default_branch)
     if github_repo_name is not None:
-        updates.append("github_repo_name = ?")
+        updates.append("github_repo_name = %s")
         values.append(github_repo_name if github_repo_name else None)
     if last_synced_at is not None:
-        updates.append("last_synced_at = ?")
+        updates.append("last_synced_at = %s")
         values.append(last_synced_at)
 
     if updates:
@@ -141,7 +140,7 @@ def update_git_repository(
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE git_repositories SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE git_repositories SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -154,7 +153,7 @@ def update_git_repository_synced(repository_id: str) -> Optional[GitRepositoryRo
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE git_repositories SET last_synced_at = ? WHERE id = ?",
+            "UPDATE git_repositories SET last_synced_at = %s WHERE id = %s",
             (now, repository_id)
         )
     return get_git_repository(repository_id)
@@ -164,7 +163,7 @@ def delete_git_repository(repository_id: str) -> bool:
     """Delete a git repository (worktrees will be cascade deleted)"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM git_repositories WHERE id = ?", (repository_id,))
+        cursor.execute("DELETE FROM git_repositories WHERE id = %s", (repository_id,))
         return cursor.rowcount > 0
 
 
@@ -176,7 +175,7 @@ def get_worktree(worktree_id: str) -> Optional[WorktreeRow]:
     """Get a worktree by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM worktrees WHERE id = ?", (worktree_id,))
+        cursor.execute("SELECT * FROM worktrees WHERE id = %s", (worktree_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -192,14 +191,14 @@ def get_worktree_by_session(session_id: str) -> Optional[WorktreeRow]:
         cursor.execute("""
             SELECT w.* FROM worktrees w
             INNER JOIN sessions s ON s.worktree_id = w.id
-            WHERE s.id = ?
+            WHERE s.id = %s
         """, (session_id,))
         result = cursor.fetchone()
         if result:
             return row_to_dict(result)
 
         # Fallback to deprecated worktrees.session_id for backward compatibility
-        cursor.execute("SELECT * FROM worktrees WHERE session_id = ?", (session_id,))
+        cursor.execute("SELECT * FROM worktrees WHERE session_id = %s", (session_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -208,7 +207,7 @@ def get_sessions_for_worktree(worktree_id: str) -> list[dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM sessions WHERE worktree_id = ? ORDER BY updated_at DESC",
+            "SELECT * FROM sessions WHERE worktree_id = %s ORDER BY updated_at DESC",
             (worktree_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -239,7 +238,7 @@ def get_worktrees_with_sessions(repository_id: str) -> List[WorktreeWithSessions
                 s.updated_at as session_updated_at
             FROM worktrees w
             LEFT JOIN sessions s ON s.worktree_id = w.id
-            WHERE w.repository_id = ?
+            WHERE w.repository_id = %s
             ORDER BY w.created_at DESC, s.updated_at DESC
         """, (repository_id,))
 
@@ -286,7 +285,7 @@ def get_worktree_by_branch(repository_id: str, branch_name: str) -> Optional[Wor
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM worktrees WHERE repository_id = ? AND branch_name = ?",
+            "SELECT * FROM worktrees WHERE repository_id = %s AND branch_name = %s",
             (repository_id, branch_name)
         )
         return row_to_dict(cursor.fetchone())
@@ -297,7 +296,7 @@ def get_worktrees_for_repository(repository_id: str) -> List[WorktreeRow]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM worktrees WHERE repository_id = ? ORDER BY created_at DESC",
+            "SELECT * FROM worktrees WHERE repository_id = %s ORDER BY created_at DESC",
             (repository_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -308,7 +307,7 @@ def get_active_worktrees_for_repository(repository_id: str) -> List[WorktreeRow]
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM worktrees WHERE repository_id = ? AND status = 'active' ORDER BY created_at DESC",
+            "SELECT * FROM worktrees WHERE repository_id = %s AND status = 'active' ORDER BY created_at DESC",
             (repository_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -329,7 +328,7 @@ def create_worktree(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO worktrees (id, repository_id, session_id, branch_name, worktree_path, base_branch, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (worktree_id, repository_id, session_id, branch_name, worktree_path, base_branch, status, now)
         )
     return get_worktree(worktree_id)
@@ -349,10 +348,10 @@ def update_worktree(
     values = []
 
     if session_id is not None:
-        updates.append("session_id = ?")
+        updates.append("session_id = %s")
         values.append(session_id if session_id else None)
     if status is not None:
-        updates.append("status = ?")
+        updates.append("status = %s")
         values.append(status)
 
     if updates:
@@ -360,7 +359,7 @@ def update_worktree(
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE worktrees SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE worktrees SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -371,7 +370,7 @@ def delete_worktree(worktree_id: str) -> bool:
     """Delete a worktree record"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM worktrees WHERE id = ?", (worktree_id,))
+        cursor.execute("DELETE FROM worktrees WHERE id = %s", (worktree_id,))
         return cursor.rowcount > 0
 
 
@@ -379,5 +378,5 @@ def delete_worktrees_for_repository(repository_id: str) -> int:
     """Delete all worktrees for a repository. Returns count of deleted worktrees."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM worktrees WHERE repository_id = ?", (repository_id,))
+        cursor.execute("DELETE FROM worktrees WHERE repository_id = %s", (repository_id,))
         return cursor.rowcount

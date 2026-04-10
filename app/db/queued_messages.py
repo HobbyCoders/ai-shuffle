@@ -39,16 +39,16 @@ def add_queued_message(
         cursor = conn.cursor()
         # Auto-increment position within this session
         cursor.execute(
-            "SELECT COALESCE(MAX(position), -1) + 1 FROM queued_messages WHERE session_id = ?",
+            "SELECT COALESCE(MAX(position), -1) + 1 as next_pos FROM queued_messages WHERE session_id = %s",
             (session_id,)
         )
-        position = cursor.fetchone()[0]
+        position = cursor.fetchone()["next_pos"]
         cursor.execute(
             """INSERT INTO queued_messages (id, session_id, content, profile_id, project_id, position)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s)""",
             (msg_id, session_id, content, profile_id, project_id, position)
         )
-        cursor.execute("SELECT * FROM queued_messages WHERE id = ?", (msg_id,))
+        cursor.execute("SELECT * FROM queued_messages WHERE id = %s", (msg_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -57,7 +57,7 @@ def get_queued_messages(session_id: str) -> List[QueuedMessageRow]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM queued_messages WHERE session_id = ? ORDER BY position ASC",
+            "SELECT * FROM queued_messages WHERE session_id = %s ORDER BY position ASC",
             (session_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -71,14 +71,14 @@ def pop_next_queued_message(session_id: str) -> Optional[QueuedMessageRow]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM queued_messages WHERE session_id = ? ORDER BY position ASC LIMIT 1",
+            "SELECT * FROM queued_messages WHERE session_id = %s ORDER BY position ASC LIMIT 1",
             (session_id,)
         )
         row = cursor.fetchone()
         if not row:
             return None
         msg = row_to_dict(row)
-        cursor.execute("DELETE FROM queued_messages WHERE id = ?", (msg["id"],))
+        cursor.execute("DELETE FROM queued_messages WHERE id = %s", (msg["id"],))
         return msg
 
 
@@ -86,7 +86,7 @@ def remove_queued_message(message_id: str) -> bool:
     """Remove a single queued message by ID. Returns True if deleted."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM queued_messages WHERE id = ?", (message_id,))
+        cursor.execute("DELETE FROM queued_messages WHERE id = %s", (message_id,))
         return cursor.rowcount > 0
 
 
@@ -94,5 +94,5 @@ def clear_queued_messages(session_id: str) -> int:
     """Delete all queued messages for a session. Returns count deleted."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM queued_messages WHERE session_id = ?", (session_id,))
+        cursor.execute("DELETE FROM queued_messages WHERE session_id = %s", (session_id,))
         return cursor.rowcount

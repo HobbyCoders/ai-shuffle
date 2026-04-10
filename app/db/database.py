@@ -1,12 +1,15 @@
 """
-SQLite database setup and operations
+Database setup and operations — PostgreSQL backend.
+
+All SQL uses %s-style placeholders (Postgres-native).
 """
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
+
+import psycopg2
 
 from app.core.config import settings
 
@@ -24,6 +27,16 @@ from app.db.base import (  # noqa: F401
     row_to_dict,
     rows_to_list,
 )
+
+from app.db.compat import (  # noqa: F401
+    sql_date,
+    sql_strftime,
+    sql_ilike,
+    sql_current_timestamp,
+)
+
+# Database error type for catch blocks
+_DB_ERRORS: tuple = (psycopg2.Error,)
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +63,7 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 39
 
 
-def _run_column_migrations(cursor: sqlite3.Cursor):
+def _run_column_migrations(cursor):
     """Run idempotent column migrations.
 
     These migrations run on EVERY startup to ensure columns exist,
@@ -97,30 +110,14 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
     try:
         cursor.execute("DROP INDEX IF EXISTS idx_worktrees_active_branch")
         migrations_applied.append("dropped idx_worktrees_active_branch")
-    except sqlite3.OperationalError:
+    except _DB_ERRORS:
         pass  # Index doesn't exist, that's fine
 
     # Migrate notes table to global (remove project_id and linked_sessions) (v31)
-    # SQLite doesn't support DROP COLUMN directly, so we recreate the table
     if table_exists(cursor, "notes") and column_exists(cursor, "notes", "project_id"):
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS notes_new (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                content TEXT DEFAULT '',
-                tags JSON DEFAULT '[]',
-                is_pinned BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cursor.execute("""
-            INSERT INTO notes_new (id, title, content, tags, is_pinned, created_at, updated_at)
-            SELECT id, title, content, tags, is_pinned, created_at, updated_at
-            FROM notes
-        """)
-        cursor.execute("DROP TABLE notes")
-        cursor.execute("ALTER TABLE notes_new RENAME TO notes")
+        cursor.execute("ALTER TABLE notes DROP COLUMN IF EXISTS project_id")
+        cursor.execute("ALTER TABLE notes DROP COLUMN IF EXISTS linked_sessions")
+        cursor.execute("DROP INDEX IF EXISTS idx_notes_project")
         # Recreate indexes (project index no longer needed)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(is_pinned DESC, updated_at DESC)")
@@ -131,49 +128,7 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
     # sessions can persist after their associated profile is deleted
     if table_exists(cursor, "sessions") and column_is_not_null(cursor, "sessions", "profile_id"):
         logger.info("Migrating sessions table to make profile_id nullable...")
-        # SQLite doesn't support ALTER COLUMN, so we must recreate the table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS sessions_new (
-                id TEXT PRIMARY KEY,
-                project_id TEXT,
-                profile_id TEXT,
-                api_user_id TEXT,
-                sdk_session_id TEXT,
-                worktree_id TEXT,
-                worktree_branch TEXT,
-                worktree_path TEXT,
-                title TEXT,
-                status TEXT DEFAULT 'active',
-                is_favorite BOOLEAN DEFAULT FALSE,
-                total_cost_usd REAL DEFAULT 0,
-                total_tokens_in INTEGER DEFAULT 0,
-                total_tokens_out INTEGER DEFAULT 0,
-                turn_count INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                parent_session_id TEXT,
-                fork_point_message_index INTEGER,
-                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
-                FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
-                FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
-                FOREIGN KEY (worktree_id) REFERENCES worktrees(id) ON DELETE SET NULL
-            )
-        """)
-        # Copy all data from old table to new
-        cursor.execute("""
-            INSERT INTO sessions_new (
-                id, project_id, profile_id, api_user_id, sdk_session_id, worktree_id,
-                title, status, is_favorite, total_cost_usd, total_tokens_in, total_tokens_out,
-                turn_count, created_at, updated_at, parent_session_id, fork_point_message_index
-            )
-            SELECT
-                id, project_id, profile_id, api_user_id, sdk_session_id, worktree_id,
-                title, status, is_favorite, total_cost_usd, total_tokens_in, total_tokens_out,
-                turn_count, created_at, updated_at, parent_session_id, fork_point_message_index
-            FROM sessions
-        """)
-        cursor.execute("DROP TABLE sessions")
-        cursor.execute("ALTER TABLE sessions_new RENAME TO sessions")
+        cursor.execute("ALTER TABLE sessions ALTER COLUMN profile_id DROP NOT NULL")
         # Recreate indexes
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
@@ -209,15 +164,8 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
                 backfilled = cursor.rowcount
                 if backfilled > 0:
                     logger.info(f"Backfilled worktree_branch/worktree_path for {backfilled} sessions")
-            except sqlite3.OperationalError:
+            except _DB_ERRORS:
                 pass  # worktrees table may not exist yet
-
-    # Performance: composite indexes for session list queries (always ensure they exist)
-    if table_exists(cursor, "sessions"):
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_updated ON sessions(project_id, updated_at DESC)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_apiuser_updated ON sessions(project_id, api_user_id, updated_at DESC)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_profile_updated ON sessions(project_id, profile_id, updated_at DESC)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(title COLLATE NOCASE)")
 
     # Add action_steps column to automations for multi-step connector actions (v36)
     if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "action_steps"):
@@ -243,7 +191,7 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
             else:
                 t_config_parsed = t_config if isinstance(t_config, dict) else {}
             triggers_arr = json.dumps([{"type": t_type, "config": t_config_parsed}])
-            cursor.execute("UPDATE automations SET triggers = ? WHERE id = ?", (triggers_arr, auto_id))
+            cursor.execute("UPDATE automations SET triggers = %s WHERE id = %s", (triggers_arr, auto_id))
         migrations_applied.append("automations.triggers_backfill")
 
     # Add message_template column to project_hooks (v38)
@@ -254,41 +202,7 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
     # Make project_hooks.project_id nullable (v38)
     if table_exists(cursor, "project_hooks") and column_is_not_null(cursor, "project_hooks", "project_id"):
         logger.info("Migrating project_hooks table to make project_id nullable...")
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS project_hooks_new (
-                id TEXT PRIMARY KEY,
-                project_id TEXT,
-                name TEXT NOT NULL,
-                event TEXT NOT NULL,
-                hook_type TEXT NOT NULL,
-                command TEXT,
-                timeout INTEGER DEFAULT 30000,
-                url TEXT,
-                secret TEXT,
-                enabled BOOLEAN DEFAULT TRUE,
-                tool_matcher TEXT,
-                message_template TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_triggered_at TIMESTAMP,
-                failure_count INTEGER DEFAULT 0,
-                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-            )
-        """)
-        cursor.execute("""
-            INSERT INTO project_hooks_new (
-                id, project_id, name, event, hook_type, command, timeout,
-                url, secret, enabled, tool_matcher, message_template,
-                created_at, updated_at, last_triggered_at, failure_count
-            )
-            SELECT
-                id, project_id, name, event, hook_type, command, timeout,
-                url, secret, enabled, tool_matcher, message_template,
-                created_at, updated_at, last_triggered_at, failure_count
-            FROM project_hooks
-        """)
-        cursor.execute("DROP TABLE project_hooks")
-        cursor.execute("ALTER TABLE project_hooks_new RENAME TO project_hooks")
+        cursor.execute("ALTER TABLE project_hooks ALTER COLUMN project_id DROP NOT NULL")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_project_id ON project_hooks(project_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_event ON project_hooks(event)")
         migrations_applied.append("project_hooks.project_id_nullable")
@@ -296,81 +210,17 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
     # Ensure performance-critical indexes exist (idempotent, no version gate).
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
 
-    # FTS5 index for session message search (idempotent).
-    # On existing databases, create the virtual table + triggers and populate from existing data.
-    if table_exists(cursor, "session_messages"):
-        # Check if FTS table exists by trying to query it
-        fts_exists = False
-        try:
-            cursor.execute("SELECT count(*) FROM session_messages_fts LIMIT 1")
-            fts_exists = True
-        except Exception:
-            pass
-
-        if not fts_exists:
-            logger.info("Creating FTS5 index for session_messages...")
-            cursor.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts
-                USING fts5(
-                    content,
-                    session_id UNINDEXED,
-                    role UNINDEXED,
-                    content='session_messages',
-                    content_rowid='id',
-                    tokenize='unicode61 remove_diacritics 2'
-                )
-            """)
-            # Triggers
-            cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS session_messages_fts_insert
-                AFTER INSERT ON session_messages
-                WHEN NEW.role IN ('user', 'assistant') AND NEW.content != ''
-                BEGIN
-                    INSERT INTO session_messages_fts(rowid, content, session_id, role)
-                    VALUES (NEW.id, NEW.content, NEW.session_id, NEW.role);
-                END
-            """)
-            cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS session_messages_fts_delete
-                AFTER DELETE ON session_messages
-                WHEN OLD.role IN ('user', 'assistant')
-                BEGIN
-                    INSERT INTO session_messages_fts(session_messages_fts, rowid, content, session_id, role)
-                    VALUES ('delete', OLD.id, OLD.content, OLD.session_id, OLD.role);
-                END
-            """)
-            cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS session_messages_fts_update
-                AFTER UPDATE OF content ON session_messages
-                WHEN NEW.role IN ('user', 'assistant')
-                BEGIN
-                    INSERT INTO session_messages_fts(session_messages_fts, rowid, content, session_id, role)
-                    VALUES ('delete', OLD.id, OLD.content, OLD.session_id, OLD.role);
-                    INSERT INTO session_messages_fts(rowid, content, session_id, role)
-                    VALUES (NEW.id, NEW.content, NEW.session_id, NEW.role);
-                END
-            """)
-            # Populate FTS from existing data (one-time backfill)
-            cursor.execute("""
-                INSERT INTO session_messages_fts(rowid, content, session_id, role)
-                SELECT id, content, session_id, role
-                FROM session_messages
-                WHERE role IN ('user', 'assistant') AND content != ''
-            """)
-            populated = cursor.rowcount
-            logger.info(f"FTS5 index created and populated with {populated} messages")
-            migrations_applied.append("session_messages_fts")
-
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
 
 def init_database():
-    """Initialize the database with schema"""
-    logger.info(f"Initializing database at {settings.db_path}")
+    """Initialize the PostgreSQL database with schema.
 
-    # Ensure data directory exists
-    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    Delegates to schema_postgres.create_postgres_schema() for initial DDL,
+    then runs idempotent column migrations.
+    """
+    logger.info("Initializing PostgreSQL database")
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -389,1008 +239,16 @@ def init_database():
 
         if current_version < SCHEMA_VERSION:
             logger.info(f"Migrating database from version {current_version} to {SCHEMA_VERSION}")
-            _create_schema(cursor)
+            from app.db.schema_postgres import create_postgres_schema
+            create_postgres_schema(cursor)
             cursor.execute("DELETE FROM schema_version")
-            cursor.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+            cursor.execute("INSERT INTO schema_version (version) VALUES (%s)", (SCHEMA_VERSION,))
 
         # Always run column migrations to handle edge cases where
         # schema version is correct but columns are missing
         _run_column_migrations(cursor)
 
     logger.info("Database initialized successfully")
-
-
-def _create_schema(cursor: sqlite3.Cursor):
-    """Create all database tables"""
-
-    # System settings (key-value store for global configuration)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS system_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Admin user (single user system)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS admin (
-            id INTEGER PRIMARY KEY DEFAULT 1,
-            username TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            CHECK (id = 1)
-        )
-    """)
-
-    # Agent profiles
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS profiles (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            is_builtin BOOLEAN DEFAULT FALSE,
-            config JSON NOT NULL,
-            mcp_tools JSON DEFAULT '[]',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Projects (workspaces)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS projects (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            path TEXT NOT NULL,
-            settings JSON DEFAULT '{}',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Sessions (conversations)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY,
-            project_id TEXT,
-            profile_id TEXT,  -- Nullable: sessions persist even when profile is deleted
-            api_user_id TEXT,
-            sdk_session_id TEXT,
-            worktree_id TEXT,
-            worktree_branch TEXT,
-            worktree_path TEXT,
-            title TEXT,
-            status TEXT DEFAULT 'active',
-            is_favorite BOOLEAN DEFAULT FALSE,
-            total_cost_usd REAL DEFAULT 0,
-            total_tokens_in INTEGER DEFAULT 0,
-            total_tokens_out INTEGER DEFAULT 0,
-            turn_count INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
-            FOREIGN KEY (worktree_id) REFERENCES worktrees(id) ON DELETE SET NULL
-        )
-    """)
-
-    # Session messages (with sync support)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS session_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            tool_name TEXT,
-            tool_input JSON,
-            metadata JSON,
-            profile_id TEXT,
-            version INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-        )
-    """)
-
-    # FTS5 full-text search index for session messages.
-    # content_rowid links FTS rows to session_messages.id for efficient lookups.
-    # Only user/assistant messages are indexed (tool_use/tool_result are noise).
-    cursor.execute("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts
-        USING fts5(
-            content,
-            session_id UNINDEXED,
-            role UNINDEXED,
-            content='session_messages',
-            content_rowid='id',
-            tokenize='unicode61 remove_diacritics 2'
-        )
-    """)
-
-    # Triggers to keep FTS index in sync with session_messages table.
-    # Only index user and assistant messages (not tool_use/tool_result/system).
-    cursor.execute("""
-        CREATE TRIGGER IF NOT EXISTS session_messages_fts_insert
-        AFTER INSERT ON session_messages
-        WHEN NEW.role IN ('user', 'assistant') AND NEW.content != ''
-        BEGIN
-            INSERT INTO session_messages_fts(rowid, content, session_id, role)
-            VALUES (NEW.id, NEW.content, NEW.session_id, NEW.role);
-        END
-    """)
-    cursor.execute("""
-        CREATE TRIGGER IF NOT EXISTS session_messages_fts_delete
-        AFTER DELETE ON session_messages
-        WHEN OLD.role IN ('user', 'assistant')
-        BEGIN
-            INSERT INTO session_messages_fts(session_messages_fts, rowid, content, session_id, role)
-            VALUES ('delete', OLD.id, OLD.content, OLD.session_id, OLD.role);
-        END
-    """)
-    cursor.execute("""
-        CREATE TRIGGER IF NOT EXISTS session_messages_fts_update
-        AFTER UPDATE OF content ON session_messages
-        WHEN NEW.role IN ('user', 'assistant')
-        BEGIN
-            INSERT INTO session_messages_fts(session_messages_fts, rowid, content, session_id, role)
-            VALUES ('delete', OLD.id, OLD.content, OLD.session_id, OLD.role);
-            INSERT INTO session_messages_fts(rowid, content, session_id, role)
-            VALUES (NEW.id, NEW.content, NEW.session_id, NEW.role);
-        END
-    """)
-
-    # Sync log for tracking changes (used for polling fallback)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sync_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            entity_type TEXT NOT NULL,
-            entity_id TEXT,
-            data JSON,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Auth sessions (login tokens)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS auth_sessions (
-            token TEXT PRIMARY KEY,
-            expires_at TIMESTAMP NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Usage tracking
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS usage_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT,
-            profile_id TEXT,
-            model TEXT,
-            tokens_in INTEGER,
-            tokens_out INTEGER,
-            cost_usd REAL,
-            duration_ms INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # API users (for programmatic access with isolated workspaces)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS api_users (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            username TEXT UNIQUE,
-            password_hash TEXT,
-            api_key_hash TEXT NOT NULL,
-            project_id TEXT,
-            profile_id TEXT,
-            is_active BOOLEAN DEFAULT TRUE,
-            web_login_allowed BOOLEAN DEFAULT TRUE,
-            description TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_used_at TIMESTAMP,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL
-        )
-    """)
-
-    # Add columns if they don't exist (migration for existing DBs)
-    # Note: SQLite doesn't support ADD COLUMN with UNIQUE constraint, so we add
-    # the column without UNIQUE and rely on the CREATE UNIQUE INDEX below
-    try:
-        cursor.execute("ALTER TABLE api_users ADD COLUMN username TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE api_users ADD COLUMN password_hash TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE api_users ADD COLUMN web_login_allowed BOOLEAN DEFAULT TRUE")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-
-    # API user profiles junction table (many-to-many relationship)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS api_user_profiles (
-            api_user_id TEXT NOT NULL,
-            profile_id TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (api_user_id, profile_id),
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Add is_favorite column to sessions (migration for existing DBs)
-    try:
-        cursor.execute("ALTER TABLE sessions ADD COLUMN is_favorite BOOLEAN DEFAULT FALSE")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-
-    # Add fork columns to sessions (migration for existing DBs)
-    try:
-        cursor.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE sessions ADD COLUMN fork_point_message_index INTEGER")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-
-    # Add worktree_id column to sessions (migration for v23 - worktree-session decoupling)
-    try:
-        cursor.execute("ALTER TABLE sessions ADD COLUMN worktree_id TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-
-    # Migrate existing worktree-session relationships from worktrees.session_id to sessions.worktree_id
-    # This preserves backward compatibility while moving to the new model
-    # First check if migration is needed (any sessions without worktree_id that should have one)
-    # Note: This check and migration only applies to existing databases, not fresh installs
-    try:
-        cursor.execute("""
-            SELECT COUNT(*) as cnt FROM sessions s
-            WHERE s.worktree_id IS NULL
-            AND EXISTS (SELECT 1 FROM worktrees w WHERE w.session_id = s.id)
-        """)
-        migration_needed = cursor.fetchone()["cnt"] > 0
-
-        if migration_needed:
-            cursor.execute("""
-                UPDATE sessions SET worktree_id = (
-                    SELECT w.id FROM worktrees w WHERE w.session_id = sessions.id
-                )
-                WHERE worktree_id IS NULL
-                AND EXISTS (SELECT 1 FROM worktrees w WHERE w.session_id = sessions.id)
-            """)
-            migrated_count = cursor.rowcount
-            logger.info(f"Migrated {migrated_count} worktree-session relationships to sessions.worktree_id")
-    except sqlite3.OperationalError as e:
-        # Handle specific SQLite errors (e.g., table doesn't exist during initial setup)
-        if "no such table" in str(e).lower():
-            logger.debug("Worktrees table does not exist yet, skipping migration")
-        else:
-            logger.error(f"Failed to migrate worktree-session relationships: {e}")
-            raise  # Re-raise unexpected errors
-
-    # Login attempts tracking for brute force protection
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS login_attempts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip_address TEXT NOT NULL,
-            username TEXT,
-            success BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Account lockout tracking
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS account_lockouts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip_address TEXT,
-            username TEXT,
-            locked_until TIMESTAMP NOT NULL,
-            reason TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # API key web sessions (for API key users logging into web UI)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS api_key_sessions (
-            token TEXT PRIMARY KEY,
-            api_user_id TEXT NOT NULL,
-            expires_at TIMESTAMP NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE
-        )
-    """)
-
-
-    # User preferences (for persisting open tabs across devices)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_preferences (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_type TEXT NOT NULL,
-            user_id TEXT NOT NULL,
-            key TEXT NOT NULL,
-            value JSON,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(user_type, user_id, key)
-        )
-    """)
-
-    # Global subagents (independent of profiles)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS subagents (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT NOT NULL,
-            prompt TEXT NOT NULL,
-            tools JSON,
-            model TEXT,
-            skills JSON,
-            memory TEXT,
-            mcp_servers JSON,
-            is_builtin BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Permission rules for tool access control
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS permission_rules (
-            id TEXT PRIMARY KEY,
-            profile_id TEXT,
-            tool_name TEXT NOT NULL,
-            tool_pattern TEXT,
-            decision TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Tags for organizing sessions
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tags (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            color TEXT NOT NULL DEFAULT '#6366f1',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Junction table for session-tag relationships
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS session_tags (
-            session_id TEXT NOT NULL,
-            tag_id TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (session_id, tag_id),
-            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-            FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Session templates for starter prompts
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS templates (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            prompt TEXT NOT NULL,
-            profile_id TEXT,
-            icon TEXT,
-            category TEXT,
-            is_builtin BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL
-        )
-    """)
-
-    # Webhooks for external integrations
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS webhooks (
-            id TEXT PRIMARY KEY,
-            url TEXT NOT NULL,
-            secret TEXT,
-            events JSON NOT NULL DEFAULT '[]',
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_triggered_at TIMESTAMP,
-            failure_count INTEGER DEFAULT 0
-        )
-    """)
-
-    # Audit log for security events
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id TEXT PRIMARY KEY,
-            user_id TEXT,
-            user_type TEXT DEFAULT 'admin',
-            event_type TEXT NOT NULL,
-            ip_address TEXT,
-            user_agent TEXT,
-            details JSON,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Add profile_id column to session_messages (migration for per-query profile tracking)
-    try:
-        cursor.execute("ALTER TABLE session_messages ADD COLUMN profile_id TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-
-    # Add built-in subagent columns (migration for v26)
-    # These store the original default values so admins can revert after editing
-    try:
-        cursor.execute("ALTER TABLE subagents ADD COLUMN default_name TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE subagents ADD COLUMN default_description TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE subagents ADD COLUMN default_prompt TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE subagents ADD COLUMN default_tools JSON")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        cursor.execute("ALTER TABLE subagents ADD COLUMN default_model TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-
-    # Drop agent execution engine tables (migration for v27)
-    # These tables are no longer used after removing the background agent feature
-    # Drop in correct order to respect foreign key constraints
-    try:
-        cursor.execute("DROP TABLE IF EXISTS agent_logs")
-    except sqlite3.OperationalError as e:
-        logger.debug(f"Could not drop agent_logs table: {e}")
-    try:
-        cursor.execute("DROP TABLE IF EXISTS agent_tasks")
-    except sqlite3.OperationalError as e:
-        logger.debug(f"Could not drop agent_tasks table: {e}")
-    try:
-        cursor.execute("DROP TABLE IF EXISTS agent_runs")
-    except sqlite3.OperationalError as e:
-        logger.debug(f"Could not drop agent_runs table: {e}")
-
-    # Create indexes
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_templates_profile ON templates(profile_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_favorite ON sessions(is_favorite)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_users_active ON api_users(is_active)")
-    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_api_users_username ON api_users(username) WHERE username IS NOT NULL")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_profiles_user ON api_user_profiles(api_user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_profiles_profile ON api_user_profiles(profile_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_api_user ON sessions(api_user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_session ON sync_log(session_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_created ON sync_log(created_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts(ip_address)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_created ON login_attempts(created_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_lockouts_ip ON account_lockouts(ip_address)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_account_lockouts_username ON account_lockouts(username)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_key_sessions_user ON api_key_sessions(api_user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_preferences_user ON user_preferences(user_type, user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_subagents_name ON subagents(name)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_profile ON permission_rules(profile_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_permission_rules_tool ON permission_rules(tool_name)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags(session_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_worktree ON sessions(worktree_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
-    # Composite indexes for session list queries (most common access pattern)
-    # Covers: WHERE project_id = ? AND api_user_id IS NULL ORDER BY updated_at DESC
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_updated ON sessions(project_id, updated_at DESC)")
-    # Covers: WHERE project_id = ? AND api_user_id = ? ORDER BY updated_at DESC
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_apiuser_updated ON sessions(project_id, api_user_id, updated_at DESC)")
-    # Covers: WHERE project_id = ? AND profile_id = ? ORDER BY updated_at DESC
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_profile_updated ON sessions(project_id, profile_id, updated_at DESC)")
-    # Title search optimization (LIKE prefix match can use this)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(title COLLATE NOCASE)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhooks_active ON webhooks(is_active)")
-
-    # Rate limit configurations
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS rate_limits (
-            id TEXT PRIMARY KEY,
-            user_id TEXT,
-            api_key_id TEXT,
-            requests_per_minute INTEGER DEFAULT 20,
-            requests_per_hour INTEGER DEFAULT 200,
-            requests_per_day INTEGER DEFAULT 1000,
-            concurrent_requests INTEGER DEFAULT 3,
-            priority INTEGER DEFAULT 0,
-            is_unlimited BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_key_id) REFERENCES api_users(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Request log for rate limit tracking
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS request_log (
-            id TEXT PRIMARY KEY,
-            user_id TEXT,
-            api_key_id TEXT,
-            endpoint TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            duration_ms INTEGER,
-            status TEXT DEFAULT 'success'
-        )
-    """)
-
-    # Create rate limit indexes
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rate_limits_user ON rate_limits(user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rate_limits_api_key ON rate_limits(api_key_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_request_log_user ON request_log(user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_request_log_api_key ON request_log(api_key_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_request_log_timestamp ON request_log(timestamp)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_event ON audit_log(event_type)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at)")
-
-    # Git repositories (tracks git state per project)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS git_repositories (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL UNIQUE,
-            remote_url TEXT,
-            default_branch TEXT DEFAULT 'main',
-            github_repo_name TEXT,
-            last_synced_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Worktrees (for parallel session work on branches)
-    # Note: session_id is deprecated - relationship is now tracked via sessions.worktree_id
-    # Kept for backward compatibility during migration
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS worktrees (
-            id TEXT PRIMARY KEY,
-            repository_id TEXT NOT NULL,
-            session_id TEXT,
-            branch_name TEXT NOT NULL,
-            worktree_path TEXT NOT NULL,
-            base_branch TEXT,
-            status TEXT DEFAULT 'active',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (repository_id) REFERENCES git_repositories(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Create git indexes
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_git_repositories_project ON git_repositories(project_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_repository ON worktrees(repository_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_session ON worktrees(session_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_branch ON worktrees(branch_name)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_status ON worktrees(status)")
-    # Composite index for efficient active worktree queries
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_worktrees_repo_status ON worktrees(repository_id, status)")
-    # NOTE: We intentionally do NOT create a unique index on (repository_id, branch_name)
-    # because users should be able to have multiple worktrees on the same branch.
-    # Each worktree is an independent workspace that can check out any branch.
-
-    # =========================================================================
-    # Notes - Global notes for ideas, bugs, planning (not project-scoped)
-    # =========================================================================
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS notes (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            content TEXT DEFAULT '',
-            tags JSON DEFAULT '[]',
-            is_pinned BOOLEAN DEFAULT FALSE,
-            file_path TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Indexes for efficient queries
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(is_pinned DESC, updated_at DESC)")
-
-    # =========================================================================
-    # Queued Messages — server-side message queue for streaming sessions
-    # =========================================================================
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS queued_messages (
-            id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            content TEXT NOT NULL,
-            profile_id TEXT,
-            project_id TEXT,
-            position INTEGER NOT NULL DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-        )
-    """)
-
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_queued_messages_session ON queued_messages(session_id, position ASC)")
-
-    # =========================================================================
-    # Project Hooks - For Claude Code event handling
-    # =========================================================================
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS project_hooks (
-            id TEXT PRIMARY KEY,
-            project_id TEXT,
-            name TEXT NOT NULL,
-            event TEXT NOT NULL,
-            hook_type TEXT NOT NULL,
-            command TEXT,
-            timeout INTEGER DEFAULT 30000,
-            url TEXT,
-            secret TEXT,
-            enabled BOOLEAN DEFAULT TRUE,
-            tool_matcher TEXT,
-            message_template TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_triggered_at TIMESTAMP,
-            failure_count INTEGER DEFAULT 0,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Index for efficient project hooks lookup
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_project_id ON project_hooks(project_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_event ON project_hooks(event)")
-
-    # =========================================================================
-    # API User Credentials & Policies (per-user API keys and GitHub auth)
-    # =========================================================================
-
-    # Credential policies - admin controls which keys are admin-provided vs user-provided
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS credential_policies (
-            id TEXT PRIMARY KEY,
-            policy TEXT NOT NULL DEFAULT 'admin_provided',
-            description TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Per-user credentials (encrypted API keys, GitHub PAT)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS api_user_credentials (
-            id TEXT PRIMARY KEY,
-            api_user_id TEXT NOT NULL,
-            credential_type TEXT NOT NULL,
-            encrypted_value TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
-            UNIQUE(api_user_id, credential_type)
-        )
-    """)
-
-    # Per-user GitHub configuration
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS api_user_github_config (
-            id TEXT PRIMARY KEY,
-            api_user_id TEXT NOT NULL UNIQUE,
-            github_username TEXT,
-            github_avatar_url TEXT,
-            default_repo TEXT,
-            default_branch TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Per-user credential policy overrides (admin can set different policies per user)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_credential_policies (
-            id TEXT PRIMARY KEY,
-            api_user_id TEXT NOT NULL,
-            credential_type TEXT NOT NULL,
-            policy TEXT NOT NULL DEFAULT 'optional',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
-            UNIQUE(api_user_id, credential_type)
-        )
-    """)
-
-    # Create indexes for new tables
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_credentials_user ON api_user_credentials(api_user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_credentials_type ON api_user_credentials(credential_type)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_user_github_config_user ON api_user_github_config(api_user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_credential_policies_user ON user_credential_policies(api_user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_credential_policies_type ON user_credential_policies(credential_type)")
-
-    # Initialize default credential policies if not exist
-    default_policies = [
-        ('openai_api_key', 'optional', 'OpenAI API key for AI tools (TTS, STT, GPT Image, Sora)'),
-        ('gemini_api_key', 'optional', 'Google Gemini API key for Nano Banana, Imagen, Veo'),
-        ('meshy_api_key', 'optional', 'Meshy API key for 3D model generation'),
-        ('github_pat', 'user_provided', 'GitHub Personal Access Token for repository access'),
-    ]
-    for policy_id, policy, description in default_policies:
-        cursor.execute("""
-            INSERT OR IGNORE INTO credential_policies (id, policy, description)
-            VALUES (?, ?, ?)
-        """, (policy_id, policy, description))
-
-    # =========================================================================
-    # Mobile Device Management
-    # =========================================================================
-
-    # Mobile devices - registered mobile apps for push notifications and actions
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS mobile_devices (
-            id TEXT PRIMARY KEY,
-            device_id TEXT NOT NULL UNIQUE,
-            device_name TEXT NOT NULL,
-            platform TEXT NOT NULL,
-            api_key_hash TEXT NOT NULL,
-            fcm_token TEXT,
-            capabilities JSON DEFAULT '{}',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_seen TIMESTAMP
-        )
-    """)
-
-    # Pending actions - actions waiting for mobile confirmation
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS pending_actions (
-            id TEXT PRIMARY KEY,
-            device_id TEXT NOT NULL,
-            action_type TEXT NOT NULL,
-            params JSON DEFAULT '{}',
-            security_level TEXT DEFAULT 'normal',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            expires_at TIMESTAMP NOT NULL,
-            status TEXT DEFAULT 'pending',
-            FOREIGN KEY (device_id) REFERENCES mobile_devices(device_id) ON DELETE CASCADE
-        )
-    """)
-
-    # Trusted actions - auto-approve patterns for specific devices
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS trusted_actions (
-            id TEXT PRIMARY KEY,
-            device_id TEXT NOT NULL,
-            action_pattern TEXT NOT NULL,
-            auto_approve BOOLEAN DEFAULT TRUE,
-            require_preview BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (device_id) REFERENCES mobile_devices(device_id) ON DELETE CASCADE
-        )
-    """)
-
-    # Mobile schedules - proactive notifications and briefings
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS mobile_schedules (
-            id TEXT PRIMARY KEY,
-            device_id TEXT NOT NULL,
-            schedule_type TEXT NOT NULL,
-            trigger_time TIMESTAMP,
-            hour INTEGER,
-            minute INTEGER,
-            params JSON DEFAULT '{}',
-            enabled BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_triggered_at TIMESTAMP,
-            FOREIGN KEY (device_id) REFERENCES mobile_devices(device_id) ON DELETE CASCADE
-        )
-    """)
-
-    # Mobile device indexes
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mobile_devices_device_id ON mobile_devices(device_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_device ON pending_actions(device_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_status ON pending_actions(status)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_expires ON pending_actions(expires_at)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trusted_actions_device ON trusted_actions(device_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mobile_schedules_device ON mobile_schedules(device_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mobile_schedules_enabled ON mobile_schedules(enabled)")
-
-    # ========================================================================
-    # Connectors — external messaging platform integrations
-    # ========================================================================
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS connectors (
-            id TEXT PRIMARY KEY,
-            type TEXT NOT NULL,
-            name TEXT NOT NULL,
-            api_user_id TEXT,
-            config JSON NOT NULL DEFAULT '{}',
-            events JSON NOT NULL DEFAULT '[]',
-            is_active BOOLEAN DEFAULT FALSE,
-            status TEXT DEFAULT 'disconnected',
-            status_message TEXT,
-            last_connected_at TIMESTAMP,
-            last_error TEXT,
-            last_event_at TIMESTAMP,
-            failure_count INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS connector_event_log (
-            id TEXT PRIMARY KEY,
-            connector_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            direction TEXT NOT NULL DEFAULT 'outbound',
-            payload JSON,
-            status TEXT DEFAULT 'pending',
-            error TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS connector_sessions (
-            id TEXT PRIMARY KEY,
-            connector_id TEXT NOT NULL,
-            platform_chat_id TEXT NOT NULL,
-            platform_user_id TEXT,
-            platform_user_name TEXT,
-            session_id TEXT,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE,
-            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL,
-            UNIQUE(connector_id, platform_chat_id)
-        )
-    """)
-
-    # Connector indexes
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_connector_event_log_connector ON connector_event_log(connector_id, created_at DESC)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_connector_sessions_connector ON connector_sessions(connector_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_connector_sessions_session ON connector_sessions(session_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_connectors_active ON connectors(is_active)")
-
-    # ========================================================================
-    # Automations — scheduled and event-driven AI task execution
-    # ========================================================================
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS automations (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            trigger_type TEXT NOT NULL,
-            trigger_config JSON NOT NULL DEFAULT '{}',
-            prompt TEXT NOT NULL,
-            profile_id TEXT NOT NULL,
-            project_id TEXT,
-            output_config JSON NOT NULL DEFAULT '{"type": "session"}',
-            max_turns INTEGER DEFAULT 1,
-            timeout_seconds INTEGER DEFAULT 300,
-            max_cost_per_run REAL,
-            max_cost_per_day REAL,
-            max_cost_total REAL,
-            max_runs_per_day INTEGER,
-            total_cost_used REAL DEFAULT 0.0,
-            is_enabled BOOLEAN DEFAULT FALSE,
-            status TEXT DEFAULT 'idle',
-            last_run_at TIMESTAMP,
-            last_error TEXT,
-            run_count INTEGER DEFAULT 0,
-            failure_count INTEGER DEFAULT 0,
-            requires_approval BOOLEAN DEFAULT FALSE,
-            action_steps TEXT DEFAULT NULL,
-            triggers TEXT DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE RESTRICT,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS automation_runs (
-            id TEXT PRIMARY KEY,
-            automation_id TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            trigger_data JSON,
-            session_id TEXT,
-            prompt_rendered TEXT,
-            response TEXT,
-            error TEXT,
-            cost_usd REAL DEFAULT 0.0,
-            tokens_in INTEGER DEFAULT 0,
-            tokens_out INTEGER DEFAULT 0,
-            duration_ms INTEGER DEFAULT 0,
-            output_status TEXT DEFAULT 'pending',
-            output_error TEXT,
-            started_at TIMESTAMP,
-            completed_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE,
-            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS automation_approvals (
-            id TEXT PRIMARY KEY,
-            run_id TEXT NOT NULL UNIQUE,
-            automation_id TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            prompt_preview TEXT,
-            decided_by TEXT,
-            decided_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (run_id) REFERENCES automation_runs(id) ON DELETE CASCADE,
-            FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Automation indexes
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automation_runs_automation ON automation_runs(automation_id, created_at DESC)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automation_runs_status ON automation_runs(status)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automation_approvals_status ON automation_approvals(status, created_at DESC)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automations_enabled ON automations(is_enabled)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_automations_trigger ON automations(trigger_type)")
-
-    # ========================================================================
-    # fal.ai Model Catalog — dynamic model discovery cache (v35)
-    # ========================================================================
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS fal_model_catalog (
-            endpoint_id TEXT PRIMARY KEY,
-            display_name TEXT NOT NULL,
-            category TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            status TEXT DEFAULT 'active',
-            thumbnail_url TEXT,
-            tags_json TEXT DEFAULT '[]',
-            group_key TEXT,
-            group_label TEXT,
-            tool_type TEXT,
-            output_type TEXT,
-            updated_at TEXT,
-            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_category ON fal_model_catalog(category)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_tool_type ON fal_model_catalog(tool_type)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_output_type ON fal_model_catalog(output_type)")
 
 
 # ============================================================================
@@ -1419,7 +277,7 @@ def create_admin(username: str, password_hash: str) -> Dict[str, Any]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO admin (id, username, password_hash) VALUES (1, ?, ?)",
+            "INSERT INTO admin (id, username, password_hash) VALUES (1, %s, %s)",
             (username, password_hash)
         )
         return {"id": 1, "username": username}
@@ -1430,7 +288,7 @@ def update_admin_password(password_hash: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE admin SET password_hash = ? WHERE id = 1",
+            "UPDATE admin SET password_hash = %s WHERE id = 1",
             (password_hash,)
         )
         return cursor.rowcount > 0
@@ -1456,7 +314,7 @@ def create_audit_log(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO audit_log (id, user_id, user_type, event_type, ip_address, user_agent, details)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (event_id, user_id, user_type, event_type, ip_address, user_agent, json.dumps(details) if details else None)
         )
         return {
@@ -1481,13 +339,13 @@ def get_audit_logs(
     params = []
 
     if user_id:
-        query += " AND user_id = ?"
+        query += " AND user_id = %s"
         params.append(user_id)
     if event_type:
-        query += " AND event_type = ?"
+        query += " AND event_type = %s"
         params.append(event_type)
 
-    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    query += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
     params.extend([limit, offset])
 
     with get_db() as conn:
@@ -1506,10 +364,10 @@ def get_audit_log_count(user_id: Optional[str] = None, event_type: Optional[str]
     params = []
 
     if user_id:
-        query += " AND user_id = ?"
+        query += " AND user_id = %s"
         params.append(user_id)
     if event_type:
-        query += " AND event_type = ?"
+        query += " AND event_type = %s"
         params.append(event_type)
 
     with get_db() as conn:
@@ -1534,7 +392,7 @@ def create_auth_session(token: str, expires_at: datetime) -> Dict[str, Any]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO auth_sessions (token, expires_at) VALUES (?, ?)",
+            "INSERT INTO auth_sessions (token, expires_at) VALUES (%s, %s)",
             (token, expires_at.isoformat())
         )
         return {"token": token, "expires_at": expires_at}
@@ -1550,7 +408,7 @@ def get_auth_session(token: str) -> Optional[Dict[str, Any]]:
         cursor = conn.cursor()
         now_iso = datetime.now(timezone.utc).isoformat()
         cursor.execute(
-            "SELECT * FROM auth_sessions WHERE token = ? AND expires_at > ?",
+            "SELECT * FROM auth_sessions WHERE token = %s AND expires_at > %s",
             (token, now_iso)
         )
         result = row_to_dict(cursor.fetchone())
@@ -1563,7 +421,7 @@ def get_auth_session(token: str) -> Optional[Dict[str, Any]]:
 
             # Check if THIS token exists (regardless of expiry)
             cursor.execute(
-                "SELECT token, expires_at, created_at FROM auth_sessions WHERE token = ?",
+                "SELECT token, expires_at, created_at FROM auth_sessions WHERE token = %s",
                 (token,)
             )
             exact_match = cursor.fetchone()
@@ -1622,7 +480,7 @@ def delete_auth_session(token: str):
     )
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+        cursor.execute("DELETE FROM auth_sessions WHERE token = %s", (token,))
 
 
 def clear_all_sessions():
@@ -1664,20 +522,20 @@ def cleanup_expired_sessions() -> dict:
         cursor = conn.cursor()
 
         # Expired admin sessions
-        cursor.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now_iso,))
+        cursor.execute("DELETE FROM auth_sessions WHERE expires_at <= %s", (now_iso,))
         results["auth_sessions"] = cursor.rowcount
 
         # Expired API key sessions
-        cursor.execute("DELETE FROM api_key_sessions WHERE expires_at <= ?", (now_iso,))
+        cursor.execute("DELETE FROM api_key_sessions WHERE expires_at <= %s", (now_iso,))
         results["api_key_sessions"] = cursor.rowcount
 
         # Expired account lockouts
-        cursor.execute("DELETE FROM account_lockouts WHERE locked_until <= ?", (now_iso,))
+        cursor.execute("DELETE FROM account_lockouts WHERE locked_until <= %s", (now_iso,))
         results["account_lockouts"] = cursor.rowcount
 
         # Old login attempts (older than 24 hours — well past the 15-minute window)
         cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        cursor.execute("DELETE FROM login_attempts WHERE created_at < ?", (cutoff_24h,))
+        cursor.execute("DELETE FROM login_attempts WHERE created_at < %s", (cutoff_24h,))
         results["login_attempts"] = cursor.rowcount
 
     total = sum(results.values())
@@ -1690,13 +548,11 @@ def cleanup_expired_sessions() -> dict:
 
 
 def run_database_maintenance(skip_vacuum: bool = False) -> dict:
-    """Run periodic SQLite maintenance to prevent progressive slowdown.
+    """Run periodic database maintenance to prevent progressive slowdown.
 
     Should be called every few hours. Handles:
-    - WAL checkpoint (keeps WAL file small, prevents read amplification)
-    - PRAGMA optimize (updates query planner statistics)
+    - PostgreSQL: ANALYZE, VACUUM ANALYZE
     - Cleanup of unbounded log tables (older than 7 days)
-    - VACUUM (reclaims disk space from deleted rows)
 
     Args:
         skip_vacuum: If True, skip the VACUUM step. Used when sessions are
@@ -1713,29 +569,14 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # 1. WAL checkpoint — moves WAL data back to main DB, resets WAL file.
-        # TRUNCATE mode is the most thorough: checkpoint + truncate WAL to zero bytes.
+        # 1. Update query planner statistics.
         try:
-            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            wal_result = cursor.fetchone()
-            results["wal_checkpoint"] = {
-                "busy": wal_result[0] if wal_result else -1,
-                "log_pages": wal_result[1] if wal_result else -1,
-                "checkpointed_pages": wal_result[2] if wal_result else -1,
-            }
+            cursor.execute("ANALYZE")
+            results["analyze"] = "ok"
         except Exception as e:
-            results["wal_checkpoint"] = f"error: {e}"
-            logger.warning(f"WAL checkpoint failed: {e}")
+            results["analyze"] = f"error: {e}"
 
-        # 2. Update query planner statistics.
-        # PRAGMA optimize runs ANALYZE on tables whose stats are stale.
-        try:
-            cursor.execute("PRAGMA optimize")
-            results["optimize"] = "ok"
-        except Exception as e:
-            results["optimize"] = f"error: {e}"
-
-        # 3. Cleanup unbounded log tables (older than 7 days).
+        # 2. Cleanup unbounded log tables (older than 7 days).
         # request_log uses 'timestamp' column; all others use 'created_at'.
         log_tables = {
             "usage_log": "created_at",
@@ -1746,12 +587,12 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
         }
         for table, ts_col in log_tables.items():
             try:
-                cursor.execute(f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff_7d,))
+                cursor.execute(f"DELETE FROM {table} WHERE {ts_col} < %s", (cutoff_7d,))
                 results[f"cleaned_{table}"] = cursor.rowcount
             except Exception as e:
                 results[f"cleaned_{table}"] = f"error: {e}"
 
-    # 4. VACUUM — reclaims disk space. Must run outside a transaction.
+    # 3. VACUUM — reclaims disk space. Must run outside a transaction.
     # Skipped when sessions are actively streaming to avoid an exclusive lock
     # that would block all reads and writes for potentially several seconds.
     if skip_vacuum:
@@ -1761,10 +602,21 @@ def run_database_maintenance(skip_vacuum: bool = False) -> dict:
         try:
             conn = get_connection()
             try:
-                conn.execute("VACUUM")
+                # Postgres VACUUM cannot run inside a transaction block
+                conn.autocommit = True
+                conn.cursor().execute("VACUUM ANALYZE")
                 results["vacuum"] = "ok"
             finally:
-                conn.close()
+                # Always reset autocommit before returning to pool,
+                # even if VACUUM raises — otherwise the pooled connection
+                # is left in autocommit mode, breaking transaction semantics
+                # for all subsequent callers.
+                try:
+                    conn.autocommit = False
+                except Exception:
+                    pass
+                from app.db.base import _close_connection
+                _close_connection(conn)
         except Exception as e:
             results["vacuum"] = f"error: {e}"
             logger.warning(f"VACUUM failed: {e}")
@@ -1781,7 +633,7 @@ def get_profile(profile_id: str) -> Optional[Dict[str, Any]]:
     """Get a profile by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,))
+        cursor.execute("SELECT * FROM profiles WHERE id = %s", (profile_id,))
         row = row_to_dict(cursor.fetchone())
         if row:
             row["config"] = json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
@@ -1815,7 +667,7 @@ def create_profile(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO profiles (id, name, description, config, is_builtin, mcp_tools, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (profile_id, name, description, json.dumps(config), is_builtin, json.dumps(mcp_tools or []), now, now)
         )
     return get_profile(profile_id)
@@ -1844,7 +696,7 @@ def update_profile(
         cursor = conn.cursor()
 
         # Check existence within the same connection
-        cursor.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,))
+        cursor.execute("SELECT * FROM profiles WHERE id = %s", (profile_id,))
         existing = row_to_dict(cursor.fetchone())
         if not existing:
             return None
@@ -1854,27 +706,27 @@ def update_profile(
         updates = []
         values = []
         if name is not None:
-            updates.append("name = ?")
+            updates.append("name = %s")
             values.append(name)
         if description is not None:
-            updates.append("description = ?")
+            updates.append("description = %s")
             values.append(description)
         if config is not None:
-            updates.append("config = ?")
+            updates.append("config = %s")
             values.append(json.dumps(config))
 
         if updates:
-            updates.append("updated_at = ?")
+            updates.append("updated_at = %s")
             values.append(datetime.now(timezone.utc).isoformat())
             values.append(profile_id)
 
             cursor.execute(
-                f"UPDATE profiles SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE profiles SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
         # Re-read the updated row within the same connection
-        cursor.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,))
+        cursor.execute("SELECT * FROM profiles WHERE id = %s", (profile_id,))
         row = row_to_dict(cursor.fetchone())
         if row:
             row["config"] = json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
@@ -1895,13 +747,13 @@ def delete_profile(profile_id: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         # Unlink sessions from this profile (sessions are preserved with NULL profile_id)
-        cursor.execute("UPDATE sessions SET profile_id = NULL WHERE profile_id = ?", (profile_id,))
+        cursor.execute("UPDATE sessions SET profile_id = NULL WHERE profile_id = %s", (profile_id,))
         # Unlink session_messages from this profile
-        cursor.execute("UPDATE session_messages SET profile_id = NULL WHERE profile_id = ?", (profile_id,))
+        cursor.execute("UPDATE session_messages SET profile_id = NULL WHERE profile_id = %s", (profile_id,))
         # Unlink usage_log entries from this profile
-        cursor.execute("UPDATE usage_log SET profile_id = NULL WHERE profile_id = ?", (profile_id,))
+        cursor.execute("UPDATE usage_log SET profile_id = NULL WHERE profile_id = %s", (profile_id,))
         # Now delete the profile
-        cursor.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+        cursor.execute("DELETE FROM profiles WHERE id = %s", (profile_id,))
         return cursor.rowcount > 0
 
 
@@ -1909,8 +761,8 @@ def get_profile_session_count(profile_id: str) -> int:
     """Get the number of sessions associated with a profile"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM sessions WHERE profile_id = ?", (profile_id,))
-        return cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) as cnt FROM sessions WHERE profile_id = %s", (profile_id,))
+        return cursor.fetchone()["cnt"]
 
 
 def get_all_profile_session_counts() -> Dict[str, int]:
@@ -1930,7 +782,7 @@ def set_profile_builtin(profile_id: str, is_builtin: bool) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE profiles SET is_builtin = ?, updated_at = ? WHERE id = ?",
+            "UPDATE profiles SET is_builtin = %s, updated_at = %s WHERE id = %s",
             (is_builtin, datetime.now(timezone.utc).isoformat(), profile_id)
         )
         return cursor.rowcount > 0
@@ -1944,7 +796,7 @@ def get_project(project_id: str) -> Optional[Dict[str, Any]]:
     """Get a project by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
+        cursor.execute("SELECT * FROM projects WHERE id = %s", (project_id,))
         row = row_to_dict(cursor.fetchone())
         if row:
             row["settings"] = json.loads(row["settings"]) if isinstance(row["settings"], str) else row["settings"]
@@ -1975,7 +827,7 @@ def create_project(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO projects (id, name, description, path, settings, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (project_id, name, description, path, json.dumps(settings_dict or {}), now, now)
         )
     return get_project(project_id)
@@ -1997,7 +849,7 @@ def update_project(
         cursor = conn.cursor()
 
         # Check existence within the same connection
-        cursor.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
+        cursor.execute("SELECT * FROM projects WHERE id = %s", (project_id,))
         existing = row_to_dict(cursor.fetchone())
         if not existing:
             return None
@@ -2005,30 +857,30 @@ def update_project(
         updates = []
         values = []
         if name is not None:
-            updates.append("name = ?")
+            updates.append("name = %s")
             values.append(name)
         if description is not None:
-            updates.append("description = ?")
+            updates.append("description = %s")
             values.append(description)
         if path is not None:
-            updates.append("path = ?")
+            updates.append("path = %s")
             values.append(path)
         if settings_dict is not None:
-            updates.append("settings = ?")
+            updates.append("settings = %s")
             values.append(json.dumps(settings_dict))
 
         if updates:
-            updates.append("updated_at = ?")
+            updates.append("updated_at = %s")
             values.append(datetime.now(timezone.utc).isoformat())
             values.append(project_id)
 
             cursor.execute(
-                f"UPDATE projects SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE projects SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
         # Re-read the updated row within the same connection
-        cursor.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
+        cursor.execute("SELECT * FROM projects WHERE id = %s", (project_id,))
         row = row_to_dict(cursor.fetchone())
         if row:
             row["settings"] = json.loads(row["settings"]) if isinstance(row["settings"], str) else row["settings"]
@@ -2039,8 +891,8 @@ def get_project_session_count(project_id: str) -> int:
     """Get the number of sessions associated with a project"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,))
-        return cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) as cnt FROM sessions WHERE project_id = %s", (project_id,))
+        return cursor.fetchone()["cnt"]
 
 
 def get_all_project_session_counts() -> Dict[str, int]:
@@ -2066,15 +918,15 @@ def delete_project(project_id: str, hard_delete: bool = False) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         if hard_delete:
-            cursor.execute("DELETE FROM sessions WHERE project_id = ?", (project_id,))
+            cursor.execute("DELETE FROM sessions WHERE project_id = %s", (project_id,))
         else:
             # Soft-delete: unlink sessions so chat history is preserved
             cursor.execute(
-                "UPDATE sessions SET project_id = NULL WHERE project_id = ?",
+                "UPDATE sessions SET project_id = NULL WHERE project_id = %s",
                 (project_id,),
             )
         # Delete the project itself
-        cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
         return cursor.rowcount > 0
 
 
@@ -2086,7 +938,7 @@ def get_session(session_id: str) -> Optional[Dict[str, Any]]:
     """Get a session by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        cursor.execute("SELECT * FROM sessions WHERE id = %s", (session_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -2094,7 +946,7 @@ def get_session_by_sdk_id(sdk_session_id: str) -> Optional[Dict[str, Any]]:
     """Get a session by SDK session ID (the Claude Code session ID)"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM sessions WHERE sdk_session_id = ?", (sdk_session_id,))
+        cursor.execute("SELECT * FROM sessions WHERE sdk_session_id = %s", (sdk_session_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -2114,20 +966,20 @@ def get_sessions(
         # Join with session_tags when filtering by tag
         query = """SELECT DISTINCT s.* FROM sessions s
                    INNER JOIN session_tags st ON s.id = st.session_id
-                   WHERE st.tag_id = ?"""
+                   WHERE st.tag_id = %s"""
         params = [tag_id]
     else:
         query = "SELECT * FROM sessions WHERE 1=1"
         params = []
 
     if project_id:
-        query += " AND s.project_id = ?" if tag_id else " AND project_id = ?"
+        query += " AND s.project_id = %s" if tag_id else " AND project_id = %s"
         params.append(project_id)
     if profile_id:
-        query += " AND s.profile_id = ?" if tag_id else " AND profile_id = ?"
+        query += " AND s.profile_id = %s" if tag_id else " AND profile_id = %s"
         params.append(profile_id)
     if status:
-        query += " AND s.status = ?" if tag_id else " AND status = ?"
+        query += " AND s.status = %s" if tag_id else " AND status = %s"
         params.append(status)
     if favorites_only:
         query += " AND s.is_favorite = TRUE" if tag_id else " AND is_favorite = TRUE"
@@ -2136,12 +988,12 @@ def get_sessions(
         query += " AND s.api_user_id IS NOT NULL" if tag_id else " AND api_user_id IS NOT NULL"
     elif api_user_id is not None:
         if api_user_id:
-            query += " AND s.api_user_id = ?" if tag_id else " AND api_user_id = ?"
+            query += " AND s.api_user_id = %s" if tag_id else " AND api_user_id = %s"
             params.append(api_user_id)
         else:
             query += " AND s.api_user_id IS NULL" if tag_id else " AND api_user_id IS NULL"
 
-    query += " ORDER BY s.updated_at DESC LIMIT ? OFFSET ?" if tag_id else " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+    query += " ORDER BY s.updated_at DESC LIMIT %s OFFSET %s" if tag_id else " ORDER BY updated_at DESC LIMIT %s OFFSET %s"
     params.extend([limit, offset])
 
     with get_db() as conn:
@@ -2170,7 +1022,7 @@ def get_sessions_paginated(
     if tag_id:
         base_query = """FROM sessions s
                        INNER JOIN session_tags st ON s.id = st.session_id
-                       WHERE st.tag_id = ?"""
+                       WHERE st.tag_id = %s"""
         params: List[Any] = [tag_id]
         col_prefix = "s."
     else:
@@ -2179,13 +1031,13 @@ def get_sessions_paginated(
         col_prefix = ""
 
     if project_id:
-        base_query += f" AND {col_prefix}project_id = ?"
+        base_query += f" AND {col_prefix}project_id = %s"
         params.append(project_id)
     if profile_id:
-        base_query += f" AND {col_prefix}profile_id = ?"
+        base_query += f" AND {col_prefix}profile_id = %s"
         params.append(profile_id)
     if status:
-        base_query += f" AND {col_prefix}status = ?"
+        base_query += f" AND {col_prefix}status = %s"
         params.append(status)
     if favorites_only:
         base_query += f" AND {col_prefix}is_favorite = TRUE"
@@ -2193,7 +1045,7 @@ def get_sessions_paginated(
         base_query += f" AND {col_prefix}api_user_id IS NOT NULL"
     elif api_user_id is not None:
         if api_user_id:
-            base_query += f" AND {col_prefix}api_user_id = ?"
+            base_query += f" AND {col_prefix}api_user_id = %s"
             params.append(api_user_id)
         else:
             base_query += f" AND {col_prefix}api_user_id IS NULL"
@@ -2207,13 +1059,13 @@ def get_sessions_paginated(
         else:
             count_query = f"SELECT COUNT(*) {base_query}"
         cursor.execute(count_query, params)
-        total = cursor.fetchone()[0]
+        total = cursor.fetchone()["count"]
 
         # Get paginated data
         if tag_id:
-            data_query = f"SELECT DISTINCT s.* {base_query} ORDER BY s.updated_at DESC LIMIT ? OFFSET ?"
+            data_query = f"SELECT DISTINCT s.* {base_query} ORDER BY s.updated_at DESC LIMIT %s OFFSET %s"
         else:
-            data_query = f"SELECT * {base_query} ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+            data_query = f"SELECT * {base_query} ORDER BY updated_at DESC LIMIT %s OFFSET %s"
         cursor.execute(data_query, params + [limit, offset])
         sessions = rows_to_list(cursor.fetchall())
 
@@ -2242,7 +1094,7 @@ def get_sessions_cursor(
     if tag_id:
         base_query = """FROM sessions s
                        INNER JOIN session_tags st ON s.id = st.session_id
-                       WHERE st.tag_id = ?"""
+                       WHERE st.tag_id = %s"""
         params: List[Any] = [tag_id]
         col_prefix = "s."
     else:
@@ -2251,13 +1103,13 @@ def get_sessions_cursor(
         col_prefix = ""
 
     if project_id:
-        base_query += f" AND {col_prefix}project_id = ?"
+        base_query += f" AND {col_prefix}project_id = %s"
         params.append(project_id)
     if profile_id:
-        base_query += f" AND {col_prefix}profile_id = ?"
+        base_query += f" AND {col_prefix}profile_id = %s"
         params.append(profile_id)
     if status:
-        base_query += f" AND {col_prefix}status = ?"
+        base_query += f" AND {col_prefix}status = %s"
         params.append(status)
     if favorites_only:
         base_query += f" AND {col_prefix}is_favorite = TRUE"
@@ -2265,14 +1117,14 @@ def get_sessions_cursor(
         base_query += f" AND {col_prefix}api_user_id IS NOT NULL"
     elif api_user_id is not None:
         if api_user_id:
-            base_query += f" AND {col_prefix}api_user_id = ?"
+            base_query += f" AND {col_prefix}api_user_id = %s"
             params.append(api_user_id)
         else:
             base_query += f" AND {col_prefix}api_user_id IS NULL"
 
     # Cursor condition: seek past the last seen (updated_at, id)
     if cursor and cursor_id:
-        base_query += f" AND ({col_prefix}updated_at < ? OR ({col_prefix}updated_at = ? AND {col_prefix}id < ?))"
+        base_query += f" AND ({col_prefix}updated_at < %s OR ({col_prefix}updated_at = %s AND {col_prefix}id < %s))"
         params.extend([cursor, cursor, cursor_id])
 
     with get_db() as conn:
@@ -2281,9 +1133,9 @@ def get_sessions_cursor(
         # Request limit+1 to detect has_more without a COUNT query
         fetch_limit = limit + 1
         if tag_id:
-            data_query = f"SELECT DISTINCT s.* {base_query} ORDER BY s.updated_at DESC, s.id DESC LIMIT ?"
+            data_query = f"SELECT DISTINCT s.* {base_query} ORDER BY s.updated_at DESC, s.id DESC LIMIT %s"
         else:
-            data_query = f"SELECT * {base_query} ORDER BY updated_at DESC, id DESC LIMIT ?"
+            data_query = f"SELECT * {base_query} ORDER BY updated_at DESC, id DESC LIMIT %s"
         db_cursor.execute(data_query, params + [fetch_limit])
         rows = rows_to_list(db_cursor.fetchall())
 
@@ -2332,7 +1184,7 @@ def create_session(
     now = datetime.now(timezone.utc).isoformat()
     params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, now, now)
     sql = """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
     if _conn is not None:
         cursor = _conn.cursor()
         cursor.execute(sql, params)
@@ -2383,7 +1235,7 @@ def create_session_with_stats(
                 id, profile_id, project_id, title, api_user_id,
                 sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (session_id, profile_id, project_id, title, api_user_id,
              sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
              ts_created, now)
@@ -2407,32 +1259,32 @@ def update_session(
     Args:
         worktree_id: Set to a worktree ID to link, or empty string "" to unlink
     """
-    updates = ["updated_at = ?"]
+    updates = ["updated_at = %s"]
     values = [datetime.now(timezone.utc).isoformat()]
 
     if sdk_session_id is not None:
-        updates.append("sdk_session_id = ?")
+        updates.append("sdk_session_id = %s")
         values.append(sdk_session_id)
     if title is not None:
-        updates.append("title = ?")
+        updates.append("title = %s")
         values.append(title)
     if status is not None:
-        updates.append("status = ?")
+        updates.append("status = %s")
         values.append(status)
     if cost_increment != 0:
-        updates.append("total_cost_usd = total_cost_usd + ?")
+        updates.append("total_cost_usd = total_cost_usd + %s")
         values.append(cost_increment)
     if tokens_in_increment != 0:
-        updates.append("total_tokens_in = total_tokens_in + ?")
+        updates.append("total_tokens_in = total_tokens_in + %s")
         values.append(tokens_in_increment)
     if tokens_out_increment != 0:
-        updates.append("total_tokens_out = total_tokens_out + ?")
+        updates.append("total_tokens_out = total_tokens_out + %s")
         values.append(tokens_out_increment)
     if turn_increment != 0:
-        updates.append("turn_count = turn_count + ?")
+        updates.append("turn_count = turn_count + %s")
         values.append(turn_increment)
     if worktree_id is not None:
-        updates.append("worktree_id = ?")
+        updates.append("worktree_id = %s")
         # Empty string means unlink (set to NULL)
         values.append(worktree_id if worktree_id else None)
 
@@ -2441,7 +1293,7 @@ def update_session(
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"UPDATE sessions SET {', '.join(updates)} WHERE id = ?",
+            f"UPDATE sessions SET {', '.join(updates)} WHERE id = %s",
             values
         )
 
@@ -2452,7 +1304,7 @@ def delete_session(session_id: str) -> bool:
     """Delete a session and its messages"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        cursor.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
         return cursor.rowcount > 0
 
 
@@ -2462,8 +1314,8 @@ def toggle_session_favorite(session_id: str) -> Optional[Dict[str, Any]]:
         cursor = conn.cursor()
         # Toggle the favorite status
         cursor.execute(
-            """UPDATE sessions SET is_favorite = NOT is_favorite, updated_at = ?
-               WHERE id = ?""",
+            """UPDATE sessions SET is_favorite = NOT is_favorite, updated_at = %s
+               WHERE id = %s""",
             (datetime.now(timezone.utc).isoformat(), session_id)
         )
         if cursor.rowcount == 0:
@@ -2476,8 +1328,8 @@ def set_session_favorite(session_id: str, is_favorite: bool) -> Optional[Dict[st
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """UPDATE sessions SET is_favorite = ?, updated_at = ?
-               WHERE id = ?""",
+            """UPDATE sessions SET is_favorite = %s, updated_at = %s
+               WHERE id = %s""",
             (is_favorite, datetime.now(timezone.utc).isoformat(), session_id)
         )
         if cursor.rowcount == 0:
@@ -2490,7 +1342,7 @@ def session_has_forks(session_id: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT COUNT(*) as count FROM sessions WHERE parent_session_id = ?",
+            "SELECT COUNT(*) as count FROM sessions WHERE parent_session_id = %s",
             (session_id,)
         )
         row = cursor.fetchone()
@@ -2502,7 +1354,7 @@ def get_session_forks(session_id: str) -> List[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """SELECT * FROM sessions WHERE parent_session_id = ?
+            """SELECT * FROM sessions WHERE parent_session_id = %s
                ORDER BY created_at DESC""",
             (session_id,)
         )
@@ -2518,7 +1370,7 @@ def get_session_messages(session_id: str) -> List[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM session_messages WHERE session_id = ? ORDER BY created_at ASC",
+            "SELECT * FROM session_messages WHERE session_id = %s ORDER BY created_at ASC",
             (session_id,)
         )
         rows = rows_to_list(cursor.fetchall())
@@ -2559,17 +1411,17 @@ def add_session_message(
               profile_id,
               now)
     sql = """INSERT INTO session_messages (session_id, role, content, tool_name, tool_input, metadata, profile_id, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
+             VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id"""
 
     if _conn is not None:
         cursor = _conn.cursor()
         cursor.execute(sql, params)
-        lastrowid = cursor.lastrowid
+        lastrowid = cursor.fetchone()["id"]
     else:
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(sql, params)
-            lastrowid = cursor.lastrowid
+            lastrowid = cursor.fetchone()["id"]
 
     msg = {
         "id": lastrowid,
@@ -2596,7 +1448,7 @@ def delete_session_message(session_id: str, message_id: int) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM session_messages WHERE session_id = ? AND id = ?",
+            "DELETE FROM session_messages WHERE session_id = %s AND id = %s",
             (session_id, message_id)
         )
         return cursor.rowcount > 0
@@ -2607,7 +1459,7 @@ def delete_session_messages_after(session_id: str, message_id: int) -> int:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM session_messages WHERE session_id = ? AND id > ?",
+            "DELETE FROM session_messages WHERE session_id = %s AND id > %s",
             (session_id, message_id)
         )
         return cursor.rowcount
@@ -2670,7 +1522,7 @@ def log_usage(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO usage_log (session_id, profile_id, model, tokens_in, tokens_out, cost_usd, duration_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (session_id, profile_id, model, tokens_in, tokens_out, cost_usd, duration_ms)
         )
 
@@ -2696,7 +1548,7 @@ def get_last_session_usage(session_id: str) -> Optional[Dict[str, Any]]:
         cursor.execute("""
             SELECT cost_usd, duration_ms, tokens_in, tokens_out, model
             FROM usage_log
-            WHERE session_id = ?
+            WHERE session_id = %s
             ORDER BY id DESC
             LIMIT 1
         """, (session_id,))
@@ -2731,7 +1583,7 @@ def get_all_session_usage(session_id: str) -> List[Dict[str, Any]]:
         cursor.execute("""
             SELECT cost_usd, duration_ms, tokens_in, tokens_out, model
             FROM usage_log
-            WHERE session_id = ?
+            WHERE session_id = %s
             ORDER BY id ASC
         """, (session_id,))
         rows = cursor.fetchall()
@@ -2786,10 +1638,10 @@ def get_usage_stats() -> Dict[str, Any]:
 def _get_api_user_profile_ids(cursor, user_id: str) -> List[str]:
     """Get profile IDs for an API user from junction table"""
     cursor.execute(
-        "SELECT profile_id FROM api_user_profiles WHERE api_user_id = ? ORDER BY created_at",
+        "SELECT profile_id FROM api_user_profiles WHERE api_user_id = %s ORDER BY created_at",
         (user_id,)
     )
-    return [row[0] for row in cursor.fetchall()]
+    return [row["profile_id"] for row in cursor.fetchall()]
 
 
 def _enrich_api_user_with_profiles(cursor, user: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -2817,16 +1669,16 @@ def create_api_user(
         cursor.execute(
             """INSERT INTO api_users
                (id, name, api_key_hash, project_id, is_active, web_login_allowed, description, created_at, updated_at)
-               VALUES (?, ?, ?, ?, TRUE, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, TRUE, %s, %s, %s, %s)""",
             (user_id, name, api_key_hash, project_id, web_login_allowed, description, now, now),
         )
         if profile_ids:
             for pid in profile_ids:
                 cursor.execute(
-                    "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (?, ?, ?)",
+                    "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (%s, %s, %s)",
                     (user_id, pid, now),
                 )
-        cursor.execute("SELECT * FROM api_users WHERE id = ?", (user_id,))
+        cursor.execute("SELECT * FROM api_users WHERE id = %s", (user_id,))
         user = row_to_dict(cursor.fetchone())
         return _enrich_api_user_with_profiles(cursor, user)
 
@@ -2835,8 +1687,8 @@ def delete_api_user(user_id: str) -> bool:
     """Delete an API user by ID. Cascade handles junction tables."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = ?", (user_id,))
-        cursor.execute("DELETE FROM api_users WHERE id = ?", (user_id,))
+        cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = %s", (user_id,))
+        cursor.execute("DELETE FROM api_users WHERE id = %s", (user_id,))
         return cursor.rowcount > 0
 
 
@@ -2844,7 +1696,7 @@ def get_api_user(user_id: str) -> Optional[Dict[str, Any]]:
     """Get an API user by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM api_users WHERE id = ?", (user_id,))
+        cursor.execute("SELECT * FROM api_users WHERE id = %s", (user_id,))
         user = row_to_dict(cursor.fetchone())
         return _enrich_api_user_with_profiles(cursor, user)
 
@@ -2854,7 +1706,7 @@ def get_api_user_by_key_hash(key_hash: str) -> Optional[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM api_users WHERE api_key_hash = ? AND is_active = TRUE",
+            "SELECT * FROM api_users WHERE api_key_hash = %s AND is_active = TRUE",
             (key_hash,)
         )
         user = row_to_dict(cursor.fetchone())
@@ -2866,7 +1718,7 @@ def update_api_user_last_used(user_id: str):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE api_users SET last_used_at = ? WHERE id = ?",
+            "UPDATE api_users SET last_used_at = %s WHERE id = %s",
             (datetime.now(timezone.utc).isoformat(), user_id)
         )
 
@@ -2901,7 +1753,7 @@ def update_api_user(user_id: str, **kwargs) -> Optional[Dict[str, Any]]:
     profile_ids = kwargs.pop("profile_ids", None)
 
     now = datetime.now(timezone.utc).isoformat()
-    updates = ["updated_at = ?"]
+    updates = ["updated_at = %s"]
     values: list = [now]
 
     allowed = {
@@ -2910,7 +1762,7 @@ def update_api_user(user_id: str, **kwargs) -> Optional[Dict[str, Any]]:
     }
     for key, val in kwargs.items():
         if key in allowed:
-            updates.append(f"{key} = ?")
+            updates.append(f"{key} = %s")
             values.append(val)
 
     values.append(user_id)
@@ -2918,19 +1770,19 @@ def update_api_user(user_id: str, **kwargs) -> Optional[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"UPDATE api_users SET {', '.join(updates)} WHERE id = ?",
+            f"UPDATE api_users SET {', '.join(updates)} WHERE id = %s",
             tuple(values),
         )
 
         if profile_ids is not None:
-            cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = %s", (user_id,))
             for pid in profile_ids:
                 cursor.execute(
-                    "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (?, ?, ?)",
+                    "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (%s, %s, %s)",
                     (user_id, pid, now),
                 )
 
-        cursor.execute("SELECT * FROM api_users WHERE id = ?", (user_id,))
+        cursor.execute("SELECT * FROM api_users WHERE id = %s", (user_id,))
         user = row_to_dict(cursor.fetchone())
         return _enrich_api_user_with_profiles(cursor, user)
 
@@ -2951,7 +1803,7 @@ def get_credential_policy(policy_id: str) -> Optional[Dict[str, Any]]:
     """Get a specific credential policy"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM credential_policies WHERE id = ?", (policy_id,))
+        cursor.execute("SELECT * FROM credential_policies WHERE id = %s", (policy_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -2972,12 +1824,12 @@ def update_credential_policy(policy_id: str, policy: str, description: Optional[
         cursor = conn.cursor()
         if description is not None:
             cursor.execute(
-                "UPDATE credential_policies SET policy = ?, description = ?, updated_at = ? WHERE id = ?",
+                "UPDATE credential_policies SET policy = %s, description = %s, updated_at = %s WHERE id = %s",
                 (policy, description, datetime.now(timezone.utc).isoformat(), policy_id)
             )
         else:
             cursor.execute(
-                "UPDATE credential_policies SET policy = ?, updated_at = ? WHERE id = ?",
+                "UPDATE credential_policies SET policy = %s, updated_at = %s WHERE id = %s",
                 (policy, datetime.now(timezone.utc).isoformat(), policy_id)
             )
     return get_credential_policy(policy_id)
@@ -2992,7 +1844,7 @@ def get_user_credential_policy(api_user_id: str, credential_type: str) -> Option
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM user_credential_policies WHERE api_user_id = ? AND credential_type = ?",
+            "SELECT * FROM user_credential_policies WHERE api_user_id = %s AND credential_type = %s",
             (api_user_id, credential_type)
         )
         return row_to_dict(cursor.fetchone())
@@ -3003,7 +1855,7 @@ def get_all_user_credential_policies(api_user_id: str) -> List[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM user_credential_policies WHERE api_user_id = ? ORDER BY credential_type",
+            "SELECT * FROM user_credential_policies WHERE api_user_id = %s ORDER BY credential_type",
             (api_user_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -3027,8 +1879,8 @@ def set_user_credential_policy(api_user_id: str, credential_type: str, policy: s
         # Try to update existing
         cursor.execute(
             """UPDATE user_credential_policies
-               SET policy = ?, updated_at = ?
-               WHERE api_user_id = ? AND credential_type = ?""",
+               SET policy = %s, updated_at = %s
+               WHERE api_user_id = %s AND credential_type = %s""",
             (policy, now, api_user_id, credential_type)
         )
 
@@ -3037,7 +1889,7 @@ def set_user_credential_policy(api_user_id: str, credential_type: str, policy: s
             policy_id = str(uuid.uuid4())
             cursor.execute(
                 """INSERT INTO user_credential_policies (id, api_user_id, credential_type, policy, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
                 (policy_id, api_user_id, credential_type, policy, now, now)
             )
 
@@ -3049,7 +1901,7 @@ def delete_user_credential_policy(api_user_id: str, credential_type: str) -> boo
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM user_credential_policies WHERE api_user_id = ? AND credential_type = ?",
+            "DELETE FROM user_credential_policies WHERE api_user_id = %s AND credential_type = %s",
             (api_user_id, credential_type)
         )
         return cursor.rowcount > 0
@@ -3094,7 +1946,7 @@ def get_user_credential(api_user_id: str, credential_type: str) -> Optional[Dict
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM api_user_credentials WHERE api_user_id = ? AND credential_type = ?",
+            "SELECT * FROM api_user_credentials WHERE api_user_id = %s AND credential_type = %s",
             (api_user_id, credential_type)
         )
         return row_to_dict(cursor.fetchone())
@@ -3105,7 +1957,7 @@ def get_all_user_credentials(api_user_id: str) -> List[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM api_user_credentials WHERE api_user_id = ? ORDER BY credential_type",
+            "SELECT * FROM api_user_credentials WHERE api_user_id = %s ORDER BY credential_type",
             (api_user_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -3121,8 +1973,8 @@ def set_user_credential(api_user_id: str, credential_type: str, encrypted_value:
         # Try to update existing
         cursor.execute(
             """UPDATE api_user_credentials
-               SET encrypted_value = ?, updated_at = ?
-               WHERE api_user_id = ? AND credential_type = ?""",
+               SET encrypted_value = %s, updated_at = %s
+               WHERE api_user_id = %s AND credential_type = %s""",
             (encrypted_value, now, api_user_id, credential_type)
         )
 
@@ -3131,7 +1983,7 @@ def set_user_credential(api_user_id: str, credential_type: str, encrypted_value:
             cred_id = str(uuid.uuid4())
             cursor.execute(
                 """INSERT INTO api_user_credentials (id, api_user_id, credential_type, encrypted_value, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
                 (cred_id, api_user_id, credential_type, encrypted_value, now, now)
             )
 
@@ -3143,7 +1995,7 @@ def delete_user_credential(api_user_id: str, credential_type: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM api_user_credentials WHERE api_user_id = ? AND credential_type = ?",
+            "DELETE FROM api_user_credentials WHERE api_user_id = %s AND credential_type = %s",
             (api_user_id, credential_type)
         )
         return cursor.rowcount > 0
@@ -3154,7 +2006,7 @@ def user_has_credential(api_user_id: str, credential_type: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT 1 FROM api_user_credentials WHERE api_user_id = ? AND credential_type = ?",
+            "SELECT 1 FROM api_user_credentials WHERE api_user_id = %s AND credential_type = %s",
             (api_user_id, credential_type)
         )
         return cursor.fetchone() is not None
@@ -3177,12 +2029,12 @@ def add_sync_log(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO sync_log (session_id, event_type, entity_type, entity_id, data, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
             (session_id, event_type, entity_type, entity_id,
              json.dumps(data) if data else None, now)
         )
         return {
-            "id": cursor.lastrowid,
+            "id": cursor.fetchone()["id"],
             "session_id": session_id,
             "event_type": event_type,
             "entity_type": entity_type,
@@ -3202,9 +2054,9 @@ def get_sync_logs(
         cursor = conn.cursor()
         cursor.execute(
             """SELECT * FROM sync_log
-               WHERE session_id = ? AND id > ?
+               WHERE session_id = %s AND id > %s
                ORDER BY id ASC
-               LIMIT ?""",
+               LIMIT %s""",
             (session_id, since_id, limit)
         )
         rows = rows_to_list(cursor.fetchall())
@@ -3219,7 +2071,7 @@ def get_latest_sync_id(session_id: str) -> int:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT MAX(id) as max_id FROM sync_log WHERE session_id = ?",
+            "SELECT MAX(id) as max_id FROM sync_log WHERE session_id = %s",
             (session_id,)
         )
         row = cursor.fetchone()
@@ -3236,22 +2088,22 @@ def update_message_content(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        updates = ["content = ?", "updated_at = ?", "version = version + 1"]
+        updates = ["content = %s", "updated_at = %s", "version = version + 1"]
         values = [content, now]
 
         if metadata is not None:
-            updates.append("metadata = ?")
+            updates.append("metadata = %s")
             values.append(json.dumps(metadata))
 
         values.append(message_id)
 
         cursor.execute(
-            f"UPDATE session_messages SET {', '.join(updates)} WHERE id = ?",
+            f"UPDATE session_messages SET {', '.join(updates)} WHERE id = %s",
             values
         )
 
         if cursor.rowcount > 0:
-            cursor.execute("SELECT * FROM session_messages WHERE id = ?", (message_id,))
+            cursor.execute("SELECT * FROM session_messages WHERE id = %s", (message_id,))
             row = row_to_dict(cursor.fetchone())
             if row and row.get("metadata"):
                 row["metadata"] = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
@@ -3270,7 +2122,7 @@ def record_login_attempt(ip_address: str, username: Optional[str], success: bool
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO login_attempts (ip_address, username, success, created_at)
-               VALUES (?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s)""",
             (ip_address, username, success, datetime.now(timezone.utc).isoformat())
         )
 
@@ -3283,7 +2135,7 @@ def get_failed_attempts_count(ip_address: str, window_minutes: int = 15) -> int:
         cursor = conn.cursor()
         cursor.execute(
             """SELECT COUNT(*) as count FROM login_attempts
-               WHERE ip_address = ? AND success = FALSE AND created_at > ?""",
+               WHERE ip_address = %s AND success = FALSE AND created_at > %s""",
             (ip_address, cutoff)
         )
         row = cursor.fetchone()
@@ -3298,7 +2150,7 @@ def get_failed_attempts_for_username(username: str, window_minutes: int = 15) ->
         cursor = conn.cursor()
         cursor.execute(
             """SELECT COUNT(*) as count FROM login_attempts
-               WHERE username = ? AND success = FALSE AND created_at > ?""",
+               WHERE username = %s AND success = FALSE AND created_at > %s""",
             (username, cutoff)
         )
         row = cursor.fetchone()
@@ -3318,7 +2170,7 @@ def create_lockout(ip_address: Optional[str], username: Optional[str],
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO account_lockouts (ip_address, username, locked_until, reason, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s)""",
             (ip_address, username, locked_until, reason, datetime.now(timezone.utc).isoformat())
         )
 
@@ -3330,7 +2182,7 @@ def is_ip_locked(ip_address: str) -> Optional[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             """SELECT * FROM account_lockouts
-               WHERE ip_address = ? AND locked_until > ?
+               WHERE ip_address = %s AND locked_until > %s
                ORDER BY locked_until DESC LIMIT 1""",
             (ip_address, now)
         )
@@ -3344,7 +2196,7 @@ def is_username_locked(username: str) -> Optional[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             """SELECT * FROM account_lockouts
-               WHERE username = ? AND locked_until > ?
+               WHERE username = %s AND locked_until > %s
                ORDER BY locked_until DESC LIMIT 1""",
             (username, now)
         )
@@ -3363,7 +2215,7 @@ def get_api_key_session(token: str) -> Optional[Dict[str, Any]]:
             """SELECT aks.*, au.name as user_name, au.project_id, au.is_active
                FROM api_key_sessions aks
                JOIN api_users au ON aks.api_user_id = au.id
-               WHERE aks.token = ? AND aks.expires_at > ? AND au.is_active = TRUE""",
+               WHERE aks.token = %s AND aks.expires_at > %s AND au.is_active = TRUE""",
             (token, datetime.now(timezone.utc).isoformat())
         )
         session = row_to_dict(cursor.fetchone())
@@ -3383,7 +2235,7 @@ def get_user_preference(user_type: str, user_id: str, key: str) -> Optional[Dict
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM user_preferences WHERE user_type = ? AND user_id = ? AND key = ?",
+            "SELECT * FROM user_preferences WHERE user_type = %s AND user_id = %s AND key = %s",
             (user_type, user_id, key)
         )
         row = cursor.fetchone()
@@ -3405,7 +2257,7 @@ def set_user_preference(user_type: str, user_id: str, key: str, value: Any) -> D
 
         cursor.execute(
             """INSERT INTO user_preferences (user_type, user_id, key, value, updated_at)
-               VALUES (?, ?, ?, ?, ?)
+               VALUES (%s, %s, %s, %s, %s)
                ON CONFLICT(user_type, user_id, key) DO UPDATE SET
                    value = excluded.value,
                    updated_at = excluded.updated_at""",
@@ -3426,7 +2278,7 @@ def delete_user_preference(user_type: str, user_id: str, key: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM user_preferences WHERE user_type = ? AND user_id = ? AND key = ?",
+            "DELETE FROM user_preferences WHERE user_type = %s AND user_id = %s AND key = %s",
             (user_type, user_id, key)
         )
         return cursor.rowcount > 0
@@ -3437,7 +2289,7 @@ def get_all_user_preferences(user_type: str, user_id: str) -> List[Dict[str, Any
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM user_preferences WHERE user_type = ? AND user_id = ?",
+            "SELECT * FROM user_preferences WHERE user_type = %s AND user_id = %s",
             (user_type, user_id)
         )
         rows = rows_to_list(cursor.fetchall())
@@ -3467,7 +2319,7 @@ def get_subagent(subagent_id: str) -> Optional[Dict[str, Any]]:
     """Get a subagent by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM subagents WHERE id = ?", (subagent_id,))
+        cursor.execute("SELECT * FROM subagents WHERE id = %s", (subagent_id,))
         row = row_to_dict(cursor.fetchone())
         return _parse_subagent_json_fields(row)
 
@@ -3527,7 +2379,7 @@ def create_subagent(
                     is_builtin,
                     default_name, default_description, default_prompt, default_tools, default_model,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (subagent_id, name, description, prompt, tools_json, model,
                  skills_json, memory, mcp_servers_json, is_builtin,
                  name, description, prompt, tools_json, model,
@@ -3538,7 +2390,7 @@ def create_subagent(
                 """INSERT INTO subagents (
                     id, name, description, prompt, tools, model, skills, memory, mcp_servers,
                     is_builtin, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (subagent_id, name, description, prompt, tools_json, model,
                  skills_json, memory, mcp_servers_json, is_builtin, now, now)
             )
@@ -3569,39 +2421,39 @@ def update_subagent(
     updates = []
     values = []
     if name is not ...:
-        updates.append("name = ?")
+        updates.append("name = %s")
         values.append(name)
     if description is not ...:
-        updates.append("description = ?")
+        updates.append("description = %s")
         values.append(description)
     if prompt is not ...:
-        updates.append("prompt = ?")
+        updates.append("prompt = %s")
         values.append(prompt)
     if tools is not ...:
-        updates.append("tools = ?")
+        updates.append("tools = %s")
         values.append(json.dumps(tools) if tools else None)
     if model is not ...:
-        updates.append("model = ?")
+        updates.append("model = %s")
         values.append(model)
     if skills is not ...:
-        updates.append("skills = ?")
+        updates.append("skills = %s")
         values.append(json.dumps(skills) if skills else None)
     if memory is not ...:
-        updates.append("memory = ?")
+        updates.append("memory = %s")
         values.append(memory)
     if mcp_servers is not ...:
-        updates.append("mcp_servers = ?")
+        updates.append("mcp_servers = %s")
         values.append(json.dumps(mcp_servers) if mcp_servers else None)
 
     if updates:
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         values.append(datetime.now(timezone.utc).isoformat())
         values.append(subagent_id)
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE subagents SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE subagents SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -3612,7 +2464,7 @@ def delete_subagent(subagent_id: str) -> bool:
     """Delete a subagent"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM subagents WHERE id = ?", (subagent_id,))
+        cursor.execute("DELETE FROM subagents WHERE id = %s", (subagent_id,))
         return cursor.rowcount > 0
 
 
@@ -3621,7 +2473,7 @@ def set_subagent_builtin(subagent_id: str, is_builtin: bool) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE subagents SET is_builtin = ?, updated_at = ? WHERE id = ?",
+            "UPDATE subagents SET is_builtin = %s, updated_at = %s WHERE id = %s",
             (is_builtin, datetime.now(timezone.utc).isoformat(), subagent_id)
         )
         return cursor.rowcount > 0
@@ -3646,7 +2498,7 @@ def revert_subagent_to_defaults(subagent_id: str) -> Optional[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             """SELECT default_name, default_description, default_prompt, default_tools, default_model
-               FROM subagents WHERE id = ?""",
+               FROM subagents WHERE id = %s""",
             (subagent_id,)
         )
         row = cursor.fetchone()
@@ -3662,8 +2514,8 @@ def revert_subagent_to_defaults(subagent_id: str) -> Optional[Dict[str, Any]]:
                 prompt = default_prompt,
                 tools = default_tools,
                 model = default_model,
-                updated_at = ?
-               WHERE id = ?""",
+                updated_at = %s
+               WHERE id = %s""",
             (datetime.now(timezone.utc).isoformat(), subagent_id)
         )
 
@@ -3686,7 +2538,7 @@ def has_subagent_been_modified(subagent_id: str) -> bool:
                 COALESCE(tools, '') != COALESCE(default_tools, '') OR
                 COALESCE(model, '') != COALESCE(default_model, '')
                AS is_modified
-               FROM subagents WHERE id = ? AND is_builtin = 1""",
+               FROM subagents WHERE id = %s AND is_builtin = TRUE""",
             (subagent_id,)
         )
         row = cursor.fetchone()
@@ -3711,7 +2563,7 @@ def add_permission_rule(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO permission_rules (id, profile_id, tool_name, tool_pattern, decision, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s)""",
             (rule_id, profile_id, tool_name, tool_pattern, decision, now)
         )
     return get_permission_rule(rule_id)
@@ -3721,7 +2573,7 @@ def get_permission_rule(rule_id: str) -> Optional[Dict[str, Any]]:
     """Get a permission rule by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM permission_rules WHERE id = ?", (rule_id,))
+        cursor.execute("SELECT * FROM permission_rules WHERE id = %s", (rule_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -3734,10 +2586,10 @@ def get_permission_rules(
     params = []
 
     if profile_id:
-        query += " AND profile_id = ?"
+        query += " AND profile_id = %s"
         params.append(profile_id)
     if tool_name:
-        query += " AND tool_name = ?"
+        query += " AND tool_name = %s"
         params.append(tool_name)
 
     query += " ORDER BY created_at DESC"
@@ -3752,7 +2604,7 @@ def delete_permission_rule(rule_id: str) -> bool:
     """Delete a permission rule"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM permission_rules WHERE id = ?", (rule_id,))
+        cursor.execute("DELETE FROM permission_rules WHERE id = %s", (rule_id,))
         return cursor.rowcount > 0
 
 
@@ -3760,7 +2612,7 @@ def delete_profile_permission_rules(profile_id: str) -> int:
     """Delete all permission rules for a profile"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM permission_rules WHERE profile_id = ?", (profile_id,))
+        cursor.execute("DELETE FROM permission_rules WHERE profile_id = %s", (profile_id,))
         return cursor.rowcount
 
 
@@ -3772,7 +2624,7 @@ def get_system_setting(key: str) -> Optional[str]:
     """Get a system setting by key"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
+        cursor.execute("SELECT value FROM system_settings WHERE key = %s", (key,))
         row = cursor.fetchone()
         return row["value"] if row else None
 
@@ -3784,7 +2636,7 @@ def set_system_setting(key: str, value: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
         cursor.execute(
             """INSERT INTO system_settings (key, value, updated_at)
-               VALUES (?, ?, ?)
+               VALUES (%s, %s, %s)
                ON CONFLICT(key) DO UPDATE SET
                    value = excluded.value,
                    updated_at = excluded.updated_at""",
@@ -3796,7 +2648,7 @@ def delete_system_setting(key: str) -> bool:
     """Delete a system setting"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM system_settings WHERE key = ?", (key,))
+        cursor.execute("DELETE FROM system_settings WHERE key = %s", (key,))
         return cursor.rowcount > 0
 
 
@@ -3817,7 +2669,7 @@ def get_tag(tag_id: str) -> Optional[Dict[str, Any]]:
     """Get a tag by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM tags WHERE id = ?", (tag_id,))
+        cursor.execute("SELECT * FROM tags WHERE id = %s", (tag_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -3840,7 +2692,7 @@ def create_tag(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO tags (id, name, color, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s)""",
             (tag_id, name, color, now, now)
         )
     return get_tag(tag_id)
@@ -3859,21 +2711,21 @@ def update_tag(
     updates = []
     values = []
     if name is not None:
-        updates.append("name = ?")
+        updates.append("name = %s")
         values.append(name)
     if color is not None:
-        updates.append("color = ?")
+        updates.append("color = %s")
         values.append(color)
 
     if updates:
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         values.append(datetime.now(timezone.utc).isoformat())
         values.append(tag_id)
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE tags SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE tags SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -3884,7 +2736,7 @@ def delete_tag(tag_id: str) -> bool:
     """Delete a tag (session_tags will cascade delete)"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+        cursor.execute("DELETE FROM tags WHERE id = %s", (tag_id,))
         return cursor.rowcount > 0
 
 
@@ -3899,7 +2751,7 @@ def get_session_tags(session_id: str) -> List[Dict[str, Any]]:
         cursor.execute(
             """SELECT t.* FROM tags t
                INNER JOIN session_tags st ON t.id = st.tag_id
-               WHERE st.session_id = ?
+               WHERE st.session_id = %s
                ORDER BY t.name ASC""",
             (session_id,)
         )
@@ -3913,8 +2765,9 @@ def add_session_tag(session_id: str, tag_id: str) -> bool:
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """INSERT OR IGNORE INTO session_tags (session_id, tag_id, created_at)
-                   VALUES (?, ?, ?)""",
+                """INSERT INTO session_tags (session_id, tag_id, created_at)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT DO NOTHING""",
                 (session_id, tag_id, now)
             )
             return cursor.rowcount > 0
@@ -3928,7 +2781,7 @@ def remove_session_tag(session_id: str, tag_id: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM session_tags WHERE session_id = ? AND tag_id = ?",
+            "DELETE FROM session_tags WHERE session_id = %s AND tag_id = %s",
             (session_id, tag_id)
         )
         return cursor.rowcount > 0
@@ -3940,12 +2793,13 @@ def set_session_tags(session_id: str, tag_ids: List[str]) -> List[Dict[str, Any]
     with get_db() as conn:
         cursor = conn.cursor()
         # Remove existing tags
-        cursor.execute("DELETE FROM session_tags WHERE session_id = ?", (session_id,))
+        cursor.execute("DELETE FROM session_tags WHERE session_id = %s", (session_id,))
         # Add new tags
         for tag_id in tag_ids:
             cursor.execute(
-                """INSERT OR IGNORE INTO session_tags (session_id, tag_id, created_at)
-                   VALUES (?, ?, ?)""",
+                """INSERT INTO session_tags (session_id, tag_id, created_at)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT DO NOTHING""",
                 (session_id, tag_id, now)
             )
     return get_session_tags(session_id)
@@ -3958,9 +2812,9 @@ def get_sessions_by_tag(tag_id: str, limit: int = 50, offset: int = 0) -> List[D
         cursor.execute(
             """SELECT s.* FROM sessions s
                INNER JOIN session_tags st ON s.id = st.session_id
-               WHERE st.tag_id = ?
+               WHERE st.tag_id = %s
                ORDER BY s.updated_at DESC
-               LIMIT ? OFFSET ?""",
+               LIMIT %s OFFSET %s""",
             (tag_id, limit, offset)
         )
         return rows_to_list(cursor.fetchall())
@@ -3990,19 +2844,20 @@ def get_analytics_usage_stats(
         cursor = conn.cursor()
 
         # Build date filter clause
+        _date_ul = sql_date("ul.created_at")
         date_filter = ""
         params = []
         if start_date:
-            date_filter += " AND DATE(ul.created_at) >= ?"
+            date_filter += f" AND {_date_ul} >= %s"
             params.append(start_date)
         if end_date:
-            date_filter += " AND DATE(ul.created_at) <= ?"
+            date_filter += f" AND {_date_ul} <= %s"
             params.append(end_date)
 
         # Add user filter if specified
         user_filter = ""
         if api_user_id:
-            user_filter = " AND s.api_user_id = ?"
+            user_filter = " AND s.api_user_id = %s"
             params.append(api_user_id)
 
         # Get usage log aggregates (join with sessions for user filtering)
@@ -4058,19 +2913,20 @@ def get_analytics_cost_breakdown(
         cursor = conn.cursor()
 
         # Build date filter clause
+        _date_ul = sql_date("ul.created_at")
         date_filter = ""
         params = []
         if start_date:
-            date_filter += " AND DATE(ul.created_at) >= ?"
+            date_filter += f" AND {_date_ul} >= %s"
             params.append(start_date)
         if end_date:
-            date_filter += " AND DATE(ul.created_at) <= ?"
+            date_filter += f" AND {_date_ul} <= %s"
             params.append(end_date)
 
         # Add user filter if specified
         user_filter = ""
         if api_user_id:
-            user_filter = " AND s.api_user_id = ?"
+            user_filter = " AND s.api_user_id = %s"
             params.append(api_user_id)
 
         if group_by == "profile":
@@ -4114,8 +2970,8 @@ def get_analytics_cost_breakdown(
         elif group_by == "date":
             cursor.execute(f"""
                 SELECT
-                    DATE(ul.created_at) as key,
-                    DATE(ul.created_at) as name,
+                    {_date_ul} as key,
+                    {_date_ul} as name,
                     COALESCE(SUM(ul.tokens_in), 0) as total_tokens_in,
                     COALESCE(SUM(ul.tokens_out), 0) as total_tokens_out,
                     COALESCE(SUM(ul.cost_usd), 0) as total_cost_usd,
@@ -4123,8 +2979,8 @@ def get_analytics_cost_breakdown(
                 FROM usage_log ul
                 LEFT JOIN sessions s ON ul.session_id = s.id
                 WHERE 1=1 {date_filter} {user_filter}
-                GROUP BY DATE(ul.created_at)
-                ORDER BY DATE(ul.created_at) DESC
+                GROUP BY {_date_ul}
+                ORDER BY {_date_ul} DESC
             """, params)
 
         else:
@@ -4166,29 +3022,29 @@ def get_analytics_usage_trends(
         cursor = conn.cursor()
 
         # Build filter clauses
+        _date_u = sql_date("u.created_at")
         date_filter = ""
         params = []
         if start_date:
-            date_filter += " AND DATE(u.created_at) >= ?"
+            date_filter += f" AND {_date_u} >= %s"
             params.append(start_date)
         if end_date:
-            date_filter += " AND DATE(u.created_at) <= ?"
+            date_filter += f" AND {_date_u} <= %s"
             params.append(end_date)
 
         # User filter for API users (join with sessions to get api_user_id)
         user_filter = ""
         if api_user_id:
-            user_filter = " AND s.api_user_id = ?"
+            user_filter = " AND s.api_user_id = %s"
             params.append(api_user_id)
 
         # Choose date grouping based on interval
         if interval == "week":
-            # SQLite strftime: %Y-W%W gives year and week number
-            date_expr = "strftime('%Y-W%W', u.created_at)"
+            date_expr = sql_strftime('%Y-W%W', 'u.created_at')
         elif interval == "month":
-            date_expr = "strftime('%Y-%m', u.created_at)"
+            date_expr = sql_strftime('%Y-%m', 'u.created_at')
         else:  # day
-            date_expr = "DATE(u.created_at)"
+            date_expr = _date_u
 
         cursor.execute(f"""
             SELECT
@@ -4239,19 +3095,20 @@ def get_analytics_top_sessions(
         cursor = conn.cursor()
 
         # Build filter clauses
+        _date_s = sql_date("s.created_at")
         date_filter = ""
         params = []
         if start_date:
-            date_filter += " AND DATE(s.created_at) >= ?"
+            date_filter += f" AND {_date_s} >= %s"
             params.append(start_date)
         if end_date:
-            date_filter += " AND DATE(s.created_at) <= ?"
+            date_filter += f" AND {_date_s} <= %s"
             params.append(end_date)
 
         # User filter for API users
         user_filter = ""
         if api_user_id:
-            user_filter = " AND s.api_user_id = ?"
+            user_filter = " AND s.api_user_id = %s"
             params.append(api_user_id)
 
         params.append(limit)
@@ -4270,7 +3127,7 @@ def get_analytics_top_sessions(
             LEFT JOIN profiles p ON s.profile_id = p.id
             WHERE s.total_cost_usd > 0 {date_filter} {user_filter}
             ORDER BY s.total_cost_usd DESC
-            LIMIT ?
+            LIMIT %s
         """, params)
 
         rows = cursor.fetchall()
@@ -4297,7 +3154,7 @@ def get_template(template_id: str) -> Optional[Dict[str, Any]]:
     """Get a template by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM templates WHERE id = ?", (template_id,))
+        cursor.execute("SELECT * FROM templates WHERE id = %s", (template_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -4311,11 +3168,11 @@ def get_all_templates(
 
     if profile_id:
         # Return templates for this profile OR templates with no profile (global)
-        query += " AND (profile_id = ? OR profile_id IS NULL)"
+        query += " AND (profile_id = %s OR profile_id IS NULL)"
         params.append(profile_id)
 
     if category:
-        query += " AND category = ?"
+        query += " AND category = %s"
         params.append(category)
 
     query += " ORDER BY is_builtin DESC, category ASC, name ASC"
@@ -4342,7 +3199,7 @@ def create_template(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO templates (id, name, description, prompt, profile_id, icon, category, is_builtin, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (template_id, name, description, prompt, profile_id, icon, category, is_builtin, now, now)
         )
     return get_template(template_id)
@@ -4370,33 +3227,33 @@ def update_template(
     values = []
 
     if name is not None:
-        updates.append("name = ?")
+        updates.append("name = %s")
         values.append(name)
     if description is not None:
-        updates.append("description = ?")
+        updates.append("description = %s")
         values.append(description if description else None)
     if prompt is not None:
-        updates.append("prompt = ?")
+        updates.append("prompt = %s")
         values.append(prompt)
     if profile_id is not None:
-        updates.append("profile_id = ?")
+        updates.append("profile_id = %s")
         values.append(profile_id if profile_id else None)
     if icon is not None:
-        updates.append("icon = ?")
+        updates.append("icon = %s")
         values.append(icon if icon else None)
     if category is not None:
-        updates.append("category = ?")
+        updates.append("category = %s")
         values.append(category if category else None)
 
     if updates:
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         values.append(datetime.now(timezone.utc).isoformat())
         values.append(template_id)
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE templates SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE templates SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -4415,7 +3272,7 @@ def delete_template(template_id: str) -> bool:
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+        cursor.execute("DELETE FROM templates WHERE id = %s", (template_id,))
         return cursor.rowcount > 0
 
 
@@ -4434,7 +3291,7 @@ def set_template_builtin(template_id: str, is_builtin: bool) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE templates SET is_builtin = ?, updated_at = ? WHERE id = ?",
+            "UPDATE templates SET is_builtin = %s, updated_at = %s WHERE id = %s",
             (is_builtin, datetime.now(timezone.utc).isoformat(), template_id)
         )
         return cursor.rowcount > 0
@@ -4472,7 +3329,7 @@ def get_webhook(webhook_id: str) -> Optional[Dict[str, Any]]:
     """Get a webhook by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM webhooks WHERE id = ?", (webhook_id,))
+        cursor.execute("SELECT * FROM webhooks WHERE id = %s", (webhook_id,))
         row = row_to_dict(cursor.fetchone())
         if row and row.get("events"):
             row["events"] = json.loads(row["events"]) if isinstance(row["events"], str) else row["events"]
@@ -4492,7 +3349,7 @@ def create_webhook(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO webhooks (id, url, secret, events, is_active, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s)""",
             (webhook_id, url, secret, json.dumps(events), is_active, now)
         )
     return get_webhook(webhook_id)
@@ -4514,16 +3371,16 @@ def update_webhook(
     values = []
 
     if url is not None:
-        updates.append("url = ?")
+        updates.append("url = %s")
         values.append(url)
     if events is not None:
-        updates.append("events = ?")
+        updates.append("events = %s")
         values.append(json.dumps(events))
     if secret is not None:
-        updates.append("secret = ?")
+        updates.append("secret = %s")
         values.append(secret if secret else None)
     if is_active is not None:
-        updates.append("is_active = ?")
+        updates.append("is_active = %s")
         values.append(is_active)
 
     if updates:
@@ -4531,7 +3388,7 @@ def update_webhook(
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE webhooks SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE webhooks SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -4542,7 +3399,7 @@ def delete_webhook(webhook_id: str) -> bool:
     """Delete a webhook"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM webhooks WHERE id = ?", (webhook_id,))
+        cursor.execute("DELETE FROM webhooks WHERE id = %s", (webhook_id,))
         return cursor.rowcount > 0
 
 
@@ -4554,13 +3411,13 @@ def update_webhook_triggered(webhook_id: str, success: bool) -> None:
         if success:
             # Reset failure count on success
             cursor.execute(
-                "UPDATE webhooks SET last_triggered_at = ?, failure_count = 0 WHERE id = ?",
+                "UPDATE webhooks SET last_triggered_at = %s, failure_count = 0 WHERE id = %s",
                 (now, webhook_id)
             )
         else:
             # Increment failure count
             cursor.execute(
-                "UPDATE webhooks SET last_triggered_at = ?, failure_count = failure_count + 1 WHERE id = ?",
+                "UPDATE webhooks SET last_triggered_at = %s, failure_count = failure_count + 1 WHERE id = %s",
                 (now, webhook_id)
             )
 
@@ -4601,7 +3458,7 @@ def create_connector(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO connectors (id, type, name, api_user_id, config, events, is_active, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (connector_id, connector_type, name, api_user_id,
              json.dumps(config), json.dumps(events), is_active, now, now)
         )
@@ -4612,7 +3469,7 @@ def get_connector(connector_id: str) -> Optional[Dict[str, Any]]:
     """Get a connector by ID."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM connectors WHERE id = ?", (connector_id,))
+        cursor.execute("SELECT * FROM connectors WHERE id = %s", (connector_id,))
         return _parse_connector_row(row_to_dict(cursor.fetchone()))
 
 
@@ -4652,24 +3509,24 @@ def update_connector(connector_id: str, **kwargs) -> Optional[Dict[str, Any]]:
     for key in ("name", "is_active", "status", "status_message", "last_connected_at",
                 "last_error", "last_event_at", "api_user_id"):
         if key in kwargs:
-            updates.append(f"{key} = ?")
+            updates.append(f"{key} = %s")
             values.append(kwargs[key])
 
     if "config" in kwargs:
-        updates.append("config = ?")
+        updates.append("config = %s")
         values.append(json.dumps(kwargs["config"]))
     if "events" in kwargs:
-        updates.append("events = ?")
+        updates.append("events = %s")
         values.append(json.dumps(kwargs["events"]))
 
     if updates:
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         values.append(datetime.now(timezone.utc).isoformat())
         values.append(connector_id)
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE connectors SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE connectors SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -4689,24 +3546,24 @@ def update_connector_status(
         if status == "connected":
             cursor.execute(
                 """UPDATE connectors
-                   SET status = ?, status_message = ?, last_error = NULL,
-                       last_connected_at = ?, failure_count = 0, updated_at = ?
-                   WHERE id = ?""",
+                   SET status = %s, status_message = %s, last_error = NULL,
+                       last_connected_at = %s, failure_count = 0, updated_at = %s
+                   WHERE id = %s""",
                 (status, status_message, now, now, connector_id)
             )
         elif status == "error":
             cursor.execute(
                 """UPDATE connectors
-                   SET status = ?, status_message = ?, last_error = ?,
-                       failure_count = failure_count + 1, updated_at = ?
-                   WHERE id = ?""",
+                   SET status = %s, status_message = %s, last_error = %s,
+                       failure_count = failure_count + 1, updated_at = %s
+                   WHERE id = %s""",
                 (status, status_message, error, now, connector_id)
             )
         else:
             cursor.execute(
                 """UPDATE connectors
-                   SET status = ?, status_message = ?, updated_at = ?
-                   WHERE id = ?""",
+                   SET status = %s, status_message = %s, updated_at = %s
+                   WHERE id = %s""",
                 (status, status_message, now, connector_id)
             )
 
@@ -4715,7 +3572,7 @@ def delete_connector(connector_id: str) -> bool:
     """Delete a connector and all related data (cascades)."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM connectors WHERE id = ?", (connector_id,))
+        cursor.execute("DELETE FROM connectors WHERE id = %s", (connector_id,))
         return cursor.rowcount > 0
 
 
@@ -4726,12 +3583,12 @@ def update_connector_event_dispatched(connector_id: str, success: bool) -> None:
         cursor = conn.cursor()
         if success:
             cursor.execute(
-                "UPDATE connectors SET last_event_at = ?, failure_count = 0, updated_at = ? WHERE id = ?",
+                "UPDATE connectors SET last_event_at = %s, failure_count = 0, updated_at = %s WHERE id = %s",
                 (now, now, connector_id)
             )
         else:
             cursor.execute(
-                "UPDATE connectors SET last_event_at = ?, failure_count = failure_count + 1, updated_at = ? WHERE id = ?",
+                "UPDATE connectors SET last_event_at = %s, failure_count = failure_count + 1, updated_at = %s WHERE id = %s",
                 (now, now, connector_id)
             )
 
@@ -4753,7 +3610,7 @@ def create_connector_event_log(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO connector_event_log (id, connector_id, event_type, direction, payload, status, error, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (log_id, connector_id, event_type, direction,
              json.dumps(payload) if payload else None, status, error, now)
         )
@@ -4764,7 +3621,7 @@ def get_connector_event_log(connector_id: str, limit: int = 50) -> List[Dict[str
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM connector_event_log WHERE connector_id = ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM connector_event_log WHERE connector_id = %s ORDER BY created_at DESC LIMIT %s",
             (connector_id, limit)
         )
         rows = rows_to_list(cursor.fetchall())
@@ -4792,9 +3649,14 @@ def create_connector_session(
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT OR REPLACE INTO connector_sessions
+            """INSERT INTO connector_sessions
                (id, connector_id, platform_chat_id, platform_user_id, platform_user_name, session_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (connector_id, platform_chat_id) DO UPDATE SET
+                   platform_user_id = excluded.platform_user_id,
+                   platform_user_name = excluded.platform_user_name,
+                   session_id = excluded.session_id,
+                   updated_at = excluded.updated_at""",
             (session_id, connector_id, platform_chat_id, platform_user_id,
              platform_user_name, ai_session_id, now, now)
         )
@@ -4806,7 +3668,7 @@ def get_connector_session(connector_id: str, platform_chat_id: str) -> Optional[
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM connector_sessions WHERE connector_id = ? AND platform_chat_id = ?",
+            "SELECT * FROM connector_sessions WHERE connector_id = %s AND platform_chat_id = %s",
             (connector_id, platform_chat_id)
         )
         return row_to_dict(cursor.fetchone())
@@ -4816,7 +3678,7 @@ def get_connector_session_by_id(session_id: str) -> Optional[Dict[str, Any]]:
     """Get a connector session by its ID."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM connector_sessions WHERE id = ?", (session_id,))
+        cursor.execute("SELECT * FROM connector_sessions WHERE id = %s", (session_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -4825,7 +3687,7 @@ def get_connector_sessions_for_ai_session(ai_session_id: str) -> List[Dict[str, 
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM connector_sessions WHERE session_id = ? AND is_active = TRUE",
+            "SELECT * FROM connector_sessions WHERE session_id = %s AND is_active = TRUE",
             (ai_session_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -4839,7 +3701,7 @@ def update_connector_session_ai_session(
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE connector_sessions SET session_id = ?, updated_at = ? WHERE id = ?",
+            "UPDATE connector_sessions SET session_id = %s, updated_at = %s WHERE id = %s",
             (ai_session_id, now, session_id)
         )
 
@@ -4852,7 +3714,7 @@ def get_rate_limit(rate_limit_id: str) -> Optional[Dict[str, Any]]:
     """Get a rate limit configuration by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM rate_limits WHERE id = ?", (rate_limit_id,))
+        cursor.execute("SELECT * FROM rate_limits WHERE id = %s", (rate_limit_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -4866,14 +3728,14 @@ def get_rate_limit_for_user(user_id: Optional[str], api_key_id: Optional[str]) -
 
         # Try API key specific first
         if api_key_id:
-            cursor.execute("SELECT * FROM rate_limits WHERE api_key_id = ?", (api_key_id,))
+            cursor.execute("SELECT * FROM rate_limits WHERE api_key_id = %s", (api_key_id,))
             result = cursor.fetchone()
             if result:
                 return row_to_dict(result)
 
         # Try user specific
         if user_id:
-            cursor.execute("SELECT * FROM rate_limits WHERE user_id = ? AND api_key_id IS NULL", (user_id,))
+            cursor.execute("SELECT * FROM rate_limits WHERE user_id = %s AND api_key_id IS NULL", (user_id,))
             result = cursor.fetchone()
             if result:
                 return row_to_dict(result)
@@ -4911,7 +3773,7 @@ def create_rate_limit(
             """INSERT INTO rate_limits
                (id, user_id, api_key_id, requests_per_minute, requests_per_hour,
                 requests_per_day, concurrent_requests, priority, is_unlimited, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (rate_limit_id, user_id, api_key_id, requests_per_minute, requests_per_hour,
              requests_per_day, concurrent_requests, priority, is_unlimited, now, now)
         )
@@ -4932,33 +3794,33 @@ def update_rate_limit(
     if not existing:
         return None
 
-    updates = ["updated_at = ?"]
+    updates = ["updated_at = %s"]
     values = [datetime.now(timezone.utc).isoformat()]
 
     if requests_per_minute is not None:
-        updates.append("requests_per_minute = ?")
+        updates.append("requests_per_minute = %s")
         values.append(requests_per_minute)
     if requests_per_hour is not None:
-        updates.append("requests_per_hour = ?")
+        updates.append("requests_per_hour = %s")
         values.append(requests_per_hour)
     if requests_per_day is not None:
-        updates.append("requests_per_day = ?")
+        updates.append("requests_per_day = %s")
         values.append(requests_per_day)
     if concurrent_requests is not None:
-        updates.append("concurrent_requests = ?")
+        updates.append("concurrent_requests = %s")
         values.append(concurrent_requests)
     if priority is not None:
-        updates.append("priority = ?")
+        updates.append("priority = %s")
         values.append(priority)
     if is_unlimited is not None:
-        updates.append("is_unlimited = ?")
+        updates.append("is_unlimited = %s")
         values.append(is_unlimited)
 
     values.append(rate_limit_id)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"UPDATE rate_limits SET {', '.join(updates)} WHERE id = ?",
+            f"UPDATE rate_limits SET {', '.join(updates)} WHERE id = %s",
             values
         )
 
@@ -4969,7 +3831,7 @@ def delete_rate_limit(rate_limit_id: str) -> bool:
     """Delete a rate limit configuration"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM rate_limits WHERE id = ?", (rate_limit_id,))
+        cursor.execute("DELETE FROM rate_limits WHERE id = %s", (rate_limit_id,))
         return cursor.rowcount > 0
 
 
@@ -4991,7 +3853,7 @@ def log_request(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO request_log (id, user_id, api_key_id, endpoint, timestamp, duration_ms, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (request_id, user_id, api_key_id, endpoint, now, duration_ms, status)
         )
     return {
@@ -5015,18 +3877,18 @@ def get_request_count(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        query = "SELECT COUNT(*) as count FROM request_log WHERE timestamp >= ?"
+        query = "SELECT COUNT(*) as count FROM request_log WHERE timestamp >= %s"
         params = [since.isoformat()]
 
         if api_key_id:
-            query += " AND api_key_id = ?"
+            query += " AND api_key_id = %s"
             params.append(api_key_id)
         elif user_id:
-            query += " AND (user_id = ? OR api_key_id IN (SELECT id FROM api_users WHERE name = ?))"
+            query += " AND (user_id = %s OR api_key_id IN (SELECT id FROM api_users WHERE name = %s))"
             params.extend([user_id, user_id])
 
         if endpoint:
-            query += " AND endpoint = ?"
+            query += " AND endpoint = %s"
             params.append(endpoint)
 
         cursor.execute(query, params)
@@ -5039,7 +3901,7 @@ def cleanup_old_request_logs(older_than: datetime) -> int:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM request_log WHERE timestamp < ?",
+            "DELETE FROM request_log WHERE timestamp < %s",
             (older_than.isoformat(),)
         )
         return cursor.rowcount
@@ -5053,7 +3915,7 @@ def get_git_repository(repository_id: str) -> Optional[Dict[str, Any]]:
     """Get a git repository by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM git_repositories WHERE id = ?", (repository_id,))
+        cursor.execute("SELECT * FROM git_repositories WHERE id = %s", (repository_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -5061,7 +3923,7 @@ def get_git_repository_by_project(project_id: str) -> Optional[Dict[str, Any]]:
     """Get a git repository by project ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM git_repositories WHERE project_id = ?", (project_id,))
+        cursor.execute("SELECT * FROM git_repositories WHERE project_id = %s", (project_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -5086,7 +3948,7 @@ def create_git_repository(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO git_repositories (id, project_id, remote_url, default_branch, github_repo_name, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s)""",
             (repository_id, project_id, remote_url, default_branch, github_repo_name, now)
         )
     return get_git_repository(repository_id)
@@ -5108,16 +3970,16 @@ def update_git_repository(
     values = []
 
     if remote_url is not None:
-        updates.append("remote_url = ?")
+        updates.append("remote_url = %s")
         values.append(remote_url if remote_url else None)
     if default_branch is not None:
-        updates.append("default_branch = ?")
+        updates.append("default_branch = %s")
         values.append(default_branch)
     if github_repo_name is not None:
-        updates.append("github_repo_name = ?")
+        updates.append("github_repo_name = %s")
         values.append(github_repo_name if github_repo_name else None)
     if last_synced_at is not None:
-        updates.append("last_synced_at = ?")
+        updates.append("last_synced_at = %s")
         values.append(last_synced_at)
 
     if updates:
@@ -5125,7 +3987,7 @@ def update_git_repository(
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE git_repositories SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE git_repositories SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -5138,7 +4000,7 @@ def update_git_repository_synced(repository_id: str) -> Optional[Dict[str, Any]]
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE git_repositories SET last_synced_at = ? WHERE id = ?",
+            "UPDATE git_repositories SET last_synced_at = %s WHERE id = %s",
             (now, repository_id)
         )
     return get_git_repository(repository_id)
@@ -5148,7 +4010,7 @@ def delete_git_repository(repository_id: str) -> bool:
     """Delete a git repository (worktrees will be cascade deleted)"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM git_repositories WHERE id = ?", (repository_id,))
+        cursor.execute("DELETE FROM git_repositories WHERE id = %s", (repository_id,))
         return cursor.rowcount > 0
 
 
@@ -5160,7 +4022,7 @@ def get_worktree(worktree_id: str) -> Optional[Dict[str, Any]]:
     """Get a worktree by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM worktrees WHERE id = ?", (worktree_id,))
+        cursor.execute("SELECT * FROM worktrees WHERE id = %s", (worktree_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -5176,14 +4038,14 @@ def get_worktree_by_session(session_id: str) -> Optional[Dict[str, Any]]:
         cursor.execute("""
             SELECT w.* FROM worktrees w
             INNER JOIN sessions s ON s.worktree_id = w.id
-            WHERE s.id = ?
+            WHERE s.id = %s
         """, (session_id,))
         result = cursor.fetchone()
         if result:
             return row_to_dict(result)
 
         # Fallback to deprecated worktrees.session_id for backward compatibility
-        cursor.execute("SELECT * FROM worktrees WHERE session_id = ?", (session_id,))
+        cursor.execute("SELECT * FROM worktrees WHERE session_id = %s", (session_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -5192,7 +4054,7 @@ def get_sessions_for_worktree(worktree_id: str) -> List[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM sessions WHERE worktree_id = ? ORDER BY updated_at DESC",
+            "SELECT * FROM sessions WHERE worktree_id = %s ORDER BY updated_at DESC",
             (worktree_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -5223,7 +4085,7 @@ def get_worktrees_with_sessions(repository_id: str) -> List[Dict[str, Any]]:
                 s.updated_at as session_updated_at
             FROM worktrees w
             LEFT JOIN sessions s ON s.worktree_id = w.id
-            WHERE w.repository_id = ?
+            WHERE w.repository_id = %s
             ORDER BY w.created_at DESC, s.updated_at DESC
         """, (repository_id,))
         
@@ -5270,7 +4132,7 @@ def get_worktree_by_branch(repository_id: str, branch_name: str) -> Optional[Dic
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM worktrees WHERE repository_id = ? AND branch_name = ?",
+            "SELECT * FROM worktrees WHERE repository_id = %s AND branch_name = %s",
             (repository_id, branch_name)
         )
         return row_to_dict(cursor.fetchone())
@@ -5281,7 +4143,7 @@ def get_worktrees_for_repository(repository_id: str) -> List[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM worktrees WHERE repository_id = ? ORDER BY created_at DESC",
+            "SELECT * FROM worktrees WHERE repository_id = %s ORDER BY created_at DESC",
             (repository_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -5292,7 +4154,7 @@ def get_active_worktrees_for_repository(repository_id: str) -> List[Dict[str, An
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM worktrees WHERE repository_id = ? AND status = 'active' ORDER BY created_at DESC",
+            "SELECT * FROM worktrees WHERE repository_id = %s AND status = 'active' ORDER BY created_at DESC",
             (repository_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -5313,7 +4175,7 @@ def create_worktree(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO worktrees (id, repository_id, session_id, branch_name, worktree_path, base_branch, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (worktree_id, repository_id, session_id, branch_name, worktree_path, base_branch, status, now)
         )
     return get_worktree(worktree_id)
@@ -5333,10 +4195,10 @@ def update_worktree(
     values = []
 
     if session_id is not None:
-        updates.append("session_id = ?")
+        updates.append("session_id = %s")
         values.append(session_id if session_id else None)
     if status is not None:
-        updates.append("status = ?")
+        updates.append("status = %s")
         values.append(status)
 
     if updates:
@@ -5344,7 +4206,7 @@ def update_worktree(
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE worktrees SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE worktrees SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -5355,7 +4217,7 @@ def delete_worktree(worktree_id: str) -> bool:
     """Delete a worktree record"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM worktrees WHERE id = ?", (worktree_id,))
+        cursor.execute("DELETE FROM worktrees WHERE id = %s", (worktree_id,))
         return cursor.rowcount > 0
 
 
@@ -5363,7 +4225,7 @@ def delete_worktrees_for_repository(repository_id: str) -> int:
     """Delete all worktrees for a repository. Returns count of deleted worktrees."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM worktrees WHERE repository_id = ?", (repository_id,))
+        cursor.execute("DELETE FROM worktrees WHERE repository_id = %s", (repository_id,))
         return cursor.rowcount
 
 
@@ -5375,7 +4237,7 @@ def get_note(note_id: str) -> Optional[Dict[str, Any]]:
     """Get a note by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM notes WHERE id = ?", (note_id,))
+        cursor.execute("SELECT * FROM notes WHERE id = %s", (note_id,))
         row = row_to_dict(cursor.fetchone())
         if row:
             row["tags"] = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
@@ -5400,16 +4262,15 @@ def get_all_notes(
         params: List[Any] = []
 
         if search:
-            query += " AND (title LIKE ? OR content LIKE ?)"
+            query += " AND (title LIKE %s OR content LIKE %s)"
             search_term = f"%{search}%"
             params.extend([search_term, search_term])
 
         if tag:
-            # JSON array contains check using JSON functions
-            query += " AND json_array_length(json_extract(tags, '$')) > 0 AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)"
-            params.append(tag)
+            query += " AND tags::jsonb @> %s::jsonb"
+            params.append(json.dumps([tag]))
 
-        query += " ORDER BY is_pinned DESC, updated_at DESC LIMIT ? OFFSET ?"
+        query += " ORDER BY is_pinned DESC, updated_at DESC LIMIT %s OFFSET %s"
         params.extend([limit, offset])
 
         cursor.execute(query, params)
@@ -5436,7 +4297,7 @@ def create_note(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO notes (id, title, content, tags, is_pinned, file_path, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 note_id,
                 title,
@@ -5468,30 +4329,30 @@ def update_note(
     values = []
 
     if title is not None:
-        updates.append("title = ?")
+        updates.append("title = %s")
         values.append(title)
     if content is not None:
-        updates.append("content = ?")
+        updates.append("content = %s")
         values.append(content)
     if tags is not None:
-        updates.append("tags = ?")
+        updates.append("tags = %s")
         values.append(json.dumps(tags))
     if is_pinned is not None:
-        updates.append("is_pinned = ?")
+        updates.append("is_pinned = %s")
         values.append(is_pinned)
     if file_path is not None:
-        updates.append("file_path = ?")
+        updates.append("file_path = %s")
         values.append(file_path)
 
     if updates:
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         values.append(datetime.now(timezone.utc).isoformat())
         values.append(note_id)
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE notes SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE notes SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -5502,7 +4363,7 @@ def delete_note(note_id: str) -> bool:
     """Delete a note"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        cursor.execute("DELETE FROM notes WHERE id = %s", (note_id,))
         return cursor.rowcount > 0
 
 
@@ -5546,11 +4407,11 @@ def get_notes_autocomplete(
         params: List[Any] = []
 
         if search:
-            query += " AND (title LIKE ? OR content LIKE ?)"
+            query += " AND (title LIKE %s OR content LIKE %s)"
             search_term = f"%{search}%"
             params.extend([search_term, search_term])
 
-        query += " ORDER BY is_pinned DESC, updated_at DESC LIMIT ?"
+        query += " ORDER BY is_pinned DESC, updated_at DESC LIMIT %s"
         params.append(limit)
 
         cursor.execute(query, params)
@@ -5611,7 +4472,7 @@ def bulk_update_note_file_paths(updates: Dict[str, str]) -> None:
         cursor = conn.cursor()
         for note_id, file_path in updates.items():
             cursor.execute(
-                "UPDATE notes SET file_path = ? WHERE id = ?",
+                "UPDATE notes SET file_path = %s WHERE id = %s",
                 (file_path, note_id)
             )
 
@@ -5710,7 +4571,7 @@ def create_mobile_device(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO mobile_devices (id, device_id, device_name, platform, api_key_hash, capabilities, created_at, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (record_id, device_id, device_name, platform, api_key_hash, json.dumps(capabilities), now, now))
 
     return get_mobile_device(device_id)
@@ -5720,7 +4581,7 @@ def get_mobile_device(device_id: str) -> Optional[Dict[str, Any]]:
     """Get a mobile device by device_id"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM mobile_devices WHERE device_id = ?", (device_id,))
+        cursor.execute("SELECT * FROM mobile_devices WHERE device_id = %s", (device_id,))
         row = cursor.fetchone()
         if row:
             result = dict(row)
@@ -5734,7 +4595,7 @@ def get_mobile_device_by_api_key_hash(api_key_hash: str) -> Optional[Dict[str, A
     """Get a mobile device by API key hash"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM mobile_devices WHERE api_key_hash = ?", (api_key_hash,))
+        cursor.execute("SELECT * FROM mobile_devices WHERE api_key_hash = %s", (api_key_hash,))
         row = cursor.fetchone()
         if row:
             result = dict(row)
@@ -5765,7 +4626,7 @@ def update_mobile_device_capabilities(device_id: str, capabilities: Dict[str, An
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            UPDATE mobile_devices SET capabilities = ?, last_seen = ? WHERE device_id = ?
+            UPDATE mobile_devices SET capabilities = %s, last_seen = %s WHERE device_id = %s
         """, (json.dumps(capabilities), now, device_id))
         if cursor.rowcount == 0:
             return None
@@ -5778,7 +4639,7 @@ def update_mobile_device_fcm_token(device_id: str, fcm_token: str) -> Optional[D
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            UPDATE mobile_devices SET fcm_token = ?, last_seen = ? WHERE device_id = ?
+            UPDATE mobile_devices SET fcm_token = %s, last_seen = %s WHERE device_id = %s
         """, (fcm_token, now, device_id))
         if cursor.rowcount == 0:
             return None
@@ -5790,14 +4651,14 @@ def update_mobile_device_last_seen(device_id: str) -> None:
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE mobile_devices SET last_seen = ? WHERE device_id = ?", (now, device_id))
+        cursor.execute("UPDATE mobile_devices SET last_seen = %s WHERE device_id = %s", (now, device_id))
 
 
 def delete_mobile_device(device_id: str) -> bool:
     """Delete a mobile device"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM mobile_devices WHERE device_id = ?", (device_id,))
+        cursor.execute("DELETE FROM mobile_devices WHERE device_id = %s", (device_id,))
         return cursor.rowcount > 0
 
 
@@ -5821,7 +4682,7 @@ def create_pending_action(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO pending_actions (id, device_id, action_type, params, security_level, created_at, expires_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
         """, (action_id, device_id, action_type, json.dumps(params), security_level, now, expires_at))
 
     return get_pending_action(action_id)
@@ -5831,7 +4692,7 @@ def get_pending_action(action_id: str) -> Optional[Dict[str, Any]]:
     """Get a pending action by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM pending_actions WHERE id = ?", (action_id,))
+        cursor.execute("SELECT * FROM pending_actions WHERE id = %s", (action_id,))
         row = cursor.fetchone()
         if row:
             result = dict(row)
@@ -5848,7 +4709,7 @@ def get_pending_actions_for_device(device_id: str) -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT * FROM pending_actions
-            WHERE device_id = ? AND status = 'pending' AND expires_at > ?
+            WHERE device_id = %s AND status = 'pending' AND expires_at > %s
             ORDER BY created_at DESC
         """, (device_id, now))
         rows = cursor.fetchall()
@@ -5866,7 +4727,7 @@ def update_pending_action_status(action_id: str, status: str) -> Optional[Dict[s
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE pending_actions SET status = ? WHERE id = ?",
+            "UPDATE pending_actions SET status = %s WHERE id = %s",
             (status, action_id)
         )
         if cursor.rowcount == 0:
@@ -5881,7 +4742,7 @@ def cleanup_expired_actions() -> int:
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE pending_actions SET status = 'expired'
-            WHERE status = 'pending' AND expires_at <= ?
+            WHERE status = 'pending' AND expires_at <= %s
         """, (now,))
         return cursor.rowcount
 
@@ -5905,7 +4766,7 @@ def create_trusted_action(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO trusted_actions (id, device_id, action_pattern, auto_approve, require_preview, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """, (trusted_id, device_id, action_pattern, auto_approve, require_preview, now))
 
     return get_trusted_action(trusted_id)
@@ -5915,7 +4776,7 @@ def get_trusted_action(trusted_id: str) -> Optional[Dict[str, Any]]:
     """Get a trusted action by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM trusted_actions WHERE id = ?", (trusted_id,))
+        cursor.execute("SELECT * FROM trusted_actions WHERE id = %s", (trusted_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -5924,7 +4785,7 @@ def get_trusted_actions_for_device(device_id: str) -> List[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM trusted_actions WHERE device_id = ? ORDER BY created_at DESC",
+            "SELECT * FROM trusted_actions WHERE device_id = %s ORDER BY created_at DESC",
             (device_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -5934,7 +4795,7 @@ def delete_trusted_action(trusted_id: str) -> bool:
     """Delete a trusted action"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM trusted_actions WHERE id = ?", (trusted_id,))
+        cursor.execute("DELETE FROM trusted_actions WHERE id = %s", (trusted_id,))
         return cursor.rowcount > 0
 
 
@@ -5954,7 +4815,7 @@ def get_mobile_schedule(schedule_id: str) -> Optional[Dict[str, Any]]:
     """Get a mobile schedule by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM mobile_schedules WHERE id = ?", (schedule_id,))
+        cursor.execute("SELECT * FROM mobile_schedules WHERE id = %s", (schedule_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -5975,7 +4836,7 @@ def save_mobile_schedule(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO mobile_schedules (id, device_id, schedule_type, trigger_time, hour, minute, params, enabled, created_at, last_triggered_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
                 device_id = excluded.device_id,
                 schedule_type = excluded.schedule_type,
@@ -5993,7 +4854,7 @@ def delete_mobile_schedule(schedule_id: str) -> bool:
     """Delete a mobile schedule"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM mobile_schedules WHERE id = ?", (schedule_id,))
+        cursor.execute("DELETE FROM mobile_schedules WHERE id = %s", (schedule_id,))
         return cursor.rowcount > 0
 
 
@@ -6035,7 +4896,7 @@ def save_mobile_action(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO pending_actions (id, device_id, action_type, params, security_level, status, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
                 device_id = excluded.device_id,
                 action_type = excluded.action_type,
@@ -6051,7 +4912,7 @@ def delete_mobile_action(action_id: str) -> bool:
     """Delete a mobile action"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM pending_actions WHERE id = ?", (action_id,))
+        cursor.execute("DELETE FROM pending_actions WHERE id = %s", (action_id,))
         return cursor.rowcount > 0
 
 
@@ -6082,26 +4943,26 @@ def save_mobile_device(
     with get_db() as conn:
         cursor = conn.cursor()
         # Check if device exists
-        cursor.execute("SELECT id FROM mobile_devices WHERE device_id = ?", (device_id,))
+        cursor.execute("SELECT id FROM mobile_devices WHERE device_id = %s", (device_id,))
         existing = cursor.fetchone()
 
         if existing:
             cursor.execute("""
                 UPDATE mobile_devices SET
-                    device_name = ?,
-                    platform = ?,
-                    fcm_token = ?,
-                    api_key_hash = COALESCE(?, api_key_hash),
-                    capabilities = ?,
-                    last_seen = ?
-                WHERE device_id = ?
+                    device_name = %s,
+                    platform = %s,
+                    fcm_token = %s,
+                    api_key_hash = COALESCE(%s, api_key_hash),
+                    capabilities = %s,
+                    last_seen = %s
+                WHERE device_id = %s
             """, (name, platform, fcm_token, api_key_hash, capabilities, last_seen_at or now, device_id))
         else:
             import uuid
             record_id = str(uuid.uuid4())[:8]
             cursor.execute("""
                 INSERT INTO mobile_devices (id, device_id, device_name, platform, api_key_hash, fcm_token, capabilities, created_at, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (record_id, device_id, name, platform, api_key_hash, fcm_token, capabilities, now, last_seen_at or now))
 
     return get_mobile_device(device_id)
@@ -6174,7 +5035,7 @@ def create_automation(
                 profile_id, project_id, output_config, max_turns, timeout_seconds,
                 max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
                 requires_approval, action_steps, triggers, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (automation_id, name, description, trigger_type,
              json.dumps(trigger_config), prompt, profile_id, project_id,
              json.dumps(output_config), max_turns, timeout_seconds,
@@ -6190,7 +5051,7 @@ def get_automation(automation_id: str) -> Optional[Dict[str, Any]]:
     """Get an automation by ID."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM automations WHERE id = ?", (automation_id,))
+        cursor.execute("SELECT * FROM automations WHERE id = %s", (automation_id,))
         return _parse_automation_row(row_to_dict(cursor.fetchone()))
 
 
@@ -6258,34 +5119,34 @@ def update_automation(automation_id: str, **kwargs) -> Optional[Dict[str, Any]]:
                 "last_run_at", "last_error", "run_count", "failure_count",
                 "total_cost_used", "requires_approval"):
         if key in kwargs:
-            updates.append(f"{key} = ?")
+            updates.append(f"{key} = %s")
             values.append(kwargs[key])
 
     for key in ("trigger_config", "output_config"):
         if key in kwargs:
-            updates.append(f"{key} = ?")
+            updates.append(f"{key} = %s")
             values.append(json.dumps(kwargs[key]))
 
     if "action_steps" in kwargs:
-        updates.append("action_steps = ?")
+        updates.append("action_steps = %s")
         values.append(json.dumps(kwargs["action_steps"]) if kwargs["action_steps"] is not None else None)
 
     if "triggers" in kwargs:
-        updates.append("triggers = ?")
+        updates.append("triggers = %s")
         values.append(json.dumps(kwargs["triggers"]) if kwargs["triggers"] is not None else None)
 
     if "trigger_type" in kwargs:
-        updates.append("trigger_type = ?")
+        updates.append("trigger_type = %s")
         values.append(kwargs["trigger_type"])
 
     if updates:
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         values.append(datetime.now(timezone.utc).isoformat())
         values.append(automation_id)
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE automations SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE automations SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -6296,7 +5157,7 @@ def delete_automation(automation_id: str) -> bool:
     """Delete an automation (cascades to runs and approvals)."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM automations WHERE id = ?", (automation_id,))
+        cursor.execute("DELETE FROM automations WHERE id = %s", (automation_id,))
         return cursor.rowcount > 0
 
 
@@ -6316,7 +5177,7 @@ def create_automation_run(
         cursor.execute(
             """INSERT INTO automation_runs
                (id, automation_id, status, trigger_data, prompt_rendered, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s)""",
             (run_id, automation_id, status,
              json.dumps(trigger_data) if trigger_data else None,
              prompt_rendered, now)
@@ -6328,7 +5189,7 @@ def get_automation_run(run_id: str) -> Optional[Dict[str, Any]]:
     """Get an automation run by ID."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM automation_runs WHERE id = ?", (run_id,))
+        cursor.execute("SELECT * FROM automation_runs WHERE id = %s", (run_id,))
         return _parse_automation_run_row(row_to_dict(cursor.fetchone()))
 
 
@@ -6337,7 +5198,7 @@ def get_automation_runs(automation_id: str, limit: int = 50, offset: int = 0) ->
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM automation_runs WHERE automation_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            "SELECT * FROM automation_runs WHERE automation_id = %s ORDER BY created_at DESC LIMIT %s OFFSET %s",
             (automation_id, limit, offset)
         )
         rows = rows_to_list(cursor.fetchall())
@@ -6353,11 +5214,11 @@ def update_automation_run(run_id: str, **kwargs) -> Optional[Dict[str, Any]]:
                 "cost_usd", "tokens_in", "tokens_out", "duration_ms",
                 "output_status", "output_error", "started_at", "completed_at"):
         if key in kwargs:
-            updates.append(f"{key} = ?")
+            updates.append(f"{key} = %s")
             values.append(kwargs[key])
 
     if "trigger_data" in kwargs:
-        updates.append("trigger_data = ?")
+        updates.append("trigger_data = %s")
         values.append(json.dumps(kwargs["trigger_data"]) if kwargs["trigger_data"] else None)
 
     if updates:
@@ -6365,7 +5226,7 @@ def update_automation_run(run_id: str, **kwargs) -> Optional[Dict[str, Any]]:
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE automation_runs SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE automation_runs SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -6380,7 +5241,7 @@ def get_automation_daily_stats(automation_id: str) -> Dict[str, Any]:
         cursor.execute(
             """SELECT COUNT(*) as run_count, COALESCE(SUM(cost_usd), 0) as total_cost
                FROM automation_runs
-               WHERE automation_id = ? AND created_at >= ?""",
+               WHERE automation_id = %s AND created_at >= %s""",
             (automation_id, today)
         )
         row = cursor.fetchone()
@@ -6399,7 +5260,7 @@ def get_automation_aggregate_stats(automation_id: str) -> Dict[str, Any]:
                 COALESCE(SUM(cost_usd), 0) as total_cost_usd,
                 AVG(CASE WHEN duration_ms > 0 THEN duration_ms END) as avg_duration_ms
             FROM automation_runs
-            WHERE automation_id = ?""",
+            WHERE automation_id = %s""",
             (automation_id,)
         )
         row = cursor.fetchone()
@@ -6427,7 +5288,7 @@ def create_automation_approval(
         cursor.execute(
             """INSERT INTO automation_approvals
                (id, run_id, automation_id, prompt_preview, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s)""",
             (approval_id, run_id, automation_id, prompt_preview, now)
         )
     return get_automation_approval(approval_id)
@@ -6437,7 +5298,7 @@ def get_automation_approval(approval_id: str) -> Optional[Dict[str, Any]]:
     """Get an automation approval by ID."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM automation_approvals WHERE id = ?", (approval_id,))
+        cursor.execute("SELECT * FROM automation_approvals WHERE id = %s", (approval_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -6461,7 +5322,7 @@ def update_automation_approval(approval_id: str, status: str, decided_by: Option
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE automation_approvals SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?",
+            "UPDATE automation_approvals SET status = %s, decided_by = %s, decided_at = %s WHERE id = %s",
             (status, decided_by, now, approval_id)
         )
     return get_automation_approval(approval_id)

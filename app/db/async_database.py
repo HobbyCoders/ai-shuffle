@@ -3,7 +3,7 @@ Async wrappers for all synchronous database operations.
 
 Problem:
     All database functions in ``app.db.database`` are synchronous, using
-    ``sqlite3`` directly.  When called from ``async def`` route handlers
+    ``psycopg2`` directly.  When called from ``async def`` route handlers
     (FastAPI, WebSocket handlers, etc.) they **block the asyncio event loop**,
     stalling all concurrent connections.
 
@@ -30,9 +30,8 @@ Incremental migration:
 
 Thread safety:
     Each ``to_thread`` call runs in a separate thread from Python's default
-    ``ThreadPoolExecutor``.  Since ``get_db()`` opens and closes a new SQLite
-    connection per call, there is no connection sharing across threads.
-    SQLite WAL mode allows concurrent readers with a single writer.
+    ``ThreadPoolExecutor``.  Since ``get_db()`` acquires a connection from the
+    PostgreSQL pool per call, there is no connection sharing across threads.
 """
 
 import asyncio

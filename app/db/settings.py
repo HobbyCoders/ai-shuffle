@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -33,7 +32,7 @@ def get_user_preference(user_type: str, user_id: str, key: str) -> Optional[User
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM user_preferences WHERE user_type = ? AND user_id = ? AND key = ?",
+            "SELECT * FROM user_preferences WHERE user_type = %s AND user_id = %s AND key = %s",
             (user_type, user_id, key)
         )
         row = cursor.fetchone()
@@ -41,7 +40,8 @@ def get_user_preference(user_type: str, user_id: str, key: str) -> Optional[User
             result = row_to_dict(row)
             # Parse JSON value
             if result and result.get("value"):
-                result["value"] = json.loads(result["value"])
+                raw = result["value"]
+                result["value"] = json.loads(raw) if isinstance(raw, str) else raw
             return result
         return None
 
@@ -55,7 +55,7 @@ def set_user_preference(user_type: str, user_id: str, key: str, value: Any) -> U
 
         cursor.execute(
             """INSERT INTO user_preferences (user_type, user_id, key, value, updated_at)
-               VALUES (?, ?, ?, ?, ?)
+               VALUES (%s, %s, %s, %s, %s)
                ON CONFLICT(user_type, user_id, key) DO UPDATE SET
                    value = excluded.value,
                    updated_at = excluded.updated_at""",
@@ -76,7 +76,7 @@ def delete_user_preference(user_type: str, user_id: str, key: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM user_preferences WHERE user_type = ? AND user_id = ? AND key = ?",
+            "DELETE FROM user_preferences WHERE user_type = %s AND user_id = %s AND key = %s",
             (user_type, user_id, key)
         )
         return cursor.rowcount > 0
@@ -87,14 +87,15 @@ def get_all_user_preferences(user_type: str, user_id: str) -> List[UserPreferenc
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM user_preferences WHERE user_type = ? AND user_id = ?",
+            "SELECT * FROM user_preferences WHERE user_type = %s AND user_id = %s",
             (user_type, user_id)
         )
         rows = rows_to_list(cursor.fetchall())
         # Parse JSON values
         for row in rows:
             if row.get("value"):
-                row["value"] = json.loads(row["value"])
+                raw = row["value"]
+                row["value"] = json.loads(raw) if isinstance(raw, str) else raw
         return rows
 
 
@@ -106,7 +107,7 @@ def get_system_setting(key: str) -> Optional[str]:
     """Get a system setting by key"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
+        cursor.execute("SELECT value FROM system_settings WHERE key = %s", (key,))
         row = cursor.fetchone()
         return row["value"] if row else None
 
@@ -118,7 +119,7 @@ def set_system_setting(key: str, value: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
         cursor.execute(
             """INSERT INTO system_settings (key, value, updated_at)
-               VALUES (?, ?, ?)
+               VALUES (%s, %s, %s)
                ON CONFLICT(key) DO UPDATE SET
                    value = excluded.value,
                    updated_at = excluded.updated_at""",
@@ -130,7 +131,7 @@ def delete_system_setting(key: str) -> bool:
     """Delete a system setting"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM system_settings WHERE key = ?", (key,))
+        cursor.execute("DELETE FROM system_settings WHERE key = %s", (key,))
         return cursor.rowcount > 0
 
 

@@ -7,7 +7,6 @@ Login Attempts, Account Lockouts, and API Key Sessions.
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -102,7 +101,7 @@ def create_admin(username: str, password_hash: str) -> AdminCreateResult:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO admin (id, username, password_hash) VALUES (1, ?, ?)",
+            "INSERT INTO admin (id, username, password_hash) VALUES (1, %s, %s)",
             (username, password_hash)
         )
         return {"id": 1, "username": username}
@@ -113,7 +112,7 @@ def update_admin_password(password_hash: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE admin SET password_hash = ? WHERE id = 1",
+            "UPDATE admin SET password_hash = %s WHERE id = 1",
             (password_hash,)
         )
         return cursor.rowcount > 0
@@ -137,7 +136,7 @@ def create_audit_log(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO audit_log (id, user_id, user_type, event_type, ip_address, user_agent, details)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (event_id, user_id, user_type, event_type, ip_address, user_agent, json.dumps(details) if details else None)
         )
         return {
@@ -162,13 +161,13 @@ def get_audit_logs(
     params = []
 
     if user_id:
-        query += " AND user_id = ?"
+        query += " AND user_id = %s"
         params.append(user_id)
     if event_type:
-        query += " AND event_type = ?"
+        query += " AND event_type = %s"
         params.append(event_type)
 
-    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    query += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
     params.extend([limit, offset])
 
     with get_db() as conn:
@@ -187,10 +186,10 @@ def get_audit_log_count(user_id: Optional[str] = None, event_type: Optional[str]
     params = []
 
     if user_id:
-        query += " AND user_id = ?"
+        query += " AND user_id = %s"
         params.append(user_id)
     if event_type:
-        query += " AND event_type = ?"
+        query += " AND event_type = %s"
         params.append(event_type)
 
     with get_db() as conn:
@@ -213,7 +212,7 @@ def create_auth_session(token: str, expires_at: datetime) -> AuthSessionRow:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO auth_sessions (token, expires_at) VALUES (?, ?)",
+            "INSERT INTO auth_sessions (token, expires_at) VALUES (%s, %s)",
             (token, expires_at.isoformat())
         )
         return {"token": token, "expires_at": expires_at}
@@ -229,7 +228,7 @@ def get_auth_session(token: str) -> Optional[AuthSessionRow]:
         cursor = conn.cursor()
         now_iso = datetime.now(timezone.utc).isoformat()
         cursor.execute(
-            "SELECT * FROM auth_sessions WHERE token = ? AND expires_at > ?",
+            "SELECT * FROM auth_sessions WHERE token = %s AND expires_at > %s",
             (token, now_iso)
         )
         result = row_to_dict(cursor.fetchone())
@@ -242,7 +241,7 @@ def get_auth_session(token: str) -> Optional[AuthSessionRow]:
 
             # Check if THIS token exists (regardless of expiry)
             cursor.execute(
-                "SELECT token, expires_at, created_at FROM auth_sessions WHERE token = ?",
+                "SELECT token, expires_at, created_at FROM auth_sessions WHERE token = %s",
                 (token,)
             )
             exact_match = cursor.fetchone()
@@ -301,7 +300,7 @@ def delete_auth_session(token: str):
     )
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+        cursor.execute("DELETE FROM auth_sessions WHERE token = %s", (token,))
 
 
 def clear_all_sessions():
@@ -336,7 +335,7 @@ def record_login_attempt(ip_address: str, username: Optional[str], success: bool
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO login_attempts (ip_address, username, success, created_at)
-               VALUES (?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s)""",
             (ip_address, username, success, datetime.now(timezone.utc).isoformat())
         )
 
@@ -349,7 +348,7 @@ def get_failed_attempts_count(ip_address: str, window_minutes: int = 15) -> int:
         cursor = conn.cursor()
         cursor.execute(
             """SELECT COUNT(*) as count FROM login_attempts
-               WHERE ip_address = ? AND success = FALSE AND created_at > ?""",
+               WHERE ip_address = %s AND success = FALSE AND created_at > %s""",
             (ip_address, cutoff)
         )
         row = cursor.fetchone()
@@ -364,7 +363,7 @@ def get_failed_attempts_for_username(username: str, window_minutes: int = 15) ->
         cursor = conn.cursor()
         cursor.execute(
             """SELECT COUNT(*) as count FROM login_attempts
-               WHERE username = ? AND success = FALSE AND created_at > ?""",
+               WHERE username = %s AND success = FALSE AND created_at > %s""",
             (username, cutoff)
         )
         row = cursor.fetchone()
@@ -384,7 +383,7 @@ def create_lockout(ip_address: Optional[str], username: Optional[str],
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO account_lockouts (ip_address, username, locked_until, reason, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s)""",
             (ip_address, username, locked_until, reason, datetime.now(timezone.utc).isoformat())
         )
 
@@ -396,7 +395,7 @@ def is_ip_locked(ip_address: str) -> Optional[AccountLockoutRow]:
         cursor = conn.cursor()
         cursor.execute(
             """SELECT * FROM account_lockouts
-               WHERE ip_address = ? AND locked_until > ?
+               WHERE ip_address = %s AND locked_until > %s
                ORDER BY locked_until DESC LIMIT 1""",
             (ip_address, now)
         )
@@ -410,7 +409,7 @@ def is_username_locked(username: str) -> Optional[AccountLockoutRow]:
         cursor = conn.cursor()
         cursor.execute(
             """SELECT * FROM account_lockouts
-               WHERE username = ? AND locked_until > ?
+               WHERE username = %s AND locked_until > %s
                ORDER BY locked_until DESC LIMIT 1""",
             (username, now)
         )
@@ -424,10 +423,10 @@ def is_username_locked(username: str) -> Optional[AccountLockoutRow]:
 def _get_api_user_profile_ids(cursor, user_id: str) -> List[str]:
     """Get profile IDs for an API user from junction table"""
     cursor.execute(
-        "SELECT profile_id FROM api_user_profiles WHERE api_user_id = ? ORDER BY created_at",
+        "SELECT profile_id FROM api_user_profiles WHERE api_user_id = %s ORDER BY created_at",
         (user_id,)
     )
-    return [row[0] for row in cursor.fetchall()]
+    return [row["profile_id"] for row in cursor.fetchall()]
 
 
 def cleanup_expired_sessions() -> dict:
@@ -447,21 +446,21 @@ def cleanup_expired_sessions() -> dict:
         cursor = conn.cursor()
 
         # Expired admin sessions
-        cursor.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now_iso,))
+        cursor.execute("DELETE FROM auth_sessions WHERE expires_at <= %s", (now_iso,))
         results["auth_sessions"] = cursor.rowcount
 
         # Expired API key sessions
-        cursor.execute("DELETE FROM api_key_sessions WHERE expires_at <= ?", (now_iso,))
+        cursor.execute("DELETE FROM api_key_sessions WHERE expires_at <= %s", (now_iso,))
         results["api_key_sessions"] = cursor.rowcount
 
         # Expired account lockouts (locked_until has passed)
-        cursor.execute("DELETE FROM account_lockouts WHERE locked_until <= ?", (now_iso,))
+        cursor.execute("DELETE FROM account_lockouts WHERE locked_until <= %s", (now_iso,))
         results["account_lockouts"] = cursor.rowcount
 
         # Old login attempts (older than 24 hours — well past the 15-minute window)
         from datetime import timedelta
         cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        cursor.execute("DELETE FROM login_attempts WHERE created_at < ?", (cutoff_24h,))
+        cursor.execute("DELETE FROM login_attempts WHERE created_at < %s", (cutoff_24h,))
         results["login_attempts"] = cursor.rowcount
 
     total = sum(results.values())
@@ -481,7 +480,7 @@ def get_api_key_session(token: str) -> Optional[ApiKeySessionRow]:
             """SELECT aks.*, au.name as user_name, au.project_id, au.is_active
                FROM api_key_sessions aks
                JOIN api_users au ON aks.api_user_id = au.id
-               WHERE aks.token = ? AND aks.expires_at > ? AND au.is_active = TRUE""",
+               WHERE aks.token = %s AND aks.expires_at > %s AND au.is_active = TRUE""",
             (token, datetime.now(timezone.utc).isoformat())
         )
         session = row_to_dict(cursor.fetchone())

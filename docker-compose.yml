@@ -1,6 +1,30 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai-shuffle-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=ai_shuffle
+      - POSTGRES_USER=ai_shuffle
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ai_shuffle"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - claude-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   ai-shuffle:
     # Use pre-built image from GitHub Container Registry
     # Replace <your-username> with your GitHub username
@@ -19,6 +43,7 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=8000
+      - DATABASE_URL=postgresql://REDACTED@postgres:5432/ai_shuffle
       - SERVICE_NAME=${SERVICE_NAME:-ai-shuffle}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-300}
@@ -28,6 +53,10 @@ services:
       - AUTO_UPDATE=${AUTO_UPDATE:-true}
       # SDK initialize timeout in ms (default: 60000, increase if CLI startup is slow)
       - CLAUDE_CODE_STREAM_CLOSE_TIMEOUT=${CLAUDE_CODE_STREAM_CLOSE_TIMEOUT:-120000}
+
+    depends_on:
+      postgres:
+        condition: service_healthy
 
     # Load environment from .env file (optional)
     env_file:
@@ -92,6 +121,9 @@ volumes:
     driver: local
   # Named volume for AI Shuffle data (database, sessions)
   ai-shuffle-data:
+    driver: local
+  # Named volume for PostgreSQL data
+  postgres-data:
     driver: local
 
 networks:

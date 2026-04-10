@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -31,11 +30,11 @@ def get_profile(profile_id: str) -> Optional[ProfileRow]:
     """Get a profile by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,))
+        cursor.execute("SELECT * FROM profiles WHERE id = %s", (profile_id,))
         row = row_to_dict(cursor.fetchone())
         if row:
-            row["config"] = json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
-            row["mcp_tools"] = json.loads(row["mcp_tools"]) if isinstance(row["mcp_tools"], str) else row["mcp_tools"]
+            row["config"] = json.loads(row["config"]) if isinstance(row["config"], str) else (row["config"] if row["config"] is not None else {})
+            row["mcp_tools"] = json.loads(row["mcp_tools"]) if isinstance(row["mcp_tools"], str) else (row["mcp_tools"] if row["mcp_tools"] is not None else [])
         return row
 
 
@@ -46,8 +45,8 @@ def get_all_profiles() -> List[ProfileRow]:
         cursor.execute("SELECT * FROM profiles ORDER BY is_builtin DESC, name ASC")
         rows = rows_to_list(cursor.fetchall())
         for row in rows:
-            row["config"] = json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
-            row["mcp_tools"] = json.loads(row["mcp_tools"]) if isinstance(row["mcp_tools"], str) else row["mcp_tools"]
+            row["config"] = json.loads(row["config"]) if isinstance(row["config"], str) else (row["config"] if row["config"] is not None else {})
+            row["mcp_tools"] = json.loads(row["mcp_tools"]) if isinstance(row["mcp_tools"], str) else (row["mcp_tools"] if row["mcp_tools"] is not None else [])
         return rows
 
 
@@ -65,7 +64,7 @@ def create_profile(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO profiles (id, name, description, config, is_builtin, mcp_tools, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (profile_id, name, description, json.dumps(config), is_builtin, json.dumps(mcp_tools or []), now, now)
         )
     return get_profile(profile_id)
@@ -96,24 +95,24 @@ def update_profile(
     updates = []
     values = []
     if name is not None:
-        updates.append("name = ?")
+        updates.append("name = %s")
         values.append(name)
     if description is not None:
-        updates.append("description = ?")
+        updates.append("description = %s")
         values.append(description)
     if config is not None:
-        updates.append("config = ?")
+        updates.append("config = %s")
         values.append(json.dumps(config))
 
     if updates:
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         values.append(datetime.now(timezone.utc).isoformat())
         values.append(profile_id)
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE profiles SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE profiles SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -133,13 +132,13 @@ def delete_profile(profile_id: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         # Unlink sessions from this profile (sessions are preserved with NULL profile_id)
-        cursor.execute("UPDATE sessions SET profile_id = NULL WHERE profile_id = ?", (profile_id,))
+        cursor.execute("UPDATE sessions SET profile_id = NULL WHERE profile_id = %s", (profile_id,))
         # Unlink session_messages from this profile
-        cursor.execute("UPDATE session_messages SET profile_id = NULL WHERE profile_id = ?", (profile_id,))
+        cursor.execute("UPDATE session_messages SET profile_id = NULL WHERE profile_id = %s", (profile_id,))
         # Unlink usage_log entries from this profile
-        cursor.execute("UPDATE usage_log SET profile_id = NULL WHERE profile_id = ?", (profile_id,))
+        cursor.execute("UPDATE usage_log SET profile_id = NULL WHERE profile_id = %s", (profile_id,))
         # Now delete the profile
-        cursor.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+        cursor.execute("DELETE FROM profiles WHERE id = %s", (profile_id,))
         return cursor.rowcount > 0
 
 
@@ -147,8 +146,8 @@ def get_profile_session_count(profile_id: str) -> int:
     """Get the number of sessions associated with a profile"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM sessions WHERE profile_id = ?", (profile_id,))
-        return cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) as cnt FROM sessions WHERE profile_id = %s", (profile_id,))
+        return cursor.fetchone()["cnt"]
 
 
 def get_all_profile_session_counts() -> Dict[str, int]:
@@ -168,7 +167,7 @@ def set_profile_builtin(profile_id: str, is_builtin: bool) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE profiles SET is_builtin = ?, updated_at = ? WHERE id = ?",
+            "UPDATE profiles SET is_builtin = %s, updated_at = %s WHERE id = %s",
             (is_builtin, datetime.now(timezone.utc).isoformat(), profile_id)
         )
         return cursor.rowcount > 0

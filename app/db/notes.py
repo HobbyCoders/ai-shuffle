@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -51,7 +50,7 @@ def get_note(note_id: str) -> Optional[NoteRow]:
     """Get a note by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM notes WHERE id = ?", (note_id,))
+        cursor.execute("SELECT * FROM notes WHERE id = %s", (note_id,))
         row = row_to_dict(cursor.fetchone())
         if row:
             row["tags"] = json.loads(row["tags"]) if isinstance(row["tags"], str) else row["tags"]
@@ -76,16 +75,16 @@ def get_all_notes(
         params: List[Any] = []
 
         if search:
-            query += " AND (title LIKE ? OR content LIKE ?)"
+            query += " AND (title LIKE %s OR content LIKE %s)"
             search_term = f"%{search}%"
             params.extend([search_term, search_term])
 
         if tag:
-            # JSON array contains check using JSON functions
-            query += " AND json_array_length(json_extract(tags, '$')) > 0 AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)"
-            params.append(tag)
+            # JSONB array contains check
+            query += " AND tags::jsonb @> %s::jsonb"
+            params.append(json.dumps([tag]))
 
-        query += " ORDER BY is_pinned DESC, updated_at DESC LIMIT ? OFFSET ?"
+        query += " ORDER BY is_pinned DESC, updated_at DESC LIMIT %s OFFSET %s"
         params.extend([limit, offset])
 
         cursor.execute(query, params)
@@ -112,7 +111,7 @@ def create_note(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO notes (id, title, content, tags, is_pinned, file_path, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 note_id,
                 title,
@@ -144,30 +143,30 @@ def update_note(
     values = []
 
     if title is not None:
-        updates.append("title = ?")
+        updates.append("title = %s")
         values.append(title)
     if content is not None:
-        updates.append("content = ?")
+        updates.append("content = %s")
         values.append(content)
     if tags is not None:
-        updates.append("tags = ?")
+        updates.append("tags = %s")
         values.append(json.dumps(tags))
     if is_pinned is not None:
-        updates.append("is_pinned = ?")
+        updates.append("is_pinned = %s")
         values.append(is_pinned)
     if file_path is not None:
-        updates.append("file_path = ?")
+        updates.append("file_path = %s")
         values.append(file_path)
 
     if updates:
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         values.append(datetime.now(timezone.utc).isoformat())
         values.append(note_id)
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE notes SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE notes SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -178,7 +177,7 @@ def delete_note(note_id: str) -> bool:
     """Delete a note"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        cursor.execute("DELETE FROM notes WHERE id = %s", (note_id,))
         return cursor.rowcount > 0
 
 
@@ -222,11 +221,11 @@ def get_notes_autocomplete(
         params: List[Any] = []
 
         if search:
-            query += " AND (title LIKE ? OR content LIKE ?)"
+            query += " AND (title LIKE %s OR content LIKE %s)"
             search_term = f"%{search}%"
             params.extend([search_term, search_term])
 
-        query += " ORDER BY is_pinned DESC, updated_at DESC LIMIT ?"
+        query += " ORDER BY is_pinned DESC, updated_at DESC LIMIT %s"
         params.append(limit)
 
         cursor.execute(query, params)
@@ -287,6 +286,6 @@ def bulk_update_note_file_paths(updates: Dict[str, str]) -> None:
         cursor = conn.cursor()
         for note_id, file_path in updates.items():
             cursor.execute(
-                "UPDATE notes SET file_path = ? WHERE id = ?",
+                "UPDATE notes SET file_path = %s WHERE id = %s",
                 (file_path, note_id)
             )

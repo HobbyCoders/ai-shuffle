@@ -20,11 +20,78 @@ from app.core import encryption
 logger = logging.getLogger(__name__)
 
 
+def _auto_migrate_sqlite_to_postgres() -> None:
+    """Automatically migrate data from SQLite if it exists and Postgres is empty.
+
+    Runs once on first startup after switching from SQLite to PostgreSQL.
+    The SQLite file is renamed to db.sqlite.migrated after success.
+    """
+    sqlite_path = settings.db_path  # data_dir / "db.sqlite"
+
+    if not sqlite_path.exists():
+        return  # No SQLite database to migrate from
+
+    # Check if Postgres already has data (admin table has rows)
+    from app.db.base import get_db
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as cnt FROM admin")
+        row = cursor.fetchone()
+        count = row["cnt"] if isinstance(row, dict) else row[0]
+        if count > 0:
+            logger.info("PostgreSQL already has data, skipping SQLite migration")
+            # Rename the old file so we don't check every startup
+            migrated_path = sqlite_path.with_suffix(".sqlite.migrated")
+            try:
+                sqlite_path.rename(migrated_path)
+                logger.info(f"Renamed old SQLite database to {migrated_path}")
+            except Exception:
+                pass
+            return
+
+    # Postgres is empty and SQLite exists — run migration
+    logger.info("=" * 60)
+    logger.info("Detected existing SQLite database — auto-migrating to PostgreSQL")
+    logger.info("=" * 60)
+
+    try:
+        from app.db.migrate_sqlite_to_postgres import migrate
+        results = migrate(
+            sqlite_path=str(sqlite_path),
+            postgres_url=settings.database_url,
+            dry_run=False,
+        )
+        total = sum(results.values())
+        logger.info(f"Migration complete: {total} total rows migrated")
+
+        # Rename SQLite file to prevent re-migration
+        migrated_path = sqlite_path.parent / "db.sqlite.migrated"
+        sqlite_path.rename(migrated_path)
+        logger.info(f"Renamed SQLite database to {migrated_path}")
+    except BaseException as e:
+        # Catch BaseException because migrate() may call sys.exit() which
+        # raises SystemExit (a subclass of BaseException, not Exception)
+        logger.error(f"Auto-migration failed: {e}")
+        logger.error("The application will continue with an empty database.")
+        logger.error(f"You can retry manually: python -m app.db.migrate_sqlite_to_postgres --sqlite-path {sqlite_path}")
+
+
 def init_core() -> None:
     """Phase 1: Initialize core infrastructure (directories, database, encryption)."""
     ensure_directories()
+
+    # Initialize PostgreSQL connection pool
+    from app.db.base import init_pool
+    init_pool(
+        min_conn=settings.db_pool_min,
+        max_conn=settings.db_pool_max,
+    )
+
     init_database()
     run_migrations()
+
+    # Auto-migrate from SQLite if it exists and Postgres is empty
+    _auto_migrate_sqlite_to_postgres()
 
     # Materialize notes as physical markdown files
     from app.core.note_files import materialize_all_notes, get_notes_dir
@@ -114,7 +181,7 @@ def start_background_tasks() -> List[asyncio.Task]:
     logger.info("Periodic session cleanup task started (every 1 hour)")
 
     async def _periodic_db_maintenance():
-        """Background task: SQLite maintenance every 4 hours."""
+        """Background task: database maintenance every 4 hours."""
         from app.core.live_session_store import live_session_store
 
         # Run once on startup after a short delay (catch up after long uptime).
@@ -152,6 +219,10 @@ async def shutdown_services() -> None:
     from app.core.http_client import close_http_client
     await close_http_client()
 
+    # Close database connection pool (Postgres)
+    from app.db.base import close_pool
+    close_pool()
+
     # Shutdown automations before connectors, since automations may use them
     from app.core.automation_manager import automation_manager
     await automation_manager.shutdown()
@@ -167,9 +238,3 @@ async def shutdown_services() -> None:
     except Exception:
         pass
 
-    # Shutdown database connection pool (close all idle connections)
-    try:
-        from app.db.base import _pool as db_pool
-        db_pool.shutdown()
-    except Exception:
-        pass

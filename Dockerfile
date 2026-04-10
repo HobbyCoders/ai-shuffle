@@ -45,6 +45,7 @@ RUN apt-get update && \
     gnupg \
     git \
     gosu \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ── GitHub CLI ──

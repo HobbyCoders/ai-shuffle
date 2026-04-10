@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
-from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.db.base import get_db, get_cursor, row_to_dict, rows_to_list, logger
+from app.db.compat import ph, sql_ilike
 
 
 # ============================================================================
@@ -121,16 +121,16 @@ class ForkInfo(TypedDict):
 def get_session(session_id: str) -> Optional[SessionRow]:
     """Get a session by ID"""
     with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        cursor = get_cursor(conn)
+        cursor.execute(f"SELECT * FROM sessions WHERE id = {ph()}", (session_id,))
         return row_to_dict(cursor.fetchone())
 
 
 def get_session_by_sdk_id(sdk_session_id: str) -> Optional[SessionRow]:
     """Get a session by SDK session ID (the Claude Code session ID)"""
     with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM sessions WHERE sdk_session_id = ?", (sdk_session_id,))
+        cursor = get_cursor(conn)
+        cursor.execute(f"SELECT * FROM sessions WHERE sdk_session_id = {ph()}", (sdk_session_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -146,24 +146,25 @@ def get_sessions(
     offset: int = 0
 ) -> List[SessionRow]:
     """Get sessions with optional filters"""
+    _ph = ph()
     if tag_id:
         # Join with session_tags when filtering by tag
-        query = """SELECT DISTINCT s.* FROM sessions s
+        query = f"""SELECT DISTINCT s.* FROM sessions s
                    INNER JOIN session_tags st ON s.id = st.session_id
-                   WHERE st.tag_id = ?"""
+                   WHERE st.tag_id = {_ph}"""
         params = [tag_id]
     else:
         query = "SELECT * FROM sessions WHERE 1=1"
         params = []
 
     if project_id:
-        query += " AND s.project_id = ?" if tag_id else " AND project_id = ?"
+        query += f" AND s.project_id = {_ph}" if tag_id else f" AND project_id = {_ph}"
         params.append(project_id)
     if profile_id:
-        query += " AND s.profile_id = ?" if tag_id else " AND profile_id = ?"
+        query += f" AND s.profile_id = {_ph}" if tag_id else f" AND profile_id = {_ph}"
         params.append(profile_id)
     if status:
-        query += " AND s.status = ?" if tag_id else " AND status = ?"
+        query += f" AND s.status = {_ph}" if tag_id else f" AND status = {_ph}"
         params.append(status)
     if favorites_only:
         query += " AND s.is_favorite = TRUE" if tag_id else " AND is_favorite = TRUE"
@@ -172,16 +173,16 @@ def get_sessions(
         query += " AND s.api_user_id IS NOT NULL" if tag_id else " AND api_user_id IS NOT NULL"
     elif api_user_id is not None:
         if api_user_id:
-            query += " AND s.api_user_id = ?" if tag_id else " AND api_user_id = ?"
+            query += f" AND s.api_user_id = {_ph}" if tag_id else f" AND api_user_id = {_ph}"
             params.append(api_user_id)
         else:
             query += " AND s.api_user_id IS NULL" if tag_id else " AND api_user_id IS NULL"
 
-    query += " ORDER BY s.updated_at DESC LIMIT ? OFFSET ?" if tag_id else " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+    query += f" ORDER BY s.updated_at DESC LIMIT {_ph} OFFSET {_ph}" if tag_id else f" ORDER BY updated_at DESC LIMIT {_ph} OFFSET {_ph}"
     params.extend([limit, offset])
 
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         cursor.execute(query, params)
         return rows_to_list(cursor.fetchall())
 
@@ -203,10 +204,11 @@ def get_sessions_paginated(
         Tuple of (sessions list, total count)
     """
     # Build the WHERE clause (shared between count and data queries)
+    _ph = ph()
     if tag_id:
-        base_query = """FROM sessions s
+        base_query = f"""FROM sessions s
                        INNER JOIN session_tags st ON s.id = st.session_id
-                       WHERE st.tag_id = ?"""
+                       WHERE st.tag_id = {_ph}"""
         params: List[Any] = [tag_id]
         col_prefix = "s."
     else:
@@ -215,13 +217,13 @@ def get_sessions_paginated(
         col_prefix = ""
 
     if project_id:
-        base_query += f" AND {col_prefix}project_id = ?"
+        base_query += f" AND {col_prefix}project_id = {_ph}"
         params.append(project_id)
     if profile_id:
-        base_query += f" AND {col_prefix}profile_id = ?"
+        base_query += f" AND {col_prefix}profile_id = {_ph}"
         params.append(profile_id)
     if status:
-        base_query += f" AND {col_prefix}status = ?"
+        base_query += f" AND {col_prefix}status = {_ph}"
         params.append(status)
     if favorites_only:
         base_query += f" AND {col_prefix}is_favorite = TRUE"
@@ -229,36 +231,31 @@ def get_sessions_paginated(
         base_query += f" AND {col_prefix}api_user_id IS NOT NULL"
     elif api_user_id is not None:
         if api_user_id:
-            base_query += f" AND {col_prefix}api_user_id = ?"
+            base_query += f" AND {col_prefix}api_user_id = {_ph}"
             params.append(api_user_id)
         else:
             base_query += f" AND {col_prefix}api_user_id IS NULL"
 
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
 
-        # Single query with window function for count + data
+        # Get total count
         if tag_id:
-            # Subquery to get distinct sessions first, then count via window
-            data_query = f"""
-                WITH filtered AS (
-                    SELECT DISTINCT s.* {base_query}
-                )
-                SELECT *, COUNT(*) OVER() as _total FROM filtered
-                ORDER BY updated_at DESC LIMIT ? OFFSET ?
-            """
+            count_query = f"SELECT COUNT(DISTINCT s.id) as cnt {base_query}"
         else:
-            data_query = f"""SELECT *, COUNT(*) OVER() as _total
-                {base_query} ORDER BY updated_at DESC LIMIT ? OFFSET ?"""
+            count_query = f"SELECT COUNT(*) as cnt {base_query}"
+        cursor.execute(count_query, params)
+        row = cursor.fetchone()
+        total = row["cnt"]
 
+        # Get paginated data
+        if tag_id:
+            data_query = f"SELECT DISTINCT s.* {base_query} ORDER BY s.updated_at DESC LIMIT {_ph} OFFSET {_ph}"
+        else:
+            data_query = f"SELECT * {base_query} ORDER BY updated_at DESC LIMIT {_ph} OFFSET {_ph}"
         cursor.execute(data_query, params + [limit, offset])
-        rows = cursor.fetchall()
+        sessions = rows_to_list(cursor.fetchall())
 
-        if not rows:
-            return [], 0
-
-        total = rows[0]["_total"]
-        sessions = [{k: v for k, v in dict(row).items() if k != "_total"} for row in rows]
         return sessions, total
 
 
@@ -291,21 +288,18 @@ def create_session(
         _conn: Optional existing DB connection for transaction grouping
     """
     now = datetime.now(timezone.utc).isoformat()
+    _ph = ph()
+    _phs12 = ", ".join([_ph] * 12)
+    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, created_at, updated_at)
+               VALUES ({_phs12})"""
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, now, now)
     if _conn is not None:
-        cursor = _conn.cursor()
-        cursor.execute(
-            """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, now, now)
-        )
+        cursor = get_cursor(_conn)
+        cursor.execute(sql, params)
     else:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, now, now)
-            )
+            cursor = get_cursor(conn)
+            cursor.execute(sql, params)
     return get_session(session_id)
 
 
@@ -342,14 +336,16 @@ def create_session_with_stats(
     """
     now = datetime.now(timezone.utc).isoformat()
     ts_created = created_at or now
+    _ph = ph()
+    _phs12 = ", ".join([_ph] * 12)
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         cursor.execute(
-            """INSERT INTO sessions (
+            f"""INSERT INTO sessions (
                 id, profile_id, project_id, title, api_user_id,
                 sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES ({_phs12})""",
             (session_id, profile_id, project_id, title, api_user_id,
              sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
              ts_created, now)
@@ -373,41 +369,42 @@ def update_session(
     Args:
         worktree_id: Set to a worktree ID to link, or empty string "" to unlink
     """
-    updates = ["updated_at = ?"]
+    _ph = ph()
+    updates = [f"updated_at = {_ph}"]
     values = [datetime.now(timezone.utc).isoformat()]
 
     if sdk_session_id is not None:
-        updates.append("sdk_session_id = ?")
+        updates.append(f"sdk_session_id = {_ph}")
         values.append(sdk_session_id)
     if title is not None:
-        updates.append("title = ?")
+        updates.append(f"title = {_ph}")
         values.append(title)
     if status is not None:
-        updates.append("status = ?")
+        updates.append(f"status = {_ph}")
         values.append(status)
     if cost_increment != 0:
-        updates.append("total_cost_usd = total_cost_usd + ?")
+        updates.append(f"total_cost_usd = total_cost_usd + {_ph}")
         values.append(cost_increment)
     if tokens_in_increment != 0:
-        updates.append("total_tokens_in = total_tokens_in + ?")
+        updates.append(f"total_tokens_in = total_tokens_in + {_ph}")
         values.append(tokens_in_increment)
     if tokens_out_increment != 0:
-        updates.append("total_tokens_out = total_tokens_out + ?")
+        updates.append(f"total_tokens_out = total_tokens_out + {_ph}")
         values.append(tokens_out_increment)
     if turn_increment != 0:
-        updates.append("turn_count = turn_count + ?")
+        updates.append(f"turn_count = turn_count + {_ph}")
         values.append(turn_increment)
     if worktree_id is not None:
-        updates.append("worktree_id = ?")
+        updates.append(f"worktree_id = {_ph}")
         # Empty string means unlink (set to NULL)
         values.append(worktree_id if worktree_id else None)
 
     values.append(session_id)
 
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         cursor.execute(
-            f"UPDATE sessions SET {', '.join(updates)} WHERE id = ?",
+            f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph}",
             values
         )
 
@@ -417,19 +414,20 @@ def update_session(
 def delete_session(session_id: str) -> bool:
     """Delete a session and its messages"""
     with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        cursor = get_cursor(conn)
+        cursor.execute(f"DELETE FROM sessions WHERE id = {ph()}", (session_id,))
         return cursor.rowcount > 0
 
 
 def toggle_session_favorite(session_id: str) -> Optional[SessionRow]:
     """Toggle the is_favorite flag for a session and return the updated session"""
+    _ph = ph()
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         # Toggle the favorite status
         cursor.execute(
-            """UPDATE sessions SET is_favorite = NOT is_favorite, updated_at = ?
-               WHERE id = ?""",
+            f"""UPDATE sessions SET is_favorite = NOT is_favorite, updated_at = {_ph}
+               WHERE id = {_ph}""",
             (datetime.now(timezone.utc).isoformat(), session_id)
         )
         if cursor.rowcount == 0:
@@ -439,11 +437,12 @@ def toggle_session_favorite(session_id: str) -> Optional[SessionRow]:
 
 def set_session_favorite(session_id: str, is_favorite: bool) -> Optional[SessionRow]:
     """Set the is_favorite flag for a session and return the updated session"""
+    _ph = ph()
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         cursor.execute(
-            """UPDATE sessions SET is_favorite = ?, updated_at = ?
-               WHERE id = ?""",
+            f"""UPDATE sessions SET is_favorite = {_ph}, updated_at = {_ph}
+               WHERE id = {_ph}""",
             (is_favorite, datetime.now(timezone.utc).isoformat(), session_id)
         )
         if cursor.rowcount == 0:
@@ -454,13 +453,16 @@ def set_session_favorite(session_id: str, is_favorite: bool) -> Optional[Session
 def session_has_forks(session_id: str) -> bool:
     """Check if a session has any forked children"""
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         cursor.execute(
-            "SELECT COUNT(*) as count FROM sessions WHERE parent_session_id = ?",
+            f"SELECT COUNT(*) as count FROM sessions WHERE parent_session_id = {ph()}",
             (session_id,)
         )
         row = cursor.fetchone()
-        return row["count"] > 0 if row else False
+        if row is None:
+            return False
+        count = row["count"]
+        return count > 0
 
 
 def get_fork_info_for_sessions(session_ids: list[str]) -> dict[str, ForkInfo]:
@@ -471,7 +473,7 @@ def get_fork_info_for_sessions(session_ids: list[str]) -> dict[str, ForkInfo]:
     """
     if not session_ids:
         return {}
-    placeholders = ','.join('?' * len(session_ids))
+    placeholders = ','.join([ph()] * len(session_ids))
 
     # Initialize defaults
     result: dict[str, ForkInfo] = {
@@ -480,7 +482,7 @@ def get_fork_info_for_sessions(session_ids: list[str]) -> dict[str, ForkInfo]:
     }
 
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
 
         # Find which sessions have children (i.e., are fork parents)
         cursor.execute(
@@ -491,6 +493,7 @@ def get_fork_info_for_sessions(session_ids: list[str]) -> dict[str, ForkInfo]:
             session_ids
         )
         for row in cursor.fetchall():
+            row = row_to_dict(row)
             parent_id = row['parent_session_id']
             if parent_id in result:
                 result[parent_id]['has_forks'] = row['fork_count'] > 0
@@ -504,6 +507,7 @@ def get_fork_info_for_sessions(session_ids: list[str]) -> dict[str, ForkInfo]:
             session_ids
         )
         for row in cursor.fetchall():
+            row = row_to_dict(row)
             result[row['id']]['fork_parent_id'] = row['parent_session_id']
 
     return result
@@ -512,9 +516,9 @@ def get_fork_info_for_sessions(session_ids: list[str]) -> dict[str, ForkInfo]:
 def get_session_forks(session_id: str) -> List[SessionRow]:
     """Get all forked children of a session"""
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         cursor.execute(
-            """SELECT * FROM sessions WHERE parent_session_id = ?
+            f"""SELECT * FROM sessions WHERE parent_session_id = {ph()}
                ORDER BY created_at DESC""",
             (session_id,)
         )
@@ -528,9 +532,9 @@ def get_session_forks(session_id: str) -> List[SessionRow]:
 def get_session_messages(session_id: str) -> List[SessionMessageRow]:
     """Get all messages for a session"""
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         cursor.execute(
-            "SELECT * FROM session_messages WHERE session_id = ? ORDER BY created_at ASC",
+            f"SELECT * FROM session_messages WHERE session_id = {ph()} ORDER BY created_at ASC",
             (session_id,)
         )
         rows = rows_to_list(cursor.fetchall())
@@ -570,18 +574,20 @@ def add_session_message(
               json.dumps(metadata) if metadata else None,
               profile_id,
               now)
-    sql = """INSERT INTO session_messages (session_id, role, content, tool_name, tool_input, metadata, profile_id, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
+    _ph = ph()
+    _phs8 = ", ".join([_ph] * 8)
+    sql = f"""INSERT INTO session_messages (session_id, role, content, tool_name, tool_input, metadata, profile_id, created_at)
+             VALUES ({_phs8}) RETURNING id"""
 
     if _conn is not None:
-        cursor = _conn.cursor()
+        cursor = get_cursor(_conn)
         cursor.execute(sql, params)
-        lastrowid = cursor.lastrowid
+        lastrowid = cursor.fetchone()["id"]
     else:
         with get_db() as conn:
-            cursor = conn.cursor()
+            cursor = get_cursor(conn)
             cursor.execute(sql, params)
-            lastrowid = cursor.lastrowid
+            lastrowid = cursor.fetchone()["id"]
 
     msg = {
         "id": lastrowid,
@@ -618,14 +624,16 @@ def add_session_messages_batch(
         return []
 
     now = datetime.now(timezone.utc).isoformat()
-    sql = """INSERT INTO session_messages
+    _ph = ph()
+    _phs8 = ", ".join([_ph] * 8)
+    sql = f"""INSERT INTO session_messages
              (session_id, role, content, tool_name, tool_input, metadata, profile_id, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
+             VALUES ({_phs8}) RETURNING id"""
 
     results: List[SessionMessageRow] = []
 
     def _do_insert(conn):
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         for msg in messages:
             tool_input = msg.get("tool_input")
             metadata = msg.get("metadata")
@@ -640,8 +648,9 @@ def add_session_messages_batch(
                 now,
             )
             cursor.execute(sql, params)
+            lastrowid = cursor.fetchone()["id"]
             results.append({
-                "id": cursor.lastrowid,
+                "id": lastrowid,
                 "session_id": msg["session_id"],
                 "role": msg["role"],
                 "content": msg["content"],
@@ -663,10 +672,11 @@ def add_session_messages_batch(
 
 def delete_session_message(session_id: str, message_id: int) -> bool:
     """Delete a specific message from a session"""
+    _ph = ph()
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         cursor.execute(
-            "DELETE FROM session_messages WHERE session_id = ? AND id = ?",
+            f"DELETE FROM session_messages WHERE session_id = {_ph} AND id = {_ph}",
             (session_id, message_id)
         )
         return cursor.rowcount > 0
@@ -674,27 +684,26 @@ def delete_session_message(session_id: str, message_id: int) -> bool:
 
 def delete_session_messages_after(session_id: str, message_id: int) -> int:
     """Delete all messages after a specific message ID (for rewind)"""
+    _ph = ph()
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         cursor.execute(
-            "DELETE FROM session_messages WHERE session_id = ? AND id > ?",
+            f"DELETE FROM session_messages WHERE session_id = {_ph} AND id > {_ph}",
             (session_id, message_id)
         )
         return cursor.rowcount
 
 
 def _fts_query_term(query: str) -> str:
-    """Convert a user search query into an FTS5 query string.
+    """Convert a user search query into a Postgres FTS query string.
 
-    Handles quoting so special FTS5 characters (*, -, etc.) don't cause
-    parse errors.  Multi-word queries are joined with implicit AND.
+    Returns the cleaned query string as-is since plainto_tsquery handles
+    tokenization natively.
     """
-    # Split into words and quote each to prevent FTS5 syntax errors
-    words = query.strip().split()
-    if not words:
-        return '""'
-    # Quote each word individually; FTS5 treats adjacent quoted terms as AND
-    return " ".join(f'"{w}"' for w in words)
+    cleaned = query.strip()
+    if not cleaned:
+        return ""
+    return cleaned
 
 
 def search_sessions(
@@ -707,7 +716,7 @@ def search_sessions(
 ) -> List[SessionSearchResult]:
     """
     Search sessions by title and message content.
-    Uses FTS5 for content search (fast indexed lookup) with LIKE fallback
+    Uses Postgres tsvector for content search (fast indexed lookup) with ILIKE
     for title search (titles are short, always fast).
     Returns sessions with matching snippets showing where the match was found.
     """
@@ -716,103 +725,73 @@ def search_sessions(
 
     search_term = f"%{query.strip()}%"
     fts_query = _fts_query_term(query)
+    _ph = ph()
 
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
 
-        # Search titles with LIKE (titles are short, always fast)
-        # Search content with FTS5 (indexed, handles large message bodies)
-        sql = """
+        # Search titles with ILIKE, content with tsvector FTS.
+        # Use DISTINCT ON (id) to deduplicate sessions that match in both
+        # title and content, keeping the best match (title > content).
+        sql = f"""
         WITH title_matches AS (
             SELECT
-                s.id,
-                s.project_id,
-                s.profile_id,
-                s.api_user_id,
-                s.title,
-                s.status,
-                s.total_cost_usd,
-                s.total_tokens_in,
-                s.total_tokens_out,
-                s.turn_count,
-                s.created_at,
-                s.updated_at,
+                s.id, s.project_id, s.profile_id, s.api_user_id, s.title,
+                s.status, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out,
+                s.turn_count, s.created_at, s.updated_at,
                 'title' as match_type,
                 s.title as match_snippet,
                 s.updated_at as match_time
             FROM sessions s
-            WHERE s.title LIKE ? COLLATE NOCASE
+            WHERE {sql_ilike('s.title')}
             AND s.status != 'archived'
         ),
         content_matches AS (
-            SELECT DISTINCT
-                s.id,
-                s.project_id,
-                s.profile_id,
-                s.api_user_id,
-                s.title,
-                s.status,
-                s.total_cost_usd,
-                s.total_tokens_in,
-                s.total_tokens_out,
-                s.turn_count,
-                s.created_at,
-                s.updated_at,
+            SELECT DISTINCT ON (s.id)
+                s.id, s.project_id, s.profile_id, s.api_user_id, s.title,
+                s.status, s.total_cost_usd, s.total_tokens_in, s.total_tokens_out,
+                s.turn_count, s.created_at, s.updated_at,
                 'content' as match_type,
-                snippet(session_messages_fts, 0, '', '', '...', 20) as match_snippet,
-                s.updated_at as match_time
-            FROM session_messages_fts fts
-            INNER JOIN sessions s ON s.id = fts.session_id
-            WHERE session_messages_fts MATCH ?
+                ts_headline('english', sm.content, plainto_tsquery('english', {_ph}),
+                    'MaxFragments=1,MaxWords=20,MinWords=5') as match_snippet,
+                sm.created_at as match_time
+            FROM session_messages sm
+            INNER JOIN sessions s ON s.id = sm.session_id
+            WHERE sm.content_tsv @@ plainto_tsquery('english', {_ph})
+            AND sm.role IN ('user', 'assistant')
             AND s.status != 'archived'
+            ORDER BY s.id, sm.created_at DESC
         ),
         all_matches AS (
             SELECT * FROM title_matches
             UNION ALL
             SELECT * FROM content_matches
         )
-        SELECT
-            id,
-            project_id,
-            profile_id,
-            api_user_id,
-            title,
-            status,
-            total_cost_usd,
-            total_tokens_in,
-            total_tokens_out,
-            turn_count,
-            created_at,
-            updated_at,
-            match_type,
-            match_snippet,
-            match_time
+        SELECT DISTINCT ON (id) *
         FROM all_matches
         WHERE 1=1
         """
-
-        params: List[Any] = [search_term, fts_query]
+        # title ILIKE needs search_term, ts_headline needs fts_query,
+        # WHERE @@ needs fts_query again
+        params: List[Any] = [search_term, fts_query, fts_query]
 
         # Add filters
         if project_id:
-            sql += " AND project_id = ?"
+            sql += f" AND project_id = {_ph}"
             params.append(project_id)
         if profile_id:
-            sql += " AND profile_id = ?"
+            sql += f" AND profile_id = {_ph}"
             params.append(profile_id)
         if admin_only:
             sql += " AND api_user_id IS NULL"
         elif api_user_id:
-            sql += " AND api_user_id = ?"
+            sql += f" AND api_user_id = {_ph}"
             params.append(api_user_id)
 
-        # Group by session to avoid duplicates, keeping the best match
-        sql += """
-        GROUP BY id
-        ORDER BY
-            CASE WHEN match_type = 'title' THEN 0 ELSE 1 END,
-            updated_at DESC
-        LIMIT ?
+        sql += f"""
+        ORDER BY id,
+            CASE WHEN match_type = 'title' THEN 0 ELSE 1 END
+        LIMIT {_ph}
         """
         params.append(limit)
 
@@ -833,7 +812,7 @@ def search_sessions_paginated(
 ) -> tuple[List[SessionSearchResultPaginated], int]:
     """
     Search sessions by title and message content with pagination.
-    Uses FTS5 for content search (fast indexed lookup) with LIKE fallback
+    Uses Postgres tsvector for content search (fast indexed lookup) with ILIKE
     for title search.
 
     Returns:
@@ -844,12 +823,15 @@ def search_sessions_paginated(
 
     search_term = f"%{query.strip()}%"
     fts_query = _fts_query_term(query)
+    _ph = ph()
 
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
 
-        # Build the base CTE using FTS5 for content matching
-        base_cte = """
+        # Build the base CTE using Postgres tsvector FTS.
+        # Uses DISTINCT ON (id) to deduplicate sessions, preferring title
+        # matches over content matches.
+        base_cte = f"""
         WITH title_matches AS (
             SELECT
                 s.*,
@@ -857,70 +839,72 @@ def search_sessions_paginated(
                 s.title as match_snippet,
                 s.updated_at as match_time
             FROM sessions s
-            WHERE s.title LIKE ? COLLATE NOCASE
+            WHERE {sql_ilike('s.title')}
             AND s.status != 'archived'
         ),
         content_matches AS (
-            SELECT DISTINCT
+            SELECT DISTINCT ON (s.id)
                 s.*,
                 'content' as match_type,
-                snippet(session_messages_fts, 0, '', '', '...', 20) as match_snippet,
-                s.updated_at as match_time
-            FROM session_messages_fts fts
-            INNER JOIN sessions s ON s.id = fts.session_id
-            WHERE session_messages_fts MATCH ?
+                ts_headline('english', sm.content, plainto_tsquery('english', {_ph}),
+                    'MaxFragments=1,MaxWords=20,MinWords=5') as match_snippet,
+                sm.created_at as match_time
+            FROM session_messages sm
+            INNER JOIN sessions s ON s.id = sm.session_id
+            WHERE sm.content_tsv @@ plainto_tsquery('english', {_ph})
+            AND sm.role IN ('user', 'assistant')
             AND s.status != 'archived'
+            ORDER BY s.id, sm.created_at DESC
         ),
         all_matches AS (
             SELECT * FROM title_matches
             UNION ALL
             SELECT * FROM content_matches
         ),
-        grouped_matches AS (
-            SELECT *
+        deduped_matches AS (
+            SELECT DISTINCT ON (id) *
             FROM all_matches
             WHERE 1=1
         """
-
-        base_params: List[Any] = [search_term, fts_query]
+        # title ILIKE needs search_term, ts_headline needs fts_query,
+        # WHERE @@ needs fts_query again
+        base_params: List[Any] = [search_term, fts_query, fts_query]
 
         # Build filter conditions
         filter_sql = ""
         filter_params: List[Any] = []
 
         if project_id:
-            filter_sql += " AND project_id = ?"
+            filter_sql += f" AND project_id = {_ph}"
             filter_params.append(project_id)
         if profile_id:
-            filter_sql += " AND profile_id = ?"
+            filter_sql += f" AND profile_id = {_ph}"
             filter_params.append(profile_id)
         if admin_only:
             filter_sql += " AND api_user_id IS NULL"
         elif api_user_id:
-            filter_sql += " AND api_user_id = ?"
+            filter_sql += f" AND api_user_id = {_ph}"
             filter_params.append(api_user_id)
 
-        # Count query - count unique session IDs
+        # Count query - count unique deduplicated sessions
         count_sql = base_cte + filter_sql + """
-            GROUP BY id
+            ORDER BY id, CASE WHEN match_type = 'title' THEN 0 ELSE 1 END
         )
-        SELECT COUNT(*) FROM grouped_matches
+        SELECT COUNT(*) as cnt FROM deduped_matches
         """
         cursor.execute(count_sql, base_params + filter_params)
-        total = cursor.fetchone()[0]
+        row = cursor.fetchone()
+        total = row["cnt"]
 
         # Data query with pagination
-        data_sql = base_cte + filter_sql + """
-            GROUP BY id
-            ORDER BY
-                CASE WHEN match_type = 'title' THEN 0 ELSE 1 END,
-                updated_at DESC
-            LIMIT ? OFFSET ?
+        data_sql = base_cte + filter_sql + f"""
+            ORDER BY id, CASE WHEN match_type = 'title' THEN 0 ELSE 1 END
         )
-        SELECT * FROM grouped_matches
+        SELECT * FROM deduped_matches
         ORDER BY
             CASE WHEN match_type = 'title' THEN 0 ELSE 1 END,
             updated_at DESC
+        LIMIT {_ph} OFFSET {_ph}
         """
         cursor.execute(data_sql, base_params + filter_params + [limit, offset])
         results = rows_to_list(cursor.fetchall())
@@ -941,16 +925,20 @@ def add_sync_log(
 ) -> SyncLogRow:
     """Add an entry to the sync log for polling fallback"""
     now = datetime.now(timezone.utc).isoformat()
+    _ph = ph()
+    _phs6 = ", ".join([_ph] * 6)
+    sql = f"""INSERT INTO sync_log (session_id, event_type, entity_type, entity_id, data, created_at)
+               VALUES ({_phs6}) RETURNING id"""
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         cursor.execute(
-            """INSERT INTO sync_log (session_id, event_type, entity_type, entity_id, data, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            sql,
             (session_id, event_type, entity_type, entity_id,
              json.dumps(data) if data else None, now)
         )
+        lastrowid = cursor.fetchone()["id"]
         return {
-            "id": cursor.lastrowid,
+            "id": lastrowid,
             "session_id": session_id,
             "event_type": event_type,
             "entity_type": entity_type,
@@ -966,13 +954,14 @@ def get_sync_logs(
     limit: int = 100
 ) -> List[SyncLogRow]:
     """Get sync log entries for a session since a given ID"""
+    _ph = ph()
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         cursor.execute(
-            """SELECT * FROM sync_log
-               WHERE session_id = ? AND id > ?
+            f"""SELECT * FROM sync_log
+               WHERE session_id = {_ph} AND id > {_ph}
                ORDER BY id ASC
-               LIMIT ?""",
+               LIMIT {_ph}""",
             (session_id, since_id, limit)
         )
         rows = rows_to_list(cursor.fetchall())
@@ -985,13 +974,16 @@ def get_sync_logs(
 def get_latest_sync_id(session_id: str) -> int:
     """Get the latest sync log ID for a session"""
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
         cursor.execute(
-            "SELECT MAX(id) as max_id FROM sync_log WHERE session_id = ?",
+            f"SELECT MAX(id) as max_id FROM sync_log WHERE session_id = {ph()}",
             (session_id,)
         )
         row = cursor.fetchone()
-        return row["max_id"] or 0
+        if row is None:
+            return 0
+        max_id = row["max_id"]
+        return max_id or 0
 
 
 def update_message_content(
@@ -1000,26 +992,27 @@ def update_message_content(
     metadata: Optional[Dict[str, Any]] = None
 ) -> Optional[SessionMessageRow]:
     """Update message content (used during streaming)"""
+    _ph = ph()
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
-        cursor = conn.cursor()
+        cursor = get_cursor(conn)
 
-        updates = ["content = ?", "updated_at = ?", "version = version + 1"]
+        updates = [f"content = {_ph}", f"updated_at = {_ph}", "version = version + 1"]
         values = [content, now]
 
         if metadata is not None:
-            updates.append("metadata = ?")
+            updates.append(f"metadata = {_ph}")
             values.append(json.dumps(metadata))
 
         values.append(message_id)
 
         cursor.execute(
-            f"UPDATE session_messages SET {', '.join(updates)} WHERE id = ?",
+            f"UPDATE session_messages SET {', '.join(updates)} WHERE id = {_ph}",
             values
         )
 
         if cursor.rowcount > 0:
-            cursor.execute("SELECT * FROM session_messages WHERE id = ?", (message_id,))
+            cursor.execute(f"SELECT * FROM session_messages WHERE id = {_ph}", (message_id,))
             row = row_to_dict(cursor.fetchone())
             if row and row.get("metadata"):
                 row["metadata"] = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]

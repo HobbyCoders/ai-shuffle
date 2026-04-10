@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -161,7 +160,7 @@ def create_automation(
                 profile_id, project_id, output_config, max_turns, timeout_seconds,
                 max_cost_per_run, max_cost_per_day, max_cost_total, max_runs_per_day,
                 requires_approval, action_steps, triggers, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (automation_id, name, description, trigger_type,
              json.dumps(trigger_config), prompt or "", profile_id, project_id,
              json.dumps(output_config), max_turns, timeout_seconds,
@@ -177,7 +176,7 @@ def get_automation(automation_id: str) -> Optional[AutomationRow]:
     """Get an automation by ID."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM automations WHERE id = ?", (automation_id,))
+        cursor.execute("SELECT * FROM automations WHERE id = %s", (automation_id,))
         return _parse_automation_row(row_to_dict(cursor.fetchone()))
 
 
@@ -246,34 +245,34 @@ def update_automation(automation_id: str, **kwargs) -> Optional[AutomationRow]:
                 "last_run_at", "last_error", "run_count", "failure_count",
                 "total_cost_used", "requires_approval"):
         if key in kwargs:
-            updates.append(f"{key} = ?")
+            updates.append(f"{key} = %s")
             values.append(kwargs[key])
 
     for key in ("trigger_config", "output_config"):
         if key in kwargs:
-            updates.append(f"{key} = ?")
+            updates.append(f"{key} = %s")
             values.append(json.dumps(kwargs[key]))
 
     if "action_steps" in kwargs:
-        updates.append("action_steps = ?")
+        updates.append("action_steps = %s")
         values.append(json.dumps(kwargs["action_steps"]) if kwargs["action_steps"] is not None else None)
 
     if "triggers" in kwargs:
-        updates.append("triggers = ?")
+        updates.append("triggers = %s")
         values.append(json.dumps(kwargs["triggers"]) if kwargs["triggers"] is not None else None)
 
     if "trigger_type" in kwargs:
-        updates.append("trigger_type = ?")
+        updates.append("trigger_type = %s")
         values.append(kwargs["trigger_type"])
 
     if updates:
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         values.append(datetime.now(timezone.utc).isoformat())
         values.append(automation_id)
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE automations SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE automations SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -284,7 +283,7 @@ def delete_automation(automation_id: str) -> bool:
     """Delete an automation (cascades to runs and approvals)."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM automations WHERE id = ?", (automation_id,))
+        cursor.execute("DELETE FROM automations WHERE id = %s", (automation_id,))
         return cursor.rowcount > 0
 
 
@@ -304,7 +303,7 @@ def create_automation_run(
         cursor.execute(
             """INSERT INTO automation_runs
                (id, automation_id, status, trigger_data, prompt_rendered, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s)""",
             (run_id, automation_id, status,
              json.dumps(trigger_data) if trigger_data else None,
              prompt_rendered, now)
@@ -316,7 +315,7 @@ def get_automation_run(run_id: str) -> Optional[AutomationRunRow]:
     """Get an automation run by ID."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM automation_runs WHERE id = ?", (run_id,))
+        cursor.execute("SELECT * FROM automation_runs WHERE id = %s", (run_id,))
         return _parse_automation_run_row(row_to_dict(cursor.fetchone()))
 
 
@@ -325,7 +324,7 @@ def get_automation_runs(automation_id: str, limit: int = 50, offset: int = 0) ->
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM automation_runs WHERE automation_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            "SELECT * FROM automation_runs WHERE automation_id = %s ORDER BY created_at DESC LIMIT %s OFFSET %s",
             (automation_id, limit, offset)
         )
         rows = rows_to_list(cursor.fetchall())
@@ -341,11 +340,11 @@ def update_automation_run(run_id: str, **kwargs) -> Optional[AutomationRunRow]:
                 "cost_usd", "tokens_in", "tokens_out", "duration_ms",
                 "output_status", "output_error", "started_at", "completed_at"):
         if key in kwargs:
-            updates.append(f"{key} = ?")
+            updates.append(f"{key} = %s")
             values.append(kwargs[key])
 
     if "trigger_data" in kwargs:
-        updates.append("trigger_data = ?")
+        updates.append("trigger_data = %s")
         values.append(json.dumps(kwargs["trigger_data"]) if kwargs["trigger_data"] else None)
 
     if updates:
@@ -353,7 +352,7 @@ def update_automation_run(run_id: str, **kwargs) -> Optional[AutomationRunRow]:
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE automation_runs SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE automation_runs SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -368,7 +367,7 @@ def get_automation_daily_stats(automation_id: str) -> AutomationDailyStats:
         cursor.execute(
             """SELECT COUNT(*) as run_count, COALESCE(SUM(cost_usd), 0) as total_cost
                FROM automation_runs
-               WHERE automation_id = ? AND created_at >= ?""",
+               WHERE automation_id = %s AND created_at >= %s""",
             (automation_id, today)
         )
         row = cursor.fetchone()
@@ -390,7 +389,7 @@ def create_automation_approval(
         cursor.execute(
             """INSERT INTO automation_approvals
                (id, run_id, automation_id, prompt_preview, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s)""",
             (approval_id, run_id, automation_id, prompt_preview, now)
         )
     return get_automation_approval(approval_id)
@@ -400,7 +399,7 @@ def get_automation_approval(approval_id: str) -> Optional[AutomationApprovalRow]
     """Get an automation approval by ID."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM automation_approvals WHERE id = ?", (approval_id,))
+        cursor.execute("SELECT * FROM automation_approvals WHERE id = %s", (approval_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -424,7 +423,7 @@ def update_automation_approval(approval_id: str, status: str, decided_by: Option
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE automation_approvals SET status = ?, decided_by = ?, decided_at = ? WHERE id = ?",
+            "UPDATE automation_approvals SET status = %s, decided_by = %s, decided_at = %s WHERE id = %s",
             (status, decided_by, now, approval_id)
         )
     return get_automation_approval(approval_id)

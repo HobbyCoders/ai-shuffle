@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -75,10 +74,10 @@ class UserCredentialRow(TypedDict):
 def _get_api_user_profile_ids(cursor, user_id: str) -> List[str]:
     """Get profile IDs for an API user from junction table"""
     cursor.execute(
-        "SELECT profile_id FROM api_user_profiles WHERE api_user_id = ? ORDER BY created_at",
+        "SELECT profile_id FROM api_user_profiles WHERE api_user_id = %s ORDER BY created_at",
         (user_id,)
     )
-    return [row[0] for row in cursor.fetchall()]
+    return [row["profile_id"] for row in cursor.fetchall()]
 
 
 def _enrich_api_user_with_profiles(cursor, user: Optional[Dict[str, Any]]) -> Optional[ApiUserRow]:
@@ -106,16 +105,16 @@ def create_api_user(
         cursor.execute(
             """INSERT INTO api_users
                (id, name, api_key_hash, project_id, is_active, web_login_allowed, description, created_at, updated_at)
-               VALUES (?, ?, ?, ?, TRUE, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, TRUE, %s, %s, %s, %s)""",
             (user_id, name, api_key_hash, project_id, web_login_allowed, description, now, now),
         )
         if profile_ids:
             for pid in profile_ids:
                 cursor.execute(
-                    "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (?, ?, ?)",
+                    "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (%s, %s, %s)",
                     (user_id, pid, now),
                 )
-        cursor.execute("SELECT * FROM api_users WHERE id = ?", (user_id,))
+        cursor.execute("SELECT * FROM api_users WHERE id = %s", (user_id,))
         user = row_to_dict(cursor.fetchone())
         return _enrich_api_user_with_profiles(cursor, user)
 
@@ -124,8 +123,8 @@ def delete_api_user(user_id: str) -> bool:
     """Delete an API user by ID. Cascade handles junction tables."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = ?", (user_id,))
-        cursor.execute("DELETE FROM api_users WHERE id = ?", (user_id,))
+        cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = %s", (user_id,))
+        cursor.execute("DELETE FROM api_users WHERE id = %s", (user_id,))
         return cursor.rowcount > 0
 
 
@@ -133,7 +132,7 @@ def get_api_user(user_id: str) -> Optional[ApiUserRow]:
     """Get an API user by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM api_users WHERE id = ?", (user_id,))
+        cursor.execute("SELECT * FROM api_users WHERE id = %s", (user_id,))
         user = row_to_dict(cursor.fetchone())
         return _enrich_api_user_with_profiles(cursor, user)
 
@@ -143,7 +142,7 @@ def get_api_user_by_key_hash(key_hash: str) -> Optional[ApiUserRow]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM api_users WHERE api_key_hash = ? AND is_active = TRUE",
+            "SELECT * FROM api_users WHERE api_key_hash = %s AND is_active = TRUE",
             (key_hash,)
         )
         user = row_to_dict(cursor.fetchone())
@@ -159,7 +158,7 @@ def get_api_users_by_ids(user_ids: list[str]) -> dict[str, dict]:
     if not user_ids:
         return {}
     unique_ids = list(set(user_ids))
-    placeholders = ','.join('?' * len(unique_ids))
+    placeholders = ','.join(['%s'] * len(unique_ids))
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -197,7 +196,7 @@ def update_api_user_last_used(user_id: str):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE api_users SET last_used_at = ? WHERE id = ?",
+            "UPDATE api_users SET last_used_at = %s WHERE id = %s",
             (datetime.now(timezone.utc).isoformat(), user_id)
         )
 
@@ -232,7 +231,7 @@ def update_api_user(user_id: str, **kwargs) -> Optional[ApiUserRow]:
     profile_ids = kwargs.pop("profile_ids", None)
 
     now = datetime.now(timezone.utc).isoformat()
-    updates = ["updated_at = ?"]
+    updates = ["updated_at = %s"]
     values: list = [now]
 
     allowed = {
@@ -241,7 +240,7 @@ def update_api_user(user_id: str, **kwargs) -> Optional[ApiUserRow]:
     }
     for key, val in kwargs.items():
         if key in allowed:
-            updates.append(f"{key} = ?")
+            updates.append(f"{key} = %s")
             values.append(val)
 
     values.append(user_id)
@@ -249,19 +248,19 @@ def update_api_user(user_id: str, **kwargs) -> Optional[ApiUserRow]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"UPDATE api_users SET {', '.join(updates)} WHERE id = ?",
+            f"UPDATE api_users SET {', '.join(updates)} WHERE id = %s",
             tuple(values),
         )
 
         if profile_ids is not None:
-            cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = %s", (user_id,))
             for pid in profile_ids:
                 cursor.execute(
-                    "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (?, ?, ?)",
+                    "INSERT INTO api_user_profiles (api_user_id, profile_id, created_at) VALUES (%s, %s, %s)",
                     (user_id, pid, now),
                 )
 
-        cursor.execute("SELECT * FROM api_users WHERE id = ?", (user_id,))
+        cursor.execute("SELECT * FROM api_users WHERE id = %s", (user_id,))
         user = row_to_dict(cursor.fetchone())
         return _enrich_api_user_with_profiles(cursor, user)
 
@@ -282,7 +281,7 @@ def get_credential_policy(policy_id: str) -> Optional[CredentialPolicyRow]:
     """Get a specific credential policy"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM credential_policies WHERE id = ?", (policy_id,))
+        cursor.execute("SELECT * FROM credential_policies WHERE id = %s", (policy_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -303,12 +302,12 @@ def update_credential_policy(policy_id: str, policy: str, description: Optional[
         cursor = conn.cursor()
         if description is not None:
             cursor.execute(
-                "UPDATE credential_policies SET policy = ?, description = ?, updated_at = ? WHERE id = ?",
+                "UPDATE credential_policies SET policy = %s, description = %s, updated_at = %s WHERE id = %s",
                 (policy, description, datetime.now(timezone.utc).isoformat(), policy_id)
             )
         else:
             cursor.execute(
-                "UPDATE credential_policies SET policy = ?, updated_at = ? WHERE id = ?",
+                "UPDATE credential_policies SET policy = %s, updated_at = %s WHERE id = %s",
                 (policy, datetime.now(timezone.utc).isoformat(), policy_id)
             )
     return get_credential_policy(policy_id)
@@ -323,7 +322,7 @@ def get_user_credential_policy(api_user_id: str, credential_type: str) -> Option
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM user_credential_policies WHERE api_user_id = ? AND credential_type = ?",
+            "SELECT * FROM user_credential_policies WHERE api_user_id = %s AND credential_type = %s",
             (api_user_id, credential_type)
         )
         return row_to_dict(cursor.fetchone())
@@ -334,7 +333,7 @@ def get_all_user_credential_policies(api_user_id: str) -> List[UserCredentialPol
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM user_credential_policies WHERE api_user_id = ? ORDER BY credential_type",
+            "SELECT * FROM user_credential_policies WHERE api_user_id = %s ORDER BY credential_type",
             (api_user_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -358,8 +357,8 @@ def set_user_credential_policy(api_user_id: str, credential_type: str, policy: s
         # Try to update existing
         cursor.execute(
             """UPDATE user_credential_policies
-               SET policy = ?, updated_at = ?
-               WHERE api_user_id = ? AND credential_type = ?""",
+               SET policy = %s, updated_at = %s
+               WHERE api_user_id = %s AND credential_type = %s""",
             (policy, now, api_user_id, credential_type)
         )
 
@@ -368,7 +367,7 @@ def set_user_credential_policy(api_user_id: str, credential_type: str, policy: s
             policy_id = str(uuid.uuid4())
             cursor.execute(
                 """INSERT INTO user_credential_policies (id, api_user_id, credential_type, policy, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
                 (policy_id, api_user_id, credential_type, policy, now, now)
             )
 
@@ -380,7 +379,7 @@ def delete_user_credential_policy(api_user_id: str, credential_type: str) -> boo
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM user_credential_policies WHERE api_user_id = ? AND credential_type = ?",
+            "DELETE FROM user_credential_policies WHERE api_user_id = %s AND credential_type = %s",
             (api_user_id, credential_type)
         )
         return cursor.rowcount > 0
@@ -425,7 +424,7 @@ def get_user_credential(api_user_id: str, credential_type: str) -> Optional[User
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM api_user_credentials WHERE api_user_id = ? AND credential_type = ?",
+            "SELECT * FROM api_user_credentials WHERE api_user_id = %s AND credential_type = %s",
             (api_user_id, credential_type)
         )
         return row_to_dict(cursor.fetchone())
@@ -436,7 +435,7 @@ def get_all_user_credentials(api_user_id: str) -> List[UserCredentialRow]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM api_user_credentials WHERE api_user_id = ? ORDER BY credential_type",
+            "SELECT * FROM api_user_credentials WHERE api_user_id = %s ORDER BY credential_type",
             (api_user_id,)
         )
         return rows_to_list(cursor.fetchall())
@@ -452,8 +451,8 @@ def set_user_credential(api_user_id: str, credential_type: str, encrypted_value:
         # Try to update existing
         cursor.execute(
             """UPDATE api_user_credentials
-               SET encrypted_value = ?, updated_at = ?
-               WHERE api_user_id = ? AND credential_type = ?""",
+               SET encrypted_value = %s, updated_at = %s
+               WHERE api_user_id = %s AND credential_type = %s""",
             (encrypted_value, now, api_user_id, credential_type)
         )
 
@@ -462,7 +461,7 @@ def set_user_credential(api_user_id: str, credential_type: str, encrypted_value:
             cred_id = str(uuid.uuid4())
             cursor.execute(
                 """INSERT INTO api_user_credentials (id, api_user_id, credential_type, encrypted_value, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
                 (cred_id, api_user_id, credential_type, encrypted_value, now, now)
             )
 
@@ -474,7 +473,7 @@ def delete_user_credential(api_user_id: str, credential_type: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM api_user_credentials WHERE api_user_id = ? AND credential_type = ?",
+            "DELETE FROM api_user_credentials WHERE api_user_id = %s AND credential_type = %s",
             (api_user_id, credential_type)
         )
         return cursor.rowcount > 0
@@ -485,7 +484,7 @@ def user_has_credential(api_user_id: str, credential_type: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT 1 FROM api_user_credentials WHERE api_user_id = ? AND credential_type = ?",
+            "SELECT 1 FROM api_user_credentials WHERE api_user_id = %s AND credential_type = %s",
             (api_user_id, credential_type)
         )
         return cursor.fetchone() is not None

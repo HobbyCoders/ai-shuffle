@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -56,8 +55,9 @@ def _parse_json_fields(row: dict) -> dict:
         return row
     for field in ("tools", "skills", "mcp_servers"):
         val = row.get(field)
-        if val and isinstance(val, str):
+        if val is not None and isinstance(val, str):
             row[field] = json.loads(val)
+        # If val is already a list/dict (JSONB), leave it as-is
     return row
 
 
@@ -65,7 +65,7 @@ def get_subagent(subagent_id: str) -> Optional[SubagentRow]:
     """Get a subagent by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM subagents WHERE id = ?", (subagent_id,))
+        cursor.execute("SELECT * FROM subagents WHERE id = %s", (subagent_id,))
         row = row_to_dict(cursor.fetchone())
         return _parse_json_fields(row)
 
@@ -125,7 +125,7 @@ def create_subagent(
                     is_builtin,
                     default_name, default_description, default_prompt, default_tools, default_model,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (subagent_id, name, description, prompt, tools_json, model,
                  skills_json, memory, mcp_servers_json, is_builtin,
                  name, description, prompt, tools_json, model,
@@ -136,7 +136,7 @@ def create_subagent(
                 """INSERT INTO subagents (
                     id, name, description, prompt, tools, model, skills, memory, mcp_servers,
                     is_builtin, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (subagent_id, name, description, prompt, tools_json, model,
                  skills_json, memory, mcp_servers_json, is_builtin, now, now)
             )
@@ -167,39 +167,39 @@ def update_subagent(
     updates = []
     values = []
     if name is not ...:
-        updates.append("name = ?")
+        updates.append("name = %s")
         values.append(name)
     if description is not ...:
-        updates.append("description = ?")
+        updates.append("description = %s")
         values.append(description)
     if prompt is not ...:
-        updates.append("prompt = ?")
+        updates.append("prompt = %s")
         values.append(prompt)
     if tools is not ...:
-        updates.append("tools = ?")
+        updates.append("tools = %s")
         values.append(json.dumps(tools) if tools else None)
     if model is not ...:
-        updates.append("model = ?")
+        updates.append("model = %s")
         values.append(model)
     if skills is not ...:
-        updates.append("skills = ?")
+        updates.append("skills = %s")
         values.append(json.dumps(skills) if skills else None)
     if memory is not ...:
-        updates.append("memory = ?")
+        updates.append("memory = %s")
         values.append(memory)
     if mcp_servers is not ...:
-        updates.append("mcp_servers = ?")
+        updates.append("mcp_servers = %s")
         values.append(json.dumps(mcp_servers) if mcp_servers else None)
 
     if updates:
-        updates.append("updated_at = ?")
+        updates.append("updated_at = %s")
         values.append(datetime.now(timezone.utc).isoformat())
         values.append(subagent_id)
 
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE subagents SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE subagents SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -210,7 +210,7 @@ def delete_subagent(subagent_id: str) -> bool:
     """Delete a subagent"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM subagents WHERE id = ?", (subagent_id,))
+        cursor.execute("DELETE FROM subagents WHERE id = %s", (subagent_id,))
         return cursor.rowcount > 0
 
 
@@ -219,7 +219,7 @@ def set_subagent_builtin(subagent_id: str, is_builtin: bool) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE subagents SET is_builtin = ?, updated_at = ? WHERE id = ?",
+            "UPDATE subagents SET is_builtin = %s, updated_at = %s WHERE id = %s",
             (is_builtin, datetime.now(timezone.utc).isoformat(), subagent_id)
         )
         return cursor.rowcount > 0
@@ -244,7 +244,7 @@ def revert_subagent_to_defaults(subagent_id: str) -> Optional[SubagentRow]:
         cursor = conn.cursor()
         cursor.execute(
             """SELECT default_name, default_description, default_prompt, default_tools, default_model
-               FROM subagents WHERE id = ?""",
+               FROM subagents WHERE id = %s""",
             (subagent_id,)
         )
         row = cursor.fetchone()
@@ -260,8 +260,8 @@ def revert_subagent_to_defaults(subagent_id: str) -> Optional[SubagentRow]:
                 prompt = default_prompt,
                 tools = default_tools,
                 model = default_model,
-                updated_at = ?
-               WHERE id = ?""",
+                updated_at = %s
+               WHERE id = %s""",
             (datetime.now(timezone.utc).isoformat(), subagent_id)
         )
 
@@ -284,8 +284,8 @@ def has_subagent_been_modified(subagent_id: str) -> bool:
                 COALESCE(tools, '') != COALESCE(default_tools, '') OR
                 COALESCE(model, '') != COALESCE(default_model, '')
                AS is_modified
-               FROM subagents WHERE id = ? AND is_builtin = 1""",
-            (subagent_id,)
+               FROM subagents WHERE id = %s AND is_builtin = %s""",
+            (subagent_id, True)
         )
         row = cursor.fetchone()
         return bool(row and row["is_modified"])
@@ -309,7 +309,7 @@ def add_permission_rule(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO permission_rules (id, profile_id, tool_name, tool_pattern, decision, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s)""",
             (rule_id, profile_id, tool_name, tool_pattern, decision, now)
         )
     return get_permission_rule(rule_id)
@@ -319,7 +319,7 @@ def get_permission_rule(rule_id: str) -> Optional[PermissionRuleRow]:
     """Get a permission rule by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM permission_rules WHERE id = ?", (rule_id,))
+        cursor.execute("SELECT * FROM permission_rules WHERE id = %s", (rule_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -332,10 +332,10 @@ def get_permission_rules(
     params = []
 
     if profile_id:
-        query += " AND profile_id = ?"
+        query += " AND profile_id = %s"
         params.append(profile_id)
     if tool_name:
-        query += " AND tool_name = ?"
+        query += " AND tool_name = %s"
         params.append(tool_name)
 
     query += " ORDER BY created_at DESC"
@@ -350,7 +350,7 @@ def delete_permission_rule(rule_id: str) -> bool:
     """Delete a permission rule"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM permission_rules WHERE id = ?", (rule_id,))
+        cursor.execute("DELETE FROM permission_rules WHERE id = %s", (rule_id,))
         return cursor.rowcount > 0
 
 
@@ -358,5 +358,5 @@ def delete_profile_permission_rules(profile_id: str) -> int:
     """Delete all permission rules for a profile"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM permission_rules WHERE profile_id = ?", (profile_id,))
+        cursor.execute("DELETE FROM permission_rules WHERE profile_id = %s", (profile_id,))
         return cursor.rowcount

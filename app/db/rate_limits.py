@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -49,7 +48,7 @@ def get_rate_limit(rate_limit_id: str) -> Optional[RateLimitRow]:
     """Get a rate limit configuration by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM rate_limits WHERE id = ?", (rate_limit_id,))
+        cursor.execute("SELECT * FROM rate_limits WHERE id = %s", (rate_limit_id,))
         return row_to_dict(cursor.fetchone())
 
 
@@ -63,14 +62,14 @@ def get_rate_limit_for_user(user_id: Optional[str], api_key_id: Optional[str]) -
 
         # Try API key specific first
         if api_key_id:
-            cursor.execute("SELECT * FROM rate_limits WHERE api_key_id = ?", (api_key_id,))
+            cursor.execute("SELECT * FROM rate_limits WHERE api_key_id = %s", (api_key_id,))
             result = cursor.fetchone()
             if result:
                 return row_to_dict(result)
 
         # Try user specific
         if user_id:
-            cursor.execute("SELECT * FROM rate_limits WHERE user_id = ? AND api_key_id IS NULL", (user_id,))
+            cursor.execute("SELECT * FROM rate_limits WHERE user_id = %s AND api_key_id IS NULL", (user_id,))
             result = cursor.fetchone()
             if result:
                 return row_to_dict(result)
@@ -108,7 +107,7 @@ def create_rate_limit(
             """INSERT INTO rate_limits
                (id, user_id, api_key_id, requests_per_minute, requests_per_hour,
                 requests_per_day, concurrent_requests, priority, is_unlimited, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (rate_limit_id, user_id, api_key_id, requests_per_minute, requests_per_hour,
              requests_per_day, concurrent_requests, priority, is_unlimited, now, now)
         )
@@ -129,33 +128,33 @@ def update_rate_limit(
     if not existing:
         return None
 
-    updates = ["updated_at = ?"]
+    updates = ["updated_at = %s"]
     values = [datetime.now(timezone.utc).isoformat()]
 
     if requests_per_minute is not None:
-        updates.append("requests_per_minute = ?")
+        updates.append("requests_per_minute = %s")
         values.append(requests_per_minute)
     if requests_per_hour is not None:
-        updates.append("requests_per_hour = ?")
+        updates.append("requests_per_hour = %s")
         values.append(requests_per_hour)
     if requests_per_day is not None:
-        updates.append("requests_per_day = ?")
+        updates.append("requests_per_day = %s")
         values.append(requests_per_day)
     if concurrent_requests is not None:
-        updates.append("concurrent_requests = ?")
+        updates.append("concurrent_requests = %s")
         values.append(concurrent_requests)
     if priority is not None:
-        updates.append("priority = ?")
+        updates.append("priority = %s")
         values.append(priority)
     if is_unlimited is not None:
-        updates.append("is_unlimited = ?")
+        updates.append("is_unlimited = %s")
         values.append(is_unlimited)
 
     values.append(rate_limit_id)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"UPDATE rate_limits SET {', '.join(updates)} WHERE id = ?",
+            f"UPDATE rate_limits SET {', '.join(updates)} WHERE id = %s",
             values
         )
 
@@ -166,7 +165,7 @@ def delete_rate_limit(rate_limit_id: str) -> bool:
     """Delete a rate limit configuration"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM rate_limits WHERE id = ?", (rate_limit_id,))
+        cursor.execute("DELETE FROM rate_limits WHERE id = %s", (rate_limit_id,))
         return cursor.rowcount > 0
 
 
@@ -188,7 +187,7 @@ def log_request(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO request_log (id, user_id, api_key_id, endpoint, timestamp, duration_ms, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (request_id, user_id, api_key_id, endpoint, now, duration_ms, status)
         )
     return {
@@ -212,18 +211,18 @@ def get_request_count(
     with get_db() as conn:
         cursor = conn.cursor()
 
-        query = "SELECT COUNT(*) as count FROM request_log WHERE timestamp >= ?"
+        query = "SELECT COUNT(*) as count FROM request_log WHERE timestamp >= %s"
         params = [since.isoformat()]
 
         if api_key_id:
-            query += " AND api_key_id = ?"
+            query += " AND api_key_id = %s"
             params.append(api_key_id)
         elif user_id:
-            query += " AND (user_id = ? OR api_key_id IN (SELECT id FROM api_users WHERE name = ?))"
+            query += " AND (user_id = %s OR api_key_id IN (SELECT id FROM api_users WHERE name = %s))"
             params.extend([user_id, user_id])
 
         if endpoint:
-            query += " AND endpoint = ?"
+            query += " AND endpoint = %s"
             params.append(endpoint)
 
         cursor.execute(query, params)
@@ -236,7 +235,7 @@ def cleanup_old_request_logs(older_than: datetime) -> int:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM request_log WHERE timestamp < ?",
+            "DELETE FROM request_log WHERE timestamp < %s",
             (older_than.isoformat(),)
         )
         return cursor.rowcount

@@ -1,36 +1,45 @@
 """
 Shared database utilities — connection management, row conversion, constants.
 
+Uses PostgreSQL via psycopg2 with a threaded connection pool.
+
 All domain modules import from here. Do NOT import domain modules from this file.
 """
 
 import re
-import sqlite3
 import logging
-import threading
-import time
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
+
+import psycopg2
+import psycopg2.pool
+import psycopg2.extras
+import psycopg2.extensions
 
 from app.core.config import settings
 
 logger = logging.getLogger("app.db")
 
-# Regex for valid SQLite identifiers: alphanumeric + underscores, must start with letter/underscore.
-# This prevents SQL injection in PRAGMA and ALTER TABLE statements where parameterization
-# is not supported by SQLite.
+# Type aliases for Postgres connections/cursors
+DbConnection = psycopg2.extensions.connection
+DbCursor = psycopg2.extensions.cursor
+
+# ---------------------------------------------------------------------------
+# Connection pool (initialized once via init_pool at startup)
+# ---------------------------------------------------------------------------
+_pg_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
+
+# Regex for valid SQL identifiers: alphanumeric + underscores, must start with letter/underscore.
+# This prevents SQL injection in DDL statements where parameterization is not supported.
 _VALID_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 def _validate_identifier(value: str, kind: str = "identifier") -> str:
     """Validate that a string is a safe SQL identifier (table name, column name).
 
-    SQLite PRAGMA and ALTER TABLE statements do not support parameterized queries
-    for table/column names, so we must validate these values ourselves.
-
     Args:
         value: The identifier to validate.
-        kind: Human-readable label for error messages (e.g. "table name").
+        kind: Human-readable label for error messages.
 
     Returns:
         The validated identifier string.
@@ -57,196 +66,132 @@ class WorktreeStatus:
 
 
 # =============================================================================
-# Connection Pool
+# Backend helpers (always Postgres — kept for downstream compatibility)
 # =============================================================================
-class ConnectionPool:
-    """Thread-safe SQLite connection pool with lazy initialization and idle eviction.
 
-    Connections are created on demand up to ``max_size``.  PRAGMAs are executed
-    once at creation time, not on every checkout.  Idle connections older than
-    ``max_idle_time`` seconds are evicted on the next pool access.
+def is_postgres() -> bool:
+    """Always returns True. Kept for backward compatibility during migration."""
+    return True
+
+
+def is_sqlite() -> bool:
+    """Always returns False. Kept for backward compatibility during migration."""
+    return False
+
+
+# =============================================================================
+# Pool management
+# =============================================================================
+
+def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
+    """Initialize the PostgreSQL connection pool.
+
+    Must be called once during application startup.
+    """
+    global _pg_pool
+
+    if _pg_pool is not None:
+        logger.warning("PostgreSQL pool already initialized, closing old pool")
+        _pg_pool.closeall()
+
+    _pg_pool = psycopg2.pool.ThreadedConnectionPool(
+        min_conn,
+        max_conn,
+        dsn=settings.database_url,
+    )
+    logger.info(
+        f"PostgreSQL connection pool initialized (min={min_conn}, max={max_conn})"
+    )
+
+
+def close_pool() -> None:
+    """Shutdown the PostgreSQL connection pool. Called during app shutdown."""
+    global _pg_pool
+    if _pg_pool is not None:
+        _pg_pool.closeall()
+        _pg_pool = None
+        logger.info("PostgreSQL connection pool closed")
+
+
+# =============================================================================
+# Connection wrapper
+# =============================================================================
+
+class _PgDictConnection:
+    """Wraps a psycopg2 connection so that ``.cursor()`` returns
+    a ``RealDictCursor`` by default, giving dict-style row access.
     """
 
-    def __init__(self, max_size: int = 8, max_idle_time: float = 300.0):
-        self._max_size = max_size
-        self._max_idle_time = max_idle_time
-        self._lock = threading.Lock()
-        # Pool of idle connections: list of (conn, last_returned_timestamp)
-        self._idle: list[tuple[sqlite3.Connection, float]] = []
-        # Total connections currently alive (idle + checked-out)
-        self._total: int = 0
+    def __init__(self, conn):
+        object.__setattr__(self, '_conn', conn)
 
-    # ----- internal helpers ------------------------------------------------
+    def cursor(self, *args, cursor_factory=None, **kwargs):
+        if cursor_factory is None:
+            cursor_factory = psycopg2.extras.RealDictCursor
+        return self._conn.cursor(*args, cursor_factory=cursor_factory, **kwargs)
 
-    @staticmethod
-    def _create_connection() -> sqlite3.Connection:
-        """Create a new SQLite connection with PRAGMAs applied once."""
-        conn = sqlite3.connect(
-            str(settings.db_path), check_same_thread=False, timeout=30.0
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
+
+    def close(self):
+        return self._conn.close()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __setattr__(self, name, value):
+        if name == '_conn':
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._conn, name, value)
+
+
+# =============================================================================
+# Connection management
+# =============================================================================
+
+def _get_pg_connection() -> "_PgDictConnection":
+    """Acquire a PostgreSQL connection from the pool.
+
+    Returns a wrapper that defaults to RealDictCursor for dict-style
+    row access.
+    """
+    if _pg_pool is None:
+        raise RuntimeError(
+            "PostgreSQL connection pool not initialized. Call init_pool() first."
         )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA wal_autocheckpoint = 1000")
-        timeout_ms = int(settings.db_busy_timeout_ms)
-        conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
-        return conn
-
-    def _evict_idle(self) -> None:
-        """Close connections that have been idle longer than max_idle_time.
-
-        Must be called while holding ``self._lock``.
-        """
-        now = time.monotonic()
-        surviving: list[tuple[sqlite3.Connection, float]] = []
-        for conn, returned_at in self._idle:
-            if now - returned_at > self._max_idle_time:
-                self._total -= 1
-                try:
-                    conn.execute("PRAGMA optimize")
-                except Exception:
-                    pass
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-            else:
-                surviving.append((conn, returned_at))
-        self._idle = surviving
-
-    @staticmethod
-    def _health_check(conn: sqlite3.Connection) -> bool:
-        """Return True if the connection is still usable."""
-        try:
-            conn.execute("SELECT 1")
-            return True
-        except Exception:
-            return False
-
-    # ----- public API ------------------------------------------------------
-
-    def checkout(self) -> sqlite3.Connection:
-        """Acquire a connection from the pool.
-
-        Returns an idle connection if one is available and healthy, otherwise
-        creates a new one (if the pool has capacity).  Evicts stale idle
-        connections on every access.
-        """
-        with self._lock:
-            self._evict_idle()
-
-            # Try to reuse an idle connection
-            while self._idle:
-                conn, _returned_at = self._idle.pop()
-                if self._health_check(conn):
-                    return conn
-                # Dead connection — discard it
-                self._total -= 1
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-
-            # No idle connection available — create a new one if under limit
-            if self._total < self._max_size:
-                self._total += 1
-            else:
-                # Pool exhausted — log a warning but still create a connection
-                # so callers don't deadlock.  The extra connection will be
-                # discarded on return if the pool is full.
-                logger.warning(
-                    "Connection pool exhausted (max_size=%d, total=%d). "
-                    "Creating overflow connection.",
-                    self._max_size,
-                    self._total,
-                )
-                self._total += 1
-
-        # Create outside the lock to avoid holding it during I/O
-        return self._create_connection()
-
-    def checkin(self, conn: sqlite3.Connection) -> None:
-        """Return a connection to the pool.
-
-        If the pool is already at capacity the connection is closed instead.
-        """
-        with self._lock:
-            if len(self._idle) < self._max_size:
-                self._idle.append((conn, time.monotonic()))
-            else:
-                # Overflow connection — close it
-                self._total -= 1
-                try:
-                    conn.execute("PRAGMA optimize")
-                except Exception:
-                    pass
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-
-    def shutdown(self) -> None:
-        """Close all pooled connections.  Call during application shutdown."""
-        with self._lock:
-            for conn, _returned_at in self._idle:
-                try:
-                    conn.execute("PRAGMA optimize")
-                except Exception:
-                    pass
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-            self._idle.clear()
-            self._total = 0
-            logger.info("Connection pool shut down.")
+    conn = _pg_pool.getconn()
+    conn.autocommit = False
+    return _PgDictConnection(conn)
 
 
-# Module-level singleton pool
-_pool = ConnectionPool()
+def get_connection():
+    """Get a database connection from the pool."""
+    return _get_pg_connection()
 
 
-def get_connection() -> sqlite3.Connection:
-    """Get a one-off database connection with row factory.
-
-    This does NOT use the pool — it creates a fresh connection every time.
-    Use this for one-off operations like ``init_database`` that need a
-    dedicated connection with a deterministic lifecycle.
-    """
-    conn = sqlite3.connect(str(settings.db_path), check_same_thread=False, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA wal_autocheckpoint = 1000")
-    timeout_ms = int(settings.db_busy_timeout_ms)
-    conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
-    return conn
-
-
-def _close_connection(conn: sqlite3.Connection):
-    """Close a connection with lightweight maintenance.
-
-    Runs PRAGMA optimize before closing — per SQLite docs, this should be
-    called on every connection close.  It's a near-instant no-op most of the
-    time; it only runs ANALYZE on tables whose stats have become stale since
-    the last call, keeping the query planner accurate continuously rather than
-    letting it degrade between periodic maintenance runs.
-    """
+def _close_connection(conn) -> None:
+    """Return a connection to the pool."""
+    if _pg_pool is None:
+        return
+    raw_conn = conn._conn if isinstance(conn, _PgDictConnection) else conn
     try:
-        conn.execute("PRAGMA optimize")
+        _pg_pool.putconn(raw_conn)
     except Exception:
-        pass  # Best-effort; don't let maintenance failure break the caller
-    conn.close()
+        pass
 
 
 @contextmanager
 def get_db():
     """Context manager for database connections.
 
-    Checks out a connection from the pool, yields it, and returns it to the
-    pool on exit.  Commits on success, rolls back on exception.
+    Yields a connection, commits on success, rolls back on error,
+    and always returns the connection to the pool.
     """
-    conn = _pool.checkout()
+    conn = get_connection()
     try:
         yield conn
         conn.commit()
@@ -254,7 +199,7 @@ def get_db():
         conn.rollback()
         raise
     finally:
-        _pool.checkin(conn)
+        _close_connection(conn)
 
 
 @contextmanager
@@ -263,7 +208,7 @@ def transaction():
 
     Groups multiple database operations into a single transaction.
     Unlike get_db() which auto-commits on exit, this yields a connection
-    that callers pass to domain functions (via `_conn` parameter) so all
+    that callers pass to domain functions (via ``_conn`` parameter) so all
     operations share one commit/rollback boundary.
 
     Usage::
@@ -278,7 +223,7 @@ def transaction():
     Domain functions that accept ``_conn`` should use it instead of opening
     their own ``get_db()`` connection when provided.
     """
-    conn = _pool.checkout()
+    conn = get_connection()
     try:
         yield conn
         conn.commit()
@@ -286,28 +231,45 @@ def transaction():
         conn.rollback()
         raise
     finally:
-        _pool.checkin(conn)
+        _close_connection(conn)
 
 
-def column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
-    """Check if a column exists in a table using PRAGMA table_info."""
+# =============================================================================
+# Cursor helpers
+# =============================================================================
+
+def get_cursor(conn):
+    """Get a RealDictCursor from a connection."""
+    return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+
+# =============================================================================
+# Schema introspection
+# =============================================================================
+
+def column_exists(cursor, table: str, column: str) -> bool:
+    """Check if a column exists in a table."""
     _validate_identifier(table, "table name")
     _validate_identifier(column, "column name")
-    cursor.execute(f"PRAGMA table_info({table})")
-    columns = [row["name"] for row in cursor.fetchall()]
-    return column in columns
-
-
-def table_exists(cursor: sqlite3.Cursor, table: str) -> bool:
-    """Check if a table exists in the database."""
     cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (table,)
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = %s AND column_name = %s",
+        (table, column),
     )
     return cursor.fetchone() is not None
 
 
-def column_is_not_null(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
+def table_exists(cursor, table: str) -> bool:
+    """Check if a table exists in the database."""
+    cursor.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = 'public' AND table_name = %s",
+        (table,),
+    )
+    return cursor.fetchone() is not None
+
+
+def column_is_not_null(cursor, table: str, column: str) -> bool:
     """Check if a column has a NOT NULL constraint.
 
     Returns True if the column exists and has NOT NULL constraint.
@@ -315,20 +277,38 @@ def column_is_not_null(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
     """
     _validate_identifier(table, "table name")
     _validate_identifier(column, "column name")
-    cursor.execute(f"PRAGMA table_info({table})")
-    for row in cursor.fetchall():
-        if row["name"] == column:
-            return row["notnull"] == 1
-    return False
+    cursor.execute(
+        "SELECT is_nullable FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = %s AND column_name = %s",
+        (table, column),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return False
+    nullable = row["is_nullable"]
+    return nullable == "NO"
 
 
-def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
-    """Convert a sqlite3.Row to a dictionary."""
+# =============================================================================
+# Row conversion utilities
+# =============================================================================
+
+def row_to_dict(row) -> Optional[Dict[str, Any]]:
+    """Convert a database row to a dictionary.
+
+    RealDictCursor returns dicts directly; handles None gracefully.
+    """
     if row is None:
         return None
+    if isinstance(row, dict):
+        return row
     return dict(row)
 
 
-def rows_to_list(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
-    """Convert a list of sqlite3.Row to a list of dictionaries."""
+def rows_to_list(rows: list) -> List[Dict[str, Any]]:
+    """Convert a list of database rows to a list of dictionaries."""
+    if not rows:
+        return []
+    if isinstance(rows[0], dict):
+        return list(rows)
     return [dict(row) for row in rows]

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
 from datetime import datetime, timezone
@@ -59,7 +58,7 @@ def get_webhook(webhook_id: str) -> Optional[WebhookRow]:
     """Get a webhook by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM webhooks WHERE id = ?", (webhook_id,))
+        cursor.execute("SELECT * FROM webhooks WHERE id = %s", (webhook_id,))
         row = row_to_dict(cursor.fetchone())
         if row and row.get("events"):
             row["events"] = json.loads(row["events"]) if isinstance(row["events"], str) else row["events"]
@@ -79,7 +78,7 @@ def create_webhook(
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO webhooks (id, url, secret, events, is_active, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s)""",
             (webhook_id, url, secret, json.dumps(events), is_active, now)
         )
     return get_webhook(webhook_id)
@@ -101,16 +100,16 @@ def update_webhook(
     values = []
 
     if url is not None:
-        updates.append("url = ?")
+        updates.append("url = %s")
         values.append(url)
     if events is not None:
-        updates.append("events = ?")
+        updates.append("events = %s")
         values.append(json.dumps(events))
     if secret is not None:
-        updates.append("secret = ?")
+        updates.append("secret = %s")
         values.append(secret if secret else None)
     if is_active is not None:
-        updates.append("is_active = ?")
+        updates.append("is_active = %s")
         values.append(is_active)
 
     if updates:
@@ -118,7 +117,7 @@ def update_webhook(
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"UPDATE webhooks SET {', '.join(updates)} WHERE id = ?",
+                f"UPDATE webhooks SET {', '.join(updates)} WHERE id = %s",
                 values
             )
 
@@ -129,7 +128,7 @@ def delete_webhook(webhook_id: str) -> bool:
     """Delete a webhook"""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM webhooks WHERE id = ?", (webhook_id,))
+        cursor.execute("DELETE FROM webhooks WHERE id = %s", (webhook_id,))
         return cursor.rowcount > 0
 
 
@@ -141,13 +140,13 @@ def update_webhook_triggered(webhook_id: str, success: bool) -> None:
         if success:
             # Reset failure count on success
             cursor.execute(
-                "UPDATE webhooks SET last_triggered_at = ?, failure_count = 0 WHERE id = ?",
+                "UPDATE webhooks SET last_triggered_at = %s, failure_count = 0 WHERE id = %s",
                 (now, webhook_id)
             )
         else:
             # Increment failure count
             cursor.execute(
-                "UPDATE webhooks SET last_triggered_at = ?, failure_count = failure_count + 1 WHERE id = ?",
+                "UPDATE webhooks SET last_triggered_at = %s, failure_count = failure_count + 1 WHERE id = %s",
                 (now, webhook_id)
             )
 
