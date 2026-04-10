@@ -46,7 +46,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob: https:; "
             "media-src 'self' blob:; "
-            "connect-src 'self' ws: wss: https://*.cloudflareaccess.com; "
+            "connect-src 'self' ws: wss: https://*.cloudflareaccess.com https://static.cloudflareinsights.com https://img.shields.io https://em-content.zobj.net; "
             "font-src 'self'; "
             "frame-ancestors 'self';"
         )

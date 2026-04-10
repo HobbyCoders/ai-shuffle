@@ -9,7 +9,6 @@ const OFFLINE_URL = '/offline.html';
 // Static assets to cache on install (minimal - let network-first handle the rest)
 const STATIC_ASSETS = [
   '/offline.html',
-  '/manifest.json',
   '/favicon.svg',
   '/icons/icon.svg',
   '/icons/icon-maskable.svg'
@@ -102,6 +101,12 @@ self.addEventListener('fetch', (event) => {
 
   // Skip chrome-extension and other non-http(s) requests
   if (!url.protocol.startsWith('http')) {
+    return;
+  }
+
+  // Skip cross-origin requests - let the browser handle them directly
+  // to avoid CSP violations when the SW tries to fetch() external URLs
+  if (url.origin !== self.location.origin) {
     return;
   }
 
