@@ -382,8 +382,8 @@
 	{/if}
 
 	<!-- Ship It: one-click pipeline (commit → push → PR → merge → cleanup) -->
-	<!-- Shows when there are changes on a feature branch, not behind upstream -->
-	{#if hasChanges && !isOnDefaultBranch && !needsPull && onClickShipIt}
+	<!-- Shows on feature branches with uncommitted changes OR commits ahead of default branch -->
+	{#if (hasChanges || commitsAhead > 0) && !isOnDefaultBranch && !needsPull && onClickShipIt}
 		<button
 			class="git-btn ship-it-btn"
 			onclick={onClickShipIt}
