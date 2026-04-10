@@ -508,12 +508,16 @@ export const plugins = {
 
 		try {
 			const updated = await pluginsApi.updatePlugin(pluginId);
+
+			// Re-check from the backend to get authoritative update state
+			const freshUpdates = await pluginsApi.checkForUpdates();
+
 			_update((state) => ({
 				...state,
 				installed: state.installed.map((p) =>
 					p.id === pluginId ? updated : p
 				),
-				updatesAvailable: state.updatesAvailable.filter((u) => u.plugin_id !== pluginId),
+				updatesAvailable: freshUpdates,
 				updating: { ...state.updating, [pluginId]: false }
 			}));
 			return updated;
@@ -544,15 +548,18 @@ export const plugins = {
 
 		try {
 			const updatedPlugins = await pluginsApi.updateAllPlugins();
-			const updatedIds = new Set(updatedPlugins.map((p) => p.id));
+
+			// Re-check from the backend to get authoritative update state
+			// rather than relying on optimistic filtering which can drift
+			const [freshInstalled, freshUpdates] = await Promise.all([
+				pluginsApi.getInstalledPlugins(),
+				pluginsApi.checkForUpdates()
+			]);
 
 			_update((state) => ({
 				...state,
-				installed: state.installed.map((p) => {
-					const updated = updatedPlugins.find((up) => up.id === p.id);
-					return updated || p;
-				}),
-				updatesAvailable: state.updatesAvailable.filter((u) => !updatedIds.has(u.plugin_id)),
+				installed: freshInstalled,
+				updatesAvailable: freshUpdates,
 				updating: {
 					...state.updating,
 					...updateIds.reduce((acc, id) => ({ ...acc, [id]: false }), {})

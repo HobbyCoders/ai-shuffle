@@ -1849,12 +1849,22 @@ class PluginService:
             installed_version = install.get("version", "unknown")
             is_local = install.get("isLocal", True)
 
-            # For local-source plugins: compare git hash
+            # For local-source plugins: compare using the same version
+            # resolution logic as install_plugin() to avoid mismatches.
+            # Priority: entry.version > git HEAD hash
             if is_local:
-                if marketplace_id not in mp_head_cache:
-                    mp_head_cache[marketplace_id] = self._get_marketplace_head_version(marketplace_id)
+                entry = self._find_plugin_in_manifest(marketplace_id, plugin_name)
+                entry_version = entry.get("version") if entry else None
 
-                available_version = mp_head_cache[marketplace_id]
+                if entry_version:
+                    # Marketplace entry has an explicit version — use it
+                    available_version = entry_version
+                else:
+                    # No explicit version — fall back to git HEAD hash
+                    if marketplace_id not in mp_head_cache:
+                        mp_head_cache[marketplace_id] = self._get_marketplace_head_version(marketplace_id)
+                    available_version = mp_head_cache[marketplace_id]
+
                 if not available_version:
                     continue
 
