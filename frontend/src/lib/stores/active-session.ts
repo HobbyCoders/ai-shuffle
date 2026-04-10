@@ -144,6 +144,9 @@ export interface ActiveSessionState {
 	fastMode: boolean;
 	sessionLocked: boolean;
 	sessionLockedBy: string | undefined;
+	/** Accumulated text from WebSocket stream_delta events for instant rendering.
+	 *  Cleared when the poller catches up or streaming ends. */
+	wsStreamContent: string;
 }
 
 /** Minimal shape persisted to the backend. */
@@ -310,6 +313,7 @@ function defaultState(): ActiveSessionState {
 		fastMode: false,
 		sessionLocked: false,
 		sessionLockedBy: undefined,
+		wsStreamContent: '',
 	};
 }
 
@@ -525,16 +529,67 @@ function setupPollCallback() {
 		console.debug(`[PollCB] applying: ${data.messages.length} msgs, streaming=${data.isStreaming}, msgsChanged=${!msgsMatch}, streamingChanged=${streamingChanged}`);
 
 		// Single authoritative update — poller is the sole writer of session state.
-		_update(s => ({
-			...s,
-			messages: data.messages,
-			isStreaming: data.isStreaming,
-			todos: todosHaveUpdate ? data.todos : s.todos,
-			// Clear streamStartTime when streaming ends
-			streamStartTime: data.isStreaming ? s.streamStartTime : null,
-			...usageDelta,
-			...metaDelta,
-		}));
+		// When WS stream buffer is ahead of the poller's content, merge it into
+		// the last streaming assistant message to prevent text "jumping back".
+		// When the poller hasn't caught up to the synthetic streaming message yet,
+		// preserve it so the streaming indicator stays visible.
+		_update(s => {
+			let finalMessages = data.messages;
+			let finalWsContent = s.wsStreamContent;
+
+			if (data.isStreaming) {
+				// Find a streaming assistant text message in the poller's data
+				let pollerStreamIdx = -1;
+				for (let i = finalMessages.length - 1; i >= 0; i--) {
+					if (finalMessages[i].role === 'assistant' && finalMessages[i].type === 'text' && finalMessages[i].streaming) {
+						pollerStreamIdx = i;
+						break;
+					}
+				}
+
+				if (pollerStreamIdx >= 0 && finalWsContent) {
+					// Poller has a streaming message — merge WS content if ahead
+					const pollerContent = finalMessages[pollerStreamIdx].content || '';
+					if (finalWsContent.length > pollerContent.length) {
+						finalMessages = [...finalMessages];
+						finalMessages[pollerStreamIdx] = { ...finalMessages[pollerStreamIdx], content: finalWsContent };
+					} else {
+						// Poller caught up — clear WS buffer
+						finalWsContent = '';
+					}
+				} else if (pollerStreamIdx < 0) {
+					// Poller doesn't have a streaming assistant message yet.
+					// Preserve the synthetic one from our current state so the
+					// streaming indicator stays visible until real content arrives.
+					const currentSynthetic = s.messages.find(
+						(m: ChatMessage) => m.role === 'assistant' && m.streaming && m.type === 'text'
+					);
+					if (currentSynthetic) {
+						finalMessages = [...finalMessages, {
+							...currentSynthetic,
+							content: finalWsContent || currentSynthetic.content,
+						}];
+					}
+				} else {
+					// Poller has streaming message but no WS content — clear buffer
+					finalWsContent = '';
+				}
+			} else {
+				// Not streaming — clear buffer
+				finalWsContent = '';
+			}
+
+			return {
+				...s,
+				messages: finalMessages,
+				isStreaming: data.isStreaming,
+				todos: todosHaveUpdate ? data.todos : s.todos,
+				streamStartTime: data.isStreaming ? s.streamStartTime : null,
+				wsStreamContent: finalWsContent,
+				...usageDelta,
+				...metaDelta,
+			};
+		});
 
 		// Persist corrected worktree state so the fix survives page refresh.
 		// This is rare (only when server corrects stale client state) and prevents
@@ -871,6 +926,7 @@ export const activeSession = {
 					error: null,
 					title: newTitle,
 					currentQueryProfileId: queryProfileId,
+					wsStreamContent: '',
 				};
 			});
 
@@ -913,6 +969,7 @@ export const activeSession = {
 			error: null,
 			title: newTitle,
 			currentQueryProfileId: queryProfileId,
+			wsStreamContent: '',
 		}));
 
 		const overrides: Record<string, string> = {};

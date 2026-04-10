@@ -131,6 +131,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		if (isActiveSession) {
 			clearStopTimeout();
 			internal.pendingTools.clear();
+			// Clear WS stream buffer — poller's final poll is authoritative
+			update(s => s.wsStreamContent ? { ...s, wsStreamContent: '' } : s);
 
 			// Fire completion notification with metadata from the WS event.
 			// State (isStreaming, messages) will be updated by the poller.
@@ -177,6 +179,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 		clearStopTimeout();
 		internal.pendingTools.clear();
+		// Clear WS stream buffer
+		update(s => s.wsStreamContent ? { ...s, wsStreamContent: '' } : s);
 
 		// Clean up streamingSessions
 		if (stoppedSessionId) {
@@ -330,9 +334,32 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					(!currentState.sessionId && internal.awaitingNewSession);
 				if (acceptStart) {
 					internal.awaitingNewSession = false;
-					// Set sessionId and streamStartTime so completion notification
-					// can calculate duration. isStreaming and messages come from poller.
-					update(s => ({ ...s, sessionId, streamStartTime: Date.now() }));
+					// Set sessionId, streamStartTime, and inject a synthetic streaming
+					// assistant message so the streaming indicator appears immediately
+					// (don't wait for the poller to deliver the first assistant message).
+					const messageId = data.message_id as string || `ws-stream-${Date.now()}`;
+					update(s => {
+						// Only inject if there isn't already a streaming assistant message
+						const hasStreamingAssistant = s.messages.some(
+							m => m.role === 'assistant' && m.streaming
+						);
+						if (hasStreamingAssistant) {
+							return { ...s, sessionId, streamStartTime: Date.now(), wsStreamContent: '' };
+						}
+						return {
+							...s,
+							sessionId,
+							streamStartTime: Date.now(),
+							wsStreamContent: '',
+							messages: [...s.messages, {
+								id: messageId,
+								role: 'assistant' as const,
+								type: 'text' as const,
+								content: '',
+								streaming: true,
+							}],
+						};
+					});
 					// Ensure poller is running
 					sessionPoller.startStreaming(sessionId);
 					onPersistSession();
@@ -357,10 +384,58 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				break;
 
-			case 'chunk':
+			case 'stream_delta': {
+				// Accumulate text content from WS for instant rendering
+				const deltaType = data.delta_type as string;
+				if (deltaType === 'text') {
+					const content = data.content as string;
+					if (content) {
+						update(s => {
+							const newContent = s.wsStreamContent + content;
+							// Also update the synthetic streaming message content directly
+							// so it renders immediately without waiting for the poller
+							const msgs = [...s.messages];
+							for (let i = msgs.length - 1; i >= 0; i--) {
+								if (msgs[i].role === 'assistant' && msgs[i].streaming && msgs[i].type === 'text') {
+									msgs[i] = { ...msgs[i], content: newContent };
+									break;
+								}
+							}
+							return { ...s, wsStreamContent: newContent, messages: msgs };
+						});
+					}
+				}
+				// Fall through to ensure polling is started
+				const deltaState = getState();
+				if (deltaState.isStreaming && deltaState.sessionId && !sessionPoller.isPolling(deltaState.sessionId)) {
+					sessionPoller.startStreaming(deltaState.sessionId);
+				}
+				break;
+			}
+			case 'chunk': {
+				// Legacy chunk (include_partial_messages=false) — accumulate for instant rendering
+				const chunkContent = data.content as string;
+				if (chunkContent) {
+					update(s => {
+						const newContent = s.wsStreamContent + chunkContent;
+						const msgs = [...s.messages];
+						for (let i = msgs.length - 1; i >= 0; i--) {
+							if (msgs[i].role === 'assistant' && msgs[i].streaming && msgs[i].type === 'text') {
+								msgs[i] = { ...msgs[i], content: newContent };
+								break;
+							}
+						}
+						return { ...s, wsStreamContent: newContent, messages: msgs };
+					});
+				}
+				const chunkState = getState();
+				if (chunkState.isStreaming && chunkState.sessionId && !sessionPoller.isPolling(chunkState.sessionId)) {
+					sessionPoller.startStreaming(chunkState.sessionId);
+				}
+				break;
+			}
 			case 'stream_start':
 			case 'stream_block_start':
-			case 'stream_delta':
 			case 'stream_block_stop':
 			case 'system': {
 				// Ensure polling is started if we're streaming but poller isn't running.
@@ -419,7 +494,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// Must reset isStreaming so the user can send another message.
 				const errState = getState();
 				if (errState.sessionId) sessionPoller.stop(errState.sessionId);
-				update(s => ({ ...s, error: data.message as string, isStreaming: false, streamStartTime: null }));
+				update(s => ({ ...s, error: data.message as string, isStreaming: false, streamStartTime: null, wsStreamContent: '' }));
 				const errorSessionId = errState.sessionId;
 				if (errorSessionId) {
 					streamingSessions.update(map => {
