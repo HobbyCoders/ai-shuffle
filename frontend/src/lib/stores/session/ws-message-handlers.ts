@@ -385,27 +385,23 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				break;
 
 			case 'stream_delta': {
-				// Accumulate text content from WS for instant rendering
+				// Accumulate text content from WS into wsStreamContent buffer.
+				// Do NOT modify messages here — the poller's onPollApplied callback
+				// is the SOLE writer of message state. It merges wsStreamContent into
+				// the streaming message when WS is ahead of the server. Modifying
+				// messages here caused flickering: after the poller cleared
+				// wsStreamContent, the next delta would set message content to just
+				// the delta text (losing the base), then the poller would restore
+				// full content — causing the UI to alternate between partial and
+				// full content every poll cycle.
 				const deltaType = data.delta_type as string;
 				if (deltaType === 'text') {
 					const content = data.content as string;
 					if (content) {
-						update(s => {
-							const newContent = s.wsStreamContent + content;
-							// Also update the synthetic streaming message content directly
-							// so it renders immediately without waiting for the poller
-							const msgs = [...s.messages];
-							for (let i = msgs.length - 1; i >= 0; i--) {
-								if (msgs[i].role === 'assistant' && msgs[i].streaming && msgs[i].type === 'text') {
-									msgs[i] = { ...msgs[i], content: newContent };
-									break;
-								}
-							}
-							return { ...s, wsStreamContent: newContent, messages: msgs };
-						});
+						update(s => ({ ...s, wsStreamContent: s.wsStreamContent + content }));
 					}
 				}
-				// Fall through to ensure polling is started
+				// Ensure polling is started
 				const deltaState = getState();
 				if (deltaState.isStreaming && deltaState.sessionId && !sessionPoller.isPolling(deltaState.sessionId)) {
 					sessionPoller.startStreaming(deltaState.sessionId);
@@ -413,20 +409,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				break;
 			}
 			case 'chunk': {
-				// Legacy chunk (include_partial_messages=false) — accumulate for instant rendering
+				// Legacy chunk (include_partial_messages=false) — accumulate into
+				// wsStreamContent only. Same rationale as stream_delta: the poller's
+				// onPollApplied is the sole message writer to prevent flickering.
 				const chunkContent = data.content as string;
 				if (chunkContent) {
-					update(s => {
-						const newContent = s.wsStreamContent + chunkContent;
-						const msgs = [...s.messages];
-						for (let i = msgs.length - 1; i >= 0; i--) {
-							if (msgs[i].role === 'assistant' && msgs[i].streaming && msgs[i].type === 'text') {
-								msgs[i] = { ...msgs[i], content: newContent };
-								break;
-							}
-						}
-						return { ...s, wsStreamContent: newContent, messages: msgs };
-					});
+					update(s => ({ ...s, wsStreamContent: s.wsStreamContent + chunkContent }));
 				}
 				const chunkState = getState();
 				if (chunkState.isStreaming && chunkState.sessionId && !sessionPoller.isPolling(chunkState.sessionId)) {
