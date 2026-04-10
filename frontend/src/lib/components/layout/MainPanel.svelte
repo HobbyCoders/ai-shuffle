@@ -236,6 +236,9 @@
 		// would saturate the browser's connection pool (6 per host) and
 		// cause progressive slowdown / eventual UI hang.
 		if (git.operationInProgress) return;
+		// Stop polling entirely if the worktree was deleted (404 detected).
+		// Continued polling would spam 404s and waste browser connections.
+		if (git.worktreeGone) return;
 		const now = Date.now();
 		const isActive = (now - _gitLastActivity) < GIT_IDLE_THRESHOLD_MS;
 		git.refreshStatus();
@@ -639,14 +642,22 @@
 			progressCompleted = true;
 			branchPR = null;
 
-			// Refresh git status
-			await git.refreshStatus();
-			await git.refreshDiffStats();
+			// Only refresh git state if worktree wasn't deleted — polling a
+			// deleted worktree produces 404 spam that saturates connections.
+			if (!(cleanup && isWorktreeMode && worktreeId)) {
+				await git.refreshStatus();
+				await git.refreshDiffStats();
+			}
 		} catch (e: any) {
 			progressError = e?.detail || e?.message || 'An error occurred';
 		} finally {
 			git.setOperationInProgress(false);
-			resumeGitPoll();
+			// Don't resume polling if the worktree was deleted — it will
+			// just fire 404s until the user closes the modal and
+			// markWorktreeDeleted() clears the worktree context.
+			if (!(cleanup && isWorktreeMode && worktreeId)) {
+				resumeGitPoll();
+			}
 		}
 	}
 
@@ -891,14 +902,24 @@
 			progressCompleted = true;
 			branchPR = null;
 
-			// Refresh git status
-			await git.refreshStatus();
-			await git.refreshDiffStats();
+			// Only refresh git state if worktree wasn't deleted — polling a
+			// deleted worktree produces 404 spam that saturates connections.
+			const worktreeWasDeleted = prefs.cleanupAfterMerge && isWorktreeMode && !!worktreeId;
+			if (!worktreeWasDeleted) {
+				await git.refreshStatus();
+				await git.refreshDiffStats();
+			}
 		} catch (e: any) {
 			progressError = e?.detail || e?.message || 'An error occurred during the pipeline';
 		} finally {
 			git.setOperationInProgress(false);
-			resumeGitPoll();
+			// Don't resume polling if the worktree was deleted — it will
+			// just fire 404s until the user closes the modal and
+			// markWorktreeDeleted() clears the worktree context.
+			const worktreeWasDeleted = prefs.cleanupAfterMerge && isWorktreeMode && !!worktreeId;
+			if (!worktreeWasDeleted) {
+				resumeGitPoll();
+			}
 		}
 	}
 

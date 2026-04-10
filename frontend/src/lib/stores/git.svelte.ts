@@ -9,6 +9,7 @@
  */
 
 import * as gitApi from '$lib/api/git';
+import { isApiError } from '$lib/api/client';
 import { untrack } from 'svelte';
 
 // Re-export types from API
@@ -152,6 +153,12 @@ const GIT_POLL_FETCH_TIMEOUT_MS = 8_000;
 // knows not to fire competing HTTP requests.
 let _operationInProgress = false;
 
+// Flag set when a polling request returns 404 for a worktree that no longer
+// exists. Once set, all poll methods early-return to stop the 404 spam that
+// saturates the browser connection pool and causes progressive slowdown.
+// Reset when the store loads a new repository/worktree context.
+let _worktreeGone = false;
+
 const _cache = new Map<string, CachedState>();
 
 function _makeKey(projectId: string, worktreeId?: string | null): string {
@@ -184,6 +191,19 @@ function _syncToCache(fields: Partial<CachedState>) {
 }
 
 /**
+ * Check if an error is a 404 for a worktree that no longer exists.
+ * When detected, sets _worktreeGone to stop all further polling.
+ */
+function _checkWorktreeGone(e: unknown): boolean {
+	if (_state.worktreeId && isApiError(e) && e.status === 404) {
+		_worktreeGone = true;
+		console.warn(`[git] Worktree ${_state.worktreeId} no longer exists, stopping git polling`);
+		return true;
+	}
+	return false;
+}
+
+/**
  * Core load logic shared by loadRepository and loadForWorktree.
  */
 async function _loadCore(
@@ -192,6 +212,7 @@ async function _loadCore(
 	worktreeId: string | undefined,
 	mode: GitMode
 ) {
+	_worktreeGone = false; // Reset on context switch
 	const cached = _restoreFromCache(key);
 	_update((s) => ({
 		...s,
@@ -366,12 +387,14 @@ export const git = {
 
 	clearRepository() {
 		_loadedKey = null;
+		_worktreeGone = false;
 		_set({ ...EMPTY_STATE });
 	},
 
 	async refreshStatus() {
 		if (!_state.projectId) return;
 		if (_statusInFlight) return; // Prevent overlapping requests
+		if (_worktreeGone) return; // Worktree deleted — stop polling
 		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
 
 		_statusAbort?.abort();
@@ -395,6 +418,7 @@ export const git = {
 		} catch (e) {
 			if (controller.signal.aborted) return; // Timeout or manual abort — silently skip
 			if (_loadedKey !== key) return;
+			if (_checkWorktreeGone(e)) return; // Worktree deleted — stop polling
 			const error = e as { detail?: string };
 			_update((s) => ({ ...s, error: error.detail || 'Failed to refresh status' }));
 		} finally {
@@ -407,6 +431,7 @@ export const git = {
 	async loadBranches() {
 		if (!_state.projectId) return;
 		if (_branchesInFlight) return; // Prevent overlapping requests
+		if (_worktreeGone) return; // Worktree deleted — stop polling
 		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
 
 		_branchesAbort?.abort();
@@ -428,6 +453,7 @@ export const git = {
 		} catch (e) {
 			if (controller.signal.aborted) return; // Timeout or manual abort — silently skip
 			if (_loadedKey !== key) return;
+			if (_checkWorktreeGone(e)) return; // Worktree deleted — stop polling
 			const error = e as { detail?: string };
 			_update((s) => ({ ...s, error: error.detail || 'Failed to load branches' }));
 		} finally {
@@ -650,6 +676,7 @@ export const git = {
 	async refreshDiffStats() {
 		if (!_state.projectId) return;
 		if (_diffStatsInFlight) return; // Prevent overlapping requests
+		if (_worktreeGone) return; // Worktree deleted — stop polling
 		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
 
 		_diffStatsAbort?.abort();
@@ -673,6 +700,7 @@ export const git = {
 		} catch (e) {
 			if (controller.signal.aborted) return; // Timeout or manual abort — silently skip
 			if (_loadedKey !== key) return;
+			if (_checkWorktreeGone(e)) return; // Worktree deleted — stop polling
 			console.debug('Failed to refresh diff stats:', e);
 		} finally {
 			clearTimeout(timeout);
@@ -753,6 +781,7 @@ export const git = {
 	async refreshChangedFiles() {
 		if (!_state.projectId) return;
 		if (_changedFilesInFlight) return;
+		if (_worktreeGone) return; // Worktree deleted — stop polling
 		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
 
 		_changedFilesInFlight = true;
@@ -770,6 +799,7 @@ export const git = {
 			if (cached) cached.changedFiles = response.files;
 		} catch (e) {
 			if (_loadedKey !== key) return;
+			if (_checkWorktreeGone(e)) return; // Worktree deleted — stop polling
 			console.debug('Failed to refresh changed files:', e);
 			_update((s) => ({ ...s, changedFilesLoading: false }));
 		} finally {
@@ -849,6 +879,14 @@ export const git = {
 	clear() {
 		_loadedKey = null;
 		_set({ ...EMPTY_STATE });
+	},
+
+	/**
+	 * Whether the current worktree has been detected as deleted (404 from backend).
+	 * When true, all polling methods early-return to stop 404 spam.
+	 */
+	get worktreeGone() {
+		return _worktreeGone;
 	},
 
 	/**
