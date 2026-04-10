@@ -711,9 +711,77 @@ class WorktreeManager:
 
         return worktree
 
-    def cleanup_worktree(self, worktree_id: str, keep_branch: bool = True) -> bool:
+    async def terminate_worktree_sessions(self, worktree_id: str) -> list[str]:
+        """
+        Terminate all SDK sessions associated with a worktree.
+
+        Finds all sessions linked to the worktree via DB, removes them from
+        the session pool (which gracefully kills the SDK subprocess), and
+        cleans up sync engine streaming state.
+
+        This MUST be called before `git worktree remove` — otherwise the
+        subprocess holds a CWD lock on the worktree folder and removal fails
+        (especially on Windows).
+
+        Args:
+            worktree_id: The worktree whose sessions should be terminated.
+
+        Returns:
+            List of session IDs that were terminated.
+        """
+        from app.core.session_pool import get_session_pool
+        from app.core.sync_engine import sync_engine
+        from app.core.live_session_store import live_session_store
+
+        sessions = database.get_sessions_for_worktree(worktree_id)
+        if not sessions:
+            return []
+
+        pool = get_session_pool()
+        terminated = []
+
+        for session in sessions:
+            session_id = session["id"]
+
+            # Remove from session pool — this gracefully disconnects the SDK
+            # subprocess (SIGTERM → wait → SIGKILL)
+            state = await pool.remove(session_id)
+            if state:
+                logger.info(
+                    f"Terminated SDK session {session_id} for worktree {worktree_id}"
+                )
+                terminated.append(session_id)
+
+            # Clean up sync engine streaming state if this session was streaming
+            if session_id in sync_engine._streaming_sessions:
+                await sync_engine.broadcast_stream_end(
+                    session_id=session_id,
+                    message_id="worktree-cleanup",
+                    metadata={"reason": "worktree_deleted"},
+                    interrupted=True,
+                )
+                logger.info(
+                    f"Ended streaming for session {session_id} (worktree cleanup)"
+                )
+
+            # Clean up live session store
+            await live_session_store.cleanup_session(session_id)
+
+        if terminated:
+            logger.info(
+                f"Terminated {len(terminated)} session(s) for worktree {worktree_id}: "
+                f"{terminated}"
+            )
+
+        return terminated
+
+    async def cleanup_worktree(self, worktree_id: str, keep_branch: bool = True) -> bool:
         """
         Remove a worktree and optionally delete its branch.
+
+        Terminates any SDK sessions whose subprocess is running inside the
+        worktree directory before removing it, ensuring no CWD locks block
+        the git worktree removal.
 
         Args:
             worktree_id: The worktree to remove
@@ -741,6 +809,17 @@ class WorktreeManager:
             logger.warning(f"Project not found for repository: {repo['id']}")
             database.delete_worktree(worktree_id)
             return True
+
+        # Terminate SDK sessions BEFORE removing the worktree folder.
+        # Their subprocess CWD is inside the worktree — if we don't kill
+        # them first, `git worktree remove` fails (Windows CWD lock) or
+        # leaves a zombie subprocess (Linux).
+        terminated = await self.terminate_worktree_sessions(worktree_id)
+        if terminated:
+            logger.info(
+                f"Terminated {len(terminated)} session(s) before removing "
+                f"worktree {worktree_id}"
+            )
 
         main_dir = get_project_working_dir(project)
         worktree_abs_path = get_worktree_working_dir(worktree)

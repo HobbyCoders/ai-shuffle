@@ -296,6 +296,35 @@ class SessionPool:
                 evicted.append(session_id)
         return evicted
 
+    async def evict_orphaned_worktree_sessions(self) -> list[str]:
+        """Evict sessions whose working directory no longer exists.
+
+        Safety net for worktree sessions that weren't cleaned up properly —
+        e.g., worktree removed via CLI, or terminate_worktree_sessions() was
+        skipped due to a crash. If the CWD recorded at connect time no longer
+        exists on disk, the session is useless and should be evicted.
+
+        Returns:
+            List of evicted session IDs.
+        """
+        evicted = []
+        for session_id in list(self._pool.keys()):
+            state = self._pool.get(session_id)
+            if state is None:
+                continue
+            if state.is_streaming:
+                continue
+            # Check if the session's CWD still exists
+            cwd = getattr(state.connect_options, 'cwd', None) if state.connect_options else None
+            if cwd and not Path(cwd).exists():
+                await self._do_evict(session_id, state)
+                evicted.append(session_id)
+                logger.info(
+                    f"[Pool] Evicted orphaned worktree session {session_id} "
+                    f"(cwd no longer exists: {cwd})"
+                )
+        return evicted
+
     async def shutdown(self) -> None:
         """Disconnect all sessions. Called during server shutdown."""
         session_ids = list(self._pool.keys())

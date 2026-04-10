@@ -2263,7 +2263,7 @@ async def delete_worktree(
             detail=f"Worktree not found in this project: {worktree_id}"
         )
 
-    success = worktree_manager.cleanup_worktree(worktree_id, keep_branch=keep_branch)
+    success = await worktree_manager.cleanup_worktree(worktree_id, keep_branch=keep_branch)
 
     if not success:
         raise HTTPException(

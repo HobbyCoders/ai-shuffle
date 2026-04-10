@@ -13,7 +13,7 @@ Tests cover:
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -42,8 +42,14 @@ def mock_git_service():
 
 @pytest.fixture
 def mock_worktree_manager():
-    """Create a mock worktree manager."""
-    return MagicMock()
+    """Create a mock worktree manager.
+
+    cleanup_worktree is async, so we use AsyncMock for it to avoid
+    RuntimeWarning when the endpoint awaits the mock.
+    """
+    mock = MagicMock()
+    mock.cleanup_worktree = AsyncMock()
+    return mock
 
 
 @pytest.fixture

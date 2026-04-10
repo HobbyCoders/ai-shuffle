@@ -252,6 +252,17 @@ async def _periodic_cleanup() -> dict:
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to evict idle pool sessions: {e}")
 
+    # Evict sessions whose worktree directory was deleted externally
+    try:
+        from app.core.session_pool import get_session_pool, _session_pool
+        if _session_pool is not None:
+            pool = get_session_pool()
+            orphaned = await pool.evict_orphaned_worktree_sessions()
+            if orphaned:
+                cleaned["orphaned_worktree_sessions"] = len(orphaned)
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to evict orphaned worktree sessions: {e}")
+
     # Clean up expired rate limiter windows and stale config cache
     try:
         from app.core.rate_limiter import rate_limiter
