@@ -1965,15 +1965,23 @@ async def create_worktree(
 
     session = None
 
+    from app.core.worktree_manager import WorktreeError
+
     if body.profile_id:
         # Legacy mode: Create worktree and session together
-        worktree, session = worktree_manager.create_worktree_session(
-            project_id=project_id,
-            branch_name=body.branch_name,
-            create_new_branch=body.create_new_branch,
-            base_branch=body.base_branch,
-            profile_id=body.profile_id
-        )
+        try:
+            worktree, session = worktree_manager.create_worktree_session(
+                project_id=project_id,
+                branch_name=body.branch_name,
+                create_new_branch=body.create_new_branch,
+                base_branch=body.base_branch,
+                profile_id=body.profile_id
+            )
+        except WorktreeError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e)
+            )
 
         if not worktree:
             raise HTTPException(
@@ -1982,12 +1990,18 @@ async def create_worktree(
             )
     else:
         # New mode: Create standalone worktree (no session)
-        worktree = worktree_manager.create_worktree(
-            project_id=project_id,
-            branch_name=body.branch_name,
-            create_new_branch=body.create_new_branch,
-            base_branch=body.base_branch
-        )
+        try:
+            worktree = worktree_manager.create_worktree(
+                project_id=project_id,
+                branch_name=body.branch_name,
+                create_new_branch=body.create_new_branch,
+                base_branch=body.base_branch
+            )
+        except WorktreeError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e)
+            )
 
         if not worktree:
             raise HTTPException(

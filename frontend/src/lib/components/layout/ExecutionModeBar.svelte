@@ -12,7 +12,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import type { ExecutionMode } from '$lib/stores/types';
 	import { syncWorktrees, createWorktree as createWorktreeApi, type Worktree, type Branch } from '$lib/api/git';
-	import { worktrees as worktreeStore, branches as branchStore, git } from '$lib/stores/git';
+	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch } from '$lib/stores/git';
 	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2 } from 'lucide-svelte';
 	import { untrack } from 'svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
@@ -35,11 +35,16 @@
 	// Branches that don't already have a worktree
 	const worktreeBranchNames = $derived(new Set(filteredWorktrees.map(w => w.branch_name)));
 
+	// The git repo's currently checked-out branch name (can't create a worktree on it)
+	const checkedOutBranchName = $derived($gitCurrentBranch?.name || null);
+
 	const filteredBranches = $derived.by(() => {
 		const seen = new Set<string>();
 		return $branchStore.filter(b => {
 			// Skip main/master (main worktree)
 			if (b.name === 'main' || b.name === 'master') return false;
+			// Skip the currently checked-out branch — git won't allow a worktree on it
+			if (!b.remote && checkedOutBranchName && b.name === checkedOutBranchName) return false;
 			// Skip remote branches that have a local counterpart
 			if (b.remote) {
 				const localName = b.name.replace(/^[^\/]+\//, '');
