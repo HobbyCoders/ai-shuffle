@@ -591,14 +591,26 @@ function setupPollCallback() {
 					// Poller doesn't have a streaming assistant message yet.
 					// Preserve the synthetic one from our current state so the
 					// streaming indicator stays visible until real content arrives.
+					//
+					// Guard: only inject if the server hasn't already finalized
+					// a text message that matches the synthetic. Without this
+					// check, a stale streaming text from s.messages gets appended
+					// as a ghost duplicate when the real text was already finalized
+					// in the same poll cycle (text finalized + tool started).
 					const currentSynthetic = s.messages.find(
 						(m: ChatMessage) => m.role === 'assistant' && m.streaming && m.type === 'text'
 					);
 					if (currentSynthetic) {
-						finalMessages = [...finalMessages, {
-							...currentSynthetic,
-							content: finalWsContent || currentSynthetic.content,
-						}];
+						const alreadyFinalized = finalMessages.some(
+							(m: ChatMessage) => m.role === 'assistant' && m.type === 'text' && !m.streaming &&
+								m.content === currentSynthetic.content
+						);
+						if (!alreadyFinalized) {
+							finalMessages = [...finalMessages, {
+								...currentSynthetic,
+								content: finalWsContent || currentSynthetic.content,
+							}];
+						}
 					}
 				} else {
 					// Poller has streaming message but no WS content — clear buffer
@@ -612,15 +624,36 @@ function setupPollCallback() {
 			// ── Phase 3: Stabilize message identity ────────────────────
 			// When IDs transition from client-side (user-*, ws-stream-*)
 			// to server-side (live-*), Svelte's keyed {#each} destroys and
-			// recreates DOM elements, causing scroll-position jumps that
-			// manifest as brief flashes of earlier messages. Position-based
-			// comparison preserves the existing object reference (or at
-			// minimum the existing ID) when the logical message is the same.
+			// recreates DOM elements, causing scroll-position jumps.
+			//
+			// Strategy: ID-first lookup with position fallback.
+			// 1. Try exact ID match in existing messages (handles position shifts)
+			// 2. Fall back to position-based match (handles synthetic→real transitions)
+			// This avoids the pure position-based approach that breaks when messages
+			// are inserted mid-array (thinking blocks, system messages).
 			if (s.messages.length > 0 && finalMessages.length > 0) {
+				// Build ID→message lookup from previous state
+				const existingById = new Map<string, ChatMessage>();
+				for (const m of s.messages) {
+					if (m.id) existingById.set(m.id, m);
+				}
+
 				let needsStabilization = false;
 				const stabilized = finalMessages.map((msg, i) => {
-					const existing = s.messages[i];
-					if (!existing || existing.role !== msg.role || existing.type !== msg.type) return msg;
+					// 1. Try exact ID match first (position-independent)
+					let existing = existingById.get(msg.id);
+
+					// 2. Fall back to position-based match for ID transitions
+					//    (e.g., synthetic ws-stream-* → server live-*)
+					if (!existing) {
+						const positional = s.messages[i];
+						if (positional && positional.role === msg.role && positional.type === msg.type) {
+							existing = positional;
+						}
+					}
+
+					if (!existing) return msg;
+
 					// Identical content — reuse exact same object to skip re-render
 					if (
 						existing.content === msg.content &&

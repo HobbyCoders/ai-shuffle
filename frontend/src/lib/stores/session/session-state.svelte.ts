@@ -145,8 +145,23 @@ function preserveMessageIds(
 		return result;
 	}
 
-	// Different lengths: full comparison (new messages added or removed)
-	return incoming.map((msg, i) => compareMessage(msg, existing[i]));
+	// Different lengths: ID-first lookup with position fallback.
+	// When messages are inserted mid-array (thinking blocks, system messages),
+	// pure position-based comparison maps the wrong existing message to each
+	// incoming message, causing ID swaps and DOM recreation flicker.
+	const existingById = new Map<string, ChatMessage>();
+	for (const m of existing) {
+		if (m.id) existingById.set(m.id, m);
+	}
+
+	return incoming.map((msg, i) => {
+		// 1. Try exact ID match (position-independent, handles insertions)
+		const byId = msg.id ? existingById.get(msg.id) : undefined;
+		if (byId) return compareMessage(msg, byId);
+
+		// 2. Fall back to position-based for new messages or ID transitions
+		return compareMessage(msg, existing[i]);
+	});
 }
 
 // ─── Session State Manager ($state-based) ────────────────────────────────────
