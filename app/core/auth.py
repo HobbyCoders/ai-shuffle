@@ -780,9 +780,30 @@ class AuthService:
     # =========================================================================
 
     def is_onboarding_complete(self) -> bool:
-        """Check if the full onboarding flow has been completed"""
+        """Check if the full onboarding flow has been completed for this instance.
+
+        When multiple instances share a database, each instance needs its own
+        workspace path configured. If this instance doesn't have one, onboarding
+        is not complete even if another instance completed it.
+        """
         val = database.get_system_setting("onboarding_complete")
         if val == "true":
+            # Onboarding was completed on some instance — check if THIS instance
+            # has a workspace path configured.
+            from app.core.config import settings
+            instance_key = f"workspace_path:{settings.effective_instance_id}"
+            if not database.get_system_setting(instance_key):
+                # No instance-scoped workspace path. Check if there's a legacy
+                # global one that matches this machine (backward compat).
+                global_path = database.get_system_setting("workspace_path")
+                if global_path:
+                    import os
+                    if os.path.exists(global_path):
+                        # Legacy path exists on this machine — migrate it to instance-scoped
+                        database.set_system_setting(instance_key, global_path)
+                        return True
+                # No workspace for this instance — force setup
+                return False
             return True
         # If admin exists but the onboarding flow was never started via the
         # setup page, this is a user who created their admin before the setup
