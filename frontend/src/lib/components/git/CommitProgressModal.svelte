@@ -1,16 +1,26 @@
 <script lang="ts">
 	/**
-	 * CommitProgressModal - Step-by-step progress for commit/push/PR
+	 * CommitProgressModal - Step-by-step progress for commit/push/PR/pipeline
 	 *
 	 * Shows a spinner on the current step, checkmarks on completed steps,
 	 * and updates the title dynamically.
+	 *
+	 * Supports a "pipeline" mode for the Ship It flow that shows all steps
+	 * (commit → push → PR → merge → cleanup) in a single view.
 	 */
-	import { Check, Loader2, X, AlertCircle } from 'lucide-svelte';
+	import { Check, Loader2, X, AlertCircle, Rocket } from 'lucide-svelte';
 
-	type CommitAction = 'commit' | 'push' | 'pr' | 'finish' | 'pull';
-	type ModalMode = 'commit' | 'pr-only' | 'finish' | 'pull' | 'push';
+	type CommitAction = 'commit' | 'push' | 'pr' | 'finish' | 'pull' | 'pipeline';
+	type ModalMode = 'commit' | 'pr-only' | 'finish' | 'pull' | 'push' | 'pipeline';
 
 	interface ProgressStep {
+		label: string;
+		sublabel?: string;
+	}
+
+	/** Pipeline steps provided externally for the Ship It flow */
+	export interface PipelineStep {
+		id: string;
 		label: string;
 		sublabel?: string;
 	}
@@ -26,12 +36,19 @@
 		isGenerating?: boolean;
 		/** Whether cleanup steps are included (finish mode) */
 		hasCleanup?: boolean;
+		/** Externally-provided pipeline steps (pipeline mode only) */
+		pipelineSteps?: PipelineStep[];
 		onClose: () => void;
 	}
 
-	let { open, action, mode = 'commit', currentStep, completed, error, branchName = '', isGenerating = false, hasCleanup = false, onClose }: Props = $props();
+	let { open, action, mode = 'commit', currentStep, completed, error, branchName = '', isGenerating = false, hasCleanup = false, pipelineSteps = [], onClose }: Props = $props();
 
 	const steps = $derived.by((): ProgressStep[] => {
+		// Pipeline mode: use externally-provided steps
+		if (mode === 'pipeline' && pipelineSteps.length > 0) {
+			return pipelineSteps.map(s => ({ label: s.label, sublabel: s.sublabel }));
+		}
+
 		if (mode === 'push') {
 			return [{ label: branchName ? `Pushing to ${branchName}` : 'Pushing to remote' }];
 		}
@@ -78,7 +95,18 @@
 
 	const title = $derived.by(() => {
 		if (error) return 'Error';
-		if (completed) return 'Done';
+		if (completed) {
+			if (mode === 'pipeline') return 'Shipped!';
+			return 'Done';
+		}
+
+		if (mode === 'pipeline') {
+			// Use the current step label as the title
+			if (pipelineSteps.length > 0 && currentStep >= 1 && currentStep <= pipelineSteps.length) {
+				return pipelineSteps[currentStep - 1].label;
+			}
+			return 'Shipping...';
+		}
 
 		if (mode === 'push') {
 			return 'Pushing changes';
@@ -111,7 +139,9 @@
 	});
 
 	const subtitle = $derived(
-		error ? error : (completed ? 'All steps completed successfully.' : 'Hold tight, this may take a few moments...')
+		error ? error : (completed
+			? (mode === 'pipeline' ? 'All steps completed — changes are live.' : 'All steps completed successfully.')
+			: 'Hold tight, this may take a few moments...')
 	);
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -136,11 +166,17 @@
 			{/if}
 
 			<!-- Icon -->
-			<div class="modal-icon" class:error-icon={!!error} class:success-icon={completed && !error}>
+			<div class="modal-icon" class:error-icon={!!error} class:success-icon={completed && !error} class:pipeline-icon={mode === 'pipeline' && !error && !completed}>
 				{#if error}
 					<AlertCircle size={20} strokeWidth={1.5} />
 				{:else if completed}
-					<Check size={20} strokeWidth={2} />
+					{#if mode === 'pipeline'}
+						<Rocket size={20} strokeWidth={1.5} />
+					{:else}
+						<Check size={20} strokeWidth={2} />
+					{/if}
+				{:else if mode === 'pipeline'}
+					<Rocket size={20} strokeWidth={1.5} class="pipeline-pulse" />
 				{:else}
 					<Loader2 size={20} strokeWidth={1.5} class="spin" />
 				{/if}
@@ -264,6 +300,20 @@
 	.modal-icon.success-icon {
 		background: color-mix(in oklch, var(--success) 12%, transparent);
 		color: var(--success);
+	}
+
+	.modal-icon.pipeline-icon {
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		color: var(--primary);
+	}
+
+	:global(.pipeline-pulse) {
+		animation: pipeline-pulse 1.5s ease-in-out infinite;
+	}
+
+	@keyframes pipeline-pulse {
+		0%, 100% { opacity: 0.7; transform: translateY(0); }
+		50% { opacity: 1; transform: translateY(-2px); }
 	}
 
 	.modal-title {

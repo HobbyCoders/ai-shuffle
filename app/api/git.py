@@ -1698,6 +1698,164 @@ Return ONLY the JSON object, no markdown code blocks or explanation."""
 
 
 # =============================================================================
+# Branch Name Generation
+# =============================================================================
+
+class GenerateBranchNameRequest(BaseModel):
+    """Request to generate a branch name from a user message"""
+    message: str = Field(..., min_length=1, max_length=2000)
+    prefix: str = Field(default="feat", description="Branch name prefix (feat, fix, chore, etc.)")
+
+class GenerateBranchNameResponse(BaseModel):
+    """Generated branch name"""
+    branch_name: str
+    display_name: str  # Human-readable version
+
+@router.post("/{project_id}/git/generate-branch-name")
+async def generate_branch_name(
+    request: Request,
+    project_id: str,
+    body: GenerateBranchNameRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Generate a git branch name from a user message using AI.
+
+    Falls back to a simple slugification if AI generation fails.
+    """
+    from app.api.generation import generate_with_claude
+
+    check_project_access(request, project_id)
+
+    # Client-side fallback slugification
+    def slugify_branch(msg: str, prefix: str) -> str:
+        """Simple fallback: slugify first few words of message."""
+        import re
+        import unicodedata
+        # Normalize unicode
+        value = unicodedata.normalize('NFKD', msg).encode('ascii', 'ignore').decode('ascii')
+        value = value.lower().strip()
+        # Remove non-word chars (keep spaces and hyphens)
+        value = re.sub(r'[^\w\s-]', '', value)
+        # Take first 5 meaningful words
+        words = [w for w in value.split() if len(w) > 1][:5]
+        slug = '-'.join(words)
+        # Truncate and clean
+        slug = slug[:50].rstrip('-')
+        return f"{prefix}/{slug}" if slug else f"{prefix}/auto-{int(time.time())}"
+
+    try:
+        prompt = f"""Generate a concise git branch name from this user message. The branch should use the prefix "{body.prefix}/".
+
+Rules:
+- Use lowercase with hyphens (e.g., feat/add-user-auth)
+- Max 50 characters total
+- Be descriptive but concise (3-5 words after prefix)
+- No special characters except hyphens and one forward slash after prefix
+
+User message: "{body.message[:500]}"
+
+Return ONLY the branch name, nothing else. No quotes, no explanation."""
+
+        response_text = await generate_with_claude(prompt, model="haiku")
+        branch_name = response_text.strip().strip('"').strip("'").strip('`')
+
+        # Validate the generated name
+        import re
+        if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9/_-]*$', branch_name) or len(branch_name) > 60:
+            branch_name = slugify_branch(body.message, body.prefix)
+
+        # Ensure prefix is correct
+        if not branch_name.startswith(f"{body.prefix}/"):
+            branch_name = f"{body.prefix}/{branch_name.split('/', 1)[-1] if '/' in branch_name else branch_name}"
+
+        display_name = branch_name.split('/', 1)[-1].replace('-', ' ').title() if '/' in branch_name else branch_name
+
+        return GenerateBranchNameResponse(branch_name=branch_name, display_name=display_name)
+
+    except Exception as e:
+        logger.warning(f"AI branch name generation failed, using fallback: {e}")
+        branch_name = slugify_branch(body.message, body.prefix)
+        display_name = branch_name.split('/', 1)[-1].replace('-', ' ').title()
+        return GenerateBranchNameResponse(branch_name=branch_name, display_name=display_name)
+
+
+# =============================================================================
+# Pending Upload Migration
+# =============================================================================
+
+class MigrateUploadsRequest(BaseModel):
+    """Request to copy pending uploads from main project to worktree"""
+    worktree_id: str
+    file_paths: List[str] = Field(..., description="Absolute paths of files to copy to worktree")
+
+class MigrateUploadsResponse(BaseModel):
+    """Result of upload migration"""
+    migrated: List[Dict[str, str]]  # List of {original_path, new_path, relative_path}
+    errors: List[str]
+
+@router.post("/{project_id}/git/migrate-uploads")
+async def migrate_uploads_to_worktree(
+    request: Request,
+    project_id: str,
+    body: MigrateUploadsRequest,
+    token: str = Depends(require_auth)
+):
+    """
+    Copy uploaded files from the main project to a worktree directory.
+
+    Used when files were uploaded before a worktree existed (auto-worktree flow).
+    """
+    import shutil
+
+    check_project_access(request, project_id)
+
+    project = database.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    worktree = database.get_worktree(body.worktree_id)
+    if not worktree:
+        raise HTTPException(status_code=404, detail="Worktree not found")
+
+    worktree_dir = Path(get_worktree_working_dir(worktree))
+    if not worktree_dir.exists():
+        raise HTTPException(status_code=400, detail="Worktree directory does not exist")
+
+    project_dir = Path(get_project_working_dir(project_id))
+    migrated = []
+    errors = []
+
+    for file_path in body.file_paths:
+        try:
+            src = Path(file_path)
+            if not src.exists():
+                errors.append(f"File not found: {file_path}")
+                continue
+
+            # Ensure the file is within the project directory
+            try:
+                rel = src.relative_to(project_dir)
+            except ValueError:
+                errors.append(f"File not in project directory: {file_path}")
+                continue
+
+            dest = worktree_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src), str(dest))
+
+            migrated.append({
+                "original_path": str(src),
+                "new_path": str(dest),
+                "relative_path": rel.as_posix()
+            })
+        except Exception as e:
+            errors.append(f"Failed to copy {file_path}: {str(e)}")
+
+    return MigrateUploadsResponse(migrated=migrated, errors=errors)
+
+
+# =============================================================================
 # Worktree Endpoints
 # =============================================================================
 

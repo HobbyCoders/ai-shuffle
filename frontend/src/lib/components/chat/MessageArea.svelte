@@ -510,8 +510,11 @@
 		const lastMsg = $activeSession.messages[$activeSession.messages.length - 1];
 		if (!lastMsg) return '';
 		// For tool_use messages, track toolInput changes (especially TodoWrite)
-		if (lastMsg.type === 'tool_use' && lastMsg.toolInput) {
-			return JSON.stringify(lastMsg.toolInput);
+		if (lastMsg.type === 'tool_use') {
+			if (lastMsg.toolInput) return JSON.stringify(lastMsg.toolInput);
+			// During streaming, toolInput is not yet parsed — track partialToolInput
+			// so auto-scroll triggers as content streams in (e.g. TodoWrite).
+			if (lastMsg.partialToolInput) return lastMsg.partialToolInput;
 		}
 		return lastMsg.content || '';
 	});
