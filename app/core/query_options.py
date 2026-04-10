@@ -12,6 +12,7 @@ import platform
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
@@ -29,6 +30,46 @@ from app.core.mcp_service import get_mcp_service, McpServerType
 from app.core.query_streaming import DEFAULT_SDK_BUFFER_SIZE
 
 logger = logging.getLogger(__name__)
+
+# Path to Claude's user settings file
+_CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
+# Lock to prevent concurrent writes to settings.json
+_settings_file_lock = threading.Lock()
+
+
+def _set_fast_mode_in_user_settings(enabled: bool) -> None:
+    """Write fastMode to ~/.claude/settings.json so the CLI picks it up.
+
+    The Claude CLI reads fastMode from the user settings file (loaded via
+    ``--setting-sources user``). The ``--settings`` inline JSON flag does NOT
+    reliably enable fast mode on the bundled CLI binary used in Docker/Linux.
+
+    This function is safe to call from multiple threads: it acquires a lock
+    before read-modify-write to prevent lost updates.
+    """
+    with _settings_file_lock:
+        try:
+            if _CLAUDE_SETTINGS_FILE.exists():
+                data = json.loads(_CLAUDE_SETTINGS_FILE.read_text(encoding="utf-8"))
+            else:
+                data = {}
+
+            current = data.get("fastMode", False)
+            if current == enabled:
+                return  # No-op: already in desired state
+
+            if enabled:
+                data["fastMode"] = True
+            else:
+                data.pop("fastMode", None)
+
+            _CLAUDE_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _CLAUDE_SETTINGS_FILE.write_text(
+                json.dumps(data, indent=2), encoding="utf-8"
+            )
+            logger.debug(f"Set fastMode={enabled} in {_CLAUDE_SETTINGS_FILE}")
+        except Exception:
+            logger.exception("Failed to update fastMode in user settings")
 
 
 # Token budgets for thinking modes (token-based thinking)
@@ -1152,14 +1193,19 @@ def build_options_from_profile(
         model_to_use, betas_to_use = MODEL_1M_MAPPING[raw_model]
         logger.debug(f"1M context model selected: {raw_model} -> model={model_to_use}, betas={betas_to_use}")
 
-    # Fast mode: inject fastMode setting when enabled and using an Opus model.
-    # Fast mode is a Claude CLI setting (fastMode: true in settings.json),
-    # NOT a beta header. The SDK picks it up via the --settings CLI flag.
+    # Fast mode: enable via user settings file when using an Opus model.
+    # The Claude CLI reads fastMode from ~/.claude/settings.json (loaded via
+    # --setting-sources user). Passing it only via --settings inline JSON does
+    # NOT work reliably with the bundled CLI on Linux/Docker — the CLI appears
+    # to check the user settings file for fastMode, not the --settings override.
+    # Fix: write fastMode directly to the user settings file so the CLI picks
+    # it up through the normal settings loading path.
     fast_mode_requested = overrides.get("fast_mode") == "true"
     fast_mode_settings: Optional[str] = None
     if fast_mode_requested and model_to_use and "opus" in str(model_to_use).lower():
         fast_mode_settings = json.dumps({"fastMode": True})
-        logger.debug(f"Fast mode enabled for model={model_to_use}, injecting settings: {fast_mode_settings}")
+        _set_fast_mode_in_user_settings(True)
+        logger.debug(f"Fast mode enabled for model={model_to_use}, wrote fastMode=true to user settings")
         # Inject fast mode awareness into system prompt
         fast_mode_note = "\n\nFast mode is enabled. You are running with faster output using the same model. When asked about your speed or mode, you can confirm fast mode is active."
         if isinstance(final_system_prompt, dict):
@@ -1167,6 +1213,9 @@ def build_options_from_profile(
             final_system_prompt["append"] = current_append + fast_mode_note
         else:
             final_system_prompt += fast_mode_note
+    else:
+        # Ensure fast mode is off in user settings when not requested
+        _set_fast_mode_in_user_settings(False)
 
     # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
     # Priority: tools > tools_preset > allowed_tools (legacy)
