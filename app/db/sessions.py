@@ -597,6 +597,64 @@ def add_session_message(
     return msg
 
 
+def add_session_messages_batch(
+    messages: List[Dict[str, Any]],
+    _conn=None
+) -> List[SessionMessageRow]:
+    """Insert multiple session messages in a single transaction.
+
+    Each dict in *messages* must have keys: session_id, role, content.
+    Optional keys: tool_name, tool_input, metadata, profile_id.
+
+    Returns the list of inserted message dicts (with ids assigned).
+    """
+    if not messages:
+        return []
+
+    now = datetime.now(timezone.utc).isoformat()
+    sql = """INSERT INTO session_messages
+             (session_id, role, content, tool_name, tool_input, metadata, profile_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
+
+    results: List[SessionMessageRow] = []
+
+    def _do_insert(conn):
+        cursor = conn.cursor()
+        for msg in messages:
+            tool_input = msg.get("tool_input")
+            metadata = msg.get("metadata")
+            params = (
+                msg["session_id"],
+                msg["role"],
+                msg["content"],
+                msg.get("tool_name"),
+                json.dumps(tool_input) if tool_input else None,
+                json.dumps(metadata) if metadata else None,
+                msg.get("profile_id"),
+                now,
+            )
+            cursor.execute(sql, params)
+            results.append({
+                "id": cursor.lastrowid,
+                "session_id": msg["session_id"],
+                "role": msg["role"],
+                "content": msg["content"],
+                "tool_name": msg.get("tool_name"),
+                "tool_input": tool_input,
+                "metadata": metadata,
+                "profile_id": msg.get("profile_id"),
+                "created_at": now,
+            })
+
+    if _conn is not None:
+        _do_insert(_conn)
+    else:
+        with get_db() as conn:
+            _do_insert(conn)
+
+    return results
+
+
 def delete_session_message(session_id: str, message_id: int) -> bool:
     """Delete a specific message from a session"""
     with get_db() as conn:
@@ -619,6 +677,20 @@ def delete_session_messages_after(session_id: str, message_id: int) -> int:
         return cursor.rowcount
 
 
+def _fts_query_term(query: str) -> str:
+    """Convert a user search query into an FTS5 query string.
+
+    Handles quoting so special FTS5 characters (*, -, etc.) don't cause
+    parse errors.  Multi-word queries are joined with implicit AND.
+    """
+    # Split into words and quote each to prevent FTS5 syntax errors
+    words = query.strip().split()
+    if not words:
+        return '""'
+    # Quote each word individually; FTS5 treats adjacent quoted terms as AND
+    return " ".join(f'"{w}"' for w in words)
+
+
 def search_sessions(
     query: str,
     project_id: Optional[str] = None,
@@ -629,18 +701,21 @@ def search_sessions(
 ) -> List[SessionSearchResult]:
     """
     Search sessions by title and message content.
+    Uses FTS5 for content search (fast indexed lookup) with LIKE fallback
+    for title search (titles are short, always fast).
     Returns sessions with matching snippets showing where the match was found.
     """
     if not query or not query.strip():
         return []
 
     search_term = f"%{query.strip()}%"
+    fts_query = _fts_query_term(query)
 
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # Build the base query - search both session titles and message content
-        # Use UNION to combine title matches and content matches
+        # Search titles with LIKE (titles are short, always fast)
+        # Search content with FTS5 (indexed, handles large message bodies)
         sql = """
         WITH title_matches AS (
             SELECT
@@ -678,32 +753,11 @@ def search_sessions(
                 s.created_at,
                 s.updated_at,
                 'content' as match_type,
-                (
-                    SELECT SUBSTR(
-                        sm2.content,
-                        MAX(1, INSTR(LOWER(sm2.content), LOWER(?)) - 40),
-                        120
-                    )
-                    FROM session_messages sm2
-                    WHERE sm2.session_id = s.id
-                    AND sm2.content LIKE ? COLLATE NOCASE
-                    AND sm2.role IN ('user', 'assistant')
-                    ORDER BY sm2.created_at DESC
-                    LIMIT 1
-                ) as match_snippet,
-                (
-                    SELECT sm3.created_at
-                    FROM session_messages sm3
-                    WHERE sm3.session_id = s.id
-                    AND sm3.content LIKE ? COLLATE NOCASE
-                    AND sm3.role IN ('user', 'assistant')
-                    ORDER BY sm3.created_at DESC
-                    LIMIT 1
-                ) as match_time
-            FROM sessions s
-            INNER JOIN session_messages sm ON sm.session_id = s.id
-            WHERE sm.content LIKE ? COLLATE NOCASE
-            AND sm.role IN ('user', 'assistant')
+                snippet(session_messages_fts, 0, '', '', '...', 20) as match_snippet,
+                s.updated_at as match_time
+            FROM session_messages_fts fts
+            INNER JOIN sessions s ON s.id = fts.session_id
+            WHERE session_messages_fts MATCH ?
             AND s.status != 'archived'
         ),
         all_matches AS (
@@ -731,8 +785,7 @@ def search_sessions(
         WHERE 1=1
         """
 
-        # Base params for the search terms (used multiple times in query)
-        params = [search_term, query.strip(), search_term, search_term, search_term]
+        params: List[Any] = [search_term, fts_query]
 
         # Add filters
         if project_id:
@@ -748,7 +801,6 @@ def search_sessions(
             params.append(api_user_id)
 
         # Group by session to avoid duplicates, keeping the best match
-        # Order by most recent match
         sql += """
         GROUP BY id
         ORDER BY
@@ -760,17 +812,6 @@ def search_sessions(
 
         cursor.execute(sql, params)
         results = rows_to_list(cursor.fetchall())
-
-        # Clean up snippets - add ellipsis if truncated
-        for result in results:
-            if result.get('match_snippet') and result.get('match_type') == 'content':
-                snippet = result['match_snippet']
-                # Add ellipsis if we truncated
-                if len(snippet) >= 118:
-                    if not snippet.startswith(' '):
-                        snippet = '...' + snippet
-                    snippet = snippet + '...'
-                result['match_snippet'] = snippet.strip()
 
         return results
 
@@ -786,7 +827,8 @@ def search_sessions_paginated(
 ) -> tuple[List[SessionSearchResultPaginated], int]:
     """
     Search sessions by title and message content with pagination.
-    Returns sessions with matching snippets and total count.
+    Uses FTS5 for content search (fast indexed lookup) with LIKE fallback
+    for title search.
 
     Returns:
         Tuple of (results list, total count)
@@ -795,32 +837,16 @@ def search_sessions_paginated(
         return [], 0
 
     search_term = f"%{query.strip()}%"
+    fts_query = _fts_query_term(query)
 
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # Build the base query - search both session titles and message content
+        # Build the base CTE using FTS5 for content matching
         base_cte = """
         WITH title_matches AS (
             SELECT
-                s.id,
-                s.project_id,
-                s.profile_id,
-                s.api_user_id,
-                s.title,
-                s.status,
-                s.is_favorite,
-                s.total_cost_usd,
-                s.total_tokens_in,
-                s.total_tokens_out,
-                s.cache_creation_tokens,
-                s.cache_read_tokens,
-                s.context_tokens,
-                s.turn_count,
-                s.parent_session_id,
-                s.fork_point_message_index,
-                s.created_at,
-                s.updated_at,
+                s.*,
                 'title' as match_type,
                 s.title as match_snippet,
                 s.updated_at as match_time
@@ -830,51 +856,13 @@ def search_sessions_paginated(
         ),
         content_matches AS (
             SELECT DISTINCT
-                s.id,
-                s.project_id,
-                s.profile_id,
-                s.api_user_id,
-                s.title,
-                s.status,
-                s.is_favorite,
-                s.total_cost_usd,
-                s.total_tokens_in,
-                s.total_tokens_out,
-                s.cache_creation_tokens,
-                s.cache_read_tokens,
-                s.context_tokens,
-                s.turn_count,
-                s.parent_session_id,
-                s.fork_point_message_index,
-                s.created_at,
-                s.updated_at,
+                s.*,
                 'content' as match_type,
-                (
-                    SELECT SUBSTR(
-                        sm2.content,
-                        MAX(1, INSTR(LOWER(sm2.content), LOWER(?)) - 40),
-                        120
-                    )
-                    FROM session_messages sm2
-                    WHERE sm2.session_id = s.id
-                    AND sm2.content LIKE ? COLLATE NOCASE
-                    AND sm2.role IN ('user', 'assistant')
-                    ORDER BY sm2.created_at DESC
-                    LIMIT 1
-                ) as match_snippet,
-                (
-                    SELECT sm3.created_at
-                    FROM session_messages sm3
-                    WHERE sm3.session_id = s.id
-                    AND sm3.content LIKE ? COLLATE NOCASE
-                    AND sm3.role IN ('user', 'assistant')
-                    ORDER BY sm3.created_at DESC
-                    LIMIT 1
-                ) as match_time
-            FROM sessions s
-            INNER JOIN session_messages sm ON sm.session_id = s.id
-            WHERE sm.content LIKE ? COLLATE NOCASE
-            AND sm.role IN ('user', 'assistant')
+                snippet(session_messages_fts, 0, '', '', '...', 20) as match_snippet,
+                s.updated_at as match_time
+            FROM session_messages_fts fts
+            INNER JOIN sessions s ON s.id = fts.session_id
+            WHERE session_messages_fts MATCH ?
             AND s.status != 'archived'
         ),
         all_matches AS (
@@ -883,34 +871,12 @@ def search_sessions_paginated(
             SELECT * FROM content_matches
         ),
         grouped_matches AS (
-            SELECT
-                id,
-                project_id,
-                profile_id,
-                api_user_id,
-                title,
-                status,
-                is_favorite,
-                total_cost_usd,
-                total_tokens_in,
-                total_tokens_out,
-                cache_creation_tokens,
-                cache_read_tokens,
-                context_tokens,
-                turn_count,
-                parent_session_id,
-                fork_point_message_index,
-                created_at,
-                updated_at,
-                match_type,
-                match_snippet,
-                match_time
+            SELECT *
             FROM all_matches
             WHERE 1=1
         """
 
-        # Base params for the search terms (used multiple times in query)
-        base_params = [search_term, query.strip(), search_term, search_term, search_term]
+        base_params: List[Any] = [search_term, fts_query]
 
         # Build filter conditions
         filter_sql = ""
@@ -952,17 +918,6 @@ def search_sessions_paginated(
         """
         cursor.execute(data_sql, base_params + filter_params + [limit, offset])
         results = rows_to_list(cursor.fetchall())
-
-        # Clean up snippets - add ellipsis if truncated
-        for result in results:
-            if result.get('match_snippet') and result.get('match_type') == 'content':
-                snippet = result['match_snippet']
-                # Add ellipsis if we truncated
-                if len(snippet) >= 118:
-                    if not snippet.startswith(' '):
-                        snippet = '...' + snippet
-                    snippet = snippet + '...'
-                result['match_snippet'] = snippet.strip()
 
         return results, total
 

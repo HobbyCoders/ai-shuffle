@@ -94,6 +94,123 @@ logger = logging.getLogger(__name__)
 _pending_background_tasks: Dict[str, asyncio.Task] = {}
 
 
+async def _persist_turn_results(
+    session_id: str,
+    sdk_session_id: Optional[str],
+    tool_messages: list,
+    response_text: list,
+    metadata: dict,
+    profile_id: Optional[str],
+    interrupted: bool = False,
+    log_prefix: str = "",
+) -> Optional[dict]:
+    """Persist a completed turn's data to the database in batched writes.
+
+    Combines tool messages + assistant response into a single transaction
+    (one DB connection, one commit) instead of N+1 individual writes.
+    Returns the assistant message dict if one was stored, else None.
+    """
+    from app.db.sessions import add_session_messages_batch
+
+    # 1. Update session metadata (sdk_session_id, cost, tokens, turns)
+    try:
+        if sdk_session_id:
+            await run_sync(
+                database.update_session,
+                session_id=session_id,
+                sdk_session_id=sdk_session_id,
+                cost_increment=metadata.get("total_cost_usd", 0),
+                tokens_in_increment=metadata.get("tokens_in", 0),
+                tokens_out_increment=metadata.get("tokens_out", 0),
+                turn_increment=metadata.get("num_turns", 0)
+            )
+            logger.debug(f"{log_prefix}Updated session {session_id}, sdk_session_id={sdk_session_id}")
+    except Exception as e:
+        logger.error(f"{log_prefix}Failed to update session {session_id} in database: {e}")
+
+    # 2. Build batch of messages to insert in one transaction
+    full_response = "\n".join(response_text) if response_text else ""
+    batch: list[dict] = []
+
+    for tool_msg in tool_messages:
+        msg_type = tool_msg.get("type")
+        if msg_type == "tool_use":
+            batch.append({
+                "session_id": session_id,
+                "role": "tool_use",
+                "content": f"Using tool: {tool_msg.get('name', 'unknown')}",
+                "tool_name": tool_msg.get("name", "unknown"),
+                "tool_input": tool_msg.get("input"),
+                "metadata": {"tool_id": tool_msg.get("tool_id")},
+                "profile_id": profile_id,
+            })
+        elif msg_type == "tool_result":
+            batch.append({
+                "session_id": session_id,
+                "role": "tool_result",
+                "content": tool_msg.get("output", ""),
+                "tool_name": tool_msg.get("name", "unknown"),
+                "metadata": {"tool_id": tool_msg.get("tool_id")},
+                "profile_id": profile_id,
+            })
+
+    assistant_msg = None
+    if full_response or interrupted or tool_messages:
+        batch.append({
+            "session_id": session_id,
+            "role": "assistant",
+            "content": full_response + ("\n[Interrupted]" if interrupted else ""),
+            "metadata": metadata,
+            "profile_id": profile_id,
+        })
+
+    # 3. Insert all messages in one transaction
+    if batch:
+        try:
+            inserted = await run_sync(add_session_messages_batch, batch)
+            # The assistant message is always last in the batch
+            if inserted and batch[-1]["role"] == "assistant":
+                assistant_msg = inserted[-1]
+        except Exception as e:
+            logger.error(f"{log_prefix}Failed to store messages for session {session_id}: {e}")
+
+    # 4. Log sync event for polling fallback
+    if assistant_msg:
+        try:
+            await run_sync(
+                database.add_sync_log,
+                session_id=session_id,
+                event_type="stream_end",
+                entity_type="message",
+                entity_id=str(assistant_msg["id"]),
+                data={
+                    "message": assistant_msg,
+                    "metadata": metadata,
+                    "interrupted": interrupted
+                }
+            )
+        except Exception as e:
+            logger.error(f"{log_prefix}Failed to add sync log for session {session_id}: {e}")
+
+    # 5. Log usage
+    if metadata and not metadata.get("error"):
+        try:
+            await run_sync(
+                database.log_usage,
+                session_id=session_id,
+                profile_id=profile_id,
+                model=metadata.get("model"),
+                tokens_in=metadata.get("tokens_in", 0),
+                tokens_out=metadata.get("tokens_out", 0),
+                cost_usd=metadata.get("total_cost_usd", 0),
+                duration_ms=metadata.get("duration_ms", 0)
+            )
+        except Exception as e:
+            logger.error(f"{log_prefix}Failed to log usage for session {session_id}: {e}")
+
+    return assistant_msg
+
+
 def get_session_state(session_id: str) -> Optional[SessionState]:
     """Get the active session state for a session ID."""
     return get_session_pool().peek(session_id)
@@ -270,63 +387,14 @@ async def execute_query(
         logger.error(f"Query execution error: {e}")
         raise
 
-    # Update session with SDK session ID for resume
-    if sdk_session_id:
-        await run_sync(
-            database.update_session,
-            session_id=session_id,
-            sdk_session_id=sdk_session_id,
-            cost_increment=metadata.get("total_cost_usd", 0),
-            tokens_in_increment=metadata.get("tokens_in", 0),
-            tokens_out_increment=metadata.get("tokens_out", 0),
-            turn_increment=metadata.get("num_turns", 0)
-        )
-
-    # Store tool messages (tool_use and tool_result)
-    for tool_msg in tool_messages:
-        if tool_msg["type"] == "tool_use":
-            await run_sync(
-                database.add_session_message,
-                session_id=session_id,
-                role="tool_use",
-                content=f"Using tool: {tool_msg['name']}",
-                tool_name=tool_msg["name"],
-                tool_input=tool_msg.get("input"),
-                metadata={"tool_id": tool_msg.get("tool_id")},
-                profile_id=profile_id
-            )
-        elif tool_msg["type"] == "tool_result":
-            await run_sync(
-                database.add_session_message,
-                session_id=session_id,
-                role="tool_result",
-                content=tool_msg.get("output", ""),
-                tool_name=tool_msg["name"],
-                metadata={"tool_id": tool_msg.get("tool_id")},
-                profile_id=profile_id
-            )
-
-    # Store assistant response
-    full_response = "\n".join(response_text)
-    await run_sync(
-        database.add_session_message,
+    # Persist session data to database in a batched write.
+    await _persist_turn_results(
         session_id=session_id,
-        role="assistant",
-        content=full_response,
+        sdk_session_id=sdk_session_id,
+        tool_messages=tool_messages,
+        response_text=response_text,
         metadata=metadata,
-        profile_id=profile_id
-    )
-
-    # Log usage
-    await run_sync(
-        database.log_usage,
-        session_id=session_id,
         profile_id=profile_id,
-        model=metadata.get("model"),
-        tokens_in=metadata.get("tokens_in", 0),
-        tokens_out=metadata.get("tokens_out", 0),
-        cost_usd=metadata.get("total_cost_usd", 0),
-        duration_ms=metadata.get("duration_ms", 0)
     )
 
     # Notify connected frontends that this session has new messages
@@ -768,96 +836,17 @@ async def stream_query(
             source_device_id=device_id
         )
 
-    # Persist session data to database — wrapped in try/except so a single
-    # DB failure doesn't lose all subsequent writes (session update, tool
-    # messages, assistant response, and usage log are independent operations).
-    try:
-        # Update session in database
-        if sdk_session_id:
-            await run_sync(
-                database.update_session,
-                session_id=session_id,
-                sdk_session_id=sdk_session_id,
-                cost_increment=metadata.get("total_cost_usd", 0),
-                tokens_in_increment=metadata.get("tokens_in", 0),
-                tokens_out_increment=metadata.get("tokens_out", 0),
-                turn_increment=metadata.get("num_turns", 0)
-            )
-            logger.debug(f"Updated session {session_id}, sdk_session_id={sdk_session_id}")
-    except Exception as e:
-        logger.error(f"Failed to update session {session_id} in database: {e}")
-
-    try:
-        # Store tool messages (tool_use and tool_result)
-        for tool_msg in tool_messages:
-            if tool_msg.get("type") == "tool_use":
-                await run_sync(
-                    database.add_session_message,
-                    session_id=session_id,
-                    role="tool_use",
-                    content=f"Using tool: {tool_msg.get('name', 'unknown')}",
-                    tool_name=tool_msg.get("name", "unknown"),
-                    tool_input=tool_msg.get("input"),
-                    metadata={"tool_id": tool_msg.get("tool_id")},
-                    profile_id=profile_id
-                )
-            elif tool_msg.get("type") == "tool_result":
-                await run_sync(
-                    database.add_session_message,
-                    session_id=session_id,
-                    role="tool_result",
-                    content=tool_msg.get("output", ""),
-                    tool_name=tool_msg.get("name", "unknown"),
-                    metadata={"tool_id": tool_msg.get("tool_id")},
-                    profile_id=profile_id
-                )
-    except Exception as e:
-        logger.error(f"Failed to store tool messages for session {session_id}: {e}")
-
-    try:
-        # Store assistant response
-        full_response = "\n".join(response_text)
-        if full_response or interrupted or tool_messages:
-            assistant_msg = await run_sync(
-                database.add_session_message,
-                session_id=session_id,
-                role="assistant",
-                content=full_response + ("\n[Interrupted]" if interrupted else ""),
-                metadata=metadata,
-                profile_id=profile_id
-            )
-
-            # Log stream end for polling fallback
-            await run_sync(
-                database.add_sync_log,
-                session_id=session_id,
-                event_type="stream_end",
-                entity_type="message",
-                entity_id=str(assistant_msg["id"]),
-                data={
-                    "message": assistant_msg,
-                    "metadata": metadata,
-                    "interrupted": interrupted
-                }
-            )
-    except Exception as e:
-        logger.error(f"Failed to store assistant response for session {session_id}: {e}")
-
-    try:
-        # Log usage
-        if metadata:
-            await run_sync(
-                database.log_usage,
-                session_id=session_id,
-                profile_id=profile_id,
-                model=metadata.get("model"),
-                tokens_in=metadata.get("tokens_in", 0),
-                tokens_out=metadata.get("tokens_out", 0),
-                cost_usd=metadata.get("total_cost_usd", 0),
-                duration_ms=metadata.get("duration_ms", 0)
-            )
-    except Exception as e:
-        logger.error(f"Failed to log usage for session {session_id}: {e}")
+    # Persist session data to database in a batched write (single transaction
+    # for all tool messages + assistant response, instead of N+1 individual writes).
+    await _persist_turn_results(
+        session_id=session_id,
+        sdk_session_id=sdk_session_id,
+        tool_messages=tool_messages,
+        response_text=response_text,
+        metadata=metadata,
+        profile_id=profile_id,
+        interrupted=interrupted,
+    )
 
     # Yield done event (unless already yielded error/interrupted)
     if not interrupted:
@@ -1264,96 +1253,17 @@ async def _run_background_query(
 
         asyncio.create_task(_delayed_cleanup())
 
-    # Update session in database
-    if sdk_session_id:
-        try:
-            await run_sync(
-                database.update_session,
-                session_id=session_id,
-                sdk_session_id=sdk_session_id,
-                cost_increment=metadata.get("total_cost_usd", 0),
-                tokens_in_increment=metadata.get("tokens_in", 0),
-                tokens_out_increment=metadata.get("tokens_out", 0),
-                turn_increment=metadata.get("num_turns", 0)
-            )
-            logger.debug(f"[Background] Updated session {session_id}, sdk_session_id={sdk_session_id}")
-        except Exception as e:
-            logger.error(f"[Background] Failed to update session {session_id}: {e}")
-
-    # Store tool messages (tool_use and tool_result)
-    for tool_msg in tool_messages:
-        try:
-            if tool_msg["type"] == "tool_use":
-                await run_sync(
-                    database.add_session_message,
-                    session_id=session_id,
-                    role="tool_use",
-                    content=f"Using tool: {tool_msg['name']}",
-                    tool_name=tool_msg["name"],
-                    tool_input=tool_msg.get("input"),
-                    metadata={"tool_id": tool_msg.get("tool_id")},
-                    profile_id=profile_id
-                )
-            elif tool_msg["type"] == "tool_result":
-                await run_sync(
-                    database.add_session_message,
-                    session_id=session_id,
-                    role="tool_result",
-                    content=tool_msg.get("output", ""),
-                    tool_name=tool_msg["name"],
-                    metadata={"tool_id": tool_msg.get("tool_id")},
-                    profile_id=profile_id
-                )
-        except Exception as e:
-            logger.error(f"[Background] Failed to store tool message for session {session_id}: {e}")
-
-    # Store assistant response
-    full_response = "\n".join(response_text)
-    if full_response or interrupted or tool_messages:
-        try:
-            assistant_msg = await run_sync(
-                database.add_session_message,
-                session_id=session_id,
-                role="assistant",
-                content=full_response + ("\n[Interrupted]" if interrupted else ""),
-                metadata=metadata,
-                profile_id=profile_id
-            )
-
-            # Log stream end for polling fallback
-            try:
-                await run_sync(
-                    database.add_sync_log,
-                    session_id=session_id,
-                    event_type="stream_end",
-                    entity_type="message",
-                    entity_id=str(assistant_msg["id"]),
-                    data={
-                        "message": assistant_msg,
-                        "metadata": metadata,
-                        "interrupted": interrupted
-                    }
-                )
-            except Exception as e:
-                logger.error(f"[Background] Failed to add sync log for session {session_id}: {e}")
-        except Exception as e:
-            logger.error(f"[Background] Failed to store assistant message for session {session_id}: {e}")
-
-    # Log usage
-    if metadata and not metadata.get("error"):
-        try:
-            await run_sync(
-                database.log_usage,
-                session_id=session_id,
-                profile_id=profile["id"],
-                model=metadata.get("model"),
-                tokens_in=metadata.get("tokens_in", 0),
-                tokens_out=metadata.get("tokens_out", 0),
-                cost_usd=metadata.get("total_cost_usd", 0),
-                duration_ms=metadata.get("duration_ms", 0)
-            )
-        except Exception as e:
-            logger.error(f"[Background] Failed to log usage for session {session_id}: {e}")
+    # Persist session data to database in a batched write.
+    await _persist_turn_results(
+        session_id=session_id,
+        sdk_session_id=sdk_session_id,
+        tool_messages=tool_messages,
+        response_text=response_text,
+        metadata=metadata,
+        profile_id=profile_id,
+        interrupted=interrupted,
+        log_prefix="[Background] ",
+    )
 
     logger.debug(f"[Background] Query completed for session {session_id}")
 
@@ -2485,69 +2395,17 @@ async def stream_to_websocket(
             # Normal case: keep in pool for reuse!
             logger.debug(f"[WS] Kept session {session_id} in pool for reuse")
 
-    # Update session in database with usage stats and SDK session ID.
-    # Title is NOT set here — it was already set atomically during session
-    # creation in the WebSocket handler. Setting it again would overwrite
-    # the 100-char title with a shorter 50-char version.
-    await run_sync(
-        database.update_session,
+    # Persist session data to database in a batched write.
+    await _persist_turn_results(
         session_id=session_id,
         sdk_session_id=sdk_session_id,
-        cost_increment=metadata.get("total_cost_usd", 0),
-        tokens_in_increment=metadata.get("tokens_in", 0),
-        tokens_out_increment=metadata.get("tokens_out", 0),
-        turn_increment=metadata.get("num_turns", 0)
+        tool_messages=tool_messages,
+        response_text=response_text,
+        metadata=metadata,
+        profile_id=profile_id,
+        interrupted=interrupted,
+        log_prefix="[WS] ",
     )
-    logger.debug(f"[WS] Updated session {session_id}, sdk_session_id={sdk_session_id}")
-
-    # Store tool messages (tool_use and tool_result)
-    for tool_msg in tool_messages:
-        if tool_msg["type"] == "tool_use":
-            await run_sync(
-                database.add_session_message,
-                session_id=session_id,
-                role="tool_use",
-                content=f"Using tool: {tool_msg['name']}",
-                tool_name=tool_msg["name"],
-                tool_input=tool_msg.get("input"),
-                metadata={"tool_id": tool_msg.get("tool_id")},
-                profile_id=profile_id
-            )
-        elif tool_msg["type"] == "tool_result":
-            await run_sync(
-                database.add_session_message,
-                session_id=session_id,
-                role="tool_result",
-                content=tool_msg.get("output", ""),
-                tool_name=tool_msg["name"],
-                metadata={"tool_id": tool_msg.get("tool_id")},
-                profile_id=profile_id
-            )
-
-    # Store assistant response
-    full_response = "".join(response_text)
-    if full_response or tool_messages or interrupted:
-        await run_sync(
-            database.add_session_message,
-            session_id=session_id,
-            role="assistant",
-            content=full_response + ("\n\n[Interrupted]" if interrupted else ""),
-            metadata=metadata,
-            profile_id=profile_id
-        )
-
-    # Log usage
-    if metadata:
-        await run_sync(
-            database.log_usage,
-            session_id=session_id,
-            profile_id=profile_id,
-            model=metadata.get("model"),
-            tokens_in=metadata.get("tokens_in", 0),
-            tokens_out=metadata.get("tokens_out", 0),
-            cost_usd=metadata.get("total_cost_usd", 0),
-            duration_ms=metadata.get("duration_ms", 0)
-        )
 
     # For slash commands that produced no visible content, yield a notification
     # SDK built-in commands like /memory, /cost, /model execute inside the subprocess

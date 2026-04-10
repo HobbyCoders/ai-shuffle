@@ -289,6 +289,71 @@ def _run_column_migrations(cursor: sqlite3.Cursor):
     # Ensure performance-critical indexes exist (idempotent, no version gate).
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
 
+    # FTS5 index for session message search (idempotent).
+    # On existing databases, create the virtual table + triggers and populate from existing data.
+    if table_exists(cursor, "session_messages"):
+        # Check if FTS table exists by trying to query it
+        fts_exists = False
+        try:
+            cursor.execute("SELECT count(*) FROM session_messages_fts LIMIT 1")
+            fts_exists = True
+        except Exception:
+            pass
+
+        if not fts_exists:
+            logger.info("Creating FTS5 index for session_messages...")
+            cursor.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts
+                USING fts5(
+                    content,
+                    session_id UNINDEXED,
+                    role UNINDEXED,
+                    content='session_messages',
+                    content_rowid='id',
+                    tokenize='unicode61 remove_diacritics 2'
+                )
+            """)
+            # Triggers
+            cursor.execute("""
+                CREATE TRIGGER IF NOT EXISTS session_messages_fts_insert
+                AFTER INSERT ON session_messages
+                WHEN NEW.role IN ('user', 'assistant') AND NEW.content != ''
+                BEGIN
+                    INSERT INTO session_messages_fts(rowid, content, session_id, role)
+                    VALUES (NEW.id, NEW.content, NEW.session_id, NEW.role);
+                END
+            """)
+            cursor.execute("""
+                CREATE TRIGGER IF NOT EXISTS session_messages_fts_delete
+                AFTER DELETE ON session_messages
+                WHEN OLD.role IN ('user', 'assistant')
+                BEGIN
+                    INSERT INTO session_messages_fts(session_messages_fts, rowid, content, session_id, role)
+                    VALUES ('delete', OLD.id, OLD.content, OLD.session_id, OLD.role);
+                END
+            """)
+            cursor.execute("""
+                CREATE TRIGGER IF NOT EXISTS session_messages_fts_update
+                AFTER UPDATE OF content ON session_messages
+                WHEN NEW.role IN ('user', 'assistant')
+                BEGIN
+                    INSERT INTO session_messages_fts(session_messages_fts, rowid, content, session_id, role)
+                    VALUES ('delete', OLD.id, OLD.content, OLD.session_id, OLD.role);
+                    INSERT INTO session_messages_fts(rowid, content, session_id, role)
+                    VALUES (NEW.id, NEW.content, NEW.session_id, NEW.role);
+                END
+            """)
+            # Populate FTS from existing data (one-time backfill)
+            cursor.execute("""
+                INSERT INTO session_messages_fts(rowid, content, session_id, role)
+                SELECT id, content, session_id, role
+                FROM session_messages
+                WHERE role IN ('user', 'assistant') AND content != ''
+            """)
+            populated = cursor.rowcount
+            logger.info(f"FTS5 index created and populated with {populated} messages")
+            migrations_applied.append("session_messages_fts")
+
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
 
@@ -421,6 +486,53 @@ def _create_schema(cursor: sqlite3.Cursor):
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         )
+    """)
+
+    # FTS5 full-text search index for session messages.
+    # content_rowid links FTS rows to session_messages.id for efficient lookups.
+    # Only user/assistant messages are indexed (tool_use/tool_result are noise).
+    cursor.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts
+        USING fts5(
+            content,
+            session_id UNINDEXED,
+            role UNINDEXED,
+            content='session_messages',
+            content_rowid='id',
+            tokenize='unicode61 remove_diacritics 2'
+        )
+    """)
+
+    # Triggers to keep FTS index in sync with session_messages table.
+    # Only index user and assistant messages (not tool_use/tool_result/system).
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS session_messages_fts_insert
+        AFTER INSERT ON session_messages
+        WHEN NEW.role IN ('user', 'assistant') AND NEW.content != ''
+        BEGIN
+            INSERT INTO session_messages_fts(rowid, content, session_id, role)
+            VALUES (NEW.id, NEW.content, NEW.session_id, NEW.role);
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS session_messages_fts_delete
+        AFTER DELETE ON session_messages
+        WHEN OLD.role IN ('user', 'assistant')
+        BEGIN
+            INSERT INTO session_messages_fts(session_messages_fts, rowid, content, session_id, role)
+            VALUES ('delete', OLD.id, OLD.content, OLD.session_id, OLD.role);
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS session_messages_fts_update
+        AFTER UPDATE OF content ON session_messages
+        WHEN NEW.role IN ('user', 'assistant')
+        BEGIN
+            INSERT INTO session_messages_fts(session_messages_fts, rowid, content, session_id, role)
+            VALUES ('delete', OLD.id, OLD.content, OLD.session_id, OLD.role);
+            INSERT INTO session_messages_fts(rowid, content, session_id, role)
+            VALUES (NEW.id, NEW.content, NEW.session_id, NEW.role);
+        END
     """)
 
     # Sync log for tracking changes (used for polling fallback)
@@ -1561,7 +1673,7 @@ def cleanup_expired_sessions() -> dict:
     return results
 
 
-def run_database_maintenance() -> dict:
+def run_database_maintenance(skip_vacuum: bool = False) -> dict:
     """Run periodic SQLite maintenance to prevent progressive slowdown.
 
     Should be called every few hours. Handles:
@@ -1569,6 +1681,11 @@ def run_database_maintenance() -> dict:
     - PRAGMA optimize (updates query planner statistics)
     - Cleanup of unbounded log tables (older than 7 days)
     - VACUUM (reclaims disk space from deleted rows)
+
+    Args:
+        skip_vacuum: If True, skip the VACUUM step. Used when sessions are
+            actively streaming to avoid holding an exclusive lock that would
+            block all reads and writes for seconds.
 
     Returns:
         dict with maintenance results.
@@ -1619,16 +1736,22 @@ def run_database_maintenance() -> dict:
                 results[f"cleaned_{table}"] = f"error: {e}"
 
     # 4. VACUUM — reclaims disk space. Must run outside a transaction.
-    try:
-        conn = get_connection()
+    # Skipped when sessions are actively streaming to avoid an exclusive lock
+    # that would block all reads and writes for potentially several seconds.
+    if skip_vacuum:
+        results["vacuum"] = "skipped (active streaming)"
+        logger.info("VACUUM skipped — active streaming sessions detected")
+    else:
         try:
-            conn.execute("VACUUM")
-            results["vacuum"] = "ok"
-        finally:
-            conn.close()
-    except Exception as e:
-        results["vacuum"] = f"error: {e}"
-        logger.warning(f"VACUUM failed: {e}")
+            conn = get_connection()
+            try:
+                conn.execute("VACUUM")
+                results["vacuum"] = "ok"
+            finally:
+                conn.close()
+        except Exception as e:
+            results["vacuum"] = f"error: {e}"
+            logger.warning(f"VACUUM failed: {e}")
 
     logger.info(f"Database maintenance completed: {results}")
     return results
@@ -2401,152 +2524,15 @@ def search_sessions(
     admin_only: bool = False,
     limit: int = 20
 ) -> List[Dict[str, Any]]:
+    """Search sessions by title and message content using FTS5.
+
+    Delegates to sessions module — kept here for backward compatibility.
     """
-    Search sessions by title and message content.
-    Returns sessions with matching snippets showing where the match was found.
-    """
-    if not query or not query.strip():
-        return []
-
-    search_term = f"%{query.strip()}%"
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        # Build the base query - search both session titles and message content
-        # Use UNION to combine title matches and content matches
-        sql = """
-        WITH title_matches AS (
-            SELECT
-                s.id,
-                s.project_id,
-                s.profile_id,
-                s.api_user_id,
-                s.title,
-                s.status,
-                s.total_cost_usd,
-                s.total_tokens_in,
-                s.total_tokens_out,
-                s.turn_count,
-                s.created_at,
-                s.updated_at,
-                'title' as match_type,
-                s.title as match_snippet,
-                s.updated_at as match_time
-            FROM sessions s
-            WHERE s.title LIKE ? COLLATE NOCASE
-            AND s.status != 'archived'
-        ),
-        content_matches AS (
-            SELECT DISTINCT
-                s.id,
-                s.project_id,
-                s.profile_id,
-                s.api_user_id,
-                s.title,
-                s.status,
-                s.total_cost_usd,
-                s.total_tokens_in,
-                s.total_tokens_out,
-                s.turn_count,
-                s.created_at,
-                s.updated_at,
-                'content' as match_type,
-                (
-                    SELECT SUBSTR(
-                        sm2.content,
-                        MAX(1, INSTR(LOWER(sm2.content), LOWER(?)) - 40),
-                        120
-                    )
-                    FROM session_messages sm2
-                    WHERE sm2.session_id = s.id
-                    AND sm2.content LIKE ? COLLATE NOCASE
-                    AND sm2.role IN ('user', 'assistant')
-                    ORDER BY sm2.created_at DESC
-                    LIMIT 1
-                ) as match_snippet,
-                (
-                    SELECT sm3.created_at
-                    FROM session_messages sm3
-                    WHERE sm3.session_id = s.id
-                    AND sm3.content LIKE ? COLLATE NOCASE
-                    AND sm3.role IN ('user', 'assistant')
-                    ORDER BY sm3.created_at DESC
-                    LIMIT 1
-                ) as match_time
-            FROM sessions s
-            INNER JOIN session_messages sm ON sm.session_id = s.id
-            WHERE sm.content LIKE ? COLLATE NOCASE
-            AND sm.role IN ('user', 'assistant')
-            AND s.status != 'archived'
-        ),
-        all_matches AS (
-            SELECT * FROM title_matches
-            UNION ALL
-            SELECT * FROM content_matches
-        )
-        SELECT
-            id,
-            project_id,
-            profile_id,
-            api_user_id,
-            title,
-            status,
-            total_cost_usd,
-            total_tokens_in,
-            total_tokens_out,
-            turn_count,
-            created_at,
-            updated_at,
-            match_type,
-            match_snippet,
-            match_time
-        FROM all_matches
-        WHERE 1=1
-        """
-
-        # Base params for the search terms (used multiple times in query)
-        params = [search_term, query.strip(), search_term, search_term, search_term]
-
-        # Add filters
-        if project_id:
-            sql += " AND project_id = ?"
-            params.append(project_id)
-        if profile_id:
-            sql += " AND profile_id = ?"
-            params.append(profile_id)
-        if admin_only:
-            sql += " AND api_user_id IS NULL"
-        elif api_user_id:
-            sql += " AND api_user_id = ?"
-            params.append(api_user_id)
-
-        # Group by session to avoid duplicates, keeping the best match
-        # Order by most recent match
-        sql += """
-        GROUP BY id
-        ORDER BY
-            CASE WHEN match_type = 'title' THEN 0 ELSE 1 END,
-            updated_at DESC
-        LIMIT ?
-        """
-        params.append(limit)
-
-        cursor.execute(sql, params)
-        results = rows_to_list(cursor.fetchall())
-
-        # Clean up snippets - add ellipsis if truncated
-        for result in results:
-            if result.get('match_snippet') and result.get('match_type') == 'content':
-                snippet = result['match_snippet']
-                # Add ellipsis if we truncated
-                if len(snippet) >= 118:
-                    if not snippet.startswith(' '):
-                        snippet = '...' + snippet
-                    snippet = snippet + '...'
-                result['match_snippet'] = snippet.strip()
-
-        return results
+    from app.db.sessions import search_sessions as _search
+    return _search(
+        query=query, project_id=project_id, profile_id=profile_id,
+        api_user_id=api_user_id, admin_only=admin_only, limit=limit
+    )
 
 
 def search_sessions_paginated(
@@ -2558,187 +2544,15 @@ def search_sessions_paginated(
     limit: int = 20,
     offset: int = 0
 ) -> tuple[List[Dict[str, Any]], int]:
+    """Search sessions with pagination using FTS5.
+
+    Delegates to sessions module — kept here for backward compatibility.
     """
-    Search sessions by title and message content with pagination.
-    Returns sessions with matching snippets and total count.
-
-    Returns:
-        Tuple of (results list, total count)
-    """
-    if not query or not query.strip():
-        return [], 0
-
-    search_term = f"%{query.strip()}%"
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        # Build the base query - search both session titles and message content
-        base_cte = """
-        WITH title_matches AS (
-            SELECT
-                s.id,
-                s.project_id,
-                s.profile_id,
-                s.api_user_id,
-                s.title,
-                s.status,
-                s.is_favorite,
-                s.total_cost_usd,
-                s.total_tokens_in,
-                s.total_tokens_out,
-                s.cache_creation_tokens,
-                s.cache_read_tokens,
-                s.context_tokens,
-                s.turn_count,
-                s.parent_session_id,
-                s.fork_point_message_index,
-                s.created_at,
-                s.updated_at,
-                'title' as match_type,
-                s.title as match_snippet,
-                s.updated_at as match_time
-            FROM sessions s
-            WHERE s.title LIKE ? COLLATE NOCASE
-            AND s.status != 'archived'
-        ),
-        content_matches AS (
-            SELECT DISTINCT
-                s.id,
-                s.project_id,
-                s.profile_id,
-                s.api_user_id,
-                s.title,
-                s.status,
-                s.is_favorite,
-                s.total_cost_usd,
-                s.total_tokens_in,
-                s.total_tokens_out,
-                s.cache_creation_tokens,
-                s.cache_read_tokens,
-                s.context_tokens,
-                s.turn_count,
-                s.parent_session_id,
-                s.fork_point_message_index,
-                s.created_at,
-                s.updated_at,
-                'content' as match_type,
-                (
-                    SELECT SUBSTR(
-                        sm2.content,
-                        MAX(1, INSTR(LOWER(sm2.content), LOWER(?)) - 40),
-                        120
-                    )
-                    FROM session_messages sm2
-                    WHERE sm2.session_id = s.id
-                    AND sm2.content LIKE ? COLLATE NOCASE
-                    AND sm2.role IN ('user', 'assistant')
-                    ORDER BY sm2.created_at DESC
-                    LIMIT 1
-                ) as match_snippet,
-                (
-                    SELECT sm3.created_at
-                    FROM session_messages sm3
-                    WHERE sm3.session_id = s.id
-                    AND sm3.content LIKE ? COLLATE NOCASE
-                    AND sm3.role IN ('user', 'assistant')
-                    ORDER BY sm3.created_at DESC
-                    LIMIT 1
-                ) as match_time
-            FROM sessions s
-            INNER JOIN session_messages sm ON sm.session_id = s.id
-            WHERE sm.content LIKE ? COLLATE NOCASE
-            AND sm.role IN ('user', 'assistant')
-            AND s.status != 'archived'
-        ),
-        all_matches AS (
-            SELECT * FROM title_matches
-            UNION ALL
-            SELECT * FROM content_matches
-        ),
-        grouped_matches AS (
-            SELECT
-                id,
-                project_id,
-                profile_id,
-                api_user_id,
-                title,
-                status,
-                is_favorite,
-                total_cost_usd,
-                total_tokens_in,
-                total_tokens_out,
-                cache_creation_tokens,
-                cache_read_tokens,
-                context_tokens,
-                turn_count,
-                parent_session_id,
-                fork_point_message_index,
-                created_at,
-                updated_at,
-                match_type,
-                match_snippet,
-                match_time
-            FROM all_matches
-            WHERE 1=1
-        """
-
-        # Base params for the search terms (used multiple times in query)
-        base_params = [search_term, query.strip(), search_term, search_term, search_term]
-
-        # Build filter conditions
-        filter_sql = ""
-        filter_params: List[Any] = []
-
-        if project_id:
-            filter_sql += " AND project_id = ?"
-            filter_params.append(project_id)
-        if profile_id:
-            filter_sql += " AND profile_id = ?"
-            filter_params.append(profile_id)
-        if admin_only:
-            filter_sql += " AND api_user_id IS NULL"
-        elif api_user_id:
-            filter_sql += " AND api_user_id = ?"
-            filter_params.append(api_user_id)
-
-        # Count query - count unique session IDs
-        count_sql = base_cte + filter_sql + """
-            GROUP BY id
-        )
-        SELECT COUNT(*) FROM grouped_matches
-        """
-        cursor.execute(count_sql, base_params + filter_params)
-        total = cursor.fetchone()[0]
-
-        # Data query with pagination
-        data_sql = base_cte + filter_sql + """
-            GROUP BY id
-            ORDER BY
-                CASE WHEN match_type = 'title' THEN 0 ELSE 1 END,
-                updated_at DESC
-            LIMIT ? OFFSET ?
-        )
-        SELECT * FROM grouped_matches
-        ORDER BY
-            CASE WHEN match_type = 'title' THEN 0 ELSE 1 END,
-            updated_at DESC
-        """
-        cursor.execute(data_sql, base_params + filter_params + [limit, offset])
-        results = rows_to_list(cursor.fetchall())
-
-        # Clean up snippets - add ellipsis if truncated
-        for result in results:
-            if result.get('match_snippet') and result.get('match_type') == 'content':
-                snippet = result['match_snippet']
-                # Add ellipsis if we truncated
-                if len(snippet) >= 118:
-                    if not snippet.startswith(' '):
-                        snippet = '...' + snippet
-                    snippet = snippet + '...'
-                result['match_snippet'] = snippet.strip()
-
-        return results, total
+    from app.db.sessions import search_sessions_paginated as _search_paginated
+    return _search_paginated(
+        query=query, project_id=project_id, profile_id=profile_id,
+        api_user_id=api_user_id, admin_only=admin_only, limit=limit, offset=offset
+    )
 
 
 # ============================================================================

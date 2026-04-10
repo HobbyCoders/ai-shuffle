@@ -115,12 +115,24 @@ def start_background_tasks() -> List[asyncio.Task]:
 
     async def _periodic_db_maintenance():
         """Background task: SQLite maintenance every 4 hours."""
+        from app.core.live_session_store import live_session_store
+
         # Run once on startup after a short delay (catch up after long uptime).
         await asyncio.sleep(30)
         while True:
             try:
+                # Skip VACUUM if any session is actively streaming — VACUUM
+                # acquires an exclusive lock that would block all DB reads/writes
+                # for potentially several seconds on large databases.
+                has_streaming = any(
+                    s.is_streaming
+                    for s in live_session_store._sessions.values()  # noqa: SLF001
+                )
                 _maint_start = time.monotonic()
-                result = await asyncio.to_thread(database.run_database_maintenance)
+                result = await asyncio.to_thread(
+                    database.run_database_maintenance,
+                    skip_vacuum=has_streaming,
+                )
                 _maint_elapsed = time.monotonic() - _maint_start
                 logger.info(f"Database maintenance completed in {_maint_elapsed:.2f}s: {result}")
             except asyncio.CancelledError:
