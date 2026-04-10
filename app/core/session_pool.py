@@ -47,6 +47,7 @@ class SessionState:
     is_streaming: bool = False
     interrupt_requested: bool = False
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    streaming_started_at: Optional[datetime] = None  # Track when streaming began (for timeout detection)
     background_task: Optional[asyncio.Task] = None
     written_agent_ids: list = field(default_factory=list)
     agents_dir: Optional[Path] = None
@@ -275,7 +276,12 @@ class SessionPool:
         """Evict sessions whose subprocess has died silently.
 
         SDK subprocesses can die without the pool being notified (e.g., OOM kill,
-        signal). This method checks each session and removes dead ones.
+        signal). This method checks ALL sessions — including streaming ones — and
+        removes those with dead subprocesses.
+
+        Previously, streaming sessions were skipped, which meant an OOM-killed
+        subprocess during streaming would leave is_streaming=True forever,
+        preventing all eviction paths from cleaning it up.
 
         Returns:
             List of evicted session IDs.
@@ -285,14 +291,61 @@ class SessionPool:
             state = self._pool.get(session_id)
             if state is None:
                 continue
-            if state.is_streaming:
-                continue
             if state.is_connected and not is_subprocess_alive(state):
+                was_streaming = state.is_streaming
                 del self._pool[session_id]
-                logger.warning(
-                    f"[Pool] Removed dead subprocess for session {session_id} "
-                    f"(pool size: {len(self._pool)})"
+                if was_streaming:
+                    logger.warning(
+                        f"[Pool] Removed dead STREAMING subprocess for session {session_id} "
+                        f"(subprocess died during active stream, pool size: {len(self._pool)})"
+                    )
+                else:
+                    logger.warning(
+                        f"[Pool] Removed dead subprocess for session {session_id} "
+                        f"(pool size: {len(self._pool)})"
+                    )
+                evicted.append(session_id)
+        return evicted
+
+    async def evict_stuck_streaming(self, max_streaming_seconds: int = 1800) -> list[str]:
+        """Evict sessions that have been streaming for too long.
+
+        If is_streaming=True for longer than max_streaming_seconds, the SDK
+        subprocess is likely hung (deadlocked tool, infinite loop, network hang).
+        Force-evict to prevent unbounded resource consumption.
+
+        This is the safety net for the critical leak path:
+        - SDK subprocess hangs → is_streaming stays True
+        - evict_idle() skips streaming sessions
+        - Pool entry persists forever, consuming ~50-100MB per subprocess
+
+        Args:
+            max_streaming_seconds: Maximum streaming duration (default: 30 minutes).
+
+        Returns:
+            List of evicted session IDs.
+        """
+        now = datetime.now(timezone.utc)
+        evicted = []
+        for session_id in list(self._pool.keys()):
+            state = self._pool.get(session_id)
+            if state is None:
+                continue
+            if not state.is_streaming:
+                continue
+            # Check streaming duration
+            started = state.streaming_started_at
+            if started is None:
+                # Legacy session without timestamp — use last_activity as fallback
+                started = state.last_activity
+            streaming_seconds = (now - started).total_seconds()
+            if streaming_seconds >= max_streaming_seconds:
+                logger.error(
+                    f"[Pool] Force-evicting STUCK streaming session {session_id} "
+                    f"(streaming for {streaming_seconds:.0f}s > {max_streaming_seconds}s, "
+                    f"subprocess_alive={is_subprocess_alive(state)})"
                 )
+                await self._do_evict(session_id, state)
                 evicted.append(session_id)
         return evicted
 

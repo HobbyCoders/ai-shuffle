@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -340,6 +341,26 @@ async def get_deployment_info(token: str = Depends(require_auth)):
     Useful for debugging and understanding the current deployment mode.
     """
     return settings.get_deployment_info()
+
+
+@router.get("/api/v1/diagnostics")
+async def get_diagnostics(token: str = Depends(require_auth)):
+    """
+    On-demand resource diagnostics snapshot.
+
+    Returns the same metrics collected by the periodic ResourceMonitor,
+    plus warnings. Use this to check system health without digging through logs.
+    """
+    from app.core.resource_monitor import _collect_metrics, _check_warnings
+
+    metrics = await _collect_metrics()
+    warnings = _check_warnings(metrics)
+
+    return {
+        "metrics": metrics,
+        "warnings": warnings,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ============================================================================

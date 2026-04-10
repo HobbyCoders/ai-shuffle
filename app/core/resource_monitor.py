@@ -71,7 +71,8 @@ async def _collect_metrics() -> dict:
 
     # --- Session Pool ---
     try:
-        from app.core.session_pool import get_session_pool, _session_pool
+        from app.core.session_pool import get_session_pool, _session_pool, is_subprocess_alive
+        from datetime import datetime as dt_cls, timezone as tz_cls
         if _session_pool is not None:
             pool = get_session_pool()
             metrics["pool_size"] = len(pool._pool)
@@ -80,6 +81,22 @@ async def _collect_metrics() -> dict:
             pool_streaming = sum(1 for s in pool._pool.values() if s.is_streaming)
             metrics["pool_streaming"] = pool_streaming
             metrics["pool_connected"] = sum(1 for s in pool._pool.values() if s.is_connected)
+            # Count dead subprocesses (connected flag set but process is gone)
+            pool_dead = sum(
+                1 for s in pool._pool.values()
+                if s.is_connected and not is_subprocess_alive(s)
+            )
+            metrics["pool_dead_subprocesses"] = pool_dead
+            # Track longest-running streaming session duration
+            now_utc = dt_cls.now(tz_cls.utc)
+            max_streaming_secs = 0.0
+            for s in pool._pool.values():
+                if s.is_streaming:
+                    started = s.streaming_started_at or s.last_activity
+                    duration = (now_utc - started).total_seconds()
+                    max_streaming_secs = max(max_streaming_secs, duration)
+            if max_streaming_secs > 0:
+                metrics["pool_max_streaming_seconds"] = round(max_streaming_secs, 0)
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to collect session pool metrics: {e}")
 
@@ -190,7 +207,47 @@ def _check_warnings(metrics: dict) -> list[str]:
     if live_sessions > 0 and total_msgs / max(1, live_sessions) > 500:
         warnings.append(f"Average {total_msgs // max(1, live_sessions)} messages per live session - possible message accumulation")
 
+    # Dead subprocesses in pool (connected flag but process gone)
+    pool_dead = metrics.get("pool_dead_subprocesses", 0)
+    if pool_dead > 0:
+        warnings.append(f"Session pool has {pool_dead} dead subprocess(es) - eviction will clean these")
+
+    # Stuck streaming sessions (streaming for too long)
+    max_stream_secs = metrics.get("pool_max_streaming_seconds", 0)
+    if max_stream_secs > 600:  # 10 minutes
+        warnings.append(f"Longest streaming session: {max_stream_secs:.0f}s - may be stuck")
+
     return warnings
+
+
+async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reason: str) -> None:
+    """Clean up live_session_store and sync_engine state for evicted pool sessions.
+
+    When session pool evicts a session (dead subprocess, stuck streaming, idle),
+    the corresponding in-memory state in LiveSessionStore and SyncEngine must
+    also be cleaned. Without this, message buffers and streaming flags accumulate.
+    """
+    for session_id in session_ids:
+        try:
+            from app.core.live_session_store import live_session_store
+            if live_session_store.has_session(session_id):
+                # End streaming first if still marked as streaming
+                if live_session_store.is_streaming(session_id):
+                    await live_session_store.end_streaming(
+                        session_id, metadata={"cleanup_reason": reason}, interrupted=True
+                    )
+                # Then clean up the session from memory
+                await live_session_store.cleanup_ended_session(session_id)
+                cleaned_key = f"live_store_cleaned_{reason}"
+                cleaned[cleaned_key] = cleaned.get(cleaned_key, 0) + 1
+        except Exception as e:
+            logger.debug(f"{_PREFIX} Failed to clean live session {session_id}: {e}")
+
+        try:
+            from app.core.sync_engine import sync_engine
+            await sync_engine.clear_streaming_state(session_id)
+        except Exception as e:
+            logger.debug(f"{_PREFIX} Failed to clear sync engine state for {session_id}: {e}")
 
 
 async def _periodic_cleanup() -> dict:
@@ -238,6 +295,10 @@ async def _periodic_cleanup() -> dict:
             dead = await pool.evict_dead()
             if dead:
                 cleaned["dead_pool_sessions"] = len(dead)
+                # Also clean up live session store and sync engine state
+                # for dead sessions — these hold in-memory message buffers
+                # and streaming flags that won't be cleaned automatically
+                await _cleanup_evicted_sessions(dead, cleaned, "dead")
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to evict dead pool sessions: {e}")
 
@@ -251,6 +312,35 @@ async def _periodic_cleanup() -> dict:
                 cleaned["idle_pool_sessions"] = len(idle)
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to evict idle pool sessions: {e}")
+
+    # Evict sessions stuck in streaming state for too long (30 minutes)
+    # This is the critical safety net for the main leak: SDK subprocess hangs →
+    # is_streaming stays True → evict_idle/evict_dead skip it → memory leak
+    try:
+        from app.core.session_pool import get_session_pool, _session_pool
+        if _session_pool is not None:
+            pool = get_session_pool()
+            stuck = await pool.evict_stuck_streaming(max_streaming_seconds=1800)
+            if stuck:
+                cleaned["stuck_streaming_sessions"] = len(stuck)
+                logger.warning(
+                    f"{_PREFIX} Force-evicted {len(stuck)} stuck streaming session(s): {stuck}"
+                )
+                # Clean up live session store and sync engine for stuck sessions
+                await _cleanup_evicted_sessions(stuck, cleaned, "stuck")
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to evict stuck streaming sessions: {e}")
+
+    # Clean up done tasks from _pending_cleanup_tasks
+    try:
+        from app.api.websocket import _pending_cleanup_tasks
+        done_ids = [sid for sid, task in _pending_cleanup_tasks.items() if task.done()]
+        for sid in done_ids:
+            _pending_cleanup_tasks.pop(sid, None)
+        if done_ids:
+            cleaned["done_cleanup_tasks"] = len(done_ids)
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to clean done cleanup tasks: {e}")
 
     # Evict sessions whose worktree directory was deleted externally
     try:

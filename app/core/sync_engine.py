@@ -227,14 +227,25 @@ class SyncEngine:
                 self._session_project_map.pop(sid, None)
                 self._session_worktree_map.pop(sid, None)
 
+            # Also clean up session locks for sessions with no connected devices
+            # and not currently streaming. Locks can become orphaned when a device
+            # disconnects abnormally without releasing its lock.
+            stale_lock_ids = []
+            for sid in list(self._session_locks.keys()):
+                if sid not in self._streaming_sessions and sid not in self._connections:
+                    stale_lock_ids.append(sid)
+            for sid in stale_lock_ids:
+                del self._session_locks[sid]
+                stale_ids.add(sid)
+
             if stale_ids:
-                import logging
-                logger = logging.getLogger(__name__)
                 logger.info(
-                    f"Swept {len(stale_ids)} stale session map entries. "
+                    f"Swept {len(stale_ids)} stale entries "
+                    f"(locks={len(stale_lock_ids)}). "
                     f"Remaining: user_map={len(self._session_user_map)} "
                     f"project_map={len(self._session_project_map)} "
-                    f"worktree_map={len(self._session_worktree_map)}"
+                    f"worktree_map={len(self._session_worktree_map)} "
+                    f"session_locks={len(self._session_locks)}"
                 )
             return len(stale_ids)
 

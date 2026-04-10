@@ -76,16 +76,20 @@ async def _delayed_session_cleanup(session_id: str, delay_seconds: int = 30) -> 
     by ``cancel_pending_cleanup()`` if a new query starts before the delay
     expires.
     """
+    current_task = asyncio.current_task()
     try:
         await asyncio.sleep(delay_seconds)
         cleaned = await live_session_store.cleanup_ended_session(session_id)
-        # Note: pop happens in the finally block below; count after pop is accurate there
         logger.info(f"Delayed cleanup for session {session_id}: {'removed' if cleaned else 'skipped (still streaming or not found)'}")
     except asyncio.CancelledError:
         logger.debug(f"Delayed cleanup cancelled for session {session_id} (new query started)")
     finally:
-        # Remove ourselves from the tracking dict (idempotent)
-        _pending_cleanup_tasks.pop(session_id, None)
+        # Only remove ourselves from the tracking dict if WE are still the tracked task.
+        # Race condition fix: if schedule_delayed_cleanup() was called again for the same
+        # session, the dict now points to the NEW task. Popping blindly would remove it,
+        # leaving the new task untracked (unable to be cancelled by cancel_pending_cleanup).
+        if _pending_cleanup_tasks.get(session_id) is current_task:
+            _pending_cleanup_tasks.pop(session_id, None)
 
 
 def schedule_delayed_cleanup(session_id: str, delay_seconds: int = 30) -> asyncio.Task:

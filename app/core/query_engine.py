@@ -596,6 +596,7 @@ async def stream_query(
 
     # Mark as streaming
     state.is_streaming = True
+    state.streaming_started_at = datetime.now(timezone.utc)
     state.last_activity = datetime.now(timezone.utc)
 
     # Generate a message ID for streaming sync
@@ -821,6 +822,7 @@ async def stream_query(
     finally:
         # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
+        state.streaming_started_at = None
         state.last_activity = datetime.now(timezone.utc)
 
         # Remove dead clients from pool
@@ -1002,6 +1004,7 @@ async def _run_background_query(
 
     # Mark as streaming
     state.is_streaming = True
+    state.streaming_started_at = datetime.now(timezone.utc)
     state.last_activity = datetime.now(timezone.utc)
 
     # Use provided message_id or generate a new one
@@ -1212,6 +1215,7 @@ async def _run_background_query(
     finally:
         # Mark as not streaming — keep in pool for reuse
         state.is_streaming = False
+        state.streaming_started_at = None
         state.last_activity = datetime.now(timezone.utc)
         state.background_task = None
 
@@ -1774,6 +1778,7 @@ async def stream_to_websocket(
 
     # Mark as streaming (both reuse and create paths)
     state.is_streaming = True
+    state.streaming_started_at = datetime.now(timezone.utc)
     state.last_activity = datetime.now(timezone.utc)
 
     # Initialize sdk_session_id - use resume_id if resuming, otherwise None until we get it from SDK
@@ -2378,6 +2383,7 @@ async def stream_to_websocket(
     finally:
         # Mark as not streaming and reset interrupt flag
         state.is_streaming = False
+        state.streaming_started_at = None
         state.interrupt_requested = False
         state.last_activity = datetime.now(timezone.utc)
 
