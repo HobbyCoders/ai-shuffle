@@ -1709,7 +1709,7 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM system_settings WHERE key = ?", ("security_instructions",))
+        cursor.execute("DELETE FROM system_settings WHERE key = %s", ("security_instructions",))
 
     return {
         "success": True,

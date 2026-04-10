@@ -2535,8 +2535,8 @@ def has_subagent_been_modified(subagent_id: str) -> bool:
                 name != default_name OR
                 description != default_description OR
                 prompt != default_prompt OR
-                COALESCE(tools, '') != COALESCE(default_tools, '') OR
-                COALESCE(model, '') != COALESCE(default_model, '')
+                tools IS DISTINCT FROM default_tools OR
+                COALESCE(model, '') IS DISTINCT FROM COALESCE(default_model, '')
                AS is_modified
                FROM subagents WHERE id = %s AND is_builtin = TRUE""",
             (subagent_id,)

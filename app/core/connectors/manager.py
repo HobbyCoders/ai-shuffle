@@ -203,7 +203,7 @@ class ConnectorManager:
                     with get_db() as conn:
                         cursor = conn.cursor()
                         cursor.execute(
-                            "SELECT * FROM connector_sessions WHERE connector_id = ? AND is_active = TRUE",
+                            "SELECT * FROM connector_sessions WHERE connector_id = %s AND is_active = TRUE",
                             (cid,),
                         )
                         sessions = rows_to_list(cursor.fetchall())

@@ -193,7 +193,7 @@ class AuthService:
             with database.get_db() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT token, expires_at FROM auth_sessions WHERE token = ?",
+                    "SELECT token, expires_at FROM auth_sessions WHERE token = %s",
                     (token,)
                 )
                 row = cursor.fetchone()

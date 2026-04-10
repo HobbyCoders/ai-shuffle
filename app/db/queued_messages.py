@@ -98,15 +98,15 @@ def requeue_message_at_front(
         cursor = conn.cursor()
         # Shift all existing positions up by 1 to make room at front
         cursor.execute(
-            "UPDATE queued_messages SET position = position + 1 WHERE session_id = ?",
+            "UPDATE queued_messages SET position = position + 1 WHERE session_id = %s",
             (session_id,)
         )
         cursor.execute(
             """INSERT INTO queued_messages (id, session_id, content, profile_id, project_id, position)
-               VALUES (?, ?, ?, ?, ?, 0)""",
+               VALUES (%s, %s, %s, %s, %s, 0)""",
             (msg_id, session_id, content, profile_id, project_id)
         )
-        cursor.execute("SELECT * FROM queued_messages WHERE id = ?", (msg_id,))
+        cursor.execute("SELECT * FROM queued_messages WHERE id = %s", (msg_id,))
         return row_to_dict(cursor.fetchone())
 
 

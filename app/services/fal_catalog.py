@@ -269,7 +269,7 @@ class FalCatalogService:
                            (endpoint_id, display_name, category, description, status,
                             thumbnail_url, tags_json, group_key, group_label,
                             tool_type, output_type, updated_at, fetched_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())""",
                         (
                             model.endpoint_id,
                             model.display_name,

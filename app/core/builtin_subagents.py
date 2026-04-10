@@ -716,13 +716,13 @@ def _update_builtin_defaults(subagent_id: str, definition: Dict[str, Any]) -> No
         cursor = conn.cursor()
         cursor.execute(
             """UPDATE subagents SET
-                default_name = ?,
-                default_description = ?,
-                default_prompt = ?,
-                default_tools = ?,
-                default_model = ?,
-                updated_at = ?
-               WHERE id = ? AND is_builtin = 1""",
+                default_name = %s,
+                default_description = %s,
+                default_prompt = %s,
+                default_tools = %s,
+                default_model = %s,
+                updated_at = %s
+               WHERE id = %s AND is_builtin = TRUE""",
             (
                 definition["name"],
                 definition["description"],
