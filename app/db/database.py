@@ -5349,3 +5349,6 @@ def remove_queued_message(message_id: str):
 def clear_queued_messages(session_id: str):
     return _queued_mod.clear_queued_messages(session_id)
 
+def requeue_message_at_front(session_id: str, content: str, profile_id=None, project_id=None):
+    return _queued_mod.requeue_message_at_front(session_id, content, profile_id, project_id)
+

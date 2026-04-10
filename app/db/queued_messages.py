@@ -82,6 +82,34 @@ def pop_next_queued_message(session_id: str) -> Optional[QueuedMessageRow]:
         return msg
 
 
+def requeue_message_at_front(
+    session_id: str,
+    content: str,
+    profile_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> QueuedMessageRow:
+    """Re-insert a message at the front of the queue (position 0).
+
+    Used for error recovery when a popped message fails to start a query.
+    Existing messages have their positions shifted up by 1.
+    """
+    msg_id = f"queued-{uuid.uuid4().hex[:12]}"
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Shift all existing positions up by 1 to make room at front
+        cursor.execute(
+            "UPDATE queued_messages SET position = position + 1 WHERE session_id = ?",
+            (session_id,)
+        )
+        cursor.execute(
+            """INSERT INTO queued_messages (id, session_id, content, profile_id, project_id, position)
+               VALUES (?, ?, ?, ?, ?, 0)""",
+            (msg_id, session_id, content, profile_id, project_id)
+        )
+        cursor.execute("SELECT * FROM queued_messages WHERE id = ?", (msg_id,))
+        return row_to_dict(cursor.fetchone())
+
+
 def remove_queued_message(message_id: str) -> bool:
     """Remove a single queued message by ID. Returns True if deleted."""
     with get_db() as conn:

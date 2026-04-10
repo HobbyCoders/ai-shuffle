@@ -29,6 +29,13 @@ from app.db.async_database import run_sync
 
 logger = logging.getLogger(__name__)
 
+# Module-level set tracking sessions with a pending interrupt_and_query or
+# user-initiated stop.  Checked by run_query's finally block to decide
+# whether to auto-process the next queued message.  Module-level (not
+# per-handler) so the flag is visible regardless of which device set it.
+_interrupt_pending_sessions: set[str] = set()
+_stopped_sessions: set[str] = set()
+
 
 class WebSocketRateLimiter:
     """Sliding-window rate limiter for WebSocket messages per connection.
@@ -75,10 +82,8 @@ class ChatWebSocketHandler:
         self.query_task: Optional[asyncio.Task] = None
         self.connection_healthy: bool = True
 
-        # Session IDs with a pending interrupt_and_query transition.
-        # Checked by run_query's finally block to skip _process_next_queued
-        # when a new query is about to start (prevents race condition).
-        self._interrupt_pending_sessions: set[str] = set()
+        # (interrupt_pending_sessions and stopped_sessions are now module-level
+        # sets so the flag is visible across handler instances / devices.)
 
         # Per-connection rate limiter for inbound messages
         self.rate_limiter = WebSocketRateLimiter(
@@ -456,6 +461,12 @@ class ChatWebSocketHandler:
         session_id = data.get("session_id") or self.current_session_id
         if session_id:
             from app.core.query_engine import interrupt_session
+
+            # Mark session as user-stopped so the finally block in run_query
+            # does NOT auto-fire queued messages.  The queue stays intact —
+            # the user can send them manually or clear them.
+            _stopped_sessions.add(session_id)
+
             # Call SDK's interrupt() - this signals the subprocess to stop.
             # Don't cancel the task immediately: let the streaming loop continue
             # so remaining in-flight tool calls are shown in the UI before
@@ -506,7 +517,8 @@ class ChatWebSocketHandler:
         # Mark this session as having a pending interrupt_and_query so the old
         # task's finally block skips _process_next_queued (prevents race where
         # queue processing starts a competing query on the same SDK client).
-        self._interrupt_pending_sessions.add(session_id)
+        # Module-level set so the flag is visible to ALL handler instances.
+        _interrupt_pending_sessions.add(session_id)
 
         try:
             # Step 1: Interrupt the SDK-level streaming
@@ -565,7 +577,7 @@ class ChatWebSocketHandler:
             logger.debug(f"Started new query after interrupt for session {session_id}")
 
         finally:
-            self._interrupt_pending_sessions.discard(session_id)
+            _interrupt_pending_sessions.discard(session_id)
 
     # ------------------------------------------------------------------
     # handle_load_session
@@ -921,6 +933,10 @@ class ChatWebSocketHandler:
             await self.send_json({"type": "error", "message": "No session for queue"})
             return
 
+        # Clear stopped flag — user explicitly queued a new message, so they
+        # want the queue to auto-process when the session becomes idle.
+        _stopped_sessions.discard(session_id)
+
         # Store in DB
         await run_sync(
             database.add_queued_message,
@@ -1006,6 +1022,9 @@ class ChatWebSocketHandler:
         Called after a query completes (done/stopped/error) or when a new
         message is queued and the session is idle. Runs entirely server-side
         — does not require the originating browser to be connected.
+
+        If anything fails after the message is popped from the queue, it is
+        re-inserted at the front so the user never silently loses a message.
         """
         from app.api.websocket import _active_chat_sessions, _active_sessions_lock
 
@@ -1019,51 +1038,70 @@ class ChatWebSocketHandler:
 
         logger.info(f"[Queue] Auto-processing queued message for session {session_id}: {content[:80]}...")
 
-        # Broadcast updated queue to all devices
-        queue = await run_sync(database.get_queued_messages, session_id)
-        await sync_engine.broadcast_queue_updated(session_id, queue)
+        try:
+            # Broadcast updated queue to all devices
+            queue = await run_sync(database.get_queued_messages, session_id)
+            await sync_engine.broadcast_queue_updated(session_id, queue)
 
-        # Store user message in DB
-        await run_sync(
-            database.add_session_message,
-            session_id=session_id,
-            role="user",
-            content=content,
-            profile_id=profile_id,
-        )
+            # Store user message in DB
+            await run_sync(
+                database.add_session_message,
+                session_id=session_id,
+                role="user",
+                content=content,
+                profile_id=profile_id,
+            )
 
-        # Broadcast user message to all devices (no source_device_id — server-originated)
-        await sync_engine.broadcast_message_added(
-            session_id=session_id,
-            message={
-                "role": "user",
-                "content": content,
-                "profile_id": profile_id
-            },
-            source_device_id=None  # Send to ALL devices
-        )
+            # Broadcast user message to all devices (no source_device_id — server-originated)
+            await sync_engine.broadcast_message_added(
+                session_id=session_id,
+                message={
+                    "role": "user",
+                    "content": content,
+                    "profile_id": profile_id
+                },
+                source_device_id=None  # Send to ALL devices
+            )
 
-        # Cancel any existing query (shouldn't be one, but safety)
-        async with _active_sessions_lock:
-            existing_task = _active_chat_sessions.get(session_id)
-        if existing_task and not existing_task.done():
-            existing_task.cancel()
+            # Cancel any existing query (shouldn't be one, but safety)
+            async with _active_sessions_lock:
+                existing_task = _active_chat_sessions.get(session_id)
+            if existing_task and not existing_task.done():
+                existing_task.cancel()
+                try:
+                    await existing_task
+                except asyncio.CancelledError:
+                    pass
+
+            # Look up worktree_id from session
+            session_data = await run_sync(database.get_session, session_id)
+            worktree_id = session_data.get("worktree_id") if session_data else None
+
+            # Start the query
+            task = asyncio.create_task(
+                self.run_query(content, session_id, profile_id, project_id, None, worktree_id)
+            )
+            async with _active_sessions_lock:
+                _active_chat_sessions[session_id] = task
+            self.query_task = task
+
+        except Exception as exc:
+            # Re-insert the message at the front of the queue so it isn't lost.
+            logger.error(f"[Queue] Failed to start query for queued message, re-queuing: {exc}")
             try:
-                await existing_task
-            except asyncio.CancelledError:
-                pass
-
-        # Look up worktree_id from session
-        session_data = await run_sync(database.get_session, session_id)
-        worktree_id = session_data.get("worktree_id") if session_data else None
-
-        # Start the query
-        task = asyncio.create_task(
-            self.run_query(content, session_id, profile_id, project_id, None, worktree_id)
-        )
-        async with _active_sessions_lock:
-            _active_chat_sessions[session_id] = task
-        self.query_task = task
+                await run_sync(
+                    database.requeue_message_at_front,
+                    session_id=session_id,
+                    content=content,
+                    profile_id=profile_id if profile_id != "claude-code" else None,
+                    project_id=project_id,
+                )
+                # Broadcast the restored queue
+                queue = await run_sync(database.get_queued_messages, session_id)
+                await sync_engine.broadcast_queue_updated(session_id, queue)
+            except Exception as requeue_err:
+                logger.error(f"[Queue] Failed to re-queue message: {requeue_err}")
+            raise
 
     # ------------------------------------------------------------------
     # run_query — the streaming pipeline
@@ -1113,8 +1151,10 @@ class ChatWebSocketHandler:
 
         # Unregister this device from SyncEngine while streaming
         # This prevents duplicate events (we get direct events via send_json)
-        # If the device disconnects and reconnects, it will re-register and get sync events
-        await sync_engine.unregister_device(self.device_id, session_id)
+        # If the device disconnects and reconnects, it will re-register and get sync events.
+        # Pass self.websocket so we only unregister OUR connection — if user already
+        # reconnected (new ws registered for same device_id), we must not nuke it.
+        await sync_engine.unregister_device(self.device_id, session_id, self.websocket)
         ctx.debug(logger, "Unregistered device during streaming to prevent duplicates")
 
         # Initialize LiveSessionStore for server-authoritative state
@@ -1412,15 +1452,26 @@ class ChatWebSocketHandler:
                     ctx.debug(logger, "Cleaned up stuck streaming session")
 
             # Auto-process next queued message (server-side, no browser needed).
-            # Skip if an interrupt_and_query is pending — it will start its own
-            # query immediately, and processing the queue here would create a
-            # competing task on the same SDK client subprocess.
-            if session_id in self._interrupt_pending_sessions:
+            # Skip if:
+            #  - interrupt_and_query pending → it starts its own query
+            #  - user-initiated stop → queue stays intact for manual action
+            if session_id in _interrupt_pending_sessions:
                 ctx.debug(logger, "Skipping queue processing — interrupt_and_query pending")
+            elif session_id in _stopped_sessions:
+                _stopped_sessions.discard(session_id)
+                ctx.debug(logger, "Skipping queue processing — user stopped session")
             else:
                 # Delay slightly to let the done/stopped event propagate to clients first.
                 await asyncio.sleep(0.5)
-                try:
-                    await self._process_next_queued(session_id)
-                except Exception as queue_err:
-                    logger.warning(f"[Queue] Failed to auto-process next queued message: {queue_err}")
+                # Re-check after the delay — user may have clicked stop or sent
+                # an interrupt_and_query during the 0.5s window.
+                if session_id in _stopped_sessions:
+                    _stopped_sessions.discard(session_id)
+                    ctx.debug(logger, "Skipping queue processing — user stopped during delay")
+                elif session_id in _interrupt_pending_sessions:
+                    ctx.debug(logger, "Skipping queue processing — interrupt arrived during delay")
+                else:
+                    try:
+                        await self._process_next_queued(session_id)
+                    except Exception as queue_err:
+                        logger.warning(f"[Queue] Failed to auto-process next queued message: {queue_err}")
