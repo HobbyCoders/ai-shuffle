@@ -574,7 +574,7 @@ async def get_git_status(
         repository_id=repo["id"] if repo else None,
         default_branch=repo["default_branch"] if repo else None,
         github_repo_name=repo["github_repo_name"] if repo else None,
-        last_synced_at=repo["last_synced_at"] if repo else None
+        last_synced_at=str(repo["last_synced_at"]) if repo and repo["last_synced_at"] else None
     )
 
 
