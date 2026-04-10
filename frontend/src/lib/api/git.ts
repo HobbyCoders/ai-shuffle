@@ -389,15 +389,27 @@ export async function generateBranchName(
 /**
  * Client-side fallback for branch name generation (no API call).
  * Used when the backend is unreachable or as instant fallback.
+ * Filters common filler/stop words to produce meaningful branch names.
  */
+const STOP_WORDS = new Set([
+    'a', 'an', 'the', 'is', 'it', 'in', 'on', 'at', 'to', 'for', 'of',
+    'and', 'or', 'but', 'not', 'with', 'from', 'by', 'as', 'be', 'was',
+    'are', 'been', 'has', 'have', 'had', 'do', 'does', 'did', 'will',
+    'would', 'could', 'should', 'can', 'may', 'might', 'shall',
+    'i', 'me', 'my', 'we', 'us', 'our', 'you', 'your', 'he', 'she',
+    'they', 'them', 'their', 'this', 'that', 'these', 'those',
+    'please', 'help', 'want', 'need', 'like', 'just', 'also',
+    'hi', 'hello', 'hey', 'thanks', 'thank',
+]);
+
 export function generateBranchNameLocal(message: string, prefix: string = 'feat'): string {
     const slug = message
         .toLowerCase()
         .trim()
         .replace(/[^\w\s-]/g, '')  // Remove special chars
         .split(/\s+/)              // Split on whitespace
-        .filter(w => w.length > 1) // Skip single chars
-        .slice(0, 5)               // Take first 5 words
+        .filter(w => w.length > 1 && !STOP_WORDS.has(w)) // Skip single chars and stop words
+        .slice(0, 5)               // Take first 5 meaningful words
         .join('-');
     const clean = slug.slice(0, 50).replace(/-+$/, '');
     return clean ? `${prefix}/${clean}` : `${prefix}/auto-${Date.now().toString(36)}`;

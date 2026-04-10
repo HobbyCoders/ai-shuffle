@@ -2228,6 +2228,20 @@ async def create_session_with_worktree(
 
     logger.debug(f"Created worktree session: {session['id']} with worktree: {worktree['id']}")
 
+    # Broadcast to all connected devices so sidebars update immediately.
+    # Without this, sessions created via REST (not WS) never appear in
+    # the sidebar until the user manually refreshes.
+    try:
+        from app.core.sync_engine import sync_engine
+        import asyncio
+        asyncio.ensure_future(sync_engine.broadcast_user_session_created(
+            user_id="admin",
+            session_id=session["id"],
+            source_device_id=None
+        ))
+    except Exception as e:
+        logger.warning(f"Failed to broadcast session creation: {e}")
+
     return WorktreeSessionResponse(
         session_id=session["id"],
         worktree_id=worktree["id"],

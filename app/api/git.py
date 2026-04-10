@@ -1727,9 +1727,20 @@ async def generate_branch_name(
 
     check_project_access(request, project_id)
 
-    # Client-side fallback slugification
+    # Common filler/stop words to strip from branch names
+    STOP_WORDS = {
+        'a', 'an', 'the', 'is', 'it', 'in', 'on', 'at', 'to', 'for', 'of',
+        'and', 'or', 'but', 'not', 'with', 'from', 'by', 'as', 'be', 'was',
+        'are', 'been', 'has', 'have', 'had', 'do', 'does', 'did', 'will',
+        'would', 'could', 'should', 'can', 'may', 'might', 'shall',
+        'i', 'me', 'my', 'we', 'us', 'our', 'you', 'your', 'he', 'she',
+        'they', 'them', 'their', 'this', 'that', 'these', 'those',
+        'please', 'help', 'want', 'need', 'like', 'just', 'also',
+        'hi', 'hello', 'hey', 'thanks', 'thank',
+    }
+
     def slugify_branch(msg: str, prefix: str) -> str:
-        """Simple fallback: slugify first few words of message."""
+        """Fallback: extract meaningful words from message into a branch name."""
         import re
         import unicodedata
         # Normalize unicode
@@ -1737,25 +1748,27 @@ async def generate_branch_name(
         value = value.lower().strip()
         # Remove non-word chars (keep spaces and hyphens)
         value = re.sub(r'[^\w\s-]', '', value)
-        # Take first 5 meaningful words
-        words = [w for w in value.split() if len(w) > 1][:5]
+        # Filter out stop words and single-char words, take first 5 meaningful words
+        words = [w for w in value.split() if len(w) > 1 and w not in STOP_WORDS][:5]
         slug = '-'.join(words)
         # Truncate and clean
         slug = slug[:50].rstrip('-')
         return f"{prefix}/{slug}" if slug else f"{prefix}/auto-{int(time.time())}"
 
     try:
-        prompt = f"""Generate a concise git branch name from this user message. The branch should use the prefix "{body.prefix}/".
+        prompt = f"""Extract the core task from this chat message and generate a git branch name.
 
+Prefix: "{body.prefix}/"
+Format: lowercase-with-hyphens (e.g., feat/fix-login-timeout, feat/add-dark-mode)
 Rules:
-- Use lowercase with hyphens (e.g., feat/add-user-auth)
+- 3-5 descriptive words AFTER the prefix slash — focus on the technical task, not conversational filler
 - Max 50 characters total
-- Be descriptive but concise (3-5 words after prefix)
-- No special characters except hyphens and one forward slash after prefix
+- Only lowercase letters, digits, hyphens, and one forward slash after prefix
+- Use action verbs: fix, add, update, refactor, remove, improve, etc.
 
-User message: "{body.message[:500]}"
+Message: "{body.message[:500]}"
 
-Return ONLY the branch name, nothing else. No quotes, no explanation."""
+Return ONLY the branch name, nothing else."""
 
         response_text = await generate_with_claude(prompt, model="haiku")
         branch_name = response_text.strip().strip('"').strip("'").strip('`')

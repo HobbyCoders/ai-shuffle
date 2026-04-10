@@ -303,9 +303,23 @@ def _default_working_dir() -> str:
 
 
 def resolve_working_dir(session: Dict[str, Any]) -> str:
-    """Resolve the working directory for a session, checking its project."""
+    """Resolve the working directory for a session, checking worktree first, then project.
+
+    Priority:
+    1. Worktree path (if session is linked to an active worktree)
+    2. Project path
+    3. Default workspace
+    """
     from app.db import database
-    from app.core.project_utils import get_project_working_dir
+    from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
+
+    # Check for worktree first — worktree sessions should resolve to the worktree path,
+    # not the main project directory.
+    worktree_id = session.get("worktree_id")
+    if worktree_id:
+        worktree = database.get_worktree(worktree_id)
+        if worktree and worktree.get("status") == "active":
+            return get_worktree_working_dir(worktree)
 
     project_id = session.get("project_id")
     if project_id:

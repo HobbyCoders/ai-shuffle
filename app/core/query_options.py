@@ -977,6 +977,14 @@ def build_options_from_profile(
                 "branch": worktree.get("branch_name", "unknown"),
                 "base_branch": worktree.get("base_branch", "main")
             }
+            logger.debug(f"[Options] Session {session_id} using worktree cwd: {working_dir}")
+        elif worktree:
+            # Worktree exists but is not active — log for debugging
+            logger.warning(
+                f"[Options] Session {session_id} has worktree {worktree.get('id')} "
+                f"but status is '{worktree.get('status')}', falling back to project cwd"
+            )
+            working_dir = get_project_working_dir(project) if project else str(settings.workspace_dir)
         elif project:
             working_dir = get_project_working_dir(project)
         else:

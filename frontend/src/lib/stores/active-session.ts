@@ -859,7 +859,7 @@ export const activeSession = {
 
 	// ── Messaging ───────────────────────────────────────────────────
 
-	async sendMessage(prompt: string, options?: { skipWorktreeSetup?: boolean; pendingUploadPaths?: string[] }) {
+	async sendMessage(prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[] }) {
 		// Worktree setup on first message
 		if (!options?.skipWorktreeSetup && _state.executionMode === 'worktree' && !_state.sessionId && _state.messages.length === 0) {
 			if (_state.worktreeMode === 'existing' && _state.worktreeId) {
@@ -960,20 +960,33 @@ export const activeSession = {
 		}
 		console.debug(`[ActiveSession] sendMessage: sessionId=${_state.sessionId}, awaitingNewSession=true, wsConnected=${wsConn.isConnected()}`);
 
-		_update(s => ({
-			...s,
-			messages: [...s.messages, {
-				id: userMsgId,
-				role: 'user' as const,
-				content: prompt,
-				profileId: queryProfileId,
-			}],
-			isStreaming: true,
-			error: null,
-			title: newTitle,
-			currentQueryProfileId: queryProfileId,
-			wsStreamContent: '',
-		}));
+		// When called from autoCreateWorktree, the user message is already in the
+		// messages array (added optimistically). Skip appending a duplicate.
+		if (options?.skipMessageAppend) {
+			_update(s => ({
+				...s,
+				isStreaming: true,
+				error: null,
+				title: newTitle,
+				currentQueryProfileId: queryProfileId,
+				wsStreamContent: '',
+			}));
+		} else {
+			_update(s => ({
+				...s,
+				messages: [...s.messages, {
+					id: userMsgId,
+					role: 'user' as const,
+					content: prompt,
+					profileId: queryProfileId,
+				}],
+				isStreaming: true,
+				error: null,
+				title: newTitle,
+				currentQueryProfileId: queryProfileId,
+				wsStreamContent: '',
+			}));
+		}
 
 		const overrides: Record<string, string> = {};
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
@@ -1145,6 +1158,11 @@ export const activeSession = {
 				}],
 			}));
 
+			// Refresh sidebar — session was created via REST, not WS
+			appData.loadSessions();
+			appData.loadApiUserSessions();
+			persistSession();
+
 			// Migrate pending uploads to the new worktree
 			if (pendingUploadPaths?.length && _state.project) {
 				try {
@@ -1154,12 +1172,20 @@ export const activeSession = {
 				}
 			}
 
-			// Reconnect WS to register the new session
-			disconnect();
-			wsConn.connect();
-
+			// Send the user's message if provided. No need to disconnect/reconnect
+			// the WS — the query handler registers the device automatically.
 			if (prompt) {
-				setTimeout(() => activeSession.sendMessage(prompt, { skipWorktreeSetup: true }), 500);
+				if (!wsConn.isConnected()) {
+					wsConn.connect();
+					await new Promise<void>((resolve) => {
+						if (wsConn.isConnected()) { resolve(); return; }
+						const timeout = setTimeout(() => { clearInterval(check); resolve(); }, 3000);
+						const check = setInterval(() => {
+							if (wsConn.isConnected()) { clearTimeout(timeout); clearInterval(check); resolve(); }
+						}, 50);
+					});
+				}
+				activeSession.sendMessage(prompt, { skipWorktreeSetup: true });
 			}
 		} catch (error) {
 			const err = error as { detail?: string; message?: string; status?: number };
@@ -1183,7 +1209,22 @@ export const activeSession = {
 		if (!_state.profile) { _update(s => ({ ...s, worktreeError: 'Please select a profile' })); return; }
 		if (!_state.project) { _update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
 
-		_update(s => ({ ...s, isCreatingWorktree: true, worktreeError: null }));
+		const queryProfileId = _state.profile;
+		const userMsgId = `user-${Date.now()}`;
+
+		// Issue 1 fix: Show the user message immediately so it doesn't disappear
+		// while we create the worktree and generate a branch name.
+		_update(s => ({
+			...s,
+			isCreatingWorktree: true,
+			worktreeError: null,
+			messages: [...s.messages, {
+				id: userMsgId,
+				role: 'user' as const,
+				content: prompt,
+				profileId: queryProfileId,
+			}],
+		}));
 
 		try {
 			// Generate branch name from the message
@@ -1231,6 +1272,13 @@ export const activeSession = {
 				}],
 			}));
 
+			// Issue 4 fix: Session was created via REST, not WS, so no
+			// session_created / user_session_created broadcast was sent.
+			// Explicitly refresh the sidebar session list and persist.
+			appData.loadSessions();
+			appData.loadApiUserSessions();
+			persistSession();
+
 			// Migrate pending uploads to the new worktree
 			if (pendingUploadPaths?.length && _state.project) {
 				try {
@@ -1240,12 +1288,26 @@ export const activeSession = {
 				}
 			}
 
-			// Reconnect WS to register the new session
-			disconnect();
-			wsConn.connect();
+			// Issue 2 fix: Don't disconnect/reconnect the WebSocket — it causes
+			// message flicker and a racy 500ms setTimeout. The WS query handler
+			// registers the device with the session automatically when it receives
+			// the query with session_id. Just send the message directly.
+			if (!wsConn.isConnected()) {
+				wsConn.connect();
+				// Wait for connection before sending
+				await new Promise<void>((resolve) => {
+					if (wsConn.isConnected()) { resolve(); return; }
+					const timeout = setTimeout(() => { clearInterval(check); resolve(); }, 3000);
+					const check = setInterval(() => {
+						if (wsConn.isConnected()) { clearTimeout(timeout); clearInterval(check); resolve(); }
+					}, 50);
+				});
+			}
 
-			// Send the user's message after worktree creation
-			setTimeout(() => activeSession.sendMessage(prompt, { skipWorktreeSetup: true }), 500);
+			// Send the user's message — skip worktree setup since we just did it.
+			// skipMessageAppend avoids duplicating the user message we already
+			// added optimistically at the start of autoCreateWorktree.
+			activeSession.sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true });
 		} catch (error) {
 			const err = error as { detail?: string; message?: string; status?: number };
 			const rawError = err.detail || err.message || '';
@@ -1257,6 +1319,8 @@ export const activeSession = {
 				...s,
 				isCreatingWorktree: false,
 				worktreeError: formatted,
+				// Remove the optimistic user message on failure
+				messages: s.messages.filter(m => m.id !== userMsgId),
 			}));
 		}
 	},
