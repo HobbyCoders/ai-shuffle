@@ -90,11 +90,23 @@ def run_migrations():
 
     This function is called on app startup to ensure data consistency.
     """
+    _migrate_instance_id()
+
     # Seed the built-in default AI profile
     _seed_default_ai_profile()
 
     # Seed default templates if none exist
     _seed_default_templates()
+
+
+def _migrate_instance_id():
+    """Add instance_id column to projects table for multi-instance isolation."""
+    from app.db.base import column_exists, get_db
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if not column_exists(cursor, "projects", "instance_id"):
+            cursor.execute("ALTER TABLE projects ADD COLUMN instance_id TEXT")
+            logger.info("Added instance_id column to projects table")
 
 
 def _seed_default_ai_profile():

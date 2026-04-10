@@ -28,6 +28,13 @@ from app.db.base import (  # noqa: F401
     rows_to_list,
 )
 
+
+def _safe_json(value):
+    """Parse JSON if string, return as-is if already parsed (Postgres JSONB returns dicts/lists)."""
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
 from app.db.compat import (  # noqa: F401
     sql_date,
     sql_strftime,
@@ -804,10 +811,15 @@ def get_project(project_id: str) -> Optional[Dict[str, Any]]:
 
 
 def get_all_projects() -> List[Dict[str, Any]]:
-    """Get all projects"""
+    """Get all projects, filtered to the current instance."""
+    from app.core.config import settings as app_settings
+    instance_id = app_settings.effective_instance_id
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM projects ORDER BY name ASC")
+        cursor.execute(
+            "SELECT * FROM projects WHERE instance_id = %s OR instance_id IS NULL ORDER BY name ASC",
+            (instance_id,)
+        )
         rows = rows_to_list(cursor.fetchall())
         for row in rows:
             row["settings"] = json.loads(row["settings"]) if isinstance(row["settings"], str) else row["settings"]
@@ -822,13 +834,15 @@ def create_project(
     settings_dict: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Create a new project"""
+    from app.core.config import settings as app_settings
     now = datetime.now(timezone.utc).isoformat()
+    instance_id = app_settings.effective_instance_id
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO projects (id, name, description, path, settings, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-            (project_id, name, description, path, json.dumps(settings_dict or {}), now, now)
+            """INSERT INTO projects (id, name, description, path, settings, instance_id, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (project_id, name, description, path, json.dumps(settings_dict or {}), instance_id, now, now)
         )
     return get_project(project_id)
 
@@ -2243,7 +2257,7 @@ def get_user_preference(user_type: str, user_id: str, key: str) -> Optional[Dict
             result = row_to_dict(row)
             # Parse JSON value
             if result and result.get("value"):
-                result["value"] = json.loads(result["value"])
+                result["value"] = _safe_json(result["value"])
             return result
         return None
 
@@ -2296,7 +2310,7 @@ def get_all_user_preferences(user_type: str, user_id: str) -> List[Dict[str, Any
         # Parse JSON values
         for row in rows:
             if row.get("value"):
-                row["value"] = json.loads(row["value"])
+                row["value"] = _safe_json(row["value"])
         return rows
 
 
@@ -4586,7 +4600,7 @@ def get_mobile_device(device_id: str) -> Optional[Dict[str, Any]]:
         if row:
             result = dict(row)
             if result.get("capabilities"):
-                result["capabilities"] = json.loads(result["capabilities"])
+                result["capabilities"] = _safe_json(result["capabilities"])
             return result
         return None
 
@@ -4600,7 +4614,7 @@ def get_mobile_device_by_api_key_hash(api_key_hash: str) -> Optional[Dict[str, A
         if row:
             result = dict(row)
             if result.get("capabilities"):
-                result["capabilities"] = json.loads(result["capabilities"])
+                result["capabilities"] = _safe_json(result["capabilities"])
             return result
         return None
 
@@ -4615,7 +4629,7 @@ def get_all_mobile_devices() -> List[Dict[str, Any]]:
         for row in rows:
             result = dict(row)
             if result.get("capabilities"):
-                result["capabilities"] = json.loads(result["capabilities"])
+                result["capabilities"] = _safe_json(result["capabilities"])
             results.append(result)
         return results
 
@@ -4697,7 +4711,7 @@ def get_pending_action(action_id: str) -> Optional[Dict[str, Any]]:
         if row:
             result = dict(row)
             if result.get("params"):
-                result["params"] = json.loads(result["params"])
+                result["params"] = _safe_json(result["params"])
             return result
         return None
 
@@ -4717,7 +4731,7 @@ def get_pending_actions_for_device(device_id: str) -> List[Dict[str, Any]]:
         for row in rows:
             result = dict(row)
             if result.get("params"):
-                result["params"] = json.loads(result["params"])
+                result["params"] = _safe_json(result["params"])
             results.append(result)
         return results
 
@@ -4872,7 +4886,7 @@ def get_mobile_actions() -> List[Dict[str, Any]]:
         for row in rows:
             result = dict(row)
             if result.get("params"):
-                result["params"] = json.loads(result["params"])
+                result["params"] = _safe_json(result["params"])
             results.append(result)
         return results
 

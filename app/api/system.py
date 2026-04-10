@@ -457,8 +457,9 @@ async def set_workspace_config(
             detail="Invalid path"
         )
 
-    # Save to database
-    database.set_system_setting("workspace_path", str(path))
+    # Save to database (instance-scoped so multi-instance deployments don't conflict)
+    instance_key = f"workspace_path:{settings.effective_instance_id}"
+    database.set_system_setting(instance_key, str(path))
 
     # Update the runtime settings
     object.__setattr__(settings, 'workspace_dir', path)

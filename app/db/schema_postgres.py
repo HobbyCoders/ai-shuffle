@@ -95,6 +95,7 @@ def create_postgres_schema(cursor) -> None:
             description TEXT,
             path TEXT NOT NULL,
             settings JSONB DEFAULT '{}',
+            instance_id TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )

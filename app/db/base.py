@@ -96,9 +96,12 @@ def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
         logger.warning("PostgreSQL pool already initialized, closing old pool")
         _pg_pool.closeall()
 
-    # Parse the URL to extract components — handles percent-encoded passwords
-    # (e.g. %40 for @) that psycopg2 may not decode from a raw DSN string.
+    # Parse the DATABASE_URL to extract components — handles percent-encoded
+    # passwords (e.g. %40 for @) that psycopg2 cannot decode from a raw DSN.
+    # Also handles URLs with or without the postgresql:// scheme prefix.
     db_url = settings.database_url
+    if not db_url.startswith(("postgresql://", "postgres://")):
+        db_url = f"postgresql://{db_url}"
     parsed = urlparse(db_url)
     _pg_pool = psycopg2.pool.ThreadedConnectionPool(
         min_conn,

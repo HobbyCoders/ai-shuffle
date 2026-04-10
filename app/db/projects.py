@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
+from app.core.config import settings
 
 
 # ============================================================================
@@ -37,10 +38,15 @@ def get_project(project_id: str) -> Optional[ProjectRow]:
 
 
 def get_all_projects() -> List[ProjectRow]:
-    """Get all projects"""
+    """Get all projects, filtered to the current instance if instance_id is set."""
+    instance_id = settings.effective_instance_id
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM projects ORDER BY name ASC")
+        # Show projects belonging to this instance OR projects with no instance_id (legacy)
+        cursor.execute(
+            "SELECT * FROM projects WHERE instance_id = %s OR instance_id IS NULL ORDER BY name ASC",
+            (instance_id,)
+        )
         rows = rows_to_list(cursor.fetchall())
         for row in rows:
             row["settings"] = json.loads(row["settings"]) if isinstance(row["settings"], str) else (row["settings"] if row["settings"] is not None else {})
@@ -56,12 +62,13 @@ def create_project(
 ) -> ProjectRow:
     """Create a new project"""
     now = datetime.now(timezone.utc).isoformat()
+    instance_id = settings.effective_instance_id
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO projects (id, name, description, path, settings, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-            (project_id, name, description, path, json.dumps(settings_dict or {}), now, now)
+            """INSERT INTO projects (id, name, description, path, settings, instance_id, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (project_id, name, description, path, json.dumps(settings_dict or {}), instance_id, now, now)
         )
     return get_project(project_id)
 

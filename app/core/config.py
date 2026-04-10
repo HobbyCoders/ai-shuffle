@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     db_pool_min: int = 2  # Min connections in PostgreSQL pool
     db_pool_max: int = 10  # Max connections in PostgreSQL pool
 
+    # Instance identity — isolates projects, sessions, and workspace path
+    # when multiple deployments share the same database.
+    # Auto-generated from hostname if not set.
+    instance_id: Optional[str] = None
+
     # Session
     session_secret: Optional[str] = None
     session_expire_days: int = 30
@@ -110,6 +115,14 @@ class Settings(BaseSettings):
         # Set workspace_dir if not provided
         if self.workspace_dir is None:
             object.__setattr__(self, 'workspace_dir', _get_default_workspace_dir())
+
+    @property
+    def effective_instance_id(self) -> str:
+        """Get the instance ID. Falls back to hostname if not explicitly set."""
+        if self.instance_id:
+            return self.instance_id
+        import socket
+        return socket.gethostname()
 
     @property
     def effective_data_dir(self) -> Path:
@@ -204,7 +217,9 @@ def load_workspace_from_database():
 
     try:
         from app.db import database
-        configured_path = database.get_system_setting("workspace_path")
+        # Instance-scoped workspace path, with fallback to global for backward compat
+        instance_key = f"workspace_path:{settings.effective_instance_id}"
+        configured_path = database.get_system_setting(instance_key) or database.get_system_setting("workspace_path")
         logger.info(f"Loading workspace from database: configured_path={configured_path}")
 
         if configured_path:
