@@ -512,13 +512,13 @@
 
 	/* Ship It button */
 	.ship-it-btn {
-		border-color: var(--success);
-		color: var(--success);
+		border-color: var(--secondary-foreground);
+		color: var(--secondary-foreground);
 	}
 
 	.ship-it-btn:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--success) 12%, transparent);
-		color: var(--success);
+		background: color-mix(in oklch, var(--secondary) 80%, transparent);
+		color: var(--secondary-foreground);
 	}
 
 	.btn-label {
