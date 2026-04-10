@@ -11,6 +11,8 @@ import logging
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
+from urllib.parse import urlparse, unquote
+
 import psycopg2
 import psycopg2.pool
 import psycopg2.extras
@@ -94,10 +96,18 @@ def init_pool(min_conn: int = 2, max_conn: int = 10) -> None:
         logger.warning("PostgreSQL pool already initialized, closing old pool")
         _pg_pool.closeall()
 
+    # Parse the URL to extract components — handles percent-encoded passwords
+    # (e.g. %40 for @) that psycopg2 may not decode from a raw DSN string.
+    db_url = settings.database_url
+    parsed = urlparse(db_url)
     _pg_pool = psycopg2.pool.ThreadedConnectionPool(
         min_conn,
         max_conn,
-        dsn=settings.database_url,
+        host=parsed.hostname,
+        port=parsed.port or 5432,
+        dbname=parsed.path.lstrip("/"),
+        user=unquote(parsed.username or ""),
+        password=unquote(parsed.password or ""),
     )
     logger.info(
         f"PostgreSQL connection pool initialized (min={min_conn}, max={max_conn})"
