@@ -36,6 +36,14 @@
 		{ value: 'plan', label: 'Plan Only', description: 'Plan without executing' },
 		{ value: 'bypassPermissions', label: 'Bypass', description: 'Execute all tools' }
 	];
+
+	const effortLevels = [
+		{ value: null, label: 'Default', description: 'Use profile setting' },
+		{ value: 'low', label: 'Low', description: 'Quick, minimal reasoning' },
+		{ value: 'medium', label: 'Medium', description: 'Balanced reasoning' },
+		{ value: 'high', label: 'High', description: 'Thorough reasoning' },
+		{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' }
+	];
 </script>
 
 <div class="controls-dock">
@@ -63,6 +71,20 @@
 
 	<!-- Right: Override buttons, Attach & Mic buttons -->
 	<div class="controls-right">
+		<!-- Effort Level Override -->
+		<OverrideDropdown
+			modes={effortLevels}
+			currentValue={$activeSession.effortLevelOverride}
+			onSelect={(v) => activeSession.setEffortLevelOverride(v)}
+			title="Effort Level"
+		>
+			{#snippet icon()}
+				<svg class="w-[16px] h-[16px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M13 10V3L4 14h7v7l9-11h-7z" />
+				</svg>
+			{/snippet}
+		</OverrideDropdown>
+
 		<!-- Permission Mode Override -->
 		<OverrideDropdown
 			modes={permissionModes}

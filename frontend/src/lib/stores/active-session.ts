@@ -125,6 +125,7 @@ export interface ActiveSessionState {
 	contextMax: number;
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
+	effortLevelOverride: string | null;
 	pendingPermissions: PermissionRequestType[];
 	pendingQuestions: UserQuestionRequest[];
 	todos: TodoItem[];
@@ -158,6 +159,7 @@ export interface PersistedSession {
 	project: string;
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
+	effortLevelOverride: string | null;
 	executionMode?: ExecutionMode;
 	worktreeId?: string | null;
 	worktreeBranch?: string;
@@ -294,6 +296,7 @@ function defaultState(): ActiveSessionState {
 		contextMax: 200_000,
 		modelOverride: null,
 		permissionModeOverride: null,
+		effortLevelOverride: null,
 		pendingPermissions: [],
 		pendingQuestions: [],
 		todos: [],
@@ -779,6 +782,7 @@ async function init() {
 					project: persisted.project || defaultProject,
 					modelOverride: persisted.modelOverride ?? null,
 					permissionModeOverride: persisted.permissionModeOverride ?? null,
+					effortLevelOverride: persisted.effortLevelOverride ?? null,
 					executionMode: persisted.executionMode || 'local',
 					worktreeBranch: persisted.worktreeBranch || '',
 					worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',
@@ -991,6 +995,7 @@ export const activeSession = {
 		const overrides: Record<string, string> = {};
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
 		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
+		if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
 		if (_state.fastMode) overrides.fast_mode = 'true';
 
 		wsConn.resetLastMessageTime();
@@ -1081,6 +1086,7 @@ export const activeSession = {
 
 	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model })); persistSession(); },
 	setPermissionModeOverride(mode: string | null) { _update(s => ({ ...s, permissionModeOverride: mode })); persistSession(); },
+	setEffortLevelOverride(level: string | null) { _update(s => ({ ...s, effortLevelOverride: level })); persistSession(); },
 	setFastMode(enabled: boolean) { _update(s => ({ ...s, fastMode: enabled })); },
 
 	// ── Ephemeral UI State ──────────────────────────────────────────
