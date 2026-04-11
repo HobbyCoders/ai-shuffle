@@ -829,12 +829,14 @@ async def stream_query(
         if not state.is_connected:
             await pool.remove_dead(session_id)
 
-        # Broadcast stream end to other devices
+        # Broadcast stream end to other devices.
+        # Use interrupt_requested as fallback — SDK interrupt ends the loop
+        # naturally without CancelledError, so `interrupted` may still be False.
         await sync_engine.broadcast_stream_end(
             session_id=session_id,
             message_id=assistant_msg_id,
             metadata=metadata,
-            interrupted=interrupted,
+            interrupted=interrupted or state.interrupt_requested,
             source_device_id=device_id
         )
 
@@ -842,8 +844,10 @@ async def stream_query(
     # for all tool messages + assistant response, instead of N+1 individual writes).
     # Detect SDK-level interrupt: client.interrupt() causes receive_response() to
     # end naturally (no CancelledError), so `interrupted` is still False here.
-    # Check the flag to correctly mark this turn as interrupted.
-    if not interrupted and state.interrupt_requested:
+    # Check the flag to correctly mark this turn as interrupted for persistence
+    # and to yield the right terminal event to the frontend.
+    sdk_interrupted = not interrupted and state.interrupt_requested
+    if sdk_interrupted:
         interrupted = True
 
     await _persist_turn_results(
@@ -856,13 +860,12 @@ async def stream_query(
         interrupted=interrupted,
     )
 
-    # Yield done event (unless already yielded error/interrupted).
-    # When interrupted (either via CancelledError or SDK interrupt), yield
-    # 'interrupted' so the frontend's interrupt guard handles it correctly
-    # (a 'done' event would clobber the new query's streaming state).
-    if interrupted:
+    # Yield terminal event. CancelledError path already yielded 'interrupted'
+    # at the top of the except block; only yield here for SDK interrupt (no
+    # CancelledError) or normal completion.
+    if sdk_interrupted:
         yield {"type": "interrupted", "message": "Query was interrupted"}
-    else:
+    elif not interrupted:
         yield {
             "type": "done",
             "session_id": session_id,
