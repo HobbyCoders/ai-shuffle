@@ -24,6 +24,43 @@ def _get_default_workspace_dir() -> Path:
     return get_default_workspace_dir()
 
 
+_cached_persisted_instance_id: Optional[str] = None
+
+
+def _get_or_create_persisted_instance_id(data_dir: Path, service_name: str) -> str:
+    """Return a stable instance ID persisted to data_dir/.instance_id.
+
+    On first startup a new ID is generated from service_name + a short UUID
+    suffix (e.g. "ai-shuffle-a1b2c3d4"). The file lives inside the Docker
+    volume so it survives container rebuilds while remaining unique per device.
+    """
+    global _cached_persisted_instance_id
+    if _cached_persisted_instance_id is not None:
+        return _cached_persisted_instance_id
+
+    id_file = data_dir / ".instance_id"
+    try:
+        if id_file.exists():
+            stored = id_file.read_text().strip()
+            if stored:
+                _cached_persisted_instance_id = stored
+                return stored
+    except OSError:
+        pass
+
+    # Generate a new stable ID
+    import uuid
+    new_id = f"{service_name}-{uuid.uuid4().hex[:8]}"
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        id_file.write_text(new_id + "\n")
+    except OSError:
+        pass  # Non-fatal: worst case we regenerate next time
+
+    _cached_persisted_instance_id = new_id
+    return new_id
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
 
@@ -52,7 +89,7 @@ class Settings(BaseSettings):
 
     # Instance identity — isolates projects, sessions, and workspace path
     # when multiple deployments share the same database.
-    # Auto-generated from hostname if not set.
+    # Falls back to service_name if not set (stable across Docker rebuilds).
     instance_id: Optional[str] = None
 
     # Session
@@ -118,11 +155,20 @@ class Settings(BaseSettings):
 
     @property
     def effective_instance_id(self) -> str:
-        """Get the instance ID. Falls back to hostname if not explicitly set."""
-        if self.instance_id:
-            return self.instance_id
-        import socket
-        return socket.gethostname()
+        """Get the instance ID for multi-instance isolation.
+
+        Priority:
+        1. Explicit INSTANCE_ID env var (user override)
+        2. Persisted ID file in data_dir (auto-generated, stable across rebuilds)
+        3. service_name as final fallback
+
+        We deliberately avoid socket.gethostname() because in Docker the
+        hostname is the container ID, which changes on every rebuild —
+        orphaning all projects and sessions created by the previous container.
+        """
+        if self.instance_id and self.instance_id.strip():
+            return self.instance_id.strip()
+        return _get_or_create_persisted_instance_id(self.effective_data_dir, self.service_name)
 
     @property
     def effective_data_dir(self) -> Path:

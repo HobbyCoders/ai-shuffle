@@ -45,6 +45,9 @@ services:
       - PORT=8000
       - DATABASE_URL=postgresql://REDACTED@postgres:5432/ai_shuffle
       - SERVICE_NAME=${SERVICE_NAME:-ai-shuffle}
+      # Instance ID isolates projects/sessions when multiple devices share one DB.
+      # Defaults to SERVICE_NAME. Set a unique value per device if needed.
+      - INSTANCE_ID=${INSTANCE_ID:-}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - COMMAND_TIMEOUT=${COMMAND_TIMEOUT:-300}
       - PUID=${PUID:-99}

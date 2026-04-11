@@ -76,6 +76,80 @@ def _auto_migrate_sqlite_to_postgres() -> None:
         logger.error(f"You can retry manually: python -m app.db.migrate_sqlite_to_postgres --sqlite-path {sqlite_path}")
 
 
+def _adopt_orphaned_instance_data() -> None:
+    """Re-parent projects and sessions orphaned by Docker container ID changes.
+
+    Before the fix, effective_instance_id fell back to socket.gethostname(),
+    which in Docker equals the container ID — a random hex string that changes
+    on every rebuild. This left data tagged with the old container ID invisible.
+
+    This function finds instance_ids that look like Docker container hex IDs
+    (12-char hex strings) and re-assigns them to the current stable instance_id.
+    It only touches hex-looking IDs to avoid clobbering data from legitimately
+    separate named instances.
+    """
+    import re
+    from app.db.base import get_db
+
+    current_id = settings.effective_instance_id
+
+    # Docker container IDs/hostnames are 12-char lowercase hex strings.
+    # Real user-set instance_ids (like "ai-shuffle") won't match this.
+    _DOCKER_HEX_RE = re.compile(r'^[0-9a-f]{12}$')
+
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+
+            # Find orphan instance_ids in projects that look like Docker container IDs
+            cursor.execute(
+                "SELECT DISTINCT instance_id FROM projects WHERE instance_id IS NOT NULL AND instance_id != %s",
+                (current_id,)
+            )
+            orphan_ids = [
+                row["instance_id"] if isinstance(row, dict) else row[0]
+                for row in cursor.fetchall()
+                if _DOCKER_HEX_RE.match(row["instance_id"] if isinstance(row, dict) else row[0])
+            ]
+
+            # Also check sessions for orphan IDs not already found
+            cursor.execute(
+                "SELECT DISTINCT instance_id FROM sessions WHERE instance_id IS NOT NULL AND instance_id != %s",
+                (current_id,)
+            )
+            session_orphans = [
+                row["instance_id"] if isinstance(row, dict) else row[0]
+                for row in cursor.fetchall()
+                if _DOCKER_HEX_RE.match(row["instance_id"] if isinstance(row, dict) else row[0])
+            ]
+            orphan_ids = list(set(orphan_ids + session_orphans))
+
+            if not orphan_ids:
+                return
+
+            # Re-parent orphaned projects
+            for oid in orphan_ids:
+                cursor.execute(
+                    "UPDATE projects SET instance_id = %s WHERE instance_id = %s",
+                    (current_id, oid)
+                )
+                proj_count = cursor.rowcount
+                cursor.execute(
+                    "UPDATE sessions SET instance_id = %s WHERE instance_id = %s",
+                    (current_id, oid)
+                )
+                sess_count = cursor.rowcount
+                if proj_count or sess_count:
+                    logger.info(
+                        f"Adopted orphaned data from container '{oid}': "
+                        f"{proj_count} projects, {sess_count} sessions"
+                    )
+
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Orphaned instance data adoption failed (non-fatal): {e}")
+
+
 def init_core() -> None:
     """Phase 1: Initialize core infrastructure (directories, database, encryption)."""
     ensure_directories()
@@ -92,6 +166,12 @@ def init_core() -> None:
 
     # Auto-migrate from SQLite if it exists and Postgres is empty
     _auto_migrate_sqlite_to_postgres()
+
+    # Adopt orphaned projects/sessions from previous Docker containers.
+    # Before this fix, instance_id fell back to socket.gethostname() which
+    # returns the Docker container ID — a value that changes on every rebuild.
+    # This left projects and sessions invisible after a rebuild.
+    _adopt_orphaned_instance_data()
 
     # Materialize notes as physical markdown files
     from app.core.note_files import materialize_all_notes, get_notes_dir
