@@ -840,6 +840,12 @@ async def stream_query(
 
     # Persist session data to database in a batched write (single transaction
     # for all tool messages + assistant response, instead of N+1 individual writes).
+    # Detect SDK-level interrupt: client.interrupt() causes receive_response() to
+    # end naturally (no CancelledError), so `interrupted` is still False here.
+    # Check the flag to correctly mark this turn as interrupted.
+    if not interrupted and state.interrupt_requested:
+        interrupted = True
+
     await _persist_turn_results(
         session_id=session_id,
         sdk_session_id=sdk_session_id,
@@ -850,8 +856,13 @@ async def stream_query(
         interrupted=interrupted,
     )
 
-    # Yield done event (unless already yielded error/interrupted)
-    if not interrupted:
+    # Yield done event (unless already yielded error/interrupted).
+    # When interrupted (either via CancelledError or SDK interrupt), yield
+    # 'interrupted' so the frontend's interrupt guard handles it correctly
+    # (a 'done' event would clobber the new query's streaming state).
+    if interrupted:
+        yield {"type": "interrupted", "message": "Query was interrupted"}
+    else:
         yield {
             "type": "done",
             "session_id": session_id,
