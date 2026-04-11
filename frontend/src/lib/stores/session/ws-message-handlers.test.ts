@@ -28,6 +28,7 @@ function createMockDeps(overrides?: Partial<MessageHandlerDeps>): MessageHandler
 		wsSend: vi.fn(() => true),
 		sessionPoller: {
 			pollNow: vi.fn(),
+			pollFinal: vi.fn(),
 			startStreaming: vi.fn(),
 			stop: vi.fn(),
 			isPolling: vi.fn(() => false),
@@ -148,9 +149,9 @@ describe('ws-message-handlers', () => {
 				session_id: 'session-1',
 			});
 
-			// In the polling-only architecture, done triggers pollNow —
-			// the poller detects streaming→ended and updates state.
-			expect(deps.sessionPoller.pollNow).toHaveBeenCalledWith('session-1');
+			// done triggers pollFinal (survives stop()) so the
+			// post-end_streaming state is always fetched.
+			expect(deps.sessionPoller.pollFinal).toHaveBeenCalledWith('session-1');
 		});
 
 		it('should call onNotifySessionComplete with metadata', () => {
@@ -204,7 +205,7 @@ describe('ws-message-handlers', () => {
 			expect(deps.internal.pendingTools.size).toBe(0);
 		});
 
-		it('should trigger pollNow when interruptPending is false', () => {
+		it('should trigger pollFinal when interruptPending is false', () => {
 			const state = mockState();
 			state.isStreaming = true;
 			state.sessionId = 'session-1';
@@ -218,7 +219,7 @@ describe('ws-message-handlers', () => {
 				session_id: 'session-1',
 			});
 
-			expect(deps.sessionPoller.pollNow).toHaveBeenCalledWith('session-1');
+			expect(deps.sessionPoller.pollFinal).toHaveBeenCalledWith('session-1');
 		});
 	});
 

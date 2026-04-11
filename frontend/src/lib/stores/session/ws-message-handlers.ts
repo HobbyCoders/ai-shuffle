@@ -48,6 +48,7 @@ export interface MessageHandlerDeps {
 	// Session poller & notifier
 	sessionPoller: {
 		pollNow: (sessionId: string) => void;
+		pollFinal: (sessionId: string) => void;
 		startStreaming: (sessionId: string) => void;
 		stop: (sessionId: string) => void;
 		isPolling: (sessionId: string) => boolean;
@@ -129,9 +130,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		const isActiveSession = !sessionId || sessionId === currentState.sessionId;
 		const doneSessionId = sessionId || currentState.sessionId;
 
-		// Trigger a final poll — the poller will detect streaming→ended
-		// transition and update state authoritatively via onPollApplied.
-		if (doneSessionId) sessionPoller.pollNow(doneSessionId);
+		// Trigger a final authoritative poll. Uses pollFinal (not pollNow)
+		// because pollNow is debounced and its timer gets killed by stop()
+		// if the interval timer's in-flight poll detects streamingJustEnded
+		// first. pollFinal survives stop() so the post-end_streaming state
+		// is always fetched, even if the interval poll got stale data.
+		if (doneSessionId) sessionPoller.pollFinal(doneSessionId);
 
 		if (isActiveSession) {
 			clearStopTimeout();
@@ -179,8 +183,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		const currentState = getState();
 		const stoppedSessionId = currentState.sessionId;
 
-		// Trigger a poll — poller will detect streaming ended.
-		if (stoppedSessionId) sessionPoller.pollNow(stoppedSessionId);
+		// Trigger a final authoritative poll (survives stop(), see handleDone).
+		if (stoppedSessionId) sessionPoller.pollFinal(stoppedSessionId);
 
 		clearStopTimeout();
 		internal.pendingTools.clear();
@@ -410,6 +414,15 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// the delta text (losing the base), then the poller would restore
 				// full content — causing the UI to alternate between partial and
 				// full content every poll cycle.
+				//
+				// Session guard: only accept deltas for the active session.
+				// Without this, late-arriving deltas from a previous session
+				// (in-flight when the user switched) contaminate the buffer
+				// and bleed into the new session's messages.
+				const deltaSessionId = data.session_id as string | undefined;
+				const deltaState = getState();
+				if (deltaSessionId && deltaSessionId !== deltaState.sessionId) break;
+
 				const deltaType = data.delta_type as string;
 				if (deltaType === 'text') {
 					const content = data.content as string;
@@ -418,7 +431,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					}
 				}
 				// Ensure polling is started
-				const deltaState = getState();
 				if (deltaState.isStreaming && deltaState.sessionId && !sessionPoller.isPolling(deltaState.sessionId)) {
 					sessionPoller.startStreaming(deltaState.sessionId);
 				}
@@ -428,11 +440,17 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// Legacy chunk (include_partial_messages=false) — accumulate into
 				// wsStreamContent only. Same rationale as stream_delta: the poller's
 				// onPollApplied is the sole message writer to prevent flickering.
+				//
+				// Session guard: same as stream_delta — reject chunks from
+				// non-active sessions to prevent cross-session bleed.
+				const chunkSessionId = data.session_id as string | undefined;
+				const chunkState = getState();
+				if (chunkSessionId && chunkSessionId !== chunkState.sessionId) break;
+
 				const chunkContent = data.content as string;
 				if (chunkContent) {
 					update(s => ({ ...s, wsStreamContent: s.wsStreamContent + chunkContent }));
 				}
-				const chunkState = getState();
 				if (chunkState.isStreaming && chunkState.sessionId && !sessionPoller.isPolling(chunkState.sessionId)) {
 					sessionPoller.startStreaming(chunkState.sessionId);
 				}

@@ -555,12 +555,21 @@ function setupPollCallback() {
 			if (clientOnlyMsgs.length > 0) {
 				// Insert before the first streaming message to maintain
 				// chronological ordering (client msgs were added pre-stream).
-				const firstStreamIdx = finalMessages.findIndex(m => m.streaming);
-				if (firstStreamIdx >= 0) {
+				let insertIdx = finalMessages.findIndex(m => m.streaming);
+				if (insertIdx >= 0) {
+					// Walk backward to avoid splitting a run of consecutive
+					// tool_use messages. During streaming, some tools are
+					// complete (streaming=false) while later tools are still
+					// running (streaming=true). Inserting at firstStreamIdx
+					// would land between complete and running tools, breaking
+					// the frontend's adjacency-based tool grouping.
+					while (insertIdx > 0 && finalMessages[insertIdx - 1].type === 'tool_use') {
+						insertIdx--;
+					}
 					finalMessages = [
-						...finalMessages.slice(0, firstStreamIdx),
+						...finalMessages.slice(0, insertIdx),
 						...clientOnlyMsgs,
-						...finalMessages.slice(firstStreamIdx),
+						...finalMessages.slice(insertIdx),
 					];
 				} else {
 					finalMessages = [...finalMessages, ...clientOnlyMsgs];

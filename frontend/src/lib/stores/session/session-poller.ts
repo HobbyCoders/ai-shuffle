@@ -69,6 +69,9 @@ class SessionPoller {
 	/** Pending debounced pollNow timers keyed by sessionId */
 	private _pendingPollNow: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
+	/** Pending final-poll timers (survive stop(), cleared only by stopAll/fire) */
+	private _pendingFinalPoll: Map<string, ReturnType<typeof setTimeout>> = new Map();
+
 	/** Consecutive error counts per session */
 	private _errorCounts: Map<string, number> = new Map();
 
@@ -194,6 +197,26 @@ class SessionPoller {
 	}
 
 	/**
+	 * Schedule a final authoritative poll that survives stop().
+	 *
+	 * Used by handleDone/handleStoppedOrInterrupted to ensure the
+	 * post-streaming state is fetched even if the interval timer's
+	 * in-flight poll triggers streamingJustEnded → stop() first.
+	 * stop() kills pending pollNow timers, but _pendingFinalPoll
+	 * timers are deliberately NOT cleared by stop().
+	 */
+	pollFinal(sessionId: string): void {
+		// If a final poll is already pending, don't double-schedule
+		if (this._pendingFinalPoll.has(sessionId)) return;
+
+		const timer = setTimeout(() => {
+			this._pendingFinalPoll.delete(sessionId);
+			this._poll(sessionId);
+		}, 150);
+		this._pendingFinalPoll.set(sessionId, timer);
+	}
+
+	/**
 	 * Stop polling for a session.
 	 */
 	stop(sessionId: string): void {
@@ -211,6 +234,8 @@ class SessionPoller {
 			clearTimeout(pending);
 			this._pendingPollNow.delete(sessionId);
 		}
+		// NOTE: _pendingFinalPoll timers are NOT cleared here.
+		// They are fire-and-forget safety nets from handleDone/handleStopped.
 	}
 
 	/**
@@ -229,6 +254,11 @@ class SessionPoller {
 			clearTimeout(timer);
 		}
 		this._pendingPollNow.clear();
+
+		for (const timer of this._pendingFinalPoll.values()) {
+			clearTimeout(timer);
+		}
+		this._pendingFinalPoll.clear();
 	}
 
 	/**
