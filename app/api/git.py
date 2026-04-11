@@ -433,10 +433,19 @@ class WorktreeSyncResponse(BaseModel):
 # Helper Functions
 # =============================================================================
 
-def get_project_path(project_id: str) -> str:
-    """Get the filesystem path for a project."""
+def get_project_path(project_id: str, allow_missing: bool = False) -> Optional[str]:
+    """Get the filesystem path for a project.
+
+    Args:
+        project_id: The project identifier.
+        allow_missing: If True, return None instead of raising 404 when
+            the project doesn't exist in the database (e.g. during startup
+            race before the project record is created).
+    """
     project = database.get_project(project_id)
     if not project:
+        if allow_missing:
+            return None
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project not found: {project_id}"
@@ -542,7 +551,16 @@ async def get_git_status(
     When worktree_id is provided, returns status for the worktree directory.
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+
+    # During startup, the project record may not exist yet (race between
+    # frontend polling and project creation).  Return an empty status
+    # instead of 404 so the poller can retry silently.
+    if worktree_id:
+        working_dir = get_working_dir(project_id, worktree_id)
+    else:
+        working_dir = get_project_path(project_id, allow_missing=True)
+        if working_dir is None:
+            return GitStatusResponse(is_git_repo=False)
 
     # Coalesced: concurrent polls for the same dir share one in-flight call
     status_data = await _coalescer.get_or_run(
@@ -1115,7 +1133,14 @@ async def get_diff_stats(
         worktree_id: Optional worktree ID to get diff stats for worktree
     """
     check_project_access(request, project_id)
-    working_dir = get_working_dir(project_id, worktree_id)
+
+    # Gracefully handle missing project during startup race
+    if worktree_id:
+        working_dir = get_working_dir(project_id, worktree_id)
+    else:
+        working_dir = get_project_path(project_id, allow_missing=True)
+        if working_dir is None:
+            return DiffStatsResponse(additions=0, deletions=0, files_changed=0)
 
     # get_diff_stats handles non-git-repo gracefully (returns zeros),
     # so skip the separate is_git_repo check to avoid an extra subprocess call.

@@ -760,12 +760,15 @@ async def sync_project_worktrees(
     # Check project access
     check_project_access(request, project_id)
 
-    # Verify project exists
+    # During startup, the frontend may poll before the project record exists.
+    # Return a safe default instead of 404 to avoid noisy logs.
     project = database.get_project(project_id)
     if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
+        return WorktreeSyncResponse(
+            is_git_repo=False,
+            active_worktrees=0,
+            cleaned_up=[],
+            imported=0
         )
 
     # Run sync

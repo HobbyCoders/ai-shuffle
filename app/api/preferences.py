@@ -2,10 +2,11 @@
 User preferences API routes - for persisting UI state like open tabs
 """
 
-from typing import Any, Optional
+from datetime import datetime
+from typing import Any, Optional, Union
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
@@ -24,7 +25,13 @@ class PreferenceResponse(BaseModel):
     """Response model for a preference"""
     key: str
     value: Any
-    updated_at: Optional[str] = None
+    updated_at: Optional[Union[str, datetime]] = None
+
+    @field_serializer("updated_at")
+    def serialize_updated_at(self, v: Any) -> Optional[str]:
+        if isinstance(v, datetime):
+            return v.isoformat()
+        return v
 
 
 class AllPreferencesResponse(BaseModel):
