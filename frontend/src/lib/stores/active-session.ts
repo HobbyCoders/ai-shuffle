@@ -354,6 +354,7 @@ const internal: InternalMutableState = {
 	pendingTools: new Set(),
 	interruptPending: false,
 	awaitingNewSession: false,
+	worktreeCreationGeneration: 0,
 };
 
 // ─── WebSocket Connection (extracted module) ─────────────────────────────────
@@ -1225,6 +1226,11 @@ export const activeSession = {
 		if (!_state.project) { _update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
 		if (!_state.worktreeBranch) { _update(s => ({ ...s, worktreeError: 'Please select a branch' })); return; }
 
+		const creationGen = internal.worktreeCreationGeneration;
+		const projectId = _state.project;
+		const queryProfileId = _state.profile;
+		const branchName = _state.worktreeBranch;
+
 		_update(s => ({ ...s, isCreatingWorktree: true, worktreeError: null }));
 
 		try {
@@ -1232,12 +1238,33 @@ export const activeSession = {
 				session_id: string; worktree_id: string; branch_name: string;
 				base_branch: string; worktree_path: string; status: string;
 			}>('/sessions/with-worktree', {
-				project_id: _state.project,
-				branch_name: _state.worktreeBranch,
+				project_id: projectId,
+				branch_name: branchName,
 				base_branch: _state.worktreeBaseBranch || 'main',
-				profile_id: _state.profile,
+				profile_id: queryProfileId,
 				create_new_branch: _state.worktreeCreateNewBranch,
 			});
+
+			// Always refresh sidebar so the new session appears
+			appData.loadSessions();
+			appData.loadApiUserSessions();
+
+			// User navigated away during worktree creation — send query
+			// in background but don't clobber active session state.
+			if (creationGen !== internal.worktreeCreationGeneration) {
+				console.debug('[Worktree] User navigated away during createWorktree, sending query in background');
+				if (prompt && wsConn.isConnected()) {
+					wsConn.send({
+						type: 'query',
+						prompt,
+						session_id: response.session_id,
+						profile: queryProfileId,
+						project: projectId,
+						worktree_id: response.worktree_id,
+					});
+				}
+				return;
+			}
 
 			_update(s => ({
 				...s,
@@ -1246,15 +1273,12 @@ export const activeSession = {
 				isCreatingWorktree: false,
 			}));
 
-			// Refresh sidebar — session was created via REST, not WS
-			appData.loadSessions();
-			appData.loadApiUserSessions();
 			persistSession();
 
 			// Migrate pending uploads to the new worktree
-			if (pendingUploadPaths?.length && _state.project) {
+			if (pendingUploadPaths?.length && projectId) {
 				try {
-					await migrateUploadsToWorktree(_state.project, response.worktree_id, pendingUploadPaths);
+					await migrateUploadsToWorktree(projectId, response.worktree_id, pendingUploadPaths);
 				} catch (e) {
 					console.warn('[Worktree] Failed to migrate uploads:', e);
 				}
@@ -1273,14 +1297,31 @@ export const activeSession = {
 						}, 50);
 					});
 				}
+
+				// Final staleness check
+				if (creationGen !== internal.worktreeCreationGeneration) {
+					console.debug('[Worktree] User navigated away during WS connect wait');
+					wsConn.send({
+						type: 'query',
+						prompt,
+						session_id: response.session_id,
+						profile: queryProfileId,
+						project: projectId,
+						worktree_id: response.worktree_id,
+					});
+					return;
+				}
+
 				activeSession.sendMessage(prompt, { skipWorktreeSetup: true });
 			}
 		} catch (error) {
+			if (creationGen !== internal.worktreeCreationGeneration) return;
+
 			const err = error as { detail?: string; message?: string; status?: number };
 			const rawError = err.detail || err.message || '';
 			const formatted = rawError
-				? formatWorktreeError(rawError, _state.worktreeBranch)
-				: `Failed to create worktree session for '${_state.worktreeBranch}'. Check the backend logs for details.`;
+				? formatWorktreeError(rawError, branchName)
+				: `Failed to create worktree session for '${branchName}'. Check the backend logs for details.`;
 			_update(s => ({
 				...s,
 				isCreatingWorktree: false,
@@ -1298,7 +1339,12 @@ export const activeSession = {
 		if (!_state.project) { _update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
 
 		const queryProfileId = _state.profile;
+		const projectId = _state.project;
 		const userMsgId = `user-${Date.now()}`;
+
+		// Capture the creation generation so we can detect if the user
+		// switched sessions during any of our await points below.
+		const creationGen = internal.worktreeCreationGeneration;
 
 		// Issue 1 fix: Show the user message immediately so it doesn't disappear
 		// while we create the worktree and generate a branch name.
@@ -1318,11 +1364,18 @@ export const activeSession = {
 			// Generate branch name from the message
 			let branchName: string;
 			try {
-				const result = await generateBranchName(_state.project, prompt);
+				const result = await generateBranchName(projectId, prompt);
 				branchName = result.branch_name;
 			} catch {
 				// Fallback to client-side generation
 				branchName = generateBranchNameLocal(prompt);
+			}
+
+			// User switched sessions during branch name generation — abandon.
+			// No worktree was created yet, so nothing to clean up.
+			if (creationGen !== internal.worktreeCreationGeneration) {
+				console.debug('[Worktree] User navigated away during branch name generation, aborting');
+				return;
 			}
 
 			// Set the generated branch name and create the worktree
@@ -1337,12 +1390,41 @@ export const activeSession = {
 				session_id: string; worktree_id: string; branch_name: string;
 				base_branch: string; worktree_path: string; status: string;
 			}>('/sessions/with-worktree', {
-				project_id: _state.project,
+				project_id: projectId,
 				branch_name: branchName,
 				base_branch: _state.worktreeBaseBranch || 'main',
 				profile_id: _state.profile,
 				create_new_branch: true,
 			});
+
+			// Always refresh sidebar so the new session appears, even if user navigated away.
+			appData.loadSessions();
+			appData.loadApiUserSessions();
+
+			// User switched sessions during worktree creation — don't clobber
+			// the active session state.  The worktree + session exist on the
+			// backend, so fire the query in the background (the response will
+			// be persisted and visible when the user opens this session later).
+			if (creationGen !== internal.worktreeCreationGeneration) {
+				console.debug('[Worktree] User navigated away during worktree creation, sending query in background');
+				if (wsConn.isConnected()) {
+					const overrides: Record<string, string> = {};
+					if (_state.modelOverride) overrides.model = _state.modelOverride;
+					if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
+					if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
+					if (_state.fastMode) overrides.fast_mode = 'true';
+					wsConn.send({
+						type: 'query',
+						prompt,
+						session_id: response.session_id,
+						profile: queryProfileId,
+						project: projectId,
+						worktree_id: response.worktree_id,
+						overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
+					});
+				}
+				return;
+			}
 
 			_update(s => ({
 				...s,
@@ -1352,17 +1434,12 @@ export const activeSession = {
 				isCreatingWorktree: false,
 			}));
 
-			// Issue 4 fix: Session was created via REST, not WS, so no
-			// session_created / user_session_created broadcast was sent.
-			// Explicitly refresh the sidebar session list and persist.
-			appData.loadSessions();
-			appData.loadApiUserSessions();
 			persistSession();
 
 			// Migrate pending uploads to the new worktree
-			if (pendingUploadPaths?.length && _state.project) {
+			if (pendingUploadPaths?.length && projectId) {
 				try {
-					await migrateUploadsToWorktree(_state.project, response.worktree_id, pendingUploadPaths);
+					await migrateUploadsToWorktree(projectId, response.worktree_id, pendingUploadPaths);
 				} catch (e) {
 					console.warn('[Worktree] Failed to migrate uploads:', e);
 				}
@@ -1384,11 +1461,28 @@ export const activeSession = {
 				});
 			}
 
+			// Final staleness check after potential WS reconnection wait
+			if (creationGen !== internal.worktreeCreationGeneration) {
+				console.debug('[Worktree] User navigated away during WS connect wait, sending query in background');
+				wsConn.send({
+					type: 'query',
+					prompt,
+					session_id: response.session_id,
+					profile: queryProfileId,
+					project: projectId,
+					worktree_id: response.worktree_id,
+				});
+				return;
+			}
+
 			// Send the user's message — skip worktree setup since we just did it.
 			// skipMessageAppend avoids duplicating the user message we already
 			// added optimistically at the start of autoCreateWorktree.
 			activeSession.sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true });
 		} catch (error) {
+			// If user navigated away, don't show error in the new session's UI
+			if (creationGen !== internal.worktreeCreationGeneration) return;
+
 			const err = error as { detail?: string; message?: string; status?: number };
 			const rawError = err.detail || err.message || '';
 			const branchDisplay = _state.worktreeBranch || 'auto-generated branch';

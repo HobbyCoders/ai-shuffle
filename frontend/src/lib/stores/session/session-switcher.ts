@@ -251,6 +251,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		internal.pendingTools.clear();
 		internal.interruptPending = false;
 		internal.awaitingNewSession = false;
+		internal.worktreeCreationGeneration++;
 
 		// Save ephemeral for session we're leaving
 		const leavingKey = state.sessionId || '__new_chat__';
@@ -387,6 +388,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		internal.pendingTools.clear();
 		internal.interruptPending = false;
 		internal.awaitingNewSession = false;
+		internal.worktreeCreationGeneration++;
 
 		// Restore new chat draft if one was saved earlier
 		const newChatEphemeral = sessionEphemeralCache.restore('__new_chat__');

@@ -17,6 +17,7 @@ function createMockInternal(): InternalMutableState {
 		pendingTools: new Set(),
 		interruptPending: false,
 		awaitingNewSession: false,
+		worktreeCreationGeneration: 0,
 	};
 }
 

@@ -27,6 +27,11 @@ export interface InternalMutableState {
 	/** True when sendMessage() sent a query for a NEW session (no sessionId yet).
 	 *  Used by session_created/start to know whether to accept the sessionId. */
 	awaitingNewSession: boolean;
+	/** Monotonic counter incremented on every session switch / new-chat.
+	 *  autoCreateWorktree captures the value at start and bails if it changes
+	 *  during an await, preventing the async callback from clobbering the
+	 *  active session after the user navigated away. */
+	worktreeCreationGeneration: number;
 }
 
 /**
