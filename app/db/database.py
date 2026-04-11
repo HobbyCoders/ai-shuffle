@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 # v37: Add triggers JSON column for multi-trigger support
 # v38: Add message_template to project_hooks, make project_id nullable
 # v39: Add queued_messages table for server-side message queueing
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 40
 
 
 def _run_column_migrations(cursor):
