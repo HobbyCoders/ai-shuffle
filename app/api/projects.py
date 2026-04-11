@@ -159,10 +159,23 @@ async def create_project(request: ProjectCreate, token: str = Depends(require_ad
     # Check if ID already exists
     existing = database.get_project(request.id)
     if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Project already exists: {request.id}"
-        )
+        # If the existing project belongs to a different instance, auto-suffix
+        # the ID so the same project name can exist on multiple machines.
+        if existing.get("instance_id") and existing["instance_id"] != settings.effective_instance_id:
+            import hashlib
+            suffix = hashlib.sha256(settings.effective_instance_id.encode()).hexdigest()[:6]
+            request = request.model_copy(update={"id": f"{request.id}-{suffix}"})
+            # Re-check with the new ID
+            if database.get_project(request.id):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Project already exists: {request.id}"
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Project already exists: {request.id}"
+            )
 
     # Determine project path and create directory if needed
     # Normalize Docker paths first (e.g., /workspace/foo → foo)
