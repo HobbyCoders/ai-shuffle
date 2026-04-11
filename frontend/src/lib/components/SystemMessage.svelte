@@ -412,21 +412,35 @@
 
 {#if !formatted.hidden}
 	{#if formatted.compact}
-		<!-- Compact single-line rendering for hooks and low-priority events -->
-		<div class="w-full flex items-center gap-2 px-3 py-1.5 rounded-md bg-muted/20 text-xs text-muted-foreground min-w-0">
-			<svg class="w-3 h-3 flex-shrink-0 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-			</svg>
-			<span class="font-medium flex-shrink-0">{formatted.title}</span>
-			{#if formatted.content}
-				<span class="opacity-60 flex-shrink-0">&middot;</span>
-				<span class="truncate min-w-0">{formatted.content}</span>
-			{/if}
-			{#if formatted.badge}
-				<span class="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] leading-tight {getBadgeClasses(formatted.badgeColor || 'gray')}">
-					{formatted.badge}
-				</span>
-			{/if}
+		<!-- Compact single-line rendering for hooks — styled like tool messages -->
+		<div class="w-full border border-border rounded-lg overflow-hidden">
+			<div class="compact-summary w-full px-3 py-2 flex items-center gap-2 min-w-0">
+				<!-- Status icon matching tool message pattern -->
+				{#if formatted.badgeColor === 'green'}
+					<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+					</svg>
+				{:else if formatted.badgeColor === 'red'}
+					<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+					</svg>
+				{:else}
+					<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+					</svg>
+				{/if}
+				<!-- Hook icon (lightning bolt) -->
+				<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+				</svg>
+				<!-- Title -->
+				<span class="text-sm font-medium text-foreground flex-shrink-0">{formatted.title}</span>
+				<!-- Content summary -->
+				{#if formatted.content}
+					<span class="text-muted-foreground flex-shrink-0">&bull;</span>
+					<span class="text-sm text-muted-foreground truncate min-w-0" title={formatted.content}>{formatted.content}</span>
+				{/if}
+			</div>
 		</div>
 	{:else}
 		<!-- Full card rendering for important system messages -->
@@ -456,6 +470,11 @@
 {/if}
 
 <style>
+	/* Compact hook messages — match tool-summary hover behavior */
+	.compact-summary {
+		transition: background-color 150ms ease;
+	}
+
 	/* Custom styles for system message markdown content */
 	.system-message-content :global(h2) {
 		font-size: 1rem;
