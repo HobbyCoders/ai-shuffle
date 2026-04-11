@@ -391,16 +391,22 @@ async def get_workspace_config() -> WorkspaceConfigResponse:
     """
     from app.core.platform import get_default_workspace_dir, is_local_mode
 
-    # Get configured path from database (if any)
-    configured_path = database.get_system_setting("workspace_path")
+    # Get configured path from database. `is_configured` only reflects whether
+    # THIS instance has its own workspace saved — a legacy global path belongs
+    # to whichever machine set it up first, not the current instance. Falling
+    # back to the global path for `workspace_path` display is fine so the
+    # setup UI can pre-fill a sensible default.
+    instance_key = f"workspace_path:{settings.effective_instance_id}"
+    instance_path = database.get_system_setting(instance_key)
+    legacy_path = database.get_system_setting("workspace_path")
+    configured_path = instance_path or legacy_path
 
     # Determine current effective path
     if configured_path:
         current_path = configured_path
-        is_configured = True
     else:
         current_path = str(settings.effective_workspace_dir)
-        is_configured = False
+    is_configured = bool(instance_path)
 
     # Get default path for the platform
     default_path = str(get_default_workspace_dir())

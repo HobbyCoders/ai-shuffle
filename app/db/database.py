@@ -67,7 +67,8 @@ logger = logging.getLogger(__name__)
 # v37: Add triggers JSON column for multi-trigger support
 # v38: Add message_template to project_hooks, make project_id nullable
 # v39: Add queued_messages table for server-side message queueing
-SCHEMA_VERSION = 40
+# v40: Add instance_id column to sessions for per-instance isolation
+SCHEMA_VERSION = 41
 
 
 def _run_column_migrations(cursor):
@@ -213,6 +214,24 @@ def _run_column_migrations(cursor):
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_project_id ON project_hooks(project_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_hooks_event ON project_hooks(event)")
         migrations_applied.append("project_hooks.project_id_nullable")
+
+    # Add instance_id to sessions for per-instance isolation across shared DBs.
+    # Mirrors the projects.instance_id column added in v33-era multi-instance work.
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "instance_id"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN instance_id TEXT")
+        # Backfill existing sessions from their project's instance_id so that
+        # legacy sessions stay visible on the instance that owns the project.
+        try:
+            cursor.execute("""
+                UPDATE sessions SET instance_id = (
+                    SELECT p.instance_id FROM projects p WHERE p.id = sessions.project_id
+                )
+                WHERE instance_id IS NULL AND project_id IS NOT NULL
+            """)
+        except _DB_ERRORS:
+            pass  # projects table may not exist yet in pathological cases
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_instance ON sessions(instance_id)")
+        migrations_applied.append("sessions.instance_id")
 
     # Ensure performance-critical indexes exist (idempotent, no version gate).
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
@@ -765,22 +784,30 @@ def delete_profile(profile_id: str) -> bool:
 
 
 def get_profile_session_count(profile_id: str) -> int:
-    """Get the number of sessions associated with a profile"""
+    """Get the number of sessions associated with a profile (current instance)"""
+    instance_id = settings.effective_instance_id
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) as cnt FROM sessions WHERE profile_id = %s", (profile_id,))
+        cursor.execute(
+            """SELECT COUNT(*) as cnt FROM sessions
+               WHERE profile_id = %s
+                 AND (instance_id = %s OR instance_id IS NULL)""",
+            (profile_id, instance_id)
+        )
         return cursor.fetchone()["cnt"]
 
 
 def get_all_profile_session_counts() -> Dict[str, int]:
-    """Get session counts for all profiles in a single query"""
+    """Get session counts for all profiles in a single query (current instance)"""
+    instance_id = settings.effective_instance_id
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT profile_id, COUNT(*) as count
             FROM sessions
+            WHERE instance_id = %s OR instance_id IS NULL
             GROUP BY profile_id
-        """)
+        """, (instance_id,))
         return {row["profile_id"]: row["count"] for row in cursor.fetchall()}
 
 
@@ -975,16 +1002,23 @@ def get_sessions(
     limit: int = 50,
     offset: int = 0
 ) -> List[Dict[str, Any]]:
-    """Get sessions with optional filters"""
+    """Get sessions with optional filters.
+
+    Sessions are scoped to the current instance when multiple instances share
+    the same database (same pattern as projects). Legacy rows with a NULL
+    instance_id remain visible everywhere so historical data isn't hidden.
+    """
+    instance_id = settings.effective_instance_id
     if tag_id:
         # Join with session_tags when filtering by tag
         query = """SELECT DISTINCT s.* FROM sessions s
                    INNER JOIN session_tags st ON s.id = st.session_id
-                   WHERE st.tag_id = %s"""
-        params = [tag_id]
+                   WHERE st.tag_id = %s
+                     AND (s.instance_id = %s OR s.instance_id IS NULL)"""
+        params = [tag_id, instance_id]
     else:
-        query = "SELECT * FROM sessions WHERE 1=1"
-        params = []
+        query = "SELECT * FROM sessions WHERE (instance_id = %s OR instance_id IS NULL)"
+        params = [instance_id]
 
     if project_id:
         query += " AND s.project_id = %s" if tag_id else " AND project_id = %s"
@@ -1032,16 +1066,19 @@ def get_sessions_paginated(
     Returns:
         Tuple of (sessions list, total count)
     """
-    # Build the WHERE clause (shared between count and data queries)
+    # Build the WHERE clause (shared between count and data queries).
+    # Sessions are instance-scoped; NULL instance_id is treated as shared/legacy.
+    instance_id = settings.effective_instance_id
     if tag_id:
         base_query = """FROM sessions s
                        INNER JOIN session_tags st ON s.id = st.session_id
-                       WHERE st.tag_id = %s"""
-        params: List[Any] = [tag_id]
+                       WHERE st.tag_id = %s
+                         AND (s.instance_id = %s OR s.instance_id IS NULL)"""
+        params: List[Any] = [tag_id, instance_id]
         col_prefix = "s."
     else:
-        base_query = "FROM sessions WHERE 1=1"
-        params = []
+        base_query = "FROM sessions WHERE (instance_id = %s OR instance_id IS NULL)"
+        params = [instance_id]
         col_prefix = ""
 
     if project_id:
@@ -1105,15 +1142,18 @@ def get_sessions_cursor(
     Returns:
         Tuple of (sessions, next_cursor, next_cursor_id, has_more)
     """
+    # Sessions are instance-scoped; NULL instance_id is treated as shared/legacy.
+    instance_id = settings.effective_instance_id
     if tag_id:
         base_query = """FROM sessions s
                        INNER JOIN session_tags st ON s.id = st.session_id
-                       WHERE st.tag_id = %s"""
-        params: List[Any] = [tag_id]
+                       WHERE st.tag_id = %s
+                         AND (s.instance_id = %s OR s.instance_id IS NULL)"""
+        params: List[Any] = [tag_id, instance_id]
         col_prefix = "s."
     else:
-        base_query = "FROM sessions WHERE 1=1"
-        params = []
+        base_query = "FROM sessions WHERE (instance_id = %s OR instance_id IS NULL)"
+        params = [instance_id]
         col_prefix = ""
 
     if project_id:
@@ -1196,9 +1236,10 @@ def create_session(
         _conn: Optional existing DB connection for transaction grouping
     """
     now = datetime.now(timezone.utc).isoformat()
-    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, now, now)
-    sql = """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, created_at, updated_at)
-             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
+    instance_id = settings.effective_instance_id
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, instance_id, now, now)
+    sql = """INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, instance_id, created_at, updated_at)
+             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
     if _conn is not None:
         cursor = _conn.cursor()
         cursor.execute(sql, params)
@@ -1242,17 +1283,18 @@ def create_session_with_stats(
     """
     now = datetime.now(timezone.utc).isoformat()
     ts_created = created_at or now
+    instance_id = settings.effective_instance_id
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO sessions (
                 id, profile_id, project_id, title, api_user_id,
                 sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
-                created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                instance_id, created_at, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (session_id, profile_id, project_id, title, api_user_id,
              sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
-             ts_created, now)
+             instance_id, ts_created, now)
         )
     return get_session(session_id)
 
@@ -1620,7 +1662,8 @@ def get_all_session_usage(session_id: str) -> List[Dict[str, Any]]:
 
 
 def get_usage_stats() -> Dict[str, Any]:
-    """Get aggregate usage statistics"""
+    """Get aggregate usage statistics (scoped to the current instance)."""
+    instance_id = settings.effective_instance_id
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -1633,7 +1676,10 @@ def get_usage_stats() -> Dict[str, Any]:
         """)
         row = cursor.fetchone()
 
-        cursor.execute("SELECT COUNT(*) as count FROM sessions")
+        cursor.execute(
+            "SELECT COUNT(*) as count FROM sessions WHERE instance_id = %s OR instance_id IS NULL",
+            (instance_id,)
+        )
         sessions_row = cursor.fetchone()
 
         return {
@@ -2820,16 +2866,18 @@ def set_session_tags(session_id: str, tag_ids: List[str]) -> List[Dict[str, Any]
 
 
 def get_sessions_by_tag(tag_id: str, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
-    """Get all sessions with a specific tag"""
+    """Get all sessions with a specific tag (scoped to the current instance)"""
+    instance_id = settings.effective_instance_id
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """SELECT s.* FROM sessions s
                INNER JOIN session_tags st ON s.id = st.session_id
                WHERE st.tag_id = %s
+                 AND (s.instance_id = %s OR s.instance_id IS NULL)
                ORDER BY s.updated_at DESC
                LIMIT %s OFFSET %s""",
-            (tag_id, limit, offset)
+            (tag_id, instance_id, limit, offset)
         )
         return rows_to_list(cursor.fetchall())
 

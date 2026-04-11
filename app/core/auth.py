@@ -782,15 +782,25 @@ class AuthService:
     def is_onboarding_complete(self) -> bool:
         """Check if the full onboarding flow has been completed for this instance.
 
-        When multiple instances share a database, each instance needs its own
-        workspace path configured. If this instance doesn't have one, onboarding
-        is not complete even if another instance completed it.
+        When multiple instances share a database, each local-mode instance needs
+        its own workspace path configured (because each machine has a different
+        home dir). Docker/non-local instances use a fixed default path, so no
+        per-instance workspace is required.
         """
         val = database.get_system_setting("onboarding_complete")
         if val == "true":
-            # Onboarding was completed on some instance — check if THIS instance
-            # has a workspace path configured.
             from app.core.config import settings
+            from app.core.platform import is_local_mode as _is_local_mode
+
+            # Docker/non-local instances use the fixed default workspace path
+            # (e.g. /workspace), so they do not need a per-instance override.
+            # Returning True here avoids an infinite setup redirect loop when
+            # a second non-local instance connects to a shared database.
+            if not _is_local_mode():
+                return True
+
+            # Local mode: each instance needs its own workspace path because
+            # home directories differ per machine.
             instance_key = f"workspace_path:{settings.effective_instance_id}"
             if not database.get_system_setting(instance_key):
                 # No instance-scoped workspace path. Check if there's a legacy

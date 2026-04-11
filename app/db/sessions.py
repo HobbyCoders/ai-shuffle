@@ -723,6 +723,9 @@ def search_sessions(
     if not query or not query.strip():
         return []
 
+    from app.core.config import settings
+    instance_id = settings.effective_instance_id
+
     search_term = f"%{query.strip()}%"
     fts_query = _fts_query_term(query)
     _ph = ph()
@@ -733,6 +736,8 @@ def search_sessions(
         # Search titles with ILIKE, content with tsvector FTS.
         # Use DISTINCT ON (id) to deduplicate sessions that match in both
         # title and content, keeping the best match (title > content).
+        # Sessions are instance-scoped; legacy rows with NULL instance_id
+        # remain visible everywhere.
         sql = f"""
         WITH title_matches AS (
             SELECT
@@ -745,6 +750,7 @@ def search_sessions(
             FROM sessions s
             WHERE {sql_ilike('s.title')}
             AND s.status != 'archived'
+            AND (s.instance_id = {_ph} OR s.instance_id IS NULL)
         ),
         content_matches AS (
             SELECT DISTINCT ON (s.id)
@@ -760,6 +766,7 @@ def search_sessions(
             WHERE sm.content_tsv @@ plainto_tsquery('english', {_ph})
             AND sm.role IN ('user', 'assistant')
             AND s.status != 'archived'
+            AND (s.instance_id = {_ph} OR s.instance_id IS NULL)
             ORDER BY s.id, sm.created_at DESC
         ),
         all_matches AS (
@@ -771,9 +778,9 @@ def search_sessions(
         FROM all_matches
         WHERE 1=1
         """
-        # title ILIKE needs search_term, ts_headline needs fts_query,
-        # WHERE @@ needs fts_query again
-        params: List[Any] = [search_term, fts_query, fts_query]
+        # title ILIKE needs search_term + instance_id, ts_headline needs
+        # fts_query, WHERE @@ needs fts_query + instance_id.
+        params: List[Any] = [search_term, instance_id, fts_query, fts_query, instance_id]
 
         # Add filters
         if project_id:
@@ -821,6 +828,9 @@ def search_sessions_paginated(
     if not query or not query.strip():
         return [], 0
 
+    from app.core.config import settings
+    instance_id = settings.effective_instance_id
+
     search_term = f"%{query.strip()}%"
     fts_query = _fts_query_term(query)
     _ph = ph()
@@ -830,7 +840,8 @@ def search_sessions_paginated(
 
         # Build the base CTE using Postgres tsvector FTS.
         # Uses DISTINCT ON (id) to deduplicate sessions, preferring title
-        # matches over content matches.
+        # matches over content matches. Sessions are instance-scoped; NULL
+        # instance_id is treated as shared/legacy.
         base_cte = f"""
         WITH title_matches AS (
             SELECT
@@ -841,6 +852,7 @@ def search_sessions_paginated(
             FROM sessions s
             WHERE {sql_ilike('s.title')}
             AND s.status != 'archived'
+            AND (s.instance_id = {_ph} OR s.instance_id IS NULL)
         ),
         content_matches AS (
             SELECT DISTINCT ON (s.id)
@@ -854,6 +866,7 @@ def search_sessions_paginated(
             WHERE sm.content_tsv @@ plainto_tsquery('english', {_ph})
             AND sm.role IN ('user', 'assistant')
             AND s.status != 'archived'
+            AND (s.instance_id = {_ph} OR s.instance_id IS NULL)
             ORDER BY s.id, sm.created_at DESC
         ),
         all_matches AS (
@@ -866,9 +879,9 @@ def search_sessions_paginated(
             FROM all_matches
             WHERE 1=1
         """
-        # title ILIKE needs search_term, ts_headline needs fts_query,
-        # WHERE @@ needs fts_query again
-        base_params: List[Any] = [search_term, fts_query, fts_query]
+        # title ILIKE needs search_term + instance_id, ts_headline needs
+        # fts_query, WHERE @@ needs fts_query + instance_id.
+        base_params: List[Any] = [search_term, instance_id, fts_query, fts_query, instance_id]
 
         # Build filter conditions
         filter_sql = ""

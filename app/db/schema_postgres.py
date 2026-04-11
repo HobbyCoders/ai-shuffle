@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 41
 
 
 def create_postgres_schema(cursor) -> None:
@@ -184,6 +184,7 @@ def create_postgres_schema(cursor) -> None:
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             parent_session_id TEXT,
             fork_point_message_index INTEGER,
+            instance_id TEXT,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
             FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,
@@ -893,6 +894,7 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_profile_updated ON sessions(project_id, profile_id, updated_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(title)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_sdk_session_id ON sessions(sdk_session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_instance ON sessions(instance_id)")
 
     # -- session_messages
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id)")
