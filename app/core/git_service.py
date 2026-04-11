@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Lightweight TTL cache for expensive git operations
 # ---------------------------------------------------------------------------
-_STATUS_CACHE_TTL = 5.0        # seconds — short enough for UI freshness
-_DIFF_STATS_CACHE_TTL = 5.0    # seconds
+_STATUS_CACHE_TTL = 2.0        # seconds — match active poll cadence for fresh UI
+_DIFF_STATS_CACHE_TTL = 2.0    # seconds
 _DEFAULT_BRANCH_CACHE_TTL = 300.0  # 5 minutes — rarely changes
 _AHEAD_BEHIND_CACHE_TTL = 30.0  # seconds — only changes on commit/push/fetch
 

@@ -218,10 +218,10 @@
 
 	import { sessionNotifier } from '$lib/stores/session/session-notifier';
 
-	const GIT_POLL_ACTIVE_MS = 5_000;
-	const GIT_POLL_IDLE_MS = 30_000;
+	const GIT_POLL_ACTIVE_MS = 2_000;
+	const GIT_POLL_IDLE_MS = 5_000;
 	const GIT_IDLE_THRESHOLD_MS = 30_000;
-	const GIT_HINT_DEBOUNCE_MS = 5_000; // Min time between hint-triggered polls
+	const GIT_HINT_DEBOUNCE_MS = 3_000; // Min time between hint-triggered polls
 
 	let _gitPollTimer: ReturnType<typeof setTimeout> | null = null;
 	let _gitPollProject: string | null = null;
