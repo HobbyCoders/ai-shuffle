@@ -22,7 +22,7 @@
 	}
 
 	// Get formatted content based on subtype
-	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string; hidden?: boolean } {
+	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string; hidden?: boolean; compact?: boolean } {
 		const subtype = message.systemSubtype || 'system';
 		const data: Record<string, unknown> = message.systemData || {};
 
@@ -206,6 +206,39 @@
 				};
 			}
 
+			case 'hook_started': {
+				// Hook launch events — compact single-line display
+				const hookName = (data.hook_name as string) || (data.hookName as string) || (data.name as string) || '';
+				const hookType = (data.hook_type as string) || (data.hookType as string) || (data.type as string) || '';
+				const parts = [hookName, hookType].filter(Boolean);
+				return {
+					title: 'Hook Started',
+					content: parts.length > 0 ? parts.join(' \u00b7 ') : 'hook executing',
+					badge: hookType || 'hook',
+					badgeColor: 'gray',
+					compact: true
+				};
+			}
+
+			case 'hook_response': {
+				// Hook completion — show pass/fail + any output snippet
+				const exitCode = (data.exitCode as number) ?? (data.exit_code as number) ?? null;
+				const success = exitCode === 0 || (data.success as boolean) === true;
+				const errMsg = (data.error as string) || (data.stderr as string) || '';
+				const outMsg = (data.output as string) || (data.stdout as string) || (data.message as string) || '';
+				const hookNameResp = (data.hook_name as string) || (data.hookName as string) || (data.name as string) || '';
+				const snippet = errMsg || outMsg;
+				const truncatedSnippet = snippet.length > 120 ? snippet.slice(0, 120) + '\u2026' : snippet;
+				const parts = [hookNameResp, truncatedSnippet].filter(Boolean);
+				return {
+					title: 'Hook Response',
+					content: parts.length > 0 ? parts.join(' \u00b7 ') : (success ? 'completed' : 'failed'),
+					badge: success ? 'success' : 'failed',
+					badgeColor: success ? 'green' : 'red',
+					compact: true
+				};
+			}
+
 			case 'turn_duration': {
 				// Turn timing info - hide these as they're internal metrics
 				const durationMs = (data.durationMs as number) || 0;
@@ -215,7 +248,8 @@
 					content: `Turn completed in ${seconds}s.`,
 					badge: `${seconds}s`,
 					badgeColor: 'gray',
-					hidden: true
+					hidden: true,
+					compact: true
 				};
 			}
 
@@ -226,7 +260,8 @@
 					content: (data.description as string) || message.content || '',
 					badge: 'task_started',
 					badgeColor: 'gray',
-					hidden: true
+					hidden: true,
+					compact: true
 				};
 			}
 
@@ -237,7 +272,8 @@
 					content: (data.description as string) || message.content || '',
 					badge: 'task_progress',
 					badgeColor: 'gray',
-					hidden: true
+					hidden: true,
+					compact: true
 				};
 			}
 
@@ -250,7 +286,8 @@
 					content: `${hookCount} hook${hookCount !== 1 ? 's' : ''} executed.${hasOutput ? ' Output was produced.' : ''}`,
 					badge: `${hookCount} hooks`,
 					badgeColor: 'gray',
-					hidden: true
+					hidden: true,
+					compact: true
 				};
 			}
 
@@ -332,12 +369,25 @@
 			}
 
 			default: {
-				// For unknown subtypes, show a formatted version of the data
-				// Check if it looks like an error based on subtype name
+				// For unknown subtypes, try to extract a meaningful field before falling back to JSON
 				const isError = subtype.includes('error') || subtype.includes('fail') || subtype.includes('exception');
+				let defaultContent: string;
+				if (typeof data === 'object' && data !== null) {
+					// Try common meaningful fields first
+					const meaningful = (data.content as string) || (data.message as string) || (data.description as string) || (data.error as string) || (data.output as string) || (data.text as string);
+					if (meaningful) {
+						defaultContent = String(meaningful);
+					} else {
+						// Fall back to JSON, but truncate
+						const json = JSON.stringify(data, null, 2);
+						defaultContent = json.length > 200 ? json.slice(0, 200) + '\u2026' : json;
+					}
+				} else {
+					defaultContent = String(data);
+				}
 				return {
 					title: subtype.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
-					content: typeof data === 'object' ? JSON.stringify(data, null, 2) : String(data),
+					content: defaultContent,
 					badge: subtype,
 					badgeColor: isError ? 'red' : 'gray'
 				};
@@ -361,28 +411,48 @@
 </script>
 
 {#if !formatted.hidden}
-<div class="w-full border border-border rounded-lg overflow-hidden shadow-s bg-card">
-	<div class="px-4 py-2 bg-muted/30 flex items-center gap-2">
-		<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-		</svg>
-		<span class="text-sm font-medium text-foreground">{formatted.title}</span>
-		{#if formatted.badge}
-			<span class="px-1.5 py-0.5 text-xs rounded {getBadgeClasses(formatted.badgeColor || 'gray')}">
-				{formatted.badge}
-			</span>
-		{/if}
-	</div>
-	<div class="px-4 py-3 bg-card">
-		{#if isMarkdownContent(message.systemSubtype)}
-			<div class="prose prose-sm prose-invert max-w-none system-message-content">
-				{@html sanitizeHtml(renderMarkdown(formatted.content))}
+	{#if formatted.compact}
+		<!-- Compact single-line rendering for hooks and low-priority events -->
+		<div class="w-full flex items-center gap-2 px-3 py-1.5 rounded-md bg-muted/20 text-xs text-muted-foreground min-w-0">
+			<svg class="w-3 h-3 flex-shrink-0 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+			</svg>
+			<span class="font-medium flex-shrink-0">{formatted.title}</span>
+			{#if formatted.content}
+				<span class="opacity-60 flex-shrink-0">&middot;</span>
+				<span class="truncate min-w-0">{formatted.content}</span>
+			{/if}
+			{#if formatted.badge}
+				<span class="ml-auto flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] leading-tight {getBadgeClasses(formatted.badgeColor || 'gray')}">
+					{formatted.badge}
+				</span>
+			{/if}
+		</div>
+	{:else}
+		<!-- Full card rendering for important system messages -->
+		<div class="w-full border border-border rounded-lg overflow-hidden shadow-s bg-card">
+			<div class="px-4 py-2 bg-muted/30 flex items-center gap-2">
+				<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+				</svg>
+				<span class="text-sm font-medium text-foreground">{formatted.title}</span>
+				{#if formatted.badge}
+					<span class="px-1.5 py-0.5 text-xs rounded {getBadgeClasses(formatted.badgeColor || 'gray')}">
+						{formatted.badge}
+					</span>
+				{/if}
 			</div>
-		{:else}
-			<pre class="text-xs text-muted-foreground overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatted.content}</pre>
-		{/if}
-	</div>
-</div>
+			<div class="px-4 py-3 bg-card">
+				{#if isMarkdownContent(message.systemSubtype)}
+					<div class="prose prose-sm prose-invert max-w-none system-message-content">
+						{@html sanitizeHtml(renderMarkdown(formatted.content))}
+					</div>
+				{:else}
+					<pre class="text-xs text-muted-foreground overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatted.content}</pre>
+				{/if}
+			</div>
+		</div>
+	{/if}
 {/if}
 
 <style>
