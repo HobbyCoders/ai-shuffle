@@ -106,6 +106,8 @@ async function registerServiceWorker() {
 
 function wasRecentlyDismissed(): boolean {
 	if (!browser) return false;
+	if (localStorage.getItem('ai-shuffle-install-never')) return true;
+
 	const dismissed = localStorage.getItem('ai-shuffle-install-dismissed');
 	if (!dismissed) return false;
 
