@@ -894,7 +894,8 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_profile_updated ON sessions(project_id, profile_id, updated_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(title)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_sdk_session_id ON sessions(sdk_session_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_instance ON sessions(instance_id)")
+    # Note: idx_sessions_instance is created by _run_column_migrations after the
+    # instance_id column is added (idempotent for both fresh installs and upgrades).
 
     # -- session_messages
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id)")

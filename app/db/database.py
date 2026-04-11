@@ -217,21 +217,23 @@ def _run_column_migrations(cursor):
 
     # Add instance_id to sessions for per-instance isolation across shared DBs.
     # Mirrors the projects.instance_id column added in v33-era multi-instance work.
-    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "instance_id"):
-        cursor.execute("ALTER TABLE sessions ADD COLUMN instance_id TEXT")
-        # Backfill existing sessions from their project's instance_id so that
-        # legacy sessions stay visible on the instance that owns the project.
-        try:
-            cursor.execute("""
-                UPDATE sessions SET instance_id = (
-                    SELECT p.instance_id FROM projects p WHERE p.id = sessions.project_id
-                )
-                WHERE instance_id IS NULL AND project_id IS NOT NULL
-            """)
-        except _DB_ERRORS:
-            pass  # projects table may not exist yet in pathological cases
+    if table_exists(cursor, "sessions"):
+        if not column_exists(cursor, "sessions", "instance_id"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN instance_id TEXT")
+            # Backfill existing sessions from their project's instance_id so that
+            # legacy sessions stay visible on the instance that owns the project.
+            try:
+                cursor.execute("""
+                    UPDATE sessions SET instance_id = (
+                        SELECT p.instance_id FROM projects p WHERE p.id = sessions.project_id
+                    )
+                    WHERE instance_id IS NULL AND project_id IS NOT NULL
+                """)
+            except _DB_ERRORS:
+                pass  # projects table may not exist yet in pathological cases
+            migrations_applied.append("sessions.instance_id")
+        # Always ensure the index exists (idempotent for fresh installs + upgrades)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_instance ON sessions(instance_id)")
-        migrations_applied.append("sessions.instance_id")
 
     # Ensure performance-critical indexes exist (idempotent, no version gate).
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
