@@ -69,6 +69,21 @@
 		return tool.getModels().find(m => m.id === modelId);
 	}
 
+	/** Get the selected catalog model when the selection isn't a curated model */
+	function getSelectedCatalogModel(tool: ToolDefinition): CatalogModel | undefined {
+		const modelId = modelSelections[tool.modelSettingKey] || tool.defaultModel;
+		const catalogForTool = catalogModelsByTool[tool.catalogToolType] || [];
+		return catalogForTool.find(m => m.endpoint_id === modelId);
+	}
+
+	/** Display name for the selected model (curated or catalog) */
+	function getSelectedDisplayName(tool: ToolDefinition): string | undefined {
+		const curated = getSelectedModel(tool);
+		if (curated) return curated.displayName;
+		const catalog = getSelectedCatalogModel(tool);
+		return catalog?.display_name;
+	}
+
 	function getSelectedModelId(tool: ToolDefinition): string {
 		return modelSelections[tool.modelSettingKey] || tool.defaultModel;
 	}
@@ -227,6 +242,7 @@
 			{@const isExpanded = expandedTool === tool.id}
 			{@const isSaving = savingTool === tool.id}
 			{@const selectedModel = getSelectedModel(tool)}
+			{@const selectedName = getSelectedDisplayName(tool)}
 			{@const caps = getCapabilities(tool)}
 
 			<div class="tool-section" class:expanded={isExpanded}>
@@ -237,8 +253,8 @@
 				>
 					<div class="tool-header-left">
 						<span class="tool-label">{tool.label}</span>
-						{#if selectedModel}
-							<span class="tool-current">{selectedModel.displayName}</span>
+						{#if selectedName}
+							<span class="tool-current">{selectedName}</span>
 						{/if}
 					</div>
 					<div class="tool-header-right">
