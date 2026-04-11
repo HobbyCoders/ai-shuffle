@@ -173,13 +173,7 @@
 			&& msg.toolName !== 'Agent';
 	}
 
-	/** Assistant text/thinking between tool calls can be absorbed into a group. */
-	function isInterleavedAssistantBlock(msg: ChatMessage): boolean {
-		return msg.role === 'assistant'
-			&& (msg.type === 'text' || msg.type === 'thinking');
-	}
-
-	const displayItems: DisplayItem[] = $derived.by(() => {
+const displayItems: DisplayItem[] = $derived.by(() => {
 		const messages = $activeSession.messages;
 		const items: DisplayItem[] = [];
 		// Deduplicate by message ID to prevent Svelte 5 each_key_duplicate crashes.
@@ -191,51 +185,30 @@
 			const msg = messages[i];
 			if (msg.id && seenIds.has(msg.id)) { i++; continue; }
 
+			if (msg.id) seenIds.add(msg.id);
+
 			if (isGroupableTool(msg)) {
-				// Lookahead: collect tools separated by assistant text/thinking.
-				// Claude SDK returns assistant turns with text blocks interleaved
-				// between tool_use blocks; without this, each tool renders individually.
+				// Only group strictly consecutive groupable tools.
+				// Any assistant text/thinking between tools breaks the group.
 				const tools: ChatMessage[] = [msg];
 				const indices: number[] = [i];
-				const interleaved: { message: ChatMessage; index: number }[] = [];
 				let j = i + 1;
-
-				while (j < messages.length) {
-					const next = messages[j];
-					if (next.id && seenIds.has(next.id)) { j++; continue; }
-
-					if (isGroupableTool(next)) {
-						tools.push(next);
-						indices.push(j);
-						j++;
-					} else if (isInterleavedAssistantBlock(next)) {
-						interleaved.push({ message: next, index: j });
-						j++;
-					} else {
-						break;
-					}
+				while (j < messages.length && isGroupableTool(messages[j])) {
+					const toolMsg = messages[j];
+					if (toolMsg.id && seenIds.has(toolMsg.id)) { j++; continue; }
+					if (toolMsg.id) seenIds.add(toolMsg.id);
+					tools.push(toolMsg);
+					indices.push(j);
+					j++;
 				}
 
 				if (tools.length >= 2) {
-					// Mark all consumed IDs as seen
-					for (const t of tools) { if (t.id) seenIds.add(t.id); }
-					for (const item of interleaved) {
-						if (item.message.id) seenIds.add(item.message.id);
-					}
-					// Emit interleaved text/thinking before the group
-					for (const item of interleaved) {
-						items.push({ kind: 'message', message: item.message, index: item.index });
-					}
 					items.push({ kind: 'tool_group', tools, indices });
-					i = j;
 				} else {
-					// Single tool — emit normally, don't consume lookahead
-					if (msg.id) seenIds.add(msg.id);
 					items.push({ kind: 'message', message: msg, index: i });
-					i++;
 				}
+				i = j;
 			} else {
-				if (msg.id) seenIds.add(msg.id);
 				items.push({ kind: 'message', message: msg, index: i });
 				i++;
 			}
