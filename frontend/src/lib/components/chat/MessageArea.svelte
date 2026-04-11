@@ -76,9 +76,14 @@
 
 	let containerRef = $state<HTMLDivElement | null>(null);
 	let shouldAutoScroll = $state(true); // Start with auto-scroll enabled
-	let isScrollingProgrammatically = $state(false);
+	// Counter (not boolean) to handle overlapping programmatic scrolls correctly.
+	// Multiple concurrent scrollToBottom() calls (ResizeObserver + content effect +
+	// scrollToBottomUntilStable) each increment on entry and decrement after double-RAF.
+	// handleScroll ignores events while any programmatic scroll is in-flight.
+	let programmaticScrollDepth = 0;
 	let isMounted = $state(false);
 	let scrollRafPending = false; // Throttle scroll handler to one per frame
+	let lastKnownScrollTop = 0; // For scroll-direction detection
 	// Set on session switch — ensures scroll-to-bottom fires after messages load,
 	// even if intermediate DOM changes set shouldAutoScroll to false.
 	let pendingScrollToBottom = false;
@@ -275,46 +280,53 @@
 
 	function scrollToBottom() {
 		if (containerRef) {
-			isScrollingProgrammatically = true;
+			programmaticScrollDepth++;
 			containerRef.scrollTop = containerRef.scrollHeight;
+			lastKnownScrollTop = containerRef.scrollTop;
 			// Use double RAF to ensure scroll events from this programmatic scroll are ignored
 			// Single RAF isn't enough - browser may fire scroll events across multiple frames
 			requestAnimationFrame(() => {
 				requestAnimationFrame(() => {
-					isScrollingProgrammatically = false;
+					programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
 				});
 			});
 		}
 	}
 
 	function handleScroll() {
-		if (!containerRef || isScrollingProgrammatically) return;
+		if (!containerRef || programmaticScrollDepth > 0) return;
 
 		// Throttle to one handler per animation frame to prevent main thread blocking
 		if (scrollRafPending) return;
 		scrollRafPending = true;
 		requestAnimationFrame(() => {
 			scrollRafPending = false;
-			if (!containerRef) return;
+			if (!containerRef || programmaticScrollDepth > 0) return;
 
 			const cacheKey = $activeSession.sessionId ?? 'new';
+			const currentScrollTop = containerRef.scrollTop;
 
 			// Save scroll position to non-reactive cache (doesn't trigger effects)
-			scrollPositionCache.set(cacheKey, containerRef.scrollTop);
+			scrollPositionCache.set(cacheKey, currentScrollTop);
 			// Also save to session store for cross-session persistence
-			activeSession.setScrollTop(containerRef.scrollTop);
+			activeSession.setScrollTop(currentScrollTop);
 
-			// Check current position
 			const nearBottom = isNearBottom();
 
 			if (nearBottom) {
 				// User is at/near the bottom - enable auto-scroll
 				shouldAutoScroll = true;
-			} else {
-				// User scrolled away from bottom - disable auto-scroll
-				// This allows reading older messages without being pulled back
+			} else if (currentScrollTop < lastKnownScrollTop) {
+				// User explicitly scrolled UP — disable auto-scroll.
+				// Only direction-decrease counts as intentional scroll-up.
+				// Content growth (scrollHeight increases, scrollTop unchanged)
+				// or programmatic scrolls won't trip this.
 				shouldAutoScroll = false;
 			}
+			// else: scrollTop increased or unchanged but not near bottom —
+			// likely content grew below viewport. Don't change shouldAutoScroll.
+
+			lastKnownScrollTop = currentScrollTop;
 		});
 	}
 
@@ -342,11 +354,12 @@
 				const storedPosition = cachedPosition ?? $activeSession.scrollTop;
 
 				if (storedPosition > 0) {
-					isScrollingProgrammatically = true;
+					programmaticScrollDepth++;
 					containerRef.scrollTop = storedPosition;
+					lastKnownScrollTop = containerRef.scrollTop;
 					shouldAutoScroll = false;
 					requestAnimationFrame(() => {
-						isScrollingProgrammatically = false;
+						programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
 					});
 				} else {
 					// No saved position even though they scrolled up - scroll to bottom
