@@ -27,7 +27,17 @@ from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
+import os
+
 from app.core.platform import is_docker_mode, get_claude_credentials_dir
+
+
+def _force_rmtree(path):
+    """Remove directory tree, handling read-only files on Windows (e.g. .git pack files)."""
+    def _on_error(_func, _path, _exc_info):
+        os.chmod(_path, stat.S_IWRITE)
+        os.unlink(_path)
+    shutil.rmtree(path, onerror=_on_error)
 
 logger = logging.getLogger(__name__)
 
@@ -1200,7 +1210,7 @@ class PluginService:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
 
             if cache_path.exists():
-                shutil.rmtree(cache_path)
+                _force_rmtree(cache_path)
             shutil.copytree(local_dir, cache_path)
 
         elif isinstance(source, dict):
@@ -1209,7 +1219,7 @@ class PluginService:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
 
             if cache_path.exists():
-                shutil.rmtree(cache_path)
+                _force_rmtree(cache_path)
 
             self._clone_plugin_source(source, cache_path)
 
@@ -1847,13 +1857,20 @@ class PluginService:
 
             plugin_name, marketplace_id = parts
             installed_version = install.get("version", "unknown")
-            is_local = install.get("isLocal", True)
+
+            # Determine locality from marketplace entry, not just installed data.
+            # Old installs may lack the isLocal field entirely.
+            entry = self._find_plugin_in_manifest(marketplace_id, plugin_name)
+            if entry:
+                source = entry.get("source", "")
+                is_local = isinstance(source, str)
+            else:
+                is_local = install.get("isLocal", True)
 
             # For local-source plugins: compare using the same version
             # resolution logic as install_plugin() to avoid mismatches.
             # Priority: entry.version > git HEAD hash
             if is_local:
-                entry = self._find_plugin_in_manifest(marketplace_id, plugin_name)
                 entry_version = entry.get("version") if entry else None
 
                 if entry_version:
@@ -1878,17 +1895,20 @@ class PluginService:
                         is_local=True
                     ))
             else:
-                # For external plugins: check if marketplace entry has a newer version
-                entry = self._find_plugin_in_manifest(marketplace_id, plugin_name)
+                # For external plugins: check if marketplace entry has a newer version.
+                # Compare against entry version, or source SHA if no explicit version.
                 if entry:
                     entry_version = entry.get("version", "")
-                    if entry_version and entry_version != installed_version:
+                    source = entry.get("source", {})
+                    source_sha = source.get("sha", "")[:7] if isinstance(source, dict) else ""
+                    available = entry_version or source_sha
+                    if available and available != installed_version:
                         updates.append(PluginUpdateInfo(
                             plugin_id=plugin_id,
                             name=plugin_name,
                             marketplace=marketplace_id,
                             installed_version=installed_version,
-                            available_version=entry_version,
+                            available_version=available,
                             is_local=False
                         ))
 
