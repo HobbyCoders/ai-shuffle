@@ -21,6 +21,7 @@ from app.core.plugin_service import get_plugin_service
 from app.core.project_utils import get_project_working_dir_as_path, get_worktree_working_dir_as_path
 from app.core.project_agent_service import get_project_agent_service
 from app.core.config import settings
+from app.core.profiles import get_builtin_profile_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -574,6 +575,47 @@ async def delete_profile(profile_id: str, token: str = Depends(require_admin)):
         )
 
     database.delete_profile(profile_id)
+
+
+@router.post("/{profile_id}/restore", response_model=Profile)
+async def restore_profile_defaults(
+    profile_id: str,
+    token: str = Depends(require_admin)
+):
+    """Restore a built-in profile to its original default settings.
+
+    Only works for built-in profiles that have known seed defaults.
+    Custom profiles cannot be restored (they have no defaults to restore to).
+    """
+    existing = database.get_profile(profile_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Profile not found: {profile_id}"
+        )
+
+    if not existing.get("is_builtin"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only built-in profiles can be restored to defaults"
+        )
+
+    defaults = get_builtin_profile_defaults(profile_id)
+    if not defaults:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No known defaults for built-in profile: {profile_id}"
+        )
+
+    profile = database.update_profile(
+        profile_id=profile_id,
+        name=defaults["name"],
+        description=defaults["description"],
+        config=defaults["config"],
+        allow_builtin=True
+    )
+
+    return profile
 
 
 # ============================================================================

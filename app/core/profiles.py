@@ -206,6 +206,21 @@ def _seed_default_templates():
         )
 
 
+def get_builtin_profile_defaults(profile_id: str) -> Optional[Dict[str, Any]]:
+    """Get the original seed defaults for a built-in profile.
+
+    Returns the default name, description, and config for a built-in profile,
+    or None if the profile_id doesn't correspond to a known built-in profile.
+    """
+    if profile_id == DEFAULT_AI_PROFILE_ID:
+        return {
+            "name": DEFAULT_AI_PROFILE["name"],
+            "description": DEFAULT_AI_PROFILE["description"],
+            "config": DEFAULT_AI_PROFILE["config"],
+        }
+    return None
+
+
 def get_profile(profile_id: str) -> Optional[Dict[str, Any]]:
     """Get a profile from database"""
     return database.get_profile(profile_id)

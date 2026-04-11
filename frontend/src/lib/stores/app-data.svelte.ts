@@ -286,6 +286,11 @@ export const appData = {
 		await appData.loadProfiles();
 	},
 
+	async restoreProfile(profileId: string) {
+		await api.post(`/profiles/${profileId}/restore`);
+		await appData.loadProfiles();
+	},
+
 	// ── Project Operations ──────────────────────────────────────────────
 
 	async loadProjects() {
