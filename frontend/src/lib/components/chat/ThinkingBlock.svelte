@@ -255,6 +255,7 @@
 		font-size: var(--text-sm, 0.875rem);
 		line-height: 1.6;
 		padding: 0.5rem 0;
+		padding-left: 0.5rem;
 	}
 
 	/* Override prose styles to maintain italic + muted appearance */

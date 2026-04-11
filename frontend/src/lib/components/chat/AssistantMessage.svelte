@@ -435,7 +435,7 @@
 			{/if}
 		</div>
 		<div class="overflow-hidden max-w-full">
-			<div class="prose prose-sm max-w-none break-words" style="overflow-wrap: anywhere; word-break: break-word;">
+			<div class="prose prose-sm max-w-none break-words pl-2" style="overflow-wrap: anywhere; word-break: break-word;">
 				{#if content}
 					{@html renderedHtml}
 				{:else if streaming && !hasPartialMessages}
