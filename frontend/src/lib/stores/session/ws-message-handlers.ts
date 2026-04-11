@@ -120,6 +120,14 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	// ── Handler: done ────────────────────────────────────────────────
 
 	function handleDone(data: Record<string, unknown>): void {
+		// During interrupt_and_query, the OLD query drains naturally and yields
+		// a 'done' event (SDK interrupt doesn't raise CancelledError, so the
+		// generator exits normally). If we process it, we'd clear interruptPending,
+		// trigger pollFinal (which returns isStreaming=false for the ended old query),
+		// and fire a premature completion notification — all of which clobber the
+		// new query that's about to start. Skip entirely, like handleStoppedOrInterrupted.
+		if (internal.interruptPending) { internal.pendingTools.clear(); return; }
+
 		const metadata = data.metadata as Record<string, unknown>;
 		const sessionId = data.session_id as string;
 		// done event — poller will handle streaming→ended transition
@@ -228,7 +236,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 		if (state.sessionId && isForActiveSession) {
 			const isInterruptTransition = internal.interruptPending &&
-				(msgType === 'interrupted' || msgType === 'stopped');
+				(msgType === 'interrupted' || msgType === 'stopped' || msgType === 'done');
 			const shouldNotify = state.isStreaming ||
 				internal.awaitingNewSession ||
 				msgType === 'start' ||

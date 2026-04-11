@@ -1778,6 +1778,7 @@ async def stream_to_websocket(
 
     # Mark as streaming (both reuse and create paths)
     state.is_streaming = True
+    state.interrupt_requested = False  # Reset from previous query's interrupt
     state.streaming_started_at = datetime.now(timezone.utc)
     state.last_activity = datetime.now(timezone.utc)
 

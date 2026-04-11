@@ -1999,15 +1999,48 @@ class PluginService:
                         # No explicit version — compare source SHAs
                         available_sha = source["sha"][:7]
                         installed_sha = install.get("sourceSha", "")
-                        if installed_sha and available_sha != installed_sha:
-                            updates.append(PluginUpdateInfo(
-                                plugin_id=plugin_id,
-                                name=plugin_name,
-                                marketplace=marketplace_id,
-                                installed_version=installed_version,
-                                available_version=available_sha,
-                                is_local=False
-                            ))
+                        if installed_sha:
+                            # We stored SHA at install time — compare directly
+                            if available_sha != installed_sha:
+                                cache_dir = self.CACHE_DIR / marketplace_id / plugin_name / available_sha
+                                cached_ver = self._get_plugin_manifest_version(cache_dir)
+                                updates.append(PluginUpdateInfo(
+                                    plugin_id=plugin_id,
+                                    name=plugin_name,
+                                    marketplace=marketplace_id,
+                                    installed_version=installed_version,
+                                    available_version=cached_ver or available_sha,
+                                    is_local=False
+                                ))
+                        else:
+                            # Legacy install without sourceSha — check cached
+                            # copy at new SHA for its manifest version
+                            cache_dir = self.CACHE_DIR / marketplace_id / plugin_name / available_sha
+                            cached_ver = self._get_plugin_manifest_version(cache_dir)
+                            if cached_ver and cached_ver != installed_version:
+                                updates.append(PluginUpdateInfo(
+                                    plugin_id=plugin_id,
+                                    name=plugin_name,
+                                    marketplace=marketplace_id,
+                                    installed_version=installed_version,
+                                    available_version=cached_ver,
+                                    is_local=False
+                                ))
+                            elif not cached_ver:
+                                # No cached copy — only compare SHA-to-SHA
+                                _is_sha = (
+                                    len(installed_version) == 7
+                                    and all(c in "0123456789abcdef" for c in installed_version)
+                                )
+                                if _is_sha and installed_version != available_sha:
+                                    updates.append(PluginUpdateInfo(
+                                        plugin_id=plugin_id,
+                                        name=plugin_name,
+                                        marketplace=marketplace_id,
+                                        installed_version=installed_version,
+                                        available_version=available_sha,
+                                        is_local=False
+                                    ))
 
         return updates
 
