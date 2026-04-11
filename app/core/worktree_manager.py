@@ -457,7 +457,11 @@ class WorktreeManager:
 
         for wt in worktrees:
             # Check if worktree is valid (not just if folder exists)
-            wt["exists"] = self.is_worktree_valid(wt)
+            try:
+                wt["exists"] = self.is_worktree_valid(wt)
+            except (ValueError, TypeError, KeyError) as e:
+                logger.warning(f"Worktree {wt.get('id', '?')} has invalid path: {e}")
+                wt["exists"] = False
 
             if not wt["exists"]:
                 # Invalid worktree (missing, empty, or corrupted) - skip it
@@ -517,8 +521,12 @@ class WorktreeManager:
         # Clean up stale worktree records (where the worktree is no longer valid on disk)
         existing_worktrees = database.get_active_worktrees_for_repository(repo["id"])
         for wt in existing_worktrees:
-            if not self.is_worktree_valid(wt):
-                logger.debug(f"Cleaning up stale worktree record: '{wt['worktree_path']}' (invalid worktree)")
+            try:
+                valid = self.is_worktree_valid(wt)
+            except (ValueError, TypeError, KeyError):
+                valid = False
+            if not valid:
+                logger.debug(f"Cleaning up stale worktree record: '{wt.get('worktree_path')}' (invalid worktree)")
                 database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
 
         # Verify the branch exists if not creating a new one
@@ -644,8 +652,14 @@ class WorktreeManager:
         worktrees = database.get_worktrees_with_sessions(repo["id"])
 
         for wt in worktrees:
-            # Check if worktree is valid (not just if folder exists)
-            wt["exists"] = self.is_worktree_valid(wt)
+            # Check if worktree is valid (not just if folder exists).
+            # Catch corrupt records (NULL worktree_path) so one bad row
+            # doesn't crash the entire list endpoint with a 500.
+            try:
+                wt["exists"] = self.is_worktree_valid(wt)
+            except (ValueError, TypeError, KeyError) as e:
+                logger.warning(f"Worktree {wt.get('id', '?')} has invalid path, marking as non-existent: {e}")
+                wt["exists"] = False
 
             # Legacy support: also check deprecated worktrees.session_id if no sessions found
             if not wt["sessions"] and wt.get("session_id"):
@@ -670,10 +684,15 @@ class WorktreeManager:
             return None
 
         # Check if worktree is valid (not just if folder exists)
-        worktree_abs_path = get_worktree_working_dir(worktree)
-        worktree["exists"] = self.is_worktree_valid(worktree)
+        try:
+            worktree_abs_path = get_worktree_working_dir(worktree)
+            worktree["exists"] = self.is_worktree_valid(worktree)
+        except (ValueError, TypeError, KeyError) as e:
+            logger.warning(f"Worktree {worktree_id} has invalid path: {e}")
+            worktree_abs_path = None
+            worktree["exists"] = False
 
-        if worktree["exists"]:
+        if worktree["exists"] and worktree_abs_path:
             worktree["git_status"] = self.git_service.get_status(worktree_abs_path)
 
         # Get all sessions for this worktree (new model)

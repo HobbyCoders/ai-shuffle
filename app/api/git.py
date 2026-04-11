@@ -2017,7 +2017,12 @@ async def list_worktrees(
     if include_status:
         async def _fetch_wt_status(wt):
             if wt.get("exists", True):
-                worktree_full_path = get_worktree_working_dir(wt)
+                try:
+                    worktree_full_path = get_worktree_working_dir(wt)
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Worktree {wt.get('id', '?')} has invalid path, skipping status: {e}")
+                    wt["git_status"] = None
+                    return
                 try:
                     wt["git_status"] = await run_git(
                         git_service.get_status, worktree_full_path

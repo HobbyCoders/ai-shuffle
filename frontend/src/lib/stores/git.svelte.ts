@@ -159,6 +159,38 @@ let _operationInProgress = false;
 // Reset when the store loads a new repository/worktree context.
 let _worktreeGone = false;
 
+// Exponential backoff for server errors (5xx). When the backend is down or
+// overloaded, hammering it every 2-5s with poll requests saturates the
+// browser's connection pool (6 per host) and blocks user-initiated actions.
+// Tracks consecutive 5xx errors and delays retries exponentially.
+const _BACKOFF_BASE_MS = 2_000;
+const _BACKOFF_MAX_MS = 60_000;
+let _serverErrorCount = 0;
+let _serverBackoffUntil = 0;
+
+function _recordServerError(): void {
+	_serverErrorCount = Math.min(_serverErrorCount + 1, 10); // cap at ~60s
+	const delay = Math.min(_BACKOFF_BASE_MS * Math.pow(2, _serverErrorCount - 1), _BACKOFF_MAX_MS);
+	_serverBackoffUntil = Date.now() + delay;
+	console.warn(`[git] Server error #${_serverErrorCount}, backing off ${delay}ms`);
+}
+
+function _clearServerBackoff(): void {
+	if (_serverErrorCount > 0) {
+		console.debug(`[git] Server recovered after ${_serverErrorCount} consecutive errors`);
+		_serverErrorCount = 0;
+		_serverBackoffUntil = 0;
+	}
+}
+
+function _isBackingOff(): boolean {
+	return Date.now() < _serverBackoffUntil;
+}
+
+function _isServerError(e: unknown): boolean {
+	return isApiError(e) && e.status !== undefined && e.status >= 500;
+}
+
 const _cache = new Map<string, CachedState>();
 
 function _makeKey(projectId: string, worktreeId?: string | null): string {
@@ -213,6 +245,7 @@ async function _loadCore(
 	mode: GitMode
 ) {
 	_worktreeGone = false; // Reset on context switch
+	_clearServerBackoff(); // Reset backoff on context switch
 	const cached = _restoreFromCache(key);
 	_update((s) => ({
 		...s,
@@ -388,6 +421,7 @@ export const git = {
 	clearRepository() {
 		_loadedKey = null;
 		_worktreeGone = false;
+		_clearServerBackoff();
 		_set({ ...EMPTY_STATE });
 	},
 
@@ -395,6 +429,7 @@ export const git = {
 		if (!_state.projectId) return;
 		if (_statusInFlight) return; // Prevent overlapping requests
 		if (_worktreeGone) return; // Worktree deleted — stop polling
+		if (_isBackingOff()) return; // Server error backoff — skip this cycle
 		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
 
 		_statusAbort?.abort();
@@ -410,6 +445,7 @@ export const git = {
 				{ signal: controller.signal }
 			);
 			if (_loadedKey !== key) return;
+			_clearServerBackoff();
 			// Skip update if status hasn't changed — prevents no-op reactive cascades
 			// that cause progressive slowdown from GC pressure during idle polling.
 			if (_shallowEqual(status as unknown as Record<string, unknown>, _state.status as unknown as Record<string, unknown>)) return;
@@ -419,6 +455,7 @@ export const git = {
 			if (controller.signal.aborted) return; // Timeout or manual abort — silently skip
 			if (_loadedKey !== key) return;
 			if (_checkWorktreeGone(e)) return; // Worktree deleted — stop polling
+			if (_isServerError(e)) { _recordServerError(); return; }
 			const error = e as { detail?: string };
 			_update((s) => ({ ...s, error: error.detail || 'Failed to refresh status' }));
 		} finally {
@@ -677,6 +714,7 @@ export const git = {
 		if (!_state.projectId) return;
 		if (_diffStatsInFlight) return; // Prevent overlapping requests
 		if (_worktreeGone) return; // Worktree deleted — stop polling
+		if (_isBackingOff()) return; // Server error backoff — skip this cycle
 		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
 
 		_diffStatsAbort?.abort();
@@ -693,6 +731,7 @@ export const git = {
 				{ signal: controller.signal }
 			);
 			if (_loadedKey !== key) return;
+			_clearServerBackoff();
 			// Skip update if diff stats haven't changed — prevents no-op reactive cascades
 			if (_shallowEqual(diffStats as unknown as Record<string, unknown>, _state.diffStats as unknown as Record<string, unknown>)) return;
 			_update((s) => ({ ...s, diffStats }));
@@ -701,6 +740,7 @@ export const git = {
 			if (controller.signal.aborted) return; // Timeout or manual abort — silently skip
 			if (_loadedKey !== key) return;
 			if (_checkWorktreeGone(e)) return; // Worktree deleted — stop polling
+			if (_isServerError(e)) { _recordServerError(); return; }
 			console.debug('Failed to refresh diff stats:', e);
 		} finally {
 			clearTimeout(timeout);
@@ -782,6 +822,7 @@ export const git = {
 		if (!_state.projectId) return;
 		if (_changedFilesInFlight) return;
 		if (_worktreeGone) return; // Worktree deleted — stop polling
+		if (_isBackingOff()) return; // Server error backoff — skip this cycle
 		const key = _makeKey(_state.projectId, _state.worktreeId ?? undefined);
 
 		_changedFilesInFlight = true;
@@ -792,6 +833,7 @@ export const git = {
 				_state.worktreeId ?? undefined
 			);
 			if (_loadedKey !== key) return;
+			_clearServerBackoff();
 			_update((s) => ({ ...s, changedFiles: response.files, changedFilesLoading: false }));
 
 			// Update cache
@@ -800,6 +842,7 @@ export const git = {
 		} catch (e) {
 			if (_loadedKey !== key) return;
 			if (_checkWorktreeGone(e)) return; // Worktree deleted — stop polling
+			if (_isServerError(e)) { _recordServerError(); _update((s) => ({ ...s, changedFilesLoading: false })); return; }
 			console.debug('Failed to refresh changed files:', e);
 			_update((s) => ({ ...s, changedFilesLoading: false }));
 		} finally {
@@ -887,6 +930,14 @@ export const git = {
 	 */
 	get worktreeGone() {
 		return _worktreeGone;
+	},
+
+	/**
+	 * Whether the store is in exponential backoff due to server errors (5xx).
+	 * When true, polling methods silently skip to avoid flooding a down server.
+	 */
+	get serverBackoff() {
+		return _isBackingOff();
 	},
 
 	/**

@@ -82,8 +82,18 @@ def get_worktree_working_dir(worktree: dict) -> str:
 
     Returns:
         Absolute filesystem path as string.
+
+    Raises:
+        ValueError: If worktree_path is None or empty.
     """
-    worktree_path = worktree["worktree_path"]
+    worktree_path = worktree.get("worktree_path")
+
+    if not worktree_path:
+        wt_id = worktree.get("id", "unknown")
+        raise ValueError(
+            f"Worktree {wt_id} has no worktree_path. "
+            f"This usually means the worktree record is corrupt or incomplete."
+        )
 
     # If the stored path is already absolute, use it directly
     if is_absolute_project_path(worktree_path):
