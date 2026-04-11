@@ -545,34 +545,55 @@ function setupPollCallback() {
 			let finalWsContent = s.wsStreamContent;
 
 			// ── Phase 1: Preserve client-side-only messages ─────────────
-			// System messages (hooks, status, etc.) are injected by the
-			// frontend and don't exist in the server's live session store.
+			// System messages (hooks, status, etc.) may be injected by the
+			// frontend or become orphaned between turns when the live session
+			// is recreated (system messages aren't persisted to JSONL).
 			// Without preservation, the poller wipes them every cycle.
+			//
+			// Position-anchored reinsertion: each client-only message is
+			// reinserted after the closest preceding message that still
+			// exists in the server response, preserving its original
+			// relative position instead of drifting to the bottom.
 			const serverIdSet = new Set(finalMessages.map(m => m.id));
-			const clientOnlyMsgs = s.messages.filter(m =>
-				m.type === 'system' && !serverIdSet.has(m.id)
-			);
-			if (clientOnlyMsgs.length > 0) {
-				// Insert before the first streaming message to maintain
-				// chronological ordering (client msgs were added pre-stream).
-				let insertIdx = finalMessages.findIndex(m => m.streaming);
-				if (insertIdx >= 0) {
-					// Walk backward to avoid splitting a run of consecutive
-					// tool_use messages. During streaming, some tools are
-					// complete (streaming=false) while later tools are still
-					// running (streaming=true). Inserting at firstStreamIdx
-					// would land between complete and running tools, breaking
-					// the frontend's adjacency-based tool grouping.
-					while (insertIdx > 0 && finalMessages[insertIdx - 1].type === 'tool_use') {
-						insertIdx--;
+			const clientOnlyEntries: Array<{msg: ChatMessage; anchorId: string | null}> = [];
+			for (let i = 0; i < s.messages.length; i++) {
+				const m = s.messages[i];
+				if (m.type === 'system' && !serverIdSet.has(m.id)) {
+					// Walk backward to find the closest preceding message
+					// that exists in the new server response (our anchor).
+					let anchorId: string | null = null;
+					for (let j = i - 1; j >= 0; j--) {
+						if (serverIdSet.has(s.messages[j].id)) {
+							anchorId = s.messages[j].id;
+							break;
+						}
 					}
-					finalMessages = [
-						...finalMessages.slice(0, insertIdx),
-						...clientOnlyMsgs,
-						...finalMessages.slice(insertIdx),
-					];
-				} else {
-					finalMessages = [...finalMessages, ...clientOnlyMsgs];
+					clientOnlyEntries.push({ msg: m, anchorId });
+				}
+			}
+			if (clientOnlyEntries.length > 0) {
+				finalMessages = [...finalMessages];
+				// Build an ID→index lookup for O(1) anchor resolution.
+				const idToIndex = new Map<string, number>();
+				for (let i = 0; i < finalMessages.length; i++) {
+					if (finalMessages[i].id) idToIndex.set(finalMessages[i].id, i);
+				}
+				// Insert in forward order; track cumulative offset from
+				// prior insertions so later anchors resolve correctly.
+				let offset = 0;
+				for (const { msg, anchorId } of clientOnlyEntries) {
+					let insertIdx: number;
+					if (anchorId && idToIndex.has(anchorId)) {
+						// Insert right after the anchor message
+						insertIdx = idToIndex.get(anchorId)! + 1 + offset;
+					} else {
+						// No anchor (system message was before all server
+						// messages) — insert at the very beginning.
+						insertIdx = 0 + offset;
+					}
+					insertIdx = Math.min(insertIdx, finalMessages.length);
+					finalMessages.splice(insertIdx, 0, msg);
+					offset++;
 				}
 			}
 
