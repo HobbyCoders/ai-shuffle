@@ -1188,7 +1188,7 @@ class PluginService:
             raise ValueError(f"Plugin not found in marketplace: {plugin_name}")
 
         source = entry.get("source", "")
-        # Version priority: entry.version > source.sha (short) > "1.0.0"
+        # Version priority: plugin manifest > entry.version > source.sha (short) > "1.0.0"
         version = entry.get("version", "1.0.0")
         if version == "1.0.0" and isinstance(source, dict) and source.get("sha"):
             version = source["sha"][:7]
@@ -1199,8 +1199,14 @@ class PluginService:
         local_dir = self._resolve_plugin_source(source, mp_path, plugin_root)
 
         if local_dir:
-            # Local source - get version from git or .gcs-sha if not in entry
-            if not entry.get("version"):
+            # Local source - read version from the plugin's own manifest
+            # (matching Claude Code's behavior: manifest.version is source of truth)
+            manifest_version = self._get_plugin_manifest_version(local_dir)
+            if manifest_version:
+                version = manifest_version
+            elif not entry.get("version"):
+                # No manifest version and no entry version — fall back to
+                # marketplace HEAD hash for git-based marketplaces
                 resolved_version = self._get_marketplace_head_version(marketplace_id)
                 if resolved_version:
                     version = resolved_version
@@ -1222,6 +1228,20 @@ class PluginService:
                 _force_rmtree(cache_path)
 
             self._clone_plugin_source(source, cache_path)
+
+            # After cloning, read the plugin's own manifest version — it's the
+            # source of truth (matching Claude Code behaviour).
+            cloned_manifest_version = self._get_plugin_manifest_version(cache_path)
+            if cloned_manifest_version and cloned_manifest_version != version:
+                # Re-cache under the correct manifest version
+                new_cache_path = self.CACHE_DIR / marketplace_id / plugin_name / cloned_manifest_version
+                if new_cache_path != cache_path:
+                    new_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    if new_cache_path.exists():
+                        _force_rmtree(new_cache_path)
+                    shutil.move(str(cache_path), str(new_cache_path))
+                    cache_path = new_cache_path
+                version = cloned_manifest_version
 
         else:
             # Better error: include resolved path for relative sources
@@ -1248,14 +1268,19 @@ class PluginService:
             installed["plugins"] = {}
 
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        installed["plugins"][plugin_id] = [{
+        install_record = {
             "scope": scope,
             "installPath": str(cache_path),
             "version": version,
             "installedAt": now,
             "lastUpdated": now,
             "isLocal": isinstance(source, str)
-        }]
+        }
+        # Store source SHA for external plugins so update checks can compare
+        # against the marketplace entry's SHA without cloning.
+        if isinstance(source, dict) and source.get("sha"):
+            install_record["sourceSha"] = source["sha"][:7]
+        installed["plugins"][plugin_id] = [install_record]
         self._write_json_file(self.INSTALLED_FILE, installed)
 
         # Enable by default
@@ -1821,6 +1846,31 @@ class PluginService:
 
         return None
 
+    def _get_plugin_manifest_version(self, local_dir: Path) -> Optional[str]:
+        """Read a plugin's version from its .claude-plugin/plugin.json manifest.
+
+        This matches Claude Code's behavior: the plugin's own manifest is the
+        source of truth for versioning, not the marketplace repo hash.
+
+        Args:
+            local_dir: Path to the plugin's source directory in the marketplace.
+
+        Returns:
+            The version string from plugin.json, or None if not found.
+        """
+        manifest_path = local_dir / ".claude-plugin" / "plugin.json"
+        if not manifest_path.exists():
+            # Also check for plugin.json at root (older format)
+            manifest_path = local_dir / "plugin.json"
+            if not manifest_path.exists():
+                return None
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            return manifest.get("version") or None
+        except (IOError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+
     def check_for_updates(self) -> List[PluginUpdateInfo]:
         """
         Check all installed plugins for available updates.
@@ -1838,6 +1888,7 @@ class PluginService:
 
         # Cache marketplace HEAD versions to avoid repeated git calls
         mp_head_cache: Dict[str, Optional[str]] = {}
+        marketplaces = self._read_json_file(self.MARKETPLACES_FILE, {})
 
         for plugin_id, installation_data in installed_data.get("plugins", {}).items():
             if not installation_data:
@@ -1867,22 +1918,51 @@ class PluginService:
             else:
                 is_local = install.get("isLocal", True)
 
-            # For local-source plugins: compare using the same version
-            # resolution logic as install_plugin() to avoid mismatches.
-            # Priority: entry.version > git HEAD hash
+            # For local-source plugins: read the plugin's own manifest version
+            # from the marketplace source directory.  This matches Claude Code's
+            # behaviour — manifest.version is the canonical version, NOT the
+            # marketplace repo's git/gcs hash.
             if is_local:
-                entry_version = entry.get("version") if entry else None
+                # Resolve the local source directory for this plugin
+                mp_data = marketplaces.get(marketplace_id, {})
+                mp_location = mp_data.get("installLocation")
 
-                if entry_version:
-                    # Marketplace entry has an explicit version — use it
-                    available_version = entry_version
-                else:
-                    # No explicit version — fall back to git HEAD hash
+                available_version = None
+                if mp_location and entry:
+                    mp_path = Path(mp_location)
+                    mp_manifest = self._get_marketplace_manifest(mp_path)
+                    mp_plugin_root = (
+                        mp_manifest.get("metadata", {}).get("pluginRoot")
+                        if mp_manifest and isinstance(mp_manifest.get("metadata"), dict)
+                        else None
+                    )
+                    local_dir = self._resolve_plugin_source(
+                        entry.get("source", ""), mp_path, mp_plugin_root
+                    )
+                    if local_dir:
+                        available_version = self._get_plugin_manifest_version(local_dir)
+
+                # Fall back chain: entry.version → marketplace HEAD hash.
+                # Track whether the version is from a "real" source (manifest/entry)
+                # vs a hash fallback, to avoid comparing apples to oranges.
+                version_from_manifest = available_version is not None
+                if not available_version:
+                    available_version = entry.get("version") if entry else None
+                    if available_version:
+                        version_from_manifest = True
+                if not available_version:
                     if marketplace_id not in mp_head_cache:
                         mp_head_cache[marketplace_id] = self._get_marketplace_head_version(marketplace_id)
                     available_version = mp_head_cache[marketplace_id]
+                    # This is a repo-level hash, not a plugin manifest version
 
                 if not available_version:
+                    continue
+
+                # Only compare versions from the same system.  If installed
+                # version is "unknown" (plugin has no manifest version) and
+                # available came from a repo hash, skip — they're incomparable.
+                if not version_from_manifest and installed_version in ("unknown", "1.0.0"):
                     continue
 
                 if installed_version != available_version:
@@ -1895,22 +1975,39 @@ class PluginService:
                         is_local=True
                     ))
             else:
-                # For external plugins: check if marketplace entry has a newer version.
-                # Compare against entry version, or source SHA if no explicit version.
+                # For external plugins: compare source SHAs when available.
+                # The marketplace entry's source.sha represents the latest
+                # pinned commit.  We stored the SHA at install time in
+                # install_record["sourceSha"].  If they differ, the plugin
+                # has been updated upstream.
                 if entry:
-                    entry_version = entry.get("version", "")
                     source = entry.get("source", {})
-                    source_sha = source.get("sha", "")[:7] if isinstance(source, dict) else ""
-                    available = entry_version or source_sha
-                    if available and available != installed_version:
-                        updates.append(PluginUpdateInfo(
-                            plugin_id=plugin_id,
-                            name=plugin_name,
-                            marketplace=marketplace_id,
-                            installed_version=installed_version,
-                            available_version=available,
-                            is_local=False
-                        ))
+                    entry_version = entry.get("version", "")
+
+                    if entry_version:
+                        # Explicit version in marketplace entry — compare directly
+                        if entry_version != installed_version:
+                            updates.append(PluginUpdateInfo(
+                                plugin_id=plugin_id,
+                                name=plugin_name,
+                                marketplace=marketplace_id,
+                                installed_version=installed_version,
+                                available_version=entry_version,
+                                is_local=False
+                            ))
+                    elif isinstance(source, dict) and source.get("sha"):
+                        # No explicit version — compare source SHAs
+                        available_sha = source["sha"][:7]
+                        installed_sha = install.get("sourceSha", "")
+                        if installed_sha and available_sha != installed_sha:
+                            updates.append(PluginUpdateInfo(
+                                plugin_id=plugin_id,
+                                name=plugin_name,
+                                marketplace=marketplace_id,
+                                installed_version=installed_version,
+                                available_version=available_sha,
+                                is_local=False
+                            ))
 
         return updates
 

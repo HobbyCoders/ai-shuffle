@@ -310,7 +310,8 @@ async function _loadCore(
 		}
 	} catch (e) {
 		if (_loadInFlight !== key) return;
-		console.error('Failed to load git repository:', e);
+		const errObj = e as { detail?: string; message?: string; status?: number };
+		console.error('Failed to load git repository:', errObj.detail || errObj.message || e, errObj.status ?? '');
 		const error = e as { detail?: string; message?: string };
 		_update((s) => ({
 			...s,

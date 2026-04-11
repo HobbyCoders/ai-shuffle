@@ -15,11 +15,12 @@ import concurrent.futures
 import time
 import uuid
 import logging
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 from app.core.config import settings
 from app.core.git_service import git_service
@@ -177,7 +178,16 @@ class GitStatusResponse(BaseModel):
     repository_id: Optional[str] = None
     default_branch: Optional[str] = None
     github_repo_name: Optional[str] = None
-    last_synced_at: Optional[str] = None
+    # DB returns datetime; accept both and serialize to ISO string.
+    last_synced_at: Optional[Union[str, datetime]] = None
+
+    @field_serializer('last_synced_at')
+    def _serialize_last_synced_at(self, v: Optional[Union[str, datetime]]) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v.isoformat()
+        return v
 
 
 class FetchResponse(BaseModel):
@@ -368,7 +378,16 @@ class SessionInfo(BaseModel):
     id: str
     title: Optional[str] = None
     status: str
-    updated_at: Optional[str] = None
+    # DB returns datetime, legacy callers pass str. Accept both and serialize to ISO string.
+    updated_at: Optional[Union[str, datetime]] = None
+
+    @field_serializer('updated_at')
+    def _serialize_updated_at(self, v: Optional[Union[str, datetime]]) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v.isoformat()
+        return v
 
 
 class WorktreeGitStatus(BaseModel):
@@ -394,7 +413,14 @@ class WorktreeInfo(BaseModel):
     worktree_path: str
     base_branch: Optional[str] = None
     status: str
-    created_at: str
+    # DB returns datetime; accept both and serialize to ISO string.
+    created_at: Union[str, datetime]
+
+    @field_serializer('created_at')
+    def _serialize_created_at(self, v: Union[str, datetime]) -> str:
+        if isinstance(v, datetime):
+            return v.isoformat()
+        return v
     # New session relationship model
     sessions: List[SessionInfo] = []  # All sessions that have used this worktree
     session_count: int = 0

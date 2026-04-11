@@ -931,6 +931,13 @@ class LiveSessionStore:
 
             session.is_streaming = False
             session.active_block_type = None
+            # Force the next poll to return full state instead of a delta.
+            # end_streaming may have filtered messages out of self.messages,
+            # which shifts the delta slice (self.messages[initial_message_count:])
+            # and can drop real streaming messages from the client view.
+            # The full-refresh path serializes all messages + initial_message_count=0,
+            # matching what a page reload would fetch via since_update_id=0.
+            session.needs_full_refresh = True
             self._increment_update_id(session)
             context_used = session.input_tokens + session.cache_creation_tokens + session.cache_read_tokens
             logger.warning(

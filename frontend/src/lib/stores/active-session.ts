@@ -1370,6 +1370,11 @@ export const activeSession = {
 
 		const queryProfileId = _state.profile;
 		const projectId = _state.project;
+		const baseBranch = _state.worktreeBaseBranch || 'main';
+		const modelOverrideSnap = _state.modelOverride;
+		const permissionModeOverrideSnap = _state.permissionModeOverride;
+		const effortLevelOverrideSnap = _state.effortLevelOverride;
+		const fastModeSnap = _state.fastMode;
 		const userMsgId = `user-${Date.now()}`;
 
 		// Capture the creation generation so we can detect if the user
@@ -1401,19 +1406,20 @@ export const activeSession = {
 				branchName = generateBranchNameLocal(prompt);
 			}
 
-			// User switched sessions during branch name generation — abandon.
-			// No worktree was created yet, so nothing to clean up.
-			if (creationGen !== internal.worktreeCreationGeneration) {
-				console.debug('[Worktree] User navigated away during branch name generation, aborting');
-				return;
-			}
+			// If user navigated away during branch name generation, we continue
+			// creating the worktree in the background — matching the symmetric
+			// behavior after worktree creation below. Otherwise, clicking New Chat
+			// mid-generation silently cancels the whole flow with no feedback.
+			const staleAfterBranchGen = creationGen !== internal.worktreeCreationGeneration;
 
-			// Set the generated branch name and create the worktree
-			_update(s => ({
-				...s,
-				worktreeBranch: branchName,
-				worktreeCreateNewBranch: true,
-			}));
+			if (!staleAfterBranchGen) {
+				// Set the generated branch name and create the worktree
+				_update(s => ({
+					...s,
+					worktreeBranch: branchName,
+					worktreeCreateNewBranch: true,
+				}));
+			}
 
 			// Now create the worktree with the generated branch name
 			const response = await api.post<{
@@ -1422,8 +1428,8 @@ export const activeSession = {
 			}>('/sessions/with-worktree', {
 				project_id: projectId,
 				branch_name: branchName,
-				base_branch: _state.worktreeBaseBranch || 'main',
-				profile_id: _state.profile,
+				base_branch: baseBranch,
+				profile_id: queryProfileId,
 				create_new_branch: true,
 			});
 
@@ -1431,18 +1437,18 @@ export const activeSession = {
 			appData.loadSessions();
 			appData.loadApiUserSessions();
 
-			// User switched sessions during worktree creation — don't clobber
-			// the active session state.  The worktree + session exist on the
-			// backend, so fire the query in the background (the response will
+			// User switched sessions (either during branch gen or worktree creation)
+			// — don't clobber the active session state. The worktree + session exist
+			// on the backend, so fire the query in the background (the response will
 			// be persisted and visible when the user opens this session later).
-			if (creationGen !== internal.worktreeCreationGeneration) {
-				console.debug('[Worktree] User navigated away during worktree creation, sending query in background');
-				if (wsConn.isConnected()) {
+			if (staleAfterBranchGen || creationGen !== internal.worktreeCreationGeneration) {
+				console.debug('[Worktree] User navigated away, sending query in background');
+				const sendBackgroundQuery = () => {
 					const overrides: Record<string, string> = {};
-					if (_state.modelOverride) overrides.model = _state.modelOverride;
-					if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
-					if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
-					if (_state.fastMode) overrides.fast_mode = 'true';
+					if (modelOverrideSnap) overrides.model = modelOverrideSnap;
+					if (permissionModeOverrideSnap) overrides.permission_mode = permissionModeOverrideSnap;
+					if (effortLevelOverrideSnap) overrides.effort = effortLevelOverrideSnap;
+					if (fastModeSnap) overrides.fast_mode = 'true';
 					wsConn.send({
 						type: 'query',
 						prompt,
@@ -1452,6 +1458,19 @@ export const activeSession = {
 						worktree_id: response.worktree_id,
 						overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
 					});
+				};
+				if (wsConn.isConnected()) {
+					sendBackgroundQuery();
+				} else {
+					wsConn.connect();
+					const timeout = setTimeout(() => clearInterval(check), 3000);
+					const check = setInterval(() => {
+						if (wsConn.isConnected()) {
+							clearTimeout(timeout);
+							clearInterval(check);
+							sendBackgroundQuery();
+						}
+					}, 50);
 				}
 				return;
 			}
