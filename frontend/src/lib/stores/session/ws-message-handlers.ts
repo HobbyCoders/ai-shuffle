@@ -232,7 +232,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 		}
 
-		// Handle sync events from other devices
+		// Handle sync events from other devices / server-originated broadcasts
 		if (eventType) {
 			// queue_updated is handled here directly since queue state
 			// is not part of the poll response — it's server-side only.
@@ -241,6 +241,17 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const messages = (syncData?.queued_messages ?? []) as Array<{ id: string; content: string; created_at: string }>;
 				update(s => ({ ...s, queuedMessages: messages.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime() })) }));
 			}
+
+			// message_added from server-side queue processing (_process_next_queued).
+			// The notifier gate above may skip this event when not streaming, so
+			// handle it directly: trigger a poll so the user message appears in chat.
+			if (eventType === 'message_added') {
+				const addedSessionId = data.session_id as string | undefined;
+				if (addedSessionId && addedSessionId === state.sessionId) {
+					sessionPoller.pollNow(addedSessionId);
+				}
+			}
+
 			return;
 		}
 

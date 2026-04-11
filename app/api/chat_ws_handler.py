@@ -960,10 +960,16 @@ class ChatWebSocketHandler:
             "data": {"queued_messages": queue},
         })
 
-        # If session is NOT currently streaming, immediately process the queue
+        # If session is NOT currently streaming, immediately process the queue.
+        # Wrap in try/except — _process_next_queued re-raises after recovery,
+        # and an unhandled exception here would kill the WebSocket connection
+        # (the dispatch loop only catches asyncio.TimeoutError).
         active_task = _active_chat_sessions.get(session_id)
         if not active_task or active_task.done():
-            await self._process_next_queued(session_id)
+            try:
+                await self._process_next_queued(session_id)
+            except Exception as exc:
+                logger.warning(f"[Queue] Failed to auto-process queued message from handle_queue_message: {exc}")
 
     # ------------------------------------------------------------------
     # handle_remove_queued_message

@@ -1409,13 +1409,38 @@ export const activeSession = {
 
 	queueMessage(content: string) {
 		if (!_state.sessionId) return;
-		wsConn.send({
+
+		// Optimistic local update — show the message in the queue bar immediately
+		// rather than waiting for the server roundtrip.  When the server's
+		// queue_updated event arrives it replaces this with the authoritative state.
+		const optimisticId = `queued-local-${Date.now()}`;
+		_update(s => ({
+			...s,
+			queuedMessages: [...s.queuedMessages, {
+				id: optimisticId,
+				content,
+				queuedAt: Date.now(),
+			}],
+		}));
+
+		const sent = wsConn.send({
 			type: 'queue_message',
 			session_id: _state.sessionId,
 			content,
 			profile: _state.currentQueryProfileId || _state.profile,
 			project: _state.project || undefined,
 		});
+
+		if (!sent) {
+			// WS send failed — remove the optimistic entry and surface an error
+			// so the user knows to retry.  The message text is preserved in the
+			// optimistic queue entry briefly; removing it here keeps state clean.
+			_update(s => ({
+				...s,
+				queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticId),
+				error: 'Failed to queue message — connection lost. Please try again.',
+			}));
+		}
 	},
 
 	removeQueuedMessage(id: string) {
