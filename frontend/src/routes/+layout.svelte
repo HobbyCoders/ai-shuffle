@@ -12,6 +12,7 @@
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
 	import { files } from '$lib/stores/files';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
+	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import { onDestroy } from 'svelte';
 	import type { Snippet } from 'svelte';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
@@ -77,7 +78,8 @@
 					hotkeyPreferences.syncFromServer(),
 					theme.syncFromServer(),
 					files.syncFromServer(),
-					gitActionPreferences.syncFromServer()
+					gitActionPreferences.syncFromServer(),
+					timezonePreference.syncFromServer()
 				]);
 			}
 
