@@ -19,9 +19,11 @@ export interface SubagentChildMessage {
 	id: string;
 	type: 'text' | 'tool_use' | 'tool_result';
 	content: string;
+	streaming?: boolean; // Whether this child is still streaming
 	toolName?: string;
 	toolId?: string;
 	toolInput?: Record<string, unknown>;
+	partialToolInput?: string; // Streaming JSON accumulator for incomplete tool_input
 	toolResult?: string; // Result content for tool_use (grouped with tool call)
 	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
 	timestamp?: string;

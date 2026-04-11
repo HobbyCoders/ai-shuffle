@@ -507,7 +507,16 @@ function convertServerMessage(m: Record<string, unknown>, index: number): ChatMe
 	if (m.agentDescription) msg.agentDescription = m.agentDescription as string;
 	if (m.agentPrompt) msg.agentPrompt = m.agentPrompt as string;
 	if (m.agentStatus) msg.agentStatus = m.agentStatus as 'pending' | 'running' | 'completed' | 'error';
-	if (m.agentChildren) msg.agentChildren = m.agentChildren as SubagentChildMessage[];
+	if (m.agentChildren) {
+		msg.agentChildren = (m.agentChildren as SubagentChildMessage[]).map(child => {
+			// For streaming tool_use children, set partialToolInput from content
+			// (mirrors the top-level tool_use handling above)
+			if (child.type === 'tool_use' && child.streaming && child.content && !child.toolInput) {
+				return { ...child, partialToolInput: child.content };
+			}
+			return child;
+		});
+	}
 	if (m.agentUsage) msg.agentUsage = m.agentUsage as ChatMessage['agentUsage'];
 
 	if (m.systemSubtype) msg.systemSubtype = m.systemSubtype as string;

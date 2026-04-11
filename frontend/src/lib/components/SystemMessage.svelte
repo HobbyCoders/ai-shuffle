@@ -22,7 +22,7 @@
 	}
 
 	// Get formatted content based on subtype
-	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string; hidden?: boolean; compact?: boolean } {
+	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string; hidden?: boolean; compact?: boolean; collapsible?: boolean; rawOutput?: string } {
 		const subtype = message.systemSubtype || 'system';
 		const data: Record<string, unknown> = message.systemData || {};
 
@@ -207,7 +207,7 @@
 			}
 
 			case 'hook_started': {
-				// Hook launch events — compact single-line display
+				// Hook launch events — hidden because hook_response follows with full info
 				const hookName = (data.hook_name as string) || (data.hookName as string) || (data.name as string) || '';
 				const hookType = (data.hook_type as string) || (data.hookType as string) || (data.type as string) || '';
 				const parts = [hookName, hookType].filter(Boolean);
@@ -216,26 +216,33 @@
 					content: parts.length > 0 ? parts.join(' \u00b7 ') : 'hook executing',
 					badge: hookType || 'hook',
 					badgeColor: 'gray',
+					hidden: true,
 					compact: true
 				};
 			}
 
 			case 'hook_response': {
-				// Hook completion — show pass/fail + any output snippet
+				// Hook completion — collapsible with raw output
 				const exitCode = (data.exitCode as number) ?? (data.exit_code as number) ?? null;
-				const success = exitCode === 0 || (data.success as boolean) === true;
+				// Default to success if no explicit error indicators
+				const hasError = exitCode !== null && exitCode !== 0;
+				const explicitFail = (data.success as boolean) === false;
+				const success = !hasError && !explicitFail;
 				const errMsg = (data.error as string) || (data.stderr as string) || '';
 				const outMsg = (data.output as string) || (data.stdout as string) || (data.message as string) || '';
 				const hookNameResp = (data.hook_name as string) || (data.hookName as string) || (data.name as string) || '';
-				const snippet = errMsg || outMsg;
-				const truncatedSnippet = snippet.length > 120 ? snippet.slice(0, 120) + '\u2026' : snippet;
-				const parts = [hookNameResp, truncatedSnippet].filter(Boolean);
+				const rawOutput = errMsg || outMsg;
+				// Short summary for header — hook name + truncated first line
+				const firstLine = rawOutput.split('\n')[0] || '';
+				const shortSnippet = firstLine.length > 60 ? firstLine.slice(0, 60) + '\u2026' : firstLine;
+				const headerParts = [hookNameResp, shortSnippet].filter(Boolean);
 				return {
-					title: 'Hook Response',
-					content: parts.length > 0 ? parts.join(' \u00b7 ') : (success ? 'completed' : 'failed'),
+					title: 'Hook',
+					content: headerParts.length > 0 ? headerParts.join(' \u00b7 ') : (success ? 'completed' : 'failed'),
 					badge: success ? 'success' : 'failed',
 					badgeColor: success ? 'green' : 'red',
-					compact: true
+					collapsible: true,
+					rawOutput: rawOutput || undefined
 				};
 			}
 
@@ -411,7 +418,52 @@
 </script>
 
 {#if !formatted.hidden}
-	{#if formatted.compact}
+	{#if formatted.collapsible}
+		<!-- Collapsible rendering for hook responses — styled like tool messages -->
+		<div class="w-full border border-border rounded-lg overflow-hidden">
+			<details class="group/hook">
+				<summary class="hook-summary w-full px-3 py-2 flex items-center gap-2 min-w-0 cursor-pointer list-none">
+					<!-- Status icon -->
+					{#if formatted.badgeColor === 'green'}
+						<svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+						</svg>
+					{:else if formatted.badgeColor === 'red'}
+						<svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+						</svg>
+					{:else}
+						<svg class="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+						</svg>
+					{/if}
+					<!-- Hook icon (lightning bolt) -->
+					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+					</svg>
+					<!-- Title -->
+					<span class="text-sm font-medium text-foreground flex-shrink-0">{formatted.title}</span>
+					<!-- Content summary -->
+					{#if formatted.content}
+						<span class="text-muted-foreground flex-shrink-0">&bull;</span>
+						<span class="text-sm text-muted-foreground truncate min-w-0" title={formatted.content}>{formatted.content}</span>
+					{/if}
+					<!-- Chevron -->
+					<svg class="w-4 h-4 text-muted-foreground ml-auto flex-shrink-0 transition-transform group-open/hook:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+					</svg>
+				</summary>
+				{#if formatted.rawOutput}
+					<div class="px-3 pb-3 pt-1">
+						<div class="p-2 bg-muted/50 rounded border border-zinc-500/20">
+							<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Output</div>
+							<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{formatted.rawOutput}</pre>
+						</div>
+					</div>
+				{/if}
+			</details>
+		</div>
+	{:else if formatted.compact}
 		<!-- Compact single-line rendering for hooks — styled like tool messages -->
 		<div class="w-full border border-border rounded-lg overflow-hidden">
 			<div class="compact-summary w-full px-3 py-2 flex items-center gap-2 min-w-0">
@@ -425,8 +477,9 @@
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
 					</svg>
 				{:else}
-					<svg class="w-4 h-4 text-primary animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+					<!-- Static icon for non-terminal states (not spinner) -->
+					<svg class="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
 					</svg>
 				{/if}
 				<!-- Hook icon (lightning bolt) -->
@@ -473,6 +526,16 @@
 	/* Compact hook messages — match tool-summary hover behavior */
 	.compact-summary {
 		transition: background-color 150ms ease;
+	}
+	/* Collapsible hook summary — match tool message details pattern */
+	.hook-summary {
+		transition: background-color 150ms ease;
+	}
+	.hook-summary:hover {
+		background-color: hsl(var(--muted) / 0.5);
+	}
+	.hook-summary::-webkit-details-marker {
+		display: none;
 	}
 
 	/* Custom styles for system message markdown content */

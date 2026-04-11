@@ -106,6 +106,38 @@
 		}
 	}
 
+	/**
+	 * Extract a short summary from tool input for the collapsed header line.
+	 * Tries complete input first, falls back to partial JSON regex extraction.
+	 */
+	function getChildSummary(child: import('$lib/stores/types').SubagentChildMessage): string {
+		// Try complete input first
+		if (child.toolInput) {
+			const input = child.toolInput;
+			const candidates = ['description', 'file_path', 'path', 'pattern', 'command', 'query', 'prompt', 'url', 'skill', 'glob'];
+			for (const key of candidates) {
+				if (input[key]) {
+					const val = String(input[key]);
+					return val.length > 80 ? val.slice(0, 80) + '\u2026' : val;
+				}
+			}
+			return '';
+		}
+		// Fall back to partial JSON extraction during streaming
+		if (child.partialToolInput) {
+			const candidates = ['description', 'file_path', 'path', 'pattern', 'command', 'query', 'prompt', 'url', 'skill', 'glob'];
+			for (const key of candidates) {
+				const regex = new RegExp(`"${key}"\\s*:\\s*"([^"]*)"?`);
+				const match = child.partialToolInput.match(regex);
+				if (match?.[1]) {
+					const val = match[1];
+					return val.length > 80 ? val.slice(0, 80) + '\u2026' : val;
+				}
+			}
+		}
+		return '';
+	}
+
 	function truncateContent(content: string, maxLength: number = 500): string {
 		if (content.length <= maxLength) return content;
 		return content.substring(0, maxLength) + '...';
@@ -249,7 +281,10 @@
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
 									</svg>
 									<span class="text-sm font-medium text-foreground">{child.toolName || 'Tool'}</span>
-									<svg class="w-4 h-4 text-muted-foreground ml-auto transition-transform group-open/tool:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									{#if getChildSummary(child)}
+										<span class="text-sm text-muted-foreground truncate min-w-0">{getChildSummary(child)}</span>
+									{/if}
+									<svg class="w-4 h-4 text-muted-foreground ml-auto flex-shrink-0 transition-transform group-open/tool:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 									</svg>
 								</summary>
@@ -258,6 +293,11 @@
 										<div class="p-2 bg-muted/50 rounded">
 											<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Input</div>
 											<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{formatToolInput(child.toolInput)}</pre>
+										</div>
+									{:else if child.partialToolInput}
+										<div class="p-2 bg-muted/50 rounded">
+											<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Input</div>
+											<pre class="text-xs text-muted-foreground overflow-x-auto max-h-32 whitespace-pre-wrap break-words font-mono">{child.partialToolInput}<span class="inline-block w-1.5 h-3 ml-0.5 bg-primary animate-pulse"></span></pre>
 										</div>
 									{/if}
 									{#if child.toolResult}
