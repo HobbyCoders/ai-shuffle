@@ -319,11 +319,15 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 				// User is at/near the bottom - enable auto-scroll
 				shouldAutoScroll = true;
 			} else if (currentScrollTop < lastKnownScrollTop) {
-				// User explicitly scrolled UP — disable auto-scroll.
-				// Only direction-decrease counts as intentional scroll-up.
-				// Content growth (scrollHeight increases, scrollTop unchanged)
-				// or programmatic scrolls won't trip this.
-				shouldAutoScroll = false;
+				// Scroll position decreased while not near bottom.
+				// Require a minimum delta to distinguish intentional user scroll-up
+				// from layout-induced jitter (e.g., input area resize after sending
+				// a message causes the browser to adjust scrollTop by a few pixels,
+				// which would falsely disable auto-scroll for the entire stream).
+				const scrollUpDelta = lastKnownScrollTop - currentScrollTop;
+				if (scrollUpDelta > 10) {
+					shouldAutoScroll = false;
+				}
 			}
 			// else: scrollTop increased or unchanged but not near bottom —
 			// likely content grew below viewport. Don't change shouldAutoScroll.
