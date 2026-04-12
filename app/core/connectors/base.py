@@ -191,9 +191,68 @@ class BaseConnector(ABC):
     def status_message(self) -> Optional[str]:
         return self._status_message
 
-    @abstractmethod
+    # Subclasses that depend on optional SDKs should set these class
+    # attributes so the template ``connect()`` can fail fast with a
+    # clear error when the SDK is missing.
+    _SDK_AVAILABLE: Optional[bool] = None   # Set to True/False when an import guard exists
+    _SDK_NAME: Optional[str] = None         # Human-readable SDK package name
+
     async def connect(self) -> bool:
-        """Start the connector. Returns True on success."""
+        """Start the connector. Returns True on success.
+
+        This is a *template method* that handles the common boilerplate
+        shared by every connector:
+
+        1. Check that the required SDK is importable (when ``_SDK_AVAILABLE``
+           is set).
+        2. Transition status to ``CONNECTING``.
+        3. Delegate to ``_do_connect()`` for platform-specific logic.
+        4. On success transition to ``CONNECTED``; on failure transition
+           to ``ERROR``.
+
+        Subclasses should override ``_do_connect()`` instead of
+        ``connect()`` in most cases.  If a subclass *does* override
+        ``connect()`` directly (e.g. because its connection is
+        asynchronous and the ``CONNECTED`` status is set later), the
+        template is bypassed and that is fine.
+        """
+        # --- SDK availability guard ---
+        if self._SDK_AVAILABLE is False:
+            sdk = self._SDK_NAME or "required SDK"
+            self._status = ConnectorStatus.ERROR
+            self._status_message = f"{sdk} is not installed"
+            logger.error(
+                "Cannot start %s %s: %s is not installed",
+                self.__class__.__name__, self.connector_id, sdk,
+            )
+            return False
+
+        try:
+            self._status = ConnectorStatus.CONNECTING
+            await self._do_connect()
+            self._status = ConnectorStatus.CONNECTED
+            self._status_message = None
+            logger.info("%s %s connected", self.__class__.__name__, self.connector_id)
+            return True
+
+        except Exception as exc:
+            self._status = ConnectorStatus.ERROR
+            self._status_message = str(exc)
+            logger.exception(
+                "%s %s failed to connect", self.__class__.__name__, self.connector_id,
+            )
+            return False
+
+    async def _do_connect(self) -> None:
+        """Platform-specific connection logic.
+
+        Override this method in subclasses.  Raise any exception to
+        signal failure — the base ``connect()`` will catch it, log it,
+        and set the status to ``ERROR``.
+
+        The method is called while status is ``CONNECTING``.  On a
+        normal return the base class sets status to ``CONNECTED``.
+        """
         ...
 
     @abstractmethod

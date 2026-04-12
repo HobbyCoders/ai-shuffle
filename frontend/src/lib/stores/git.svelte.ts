@@ -10,7 +10,7 @@
 
 import * as gitApi from '$lib/api/git';
 import { isApiError } from '$lib/api/client';
-import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 // Re-export types from API
 export type {
@@ -82,26 +82,14 @@ const MAX_CACHE_ENTRIES = 10;
 let _state = $state<GitState>({ ...EMPTY_STATE });
 
 // ============================================================================
-// Subscribe shim
+// Subscribe shim (centralized via store-utils)
 // ============================================================================
 
-type Subscriber = (value: GitState) => void;
-
-const _subscribers = new Set<Subscriber>();
-
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
-
-function _update(fn: (s: GitState) => GitState) {
-	_state = fn(untrack(() => _state));
-	_notifySubscribers();
-}
-
-function _set(newState: GitState) {
-	_state = newState;
-	_notifySubscribers();
-}
+const { subscribe, update: _update, set: _set, notifySubscribers: _notifySubscribers, createDerived } =
+	createSubscribers<GitState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ============================================================================
 // Shallow equality helpers — prevent no-op poll updates from triggering
@@ -367,13 +355,7 @@ export const git = {
 		return _state;
 	},
 
-	subscribe(fn: Subscriber) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	async loadRepository(projectId: string, _forceReload = false) {
 		const key = _makeKey(projectId);
@@ -1000,24 +982,8 @@ export const git = {
 };
 
 // ============================================================================
-// Derived stores with subscribe shim
+// Derived stores (via store-utils createDerived)
 // ============================================================================
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() {
-			return getter();
-		},
-		subscribe(fn: (value: T) => void) {
-			const handler: Subscriber = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => {
-				_subscribers.delete(handler);
-			};
-		}
-	};
-}
 
 export const branches = createDerived(() => _state.branches);
 export const commits = createDerived(() => _state.commits);

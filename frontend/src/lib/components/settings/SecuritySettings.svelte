@@ -6,7 +6,7 @@
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
 	import { changePassword } from '$lib/api/auth';
-	import { getErrorMessage } from '$lib/api/client-core';
+	import { getErrorMessage } from '$lib/api/client';
 
 	let expanded = $state(false);
 

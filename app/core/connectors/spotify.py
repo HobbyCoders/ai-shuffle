@@ -293,31 +293,15 @@ class SpotifyConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    _SDK_AVAILABLE = HTTPX_AVAILABLE
+    _SDK_NAME = "httpx"
+
+    async def _do_connect(self) -> None:
         """Create an HTTP client, authenticate, and start polling playback."""
-        if not HTTPX_AVAILABLE:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = "httpx is not installed"
-            logger.error("Cannot start SpotifyConnector: httpx is not installed")
-            return False
+        self._http_client = httpx.AsyncClient(timeout=30.0)
+        await self._refresh_access_token()
 
-        try:
-            self._status = ConnectorStatus.CONNECTING
-
-            self._http_client = httpx.AsyncClient(timeout=30.0)
-            await self._refresh_access_token()
-
-            self._poll_task = asyncio.create_task(self._poll_playback())
-            self._status = ConnectorStatus.CONNECTED
-            self._status_message = None
-            logger.info("SpotifyConnector %s connected", self.connector_id)
-            return True
-
-        except Exception as exc:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = str(exc)
-            logger.exception("SpotifyConnector %s failed to connect", self.connector_id)
-            return False
+        self._poll_task = asyncio.create_task(self._poll_playback())
 
     async def disconnect(self) -> None:
         """Cancel the poll task and close the HTTP client."""

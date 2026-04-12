@@ -2,8 +2,7 @@
  * AI Generation API types and functions
  */
 
-import { api } from './client-core';
-import type { AgentExport } from './client';
+import { api, type AgentExport } from './client';
 
 // ============================================================================
 // Types

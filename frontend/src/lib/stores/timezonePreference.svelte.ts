@@ -10,7 +10,7 @@
 
 import { browser } from '$app/environment';
 import { getPreference, setPreference } from '$lib/api/client';
-import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 const STORAGE_KEY = 'ai-shuffle-timezone';
 const SERVER_PREFERENCE_KEY = 'timezone';
@@ -99,16 +99,14 @@ if (browser && !(window as any).__tzPrefs_listeners) {
 let _state = $state<string>(getStoredTimezone());
 
 // ============================================
-// Subscribe shim
+// Subscribe shim (centralized via store-utils)
 // ============================================
 
-type Subscriber<T> = (value: T) => void;
-
-const _subscribers = new Set<Subscriber<string>>();
-
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
+const { subscribe, notifySubscribers: _notifySubscribers } =
+	createSubscribers<string>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ============================================
 // Exported Store
@@ -119,13 +117,7 @@ export const timezonePreference = {
 		return _state;
 	},
 
-	subscribe(fn: Subscriber<string>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	load(): Promise<void> {
 		return syncFromServer();

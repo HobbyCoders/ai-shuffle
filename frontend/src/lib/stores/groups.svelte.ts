@@ -11,6 +11,7 @@
 
 import { browser } from '$app/environment';
 import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 // ─── Types (re-exported) ─────────────────────────────────────────────────────
 
@@ -190,11 +191,13 @@ let _state = $state<GroupsState>(loadFromLocalStorage());
 // Track if we've loaded from backend
 let backendLoaded = false;
 
-// ─── Subscribe Shim ──────────────────────────────────────────────────────────
+// ─── Subscribe Shim (centralized via store-utils) ───────────────────────────
 
-type Subscriber<T> = (value: T) => void;
-
-const _subscribers = new Set<Subscriber<GroupsState>>();
+const { subscribe, notifySubscribers, createDerived } =
+	createSubscribers<GroupsState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 function _notifySubscribers() {
 	// Auto-save to localStorage + debounced backend on every state change
@@ -205,7 +208,7 @@ function _notifySubscribers() {
 		}
 	}
 
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
+	notifySubscribers();
 }
 
 function _update(fn: (s: GroupsState) => GroupsState) {
@@ -228,7 +231,7 @@ if (browser) {
 			saveToLocalStorage(backendState);
 			backendLoaded = true;
 			// Notify subscribers of the backend-loaded state
-			untrack(() => { for (const fn of _subscribers) fn(_state); });
+			notifySubscribers();
 		} else {
 			// No backend data, sync localStorage to backend
 			if (_state.projects.groups.length > 0 ||
@@ -257,11 +260,7 @@ if (browser) {
 export const groups = {
 	get current() { return _state; },
 
-	subscribe(fn: Subscriber<GroupsState>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => { _subscribers.delete(fn); };
-	},
+	subscribe,
 
 	/**
 	 * Force reload from backend
@@ -489,19 +488,7 @@ export function organizeByGroups<T extends { id: string }>(
 	return { grouped, ungrouped, groupOrder: entity.groups };
 }
 
-// ─── Derived Convenience Stores ──────────────────────────────────────────────
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() { return getter(); },
-		subscribe(fn: Subscriber<T>) {
-			const handler: Subscriber<GroupsState> = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => { _subscribers.delete(handler); };
-		}
-	};
-}
+// ─── Derived Convenience Stores (via store-utils createDerived) ─────────────
 
 export const projectGroups = createDerived(() => _state.projects);
 export const profileGroups = createDerived(() => _state.profiles);

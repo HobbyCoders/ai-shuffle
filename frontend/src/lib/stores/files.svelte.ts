@@ -14,7 +14,7 @@
 
 import { browser } from '$app/environment';
 import { getPreference, setPreference } from '$lib/api/client';
-import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 // ============================================================================
 // Types
@@ -218,21 +218,14 @@ let _state = $state<FilesState>({
 });
 
 // ============================================================================
-// Subscribe shim for backward compat with $storeName syntax
+// Subscribe shim (centralized via store-utils)
 // ============================================================================
 
-type Subscriber<T> = (value: T) => void;
-
-const _subscribers = new Set<Subscriber<FilesState>>();
-
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
-
-function _update(fn: (s: FilesState) => FilesState) {
-	_state = fn(untrack(() => _state));
-	_notifySubscribers();
-}
+const { subscribe, update: _update, notifySubscribers: _notifySubscribers, createDerived } =
+	createSubscribers<FilesState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ============================================================================
 // Exported Store
@@ -243,13 +236,7 @@ export const files = {
 		return _state;
 	},
 
-	subscribe(fn: Subscriber<FilesState>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	// ========================================================================
 	// Navigation
@@ -643,24 +630,8 @@ export const files = {
 };
 
 // ============================================================================
-// Derived Stores
+// Derived Stores (via store-utils createDerived)
 // ============================================================================
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() {
-			return getter();
-		},
-		subscribe(fn: Subscriber<T>) {
-			const handler: Subscriber<FilesState> = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => {
-				_subscribers.delete(handler);
-			};
-		},
-	};
-}
 
 // Derived: Current path breadcrumbs
 export const breadcrumbs = createDerived(() => {

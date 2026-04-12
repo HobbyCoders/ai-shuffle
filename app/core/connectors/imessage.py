@@ -226,44 +226,26 @@ class IMessageConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    async def _do_connect(self) -> None:
         """Start the imsg RPC subprocess and subscribe to incoming messages."""
-        try:
-            self._status = ConnectorStatus.CONNECTING
-            cli_path = self.config.get("cli_path", "imsg")
+        cli_path = self.config.get("cli_path", "imsg")
 
+        try:
             self._rpc = IMessageRpcClient(cli_path=cli_path)
             self._rpc.set_notification_callback(self._on_rpc_notification)
             await self._rpc.start()
-
-            # Verify RPC is working
-            try:
-                await self._rpc.request("chats.list", {"limit": 1})
-            except Exception as exc:
-                self._status = ConnectorStatus.ERROR
-                self._status_message = f"RPC probe failed: {exc}"
-                await self._rpc.stop()
-                return False
-
-            # Subscribe to incoming messages
-            await self._rpc.request("watch.subscribe", {"attachments": False})
-
-            self._status = ConnectorStatus.CONNECTED
-            self._status_message = None
-            logger.info("IMessageConnector %s connected", self.connector_id)
-            return True
-
         except FileNotFoundError:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = "imsg CLI not found (macOS only)"
-            logger.error("Cannot start IMessageConnector: imsg CLI not found")
-            return False
+            raise RuntimeError("imsg CLI not found (macOS only)")
 
+        # Verify RPC is working
+        try:
+            await self._rpc.request("chats.list", {"limit": 1})
         except Exception as exc:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = str(exc)
-            logger.exception("IMessageConnector %s failed to connect", self.connector_id)
-            return False
+            await self._rpc.stop()
+            raise RuntimeError(f"RPC probe failed: {exc}") from exc
+
+        # Subscribe to incoming messages
+        await self._rpc.request("watch.subscribe", {"attachments": False})
 
     async def disconnect(self) -> None:
         """Stop the RPC subprocess."""

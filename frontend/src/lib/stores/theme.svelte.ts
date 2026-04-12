@@ -21,7 +21,7 @@ import {
 	type ThemeStyles
 } from '$lib/themes/presets';
 import { getPreference, setPreference } from '$lib/api/client';
-import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 export type Theme = 'light' | 'dark' | 'system';
 
@@ -311,16 +311,14 @@ if (browser && !(window as any).__theme_media_listener) {
 }
 
 // ============================================================================
-// Subscribe shim
+// Subscribe shim (centralized via store-utils)
 // ============================================================================
 
-type Subscriber = (value: ThemeState) => void;
-
-const _subscribers = new Set<Subscriber>();
-
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
+const { subscribe, notifySubscribers: _notifySubscribers, createDerived } =
+	createSubscribers<ThemeState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ============================================================================
 // Exported Store
@@ -331,13 +329,7 @@ export const theme = {
 		return _state;
 	},
 
-	subscribe(fn: Subscriber) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	/** Set theme preference */
 	setTheme(preference: Theme) {
@@ -449,24 +441,8 @@ export const theme = {
 };
 
 // ============================================================================
-// Derived stores with subscribe shim
+// Derived stores (via store-utils createDerived)
 // ============================================================================
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() {
-			return getter();
-		},
-		subscribe(fn: (value: T) => void) {
-			const handler: Subscriber = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => {
-				_subscribers.delete(handler);
-			};
-		}
-	};
-}
 
 export const themePreference = createDerived(() => _state.preference);
 export const isDark = createDerived(() => _state.resolved === 'dark');

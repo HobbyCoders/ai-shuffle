@@ -21,7 +21,7 @@ import type {
 	McpScope
 } from '$lib/api/mcp';
 import * as mcpApi from '$lib/api/mcp';
-import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 // ============================================================================
 // Types
@@ -85,21 +85,14 @@ function extractError(e: unknown, fallback: string): string {
 let _state = $state<McpState>({ ...initialState, projectServers: { user: [], installed: [], local: [], project: [] } });
 
 // ============================================================================
-// Subscribe Shim
+// Subscribe Shim (centralized via store-utils)
 // ============================================================================
 
-type Subscriber<T> = (value: T) => void;
-
-const _subscribers = new Set<Subscriber<McpState>>();
-
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
-
-function _update(fn: (s: McpState) => McpState) {
-	_state = fn(untrack(() => _state));
-	_notifySubscribers();
-}
+const { subscribe, update: _update, notifySubscribers: _notifySubscribers, createDerived } =
+	createSubscribers<McpState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ============================================================================
 // Exported Store
@@ -110,13 +103,7 @@ export const mcp = {
 		return _state;
 	},
 
-	subscribe(fn: Subscriber<McpState>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	// ========================================================================
 	// Global Server Operations
@@ -434,24 +421,8 @@ export const mcp = {
 };
 
 // ============================================================================
-// Derived Stores
+// Derived Stores (via store-utils createDerived)
 // ============================================================================
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() {
-			return getter();
-		},
-		subscribe(fn: Subscriber<T>) {
-			const handler: Subscriber<McpState> = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => {
-				_subscribers.delete(handler);
-			};
-		}
-	};
-}
 
 // Global servers
 export const globalMcpServers = createDerived(() => _state.globalServers);

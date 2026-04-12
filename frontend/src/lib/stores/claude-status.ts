@@ -11,6 +11,7 @@
  */
 
 import { getClaudeStatus, type ClaudeStatusResponse } from '$lib/api/claude-status';
+import { createStore } from './store-utils';
 
 const POLL_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
 const STORAGE_KEY = 'claude-status-dismissed-fingerprint';
@@ -20,8 +21,6 @@ export interface ClaudeStatusState {
 	loading: boolean;
 	dismissed: boolean;
 }
-
-type Subscriber = (state: ClaudeStatusState) => void;
 
 /**
  * Build a stable fingerprint from current incidents.
@@ -60,30 +59,17 @@ function _clearFingerprint() {
 	}
 }
 
-let _state: ClaudeStatusState = {
+const _store = createStore<ClaudeStatusState>({
 	status: null,
 	loading: false,
 	dismissed: false,
-};
+});
 
-const _subscribers = new Set<Subscriber>();
 let _pollTimer: ReturnType<typeof setInterval> | null = null;
 let _started = false;
 
-function _notify() {
-	const snapshot = { ..._state };
-	for (const fn of _subscribers) {
-		try {
-			fn(snapshot);
-		} catch {
-			// Subscriber threw — ignore
-		}
-	}
-}
-
 function _setState(partial: Partial<ClaudeStatusState>) {
-	_state = { ..._state, ...partial };
-	_notify();
+	_store.update(s => ({ ...s, ...partial }));
 }
 
 /** Compare two status responses to avoid no-op reactive cascades during polling. */
@@ -105,7 +91,7 @@ async function _fetchStatus() {
 		// Status is ok — clear any saved dismiss and show as not-dismissed
 		if (status.ok) {
 			// Skip update if status hasn't changed — prevents idle GC pressure
-			if (_statusUnchanged(status, _state.status)) {
+			if (_statusUnchanged(status, _store.current.status)) {
 				_setState({ loading: false });
 				return;
 			}
@@ -119,7 +105,7 @@ async function _fetchStatus() {
 		const isDismissed = savedFp !== null && savedFp === fingerprint;
 
 		// Skip update if nothing meaningful changed
-		if (_statusUnchanged(status, _state.status) && _state.dismissed === isDismissed) {
+		if (_statusUnchanged(status, _store.current.status) && _store.current.dismissed === isDismissed) {
 			_setState({ loading: false });
 			return;
 		}
@@ -153,14 +139,10 @@ function _stopPoll() {
 
 export const claudeStatus = {
 	get current(): ClaudeStatusState {
-		return _state;
+		return _store.current;
 	},
 
-	subscribe(fn: Subscriber): () => void {
-		_subscribers.add(fn);
-		fn({ ..._state });
-		return () => _subscribers.delete(fn);
-	},
+	subscribe: _store.subscribe,
 
 	/** Start polling. Call once from the root layout. */
 	start() {
@@ -181,8 +163,8 @@ export const claudeStatus = {
 	/** Dismiss the banner. Persists to localStorage so it survives page refreshes.
 	 *  Banner reappears only when incidents change (new incident or updated status). */
 	dismiss() {
-		if (_state.status) {
-			const fp = _buildFingerprint(_state.status);
+		if (_store.current.status) {
+			const fp = _buildFingerprint(_store.current.status);
 			if (fp) _saveFingerprint(fp);
 		}
 		_setState({ dismissed: true });

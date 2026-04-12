@@ -127,35 +127,18 @@ class WhatsAppConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    async def _do_connect(self) -> None:
         """Validate the access token by fetching the phone number details."""
-        try:
-            self._status = ConnectorStatus.CONNECTING
-            phone_number_id = self.config["phone_number_id"]
-            url = f"{GRAPH_API_BASE}/{phone_number_id}"
+        phone_number_id = self.config["phone_number_id"]
+        url = f"{GRAPH_API_BASE}/{phone_number_id}"
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(url, headers=self._headers())
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers=self._headers())
 
-            if response.status_code == 200:
-                self._status = ConnectorStatus.CONNECTED
-                self._status_message = None
-                logger.info("WhatsAppConnector %s connected", self.connector_id)
-                return True
-
-            self._status = ConnectorStatus.ERROR
-            self._status_message = f"API returned {response.status_code}"
-            logger.error(
-                "WhatsAppConnector %s failed to validate token: %s",
-                self.connector_id, response.text[:200],
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"API returned {response.status_code}: {response.text[:200]}"
             )
-            return False
-
-        except Exception as exc:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = str(exc)
-            logger.exception("WhatsAppConnector %s failed to connect", self.connector_id)
-            return False
 
     async def disconnect(self) -> None:
         """Mark the connector as disconnected (no persistent connection)."""

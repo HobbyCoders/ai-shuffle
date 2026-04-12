@@ -22,7 +22,7 @@ import type {
 	AutoUpdateSettings
 } from '$lib/api/plugins';
 import * as pluginsApi from '$lib/api/plugins';
-import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 // ============================================================================
 // Types
@@ -71,21 +71,14 @@ const initialState: PluginsState = {
 let _state = $state<PluginsState>(initialState);
 
 // ============================================================================
-// Subscribe shim
+// Subscribe shim (centralized via store-utils)
 // ============================================================================
 
-type Subscriber<T> = (value: T) => void;
-
-const _subscribers = new Set<Subscriber<PluginsState>>();
-
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
-
-function _update(fn: (s: PluginsState) => PluginsState) {
-	_state = fn(untrack(() => _state));
-	_notifySubscribers();
-}
+const { subscribe, update: _update, notifySubscribers: _notifySubscribers, createDerived } =
+	createSubscribers<PluginsState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ============================================================================
 // Exported Store
@@ -96,13 +89,7 @@ export const plugins = {
 		return _state;
 	},
 
-	subscribe(fn: Subscriber<PluginsState>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	// ========================================================================
 	// Marketplace Operations
@@ -673,24 +660,8 @@ export const plugins = {
 };
 
 // ============================================================================
-// Derived stores with subscribe shim
+// Derived stores (via store-utils createDerived)
 // ============================================================================
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() {
-			return getter();
-		},
-		subscribe(fn: Subscriber<T>) {
-			const handler: Subscriber<PluginsState> = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => {
-				_subscribers.delete(handler);
-			};
-		}
-	};
-}
 
 // All marketplaces
 export const marketplaces = createDerived(() => _state.marketplaces);

@@ -18,6 +18,7 @@ from claude_agent_sdk import query, ClaudeAgentOptions
 from claude_agent_sdk import AssistantMessage, TextBlock
 
 from app.api.auth import require_auth
+from app.api.common import api_error_handler
 from app.core.models import (
     AgentExport,
     AgentExportData,
@@ -194,18 +195,12 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
 
     response_text = []
 
-    try:
+    async with api_error_handler("run AI generation"):
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         response_text.append(block.text)
-    except Exception as e:
-        logger.exception("AI generation failed")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="AI generation failed"
-        )
 
     return "".join(response_text)
 

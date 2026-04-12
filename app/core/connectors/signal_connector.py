@@ -132,32 +132,17 @@ class SignalConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    async def _do_connect(self) -> None:
         """Validate the signal-cli API connection and start the SSE listener."""
-        try:
-            self._status = ConnectorStatus.CONNECTING
+        # Health check
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{self._api_url}/api/v1/about")
 
-            # Health check
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(f"{self._api_url}/api/v1/about")
+        if response.status_code != 200:
+            raise RuntimeError(f"API returned {response.status_code}")
 
-            if response.status_code != 200:
-                self._status = ConnectorStatus.ERROR
-                self._status_message = f"API returned {response.status_code}"
-                return False
-
-            # Start SSE listener for incoming messages
-            self._task = asyncio.create_task(self._sse_listener())
-            self._status = ConnectorStatus.CONNECTED
-            self._status_message = None
-            logger.info("SignalConnector %s connected", self.connector_id)
-            return True
-
-        except Exception as exc:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = str(exc)
-            logger.exception("SignalConnector %s failed to connect", self.connector_id)
-            return False
+        # Start SSE listener for incoming messages
+        self._task = asyncio.create_task(self._sse_listener())
 
     async def _sse_listener(self) -> None:
         """

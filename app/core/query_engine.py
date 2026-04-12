@@ -15,7 +15,7 @@ import re
 import time
 import uuid
 import asyncio
-from typing import Optional, Dict, Any, AsyncGenerator
+from typing import Optional, Dict, Any, AsyncGenerator, Callable
 from datetime import datetime, timezone
 
 from claude_agent_sdk import query, ClaudeAgentOptions
@@ -92,6 +92,22 @@ logger = logging.getLogger(__name__)
 
 # Pending background tasks awaiting pool entry creation
 _pending_background_tasks: Dict[str, asyncio.Task] = {}
+
+
+def _wrap_stderr_capture(original_stderr: Optional[Callable]) -> tuple[Callable[[str], None], list[str]]:
+    """Wrap a stderr callback to also capture lines into a list.
+
+    Returns (capturing_callback, captured_lines) so callers can inspect
+    captured stderr output for error reporting.
+    """
+    captured: list[str] = []
+
+    def capturing_stderr(line: str):
+        captured.append(line)
+        if original_stderr:
+            original_stderr(line)
+
+    return capturing_stderr, captured
 
 
 async def _persist_turn_results(
@@ -554,13 +570,7 @@ async def stream_query(
         logger.debug(f"Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
 
         # Wrap stderr callback to collect lines for error reporting
-        cli_stderr_lines: list[str] = []
-        original_stderr = options.stderr
-        def capturing_stderr(line: str):
-            cli_stderr_lines.append(line)
-            if original_stderr:
-                original_stderr(line)
-        options.stderr = capturing_stderr
+        options.stderr, cli_stderr_lines = _wrap_stderr_capture(options.stderr)
 
         adapter = ClaudeAgentAdapter()
 
@@ -968,13 +978,7 @@ async def _run_background_query(
         logger.debug(f"[Background] Creating new ClaudeSDKClient for session {session_id} (resume={resume_id is not None})")
 
         # Wrap stderr callback to collect lines for error reporting
-        cli_stderr_lines: list[str] = []
-        original_stderr = options.stderr
-        def capturing_stderr(line: str):
-            cli_stderr_lines.append(line)
-            if original_stderr:
-                original_stderr(line)
-        options.stderr = capturing_stderr
+        options.stderr, cli_stderr_lines = _wrap_stderr_capture(options.stderr)
 
         adapter = ClaudeAgentAdapter()
 
@@ -1743,13 +1747,7 @@ async def stream_to_websocket(
         logger.debug(f"[WS] Options cwd: {options.cwd}")
 
         # Wrap stderr callback to collect lines for error reporting
-        cli_stderr_lines: list[str] = []
-        original_stderr = options.stderr
-        def capturing_stderr(line: str):
-            cli_stderr_lines.append(line)
-            if original_stderr:
-                original_stderr(line)
-        options.stderr = capturing_stderr
+        options.stderr, cli_stderr_lines = _wrap_stderr_capture(options.stderr)
 
         adapter = ClaudeAgentAdapter()
         logger.debug("[WS] ClaudeAgentAdapter created, attempting connect...")

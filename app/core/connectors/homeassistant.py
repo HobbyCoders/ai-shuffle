@@ -242,13 +242,11 @@ class HomeAssistantConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    async def _do_connect(self) -> None:
         """Connect to Home Assistant, validate API, load initial states."""
+        self._http_client = httpx.AsyncClient(timeout=HA_TIMEOUT)
+
         try:
-            self._status = ConnectorStatus.CONNECTING
-
-            self._http_client = httpx.AsyncClient(timeout=HA_TIMEOUT)
-
             # Validate connectivity
             resp = await self._api_get("/api/")
             if resp.status_code != 200:
@@ -279,21 +277,11 @@ class HomeAssistantConnector(BaseConnector):
             # Start polling task
             self._poll_task = asyncio.create_task(self._poll_states())
 
-            self._status = ConnectorStatus.CONNECTED
-            self._status_message = None
-            logger.info("HomeAssistantConnector %s connected", self.connector_id)
-            return True
-
-        except Exception as exc:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = str(exc)
-            logger.exception(
-                "HomeAssistantConnector %s failed to connect", self.connector_id
-            )
+        except Exception:
             if self._http_client is not None:
                 await self._http_client.aclose()
                 self._http_client = None
-            return False
+            raise
 
     async def disconnect(self) -> None:
         """Stop polling and close the HTTP client."""

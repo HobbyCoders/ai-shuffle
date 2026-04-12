@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 from app.api.auth import require_auth, require_admin
+from app.api.common import api_error_handler
 from app.core.plugin_service import (
     get_plugin_service
 )
@@ -163,7 +164,7 @@ class AutoUpdateRunResponse(BaseModel):
 @router.get("/marketplaces", response_model=List[MarketplaceResponse])
 async def list_marketplaces(token: str = Depends(require_auth)):
     """List all registered plugin marketplaces"""
-    try:
+    async with api_error_handler("load marketplaces"):
         service = get_plugin_service()
         marketplaces = service.get_marketplaces()
         return [
@@ -176,12 +177,6 @@ async def list_marketplaces(token: str = Depends(require_auth)):
             )
             for mp in marketplaces
         ]
-    except Exception as e:
-        logger.exception("Failed to load marketplaces")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to load marketplaces"
-        )
 
 
 @router.post("/marketplaces", response_model=MarketplaceResponse, status_code=status.HTTP_201_CREATED)
@@ -262,7 +257,7 @@ async def list_available_plugins(
     token: str = Depends(require_auth)
 ):
     """List all available plugins from marketplaces"""
-    try:
+    async with api_error_handler("load available plugins"):
         service = get_plugin_service()
         plugins = service.get_available_plugins(marketplace)
         return [
@@ -282,12 +277,6 @@ async def list_available_plugins(
             )
             for p in plugins
         ]
-    except Exception as e:
-        logger.exception("Failed to load available plugins")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to load available plugins"
-        )
 
 
 # ============================================================================
@@ -297,7 +286,7 @@ async def list_available_plugins(
 @router.get("/installed", response_model=List[PluginResponse])
 async def list_installed_plugins(token: str = Depends(require_auth)):
     """List all installed plugins"""
-    try:
+    async with api_error_handler("load installed plugins"):
         service = get_plugin_service()
         plugins = service.get_installed_plugins()
         return [
@@ -319,12 +308,6 @@ async def list_installed_plugins(token: str = Depends(require_auth)):
             )
             for p in plugins
         ]
-    except Exception as e:
-        logger.exception("Failed to load installed plugins")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to load installed plugins"
-        )
 
 
 # ============================================================================
@@ -335,7 +318,7 @@ async def list_installed_plugins(token: str = Depends(require_auth)):
 @router.get("/agents/file-based", response_model=List[FileAgentResponse])
 async def list_file_based_agents(token: str = Depends(require_auth)):
     """List all file-based agents from enabled plugins"""
-    try:
+    async with api_error_handler("load file-based agents"):
         service = get_plugin_service()
         agents = service.get_file_based_agents()
         return [
@@ -351,12 +334,6 @@ async def list_file_based_agents(token: str = Depends(require_auth)):
             )
             for a in agents
         ]
-    except Exception as e:
-        logger.exception("Failed to load file-based agents")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to load file-based agents"
-        )
 
 
 # ============================================================================
@@ -367,8 +344,8 @@ async def list_file_based_agents(token: str = Depends(require_auth)):
 @router.get("/updates", response_model=List[PluginUpdateInfoResponse])
 async def check_for_updates(token: str = Depends(require_auth)):
     """Check all installed plugins for available updates"""
-    service = get_plugin_service()
-    try:
+    async with api_error_handler("check for updates"):
+        service = get_plugin_service()
         updates = service.check_for_updates()
         return [
             PluginUpdateInfoResponse(
@@ -381,12 +358,6 @@ async def check_for_updates(token: str = Depends(require_auth)):
             )
             for u in updates
         ]
-    except Exception as e:
-        logger.exception("Failed to check for updates")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to check for updates"
-        )
 
 
 @router.post("/update", response_model=PluginResponse, status_code=status.HTTP_200_OK)
@@ -395,43 +366,38 @@ async def update_plugin(
     token: str = Depends(require_admin)
 ):
     """Update a specific plugin to the latest version - Admin only"""
-    service = get_plugin_service()
-    try:
-        plugin = service.update_plugin(request.plugin_id)
-        return PluginResponse(
-            id=plugin.id,
-            name=plugin.name,
-            marketplace=plugin.marketplace,
-            description=plugin.description,
-            version=plugin.version,
-            scope=plugin.scope,
-            install_path=plugin.install_path,
-            installed_at=plugin.installed_at,
-            enabled=plugin.enabled,
-            has_commands=plugin.has_commands,
-            has_agents=plugin.has_agents,
-            has_skills=plugin.has_skills,
-            has_hooks=plugin.has_hooks,
-            has_mcp=plugin.has_mcp
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except Exception as e:
-        logger.exception(f"Failed to update plugin: {request.plugin_id}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update plugin"
-        )
+    async with api_error_handler("update plugin"):
+        service = get_plugin_service()
+        try:
+            plugin = service.update_plugin(request.plugin_id)
+            return PluginResponse(
+                id=plugin.id,
+                name=plugin.name,
+                marketplace=plugin.marketplace,
+                description=plugin.description,
+                version=plugin.version,
+                scope=plugin.scope,
+                install_path=plugin.install_path,
+                installed_at=plugin.installed_at,
+                enabled=plugin.enabled,
+                has_commands=plugin.has_commands,
+                has_agents=plugin.has_agents,
+                has_skills=plugin.has_skills,
+                has_hooks=plugin.has_hooks,
+                has_mcp=plugin.has_mcp
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e)
+            )
 
 
 @router.post("/update/all", response_model=List[PluginResponse], status_code=status.HTTP_200_OK)
 async def update_all_plugins(token: str = Depends(require_admin)):
     """Update all plugins that have available updates - Admin only"""
-    service = get_plugin_service()
-    try:
+    async with api_error_handler("update all plugins"):
+        service = get_plugin_service()
         plugins = service.update_all_plugins()
         return [
             PluginResponse(
@@ -452,12 +418,6 @@ async def update_all_plugins(token: str = Depends(require_admin)):
             )
             for p in plugins
         ]
-    except Exception as e:
-        logger.exception("Failed to update all plugins")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update plugins"
-        )
 
 
 # ============================================================================
@@ -517,16 +477,10 @@ async def update_auto_update_settings(
 async def run_auto_update(token: str = Depends(require_admin)):
     """Manually trigger an auto-update cycle - Admin only"""
     import asyncio
-    service = get_plugin_service()
-    try:
+    async with api_error_handler("run auto-update"):
+        service = get_plugin_service()
         summary = await asyncio.to_thread(service.run_auto_update)
         return AutoUpdateRunResponse(**summary)
-    except Exception as e:
-        logger.exception("Failed to run auto-update")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to run auto-update"
-        )
 
 
 # ============================================================================

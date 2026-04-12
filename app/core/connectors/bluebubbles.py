@@ -232,34 +232,16 @@ class BlueBubblesConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    async def _do_connect(self) -> None:
         """Validate the BlueBubbles server connection."""
-        try:
-            self._status = ConnectorStatus.CONNECTING
-            response = await self._api_get("/api/v1/server/info")
+        response = await self._api_get("/api/v1/server/info")
 
-            if response.status_code == 200:
-                self._server_info = response.json().get("data", {})
-                self._status = ConnectorStatus.CONNECTED
-                self._status_message = None
-                logger.info("BlueBubblesConnector %s connected", self.connector_id)
-                return True
-
-            self._status = ConnectorStatus.ERROR
-            self._status_message = f"API returned {response.status_code}"
-            logger.error(
-                "BlueBubblesConnector %s failed to connect: %s",
-                self.connector_id, response.text[:200],
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"API returned {response.status_code}: {response.text[:200]}"
             )
-            return False
 
-        except Exception as exc:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = str(exc)
-            logger.exception(
-                "BlueBubblesConnector %s failed to connect", self.connector_id
-            )
-            return False
+        self._server_info = response.json().get("data", {})
 
     async def disconnect(self) -> None:
         """Mark as disconnected (webhook-based, no persistent connection)."""

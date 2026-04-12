@@ -259,6 +259,92 @@ def get_sessions_paginated(
         return sessions, total
 
 
+def get_sessions_cursor(
+    project_id: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    status: Optional[str] = None,
+    api_user_id: Optional[str] = None,
+    api_users_only: bool = False,
+    favorites_only: bool = False,
+    tag_id: Optional[str] = None,
+    limit: int = 50,
+    cursor: Optional[str] = None,
+    cursor_id: Optional[str] = None,
+) -> tuple[List[Dict[str, Any]], Optional[str], Optional[str], bool]:
+    """Get sessions using cursor-based pagination (keyset pagination).
+
+    Uses (updated_at, id) as the cursor key for deterministic ordering.
+
+    Returns:
+        Tuple of (sessions, next_cursor, next_cursor_id, has_more)
+    """
+    from app.core.config import settings
+    _ph = ph()
+    # Sessions are instance-scoped; NULL instance_id is treated as shared/legacy.
+    instance_id = settings.effective_instance_id
+    if tag_id:
+        base_query = f"""FROM sessions s
+                       INNER JOIN session_tags st ON s.id = st.session_id
+                       WHERE st.tag_id = {_ph}
+                         AND (s.instance_id = {_ph} OR s.instance_id IS NULL)"""
+        params: List[Any] = [tag_id, instance_id]
+        col_prefix = "s."
+    else:
+        base_query = f"FROM sessions WHERE (instance_id = {_ph} OR instance_id IS NULL)"
+        params = [instance_id]
+        col_prefix = ""
+
+    if project_id:
+        base_query += f" AND {col_prefix}project_id = {_ph}"
+        params.append(project_id)
+    if profile_id:
+        base_query += f" AND {col_prefix}profile_id = {_ph}"
+        params.append(profile_id)
+    if status:
+        base_query += f" AND {col_prefix}status = {_ph}"
+        params.append(status)
+    if favorites_only:
+        base_query += f" AND {col_prefix}is_favorite = TRUE"
+    if api_users_only:
+        base_query += f" AND {col_prefix}api_user_id IS NOT NULL"
+    elif api_user_id is not None:
+        if api_user_id:
+            base_query += f" AND {col_prefix}api_user_id = {_ph}"
+            params.append(api_user_id)
+        else:
+            base_query += f" AND {col_prefix}api_user_id IS NULL"
+
+    # Cursor condition: seek past the last seen (updated_at, id)
+    if cursor and cursor_id:
+        base_query += f" AND ({col_prefix}updated_at < {_ph} OR ({col_prefix}updated_at = {_ph} AND {col_prefix}id < {_ph}))"
+        params.extend([cursor, cursor, cursor_id])
+
+    with get_db() as conn:
+        db_cursor = get_cursor(conn)
+
+        # Request limit+1 to detect has_more without a COUNT query
+        fetch_limit = limit + 1
+        if tag_id:
+            data_query = f"SELECT DISTINCT s.* {base_query} ORDER BY s.updated_at DESC, s.id DESC LIMIT {_ph}"
+        else:
+            data_query = f"SELECT * {base_query} ORDER BY updated_at DESC, id DESC LIMIT {_ph}"
+        db_cursor.execute(data_query, params + [fetch_limit])
+        rows = rows_to_list(db_cursor.fetchall())
+
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+
+        next_cursor: Optional[str] = None
+        next_cursor_id: Optional[str] = None
+        if rows and has_more:
+            last = rows[-1]
+            next_cursor = last["updated_at"]
+            next_cursor_id = last["id"]
+
+        return rows, next_cursor, next_cursor_id, has_more
+
+
 def create_session(
     session_id: str,
     profile_id: str,

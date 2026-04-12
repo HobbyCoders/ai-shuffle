@@ -31,15 +31,12 @@ import { sessionEphemeralCache } from './session-cache';
 import { appData } from './app-data';
 import { git } from './git.svelte';
 import { untrack } from 'svelte';
+import { createStore, createSubscribers } from './store-utils';
 // Shared types
 import type {
 	ChatMessage, MessageType, TodoItem,
 	QueuedMessage, ExecutionMode
 } from './types';
-
-// ─── Subscriber Type ─────────────────────────────────────────────────────────
-
-type Subscriber<T> = (value: T) => void;
 
 // ─── Module-Level Exports ────────────────────────────────────────────────────
 
@@ -51,56 +48,26 @@ export interface StreamingSessionInfo {
 
 // ─── streamingSessions ───────────────────────────────────────────────────────
 
-let _streamingSessions: Map<string, StreamingSessionInfo> = new Map();
-const _ssSubs = new Set<Subscriber<Map<string, StreamingSessionInfo>>>();
-
-function _notifySsSubs() {
-	untrack(() => { for (const fn of _ssSubs) fn(_streamingSessions); });
-}
+const _ssStore = createStore<Map<string, StreamingSessionInfo>>(new Map());
 
 /** Track which sessions are streaming across all user devices */
 export const streamingSessions = {
-	get current() { return _streamingSessions; },
-	subscribe(fn: Subscriber<Map<string, StreamingSessionInfo>>) {
-		_ssSubs.add(fn);
-		untrack(() => fn(_streamingSessions));
-		return () => { _ssSubs.delete(fn); };
-	},
-	set(value: Map<string, StreamingSessionInfo>) {
-		_streamingSessions = value;
-		_notifySsSubs();
-	},
-	update(fn: (v: Map<string, StreamingSessionInfo>) => Map<string, StreamingSessionInfo>) {
-		_streamingSessions = fn(_streamingSessions);
-		_notifySsSubs();
-	}
+	get current() { return _ssStore.current; },
+	subscribe: _ssStore.subscribe,
+	set: _ssStore.set,
+	update: _ssStore.update,
 };
 
 // ─── backgroundPermissions ────────────────────────────────────────────────────
 
-let _backgroundPermissions: Map<string, number> = new Map();
-const _bpSubs = new Set<Subscriber<Map<string, number>>>();
-
-function _notifyBpSubs() {
-	untrack(() => { for (const fn of _bpSubs) fn(_backgroundPermissions); });
-}
+const _bpStore = createStore<Map<string, number>>(new Map());
 
 /** Track pending permissions for non-active sessions ("needs attention" indicator) */
 export const backgroundPermissions = {
-	get current() { return _backgroundPermissions; },
-	subscribe(fn: Subscriber<Map<string, number>>) {
-		_bpSubs.add(fn);
-		untrack(() => fn(_backgroundPermissions));
-		return () => { _bpSubs.delete(fn); };
-	},
-	set(value: Map<string, number>) {
-		_backgroundPermissions = value;
-		_notifyBpSubs();
-	},
-	update(fn: (v: Map<string, number>) => Map<string, number>) {
-		_backgroundPermissions = fn(_backgroundPermissions);
-		_notifyBpSubs();
-	}
+	get current() { return _bpStore.current; },
+	subscribe: _bpStore.subscribe,
+	set: _bpStore.set,
+	update: _bpStore.update,
 };
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
@@ -325,13 +292,13 @@ function defaultState(): ActiveSessionState {
 
 let _state: ActiveSessionState = defaultState();
 
-// ─── Subscribe shim ──────────────────────────────────────────────────────────
+// ─── Subscribe shim (centralized via store-utils) ───────────────────────────
 
-const _subscribers = new Set<Subscriber<ActiveSessionState>>();
-
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
+const { subscribe: _subscribe, notifySubscribers: _notifySubscribers, createDerived } =
+	createSubscribers<ActiveSessionState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
 	const next = fn(untrack(() => _state));
@@ -1024,11 +991,7 @@ function destroy() {
 export const activeSession = {
 	get current() { return _state; },
 
-	subscribe(fn: Subscriber<ActiveSessionState>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => { _subscribers.delete(fn); };
-	},
+	subscribe: _subscribe,
 
 	init,
 	destroy,
@@ -1719,19 +1682,7 @@ export const activeSession = {
 	getDeviceId: () => typeof window !== 'undefined' ? getOrCreateDeviceId() : '',
 };
 
-// ─── Derived Convenience Stores ──────────────────────────────────────────────
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() { return getter(); },
-		subscribe(fn: Subscriber<T>) {
-			const handler: Subscriber<ActiveSessionState> = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => { _subscribers.delete(handler); };
-		}
-	};
-}
+// ─── Derived Convenience Stores (via store-utils createDerived) ─────────────
 
 export const activeSessionId = createDerived(() => _state.sessionId);
 export const activeMessages = createDerived(() => _state.messages);

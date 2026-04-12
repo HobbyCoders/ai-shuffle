@@ -7,6 +7,7 @@
 
 import { browser } from '$app/environment';
 import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 interface PWAState {
 	isInstalled: boolean;
@@ -117,20 +118,14 @@ function wasRecentlyDismissed(): boolean {
 }
 
 // ============================================================================
-// Subscribe shim for Svelte 4 compatibility
+// Subscribe shim (centralized via store-utils)
 // ============================================================================
 
-type Subscriber = (value: PWAState) => void;
-
-const _subscribers = new Set<Subscriber>();
-
-/**
- * Notify all subscribers of state changes.
- * Called via $effect in components that import the store.
- */
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
+const { subscribe, notifySubscribers: _notifySubscribers, createDerived } =
+	createSubscribers<PWAState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ============================================================================
 // Event listener references (for cleanup)
@@ -192,13 +187,7 @@ export const pwa = {
 	/**
 	 * Svelte 4 compatibility: subscribe for $pwa auto-subscription.
 	 */
-	subscribe(fn: Subscriber) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	init() {
 		if (!browser) return;
@@ -304,30 +293,10 @@ export const pwa = {
 };
 
 // ============================================================================
-// Derived values (Svelte 5 $derived)
+// Derived values (via store-utils createDerived)
 // ============================================================================
 
-// These use getter-based objects with subscribe shims for backward compat.
-
-function createDerivedBool(getter: () => boolean) {
-	return {
-		get current() {
-			return getter();
-		},
-		subscribe(fn: (value: boolean) => void) {
-			// For Svelte 4 $store auto-subscription
-			// We piggyback on the parent store's subscriber mechanism
-			const handler: Subscriber = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => {
-				_subscribers.delete(handler);
-			};
-		}
-	};
-}
-
-export const isOnline = createDerivedBool(() => _state.isOnline);
-export const isInstallable = createDerivedBool(() => _state.isInstallable && !_state.isInstalled);
-export const hasUpdate = createDerivedBool(() => _state.hasUpdate);
-export const isInstalled = createDerivedBool(() => _state.isInstalled);
+export const isOnline = createDerived(() => _state.isOnline);
+export const isInstallable = createDerived(() => _state.isInstallable && !_state.isInstalled);
+export const hasUpdate = createDerived(() => _state.hasUpdate);
+export const isInstalled = createDerived(() => _state.isInstalled);

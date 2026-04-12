@@ -202,29 +202,21 @@ class HueConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    async def _do_connect(self) -> None:
         """
         Create an HTTP client, validate the bridge connection by fetching
         the lights list, cache it, and optionally start the polling task.
         """
+        self._http_client = httpx.AsyncClient(timeout=10.0)
+
         try:
-            self._status = ConnectorStatus.CONNECTING
-
-            self._http_client = httpx.AsyncClient(timeout=10.0)
-
             # Validate connection by fetching lights
             response = await self._api_get("/lights")
 
             if response.status_code != 200:
-                self._status = ConnectorStatus.ERROR
-                self._status_message = f"Bridge API returned {response.status_code}"
-                logger.error(
-                    "HueConnector %s failed to connect: %s",
-                    self.connector_id, response.text[:200],
+                raise RuntimeError(
+                    f"Bridge API returned {response.status_code}: {response.text[:200]}"
                 )
-                await self._http_client.aclose()
-                self._http_client = None
-                return False
 
             lights_data = response.json()
 
@@ -232,15 +224,7 @@ class HueConnector(BaseConnector):
             if isinstance(lights_data, list):
                 errors = [e.get("error", {}).get("description", "") for e in lights_data if "error" in e]
                 if errors:
-                    self._status = ConnectorStatus.ERROR
-                    self._status_message = "; ".join(errors)
-                    logger.error(
-                        "HueConnector %s bridge returned errors: %s",
-                        self.connector_id, self._status_message,
-                    )
-                    await self._http_client.aclose()
-                    self._http_client = None
-                    return False
+                    raise RuntimeError("; ".join(errors))
 
             # Cache light ID -> name mapping
             self._lights = {
@@ -259,22 +243,11 @@ class HueConnector(BaseConnector):
             if poll_interval > 0:
                 self._poll_task = asyncio.create_task(self._poll_state(poll_interval))
 
-            self._status = ConnectorStatus.CONNECTED
-            self._status_message = None
-            logger.info(
-                "HueConnector %s connected (%d lights found)",
-                self.connector_id, len(self._lights),
-            )
-            return True
-
-        except Exception as exc:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = str(exc)
-            logger.exception("HueConnector %s failed to connect", self.connector_id)
+        except Exception:
             if self._http_client is not None:
                 await self._http_client.aclose()
                 self._http_client = None
-            return False
+            raise
 
     async def disconnect(self) -> None:
         """Cancel the poll task and close the HTTP client."""

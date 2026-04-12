@@ -374,6 +374,31 @@ def get_automation_daily_stats(automation_id: str) -> AutomationDailyStats:
         return {"run_count": row["run_count"], "total_cost": row["total_cost"]}
 
 
+def get_automation_aggregate_stats(automation_id: str) -> Dict[str, Any]:
+    """Get all-time aggregate statistics for an automation using SQL queries."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT
+                COUNT(*) as total_runs,
+                COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as successful_runs,
+                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) as failed_runs,
+                COALESCE(SUM(cost_usd), 0) as total_cost_usd,
+                AVG(CASE WHEN duration_ms > 0 THEN duration_ms END) as avg_duration_ms
+            FROM automation_runs
+            WHERE automation_id = %s""",
+            (automation_id,)
+        )
+        row = cursor.fetchone()
+        return {
+            "total_runs": row["total_runs"],
+            "successful_runs": row["successful_runs"],
+            "failed_runs": row["failed_runs"],
+            "total_cost_usd": row["total_cost_usd"],
+            "avg_duration_ms": row["avg_duration_ms"] or 0,
+        }
+
+
 # ---- Automation Approvals ----
 
 def create_automation_approval(

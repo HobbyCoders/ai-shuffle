@@ -1,0 +1,475 @@
+/* ========================================
+   SETTINGS SHARED STYLES
+   Used by all settings sub-components
+   ======================================== */
+
+/* Sections */
+.section {
+	background: transparent;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	overflow: hidden;
+}
+
+.section-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	width: 100%;
+	padding: 12px 16px;
+	background: transparent;
+	border: none;
+	cursor: pointer;
+	transition: background 150ms ease;
+}
+
+.section-header:hover {
+	background: var(--hover-overlay);
+}
+
+.section-header:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+
+.section-header h3 {
+	margin: 0;
+	font-size: 0.9375rem;
+	font-weight: 600;
+	color: var(--foreground);
+}
+
+/* Center section header text on desktop */
+@media (min-width: 640px) {
+	.section-header {
+		justify-content: center;
+		position: relative;
+	}
+
+	.section-header .chevron {
+		position: absolute;
+		right: 16px;
+	}
+}
+
+.chevron {
+	width: 20px;
+	height: 20px;
+	color: var(--muted-foreground);
+	transition: transform 200ms ease;
+}
+
+.chevron.expanded {
+	transform: rotate(180deg);
+}
+
+.section-content {
+	padding: 8px 16px 16px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+/* Setting Rows */
+.setting-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	padding: 8px 0;
+}
+
+.setting-row.vertical {
+	flex-direction: column;
+	align-items: stretch;
+}
+
+.setting-info {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.setting-info label {
+	font-size: 0.875rem;
+	font-weight: 500;
+	color: var(--foreground);
+}
+
+.setting-desc {
+	font-size: 0.75rem;
+	color: var(--muted-foreground);
+}
+
+/* Inputs */
+.input {
+	padding: 8px 12px;
+	background-color: var(--input);
+	border: 1px solid var(--border);
+	border-radius: calc(var(--radius) - 2px);
+	color: var(--foreground);
+	font-size: 0.875rem;
+	transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.input:focus {
+	outline: none;
+	border-color: var(--ring);
+	box-shadow: 0 0 0 2px var(--primary-20);
+}
+
+.input::placeholder {
+	color: var(--muted-foreground);
+}
+
+.input.compact {
+	padding: 6px 10px;
+	font-size: 0.8125rem;
+}
+
+.input-group {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+}
+
+.input-group .input {
+	flex: 1;
+}
+
+/* Buttons */
+.btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	padding: 8px 16px;
+	border: none;
+	border-radius: calc(var(--radius) - 2px);
+	font-size: 0.875rem;
+	font-weight: 500;
+	cursor: pointer;
+	transition: all 150ms ease;
+}
+
+.btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.btn:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+
+.btn.primary {
+	background: var(--primary);
+	color: var(--primary-foreground);
+}
+
+.btn.primary:hover:not(:disabled) {
+	filter: brightness(1.1);
+}
+
+.btn.secondary {
+	background: var(--secondary);
+	color: var(--secondary-foreground);
+	border: 1px solid var(--border);
+}
+
+.btn.secondary:hover:not(:disabled) {
+	background: var(--hover-overlay);
+}
+
+.btn.danger {
+	background: var(--destructive);
+	color: var(--destructive-foreground);
+}
+
+.btn.compact {
+	padding: 6px 12px;
+	font-size: 0.8125rem;
+}
+
+/* Toggle Switch */
+.toggle {
+	position: relative;
+	width: 44px;
+	height: 24px;
+	background: var(--muted);
+	border: 1px solid var(--border);
+	border-radius: var(--radius, 0.75rem);
+	cursor: pointer;
+	transition: all 200ms ease;
+	flex-shrink: 0;
+}
+
+.toggle:hover {
+	border-color: var(--ring);
+}
+
+.toggle:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+
+.toggle.active {
+	background: var(--primary);
+	border-color: var(--primary);
+}
+
+.toggle-knob {
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 18px;
+	height: 18px;
+	background: var(--primary-foreground);
+	border-radius: 50%;
+	transition: transform 200ms ease;
+	box-shadow: var(--shadow-s);
+}
+
+.toggle.active .toggle-knob {
+	transform: translateX(20px);
+}
+
+/* Theme Switcher */
+.theme-switcher {
+	display: flex;
+	gap: 4px;
+	background: var(--muted);
+	padding: 4px;
+	border-radius: var(--radius);
+}
+
+.theme-option {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 36px;
+	height: 32px;
+	background: transparent;
+	border: none;
+	border-radius: calc(var(--radius) - 4px);
+	color: var(--muted-foreground);
+	cursor: pointer;
+	transition: all 150ms ease;
+}
+
+.theme-option:hover {
+	background: var(--hover-overlay);
+	color: var(--foreground);
+}
+
+.theme-option:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+
+.theme-option.active {
+	background: var(--card);
+	color: var(--primary);
+	box-shadow: var(--shadow-s);
+}
+
+.theme-option svg {
+	width: 18px;
+	height: 18px;
+}
+
+/* Badges */
+.badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 2px 8px;
+	font-size: 0.6875rem;
+	font-weight: 600;
+	border-radius: 9999px;
+	text-transform: uppercase;
+	letter-spacing: 0.025em;
+}
+
+.badge.success {
+	background: color-mix(in oklch, var(--success) 15%, transparent);
+	color: var(--success);
+	border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
+}
+
+.badge.muted {
+	background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
+	color: var(--muted-foreground);
+	border: 1px solid color-mix(in oklch, var(--muted-foreground) 30%, transparent);
+}
+
+.badge.primary {
+	background: color-mix(in oklch, var(--primary) 15%, transparent);
+	color: var(--primary);
+	border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
+}
+
+.badge.warning {
+	background: color-mix(in oklch, var(--warning) 15%, transparent);
+	color: var(--warning);
+	border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
+}
+
+/* Security Instructions Editor */
+.security-instructions-editor {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.security-textarea {
+	width: 100%;
+	min-height: 200px;
+	font-family: var(--font-mono);
+	font-size: 0.8125rem;
+	line-height: 1.5;
+	resize: vertical;
+}
+
+.security-instructions-footer {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 12px;
+}
+
+.security-status {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+}
+
+.security-actions {
+	display: flex;
+	gap: 8px;
+}
+
+/* Messages */
+.success-msg {
+	font-size: 0.8125rem;
+	color: var(--success);
+}
+
+.error-msg {
+	font-size: 0.8125rem;
+	color: var(--destructive);
+}
+
+.validation-result {
+	font-size: 0.8125rem;
+	padding: 6px 10px;
+	border-radius: calc(var(--radius) - 2px);
+	background: color-mix(in oklch, var(--destructive) 10%, transparent);
+	color: var(--destructive);
+}
+
+.validation-result.valid {
+	background: color-mix(in oklch, var(--success) 10%, transparent);
+	color: var(--success);
+}
+
+/* Password Form */
+.password-form {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+/* Connections */
+.connection-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	padding: 12px;
+	background: var(--muted);
+	border-radius: var(--radius);
+}
+
+.connection-info {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+.connection-icon {
+	width: 36px;
+	height: 36px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: var(--radius, 0.75rem);
+	color: var(--primary-foreground);
+}
+
+.connection-icon.claude {
+	background: linear-gradient(135deg, var(--warning), color-mix(in oklch, var(--warning) 80%, oklch(0.3 0 0)));
+}
+
+.connection-icon.github {
+	background: var(--muted-foreground);
+}
+
+.connection-icon svg {
+	width: 20px;
+	height: 20px;
+}
+
+.connection-name {
+	font-weight: 500;
+	font-size: 0.875rem;
+}
+
+.connection-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.oauth-flow {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+}
+
+.connected-text {
+	font-size: 0.8125rem;
+	color: var(--success);
+}
+
+/* Dividers */
+.divider {
+	border: none;
+	border-top: 1px solid var(--border);
+	margin: 12px 0;
+}
+
+/* Utility */
+.loading-text {
+	text-align: center;
+	padding: 20px;
+	color: var(--muted-foreground);
+}
+
+.mb-3 {
+	margin-bottom: 12px;
+}
+
+/* Status messages (used in SystemTab) */
+.status {
+	font-size: 0.8125rem;
+	margin: 0;
+}
+
+.status.error {
+	color: var(--destructive);
+}
+
+.status.success {
+	color: var(--success);
+}

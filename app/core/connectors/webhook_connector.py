@@ -123,40 +123,21 @@ class WebhookConnector(BaseConnector):
     def mode(self) -> str:
         return self.config.get("mode", "outbound")
 
-    async def connect(self) -> bool:
+    async def _do_connect(self) -> None:
         """Validate that the webhook is configured correctly."""
-        try:
-            self._status = ConnectorStatus.CONNECTING
-            mode = self.mode
+        mode = self.mode
 
-            if mode in ("outbound", "bidirectional"):
-                url = self.config.get("url")
-                if not url:
-                    self._status = ConnectorStatus.ERROR
-                    self._status_message = "Outbound URL is required"
-                    return False
-                async with httpx.AsyncClient(timeout=WEBHOOK_TIMEOUT) as client:
-                    await client.head(url)
+        if mode in ("outbound", "bidirectional"):
+            url = self.config.get("url")
+            if not url:
+                raise RuntimeError("Outbound URL is required")
+            async with httpx.AsyncClient(timeout=WEBHOOK_TIMEOUT) as client:
+                await client.head(url)
 
-            if mode in ("inbound", "bidirectional"):
-                inbound_path = self.config.get("inbound_path")
-                if not inbound_path:
-                    self._status = ConnectorStatus.ERROR
-                    self._status_message = "Inbound path is required for inbound mode"
-                    return False
-
-            self._status = ConnectorStatus.CONNECTED
-            self._status_message = None
-            logger.info(
-                "WebhookConnector %s connected (mode=%s)", self.connector_id, mode
-            )
-            return True
-
-        except Exception as exc:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = str(exc)
-            logger.exception("WebhookConnector %s failed to connect", self.connector_id)
-            return False
+        if mode in ("inbound", "bidirectional"):
+            inbound_path = self.config.get("inbound_path")
+            if not inbound_path:
+                raise RuntimeError("Inbound path is required for inbound mode")
 
     async def disconnect(self) -> None:
         """No-op -- webhooks are stateless."""

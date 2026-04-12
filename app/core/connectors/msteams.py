@@ -176,21 +176,9 @@ class MSTeamsConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    async def _do_connect(self) -> None:
         """Validate credentials by obtaining a Bot Framework token."""
-        try:
-            self._status = ConnectorStatus.CONNECTING
-            await self._ensure_token()
-            self._status = ConnectorStatus.CONNECTED
-            self._status_message = None
-            logger.info("MSTeamsConnector %s connected", self.connector_id)
-            return True
-
-        except Exception as exc:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = str(exc)
-            logger.exception("MSTeamsConnector %s failed to connect", self.connector_id)
-            return False
+        await self._ensure_token()
 
     async def disconnect(self) -> None:
         """Mark as disconnected (webhook-based, no persistent connection)."""

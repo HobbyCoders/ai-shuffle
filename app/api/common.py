@@ -9,11 +9,15 @@ projects, github, git, project_agents, mcp, project_plugins, hooks).
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from fastapi import HTTPException, Request, status
 
-from app.core.project_utils import get_project_working_dir_as_path
+from app.core.config import settings
+from app.core.project_utils import (
+    get_project_working_dir_as_path,
+    get_worktree_working_dir,
+)
 from app.db import database
 from app.api.auth import get_api_user_from_request
 
@@ -91,8 +95,98 @@ def validate_project_access(request: Request, project_id: str) -> dict:
 
 
 def get_project_path_from_dict(project: dict) -> Path:
-    """Get the resolved filesystem path for a project dict."""
+    """Get the resolved filesystem path for a project dict.
+
+    .. deprecated:: Use :func:`resolve_project_path` instead.
+    """
     return get_project_working_dir_as_path(project)
+
+
+def resolve_project_path(
+    project_id: Optional[str] = None,
+    *,
+    request: Optional[Request] = None,
+    check_access: bool = True,
+    allow_missing: bool = False,
+    check_exists: bool = False,
+    worktree_id: Optional[str] = None,
+    fallback_to_workspace: bool = False,
+) -> Optional[Path]:
+    """Resolve a project (or worktree) identifier to a filesystem path.
+
+    This is the single entry-point for "project ID -> filesystem path"
+    resolution.  It replaces the four per-module helpers that previously
+    duplicated this logic.
+
+    Args:
+        project_id: The project identifier.  May be *None* when
+            *fallback_to_workspace* is True.
+        request: The incoming HTTP request.  When provided together with
+            *check_access=True*, verifies that the caller is allowed to
+            access the project (raises 403 otherwise).
+        check_access: Whether to perform the access check.  Ignored when
+            *request* is None.
+        allow_missing: If True, return None instead of raising 404 when
+            the project doesn't exist in the database.
+        check_exists: If True, verify that the resolved directory exists
+            on disk and raise 404 if it doesn't.
+        worktree_id: When provided, resolve the worktree path instead of
+            the main project path.
+        fallback_to_workspace: When True **and** neither *worktree_id*
+            nor *project_id* resolve to a path, fall back to
+            ``settings.workspace_dir``.
+
+    Returns:
+        A :class:`~pathlib.Path` pointing at the resolved directory, or
+        None when *allow_missing* is True and the project does not exist.
+
+    Raises:
+        HTTPException(403): Access denied (only when *check_access* and
+            *request* are both provided).
+        HTTPException(404): Project/worktree/directory not found.
+    """
+    # --- worktree shortcut ---------------------------------------------------
+    if worktree_id:
+        worktree = database.get_worktree(worktree_id)
+        if worktree:
+            return Path(get_worktree_working_dir(worktree))
+        # If worktree not found, fall through to project resolution.
+
+    # --- access check ---------------------------------------------------------
+    if request is not None and check_access and project_id:
+        check_project_access(request, project_id)
+
+    # --- project lookup -------------------------------------------------------
+    if project_id:
+        project = database.get_project(project_id)
+        if not project:
+            if allow_missing:
+                return None
+            if fallback_to_workspace:
+                return Path(str(settings.workspace_dir))
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project not found: {project_id}",
+            )
+
+        resolved = get_project_working_dir_as_path(project)
+
+        if check_exists and not resolved.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project directory not found: {project_id}",
+            )
+
+        return resolved
+
+    # --- fallback -------------------------------------------------------------
+    if fallback_to_workspace:
+        return Path(str(settings.workspace_dir))
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="No project_id provided",
+    )
 
 
 # =============================================================================

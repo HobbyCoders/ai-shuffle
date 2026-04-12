@@ -14,7 +14,7 @@
 
 import type { Hook, HookCreate, HookUpdate, HookTestResult, PluginHookInfo } from '$lib/api/client';
 import * as api from '$lib/api/client';
-import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 // ============================================================================
 // Types
@@ -51,21 +51,14 @@ const initialState: HooksState = {
 let _state = $state<HooksState>({ ...initialState });
 
 // ============================================================================
-// Subscribe Shim
+// Subscribe Shim (centralized via store-utils)
 // ============================================================================
 
-type Subscriber<T> = (value: T) => void;
-
-const _subscribers = new Set<Subscriber<HooksState>>();
-
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
-
-function _update(fn: (s: HooksState) => HooksState) {
-	_state = fn(untrack(() => _state));
-	_notifySubscribers();
-}
+const { subscribe, update: _update, notifySubscribers: _notifySubscribers, createDerived } =
+	createSubscribers<HooksState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ============================================================================
 // Exported Store
@@ -76,13 +69,7 @@ export const hooks = {
 		return _state;
 	},
 
-	subscribe(fn: Subscriber<HooksState>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	// ========================================================================
 	// Project Hooks Operations
@@ -352,24 +339,8 @@ export const hooks = {
 };
 
 // ============================================================================
-// Derived Stores
+// Derived Stores (via store-utils createDerived)
 // ============================================================================
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() {
-			return getter();
-		},
-		subscribe(fn: Subscriber<T>) {
-			const handler: Subscriber<HooksState> = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => {
-				_subscribers.delete(handler);
-			};
-		}
-	};
-}
 
 // All hooks (both app + project)
 export const projectHooks = createDerived(() => _state.hooks);

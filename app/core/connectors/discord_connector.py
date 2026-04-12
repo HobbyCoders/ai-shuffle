@@ -122,12 +122,21 @@ class DiscordConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    _SDK_AVAILABLE = DISCORD_AVAILABLE
+    _SDK_NAME = "discord.py"
+
     async def connect(self) -> bool:
-        """Start the Discord client and connect to the gateway."""
-        if not DISCORD_AVAILABLE:
+        """Start the Discord client and connect to the gateway.
+
+        Overrides the base template because Discord sets CONNECTED
+        asynchronously in the ``on_ready`` callback, not at the end of
+        this method.
+        """
+        if self._SDK_AVAILABLE is False:
+            sdk = self._SDK_NAME or "required SDK"
             self._status = ConnectorStatus.ERROR
-            self._status_message = "discord.py is not installed"
-            logger.error("Cannot start DiscordConnector: discord.py is not installed")
+            self._status_message = f"{sdk} is not installed"
+            logger.error("Cannot start DiscordConnector: %s is not installed", sdk)
             return False
 
         try:

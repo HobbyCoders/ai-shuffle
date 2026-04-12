@@ -18,7 +18,7 @@ from app.core.project_utils import get_project_working_dir, get_project_working_
 from app.core.platform import is_local_mode
 from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
-from app.api.common import check_project_access, format_file_size
+from app.api.common import check_project_access, format_file_size, api_error_handler
 
 logger = logging.getLogger(__name__)
 
@@ -417,7 +417,7 @@ async def upload_file(
             counter += 1
 
     # Save the file with size limit enforcement
-    try:
+    async with api_error_handler("save uploaded file"):
         # Read in chunks to enforce size limit without trusting Content-Length
         chunks = []
         total_size = 0
@@ -434,14 +434,6 @@ async def upload_file(
             chunks.append(chunk)
         content = b"".join(chunks)
         file_path.write_bytes(content)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Failed to save uploaded file")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to save file"
-        )
 
     # Return relative path for reference (relative to the effective base path)
     base_path = get_project_working_dir_as_path(base_project_path)
@@ -536,14 +528,8 @@ async def create_folder(
             detail="Folder already exists"
         )
 
-    try:
+    async with api_error_handler("create folder"):
         folder_path.mkdir(parents=True, exist_ok=False)
-    except Exception as e:
-        logger.exception("Failed to create folder")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create folder"
-        )
 
     base_path = get_project_working_dir_as_path(project)
     return {
@@ -594,14 +580,8 @@ async def rename_file_or_folder(
             detail="A file or folder with that name already exists"
         )
 
-    try:
+    async with api_error_handler("rename file or folder"):
         current_path.rename(new_path)
-    except Exception as e:
-        logger.exception("Failed to rename file or folder")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to rename"
-        )
 
     base_path = get_project_working_dir_as_path(project)
     return {
@@ -643,17 +623,11 @@ async def delete_file_or_folder(
             detail="Cannot delete project root directory"
         )
 
-    try:
+    async with api_error_handler("delete file or folder"):
         if target_path.is_dir():
             shutil.rmtree(target_path)
         else:
             target_path.unlink()
-    except Exception as e:
-        logger.exception("Failed to delete file or folder")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete"
-        )
 
     return {"deleted": path}
 

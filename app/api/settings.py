@@ -1048,18 +1048,22 @@ class ModelUpdateRequest(BaseModel):
     model: str
 
 
+async def _update_model_setting(setting_name: str, body: ModelUpdateRequest):
+    """Shared helper: validate and persist a model selection setting."""
+    model = body.model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Model cannot be empty")
+    database.set_system_setting(setting_name, model)
+    return {"success": True, "model": model}
+
+
 @router.patch("/integrations/image/model")
 async def update_image_model(
     request: ModelUpdateRequest,
     token: str = Depends(require_admin)
 ):
     """Update the image generation model (admin only). Accepts any fal.ai model ID."""
-    model = request.model.strip()
-    if not model:
-        raise HTTPException(status_code=400, detail="Model cannot be empty")
-
-    database.set_system_setting("image_model", model)
-    return {"success": True, "model": model}
+    return await _update_model_setting("image_model", request)
 
 
 @router.patch("/integrations/image/edit-model")
@@ -1068,12 +1072,7 @@ async def update_image_edit_model(
     token: str = Depends(require_admin)
 ):
     """Update the image editing model (admin only). Accepts any fal.ai model ID."""
-    model = request.model.strip()
-    if not model:
-        raise HTTPException(status_code=400, detail="Model cannot be empty")
-
-    database.set_system_setting("image_edit_model", model)
-    return {"success": True, "model": model}
+    return await _update_model_setting("image_edit_model", request)
 
 
 @router.patch("/integrations/video/model")
@@ -1082,12 +1081,7 @@ async def update_video_model(
     token: str = Depends(require_admin)
 ):
     """Update the video generation model (admin only). Accepts any fal.ai model ID."""
-    model = request.model.strip()
-    if not model:
-        raise HTTPException(status_code=400, detail="Model cannot be empty")
-
-    database.set_system_setting("video_model", model)
-    return {"success": True, "model": model}
+    return await _update_model_setting("video_model", request)
 
 
 @router.patch("/integrations/video/i2v-model")
@@ -1096,12 +1090,7 @@ async def update_i2v_model(
     token: str = Depends(require_admin)
 ):
     """Update the image-to-video model (admin only). Accepts any fal.ai model ID."""
-    model = request.model.strip()
-    if not model:
-        raise HTTPException(status_code=400, detail="Model cannot be empty")
-
-    database.set_system_setting("i2v_model", model)
-    return {"success": True, "model": model}
+    return await _update_model_setting("i2v_model", request)
 
 
 @router.patch("/integrations/3d/model")
@@ -1110,12 +1099,7 @@ async def update_3d_model(
     token: str = Depends(require_admin)
 ):
     """Update the 3D model generation model (admin only). Accepts any fal.ai model ID."""
-    model = request.model.strip()
-    if not model:
-        raise HTTPException(status_code=400, detail="Model cannot be empty")
-
-    database.set_system_setting("model3d_model", model)
-    return {"success": True, "model": model}
+    return await _update_model_setting("model3d_model", request)
 
 
 @router.patch("/integrations/3d/i2-3d-model")
@@ -1124,12 +1108,7 @@ async def update_image_to_3d_model(
     token: str = Depends(require_admin)
 ):
     """Update the image-to-3D model (admin only). Accepts any fal.ai model ID."""
-    model = request.model.strip()
-    if not model:
-        raise HTTPException(status_code=400, detail="Model cannot be empty")
-
-    database.set_system_setting("image_to_3d_model", model)
-    return {"success": True, "model": model}
+    return await _update_model_setting("image_to_3d_model", request)
 
 
 # ============================================================================

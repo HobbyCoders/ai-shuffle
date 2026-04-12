@@ -132,36 +132,21 @@ class TelegramConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    _SDK_AVAILABLE = AIOGRAM_AVAILABLE
+    _SDK_NAME = "aiogram"
+
+    async def _do_connect(self) -> None:
         """Start the Telegram bot and begin polling for updates."""
-        if not AIOGRAM_AVAILABLE:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = "aiogram is not installed"
-            logger.error("Cannot start TelegramConnector: aiogram is not installed")
-            return False
+        token = self.config["bot_token"]
 
-        try:
-            self._status = ConnectorStatus.CONNECTING
-            token = self.config["bot_token"]
+        self._bot = Bot(token=token)
+        self._dp = Dispatcher()
 
-            self._bot = Bot(token=token)
-            self._dp = Dispatcher()
+        # Register handlers
+        self._dp.message.register(self._handle_message)
+        self._dp.callback_query.register(self._handle_callback_query)
 
-            # Register handlers
-            self._dp.message.register(self._handle_message)
-            self._dp.callback_query.register(self._handle_callback_query)
-
-            self._task = asyncio.create_task(self._run_polling())
-            self._status = ConnectorStatus.CONNECTED
-            self._status_message = None
-            logger.info("TelegramConnector %s connected", self.connector_id)
-            return True
-
-        except Exception as exc:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = str(exc)
-            logger.exception("TelegramConnector %s failed to connect", self.connector_id)
-            return False
+        self._task = asyncio.create_task(self._run_polling())
 
     async def _run_polling(self) -> None:
         """Background task that runs the aiogram polling loop."""

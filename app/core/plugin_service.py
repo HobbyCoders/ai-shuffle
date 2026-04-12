@@ -42,6 +42,21 @@ def _force_rmtree(path):
 logger = logging.getLogger(__name__)
 
 
+class DictMixin:
+    """Mixin providing generic to_dict() for dataclasses.
+
+    Converts datetime fields to ISO format strings (or None).
+    All other fields are passed through via dataclasses.asdict().
+    """
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = asdict(self)
+        for key, value in result.items():
+            if isinstance(value, datetime):
+                result[key] = value.isoformat()
+        return result
+
+
 class PluginScope(str, Enum):
     USER = "user"       # ~/.claude/plugins/
     LOCAL = "local"     # <project>/.claude/plugins/
@@ -49,22 +64,13 @@ class PluginScope(str, Enum):
 
 
 @dataclass
-class MarketplaceInfo:
+class MarketplaceInfo(DictMixin):
     """Information about a plugin marketplace"""
     id: str
     source: str  # "git"
     url: str
     install_location: str
     last_updated: Optional[datetime] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "source": self.source,
-            "url": self.url,
-            "install_location": self.install_location,
-            "last_updated": self.last_updated.isoformat() if self.last_updated else None
-        }
 
 
 @dataclass
@@ -79,7 +85,7 @@ class PluginInstallation:
 
 
 @dataclass
-class PluginInfo:
+class PluginInfo(DictMixin):
     """Information about a plugin"""
     id: str  # e.g., "frontend-design@claude-plugins-official"
     name: str
@@ -96,24 +102,6 @@ class PluginInfo:
     has_hooks: bool = False
     has_mcp: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "marketplace": self.marketplace,
-            "description": self.description,
-            "version": self.version,
-            "scope": self.scope,
-            "install_path": self.install_path,
-            "installed_at": self.installed_at.isoformat() if self.installed_at else None,
-            "enabled": self.enabled,
-            "has_commands": self.has_commands,
-            "has_agents": self.has_agents,
-            "has_skills": self.has_skills,
-            "has_hooks": self.has_hooks,
-            "has_mcp": self.has_mcp
-        }
-
 
 @dataclass
 class PluginDetails(PluginInfo):
@@ -123,19 +111,9 @@ class PluginDetails(PluginInfo):
     skills: List[str] = field(default_factory=list)
     readme: Optional[str] = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        base = super().to_dict()
-        base.update({
-            "commands": self.commands,
-            "agents": self.agents,
-            "skills": self.skills,
-            "readme": self.readme
-        })
-        return base
-
 
 @dataclass
-class PluginUpdateInfo:
+class PluginUpdateInfo(DictMixin):
     """Information about an available plugin update"""
     plugin_id: str
     name: str
@@ -144,19 +122,9 @@ class PluginUpdateInfo:
     available_version: str
     is_local: bool = True
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "plugin_id": self.plugin_id,
-            "name": self.name,
-            "marketplace": self.marketplace,
-            "installed_version": self.installed_version,
-            "available_version": self.available_version,
-            "is_local": self.is_local
-        }
-
 
 @dataclass
-class AutoUpdateSettings:
+class AutoUpdateSettings(DictMixin):
     """Settings for plugin auto-update"""
     enabled: bool = True
     interval_hours: int = 6
@@ -164,18 +132,9 @@ class AutoUpdateSettings:
     auto_update_plugins: bool = True
     last_check: Optional[str] = None  # ISO timestamp
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "interval_hours": self.interval_hours,
-            "auto_sync_marketplaces": self.auto_sync_marketplaces,
-            "auto_update_plugins": self.auto_update_plugins,
-            "last_check": self.last_check
-        }
-
 
 @dataclass
-class AvailablePlugin:
+class AvailablePlugin(DictMixin):
     """A plugin available in a marketplace (not necessarily installed)"""
     id: str
     name: str
@@ -189,9 +148,6 @@ class AvailablePlugin:
     has_mcp: bool = False
     installed: bool = False
     enabled: bool = False
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 def _get_claude_dir() -> Path:

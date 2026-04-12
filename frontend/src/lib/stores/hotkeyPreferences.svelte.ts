@@ -11,7 +11,7 @@
 
 import { browser } from '$app/environment';
 import { getPreference, setPreference } from '$lib/api/client';
-import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 // ============================================
 // Types
@@ -198,21 +198,14 @@ const initialPreferences = getStoredPreferences();
 let _state = $state<HotkeyPreferences>(initialPreferences);
 
 // ============================================
-// Subscribe shim
+// Subscribe shim (centralized via store-utils)
 // ============================================
 
-type Subscriber<T> = (value: T) => void;
-
-const _subscribers = new Set<Subscriber<HotkeyPreferences>>();
-
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
-
-function _update(fn: (s: HotkeyPreferences) => HotkeyPreferences) {
-	_state = fn(untrack(() => _state));
-	_notifySubscribers();
-}
+const { subscribe, notifySubscribers: _notifySubscribers, update: _update } =
+	createSubscribers<HotkeyPreferences>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ============================================
 // Actions
@@ -329,13 +322,7 @@ export const hotkeyPreferences = {
 		return _state;
 	},
 
-	subscribe(fn: Subscriber<HotkeyPreferences>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	load,
 	syncFromServer,

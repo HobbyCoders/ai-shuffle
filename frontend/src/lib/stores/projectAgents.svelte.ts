@@ -15,7 +15,7 @@ import type {
 	UpdateProjectAgentRequest
 } from '$lib/api/projectAgents';
 import * as projectAgentsApi from '$lib/api/projectAgents';
-import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 // ============================================================================
 // Types
@@ -50,21 +50,14 @@ const initialState: ProjectAgentsState = {
 let _state = $state<ProjectAgentsState>({ ...initialState });
 
 // ============================================================================
-// Subscribe shim
+// Subscribe shim (centralized via store-utils)
 // ============================================================================
 
-type Subscriber<T> = (value: T) => void;
-
-const _subscribers = new Set<Subscriber<ProjectAgentsState>>();
-
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
-
-function _update(fn: (s: ProjectAgentsState) => ProjectAgentsState) {
-	_state = fn(untrack(() => _state));
-	_notifySubscribers();
-}
+const { subscribe, update: _update, notifySubscribers: _notifySubscribers, createDerived } =
+	createSubscribers<ProjectAgentsState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ============================================================================
 // Exported Store
@@ -75,13 +68,7 @@ export const projectAgents = {
 		return _state;
 	},
 
-	subscribe(fn: Subscriber<ProjectAgentsState>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	// ========================================================================
 	// Agent Loading
@@ -256,24 +243,8 @@ export const projectAgents = {
 };
 
 // ============================================================================
-// Derived stores with subscribe shim
+// Derived stores (via store-utils createDerived)
 // ============================================================================
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() {
-			return getter();
-		},
-		subscribe(fn: Subscriber<T>) {
-			const handler: Subscriber<ProjectAgentsState> = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => {
-				_subscribers.delete(handler);
-			};
-		}
-	};
-}
 
 // All agents
 export const allProjectAgents = createDerived(() => _state.agents);

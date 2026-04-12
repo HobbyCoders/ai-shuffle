@@ -6,7 +6,7 @@
 
 import type { AuthStatus } from '$lib/api/client';
 import { getAuthStatus, login as apiLogin, logout as apiLogout, setup as apiSetup } from '$lib/api/auth';
-import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 // ============================================
 // Types
@@ -29,21 +29,14 @@ let _state = $state<AuthState>({
 });
 
 // ============================================
-// Subscribe shim
+// Subscribe shim (centralized via store-utils)
 // ============================================
 
-type Subscriber<T> = (value: T) => void;
-
-const _subscribers = new Set<Subscriber<AuthState>>();
-
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
-
-function _update(fn: (s: AuthState) => AuthState) {
-	_state = fn(untrack(() => _state));
-	_notifySubscribers();
-}
+const { subscribe, update: _update, createDerived } =
+	createSubscribers<AuthState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ============================================
 // Exported Store
@@ -54,13 +47,7 @@ export const auth = {
 		return _state;
 	},
 
-	subscribe(fn: Subscriber<AuthState>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	async checkAuth() {
 		_update(s => ({ ...s, loading: true, error: null }));
@@ -120,24 +107,8 @@ export const auth = {
 };
 
 // ============================================
-// Derived stores with subscribe shim
+// Derived stores (via store-utils createDerived)
 // ============================================
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() {
-			return getter();
-		},
-		subscribe(fn: Subscriber<T>) {
-			const handler: Subscriber<AuthState> = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => {
-				_subscribers.delete(handler);
-			};
-		}
-	};
-}
 
 export const isAuthenticated = createDerived(() => _state.status?.authenticated ?? false);
 export const isAdmin = createDerived(() => _state.status?.is_admin ?? false);

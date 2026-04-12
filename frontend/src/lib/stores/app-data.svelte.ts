@@ -12,7 +12,7 @@ import type { Session, Profile, PaginatedSessions, CursorPaginatedSessions, Sess
 import { api, searchSessionsPaginated } from '$lib/api/client';
 import type { Project } from './types';
 import { messageCache } from './message-cache';
-import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 // Re-export the Project type so consumers migrating from the old file get it
 export type { Project };
@@ -83,20 +83,13 @@ let _state = $state<AppDataState>({
 	apiUserSessionsLoading: false,
 });
 
-// ─── Subscribe Shim ──────────────────────────────────────────────────────────
+// ─── Subscribe Shim (centralized via store-utils) ───────────────────────────
 
-type Subscriber<T> = (value: T) => void;
-
-const _subscribers = new Set<Subscriber<AppDataState>>();
-
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
-
-function _update(fn: (s: AppDataState) => AppDataState) {
-	_state = fn(untrack(() => _state));
-	_notifySubscribers();
-}
+const { subscribe, update: _update, createDerived } =
+	createSubscribers<AppDataState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ─── Internal Data Loading ───────────────────────────────────────────────────
 
@@ -254,11 +247,7 @@ async function loadApiUserSessionsInternal() {
 export const appData = {
 	get current() { return _state; },
 
-	subscribe(fn: Subscriber<AppDataState>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => { _subscribers.delete(fn); };
-	},
+	subscribe,
 
 	// ── Profile Operations ──────────────────────────────────────────────
 
@@ -425,19 +414,7 @@ export const appData = {
 	},
 };
 
-// ─── Derived Convenience Stores ──────────────────────────────────────────────
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() { return getter(); },
-		subscribe(fn: Subscriber<T>) {
-			const handler: Subscriber<AppDataState> = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => { _subscribers.delete(handler); };
-		}
-	};
-}
+// ─── Derived Convenience Stores (via store-utils createDerived) ─────────────
 
 export const profiles = createDerived(() => _state.profiles);
 export const projects = createDerived(() => _state.projects);

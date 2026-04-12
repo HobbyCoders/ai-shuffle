@@ -779,14 +779,7 @@ async def get_live_session(
     from app.core.live_session_store import live_session_store
 
     # Check session exists and user has access
-    session = await run_sync(database.get_session, session_id)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}"
-        )
-
-    check_session_access(request, session)
+    session = await require_session(request, session_id)
 
     # Compute session metadata from DB session — included in all response
     # paths so the frontend can correct any stale state on switch.
@@ -971,14 +964,7 @@ async def update_session(
     token: str = Depends(require_auth)
 ):
     """Update session title or status. API users can only modify their accessible sessions."""
-    existing = await run_sync(database.get_session, session_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}"
-        )
-
-    check_session_access(request, existing)
+    existing = await require_session(request, session_id)
 
     # Sync title rename to Claude SDK session if available
     sdk_sid = existing.get("sdk_session_id")
@@ -1013,14 +999,7 @@ async def tag_sdk_session(
             detail="SDK tag_session not available (requires SDK 0.1.49+)"
         )
 
-    existing = await run_sync(database.get_session, session_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}"
-        )
-
-    check_session_access(request, existing)
+    existing = await require_session(request, session_id)
 
     sdk_sid = existing.get("sdk_session_id")
     if not sdk_sid:
@@ -1047,14 +1026,7 @@ async def get_sdk_session_info(
             detail="SDK get_session_info not available (requires SDK 0.1.50+)"
         )
 
-    existing = await run_sync(database.get_session, session_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}"
-        )
-
-    check_session_access(request, existing)
+    existing = await require_session(request, session_id)
 
     sdk_sid = existing.get("sdk_session_id")
     if not sdk_sid:
@@ -1087,14 +1059,7 @@ async def get_sdk_session_info(
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_session(request: Request, session_id: str, token: str = Depends(require_auth)):
     """Delete a session and its messages. API users can only delete their accessible sessions."""
-    existing = await run_sync(database.get_session, session_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}"
-        )
-
-    check_session_access(request, existing)
+    existing = await require_session(request, session_id)
 
     # Evict from session pool before deleting — terminates subprocess if alive
     from app.core.session_pool import get_session_pool
@@ -1132,12 +1097,7 @@ async def batch_delete_sessions(
 
     for session_id in body.session_ids:
         try:
-            existing = await run_sync(database.get_session, session_id)
-            if not existing:
-                errors.append(f"Session not found: {session_id}")
-                continue
-
-            check_session_access(request, existing)
+            existing = await require_session(request, session_id)
             # Evict from session pool before deleting
             from app.core.session_pool import get_session_pool
             await get_session_pool().remove(session_id)
@@ -1158,14 +1118,7 @@ async def batch_delete_sessions(
 @router.post("/{session_id}/archive")
 async def archive_session(request: Request, session_id: str, token: str = Depends(require_auth)):
     """Archive a session. API users can only archive their accessible sessions."""
-    existing = await run_sync(database.get_session, session_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}"
-        )
-
-    check_session_access(request, existing)
+    existing = await require_session(request, session_id)
 
     # Update session - result not needed for response
     await run_sync(
@@ -1180,14 +1133,7 @@ async def archive_session(request: Request, session_id: str, token: str = Depend
 @router.patch("/{session_id}/favorite", response_model=Session)
 async def toggle_session_favorite(request: Request, session_id: str, token: str = Depends(require_auth)):
     """Toggle the favorite status of a session. Returns the updated session."""
-    existing = await run_sync(database.get_session, session_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}"
-        )
-
-    check_session_access(request, existing)
+    existing = await require_session(request, session_id)
 
     session = await run_sync(database.toggle_session_favorite, session_id)
     if not session:
@@ -1219,14 +1165,7 @@ async def get_sync_changes(
         - latest_id: The most recent sync ID (use for next poll)
         - is_streaming: Whether the session is currently streaming
     """
-    existing = await run_sync(database.get_session, session_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}"
-        )
-
-    check_session_access(request, existing)
+    existing = await require_session(request, session_id)
 
     changes = await run_sync(database.get_sync_logs, session_id, since_id=since_id)
     latest_id = await run_sync(database.get_latest_sync_id, session_id)
@@ -1263,14 +1202,7 @@ async def get_session_state(
         - connected_devices: Number of devices watching this session
         - streaming_messages: Buffered messages if streaming (for late-joiners)
     """
-    session = await run_sync(database.get_session, session_id)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}"
-        )
-
-    check_session_access(request, session)
+    session = await require_session(request, session_id)
 
     # Get current streaming state from SyncEngine
     from app.core.sync_engine import sync_engine
@@ -1316,14 +1248,7 @@ async def export_session(
             detail="Invalid format. Must be 'markdown' or 'json'"
         )
 
-    session = await run_sync(database.get_session, session_id)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}"
-        )
-
-    check_session_access(request, session)
+    session = await require_session(request, session_id)
 
     # Load messages from JSONL (same logic as get_session)
     sdk_session_id = session.get("sdk_session_id")
@@ -2039,14 +1964,7 @@ async def fork_session(
     from app.core.jsonl_parser import get_session_jsonl_path, parse_jsonl_file
 
     # Get the original session
-    original_session = await run_sync(database.get_session, session_id)
-    if not original_session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session not found: {session_id}"
-        )
-
-    check_session_access(request, original_session)
+    original_session = await require_session(request, session_id)
 
     sdk_session_id = original_session.get("sdk_session_id")
     if not sdk_session_id:

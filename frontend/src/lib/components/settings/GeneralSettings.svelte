@@ -8,7 +8,7 @@
 	import { theme, themePreference, currentPresetId, themePresets } from '$lib/stores/theme';
 	import { timezonePreference } from '$lib/stores/timezonePreference';
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig } from '$lib/api/auth';
-	import { getErrorMessage } from '$lib/api/client-core';
+	import { getErrorMessage } from '$lib/api/client';
 	import type { WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import { onMount } from 'svelte';
 

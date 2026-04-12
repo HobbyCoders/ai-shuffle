@@ -17,6 +17,7 @@ from app.core.models import (
     ConnectorTestResponse, ConnectorEventLog, VALID_CONNECTOR_EVENTS,
 )
 from app.api.auth import require_admin
+from app.api.common import api_error_handler
 from app.db import database
 
 logger = logging.getLogger(__name__)
@@ -325,19 +326,14 @@ async def execute_connector_action(
         params = {}
 
     # Execute the action
-    try:
-        result = await instance.execute_action(action_id, params)
-    except NotImplementedError as e:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail=str(e),
-        )
-    except Exception as e:
-        logger.exception(f"Error executing action '{action_id}' on connector '{connector_id}'")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Action execution failed: {e}",
-        )
+    async with api_error_handler(f"execute action '{action_id}' on connector '{connector_id}'"):
+        try:
+            result = await instance.execute_action(action_id, params)
+        except NotImplementedError as e:
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail=str(e),
+            )
 
     return {"status": "ok", "action_id": action_id, "result": result}
 
@@ -494,14 +490,8 @@ async def inbound_webhook(webhook_slug: str, request: Request):
             )
 
         # Dispatch to AI
-        try:
+        async with api_error_handler("process inbound webhook"):
             await connector.handle_webhook_payload(payload)
-        except Exception as e:
-            logger.error(f"Inbound webhook handler error: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Webhook processing failed",
-            )
 
         matched = True
         break

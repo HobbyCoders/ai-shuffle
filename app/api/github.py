@@ -13,10 +13,9 @@ from pydantic import BaseModel, Field
 
 from app.core.github_service import github_service, PullRequest, WorkflowRun
 from app.core.config import settings
-from app.core.project_utils import get_project_working_dir_as_path
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
-from app.api.common import check_project_access
+from app.api.common import resolve_project_path
 
 logger = logging.getLogger(__name__)
 
@@ -80,24 +79,14 @@ class GitHubStatusResponse(BaseModel):
 # =============================================================================
 
 def get_project_path(request: Request, project_id: str) -> str:
-    """Get the filesystem path for a project after verifying access."""
-    check_project_access(request, project_id)
+    """Get the filesystem path for a project after verifying access.
 
-    project = database.get_project(project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}"
-        )
-
-    project_path = get_project_working_dir_as_path(project)
-    if not project_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project directory not found: {project_id}"
-        )
-
-    return str(project_path)
+    .. deprecated:: Use :func:`app.api.common.resolve_project_path` instead.
+    """
+    result = resolve_project_path(
+        project_id, request=request, check_access=True, check_exists=True
+    )
+    return str(result)
 
 
 def get_repo_for_project(request: Request, project_id: str) -> str:

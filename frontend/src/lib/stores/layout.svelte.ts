@@ -6,6 +6,7 @@
  */
 import { browser } from '$app/environment';
 import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 // ============================================
 // Types
@@ -95,16 +96,18 @@ let _state = $state<LayoutState>({
 });
 
 // ============================================
-// Subscribe shim
+// Subscribe shim (centralized via store-utils)
 // ============================================
 
-type Subscriber<T> = (value: T) => void;
-
-const _subscribers = new Set<Subscriber<LayoutState>>();
+const { subscribe, notifySubscribers, createDerived } =
+	createSubscribers<LayoutState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 function _notifyAndPersist() {
 	persistState(_state);
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
+	notifySubscribers();
 }
 
 function _update(fn: (s: LayoutState) => LayoutState) {
@@ -121,13 +124,7 @@ export const layout = {
 		return _state;
 	},
 
-	subscribe(fn: Subscriber<LayoutState>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	/** Toggle sidebar collapsed state */
 	toggleSidebar() {
@@ -189,24 +186,8 @@ export const layout = {
 };
 
 // ============================================
-// Derived stores with subscribe shim
+// Derived stores (via store-utils createDerived)
 // ============================================
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() {
-			return getter();
-		},
-		subscribe(fn: Subscriber<T>) {
-			const handler: Subscriber<LayoutState> = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => {
-				_subscribers.delete(handler);
-			};
-		}
-	};
-}
 
 export const sidebarCollapsed = createDerived(() => _state.sidebarCollapsed);
 export const activeView = createDerived(() => _state.activeView);

@@ -10,7 +10,7 @@
 
 import type { MemoryFile, MemoryLocation } from '$lib/api/projectMemory';
 import * as memoryApi from '$lib/api/projectMemory';
-import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 // ============================================================================
 // Types
@@ -43,23 +43,14 @@ const initialState: ProjectMemoryState = {
 let _state = $state<ProjectMemoryState>({ ...initialState });
 
 // ============================================================================
-// Subscribe shim
+// Subscribe shim (centralized via store-utils)
 // ============================================================================
 
-type Subscriber<T> = (value: T) => void;
-
-const _subscribers = new Set<Subscriber<ProjectMemoryState>>();
-
-function _notifySubscribers() {
-	untrack(() => {
-		for (const fn of _subscribers) fn(_state);
-	});
-}
-
-function _update(fn: (s: ProjectMemoryState) => ProjectMemoryState) {
-	_state = fn(untrack(() => _state));
-	_notifySubscribers();
-}
+const { subscribe, notifySubscribers: _notifySubscribers, update: _update, createDerived } =
+	createSubscribers<ProjectMemoryState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ============================================================================
 // Exported Store
@@ -70,13 +61,7 @@ export const projectMemory = {
 		return _state;
 	},
 
-	subscribe(fn: Subscriber<ProjectMemoryState>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	// ========================================================================
 	// Loading
@@ -176,24 +161,8 @@ export const projectMemory = {
 };
 
 // ============================================================================
-// Derived stores with subscribe shim
+// Derived stores (via store-utils createDerived)
 // ============================================================================
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() {
-			return getter();
-		},
-		subscribe(fn: Subscriber<T>) {
-			const handler: Subscriber<ProjectMemoryState> = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => {
-				_subscribers.delete(handler);
-			};
-		}
-	};
-}
 
 /** All memory files */
 export const allMemoryFiles = createDerived(() => _state.files);

@@ -8,12 +8,15 @@
 	 */
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
-	import { layout } from '$lib/stores/layout';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
-	import { Users, Search, Upload, Sparkles, Plus, Download, Trash2, Wrench, Bot, MessageSquare, Settings, FileText, SlidersHorizontal, ChevronRight, Check, Info, Lock, Cpu, RotateCcw } from 'lucide-svelte';
+	import { Users, Upload, Sparkles, Plus, Wrench, Bot, Settings, FileText, SlidersHorizontal, Check, RotateCcw } from 'lucide-svelte';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data';
 	import { groups as groupsStore } from '$lib/stores/groups';
 	import './card-design-system.css';
+
+	// Sub-components
+	import ProfileList from './profiles/ProfileList.svelte';
+	import ProfileForm from './profiles/ProfileForm.svelte';
 
 	// Icon map for tabs
 	const tabIcons = { general: Settings, tools: Wrench, agents: Bot, prompt: FileText, advanced: SlidersHorizontal } as const;
@@ -115,11 +118,6 @@
 	let viewMode = $state<'list' | 'form'>('list');
 	let editingProfile = $state<Profile | null>(null);
 	let activeTab = $state('general');
-	let searchQuery = $state('');
-
-	// Delete confirmation state
-	let deletingId = $state<string | null>(null);
-	let deleteLoading = $state(false);
 
 	// Profile form state
 	let profileForm = $state({
@@ -147,9 +145,7 @@
 		user: '',
 		max_buffer_size: null as number | null,
 		env_vars: [] as { key: string; value: string }[],
-		// SDK 0.1.15+ file checkpointing for rewind
 		enable_file_checkpointing: false,
-		// App configuration tools — allow AI to manage hooks, automations, MCP, profiles via chat
 		app_config_tools: false
 	});
 
@@ -203,25 +199,12 @@
 		{ id: 'advanced', label: 'Advanced', icon: 'cog' }
 	];
 
-	// Filtered profiles based on search
-	const filteredProfiles = $derived(
-		searchQuery.trim()
-			? profiles.filter(
-					(p) =>
-						p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-						(p.description && p.description.toLowerCase().includes(searchQuery.toLowerCase())) ||
-						p.id.toLowerCase().includes(searchQuery.toLowerCase())
-				)
-			: profiles
-	);
-
 	// Tool counts
 	const sdkToolTotal = $derived(sdkToolCategories.reduce((sum, c) => sum + c.tools.length, 0));
 
 	const enabledSdkToolCount = $derived.by(() => {
 		if (toolSelectionMode === 'none') return 0;
 		if (toolSelectionMode === 'allow') {
-			// Count only allowed SDK tools (exclude AI tool IDs)
 			const sdkToolNames = new Set(sdkToolCategories.flatMap(c => c.tools.map(t => t.name)));
 			return profileForm.allowed_tools.filter(t => sdkToolNames.has(t)).length;
 		}
@@ -243,16 +226,12 @@
 
 	/**
 	 * Compute the effective tool count for a profile based on its selection mode.
-	 * - allowed_tools non-empty → "allow only" mode → count = allowed_tools.length
-	 * - disallowed_tools non-empty → "disallow" mode → count = total - disallowed_tools.length
-	 * - neither → "all" mode → count = total available tools
 	 */
 	function getProfileToolCount(profile: Profile): number {
 		const total = availableTools.all_tools.length;
 		const allowed = profile.config?.allowed_tools;
 		const disallowed = profile.config?.disallowed_tools;
 
-		// Empty allowed_tools array = "none" mode (all tools disabled)
 		if (Array.isArray(allowed) && allowed.length === 0) {
 			return 0;
 		}
@@ -346,13 +325,10 @@
 		const allowedTools = config.allowed_tools || [];
 		const disallowedTools = config.disallowed_tools || [];
 
-		// Build enabled AI tools array dynamically from config keys
-		// If no ai_tools config exists, treat as "all enabled"
 		const enabledAITools: string[] = hasExplicitAIToolConfig
 			? Object.entries(aiTools).filter(([_, enabled]) => enabled).map(([key]) => key)
 			: [];
 
-		// Determine tool selection mode
 		if (Array.isArray(config.allowed_tools) && config.allowed_tools.length === 0) {
 			toolSelectionMode = 'none';
 		} else if (allowedTools.length > 0) {
@@ -398,10 +374,8 @@
 		viewMode = 'form';
 		activeTab = 'general';
 
-		// Check if all AI tools are enabled after loading
 		loadAvailableAITools().then(() => {
 			if (!hasExplicitAIToolConfig) {
-				// No explicit config = all AI tools enabled by default
 				aiToolSelectionMode = 'all';
 			} else {
 				const allIds = getAllAIToolIds();
@@ -513,12 +487,11 @@
 		return 'some';
 	}
 
-	// Agent helpers — built-in agents are always enabled and cannot be toggled
+	// Agent helpers
 	const builtinAgentIds = $derived(allSubagents.filter(a => a.is_builtin).map(a => a.id));
 	const customAgents = $derived(allSubagents.filter(a => !a.is_builtin));
 
 	function toggleAgent(agentId: string) {
-		// Built-in agents cannot be toggled
 		if (builtinAgentIds.includes(agentId)) return;
 		if (profileForm.enabled_agents.includes(agentId)) {
 			profileForm.enabled_agents = profileForm.enabled_agents.filter((id) => id !== agentId);
@@ -564,6 +537,33 @@
 		}
 	}
 
+	// Handle form field changes from sub-component
+	function handleFormChange(field: string, value: any) {
+		(profileForm as any)[field] = value;
+	}
+
+	// Handle tool selection mode changes from sub-component
+	function handleToolSelectionModeChange(mode: 'all' | 'none' | 'allow' | 'disallow') {
+		toolSelectionMode = mode;
+		if (mode === 'all') {
+			profileForm.allowed_tools = [];
+			profileForm.disallowed_tools = [];
+		} else if (mode === 'none') {
+			profileForm.allowed_tools = [];
+			profileForm.disallowed_tools = [];
+		} else if (mode === 'allow') {
+			profileForm.disallowed_tools = [];
+		} else {
+			profileForm.allowed_tools = [];
+		}
+	}
+
+	// Handle custom model mode change
+	function handleCustomModelModeChange(custom: boolean, model: string) {
+		customModelMode = custom;
+		profileForm.model = model;
+	}
+
 	// Save profile
 	async function saveProfile() {
 		if (!profileForm.name) return;
@@ -572,13 +572,10 @@
 			model: profileForm.model,
 			permission_mode: profileForm.permission_mode,
 			include_partial_messages: profileForm.include_partial_messages,
-			// SDK 0.1.15+ file checkpointing for rewind
 			enable_file_checkpointing: profileForm.enable_file_checkpointing,
-			// App configuration tools
 			app_config_tools: profileForm.app_config_tools
 		};
 
-		// Thinking and effort are independent controls
 		config.thinking_mode = profileForm.thinking_mode;
 		if (profileForm.effort) {
 			config.effort = profileForm.effort;
@@ -592,7 +589,6 @@
 		} else if (toolSelectionMode === 'disallow' && profileForm.disallowed_tools.length > 0) {
 			config.disallowed_tools = profileForm.disallowed_tools;
 		}
-		// Always include built-in agents + any user-selected custom agents
 		const allEnabledAgents = [...new Set([...builtinAgentIds, ...profileForm.enabled_agents])];
 		config.enabled_agents = allEnabledAgents;
 		if (profileForm.setting_sources.length > 0) {
@@ -608,7 +604,6 @@
 		if (profileForm.user.trim()) config.user = profileForm.user;
 		if (profileForm.max_buffer_size) config.max_buffer_size = profileForm.max_buffer_size;
 
-		// Environment variables - convert array to dict
 		const validEnvVars = profileForm.env_vars.filter(v => v.key.trim());
 		if (validEnvVars.length > 0) {
 			config.env = validEnvVars.reduce((acc, { key, value }) => {
@@ -617,22 +612,17 @@
 			}, {} as Record<string, string>);
 		}
 
-		// AI tools - always include ai_tools to explicitly save the selection
 		let effectiveAITools: string[];
 		if (aiToolSelectionMode === 'all') {
 			const allIds = getAllAIToolIds();
-			// Fallback: if categories haven't loaded yet, use the form's current selection
 			effectiveAITools = allIds.length > 0 ? allIds : [...profileForm.enabled_ai_tools];
 		} else {
-			// Spread to ensure plain array (not Svelte proxy)
 			effectiveAITools = [...profileForm.enabled_ai_tools];
 		}
-		// Always include ai_tools in config - even empty means "no AI tools enabled"
 		config.ai_tools = effectiveAITools.length > 0
 			? Object.fromEntries(effectiveAITools.map((id) => [id, true]))
 			: {};
 
-		// System prompt
 		if (profileForm.system_prompt_type === 'preset') {
 			config.system_prompt = {
 				type: 'preset',
@@ -682,7 +672,6 @@
 
 		try {
 			await tabsStore.restoreProfile(editingProfile.id);
-			// Re-open the edit form with restored data
 			const restored = profiles.find(p => p.id === editingProfile!.id);
 			if (restored) {
 				openEditForm(restored);
@@ -730,18 +719,15 @@
 
 	/**
 	 * Opens the form view populated with AI-generated profile data.
-	 * User can review/edit the values before saving.
 	 */
 	function openFormFromGenerated(data: AgentExport) {
-		editingProfile = null; // Creating new, not editing existing
+		editingProfile = null;
 
 		const agent = data.agent;
 
-		// Map AgentExportData fields to form fields
 		const allowedTools = agent.allowed_tools || [];
 		const disallowedTools = agent.disallowed_tools || [];
 
-		// Determine tool selection mode
 		if (Array.isArray(agent.allowed_tools) && agent.allowed_tools.length === 0) {
 			toolSelectionMode = 'none';
 		} else if (allowedTools.length > 0) {
@@ -752,20 +738,17 @@
 			toolSelectionMode = 'all';
 		}
 
-		// Build enabled AI tools array dynamically from config keys
 		const aiTools = agent.ai_tools || {};
 		const enabledAITools: string[] = Object.entries(aiTools)
 			.filter(([_, enabled]) => enabled)
 			.map(([key]) => key);
 
-		// Determine AI tool selection mode
 		if (enabledAITools.length > 0) {
 			aiToolSelectionMode = 'custom';
 		} else {
-			aiToolSelectionMode = 'custom'; // Default to custom so user can add if needed
+			aiToolSelectionMode = 'custom';
 		}
 
-		// Parse system prompt
 		let spType = 'preset';
 		let spPreset = 'claude_code';
 		let spAppend = '';
@@ -786,7 +769,7 @@
 		customModelMode = !presetModelsAgent.includes(agent.model || 'sonnet');
 
 		profileForm = {
-			id: '', // User must provide unique ID for new profile
+			id: '',
 			name: agent.name,
 			description: agent.description || '',
 			model: agent.model || 'sonnet',
@@ -819,22 +802,12 @@
 	}
 
 	function handleGeneratedProfile(data: AgentExport | unknown) {
-		// Close the dialog and open the form with generated data
 		showGenerateDialog = false;
 		openFormFromGenerated(data as AgentExport);
 	}
 
-	async function confirmDeleteProfile() {
-		if (!deletingId) return;
-		deleteLoading = true;
-		try {
-			await tabsStore.deleteProfile(deletingId);
-			deletingId = null;
-		} catch (err: any) {
-			console.error('Failed to delete profile:', err);
-		} finally {
-			deleteLoading = false;
-		}
+	async function handleDeleteProfile(profileId: string) {
+		await tabsStore.deleteProfile(profileId);
 	}
 
 	function assignToGroup(profileId: string, groupName: string) {
@@ -845,27 +818,12 @@
 		groupsStore.removeFromGroup('profiles', profileId);
 	}
 
-	let creatingGroup = $state(false);
-	let newGroupName = $state('');
-
-	function startGroupCreate() {
-		creatingGroup = true;
-		newGroupName = '';
+	function createGroup(category: string, name: string) {
+		groupsStore.createGroup(category as any, name);
 	}
 
-	function confirmGroupCreate(profileId: string) {
-		const name = newGroupName.trim();
-		if (name) {
-			groupsStore.createGroup('profiles', name);
-			groupsStore.assignToGroup('profiles', profileId, name);
-		}
-		creatingGroup = false;
-		newGroupName = '';
-	}
-
-	function cancelGroupCreate() {
-		creatingGroup = false;
-		newGroupName = '';
+	function deleteGroup(category: string, name: string) {
+		groupsStore.deleteGroup(category as any, name);
 	}
 </script>
 
@@ -892,543 +850,42 @@
 				</div>
 			{/snippet}
 
-			<!-- Tab Content -->
-			<div class="card-system pf-content">
-				{#if activeTab === 'general'}
-				<!-- ═══ GENERAL TAB ═══ -->
-					<div class="pf-section">
-						<div class="pf-section-header">
-							<Users size={16} />
-							<h3>Profile Information</h3>
-						</div>
-						<div class="pf-field-grid">
-							<div class="pf-field">
-								<label class="pf-label" for="profile-name">Name <span class="required">*</span></label>
-								<input id="profile-name" bind:value={profileForm.name} class="pf-input" placeholder="My Custom Agent" />
-							</div>
-							<div class="pf-field">
-								<label class="pf-label" for="profile-description">Description</label>
-								<input id="profile-description" bind:value={profileForm.description} class="pf-input" placeholder="A coding assistant for frontend work" />
-							</div>
-							{#if editingProfile}
-								<div class="pf-field">
-									<label class="pf-label" for="profile-group">Group</label>
-									<div class="pf-group-wrapper">
-									<div class="pf-group-row">
-										<select
-											id="profile-group"
-											class="pf-select"
-											value={groups?.profiles?.assignments?.[editingProfile.id] ?? ''}
-											onchange={(e) => {
-												const v = (e.target as HTMLSelectElement).value;
-												if (editingProfile) {
-													if (v) assignToGroup(editingProfile.id, v);
-													else removeFromGroup(editingProfile.id);
-												}
-											}}
-										>
-											<option value="">No group</option>
-											{#each groups?.profiles?.groups ?? [] as group}
-												<option value={group.name}>{group.name}</option>
-											{/each}
-										</select>
-										{#if creatingGroup}
-											<button type="button" class="pf-btn-new-group" onclick={() => editingProfile && confirmGroupCreate(editingProfile.id)} title="Create">
-												<Check size={14} />
-											</button>
-										{:else}
-											<button type="button" class="pf-btn-new-group" onclick={startGroupCreate} title="New group">
-												<Plus size={14} />
-											</button>
-											{#if editingProfile && (groups?.profiles?.assignments?.[editingProfile.id] ?? "")}
-												<button type="button" class="pf-btn-new-group pf-btn-new-group--delete" onclick={() => { if (!editingProfile) return; const g = groups?.profiles?.assignments?.[editingProfile.id]; if (g) { removeFromGroup(editingProfile.id); groupsStore.deleteGroup("profiles", g); } }} title="Delete group">
-													<Trash2 size={14} />
-												</button>
-											{/if}
-										{/if}
-									</div>
-									{#if creatingGroup}
-										<!-- svelte-ignore a11y_autofocus -->
-										<input
-											type="text"
-											class="pf-input pf-group-input"
-											placeholder="Group name..."
-											bind:value={newGroupName}
-											onkeydown={(e) => {
-												if (e.key === 'Enter') { e.preventDefault(); editingProfile && confirmGroupCreate(editingProfile.id); }
-												if (e.key === 'Escape') { e.preventDefault(); cancelGroupCreate(); }
-											}}
-											autofocus
-										/>
-									{/if}
-								</div>
-								</div>
-							{/if}
-						</div>
-					</div>
-
-					<div class="pf-divider"></div>
-
-					<div class="pf-section">
-						<div class="pf-section-header">
-							<Settings size={16} />
-							<h3>Model & AI Settings</h3>
-						</div>
-						<div class="pf-field-grid">
-							<div class="pf-field">
-								<label class="pf-label" for="profile-model">Model</label>
-								<select id="profile-model" class="pf-select" value={customModelMode ? '__custom__' : profileForm.model} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v === '__custom__') { customModelMode = true; profileForm.model = ''; } else { customModelMode = false; profileForm.model = v; } }}>
-									<option value="haiku">Haiku</option>
-									<option value="sonnet">Sonnet</option>
-									<option value="opus">Opus</option>
-									<option value="opus[1m]">Opus 1M</option>
-									<option value="__custom__">Custom...</option>
-								</select>
-								{#if customModelMode}
-									<input type="text" bind:value={profileForm.model} class="pf-input pf-input--mono" placeholder="e.g. claude-opus-4-6" style="margin-top: 6px;" />
-								{/if}
-							</div>
-							<div class="pf-field">
-								<label class="pf-label" for="profile-permission">Permission Mode</label>
-								<select id="profile-permission" bind:value={profileForm.permission_mode} class="pf-select">
-									<option value="default">Default</option>
-									<option value="acceptEdits">Accept Edits</option>
-									<option value="plan">Plan</option>
-									<option value="bypassPermissions">Bypass Permissions</option>
-								</select>
-							</div>
-							<div class="pf-field">
-								<label class="pf-label" for="profile-thinking">Thinking Mode</label>
-								<select id="profile-thinking" bind:value={profileForm.thinking_mode} class="pf-select">
-									<option value="default">Default</option>
-									<option value="disabled">Off</option>
-									<option value="adaptive">Adaptive</option>
-									<option value="think">8K Budget</option>
-									<option value="think_harder">24K Budget</option>
-									<option value="ultra_think">64K Budget</option>
-								</select>
-							</div>
-							<div class="pf-field">
-								<label class="pf-label" for="profile-effort">Effort Level</label>
-								<select id="profile-effort" class="pf-select" value={profileForm.effort || ''} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; profileForm.effort = v ? v as 'low' | 'medium' | 'high' | 'max' : null; }}>
-									<option value="">Default</option>
-									<option value="low">Low</option>
-									<option value="medium">Medium</option>
-									<option value="high">High</option>
-									<option value="max">Max</option>
-								</select>
-							</div>
-							<div class="pf-field">
-								<label class="pf-label" for="profile-max-turns">Max Turns</label>
-								<input id="profile-max-turns" type="number" bind:value={profileForm.max_turns} class="pf-input" placeholder="Unlimited" />
-							</div>
-							</div>
-					</div>
-
-					<div class="pf-divider"></div>
-
-					<div class="pf-section">
-						<div class="pf-section-header">
-							<SlidersHorizontal size={16} />
-							<h3>Behavior</h3>
-						</div>
-						<div class="pf-toggle-row">
-							<div class="pf-toggle-info">
-								<span class="pf-toggle-title">Include Partial Messages</span>
-								<span class="pf-toggle-desc">Stream partial text during AI generation for real-time feedback</span>
-							</div>
-							<button
-								type="button"
-								class="pf-toggle"
-								class:active={profileForm.include_partial_messages}
-								role="switch"
-								aria-checked={profileForm.include_partial_messages}
-								aria-label="Toggle include partial messages"
-								onclick={() => profileForm.include_partial_messages = !profileForm.include_partial_messages}
-							>
-								<span class="pf-toggle-knob"></span>
-							</button>
-						</div>
-						<div class="pf-toggle-row">
-							<div class="pf-toggle-info">
-								<span class="pf-toggle-title">File Checkpointing</span>
-								<span class="pf-toggle-desc">Create restore points before file modifications.</span>
-							</div>
-							<button
-								type="button"
-								class="pf-toggle"
-								class:active={profileForm.enable_file_checkpointing}
-								role="switch"
-								aria-checked={profileForm.enable_file_checkpointing}
-								aria-label="Toggle file checkpointing"
-								onclick={() => profileForm.enable_file_checkpointing = !profileForm.enable_file_checkpointing}
-							>
-								<span class="pf-toggle-knob"></span>
-							</button>
-						</div>
-						<div class="pf-toggle-row">
-							<div class="pf-toggle-info">
-								<span class="pf-toggle-title">App Config via Chat</span>
-								<span class="pf-toggle-desc">Allow AI to manage hooks, automations, MCP servers, and profiles through conversation. Admin only.</span>
-							</div>
-							<button
-								type="button"
-								class="pf-toggle"
-								class:active={profileForm.app_config_tools}
-								role="switch"
-								aria-checked={profileForm.app_config_tools}
-								aria-label="Toggle app configuration tools"
-								onclick={() => profileForm.app_config_tools = !profileForm.app_config_tools}
-							>
-								<span class="pf-toggle-knob"></span>
-							</button>
-						</div>
-					</div>
-
-				{:else if activeTab === 'tools'}
-					<!-- ═══ TOOLS TAB ═══ -->
-					<div class="pf-section">
-						<div class="pf-section-header">
-							<Wrench size={16} />
-							<h3>Tool Access</h3>
-						</div>
-						<p class="pf-desc">Control which tools this profile can access during conversations.</p>
-						<select class="pf-select" bind:value={toolSelectionMode} onchange={() => { if (toolSelectionMode === 'all') { profileForm.allowed_tools = []; profileForm.disallowed_tools = []; } else if (toolSelectionMode === 'none') { profileForm.allowed_tools = []; profileForm.disallowed_tools = []; } else if (toolSelectionMode === 'allow') { profileForm.disallowed_tools = []; } else { profileForm.allowed_tools = []; } }}>
-							<option value="all">All Tools Allowed</option>
-							<option value="none">Disable All Tools</option>
-							<option value="allow">Allow Only Selected</option>
-							<option value="disallow">Disallow Selected</option>
-						</select>
-					</div>
-
-					{#if toolSelectionMode !== 'none'}
-					<div class="pf-section">
-						<div class="pf-section-header">
-							<Settings size={16} />
-							<h3>Tool Categories</h3>
-						</div>
-						<p class="pf-desc">Browse and manage tools by category. Toggle entire categories on or off.</p>
-						<div class="pf-category-list">
-							<!-- Built-in SDK Tools -->
-							<button type="button" class="pf-category-card" onclick={() => toggleSection('sdk')}>
-								<div class="pf-category-icon">
-									<Wrench size={18} />
-								</div>
-								<div class="pf-category-info">
-									<span class="pf-category-name">Built-in Tools</span>
-									<span class="pf-category-desc">{sdkToolCategories.map(c => c.name).join(', ')}</span>
-								</div>
-								<span class="pf-category-count">{enabledSdkToolCount}</span>
-								<ChevronRight size={16} class="pf-category-chevron" />
-							</button>
-
-							{#if expandedSections.sdk}
-								<div class="pf-category-expanded">
-									{#if toolSelectionMode !== 'all'}
-										<div class="tools-list">
-											{#each sdkToolCategories as category}
-												{#if category.tools.length > 0}
-													{@const state = getCategorySelectionState(category)}
-													<div class="tool-category">
-														<button type="button" class="category-header" onclick={() => toggleCategory(category)}>
-															<div class="category-checkbox" class:checked={state !== 'none'} class:partial={state === 'some'}>
-																{#if state === 'all'}
-																	<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
-																{:else if state === 'some'}
-																	<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" /></svg>
-																{/if}
-															</div>
-															<span class="category-name">{category.name}</span>
-															<span class="category-count">{category.tools.length}</span>
-														</button>
-														<div class="category-tools">
-															{#each category.tools as tool}
-																{@const isSelected = toolSelectionMode === 'allow' ? profileForm.allowed_tools.includes(tool.name) : profileForm.disallowed_tools.includes(tool.name)}
-																<label class="tool-item">
-																	<input type="checkbox" checked={isSelected} onchange={() => toggleTool(tool.name)} class="tool-checkbox" />
-																	<span class="tool-name" title={tool.description}>{tool.name}</span>
-																</label>
-															{/each}
-														</div>
-													</div>
-												{/if}
-											{/each}
-										</div>
-										<div class="selection-count">
-											{#if toolSelectionMode === 'allow'}{profileForm.allowed_tools.length} tool{profileForm.allowed_tools.length !== 1 ? 's' : ''} allowed
-											{:else}{profileForm.disallowed_tools.length} tool{profileForm.disallowed_tools.length !== 1 ? 's' : ''} blocked{/if}
-										</div>
-									{:else}
-										<p class="pf-desc" style="padding: 12px 16px;">All built-in tools are available.</p>
-									{/if}
-								</div>
-							{/if}
-
-							<!-- AI Tools -->
-							<button type="button" class="pf-category-card" onclick={() => toggleSection('ai')}>
-								<div class="pf-category-icon">
-									<Sparkles size={18} />
-								</div>
-								<div class="pf-category-info">
-									<span class="pf-category-name">AI Tools</span>
-									<span class="pf-category-desc">Image generation, video, 3D models, web search</span>
-								</div>
-								<span class="pf-category-count">{aiToolCount}</span>
-								<ChevronRight size={16} class="pf-category-chevron" />
-							</button>
-
-							{#if expandedSections.ai}
-								<div class="pf-category-expanded">
-									{#if aiToolsLoading}
-										<div class="loading-state">Loading AI tools...</div>
-									{:else if aiToolCategories.length === 0}
-										<div class="card-empty-state"><p class="card-empty-description">No AI tools available. Configure API keys in Settings.</p></div>
-									{:else if toolSelectionMode !== 'all'}
-										<div class="tools-list">
-											{#each aiToolCategories as category}
-												{#if category.tools.length > 0}
-													{@const state = getAICategorySelectionState(category)}
-													<div class="tool-category">
-														<button type="button" class="category-header" onclick={() => toggleAIToolCategory(category)}>
-															<div class="category-checkbox" class:checked={state !== 'none'} class:partial={state === 'some'}>
-																{#if state === 'all'}
-																	<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
-																{:else if state === 'some'}
-																	<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" /></svg>
-																{/if}
-															</div>
-															<span class="category-name">{category.name}</span>
-															<span class="category-count">{category.tools.length}</span>
-														</button>
-														<div class="ai-category-tools">
-															{#each category.tools as tool}
-																{@const isSelected = profileForm.enabled_ai_tools.includes(tool.id)}
-																<label class="ai-tool-row" class:disabled={!tool.available}>
-																	<input type="checkbox" checked={isSelected} disabled={!tool.available} onchange={() => toggleAITool(tool.id)} class="tool-checkbox" />
-																	<div class="ai-tool-content">
-																		<span class="tool-name">{tool.name}</span>
-																		{#if !tool.available}<span class="card-badge card-badge--warning">No API key</span>{/if}
-																		<p class="ai-tool-description">{tool.description}</p>
-																	</div>
-																</label>
-															{/each}
-														</div>
-													</div>
-												{/if}
-											{/each}
-										</div>
-									{:else}
-										<p class="pf-desc" style="padding: 12px 16px;">All AI tools are available.</p>
-									{/if}
-								</div>
-							{/if}
-
-						</div>
-					</div>
-					{/if}
-
-					<!-- Tools Summary Bar -->
-					<div class="pf-summary-bar">
-						<div class="pf-summary-left">
-							<Wrench size={14} />
-							<span>{effectiveToolCount} tools enabled</span>
-						</div>
-						<span class="pf-summary-link">Manage individually →</span>
-					</div>
-
-				{:else if activeTab === 'agents'}
-					<!-- ═══ AGENTS TAB ═══ -->
-					<div class="pf-section">
-						<div class="pf-section-header">
-							<Bot size={16} />
-							<h3>Sub-Agents</h3>
-							{#if customAgents.length > 0}
-								<div class="pf-section-actions">
-									<button type="button" class="text-btn primary" onclick={() => (profileForm.enabled_agents = [...builtinAgentIds, ...customAgents.map((a) => a.id)])}>Select All</button>
-									<button type="button" class="text-btn muted" onclick={() => (profileForm.enabled_agents = [...builtinAgentIds])}>Clear Custom</button>
-								</div>
-							{/if}
-						</div>
-						<p class="pf-desc">Built-in agents are always available. Choose which custom agents to enable.</p>
-					</div>
-
-					{#if allSubagents.length === 0}
-						<div class="card-empty-state"><p class="card-empty-description">No agents configured</p></div>
-					{:else}
-						<div class="fp-list" style="padding: 0 20px;">
-							{#each allSubagents as agent, index (agent.id)}
-								{@const isBuiltin = agent.is_builtin}
-								{@const isSelected = isBuiltin || profileForm.enabled_agents.includes(agent.id)}
-								{#if index > 0}<div class="fp-list-divider"></div>{/if}
-								<label class="fp-list-item pf-agent-row" class:pf-agent-row--selected={isSelected} class:pf-agent-row--builtin={isBuiltin}>
-									<input type="checkbox" checked={isSelected} disabled={isBuiltin} onchange={() => toggleAgent(agent.id)} class="pf-agent-checkbox" />
-									<div class="fp-item-indicator" style={isSelected ? 'background: var(--primary)' : 'background: var(--text-tertiary); opacity: 0.3'}></div>
-									<div class="fp-item-content">
-										<div class="fp-item-header">
-											<span class="fp-item-name">{agent.name}</span>
-											{#if isBuiltin}
-												<span class="fp-item-badge">Always on</span>
-											{/if}
-										</div>
-										<div class="fp-item-meta">
-											<span class="fp-meta-model">{getModelDisplay(agent.model)}</span>
-										</div>
-									</div>
-								</label>
-							{/each}
-						</div>
-
-						<!-- Agents Summary Bar -->
-						<div class="pf-summary-bar">
-							<div class="pf-summary-left">
-								<Bot size={14} />
-									<span>{builtinAgentIds.length} built-in{#if customAgents.length > 0} + {profileForm.enabled_agents.filter(id => !builtinAgentIds.includes(id) && customAgents.some(a => a.id === id)).length} of {customAgents.length} custom{/if}</span>
-							</div>
-							<button type="button" class="pf-summary-link" onclick={() => layout.openFeaturePage('subagent')}>Configure agents →</button>
-						</div>
-					{/if}
-
-				{:else if activeTab === 'prompt'}
-					<!-- ═══ PROMPT TAB ═══ -->
-					<div class="pf-section">
-						<div class="pf-section-header">
-							<FileText size={16} />
-							<h3>System Prompt Mode</h3>
-						</div>
-						<p class="pf-desc">Choose how the system prompt is configured for this profile.</p>
-						<select class="pf-select" bind:value={profileForm.system_prompt_type}>
-							<option value="preset">Claude Code Default + Append</option>
-							<option value="custom">Custom Prompt</option>
-						</select>
-					</div>
-
-					<div class="pf-section">
-						<div class="pf-section-header">
-							<MessageSquare size={16} />
-							<h3>Custom Prompt</h3>
-							<span class="pf-char-count">
-								{(profileForm.system_prompt_type === 'preset' ? profileForm.system_prompt_append : profileForm.system_prompt_content).length.toLocaleString()} / 10,000
-							</span>
-						</div>
-						{#if profileForm.system_prompt_type === 'preset'}
-							<textarea
-								bind:value={profileForm.system_prompt_append}
-								class="pf-textarea"
-								rows="8"
-								placeholder="Additional instructions to append to Claude Code's system prompt..."
-							></textarea>
-						{:else}
-							<textarea
-								bind:value={profileForm.system_prompt_content}
-								class="pf-textarea"
-								rows="10"
-								placeholder="Enter your custom system prompt..."
-							></textarea>
-						{/if}
-					</div>
-
-					<div class="pf-toggle-row">
-						<div class="pf-toggle-info">
-							<span class="pf-toggle-title">Inject Environment Details</span>
-							<span class="pf-toggle-desc">Automatically inject OS, platform, and working directory info into the prompt.</span>
-						</div>
-						<button
-							type="button"
-							class="pf-toggle"
-							class:active={profileForm.system_prompt_inject_env}
-							role="switch"
-							aria-checked={profileForm.system_prompt_inject_env}
-							aria-label="Toggle inject environment details"
-							onclick={() => profileForm.system_prompt_inject_env = !profileForm.system_prompt_inject_env}
-						>
-							<span class="pf-toggle-knob"></span>
-						</button>
-					</div>
-
-				{:else if activeTab === 'advanced'}
-					<!-- ═══ ADVANCED TAB ═══ -->
-					<div class="pf-section">
-						<div class="pf-section-header">
-							<SlidersHorizontal size={16} />
-							<h3>Environment</h3>
-						</div>
-						<p class="pf-desc">Configure the working environment for this profile.</p>
-						<div class="pf-field-grid">
-							<div class="pf-field">
-								<label class="pf-label" for="profile-cwd">Working Directory</label>
-								<input id="profile-cwd" bind:value={profileForm.cwd} class="pf-input pf-input--mono" placeholder="/home/user/projects/my-api" />
-							</div>
-							<div class="pf-field">
-								<label class="pf-label" for="profile-user">Run as User</label>
-								<input id="profile-user" bind:value={profileForm.user} class="pf-input" placeholder="default" />
-							</div>
-						</div>
-					</div>
-
-					<div class="pf-section">
-						<div class="pf-section-header">
-							<Settings size={16} />
-							<h3>Performance & Limits</h3>
-						</div>
-						<div class="pf-field-grid">
-							<div class="pf-field">
-								<label class="pf-label" for="profile-max-buffer">Max Output Buffer</label>
-								<input id="profile-max-buffer" type="number" bind:value={profileForm.max_buffer_size} class="pf-input" placeholder="200,000 chars" />
-							</div>
-						</div>
-					</div>
-
-					<div class="pf-section">
-						<div class="pf-section-header">
-							<FileText size={16} />
-							<h3>Settings Sources</h3>
-						</div>
-						<p class="pf-desc">Load settings from filesystem locations</p>
-						<div class="inline-checkboxes">
-							{#each [{ id: 'user', label: 'User (~/.claude)' }, { id: 'project', label: 'Project (.claude)' }, { id: 'local', label: 'Local' }] as source}
-								<label class="inline-checkbox">
-									<input type="checkbox" checked={profileForm.setting_sources.includes(source.id)} onchange={() => toggleSettingSource(source.id)} class="checkbox-input" />
-									<span class="checkbox-label">{source.label}</span>
-								</label>
-							{/each}
-						</div>
-					</div>
-
-					<div class="pf-section">
-						<div class="pf-section-header">
-							<SlidersHorizontal size={16} />
-							<h3>Environment Variables</h3>
-							<button type="button" class="pf-add-var-btn" onclick={() => { profileForm.env_vars = [...profileForm.env_vars, { key: '', value: '' }]; }}>
-								+ Add Variable
-							</button>
-						</div>
-						<select class="pf-select" onchange={(e) => { const target = e.target as HTMLSelectElement; const key = target.value; if (key && !profileForm.env_vars.some(v => v.key === key)) { profileForm.env_vars = [...profileForm.env_vars, { key, value: '' }]; } target.value = ''; }}>
-							<option value="">Select a known variable to add...</option>
-							{#each envVarPresets as preset}
-								{#if !profileForm.env_vars.some(v => v.key === preset.key)}
-									<option value={preset.key}>{preset.key}</option>
-								{/if}
-							{/each}
-						</select>
-						{#if profileForm.env_vars.length > 0}
-							<div class="pf-env-list">
-								{#each profileForm.env_vars as envVar, index}
-									{@const preset = envVarPresets.find(p => p.key === envVar.key)}
-									<div class="pf-env-row">
-										<input type="text" bind:value={envVar.key} class="pf-input pf-input--mono pf-env-key" placeholder="VARIABLE_NAME" oninput={(e) => { const target = e.target as HTMLInputElement; if (target.value.includes(',')) { target.value = target.value.replace(/,/g, ''); envVar.key = target.value; } }} />
-										<input type="text" bind:value={envVar.value} class="pf-input pf-input--mono pf-env-value" placeholder={preset?.placeholder || 'value'} oninput={(e) => { const target = e.target as HTMLInputElement; if (target.value.includes(',')) { target.value = target.value.replace(/,/g, ''); envVar.value = target.value; } }} />
-										<button type="button" class="pf-env-remove" title="Remove variable" onclick={() => { profileForm.env_vars = profileForm.env_vars.filter((_, i) => i !== index); }}>
-											<Trash2 size={14} />
-										</button>
-									</div>
-								{/each}
-							</div>
-						{:else}
-							<p class="pf-desc">No environment variables configured.</p>
-						{/if}
-					</div>
-				{/if}
-			</div>
+			<ProfileForm
+				{activeTab}
+				{editingProfile}
+				{profileForm}
+				{toolSelectionMode}
+				{customModelMode}
+				{groups}
+				{allSubagents}
+				{builtinAgentIds}
+				{customAgents}
+				{sdkToolCategories}
+				{aiToolCategories}
+				{aiToolsLoading}
+				{enabledSdkToolCount}
+				{aiToolCount}
+				{effectiveToolCount}
+				{expandedSections}
+				{envVarPresets}
+				onFormChange={handleFormChange}
+				onToolSelectionModeChange={handleToolSelectionModeChange}
+				onCustomModelModeChange={handleCustomModelModeChange}
+				onToggleTool={toggleTool}
+				onToggleCategory={toggleCategory}
+				onToggleAITool={toggleAITool}
+				onToggleAIToolCategory={toggleAIToolCategory}
+				onToggleSection={toggleSection}
+				onToggleAgent={toggleAgent}
+				onToggleSettingSource={toggleSettingSource}
+				onAssignToGroup={assignToGroup}
+				onRemoveFromGroup={removeFromGroup}
+				onCreateGroup={createGroup}
+				onDeleteGroup={deleteGroup}
+				{getCategorySelectionState}
+				{getAICategorySelectionState}
+				{getModelDisplay}
+			/>
 
 			{#snippet footer()}
 				<div class="pf-form-footer">
@@ -1473,98 +930,17 @@
 
 			<input type="file" accept=".json" bind:this={profileImportInput} onchange={handleImport} class="hidden" />
 
-			<div class="fp-search-bar">
-				<div class="fph-search-wrapper">
-					<Search size={14} />
-					<input type="text" bind:value={searchQuery} placeholder="Search profiles..." class="fph-search-input" />
-				</div>
-			</div>
-
-			{#if filteredProfiles.length === 0}
-				<div class="card-empty-state">
-					{#if searchQuery}
-						<p class="card-empty-title">No profiles match your search</p>
-					{:else}
-						<svg class="card-empty-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-						</svg>
-						<p class="card-empty-title">No profiles yet</p>
-						<p class="card-empty-description">Create your first profile to get started</p>
-					{/if}
-				</div>
-			{:else}
-				<div class="fp-list">
-					{#each filteredProfiles as profile, index}
-						{#if index > 0}<div class="fp-list-divider"></div>{/if}
-						{#if deletingId === profile.id}
-							<!-- Inline delete confirmation -->
-							<div class="fp-list-item fp-list-item--deleting">
-								<div class="fp-item-content">
-									<p class="delete-confirm-text">
-										Delete <strong>{profile.name}</strong>? This cannot be undone.
-									</p>
-									<div class="delete-confirm-actions">
-										<button onclick={() => (deletingId = null)} disabled={deleteLoading} class="fp-btn fp-btn--secondary fp-btn--sm">Cancel</button>
-										<button onclick={confirmDeleteProfile} disabled={deleteLoading} class="fp-btn fp-btn--destructive fp-btn--sm">
-											{#if deleteLoading}<div class="card-spinner card-spinner--small"></div>{/if}
-											Delete
-										</button>
-									</div>
-								</div>
-							</div>
-						{:else}
-							<div
-								class="fp-list-item"
-								onclick={() => openEditForm(profile)}
-								role="button"
-								tabindex="0"
-								onkeydown={(e) => e.key === 'Enter' && openEditForm(profile)}
-							>
-								<div class="fp-item-indicator"></div>
-								<div class="fp-item-content">
-									<div class="fp-item-header">
-										<span class="fp-item-name">{profile.name}</span>
-										{#if profile.is_builtin}
-											<span class="fp-item-badge">Built-in</span>
-										{/if}
-										{#if groups?.profiles?.assignments?.[profile.id]}
-											<span class="fp-item-badge fp-item-badge--accent">{groups.profiles.assignments[profile.id]}</span>
-										{/if}
-									</div>
-									<div class="fp-item-meta">
-										<span class="fp-meta-model">{getModelDisplay(profile.config?.model)}</span>
-										<span class="fp-meta-sep">·</span>
-										<span class="fp-meta-chip">{getProfileToolCount(profile)} tools</span>
-										<span class="fp-meta-sep">·</span>
-										<span class="fp-meta-chip">{Math.max((profile.config?.enabled_agents?.filter((id: string) => allSubagents.some(a => a.id === id))?.length) || 0, builtinAgentIds.length)} agents</span>
-										<span class="fp-meta-sep">·</span>
-										<span class="fp-meta-chip">{profile.session_count || 0} sessions</span>
-									</div>
-								</div>
-								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
-									<button
-										class="card-action-btn"
-										title="Export"
-										onclick={() => handleExportProfile(profile.id)}
-									>
-										<Download size={16} />
-									</button>
-									{#if !profile.is_builtin}
-										<button
-											class="card-action-btn card-action-btn--destructive"
-											title="Delete"
-											onclick={() => { deletingId = profile.id; }}
-										>
-											<Trash2 size={16} />
-										</button>
-									{/if}
-								</div>
-								<div class="fp-item-chevron"><ChevronRight size={16} /></div>
-							</div>
-						{/if}
-					{/each}
-				</div>
-			{/if}
+			<ProfileList
+				{profiles}
+				{groups}
+				{allSubagents}
+				{builtinAgentIds}
+				onEditProfile={openEditForm}
+				onExportProfile={handleExportProfile}
+				onDeleteProfile={handleDeleteProfile}
+				{getModelDisplay}
+				{getProfileToolCount}
+			/>
 		</FeaturePageLayout>
 	{/if}
 
@@ -1578,32 +954,12 @@
 
 
 <style>
-	/* ═══════════════════════════════════════════════════════════════════════════
-	   PROFILE CARD REDESIGN — Clean, card-based editing interface
-	   ═══════════════════════════════════════════════════════════════════════════ */
-
 	.hidden {
 		display: none;
 	}
 
 	.btn-label {
 		display: inline;
-	}
-
-
-	/* Search bar between header and list */
-	.fp-search-bar {
-		max-width: 640px;
-		width: 100%;
-		margin: 0 auto;
-	}
-
-	.fp-search-bar :global(.fph-search-wrapper) {
-		width: 100%;
-	}
-
-	.fp-search-bar :global(.fph-search-input) {
-		width: 100% !important;
 	}
 
 	/* Tab labels — hide on small screens, icons only */
@@ -1617,449 +973,7 @@
 		}
 	}
 
-	/* ─── Content Area ─── */
-	.pf-content {
-		padding: 24px 20px;
-		display: flex;
-		flex-direction: column;
-		gap: 28px;
-	}
-
-	/* ─── Sections ─── */
-	.pf-section {
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-	}
-
-	.pf-section-header {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		color: var(--text-primary);
-	}
-
-	.pf-section-header h3 {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 600;
-		margin: 0;
-		color: var(--text-primary);
-	}
-
-	.pf-section-actions {
-		margin-left: auto;
-		display: flex;
-		gap: 12px;
-	}
-
-	.pf-divider {
-		height: 1px;
-		background: var(--border-subtle);
-		width: 100%;
-	}
-
-	.pf-desc {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-		margin: 0;
-	}
-
-	.pf-char-count {
-		margin-left: auto;
-		font-size: var(--text-xs, 0.6875rem);
-		color: var(--text-secondary);
-		font-weight: 400;
-	}
-
-	/* ─── Field Grid (two-column) ─── */
-	.pf-field-grid {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		gap: 16px;
-	}
-
-	@media (max-width: 480px) {
-		.pf-field-grid {
-			grid-template-columns: 1fr;
-		}
-	}
-
-	.pf-field {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.pf-label {
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 500;
-		color: var(--text-secondary);
-	}
-
-	/* ─── Inputs ─── */
-	.pf-input {
-		width: 100%;
-		padding: 10px 14px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		color: var(--text-primary);
-		font-size: var(--text-md, 0.875rem);
-		font-family: inherit;
-		transition: border-color 200ms, box-shadow 200ms;
-		outline: none;
-	}
-
-	.pf-input:focus {
-		border-color: var(--primary);
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
-	}
-
-	.pf-input::placeholder {
-		color: var(--text-tertiary);
-	}
-
-	.pf-input--mono {
-		font-family: var(--card-font-mono, 'JetBrains Mono', monospace);
-		font-size: var(--text-sm, 0.75rem);
-	}
-
-	/* ─── Selects ─── */
-	.pf-select {
-		width: 100%;
-		padding: 10px 14px;
-		padding-right: 36px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		color: var(--text-primary);
-		font-size: var(--text-md, 0.875rem);
-		font-family: inherit;
-		cursor: pointer;
-		outline: none;
-		appearance: none;
-		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239090A8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
-		background-repeat: no-repeat;
-		background-position: right 12px center;
-		background-size: 16px;
-		transition: border-color 200ms, box-shadow 200ms;
-	}
-
-	.pf-select:focus {
-		border-color: var(--primary);
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
-	}
-
-	/* ─── Textarea ─── */
-	.pf-textarea {
-		width: 100%;
-		min-height: 200px;
-		padding: 12px 14px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		color: var(--text-primary);
-		font-size: var(--text-md, 0.875rem);
-		font-family: inherit;
-		resize: vertical;
-		outline: none;
-		transition: border-color 200ms, box-shadow 200ms;
-	}
-
-	.pf-textarea:focus {
-		border-color: var(--primary);
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
-	}
-
-	.pf-textarea::placeholder {
-		color: var(--text-tertiary);
-	}
-
-	/* ─── Toggle Switch ─── */
-	.pf-toggle-row {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 14px 16px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-	}
-
-	.pf-toggle-info {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		flex: 1;
-		min-width: 0;
-	}
-
-	.pf-toggle-title {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 500;
-		color: var(--text-primary);
-	}
-
-	.pf-toggle-desc {
-		font-size: var(--text-xs, 0.6875rem);
-		color: var(--text-secondary);
-	}
-
-	.pf-toggle {
-		position: relative;
-		width: 44px;
-		height: 24px;
-		background: var(--muted);
-		border: 1px solid var(--border-subtle);
-		border-radius: 12px;
-		cursor: pointer;
-		transition: all 200ms ease;
-		flex-shrink: 0;
-		margin-left: 16px;
-	}
-
-	.pf-toggle.active {
-		background: var(--primary);
-		border-color: var(--primary);
-	}
-
-	.pf-toggle-knob {
-		position: absolute;
-		top: 2px;
-		left: 2px;
-		width: 18px;
-		height: 18px;
-		background: var(--primary-foreground);
-		border-radius: 50%;
-		transition: transform 200ms ease;
-	}
-
-	.pf-toggle.active .pf-toggle-knob {
-		transform: translateX(20px);
-	}
-
-	/* ─── Category Cards (Tools Tab) ─── */
-	.pf-category-list {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-
-	.pf-category-card {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		width: 100%;
-		padding: 14px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		cursor: pointer;
-		transition: all 200ms;
-		color: var(--text-primary);
-		text-align: left;
-	}
-
-	.pf-category-card:hover {
-		border-color: color-mix(in oklch, var(--primary) 30%, transparent);
-		background: var(--surface-hover);
-	}
-
-	.pf-category-icon {
-		width: 36px;
-		height: 36px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		border-radius: 8px;
-		color: var(--primary);
-		flex-shrink: 0;
-	}
-
-	.pf-category-info {
-		flex: 1;
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-	}
-
-	.pf-category-name {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 500;
-	}
-
-	.pf-category-desc {
-		font-size: var(--text-xs, 0.6875rem);
-		color: var(--text-secondary);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.pf-category-count {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 600;
-		color: var(--primary);
-		padding: 2px 8px;
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		border-radius: 6px;
-	}
-
-	.pf-category-card :global(.pf-category-chevron) {
-		color: var(--text-secondary);
-		flex-shrink: 0;
-	}
-
-	.pf-category-expanded {
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		overflow: hidden;
-		margin-top: -4px;
-	}
-
-	/* ─── Summary Bar ─── */
-	.pf-summary-bar {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 12px 16px;
-		background: color-mix(in oklch, var(--primary) 3%, transparent);
-		border: 1px solid color-mix(in oklch, var(--primary) 20%, transparent);
-		border-radius: var(--radius-md, 10px);
-	}
-
-	.pf-summary-left {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-	}
-
-	.pf-summary-left :global(svg) {
-		color: var(--primary);
-	}
-
-	.pf-summary-link {
-		font-size: var(--text-xs, 0.6875rem);
-		font-weight: 500;
-		color: var(--text-secondary);
-		background: none;
-		border: none;
-		padding: 0;
-		cursor: pointer;
-		transition: color 120ms;
-	}
-
-	.pf-summary-link:hover {
-		color: var(--primary);
-	}
-
-	/* ─── Agent Cards ─── */
-	.pf-agent-row {
-		cursor: pointer;
-	}
-
-	.pf-agent-row--builtin {
-		cursor: default;
-		opacity: 0.85;
-	}
-
-	.pf-agent-checkbox {
-		width: 18px;
-		height: 18px;
-		flex-shrink: 0;
-		accent-color: var(--primary);
-	}
-
-	.pf-agent-checkbox:disabled {
-		opacity: 0.5;
-		cursor: default;
-	}
-
-	/* ─── Environment Variables ─── */
-	.pf-env-list {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.pf-env-row {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-
-	.pf-env-key {
-		width: 200px;
-		flex-shrink: 0;
-	}
-
-	.pf-env-value {
-		flex: 1;
-	}
-
-	.pf-env-remove {
-		width: 32px;
-		height: 32px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: color-mix(in oklch, var(--destructive) 10%, transparent);
-		border: none;
-		border-radius: 6px;
-		color: var(--destructive);
-		cursor: pointer;
-		transition: all 150ms;
-		flex-shrink: 0;
-	}
-
-	.pf-env-remove:hover {
-		background: color-mix(in oklch, var(--destructive) 20%, transparent);
-	}
-
-	.pf-add-var-btn {
-		margin-left: auto;
-		background: none;
-		border: none;
-		color: var(--primary);
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 500;
-		cursor: pointer;
-	}
-
-	.pf-add-var-btn:hover {
-		text-decoration: underline;
-	}
-
-	@media (max-width: 480px) {
-		.pf-env-row {
-			display: grid;
-			grid-template-columns: 1fr auto;
-			grid-template-rows: auto auto;
-		}
-
-		.pf-env-key {
-			width: 100%;
-			grid-column: 1;
-			grid-row: 1;
-		}
-
-		.pf-env-value {
-			grid-column: 1;
-			grid-row: 2;
-		}
-
-		.pf-env-remove {
-			grid-column: 2;
-			grid-row: 1 / 3;
-			align-self: center;
-		}
-	}
-
-	/* ─── Footer ─── */
+	/* Footer */
 	.pf-footer {
 		display: flex;
 		align-items: center;
@@ -2077,57 +991,6 @@
 		display: flex;
 		align-items: center;
 		gap: 10px;
-	}
-
-	.pf-group-wrapper {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.pf-group-row {
-		display: flex;
-		gap: 6px;
-		align-items: center;
-	}
-
-	.pf-group-row .pf-select {
-		flex: 1;
-	}
-
-	.pf-btn-new-group {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 36px;
-		height: 36px;
-		flex-shrink: 0;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: all 200ms;
-	}
-
-	.pf-btn-new-group:hover {
-		background: var(--surface-hover);
-		color: var(--text-primary);
-		border-color: var(--border-default);
-	}
-
-	.pf-btn-new-group--delete {
-		color: var(--destructive);
-	}
-
-	.pf-btn-new-group--delete:hover {
-		background: color-mix(in oklch, var(--destructive) 15%, transparent);
-		color: var(--destructive);
-		border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
-	}
-
-	.pf-group-input {
-		width: 100%;
 	}
 
 	.pf-btn-save {
@@ -2185,267 +1048,4 @@
 		border-color: color-mix(in oklch, var(--warning, #f59e0b) 40%, transparent);
 		color: var(--warning, #f59e0b);
 	}
-
-	/* ─── Existing styles retained ─── */
-
-	.text-btn {
-		background: transparent;
-		border: none;
-		font-size: var(--text-xs, 0.75rem);
-		cursor: pointer;
-		transition: color 100ms;
-	}
-
-	.text-btn.muted {
-		color: var(--text-secondary);
-	}
-
-	.text-btn.muted:hover {
-		color: var(--text-primary);
-	}
-
-	.text-btn.primary {
-		color: var(--primary);
-	}
-
-	.text-btn.primary:hover {
-		text-decoration: underline;
-	}
-
-	.required {
-		color: var(--destructive);
-	}
-
-	/* Inline checkboxes (Advanced tab: Settings Sources) */
-	.inline-checkboxes {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 16px;
-	}
-
-	.inline-checkbox {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		cursor: pointer;
-	}
-
-	.checkbox-input {
-		width: 16px;
-		height: 16px;
-		accent-color: var(--primary);
-		color-scheme: dark;
-	}
-
-	.checkbox-label {
-		font-size: var(--text-md, 0.875rem);
-		color: var(--text-primary);
-	}
-
-	/* Tool details (reused from existing) */
-	.tools-list {
-		max-height: 256px;
-		overflow-y: auto;
-		padding-right: 8px;
-		margin-top: 12px;
-	}
-
-	.tool-category {
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		overflow: hidden;
-		margin-bottom: 8px;
-	}
-
-	.category-header {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		width: 100%;
-		padding: 12px;
-		background: var(--surface-1);
-		border: none;
-		color: var(--text-primary);
-		font-size: var(--text-md, 0.875rem);
-		cursor: pointer;
-		transition: background 200ms;
-	}
-
-	.category-header:hover {
-		background: var(--surface-hover);
-	}
-
-	.category-checkbox {
-		width: 16px;
-		height: 16px;
-		border-radius: 4px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: var(--surface-1);
-		border: 1px solid var(--border-default);
-		transition: all 100ms;
-	}
-
-	.category-checkbox.checked,
-	.category-checkbox.partial {
-		background: var(--primary);
-		border-color: var(--primary);
-	}
-
-	.check-icon {
-		width: 12px;
-		height: 12px;
-		color: var(--primary-foreground);
-	}
-
-	.category-name {
-		flex: 1;
-		text-align: left;
-		font-weight: 500;
-	}
-
-	.category-count {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-	}
-
-	.category-tools {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		gap: 4px;
-		padding: 8px;
-		background: var(--surface-0);
-	}
-
-	@media (max-width: 480px) {
-		.category-tools {
-			grid-template-columns: 1fr;
-		}
-	}
-
-	.tool-item {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 6px 8px;
-		border-radius: var(--radius-sm, 6px);
-		cursor: pointer;
-		transition: background 100ms;
-	}
-
-	.tool-item:hover {
-		background: var(--surface-1);
-	}
-
-	.tool-checkbox {
-		width: 14px;
-		height: 14px;
-		flex-shrink: 0;
-		accent-color: var(--primary);
-	}
-
-	.tool-name {
-		font-size: var(--text-base, 0.8125rem);
-		color: var(--text-primary);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.selection-count {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-		margin-top: 12px;
-		padding: 12px 16px 0;
-		border-top: 1px solid var(--border-subtle);
-	}
-
-	/* AI tool rows */
-	.ai-category-tools {
-		display: flex;
-		flex-direction: column;
-		padding: 8px;
-		background: var(--surface-0);
-	}
-
-	.ai-tool-row {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 6px 8px;
-		border-radius: var(--radius-sm, 6px);
-		cursor: pointer;
-		transition: background 100ms;
-	}
-
-	.ai-tool-row:hover {
-		background: var(--surface-1);
-	}
-
-	.ai-tool-row.disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.ai-tool-content {
-		flex: 1;
-		min-width: 0;
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		overflow: hidden;
-	}
-
-	.ai-tool-description {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		flex: 1;
-		min-width: 0;
-	}
-
-	.ai-tool-description::before {
-		content: "—";
-		margin-right: 6px;
-	}
-
-	/* Loading state */
-	.loading-state {
-		text-align: center;
-		padding: 32px;
-		color: var(--text-secondary);
-		font-size: var(--text-md, 0.875rem);
-	}
-
-	/* Scrollbar styling */
-	.tools-list {
-		scrollbar-width: thin;
-		scrollbar-color: var(--border-default) transparent;
-	}
-
-	.tools-list::-webkit-scrollbar {
-		width: 6px;
-	}
-
-	.tools-list::-webkit-scrollbar-track {
-		background: transparent;
-	}
-
-	.tools-list::-webkit-scrollbar-thumb {
-		background-color: var(--border-default);
-		border-radius: 3px;
-	}
-
-	/* ═══════════════════════════════════════════════════════════════════════════
-	   LIST VIEW STYLES (unchanged)
-	   ═══════════════════════════════════════════════════════════════════════════ */
-
-	.fp-btn--sm {
-		padding: 4px 10px;
-		font-size: 0.75rem;
-	}
-
 </style>

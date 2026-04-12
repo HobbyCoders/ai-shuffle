@@ -7,7 +7,7 @@
  */
 
 import * as githubApi from '$lib/api/github';
-import { untrack } from 'svelte';
+import { createSubscribers } from './store-utils';
 
 // Re-export types from API
 export type {
@@ -67,21 +67,14 @@ const initialState: GitHubState = {
 let _state = $state<GitHubState>({ ...initialState });
 
 // ============================================================================
-// Subscribe shim
+// Subscribe shim (centralized via store-utils)
 // ============================================================================
 
-type Subscriber<T> = (value: T) => void;
-
-const _subscribers = new Set<Subscriber<GitHubState>>();
-
-function _notifySubscribers() {
-	untrack(() => { for (const fn of _subscribers) fn(_state); });
-}
-
-function _update(fn: (s: GitHubState) => GitHubState) {
-	_state = fn(untrack(() => _state));
-	_notifySubscribers();
-}
+const { subscribe, update: _update, notifySubscribers: _notifySubscribers, createDerived } =
+	createSubscribers<GitHubState>(
+		() => _state,
+		(v) => { _state = v; }
+	);
 
 // ============================================================================
 // Exported Store
@@ -92,13 +85,7 @@ export const github = {
 		return _state;
 	},
 
-	subscribe(fn: Subscriber<GitHubState>) {
-		_subscribers.add(fn);
-		untrack(() => fn(_state));
-		return () => {
-			_subscribers.delete(fn);
-		};
-	},
+	subscribe,
 
 	/**
 	 * Load GitHub status for a project
@@ -303,24 +290,8 @@ export const github = {
 };
 
 // ============================================================================
-// Derived stores with subscribe shim
+// Derived stores (via store-utils createDerived)
 // ============================================================================
-
-function createDerived<T>(getter: () => T) {
-	return {
-		get current() {
-			return getter();
-		},
-		subscribe(fn: Subscriber<T>) {
-			const handler: Subscriber<GitHubState> = () => fn(getter());
-			_subscribers.add(handler);
-			untrack(() => fn(getter()));
-			return () => {
-				_subscribers.delete(handler);
-			};
-		}
-	};
-}
 
 export const githubAuthenticated = createDerived(() => _state.authenticated);
 export const githubRepoName = createDerived(() => _state.repoName);

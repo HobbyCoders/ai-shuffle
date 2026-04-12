@@ -152,34 +152,17 @@ class LINEConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    async def _do_connect(self) -> None:
         """Validate the channel access token by fetching bot info."""
-        try:
-            self._status = ConnectorStatus.CONNECTING
-            url = f"{LINE_API_BASE}/bot/info"
+        url = f"{LINE_API_BASE}/bot/info"
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(url, headers=self._headers())
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers=self._headers())
 
-            if response.status_code == 200:
-                self._status = ConnectorStatus.CONNECTED
-                self._status_message = None
-                logger.info("LINEConnector %s connected", self.connector_id)
-                return True
-
-            self._status = ConnectorStatus.ERROR
-            self._status_message = f"API returned {response.status_code}"
-            logger.error(
-                "LINEConnector %s failed to validate token: %s",
-                self.connector_id, response.text[:200],
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"API returned {response.status_code}: {response.text[:200]}"
             )
-            return False
-
-        except Exception as exc:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = str(exc)
-            logger.exception("LINEConnector %s failed to connect", self.connector_id)
-            return False
 
     async def disconnect(self) -> None:
         """Mark the connector as disconnected (webhook-based, no persistent connection)."""

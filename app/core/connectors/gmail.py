@@ -231,49 +231,28 @@ class GmailConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    _SDK_AVAILABLE = GMAIL_AVAILABLE
+    _SDK_NAME = "google-api-python-client and google-auth"
+
+    async def _do_connect(self) -> None:
         """Build credentials, initialise the Gmail service, and start polling."""
-        if not GMAIL_AVAILABLE:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = (
-                "google-api-python-client and google-auth are not installed"
-            )
-            logger.error(
-                "Cannot start GmailConnector: required Google libraries are not installed"
-            )
-            return False
+        creds = self._build_credentials()
+        self._service = self._build_service(creds)
 
-        try:
-            self._status = ConnectorStatus.CONNECTING
+        # Verify credentials by fetching user profile
+        profile = self._service.users().getProfile(userId="me").execute()
+        self._email_address = profile.get("emailAddress", "")
+        logger.info(
+            "GmailConnector %s authenticated as %s",
+            self.connector_id, self._email_address,
+        )
 
-            creds = self._build_credentials()
-            self._service = self._build_service(creds)
+        # Seed _seen_message_ids with current inbox messages to avoid
+        # processing old emails on first poll
+        await self._seed_seen_messages()
 
-            # Verify credentials by fetching user profile
-            profile = self._service.users().getProfile(userId="me").execute()
-            self._email_address = profile.get("emailAddress", "")
-            logger.info(
-                "GmailConnector %s authenticated as %s",
-                self.connector_id, self._email_address,
-            )
-
-            # Seed _seen_message_ids with current inbox messages to avoid
-            # processing old emails on first poll
-            await self._seed_seen_messages()
-
-            # Start the polling background task
-            self._poll_task = asyncio.create_task(self._poll_inbox())
-
-            self._status = ConnectorStatus.CONNECTED
-            self._status_message = None
-            logger.info("GmailConnector %s connected", self.connector_id)
-            return True
-
-        except Exception as exc:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = str(exc)
-            logger.exception("GmailConnector %s failed to connect", self.connector_id)
-            return False
+        # Start the polling background task
+        self._poll_task = asyncio.create_task(self._poll_inbox())
 
     async def _seed_seen_messages(self) -> None:
         """Populate _seen_message_ids with current unread message IDs."""

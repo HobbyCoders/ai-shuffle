@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from app.db import database
 from app.core.config import settings
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
+from app.api.common import resolve_project_path
 from app.core.slash_commands import (
     get_command_by_name, get_all_commands,
     is_interactive_command, is_rest_api_command, get_rest_api_command_info,
@@ -87,16 +88,17 @@ class ExecuteCommandResponse(BaseModel):
 
 
 def get_working_dir_for_project(project_id: Optional[str], worktree_id: Optional[str] = None) -> str:
-    """Get the working directory for a project, or its worktree if specified."""
-    if worktree_id:
-        worktree = database.get_worktree(worktree_id)
-        if worktree:
-            return get_worktree_working_dir(worktree)
-    if project_id:
-        project = database.get_project(project_id)
-        if project:
-            return get_project_working_dir(project)
-    return str(settings.workspace_dir)
+    """Get the working directory for a project, or its worktree if specified.
+
+    .. deprecated:: Use :func:`app.api.common.resolve_project_path` instead.
+    """
+    result = resolve_project_path(
+        project_id,
+        check_access=False,
+        worktree_id=worktree_id,
+        fallback_to_workspace=True,
+    )
+    return str(result)
 
 
 @router.get("/", response_model=CommandListResponse)

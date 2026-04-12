@@ -125,44 +125,29 @@ class SlackConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    _SDK_AVAILABLE = SLACK_SDK_AVAILABLE
+    _SDK_NAME = "slack_sdk"
+
+    async def _do_connect(self) -> None:
         """Start the Slack Socket Mode client."""
-        if not SLACK_SDK_AVAILABLE:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = "slack_sdk is not installed"
-            logger.error("Cannot start SlackConnector: slack_sdk is not installed")
-            return False
+        bot_token = self.config["bot_token"]
+        app_token = self.config["app_token"]
 
-        try:
-            self._status = ConnectorStatus.CONNECTING
-            bot_token = self.config["bot_token"]
-            app_token = self.config["app_token"]
+        self._web_client = AsyncWebClient(token=bot_token)
 
-            self._web_client = AsyncWebClient(token=bot_token)
+        # Get bot identity
+        auth_response = await self._web_client.auth_test()
+        self._bot_user_id = auth_response.get("user_id")
 
-            # Get bot identity
-            auth_response = await self._web_client.auth_test()
-            self._bot_user_id = auth_response.get("user_id")
+        self._socket_client = SocketModeClient(
+            app_token=app_token,
+            web_client=self._web_client,
+        )
+        self._socket_client.socket_mode_request_listeners.append(
+            self._handle_socket_event
+        )
 
-            self._socket_client = SocketModeClient(
-                app_token=app_token,
-                web_client=self._web_client,
-            )
-            self._socket_client.socket_mode_request_listeners.append(
-                self._handle_socket_event
-            )
-
-            self._task = asyncio.create_task(self._run_socket())
-            self._status = ConnectorStatus.CONNECTED
-            self._status_message = None
-            logger.info("SlackConnector %s connected", self.connector_id)
-            return True
-
-        except Exception as exc:
-            self._status = ConnectorStatus.ERROR
-            self._status_message = str(exc)
-            logger.exception("SlackConnector %s failed to connect", self.connector_id)
-            return False
+        self._task = asyncio.create_task(self._run_socket())
 
     async def _run_socket(self) -> None:
         """Background task that runs the Socket Mode client."""
