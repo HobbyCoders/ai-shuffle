@@ -28,6 +28,7 @@ import {
 // Caches and helpers
 import { messageCache } from './message-cache';
 import { sessionEphemeralCache } from './session-cache';
+import { getOrCreateDeviceId } from './device-id';
 import { appData } from './app-data';
 import { git } from './git.svelte';
 import { untrack } from 'svelte';
@@ -138,28 +139,8 @@ export interface PersistedSession {
 
 // ─── Module-Level Helpers ────────────────────────────────────────────────────
 
-function getOrCreateDeviceId(): string {
-	const CANONICAL_KEY = 'ai-shuffle-device-id';
-	const LEGACY_KEY = 'aihub_device_id';
-
-	if (typeof window === 'undefined') {
-		return `device-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
-	}
-
-	let deviceId = localStorage.getItem(CANONICAL_KEY);
-	if (deviceId) return deviceId;
-
-	const legacyId = localStorage.getItem(LEGACY_KEY);
-	if (legacyId) {
-		localStorage.setItem(CANONICAL_KEY, legacyId);
-		localStorage.removeItem(LEGACY_KEY);
-		return legacyId;
-	}
-
-	deviceId = `device-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
-	localStorage.setItem(CANONICAL_KEY, deviceId);
-	return deviceId;
-}
+// getOrCreateDeviceId() moved to ./device-id.ts to avoid circular imports
+// and allow session-switcher to scope preferences per device.
 
 function getAuthToken(): string | null {
 	const cookies = document.cookie.split(';');

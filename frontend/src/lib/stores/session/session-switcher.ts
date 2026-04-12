@@ -13,6 +13,7 @@ import type { SessionEphemeral } from '../session-cache';
 import type { ChatMessage } from '../types';
 import type { PollAppliedData } from './session-poller';
 import { api } from '$lib/api/client';
+import { getOrCreateDeviceId } from '../device-id';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -94,7 +95,9 @@ export function getPersistedProject(): string {
 export async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; selectedProject: string } | null> {
 	if (typeof window === 'undefined') return null;
 	try {
-		const response = await fetch('/api/v1/preferences/selection', { credentials: 'include' });
+		const deviceId = getOrCreateDeviceId();
+		const prefKey = `selection:${deviceId}`;
+		const response = await fetch(`/api/v1/preferences/${encodeURIComponent(prefKey)}`, { credentials: 'include' });
 		if (response.ok) {
 			const data = await response.json();
 			if (data?.value) {
@@ -159,8 +162,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		selectionSyncTimeout = setTimeout(async () => {
 			if (!pendingSelection) return;
 			try {
-				await api.put('/preferences/selection', {
-					key: 'selection',
+				const deviceId = getOrCreateDeviceId();
+				const prefKey = `selection:${deviceId}`;
+				await api.put(`/preferences/${encodeURIComponent(prefKey)}`, {
+					key: prefKey,
 					value: { selectedProfile: pendingSelection.profile, selectedProject: pendingSelection.project },
 				});
 			} catch (e) {
@@ -175,8 +180,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	function buildPersistBody() {
 		const state = getState();
+		const deviceId = getOrCreateDeviceId();
+		const prefKey = `active_session:${deviceId}`;
 		return JSON.stringify({
-			key: 'active_session',
+			key: prefKey,
 			value: {
 				sessionId: state.sessionId,
 				title: state.title,
@@ -198,7 +205,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	async function doPersist() {
 		try {
-			await fetch('/api/v1/preferences/active_session', {
+			const deviceId = getOrCreateDeviceId();
+			const prefKey = `active_session:${deviceId}`;
+			await fetch(`/api/v1/preferences/${encodeURIComponent(prefKey)}`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
 				credentials: 'include',
@@ -224,7 +233,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	async function loadPersistedSession(): Promise<PersistedSession | null> {
 		try {
-			const response = await api.get<{ key: string; value: PersistedSession } | null>('/preferences/active_session');
+			const deviceId = getOrCreateDeviceId();
+			const prefKey = `active_session:${deviceId}`;
+			const response = await api.get<{ key: string; value: PersistedSession } | null>(`/preferences/${encodeURIComponent(prefKey)}`);
 			if (response?.value) return response.value;
 		} catch {
 			// No persisted session — fresh start
