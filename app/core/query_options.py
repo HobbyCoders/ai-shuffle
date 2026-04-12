@@ -12,6 +12,7 @@ sibling modules and re-exported for backward compatibility.
 
 import json
 import logging
+import tempfile
 import threading
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -57,17 +58,47 @@ logger = logging.getLogger(__name__)
 _CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 # Lock to prevent concurrent writes to settings.json
 _settings_file_lock = threading.Lock()
+# Directory for per-session fast mode settings files (avoids race conditions)
+_FAST_MODE_SETTINGS_DIR = Path(tempfile.gettempdir()) / "claude-fast-mode"
+
+
+def _create_fast_mode_settings_file(session_id: str) -> str:
+    """Create a per-session settings file with fastMode enabled.
+
+    Returns the file path as a string for use with ``--settings``.
+
+    Previous approach wrote fastMode to the shared ``~/.claude/settings.json``,
+    but this caused a race condition: concurrent queries (background tasks,
+    commit generation, etc.) without fast mode would overwrite ``fastMode``
+    to ``false`` before the CLI subprocess could read the file.
+
+    New approach: each fast-mode session gets its own temp settings file.
+    This eliminates the race entirely — no shared mutable state.
+    """
+    _FAST_MODE_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    settings_file = _FAST_MODE_SETTINGS_DIR / f"fast-{session_id}.json"
+    settings_file.write_text(json.dumps({"fastMode": True}), encoding="utf-8")
+    logger.debug(f"Created per-session fast mode settings: {settings_file}")
+    return str(settings_file)
+
+
+def cleanup_fast_mode_settings(session_id: str) -> None:
+    """Remove the per-session fast mode settings file after use."""
+    settings_file = _FAST_MODE_SETTINGS_DIR / f"fast-{session_id}.json"
+    try:
+        settings_file.unlink(missing_ok=True)
+    except Exception:
+        pass  # Best-effort cleanup
 
 
 def _set_fast_mode_in_user_settings(enabled: bool) -> None:
-    """Write fastMode to ~/.claude/settings.json so the CLI picks it up.
+    """Write fastMode to ~/.claude/settings.json (belt-and-suspenders).
 
-    The Claude CLI reads fastMode from the user settings file (loaded via
-    ``--setting-sources user``). The ``--settings`` inline JSON flag does NOT
-    reliably enable fast mode on the bundled CLI binary used in Docker/Linux.
+    This is a backup mechanism alongside the per-session settings file.
+    The Claude CLI may read fastMode from either ``--settings`` (file path)
+    or the user settings file (loaded via ``--setting-sources user``).
 
-    This function is safe to call from multiple threads: it acquires a lock
-    before read-modify-write to prevent lost updates.
+    Thread-safe: acquires a lock before read-modify-write.
     """
     with _settings_file_lock:
         try:
@@ -388,19 +419,29 @@ def build_options_from_profile(
         model_to_use, betas_to_use = MODEL_1M_MAPPING[raw_model]
         logger.debug(f"1M context model selected: {raw_model} -> model={model_to_use}, betas={betas_to_use}")
 
-    # Fast mode: enable via user settings file when using an Opus model.
-    # The Claude CLI reads fastMode from ~/.claude/settings.json (loaded via
-    # --setting-sources user). Passing it only via --settings inline JSON does
-    # NOT work reliably with the bundled CLI on Linux/Docker — the CLI appears
-    # to check the user settings file for fastMode, not the --settings override.
-    # Fix: write fastMode directly to the user settings file so the CLI picks
-    # it up through the normal settings loading path.
+    # Fast mode: uses a two-pronged approach to enable fastMode reliably.
+    #
+    # 1. Per-session settings FILE passed via --settings (file path, not inline JSON).
+    #    Inline JSON (--settings '{"fastMode":true}') does NOT reliably work on
+    #    the bundled CLI on Linux/Docker. A file path avoids that issue.
+    #
+    # 2. Write fastMode to ~/.claude/settings.json as backup (belt-and-suspenders).
+    #    The CLI also reads fastMode from the user settings file loaded via
+    #    --setting-sources user.
+    #
+    # Previous bug: the else branch wrote fastMode=false to the shared settings
+    # file, causing a race condition — concurrent queries (background tasks,
+    # commit generation) without fast mode would overwrite fastMode before the
+    # fast-mode CLI subprocess could read it. Now each session gets its own
+    # temp file, and we only write TRUE to the shared file (never false).
     fast_mode_requested = overrides.get("fast_mode") == "true"
     fast_mode_settings: Optional[str] = None
     if fast_mode_requested and model_to_use and "opus" in str(model_to_use).lower():
-        fast_mode_settings = json.dumps({"fastMode": True})
+        # Per-session temp file — no race with concurrent queries
+        fast_mode_settings = _create_fast_mode_settings_file(session_id or "default")
+        # Also write to shared settings as backup (no false-write race now)
         _set_fast_mode_in_user_settings(True)
-        logger.debug(f"Fast mode enabled for model={model_to_use}, wrote fastMode=true to user settings")
+        logger.debug(f"Fast mode enabled for model={model_to_use}, settings file={fast_mode_settings}")
         # Inject fast mode awareness into system prompt
         fast_mode_note = "\n\nFast mode is enabled. You are running with faster output using the same model. When asked about your speed or mode, you can confirm fast mode is active."
         if isinstance(final_system_prompt, dict):
@@ -408,9 +449,6 @@ def build_options_from_profile(
             final_system_prompt["append"] = current_append + fast_mode_note
         else:
             final_system_prompt += fast_mode_note
-    else:
-        # Ensure fast mode is off in user settings when not requested
-        _set_fast_mode_in_user_settings(False)
 
     # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
     # Priority: tools > tools_preset > allowed_tools (legacy)

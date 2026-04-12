@@ -70,6 +70,7 @@ from app.core.query_options import (  # noqa: F401 — re-exports
     THINKING_TOKEN_BUDGETS,
     write_agents_to_filesystem,
     cleanup_agents_directory,
+    cleanup_fast_mode_settings,
     resolve_note_references,
     DEFAULT_SECURITY_INSTRUCTIONS,
     get_security_instructions,
@@ -1794,8 +1795,12 @@ async def stream_to_websocket(
                     logger.error(f"[WS] CLI process exited with code {handle.returncode} during initialization")
             error_msg = _extract_connection_error(e, cli_stderr_lines)
             logger.error(f"[WS] User-facing error: {error_msg}")
+            cleanup_fast_mode_settings(session_id)
             yield {"type": "error", "message": error_msg}
             return
+
+        # Clean up per-session fast mode settings file (CLI has read it by now)
+        cleanup_fast_mode_settings(session_id)
 
         state = SessionState(
             adapter=adapter,
