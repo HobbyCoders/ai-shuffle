@@ -694,6 +694,43 @@ function setupPollCallback() {
 
 					if (!existing) return msg;
 
+					// Subagent messages need special handling — their top-level
+					// content/streaming/toolResult/toolStatus don't change during
+					// execution; only agentChildren grows as the subagent runs.
+					// Reusing `existing` based on the generic check below would
+					// clobber live child updates and freeze the UI until the
+					// subagent completes.
+					if (msg.type === 'subagent') {
+						const existChildren = existing.agentChildren;
+						const incomChildren = msg.agentChildren;
+						const sameLen = (existChildren?.length ?? 0) === (incomChildren?.length ?? 0);
+						const existLast = existChildren?.[(existChildren?.length ?? 0) - 1];
+						const incomLast = incomChildren?.[(incomChildren?.length ?? 0) - 1];
+						const sameTail =
+							existLast?.content === incomLast?.content &&
+							existLast?.toolResult === incomLast?.toolResult &&
+							existLast?.toolStatus === incomLast?.toolStatus &&
+							existLast?.streaming === incomLast?.streaming;
+						if (
+							existing.agentStatus === msg.agentStatus &&
+							existing.streaming === msg.streaming &&
+							existing.content === msg.content &&
+							sameLen &&
+							sameTail
+						) {
+							if (existing !== msg) needsStabilization = true;
+							return existing;
+						}
+						// Children changed — emit a new object so downstream
+						// $derived/reactivity sees the update. Preserve the
+						// existing id for DOM stability.
+						if (existing.id !== msg.id) {
+							needsStabilization = true;
+							return { ...msg, id: existing.id };
+						}
+						return msg;
+					}
+
 					// Identical content — reuse exact same object to skip re-render
 					if (
 						existing.content === msg.content &&
