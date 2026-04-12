@@ -9,7 +9,7 @@ import subprocess
 import json
 import logging
 import re
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -69,13 +69,19 @@ class GitHubService:
     def __init__(self):
         self.timeout = 60
 
-    def _run_gh(self, args: List[str], timeout: int = None) -> subprocess.CompletedProcess:
+    def _run_gh(
+        self,
+        args: List[str],
+        timeout: int = None,
+        stdin_data: Optional[str] = None,
+    ) -> subprocess.CompletedProcess:
         """
         Run a gh CLI command.
 
         Args:
             args: Command arguments (excluding 'gh')
             timeout: Optional timeout in seconds (defaults to self.timeout)
+            stdin_data: Optional string to pass via stdin
 
         Returns:
             CompletedProcess with stdout, stderr, and returncode
@@ -94,7 +100,8 @@ class GitHubService:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=timeout
+                timeout=timeout,
+                input=stdin_data,
             )
 
             if result.returncode != 0:
@@ -375,7 +382,7 @@ class GitHubService:
         body: str,
         head: str,
         base: str
-    ) -> Optional[PullRequest]:
+    ) -> Tuple[Optional[PullRequest], Optional[str]]:
         """
         Create a pull request.
 
@@ -387,17 +394,23 @@ class GitHubService:
             base: Base branch name
 
         Returns:
-            Created PullRequest object or None on failure
+            Tuple of (PullRequest or None, error message or None).
+            On success: (pr, None). On failure: (None, error_detail).
         """
         try:
-            result = self._run_gh([
-                'pr', 'create',
-                '--repo', repo,
-                '--title', title,
-                '--body', body,
-                '--head', head,
-                '--base', base
-            ])
+            # Pass body via stdin (--body-file -) to avoid Windows command
+            # line length limits (~8191 chars) with long PR descriptions.
+            result = self._run_gh(
+                [
+                    'pr', 'create',
+                    '--repo', repo,
+                    '--title', title,
+                    '--body-file', '-',
+                    '--head', head,
+                    '--base', base,
+                ],
+                stdin_data=body,
+            )
 
             if result.returncode != 0:
                 stderr = result.stderr.strip()
@@ -406,28 +419,30 @@ class GitHubService:
                 if existing_match:
                     existing_number = int(existing_match.group(1))
                     logger.debug(f"PR already exists (#{existing_number}), returning existing PR")
-                    return self.get_pull(repo, existing_number)
+                    pr = self.get_pull(repo, existing_number)
+                    return (pr, None) if pr else (None, f"PR #{existing_number} exists but could not be fetched")
                 logger.error(f"Failed to create PR: {stderr}")
-                return None
+                return None, stderr or "gh pr create failed with no error output"
 
             # Parse the URL from output to get the PR number
             output = result.stdout.strip()
             pr_url_match = re.search(r'/pull/(\d+)', output)
             if pr_url_match:
                 pr_number = int(pr_url_match.group(1))
-                return self.get_pull(repo, pr_number)
+                pr = self.get_pull(repo, pr_number)
+                return (pr, None) if pr else (None, f"PR #{pr_number} created but could not be fetched")
 
-            return None
+            return None, "gh pr create succeeded but returned no PR URL"
         except Exception as e:
             logger.error(f"Failed to create PR: {e}")
-            return None
+            return None, str(e)
 
     def merge_pull(
         self,
         repo: str,
         pr_number: int,
         method: str = 'merge'
-    ) -> bool:
+    ) -> Tuple[bool, Optional[str]]:
         """
         Merge a pull request.
 
@@ -437,7 +452,8 @@ class GitHubService:
             method: Merge method - 'merge', 'squash', or 'rebase'
 
         Returns:
-            True if merge succeeded, False otherwise
+            Tuple of (success, error message or None).
+            On success: (True, None). On failure: (False, error_detail).
         """
         try:
             method_flag = f'--{method}'
@@ -450,15 +466,16 @@ class GitHubService:
             ])
 
             if result.returncode != 0:
-                logger.error(f"Failed to merge PR: {result.stderr}")
-                return False
+                stderr = result.stderr.strip()
+                logger.error(f"Failed to merge PR: {stderr}")
+                return False, stderr or "gh pr merge failed with no error output"
 
-            return True
+            return True, None
         except Exception as e:
             logger.error(f"Failed to merge PR: {e}")
-            return False
+            return False, str(e)
 
-    def close_pull(self, repo: str, pr_number: int) -> bool:
+    def close_pull(self, repo: str, pr_number: int) -> Tuple[bool, Optional[str]]:
         """
         Close a pull request without merging.
 
@@ -467,7 +484,7 @@ class GitHubService:
             pr_number: Pull request number
 
         Returns:
-            True if close succeeded, False otherwise
+            Tuple of (success, error message or None).
         """
         try:
             result = self._run_gh([
@@ -476,13 +493,14 @@ class GitHubService:
             ])
 
             if result.returncode != 0:
-                logger.error(f"Failed to close PR: {result.stderr}")
-                return False
+                stderr = result.stderr.strip()
+                logger.error(f"Failed to close PR: {stderr}")
+                return False, stderr or "gh pr close failed with no error output"
 
-            return True
+            return True, None
         except Exception as e:
             logger.error(f"Failed to close PR: {e}")
-            return False
+            return False, str(e)
 
     # =========================================================================
     # GitHub Actions / Workflows

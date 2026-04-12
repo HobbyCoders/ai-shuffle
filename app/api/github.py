@@ -15,7 +15,7 @@ from app.core.github_service import github_service, PullRequest, WorkflowRun
 from app.core.config import settings
 from app.db import database
 from app.api.auth import require_auth, get_api_user_from_request
-from app.api.common import resolve_project_path
+from app.api.common import check_project_access, resolve_project_path
 
 logger = logging.getLogger(__name__)
 
@@ -259,18 +259,26 @@ async def create_pull_request(
     check_github_auth()
 
     repo = get_repo_for_project(request, project_id)
-    pr = github_service.create_pull(
-        repo=repo,
-        title=body.title,
-        body=body.body,
-        head=body.head,
-        base=body.base
-    )
+
+    try:
+        pr, error = github_service.create_pull(
+            repo=repo,
+            title=body.title,
+            body=body.body,
+            head=body.head,
+            base=body.base
+        )
+    except Exception as e:
+        logger.exception("Unhandled error creating pull request")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create pull request: {e}"
+        )
 
     if not pr:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to create pull request. Ensure the head branch exists on GitHub."
+            detail=f"Failed to create pull request: {error or 'unknown error'}"
         )
 
     return pr_to_response(pr)
@@ -298,12 +306,20 @@ async def merge_pull_request(
     method = body.method if body else "merge"
 
     repo = get_repo_for_project(request, project_id)
-    success = github_service.merge_pull(repo, number, method=method)
+
+    try:
+        success, error = github_service.merge_pull(repo, number, method=method)
+    except Exception as e:
+        logger.exception(f"Unhandled error merging pull request #{number}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to merge pull request #{number}: {e}"
+        )
 
     if not success:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to merge pull request #{number}. It may have conflicts or require review."
+            detail=f"Failed to merge pull request #{number}: {error or 'unknown error'}"
         )
 
     return {"status": "ok", "message": f"Pull request #{number} merged successfully"}
@@ -323,12 +339,20 @@ async def close_pull_request(
     check_github_auth()
 
     repo = get_repo_for_project(request, project_id)
-    success = github_service.close_pull(repo, number)
+
+    try:
+        success, error = github_service.close_pull(repo, number)
+    except Exception as e:
+        logger.exception(f"Unhandled error closing pull request #{number}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to close pull request #{number}: {e}"
+        )
 
     if not success:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to close pull request #{number}"
+            detail=f"Failed to close pull request #{number}: {error or 'unknown error'}"
         )
 
     return {"status": "ok", "message": f"Pull request #{number} closed"}

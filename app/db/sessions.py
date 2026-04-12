@@ -146,16 +146,20 @@ def get_sessions(
     offset: int = 0
 ) -> List[SessionRow]:
     """Get sessions with optional filters"""
+    from app.core.config import settings
     _ph = ph()
+    # Sessions are instance-scoped; NULL instance_id is treated as shared/legacy.
+    instance_id = settings.effective_instance_id
     if tag_id:
         # Join with session_tags when filtering by tag
         query = f"""SELECT DISTINCT s.* FROM sessions s
                    INNER JOIN session_tags st ON s.id = st.session_id
-                   WHERE st.tag_id = {_ph}"""
-        params = [tag_id]
+                   WHERE st.tag_id = {_ph}
+                     AND (s.instance_id = {_ph} OR s.instance_id IS NULL)"""
+        params = [tag_id, instance_id]
     else:
-        query = "SELECT * FROM sessions WHERE 1=1"
-        params = []
+        query = f"SELECT * FROM sessions WHERE (instance_id = {_ph} OR instance_id IS NULL)"
+        params = [instance_id]
 
     if project_id:
         query += f" AND s.project_id = {_ph}" if tag_id else f" AND project_id = {_ph}"
@@ -204,16 +208,20 @@ def get_sessions_paginated(
         Tuple of (sessions list, total count)
     """
     # Build the WHERE clause (shared between count and data queries)
+    from app.core.config import settings
     _ph = ph()
+    # Sessions are instance-scoped; NULL instance_id is treated as shared/legacy.
+    instance_id = settings.effective_instance_id
     if tag_id:
         base_query = f"""FROM sessions s
                        INNER JOIN session_tags st ON s.id = st.session_id
-                       WHERE st.tag_id = {_ph}"""
-        params: List[Any] = [tag_id]
+                       WHERE st.tag_id = {_ph}
+                         AND (s.instance_id = {_ph} OR s.instance_id IS NULL)"""
+        params: List[Any] = [tag_id, instance_id]
         col_prefix = "s."
     else:
-        base_query = "FROM sessions WHERE 1=1"
-        params = []
+        base_query = f"FROM sessions WHERE (instance_id = {_ph} OR instance_id IS NULL)"
+        params = [instance_id]
         col_prefix = ""
 
     if project_id:
@@ -373,12 +381,14 @@ def create_session(
         worktree_path: Optional worktree path (persisted for display after worktree deletion)
         _conn: Optional existing DB connection for transaction grouping
     """
+    from app.core.config import settings
     now = datetime.now(timezone.utc).isoformat()
+    instance_id = settings.effective_instance_id
     _ph = ph()
-    _phs12 = ", ".join([_ph] * 12)
-    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, created_at, updated_at)
-               VALUES ({_phs12})"""
-    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, now, now)
+    _phs13 = ", ".join([_ph] * 13)
+    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, instance_id, created_at, updated_at)
+               VALUES ({_phs13})"""
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, instance_id, now, now)
     if _conn is not None:
         cursor = get_cursor(_conn)
         cursor.execute(sql, params)
@@ -420,21 +430,23 @@ def create_session_with_stats(
         turn_count: Number of conversation turns
         created_at: Optional creation timestamp (ISO format), defaults to now
     """
+    from app.core.config import settings
     now = datetime.now(timezone.utc).isoformat()
     ts_created = created_at or now
+    instance_id = settings.effective_instance_id
     _ph = ph()
-    _phs12 = ", ".join([_ph] * 12)
+    _phs13 = ", ".join([_ph] * 13)
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
             f"""INSERT INTO sessions (
                 id, profile_id, project_id, title, api_user_id,
                 sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
-                created_at, updated_at
-            ) VALUES ({_phs12})""",
+                instance_id, created_at, updated_at
+            ) VALUES ({_phs13})""",
             (session_id, profile_id, project_id, title, api_user_id,
              sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
-             ts_created, now)
+             instance_id, ts_created, now)
         )
     return get_session(session_id)
 

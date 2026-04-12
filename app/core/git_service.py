@@ -1224,7 +1224,9 @@ class GitService:
             message: Commit message
 
         Returns:
-            Tuple of (success: bool, commit_sha: Optional[str])
+            Tuple of (success: bool, sha_or_error: Optional[str]).
+            On success the second element is the commit SHA.
+            On failure the second element is the error message.
         """
         try:
             args = ["commit", "-m", message]
@@ -1237,12 +1239,12 @@ class GitService:
                 self.invalidate_status_cache(working_dir)
                 return True, commit_sha
 
-            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+            error_msg = result.stderr.strip() if result.stderr else "Unknown commit error"
             logger.warning(f"Failed to commit: {error_msg}")
-            return False, None
+            return False, error_msg
         except Exception as e:
             logger.error(f"Error creating commit: {e}")
-            return False, None
+            return False, str(e)
 
     def push(
         self,

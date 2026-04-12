@@ -11,6 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -144,6 +145,17 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+# Global exception handler — surface actual error details instead of generic
+# "Internal Server Error" for unhandled exceptions.  The detail is already
+# logged by the AccessLogMiddleware; this just ensures the *client* sees it too.
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {exc}"},
+    )
 
 # Security headers middleware (runs first on response)
 app.add_middleware(SecurityHeadersMiddleware)

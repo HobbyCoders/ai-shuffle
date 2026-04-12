@@ -1156,14 +1156,16 @@ async def create_commit(
                 detail="No staged changes to commit"
             )
 
-    # Create commit
-    success, commit_sha = await run_git(git_service.commit, working_dir, body.message)
+    # Create commit — on failure, sha_or_error contains the error message
+    success, sha_or_error = await run_git(git_service.commit, working_dir, body.message)
 
     if not success:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to create commit. There may be no changes to commit."
+            detail=f"Failed to create commit: {sha_or_error or 'unknown error'}"
         )
+
+    commit_sha = sha_or_error
 
     # Fetch inline git state for instant frontend update
     inline_status = await run_git(git_service.get_status, working_dir)
