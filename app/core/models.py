@@ -163,6 +163,7 @@ class Profile(ProfileBase):
     """Full profile response"""
     id: str
     is_builtin: bool = False
+    is_modified: bool = False  # Whether built-in profile has been modified from defaults
     session_count: Optional[int] = None  # Number of sessions using this profile
     created_at: datetime
     updated_at: datetime
@@ -728,6 +729,7 @@ class AgentExportData(BaseModel):
     fork_session: Optional[bool] = False
     setting_sources: Optional[List[str]] = None
     enable_file_checkpointing: Optional[bool] = False
+    app_config_tools: Optional[bool] = False
     # Environment variables (exported with profile)
     env: Optional[Dict[str, str]] = None
 

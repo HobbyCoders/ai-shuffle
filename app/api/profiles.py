@@ -64,6 +64,20 @@ class UnifiedSubagentItem(BaseModel):
     source_name: Optional[str] = Field(None, description="Name of the source (e.g., plugin name)")
 
 
+def _check_profile_modified(profile: dict) -> None:
+    """Set is_modified on a built-in profile by comparing to seed defaults."""
+    if not profile.get("is_builtin"):
+        return
+    defaults = get_builtin_profile_defaults(profile["id"])
+    if not defaults:
+        return
+    profile["is_modified"] = (
+        profile.get("name") != defaults["name"]
+        or profile.get("description") != defaults["description"]
+        or profile.get("config") != defaults["config"]
+    )
+
+
 @router.get("", response_model=List[Profile])
 async def list_profiles(request: Request, token: str = Depends(require_auth)):
     """List all agent profiles. API users only see their assigned profiles."""
@@ -80,6 +94,7 @@ async def list_profiles(request: Request, token: str = Depends(require_auth)):
             profile = database.get_profile(pid)
             if profile:
                 profile["session_count"] = session_counts.get(pid, 0)
+                _check_profile_modified(profile)
                 allowed_profiles.append(profile)
         return allowed_profiles
 
@@ -87,6 +102,7 @@ async def list_profiles(request: Request, token: str = Depends(require_auth)):
     profiles = database.get_all_profiles()
     for profile in profiles:
         profile["session_count"] = session_counts.get(profile["id"], 0)
+        _check_profile_modified(profile)
     return profiles
 
 
@@ -110,8 +126,9 @@ async def get_profile(request: Request, profile_id: str, token: str = Depends(re
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Profile not found: {profile_id}"
         )
-    # Add session count
+    # Add session count and modification status
     profile["session_count"] = database.get_profile_session_count(profile_id)
+    _check_profile_modified(profile)
     return profile
 
 
@@ -804,6 +821,7 @@ async def export_profile(
         fork_session=config.get("fork_session", False),
         setting_sources=config.get("setting_sources"),
         enable_file_checkpointing=config.get("enable_file_checkpointing", False),
+        app_config_tools=config.get("app_config_tools", False),
         env=config.get("env"),  # Environment variables are exported
         # Note: We intentionally exclude some data:
         # - cwd (working directory path - system-specific)
@@ -946,6 +964,8 @@ async def import_profile(
         config["max_buffer_size"] = agent_data.max_buffer_size
     if agent_data.setting_sources:
         config["setting_sources"] = agent_data.setting_sources
+    if agent_data.app_config_tools:
+        config["app_config_tools"] = agent_data.app_config_tools
     if agent_data.env:
         config["env"] = agent_data.env
 

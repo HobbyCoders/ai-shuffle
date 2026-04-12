@@ -9,7 +9,7 @@
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
-	import { Users, Upload, Sparkles, Plus, Wrench, Bot, Settings, FileText, SlidersHorizontal, Check, RotateCcw } from 'lucide-svelte';
+	import { Users, Upload, Sparkles, Plus, Wrench, Bot, Settings, FileText, SlidersHorizontal, Check } from 'lucide-svelte';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data';
 	import { groups as groupsStore } from '$lib/stores/groups';
 	import './card-design-system.css';
@@ -666,19 +666,13 @@
 		resetForm();
 	}
 
-	async function restoreProfileDefaults() {
-		if (!editingProfile?.is_builtin) return;
+	async function handleRevertProfile(profileId: string) {
+		const profile = profiles.find(p => p.id === profileId);
+		if (!profile?.is_builtin) return;
 		if (!confirm('Restore this profile to its original default settings? Your customizations will be lost.')) return;
 
 		try {
-			await tabsStore.restoreProfile(editingProfile.id);
-			const restored = profiles.find(p => p.id === editingProfile!.id);
-			if (restored) {
-				openEditForm(restored);
-			} else {
-				viewMode = 'list';
-				resetForm();
-			}
+			await tabsStore.restoreProfile(profileId);
 		} catch (e: any) {
 			alert('Failed to restore defaults: ' + (e.detail || e.message || 'Unknown error'));
 		}
@@ -889,12 +883,6 @@
 
 			{#snippet footer()}
 				<div class="pf-form-footer">
-					{#if editingProfile?.is_builtin}
-						<button type="button" class="pf-btn-restore" onclick={restoreProfileDefaults} title="Restore this profile to its original default settings">
-							<RotateCcw size={14} />
-							<span>Restore Defaults</span>
-						</button>
-					{/if}
 					<button type="button" class="pf-btn-save" onclick={saveProfile} disabled={!profileForm.name}>
 						<Check size={14} />
 						<span>Save Profile</span>
@@ -938,6 +926,7 @@
 				onEditProfile={openEditForm}
 				onExportProfile={handleExportProfile}
 				onDeleteProfile={handleDeleteProfile}
+				onRevertProfile={handleRevertProfile}
 				{getModelDisplay}
 				{getProfileToolCount}
 			/>
@@ -1028,24 +1017,4 @@
 		width: 100%;
 	}
 
-	.pf-btn-restore {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 8px 16px;
-		background: transparent;
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-md, 10px);
-		color: var(--text-secondary);
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 200ms;
-	}
-
-	.pf-btn-restore:hover {
-		background: color-mix(in oklch, var(--warning, #f59e0b) 10%, transparent);
-		border-color: color-mix(in oklch, var(--warning, #f59e0b) 40%, transparent);
-		color: var(--warning, #f59e0b);
-	}
 </style>

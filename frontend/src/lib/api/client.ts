@@ -218,6 +218,7 @@ export interface Profile {
 	name: string;
 	description: string | null;
 	is_builtin: boolean;
+	is_modified: boolean;
 	session_count?: number;  // Number of conversations using this profile
 	config: ProfileConfig;
 	created_at: string;
@@ -928,6 +929,7 @@ export interface AgentExportData {
 	fork_session: boolean | null;
 	setting_sources: string[] | null;
 	enable_file_checkpointing: boolean | null;
+	app_config_tools: boolean | null;
 	env: Record<string, string> | null;
 }
 

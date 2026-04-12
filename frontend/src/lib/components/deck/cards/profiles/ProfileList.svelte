@@ -3,7 +3,7 @@
 	 * ProfileList — List view with search/filter for profiles
 	 */
 	import type { Profile } from '$lib/api/client';
-	import { Search, Download, Trash2, ChevronRight } from 'lucide-svelte';
+	import { Search, Download, Trash2, ChevronRight, RotateCcw } from 'lucide-svelte';
 
 	interface GroupState {
 		profiles?: {
@@ -28,6 +28,7 @@
 		onEditProfile: (profile: Profile) => void;
 		onExportProfile: (profileId: string) => void;
 		onDeleteProfile: (profileId: string) => void;
+		onRevertProfile: (profileId: string) => void;
 		getModelDisplay: (model?: string) => string;
 		getProfileToolCount: (profile: Profile) => number;
 	}
@@ -40,6 +41,7 @@
 		onEditProfile,
 		onExportProfile,
 		onDeleteProfile,
+		onRevertProfile,
 		getModelDisplay,
 		getProfileToolCount
 	}: Props = $props();
@@ -142,6 +144,15 @@
 						</div>
 					</div>
 					<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
+						{#if profile.is_builtin && profile.is_modified}
+							<button
+								class="card-action-btn"
+								title="Revert to defaults"
+								onclick={() => onRevertProfile(profile.id)}
+							>
+								<RotateCcw size={16} />
+							</button>
+						{/if}
 						<button
 							class="card-action-btn"
 							title="Export"
