@@ -63,6 +63,7 @@ DEFAULT_AI_PROFILE: Dict[str, Any] = {
             "preset": "claude_code",
             "content": "",
         },
+        "allowed_tools": [],
         "include_partial_messages": False,
         "continue_conversation": False,
         "fork_session": False,
