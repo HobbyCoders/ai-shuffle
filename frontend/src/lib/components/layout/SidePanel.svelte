@@ -95,6 +95,10 @@
 	let deletingProjectId = $state<string | null>(null);
 	let deleteLoading = $state(false);
 
+	// Track session being deleted (for confirmation)
+	let deletingSessionId = $state<string | null>(null);
+	let deleteSessionLoading = $state(false);
+
 	// Group API user sessions by user name
 	interface ApiUserGroup {
 		userName: string;
@@ -291,6 +295,40 @@
 		deletingProjectId = null;
 	}
 
+	// Delete a session with confirmation
+	async function handleDeleteSession(e: MouseEvent | KeyboardEvent, sessionId: string) {
+		e.stopPropagation();
+		if (deletingSessionId === sessionId) {
+			// Confirm delete
+			deleteSessionLoading = true;
+			try {
+				// If deleting the active session, switch to new chat first
+				if (activeId === sessionId) {
+					onNewSession();
+				}
+				await appData.deleteSession(sessionId);
+			} catch (err) {
+				console.error('Failed to delete session:', err);
+			} finally {
+				deleteSessionLoading = false;
+				deletingSessionId = null;
+			}
+		} else {
+			deletingSessionId = sessionId;
+			// Auto-dismiss after 3 seconds
+			setTimeout(() => {
+				if (deletingSessionId === sessionId) {
+					deletingSessionId = null;
+				}
+			}, 3000);
+		}
+	}
+
+	function cancelDeleteSession(e: MouseEvent | KeyboardEvent) {
+		e.stopPropagation();
+		deletingSessionId = null;
+	}
+
 	// Check if a session is currently streaming (active session or other devices)
 	function isStreaming(sessionId: string): boolean {
 		// If this is the active session, its isStreaming flag is authoritative
@@ -474,6 +512,34 @@
 									>
 										<Star size={12} strokeWidth={1.5} fill={session.is_favorite ? 'currentColor' : 'none'} />
 									</span>
+									{#if deletingSessionId === session.id}
+										<button
+											class="session-delete-confirm"
+											onclick={(e) => handleDeleteSession(e, session.id)}
+											title="Confirm delete"
+											disabled={deleteSessionLoading}
+										>
+											<Trash2 size={11} strokeWidth={2} />
+										</button>
+										<button
+											class="session-delete-cancel"
+											onclick={(e) => cancelDeleteSession(e)}
+											title="Cancel"
+										>
+											<X size={11} strokeWidth={2} />
+										</button>
+									{:else}
+										<span
+											class="session-delete-btn"
+											role="button"
+											tabindex="0"
+											onclick={(e) => handleDeleteSession(e, session.id)}
+											onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleDeleteSession(e, session.id); }}
+											title="Delete session"
+										>
+											<Trash2 size={11} strokeWidth={1.5} />
+										</span>
+									{/if}
 								</button>
 							{/each}
 						</div>
@@ -607,6 +673,34 @@
 												>
 													<Star size={12} strokeWidth={1.5} fill={session.is_favorite ? 'currentColor' : 'none'} />
 												</span>
+												{#if deletingSessionId === session.id}
+													<button
+														class="session-delete-confirm"
+														onclick={(e) => handleDeleteSession(e, session.id)}
+														title="Confirm delete"
+														disabled={deleteSessionLoading}
+													>
+														<Trash2 size={11} strokeWidth={2} />
+													</button>
+													<button
+														class="session-delete-cancel"
+														onclick={(e) => cancelDeleteSession(e)}
+														title="Cancel"
+													>
+														<X size={11} strokeWidth={2} />
+													</button>
+												{:else}
+													<span
+														class="session-delete-btn"
+														role="button"
+														tabindex="0"
+														onclick={(e) => handleDeleteSession(e, session.id)}
+														onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleDeleteSession(e, session.id); }}
+														title="Delete session"
+													>
+														<Trash2 size={11} strokeWidth={1.5} />
+													</span>
+												{/if}
 											</button>
 										{/each}
 									</div>
@@ -683,6 +777,34 @@
 														{/if}
 													</div>
 													<span class="session-time">{formatRelativeTime(session.updated_at || session.created_at)}</span>
+													{#if deletingSessionId === session.id}
+														<button
+															class="session-delete-confirm"
+															onclick={(e) => handleDeleteSession(e, session.id)}
+															title="Confirm delete"
+															disabled={deleteSessionLoading}
+														>
+															<Trash2 size={11} strokeWidth={2} />
+														</button>
+														<button
+															class="session-delete-cancel"
+															onclick={(e) => cancelDeleteSession(e)}
+															title="Cancel"
+														>
+															<X size={11} strokeWidth={2} />
+														</button>
+													{:else}
+														<span
+															class="session-delete-btn"
+															role="button"
+															tabindex="0"
+															onclick={(e) => handleDeleteSession(e, session.id)}
+															onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleDeleteSession(e, session.id); }}
+															title="Delete session"
+														>
+															<Trash2 size={11} strokeWidth={1.5} />
+														</span>
+													{/if}
 												</button>
 											{/each}
 										</div>
@@ -1342,6 +1464,102 @@
 
 		.favorite-btn.is-favorite {
 			opacity: 1;
+		}
+	}
+
+	/* Session delete button */
+	.session-delete-btn {
+		flex-shrink: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 20px;
+		height: 20px;
+		padding: 0;
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius) - 4px);
+		color: var(--muted-foreground);
+		cursor: pointer;
+		opacity: 0;
+		transition: opacity 150ms ease, color 150ms ease, background-color 150ms ease;
+	}
+
+	.session-item:hover .session-delete-btn {
+		opacity: 1;
+	}
+
+	.session-delete-btn:hover {
+		color: var(--destructive, #ef4444);
+		background: color-mix(in oklch, var(--destructive, #ef4444) 12%, transparent);
+	}
+
+	.session-delete-confirm {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 20px;
+		height: 20px;
+		padding: 0;
+		background: color-mix(in oklch, var(--destructive, #ef4444) 15%, transparent);
+		border: 1px solid var(--destructive, #ef4444);
+		border-radius: calc(var(--radius) - 4px);
+		color: var(--destructive, #ef4444);
+		cursor: pointer;
+		flex-shrink: 0;
+		transition: background-color 120ms ease;
+		animation: fadeIn 150ms ease;
+	}
+
+	.session-delete-confirm:hover {
+		background: color-mix(in oklch, var(--destructive, #ef4444) 25%, transparent);
+	}
+
+	.session-delete-confirm:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.session-delete-cancel {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 20px;
+		height: 20px;
+		padding: 0;
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius) - 4px);
+		color: var(--muted-foreground);
+		cursor: pointer;
+		flex-shrink: 0;
+		transition: color 120ms ease, background-color 120ms ease;
+		animation: fadeIn 150ms ease;
+	}
+
+	.session-delete-cancel:hover {
+		color: var(--foreground);
+		background: var(--hover-overlay);
+	}
+
+	/* Touch devices: always show session delete */
+	@media (pointer: coarse) {
+		.session-delete-btn {
+			opacity: 0.5;
+		}
+	}
+
+	@media (max-width: 639px) {
+		.session-delete-btn {
+			opacity: 0.5;
+			min-width: 32px;
+			min-height: 32px;
+		}
+
+		.session-delete-confirm,
+		.session-delete-cancel {
+			min-width: 32px;
+			min-height: 32px;
 		}
 	}
 
