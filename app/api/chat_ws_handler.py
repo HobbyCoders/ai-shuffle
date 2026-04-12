@@ -632,7 +632,7 @@ class ChatWebSocketHandler:
         await sync_engine.register_device(self.device_id, session_id, self.websocket)
         self.current_session_id = session_id
 
-        # Unified message resolution: LiveSessionStore -> JSONL -> SQLite
+        # Unified message resolution: LiveSessionStore -> JSONL -> PostgreSQL
         # The force_jsonl flag bypasses the live store cache (used after
         # rewind to ensure we read the truncated JSONL, not stale data).
         sdk_session_id = session.get("sdk_session_id")
@@ -1254,30 +1254,109 @@ class ChatWebSocketHandler:
                 await dispatch_event(event, event_ctx, stream_state)
 
                 # --- Turn-boundary queue check ---
-                # When a turn ends with stop_reason "tool_use", the SDK is about
-                # to execute tools and start another API call.  If there are
-                # queued messages waiting, interrupt now so the queued message is
-                # sent at the turn boundary (matching Claude Code behaviour)
-                # instead of waiting for the entire multi-turn query to finish.
+                # When any turn ends (tool_use, end_turn, etc.) and there are
+                # queued messages waiting, interrupt now so the queued message
+                # is sent at the turn boundary instead of waiting for the
+                # entire multi-turn query to finish.  For end_turn this is a
+                # no-op interrupt (query is already ending), but the flag
+                # ensures the pre-close queue processor picks it up before
+                # session state is torn down.
                 if event_type == "stream_message_delta":
                     stop_reason = event.get("delta", {}).get("stop_reason")
-                    if stop_reason and stop_reason != "end_turn":
+                    if stop_reason:
                         queued = await run_sync(database.get_queued_messages, session_id)
                         if queued:
-                            from app.core.query_engine import interrupt_session
-                            ctx.debug(
-                                logger,
-                                f"Interrupting at turn boundary — "
-                                f"{len(queued)} queued message(s) waiting, "
-                                f"stop_reason={stop_reason}"
-                            )
-                            await interrupt_session(session_id)
-                            # Don't break — let the streaming loop drain the
-                            # remaining events (the SDK will emit a ResultMessage
-                            # after interrupt, which stream_to_websocket yields
-                            # as an "interrupted" event).
+                            if stop_reason != "end_turn":
+                                # Mid-query turn boundary — interrupt so the
+                                # loop drains and pre-close processing fires.
+                                from app.core.query_engine import interrupt_session
+                                ctx.debug(
+                                    logger,
+                                    f"Interrupting at turn boundary — "
+                                    f"{len(queued)} queued message(s) waiting, "
+                                    f"stop_reason={stop_reason}"
+                                )
+                                await interrupt_session(session_id)
+                                # Don't break — let the streaming loop drain
+                                # remaining events.
+                            else:
+                                ctx.debug(
+                                    logger,
+                                    f"end_turn with {len(queued)} queued message(s) — "
+                                    f"pre-close processing will handle them"
+                                )
 
             ctx.debug(logger, "Query completed")
+
+            # --- Pre-close queue processing ---
+            # Before ending the session, check for queued messages.  If any
+            # exist, pop the next one and start a new query *before* the
+            # session state is torn down.  This prevents the race where
+            # the frontend receives "done", navigates away, and the 0.5s
+            # delay in the finally-block never gets a chance to fire.
+            if session_id not in _stopped_sessions and session_id not in _interrupt_pending_sessions:
+                queued_msg = await run_sync(database.pop_next_queued_message, session_id)
+                if queued_msg:
+                    q_content = queued_msg["content"]
+                    q_profile = queued_msg.get("profile_id") or profile_id
+                    q_project = queued_msg.get("project_id") or project_id
+
+                    ctx.debug(logger, f"Queue: processing queued message before session close: {q_content[:80]}...")
+
+                    # Broadcast updated (now smaller) queue to all devices
+                    remaining_queue = await run_sync(database.get_queued_messages, session_id)
+                    await sync_engine.broadcast_queue_updated(session_id, remaining_queue)
+
+                    # Store user message in DB
+                    await run_sync(
+                        database.add_session_message,
+                        session_id=session_id,
+                        role="user",
+                        content=q_content,
+                        profile_id=q_profile,
+                    )
+
+                    # Broadcast user message to all devices
+                    await sync_engine.broadcast_message_added(
+                        session_id=session_id,
+                        message={
+                            "role": "user",
+                            "content": q_content,
+                            "profile_id": q_profile,
+                        },
+                        source_device_id=None,
+                    )
+
+                    # End current streaming state so the new query can re-init
+                    await live_session_store.end_streaming(
+                        session_id=session_id,
+                        metadata=stream_state.final_metadata,
+                        interrupted=False,
+                    )
+
+                    # Start new query inline — session stays active, no gap
+                    try:
+                        task = asyncio.create_task(
+                            self.run_query(q_content, session_id, q_profile, q_project, None, worktree_id)
+                        )
+                        async with _active_sessions_lock:
+                            _active_chat_sessions[session_id] = task
+                        self.query_task = task
+                        ctx.debug(logger, "Queue: new query started for queued message")
+                        return  # Exit this run_query — the new task continues streaming
+                    except Exception as exc:
+                        # Re-queue on failure so the message isn't lost
+                        ctx.error(logger, f"Queue: failed to start query for queued message, re-queuing: {exc}")
+                        await run_sync(
+                            database.requeue_message_at_front,
+                            session_id=session_id,
+                            content=q_content,
+                            profile_id=q_profile if q_profile != "claude-code" else None,
+                            project_id=q_project,
+                        )
+                        queue = await run_sync(database.get_queued_messages, session_id)
+                        await sync_engine.broadcast_queue_updated(session_id, queue)
+                        # Fall through to normal completion
 
             # Dispatch notifications for session completion (non-blocking)
             import time as time_module
@@ -1457,27 +1536,24 @@ class ChatWebSocketHandler:
                     await live_session_store.cleanup_session(session_id)
                     ctx.debug(logger, "Cleaned up stuck streaming session")
 
-            # Auto-process next queued message (server-side, no browser needed).
-            # Skip if:
-            #  - interrupt_and_query pending → it starts its own query
-            #  - user-initiated stop → queue stays intact for manual action
+            # Fallback queue processing for error/cancel paths.
+            # The normal completion path handles queued messages pre-close
+            # (before end_streaming), so this only fires when:
+            #  - Query was cancelled (CancelledError) or errored
+            #  - A queued message arrived during the cancel/error teardown
             if session_id in _interrupt_pending_sessions:
                 ctx.debug(logger, "Skipping queue processing — interrupt_and_query pending")
             elif session_id in _stopped_sessions:
                 _stopped_sessions.discard(session_id)
                 ctx.debug(logger, "Skipping queue processing — user stopped session")
             else:
-                # Delay slightly to let the done/stopped event propagate to clients first.
-                await asyncio.sleep(0.5)
-                # Re-check after the delay — user may have clicked stop or sent
-                # an interrupt_and_query during the 0.5s window.
-                if session_id in _stopped_sessions:
-                    _stopped_sessions.discard(session_id)
-                    ctx.debug(logger, "Skipping queue processing — user stopped during delay")
-                elif session_id in _interrupt_pending_sessions:
-                    ctx.debug(logger, "Skipping queue processing — interrupt arrived during delay")
+                # Check if a new query was already spawned by pre-close processing
+                async with _active_sessions_lock:
+                    active_task = _active_chat_sessions.get(session_id)
+                if active_task and not active_task.done():
+                    ctx.debug(logger, "Skipping fallback queue processing — new query already active")
                 else:
                     try:
                         await self._process_next_queued(session_id)
                     except Exception as queue_err:
-                        logger.warning(f"[Queue] Failed to auto-process next queued message: {queue_err}")
+                        logger.warning(f"[Queue] Fallback queue processing failed: {queue_err}")

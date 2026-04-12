@@ -1,5 +1,5 @@
 """
-Unified message resolution — single entry point for the LiveSessionStore → JSONL → SQLite fallback chain.
+Unified message resolution — single entry point for the LiveSessionStore → JSONL → PostgreSQL fallback chain.
 
 This eliminates the 4 duplicate fallback implementations that previously existed in:
 - api/sessions.py get_session (REST)
@@ -113,7 +113,7 @@ def _normalize_db_message(m: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class MessageResolver:
-    """Unified message resolution with LiveSessionStore → JSONL → SQLite fallback.
+    """Unified message resolution with LiveSessionStore → JSONL → PostgreSQL fallback.
 
     All code that needs to load session messages should use this instead of
     implementing the fallback chain directly.
@@ -133,7 +133,7 @@ class MessageResolver:
         Priority:
         1. LiveSessionStore (if check_live_store=True and not force_jsonl)
         2. JSONL files (Claude SDK session history)
-        3. SQLite database (fallback)
+        3. PostgreSQL database (fallback)
 
         Args:
             session_id: AI Shuffle session ID
@@ -159,7 +159,7 @@ class MessageResolver:
             if jsonl_result is not None:
                 return jsonl_result
 
-        # --- Tier 3: SQLite database (fallback) ---
+        # --- Tier 3: PostgreSQL database (fallback) ---
         return MessageResolver._try_database(session_id)
 
     @staticmethod
@@ -284,7 +284,7 @@ class MessageResolver:
 
     @staticmethod
     def _try_database(session_id: str) -> ResolvedMessages:
-        """Load messages from the SQLite database (final fallback)."""
+        """Load messages from the PostgreSQL database (final fallback)."""
         from app.db import database
 
         db_messages = database.get_session_messages(session_id)

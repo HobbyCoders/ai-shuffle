@@ -5,7 +5,7 @@ Fetches, caches, and serves the full fal.ai model catalog (~600+ models).
 Uses the fal.ai platform API to discover models dynamically, so new models
 are available without code changes.
 
-Catalog is persisted to SQLite for instant availability on startup,
+Catalog is persisted to PostgreSQL for instant availability on startup,
 and refreshed in the background periodically (default: every hour).
 """
 
@@ -101,7 +101,7 @@ class CatalogModel:
 
     @classmethod
     def from_db_row(cls, row: dict) -> "CatalogModel":
-        """Parse from a SQLite row."""
+        """Parse from a database row."""
         tags = []
         if row.get("tags_json"):
             try:
@@ -131,7 +131,7 @@ class FalCatalogService:
 
     - Fetches all models from fal.ai's platform API
     - Caches in memory with configurable TTL
-    - Persists to SQLite for instant startup
+    - Persists to PostgreSQL for instant startup
     - Provides search, filter, and lookup methods
     """
 
@@ -150,7 +150,7 @@ class FalCatalogService:
         return len(self._cache)
 
     def load_from_db(self) -> int:
-        """Load catalog from SQLite on startup. Returns count of models loaded."""
+        """Load catalog from database on startup. Returns count of models loaded."""
         try:
             with get_db() as conn:
                 cursor = conn.cursor()
@@ -172,7 +172,7 @@ class FalCatalogService:
         Fetch the full model catalog from fal.ai API.
 
         Paginates through all results, filters to inference models only,
-        and persists to both memory and SQLite.
+        and persists to both memory and PostgreSQL.
 
         Returns the number of models fetched.
         """
@@ -258,7 +258,7 @@ class FalCatalogService:
         return all_models
 
     def _persist_to_db(self, models: list[CatalogModel]) -> None:
-        """Persist the catalog to SQLite, replacing all existing entries."""
+        """Persist the catalog to database, replacing all existing entries."""
         try:
             with get_db() as conn:
                 cursor = conn.cursor()

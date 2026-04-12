@@ -40,12 +40,12 @@ def sql_date(column: str) -> str:
 
 def sql_strftime(fmt: str, column: str) -> str:
     """Format a timestamp as a string using PostgreSQL to_char."""
-    pg_fmt = _sqlite_fmt_to_pg(fmt)
+    pg_fmt = _strftime_to_pg(fmt)
     return f"to_char({column}, '{pg_fmt}')"
 
 
-def _sqlite_fmt_to_pg(fmt: str) -> str:
-    """Convert strftime-style format to PostgreSQL to_char format."""
+def _strftime_to_pg(fmt: str) -> str:
+    """Convert Python strftime-style format to PostgreSQL to_char format."""
     mapping = {
         "%Y-W%W": "IYYY-\"W\"IW",
         "%Y-%m": "YYYY-MM",
