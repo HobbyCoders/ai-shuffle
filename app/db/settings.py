@@ -41,7 +41,12 @@ def get_user_preference(user_type: str, user_id: str, key: str) -> Optional[User
             # Parse JSON value
             if result and result.get("value"):
                 raw = result["value"]
-                result["value"] = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(raw, str):
+                    try:
+                        result["value"] = json.loads(raw)
+                    except (json.JSONDecodeError, ValueError):
+                        logger.warning("Invalid JSON in preference %s for %s/%s: %r", key, user_type, user_id, raw)
+                        result["value"] = raw
             return result
         return None
 
@@ -95,7 +100,12 @@ def get_all_user_preferences(user_type: str, user_id: str) -> List[UserPreferenc
         for row in rows:
             if row.get("value"):
                 raw = row["value"]
-                row["value"] = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(raw, str):
+                    try:
+                        row["value"] = json.loads(raw)
+                    except (json.JSONDecodeError, ValueError):
+                        logger.warning("Invalid JSON in preference %s: %r", row.get("key"), raw)
+                        row["value"] = raw
         return rows
 
 
