@@ -241,6 +241,20 @@ def _run_column_migrations(cursor):
             migrations_applied.append("sessions.instance_id")
         # Always ensure the index exists (idempotent for fresh installs + upgrades)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_instance ON sessions(instance_id)")
+        # Backfill any remaining sessions with NULL instance_id (e.g. ungrouped
+        # sessions without a project_id that the original migration missed).
+        # Assigns them to the current instance so they stop leaking across installs.
+        try:
+            from app.core.config import settings
+            _ph = ph()
+            cursor.execute(
+                f"UPDATE sessions SET instance_id = {_ph} WHERE instance_id IS NULL",
+                (settings.effective_instance_id,)
+            )
+            if cursor.rowcount and cursor.rowcount > 0:
+                migrations_applied.append(f"sessions.instance_id_backfill({cursor.rowcount} rows)")
+        except _DB_ERRORS:
+            pass
 
     # Ensure performance-critical indexes exist (idempotent, no version gate).
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
