@@ -485,6 +485,15 @@ function setupPollCallback() {
 			return;
 		}
 
+		// During interrupt_and_query, stale polls from the old query can return
+		// with isStreaming=false and clobber the optimistic isStreaming=true set
+		// by the interrupt path. Skip all poll updates while the transition is
+		// in progress — the new query's 'start' event restarts polling cleanly.
+		if (internal.interruptPending) {
+			console.debug(`[PollCB] skipped: interruptPending for ${sessionId}`);
+			return;
+		}
+
 		// Build usage delta — don't overwrite a valid contextUsed with 0.
 		// During the brief window between sending a message and the first
 		// stream_start event, the server may return 0 usage. Slash commands

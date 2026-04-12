@@ -365,6 +365,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// Set sessionId, streamStartTime, and inject a synthetic streaming
 					// assistant message so the streaming indicator appears immediately
 					// (don't wait for the poller to deliver the first assistant message).
+					// Also explicitly set isStreaming: true — during interrupt_and_query,
+					// a stale poll from the old streaming session can clobber isStreaming
+					// to false between the interrupt and this start event.
 					const messageId = data.message_id as string || `ws-stream-${Date.now()}`;
 					update(s => {
 						// Only inject if there isn't already a streaming assistant message
@@ -372,11 +375,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 							m => m.role === 'assistant' && m.streaming
 						);
 						if (hasStreamingAssistant) {
-							return { ...s, sessionId, streamStartTime: Date.now(), wsStreamContent: '' };
+							return { ...s, sessionId, isStreaming: true, streamStartTime: Date.now(), wsStreamContent: '' };
 						}
 						return {
 							...s,
 							sessionId,
+							isStreaming: true,
 							streamStartTime: Date.now(),
 							wsStreamContent: '',
 							messages: [...s.messages, {
