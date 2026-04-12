@@ -112,6 +112,18 @@
 		}
 	});
 
+	// Restore message to editor when interrupt fails (pendingInterruptPrompt preserved, streaming stopped)
+	$effect(() => {
+		const pending = $activeSession.pendingInterruptPrompt;
+		const streaming = $activeSession.isStreaming;
+		if (pending && !streaming) {
+			// Interrupt failed/timed out — restore the user's message so they don't lose it
+			inputValue = pending;
+			editorRef?.setContent(pending);
+			activeSession.clearPendingInterruptPrompt();
+		}
+	});
+
 	let fileInputRef = $state<HTMLInputElement | null>(null);
 	let isUploading = $state(false);
 
@@ -270,7 +282,7 @@
 			// Queue for when current stream completes naturally
 			activeSession.queueMessage(finalPrompt);
 		} else {
-			// Send immediately (interrupt_and_query if streaming, normal query if not)
+			// Send immediately (interrupt → confirm → query if streaming, normal query if not)
 			activeSession.sendMessage(finalPrompt, pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : undefined);
 		}
 	}

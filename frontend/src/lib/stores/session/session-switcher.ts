@@ -263,6 +263,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		internal.interruptPending = false;
 		internal.awaitingNewSession = false;
 		internal.worktreeCreationGeneration++;
+		if (internal.interruptConfirmResolve) {
+			internal.interruptConfirmResolve(false);
+			internal.interruptConfirmResolve = null;
+		}
 
 		// Save ephemeral for session we're leaving
 		const leavingKey = state.sessionId || '__new_chat__';
@@ -301,6 +305,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			pendingQuestions: [],
 			isStreaming: false,
 			wsStreamContent: '',
+			pendingInterruptPrompt: null,
 			isCreatingWorktree: false,
 			worktreeError: null,
 			sessionLocked: false,
@@ -401,6 +406,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		internal.interruptPending = false;
 		internal.awaitingNewSession = false;
 		internal.worktreeCreationGeneration++;
+		if (internal.interruptConfirmResolve) {
+			internal.interruptConfirmResolve(false);
+			internal.interruptConfirmResolve = null;
+		}
 
 		// Restore new chat draft if one was saved earlier
 		const newChatEphemeral = sessionEphemeralCache.restore('__new_chat__');
@@ -416,6 +425,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			messages: [],
 			isStreaming: false,
 			wsStreamContent: '',
+			pendingInterruptPrompt: null,
 			error: null,
 			title: 'New Chat',
 			totalTokensIn: 0,

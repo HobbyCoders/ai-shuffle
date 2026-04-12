@@ -106,6 +106,7 @@ class ChatWebSocketHandler:
             "query": self.handle_query,
             "stop": self.handle_stop,
             "interrupt_and_query": self.handle_interrupt_and_query,
+            "interrupt_for_query": self.handle_interrupt_for_query,
             "load_session": self.handle_load_session,
             "close_session": self.handle_close_session,
             "permission_response": self.handle_permission_response,
@@ -490,7 +491,61 @@ class ChatWebSocketHandler:
                     _t.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     # ------------------------------------------------------------------
-    # handle_interrupt_and_query
+    # handle_interrupt_for_query (two-phase: interrupt only, then confirm)
+    # ------------------------------------------------------------------
+
+    async def handle_interrupt_for_query(self, data: dict) -> None:
+        """Handle 'interrupt_for_query' — Phase 1 of the two-phase interrupt+query.
+
+        Interrupts the active streaming session, waits for the drain to complete,
+        then sends 'interrupt_confirmed' back to the frontend.  The frontend
+        will only send the actual query AFTER receiving confirmation, preventing
+        the race condition where a message is sent before the interrupt finishes.
+        """
+        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
+
+        session_id = data.get("session_id") or self.current_session_id
+        if not session_id:
+            await self.send_json({"type": "interrupt_failed", "session_id": session_id, "message": "No active session"})
+            return
+
+        from app.core.query_engine import interrupt_session
+
+        # Mark as interrupt-pending so the old task's finally block skips queue processing
+        _interrupt_pending_sessions.add(session_id)
+
+        try:
+            # Step 1: Interrupt the SDK-level streaming
+            interrupted = await interrupt_session(session_id)
+            logger.debug(f"interrupt_for_query: interrupt session {session_id}: {interrupted}")
+
+            # Step 2: Wait for the streaming task to drain fully.
+            # Same logic as handle_interrupt_and_query — we MUST let
+            # receive_response() drain before the frontend sends a new query.
+            async with _active_sessions_lock:
+                task = _active_chat_sessions.get(session_id)
+            if task and not task.done():
+                done, pending = await asyncio.wait({task}, timeout=8.0)
+                if pending:
+                    logger.warning(f"interrupt_for_query: drain timed out for {session_id}, force cancelling")
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+            # Step 3: Confirm to frontend — safe to send the query now
+            await self.send_json({"type": "interrupt_confirmed", "session_id": session_id})
+            logger.debug(f"interrupt_for_query: confirmed for session {session_id}")
+
+        except Exception as e:
+            logger.error(f"interrupt_for_query failed for {session_id}: {e}")
+            await self.send_json({"type": "interrupt_failed", "session_id": session_id, "message": str(e)})
+        finally:
+            _interrupt_pending_sessions.discard(session_id)
+
+    # ------------------------------------------------------------------
+    # handle_interrupt_and_query (legacy — kept for backward compatibility)
     # ------------------------------------------------------------------
 
     async def handle_interrupt_and_query(self, data: dict) -> None:

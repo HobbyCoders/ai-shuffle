@@ -32,6 +32,11 @@ export interface InternalMutableState {
 	 *  during an await, preventing the async callback from clobbering the
 	 *  active session after the user navigated away. */
 	worktreeCreationGeneration: number;
+	/** Resolve callback for the interrupt_confirmed promise.
+	 *  Set by sendMessage's interrupt path, called by the interrupt_confirmed
+	 *  WS handler so the frontend waits for backend confirmation before
+	 *  sending the new query. */
+	interruptConfirmResolve: ((confirmed: boolean) => void) | null;
 }
 
 /**
@@ -517,6 +522,30 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				handleDone(data);
 				break;
 
+			case 'interrupt_confirmed': {
+				// Backend confirmed the interrupt + drain completed.
+				// Resolve the promise so sendMessage can proceed with the query.
+				const confirmedSessionId = data.session_id as string | undefined;
+				const currentSt = getState();
+				if (confirmedSessionId && confirmedSessionId === currentSt.sessionId && internal.interruptConfirmResolve) {
+					internal.interruptConfirmResolve(true);
+					internal.interruptConfirmResolve = null;
+				}
+				break;
+			}
+
+			case 'interrupt_failed': {
+				// Backend failed to interrupt — resolve with false so sendMessage
+				// can restore the message to the input.
+				const failedSessionId = data.session_id as string | undefined;
+				const failedSt = getState();
+				if (failedSessionId && failedSessionId === failedSt.sessionId && internal.interruptConfirmResolve) {
+					internal.interruptConfirmResolve(false);
+					internal.interruptConfirmResolve = null;
+				}
+				break;
+			}
+
 			case 'stopped':
 			case 'interrupted':
 				handleStoppedOrInterrupted(data);
@@ -524,6 +553,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 			case 'error': {
 				internal.interruptPending = false;
+				// Reject any pending interrupt-and-query promise
+				if (internal.interruptConfirmResolve) {
+					internal.interruptConfirmResolve(false);
+					internal.interruptConfirmResolve = null;
+				}
 				// Error is a terminal event — stop polling, reset streaming, show error.
 				// Must reset isStreaming so the user can send another message.
 				const errState = getState();

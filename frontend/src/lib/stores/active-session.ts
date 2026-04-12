@@ -117,6 +117,10 @@ export interface ActiveSessionState {
 	/** Accumulated text from WebSocket stream_delta events for instant rendering.
 	 *  Cleared when the poller catches up or streaming ends. */
 	wsStreamContent: string;
+	/** Holds the user's message text while waiting for interrupt confirmation.
+	 *  If the interrupt fails/times out, ChatInput restores this to the editor
+	 *  so the user doesn't lose their message. Cleared on success or session switch. */
+	pendingInterruptPrompt: string | null;
 }
 
 /** Minimal shape persisted to the backend. */
@@ -266,6 +270,7 @@ function defaultState(): ActiveSessionState {
 		sessionLocked: false,
 		sessionLockedBy: undefined,
 		wsStreamContent: '',
+		pendingInterruptPrompt: null,
 	};
 }
 
@@ -303,6 +308,7 @@ const internal: InternalMutableState = {
 	interruptPending: false,
 	awaitingNewSession: false,
 	worktreeCreationGeneration: 0,
+	interruptConfirmResolve: null,
 };
 
 // ─── WebSocket Connection (extracted module) ─────────────────────────────────
@@ -414,6 +420,10 @@ function disconnect() {
 	internal.pendingTools.clear();
 	internal.interruptPending = false;
 	internal.awaitingNewSession = false;
+	if (internal.interruptConfirmResolve) {
+		internal.interruptConfirmResolve(false);
+		internal.interruptConfirmResolve = null;
+	}
 
 	if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
 
@@ -1039,16 +1049,24 @@ export const activeSession = {
 			: _state.title;
 		const queryProfileId = _state.profile;
 
-		// Interrupt and re-query if currently streaming
+		// Interrupt and re-query if currently streaming.
+		// Two-phase approach: send interrupt first, wait for backend confirmation
+		// that the interrupt + drain completed, THEN send the query. This prevents
+		// the race where the message is sent before the interrupt takes effect,
+		// causing message loss.
 		if (_state.isStreaming && _state.sessionId) {
+			const interruptSessionId = _state.sessionId;
+
 			// Cleanup first: stop poller and remove session to prevent
 			// the sessionState subscriber from overwriting our update
-			sessionPoller.stop(_state.sessionId);
-			sessionState.removeSession(_state.sessionId);
+			sessionPoller.stop(interruptSessionId);
+			sessionState.removeSession(interruptSessionId);
 			internal.interruptPending = true;
 
-			// Single atomic update: mark running tools as errored + append user message.
-			// Uses s.messages (current store state) instead of stale sessionState data.
+			// Mark running tools as errored but DON'T append user message yet.
+			// The message is only appended after interrupt is confirmed.
+			// Store the prompt in pendingInterruptPrompt so the UI can restore
+			// it to the input if the interrupt fails.
 			_update(s => {
 				const updatedMessages = s.messages.map(m => {
 					if (m.type === 'tool_use' && m.toolStatus === 'running') {
@@ -1058,29 +1076,98 @@ export const activeSession = {
 				});
 				return {
 					...s,
-					messages: [...updatedMessages, {
-						id: userMsgId,
-						role: 'user' as const,
-						content: prompt,
-						profileId: queryProfileId,
-					}],
-					isStreaming: true,
+					messages: updatedMessages,
+					isStreaming: true,  // Keep streaming indicator while waiting for interrupt
 					error: null,
 					title: newTitle,
 					currentQueryProfileId: queryProfileId,
 					wsStreamContent: '',
+					pendingInterruptPrompt: prompt,
 				};
 			});
 
 			internal.pendingTools.clear();
+
+			// Phase 1: Send interrupt request (no prompt — just stop the stream)
+			wsConn.resetLastMessageTime();
+			const sent = wsConn.send({
+				type: 'interrupt_for_query',
+				session_id: interruptSessionId,
+			});
+
+			if (!sent) {
+				// WS send failed — restore state so user can retry
+				internal.interruptPending = false;
+				_update(s => ({ ...s, isStreaming: false, error: 'Failed to send interrupt. Please try again.' }));
+				return;
+			}
+
+			// Phase 2: Wait for backend confirmation (with timeout)
+			const INTERRUPT_TIMEOUT_MS = 12_000;
+			let timeoutId: ReturnType<typeof setTimeout>;
+
+			const confirmed = await new Promise<boolean>((resolve) => {
+				internal.interruptConfirmResolve = resolve;
+				timeoutId = setTimeout(() => {
+					if (internal.interruptConfirmResolve === resolve) {
+						internal.interruptConfirmResolve = null;
+						resolve(false);
+					}
+				}, INTERRUPT_TIMEOUT_MS);
+			});
+			clearTimeout(timeoutId!);
+
+			// If session changed during the wait, bail — user navigated away
+			if (_state.sessionId !== interruptSessionId) {
+				internal.interruptPending = false;
+				return;
+			}
+
+			if (!confirmed) {
+				// Interrupt failed or timed out — restore non-streaming state
+				// so user can retry. Message was never sent, so no loss.
+				internal.interruptPending = false;
+				_update(s => ({
+					...s,
+					isStreaming: false,
+					error: 'Interrupt timed out. Please try sending your message again.',
+				}));
+				return;
+			}
+
+			// Phase 3: Interrupt confirmed — now append user message and send query
+			// through the normal path. The session is confirmed idle.
+			internal.interruptPending = false;
+
+			_update(s => ({
+				...s,
+				messages: [...s.messages, {
+					id: userMsgId,
+					role: 'user' as const,
+					content: prompt,
+					profileId: queryProfileId,
+				}],
+				isStreaming: true,
+				error: null,
+				wsStreamContent: '',
+				pendingInterruptPrompt: null,
+			}));
+
+			const overrides: Record<string, string> = {};
+			if (_state.modelOverride) overrides.model = _state.modelOverride;
+			if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
+			if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
+			if (_state.fastMode) overrides.fast_mode = 'true';
+
 			wsConn.resetLastMessageTime();
 			wsConn.send({
-				type: 'interrupt_and_query',
+				type: 'query',
 				prompt,
-				session_id: _state.sessionId,
+				session_id: interruptSessionId,
 				profile: _state.profile,
 				project: _state.project || undefined,
 				worktree_id: _state.worktreeId || undefined,
+				overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
 			});
 			return;
 		}
@@ -1235,6 +1322,7 @@ export const activeSession = {
 	// ── Ephemeral UI State ──────────────────────────────────────────
 
 	setDraft(text: string) { _update(s => ({ ...s, draft: text })); },
+	clearPendingInterruptPrompt() { _update(s => s.pendingInterruptPrompt ? { ...s, pendingInterruptPrompt: null } : s); },
 	setScrollTop(pos: number) { _update(s => ({ ...s, scrollTop: pos })); },
 	clearError() { _update(s => ({ ...s, error: null })); },
 	clearWorktreeError() { _update(s => ({ ...s, worktreeError: null })); },
