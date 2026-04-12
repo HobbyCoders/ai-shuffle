@@ -98,6 +98,7 @@ function mockState(): ActiveSessionState {
 		worktreeMode: 'new',
 		selectedWorktreeBranch: null,
 		isCreatingWorktree: false,
+		isReopeningWorktree: false,
 		worktreeError: null,
 		worktreeDeleted: false,
 		sessionLocked: false,

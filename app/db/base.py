@@ -63,6 +63,7 @@ def _validate_identifier(value: str, kind: str = "identifier") -> str:
 class WorktreeStatus:
     """Worktree status values — use these constants for consistency."""
     ACTIVE = "active"
+    COMPLETED = "completed"  # Worktree cleaned up after merge; DB record preserved for session reopen
     DELETED = "deleted"
     ORPHANED = "orphaned"
 

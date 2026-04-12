@@ -26,6 +26,7 @@ from app.core.git_service import git_service
 from app.core.worktree_manager import worktree_manager
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.db import database
+from app.db.base import WorktreeStatus
 from app.api.auth import require_auth, get_api_user_from_request
 from app.api.common import check_project_access, resolve_project_path
 
@@ -2045,6 +2046,48 @@ async def delete_worktree(
         success=True,
         message=f"Removed worktree for branch '{worktree['branch_name']}'{branch_msg}"
     )
+
+
+@router.post("/worktrees/{worktree_id}/reopen", response_model=WorktreeInfo)
+async def reopen_worktree(
+    request: Request,
+    project_id: str,
+    worktree_id: str,
+    token: str = Depends(require_auth)
+):
+    """
+    Recreate a completed worktree so the user can resume the session.
+
+    Creates a new git worktree with the same branch name (new branch from
+    default branch if the old branch was deleted). Updates the DB record
+    back to ACTIVE.
+    """
+    check_project_access(request, project_id)
+
+    worktree = database.get_worktree(worktree_id)
+    if not worktree:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Worktree not found: {worktree_id}"
+        )
+
+    repo = database.get_git_repository_by_project(project_id)
+    if not repo or worktree["repository_id"] != repo["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Worktree not found in this project: {worktree_id}"
+        )
+
+    from app.core.worktree_manager import WorktreeError
+    try:
+        updated = worktree_manager.recreate_worktree(worktree_id)
+    except WorktreeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+    return _convert_worktree_to_info(updated)
 
 
 @router.post("/worktrees/sync", response_model=WorktreeSyncResponse)

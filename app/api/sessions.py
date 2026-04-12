@@ -48,6 +48,7 @@ from app.core.models import (
 import time
 from app.db import database
 from app.db.async_database import run_sync
+from app.db.base import WorktreeStatus
 from app.db.tags import get_tags_for_sessions
 from app.db.sessions import get_fork_info_for_sessions
 from app.api.auth import require_auth, get_api_user_from_request
@@ -734,15 +735,20 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     worktree_id = session.get("worktree_id")
     if worktree_id:
         worktree = await run_sync(database.get_worktree, worktree_id)
-        if worktree:
+        if worktree and worktree.get("status") == WorktreeStatus.ACTIVE:
             session["worktree_id"] = worktree_id
             session["worktree_branch"] = worktree.get("branch_name")
             session["worktree_path"] = worktree.get("worktree_path")
             session["worktree_deleted"] = False
+        elif worktree and worktree.get("status") == WorktreeStatus.COMPLETED:
+            # Worktree completed (merged & cleaned up) — record preserved for reopen
+            session["worktree_id"] = worktree_id
+            session["worktree_branch"] = worktree.get("branch_name")
+            session["worktree_path"] = worktree.get("worktree_path")
+            session["worktree_deleted"] = True
         else:
-            # Worktree was deleted - use stored values from session columns
+            # Worktree record missing or in DELETED/ORPHANED state
             session["worktree_id"] = None
-            # worktree_branch and worktree_path are already in session from DB columns
             session["worktree_deleted"] = True
     elif session.get("worktree_branch"):
         # Worktree was fully unlinked (ON DELETE SET NULL) but stored info remains
@@ -793,10 +799,15 @@ async def get_live_session(
     wt_id = session.get("worktree_id")
     if wt_id:
         wt = await run_sync(database.get_worktree, wt_id)
-        if wt:
+        if wt and wt.get("status") == WorktreeStatus.ACTIVE:
             session_meta["worktree_id"] = wt_id
             session_meta["worktree_branch"] = wt.get("branch_name")
             session_meta["worktree_deleted"] = False
+            session_meta["execution_mode"] = "worktree"
+        elif wt and wt.get("status") == WorktreeStatus.COMPLETED:
+            session_meta["worktree_id"] = wt_id
+            session_meta["worktree_branch"] = wt.get("branch_name")
+            session_meta["worktree_deleted"] = True
             session_meta["execution_mode"] = "worktree"
         else:
             session_meta["worktree_id"] = None

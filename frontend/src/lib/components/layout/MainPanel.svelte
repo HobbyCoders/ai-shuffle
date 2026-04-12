@@ -160,7 +160,9 @@
 	// activeTab object, which changes on every streaming poll and would re-trigger load needlessly.
 	const activeProject = $derived(activeTab?.project ?? null);
 	const activeWorktreeId = $derived(
-		activeTab?.executionMode === 'worktree' ? (activeTab.worktreeId ?? null) : null
+		activeTab?.executionMode === 'worktree' && !activeTab?.worktreeDeleted
+			? (activeTab.worktreeId ?? null)
+			: null
 	);
 	const activeSessionId = $derived(activeTab?.sessionId ?? null);
 

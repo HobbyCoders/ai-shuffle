@@ -337,7 +337,9 @@ def create_worktree(
 def update_worktree(
     worktree_id: str,
     session_id: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    worktree_path: Optional[str] = None,
+    branch_name: Optional[str] = None,
 ) -> Optional[WorktreeRow]:
     """Update a worktree"""
     existing = get_worktree(worktree_id)
@@ -353,6 +355,12 @@ def update_worktree(
     if status is not None:
         updates.append("status = %s")
         values.append(status)
+    if worktree_path is not None:
+        updates.append("worktree_path = %s")
+        values.append(worktree_path)
+    if branch_name is not None:
+        updates.append("branch_name = %s")
+        values.append(branch_name)
 
     if updates:
         values.append(worktree_id)

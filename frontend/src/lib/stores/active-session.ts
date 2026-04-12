@@ -111,6 +111,7 @@ export interface ActiveSessionState {
 	isCreatingWorktree: boolean;
 	worktreeError: string | null;
 	worktreeDeleted: boolean;
+	isReopeningWorktree: boolean;
 	fastMode: boolean;
 	sessionLocked: boolean;
 	sessionLockedBy: string | undefined;
@@ -266,6 +267,7 @@ function defaultState(): ActiveSessionState {
 		isCreatingWorktree: false,
 		worktreeError: null,
 		worktreeDeleted: false,
+		isReopeningWorktree: false,
 		fastMode: false,
 		sessionLocked: false,
 		sessionLockedBy: undefined,
@@ -1009,6 +1011,21 @@ export const activeSession = {
 	// ── Messaging ───────────────────────────────────────────────────
 
 	async sendMessage(prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[] }) {
+		// Reopen completed worktree before sending message
+		if (_state.worktreeDeleted && _state.worktreeId && _state.project) {
+			_update(s => ({ ...s, isReopeningWorktree: true, error: null }));
+			try {
+				const { reopenWorktree } = await import('$lib/api/git');
+				await reopenWorktree(_state.project, _state.worktreeId);
+				// Worktree recreated — clear the deleted flag and resume
+				_update(s => ({ ...s, worktreeDeleted: false, isReopeningWorktree: false }));
+			} catch (e: any) {
+				const msg = e?.message || String(e);
+				_update(s => ({ ...s, isReopeningWorktree: false, error: `Failed to reopen worktree: ${msg}` }));
+				return;
+			}
+		}
+
 		// Worktree setup on first message
 		if (!options?.skipWorktreeSetup && _state.executionMode === 'worktree' && !_state.sessionId && _state.messages.length === 0) {
 			if (_state.worktreeMode === 'existing' && _state.worktreeId) {
@@ -1358,7 +1375,10 @@ export const activeSession = {
 	},
 
 	markWorktreeDeleted() {
-		_update(s => ({ ...s, worktreeDeleted: true, worktreeId: null }));
+		// Preserve worktreeId so the session can be reopened later.
+		// The worktreeDeleted flag controls UI state; worktreeId is needed
+		// for the reopen API call.
+		_update(s => ({ ...s, worktreeDeleted: true }));
 	},
 
 	async createWorktree(prompt?: string, pendingUploadPaths?: string[]) {

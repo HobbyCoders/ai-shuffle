@@ -339,6 +339,14 @@ export async function deleteWorktree(projectId: string, worktreeId: string, keep
     await api.delete(`${BASE}/${projectId}/git/worktrees/${worktreeId}${params}`);
 }
 
+/**
+ * Reopen a completed worktree — recreates the git worktree on disk
+ * and sets the DB record back to active so the session can resume.
+ */
+export async function reopenWorktree(projectId: string, worktreeId: string): Promise<Worktree> {
+    return api.post<Worktree>(`${BASE}/${projectId}/git/worktrees/${worktreeId}/reopen`);
+}
+
 // ============================================================================
 // Worktree Sync API
 // ============================================================================

@@ -859,14 +859,106 @@ class WorktreeManager:
                 self.git_service.delete_branch(main_dir, branch_name, force=True)
                 logger.debug(f"Deleted branch {branch_name}")
 
-        # Update database record
-        database.update_worktree(worktree_id, status=WorktreeStatus.DELETED)
+        # Mark as completed (preserve record for session reopen)
+        database.update_worktree(worktree_id, status=WorktreeStatus.COMPLETED)
 
-        # Delete the worktree record
-        database.delete_worktree(worktree_id)
-
-        logger.debug(f"Cleaned up worktree {worktree_id}")
+        logger.debug(f"Cleaned up worktree {worktree_id} (marked COMPLETED)")
         return True
+
+    def recreate_worktree(self, worktree_id: str) -> Dict:
+        """
+        Recreate a completed worktree so the user can resume the session.
+
+        Creates a new git worktree with the same branch name (new branch from
+        default branch, since the old branch was merged and deleted). Updates
+        the existing DB record back to ACTIVE with the new path.
+
+        Args:
+            worktree_id: The completed worktree to recreate
+
+        Returns:
+            Updated worktree dict
+
+        Raises:
+            WorktreeError: If worktree not found, not completed, or recreation fails
+        """
+        worktree = database.get_worktree(worktree_id)
+        if not worktree:
+            raise WorktreeError(f"Worktree not found: {worktree_id}")
+
+        if worktree["status"] == WorktreeStatus.ACTIVE:
+            # Already active — check if valid on disk
+            if self.is_worktree_valid(worktree):
+                return worktree
+            # Active but missing on disk — proceed with recreation
+
+        if worktree["status"] not in (WorktreeStatus.COMPLETED, WorktreeStatus.ACTIVE):
+            raise WorktreeError(
+                f"Worktree {worktree_id} has status '{worktree['status']}' — "
+                f"only completed worktrees can be reopened"
+            )
+
+        # Get repository and project
+        repo = database.get_git_repository(worktree["repository_id"])
+        if not repo:
+            raise WorktreeError(f"Repository not found for worktree: {worktree_id}")
+
+        project = database.get_project(repo["project_id"])
+        if not project:
+            raise WorktreeError(f"Project not found for repository: {repo['id']}")
+
+        main_dir = get_project_working_dir(project)
+        branch_name = worktree["branch_name"]
+        default_branch = repo.get("default_branch", "main")
+
+        # Determine if we need to create a new branch or reuse existing
+        branches = self.git_service.list_branches(main_dir, include_remote=False)
+        local_branch_names = [b["name"] for b in branches if not b["is_remote"]]
+        branch_exists = branch_name in local_branch_names
+        create_new = not branch_exists
+
+        # If creating new branch, base it on the default branch (which has merged changes)
+        base_branch = default_branch if create_new else None
+
+        # Generate new worktree path (old path was deleted)
+        worktree_path = self._get_worktree_path(project["path"], branch_name)
+        relative_worktree_path = self._get_relative_worktree_path_from_full(
+            worktree_path, project["path"]
+        )
+
+        logger.debug(
+            f"Recreating worktree {worktree_id} at {worktree_path} "
+            f"(branch={branch_name}, create_new={create_new})"
+        )
+
+        # Prune stale worktree entries so git doesn't complain about existing refs
+        self.git_service.prune_worktrees(main_dir)
+
+        # Create git worktree
+        success, error_msg = self.git_service.add_worktree(
+            main_dir=main_dir,
+            path=str(worktree_path),
+            branch=branch_name,
+            new_branch=create_new,
+            base_branch=base_branch
+        )
+
+        if not success:
+            raise WorktreeError(f"Git failed to recreate worktree: {error_msg or 'Unknown error'}")
+
+        # Update existing DB record back to ACTIVE with new path
+        updated = database.update_worktree(
+            worktree_id,
+            status=WorktreeStatus.ACTIVE,
+            worktree_path=relative_worktree_path,
+            branch_name=branch_name,
+        )
+
+        logger.info(
+            f"Recreated worktree {worktree_id} at {worktree_path} "
+            f"for branch {branch_name} (was COMPLETED)"
+        )
+        return updated
 
     def sync_worktrees(self, project_id: str) -> Dict[str, Any]:
         """
@@ -923,6 +1015,9 @@ class WorktreeManager:
                 logger.warning(f"Worktree {db_wt['id']} is orphaned (path doesn't exist)")
                 database.update_worktree(db_wt["id"], status=WorktreeStatus.ORPHANED)
                 result["orphaned"] += 1
+            elif db_wt["status"] == WorktreeStatus.COMPLETED:
+                # Completed worktrees are preserved for session reopen — skip
+                result["synced"] += 1
             elif db_wt["status"] in [WorktreeStatus.DELETED, WorktreeStatus.ORPHANED]:
                 # Clean up stale records
                 database.delete_worktree(db_wt["id"])

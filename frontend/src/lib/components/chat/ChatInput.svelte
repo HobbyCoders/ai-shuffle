@@ -211,7 +211,7 @@
 		// Get serialized message from editor (includes inline @path references)
 		const finalPrompt = editorRef?.getMessage() ?? '';
 
-		if (!finalPrompt.trim() || isUploading || $activeSession.worktreeDeleted) return;
+		if (!finalPrompt.trim() || isUploading || $activeSession.isReopeningWorktree) return;
 
 		// Client-side slash command: /fast [on|off] — per-session toggle
 		const fastMatch = finalPrompt.trim().match(/^\/fast(?:\s+(on|off|enable|disable|true|false))?$/i);
@@ -549,13 +549,20 @@
 			</div>
 		{/if}
 
-		<!-- Worktree Deleted Banner (read-only mode) -->
-		{#if $activeSession.worktreeDeleted}
+		<!-- Worktree Completed Banner (reopenable) -->
+		{#if $activeSession.isReopeningWorktree}
+			<div class="error-banner worktree-completed reopening">
+				<svg class="w-4 h-4 flex-shrink-0 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+				</svg>
+				<span>Reopening worktree...</span>
+			</div>
+		{:else if $activeSession.worktreeDeleted}
 			<div class="error-banner worktree-completed">
 				<svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
 				</svg>
-				<span>This worktree session has been completed. Chat history is read-only.</span>
+				<span>Worktree completed. Send a message to reopen and continue.</span>
 			</div>
 		{/if}
 
@@ -593,7 +600,7 @@
 								bind:this={editorRef}
 								placeholder="Message {selectedProfileName}..."
 								initialContent={$activeSession.draft || ''}
-								disabled={!$claudeAuthenticated || $activeSession.worktreeDeleted}
+								disabled={!$claudeAuthenticated || $activeSession.isReopeningWorktree}
 								onTextChange={(text) => {
 									inputValue = text;
 									// Also update plain text for autocomplete (without chip @path serialization)
@@ -609,7 +616,7 @@
 							<!-- Voice Input (delegated to VoiceRecorder component) -->
 							<VoiceRecorder
 								onTranscription={handleTranscription}
-								disabled={!$claudeAuthenticated || isUploading || $activeSession.worktreeDeleted}
+								disabled={!$claudeAuthenticated || isUploading || $activeSession.isReopeningWorktree}
 								bind:isRecording
 								bind:isTranscribing
 							/>
@@ -654,8 +661,8 @@
 								<button
 									type="submit"
 									class="send-btn"
-									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing || $activeSession.worktreeDeleted}
-									title={$activeSession.worktreeDeleted ? "This worktree session has been completed" : isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.executionMode === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
+									disabled={!inputValue.trim() || !$claudeAuthenticated || isUploading || isRecording || isTranscribing || $activeSession.isReopeningWorktree}
+									title={$activeSession.isReopeningWorktree ? "Reopening worktree..." : $activeSession.worktreeDeleted ? "Send to reopen worktree and continue" : isUploading ? "Uploading files..." : isRecording ? "Recording..." : isTranscribing ? "Transcribing..." : ($activeSession.executionMode === "worktree" && !$activeSession.worktreeId) ? "Branch will be auto-created from your message" : "Send message"}
 								>
 									<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />

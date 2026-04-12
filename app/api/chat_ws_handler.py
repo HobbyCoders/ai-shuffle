@@ -26,6 +26,7 @@ from app.core.user_question_handler import user_question_handler
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
 from app.db import database
 from app.db.async_database import run_sync
+from app.db.base import WorktreeStatus
 
 logger = logging.getLogger(__name__)
 
@@ -787,15 +788,18 @@ class ChatWebSocketHandler:
         worktree_id = session.get("worktree_id")
         if worktree_id:
             worktree = database.get_worktree(worktree_id)
-            if worktree:
+            if worktree and worktree.get("status") == WorktreeStatus.ACTIVE:
                 session["worktree_id"] = worktree_id
                 session["worktree_branch"] = worktree.get("branch_name")
                 session["worktree_path"] = worktree.get("worktree_path")
                 session["worktree_deleted"] = False
+            elif worktree and worktree.get("status") == WorktreeStatus.COMPLETED:
+                session["worktree_id"] = worktree_id
+                session["worktree_branch"] = worktree.get("branch_name")
+                session["worktree_path"] = worktree.get("worktree_path")
+                session["worktree_deleted"] = True
             else:
-                # Worktree was deleted - use stored values from session columns
                 session["worktree_id"] = None
-                # worktree_branch and worktree_path are already in session from DB columns
                 session["worktree_deleted"] = True
         elif session.get("worktree_branch"):
             # Worktree was fully unlinked (ON DELETE SET NULL) but stored info remains
