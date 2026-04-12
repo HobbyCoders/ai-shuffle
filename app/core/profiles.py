@@ -57,11 +57,35 @@ DEFAULT_AI_PROFILE: Dict[str, Any] = {
     "config": {
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
+        "thinking_mode": "default",
         "system_prompt": {
             "type": "preset",
-            "preset": "claude_code"
+            "preset": "claude_code",
         },
-        "setting_sources": ["user"],
+        "include_partial_messages": False,
+        "continue_conversation": False,
+        "fork_session": False,
+        "enable_file_checkpointing": False,
+        "enabled_agents": [
+            "chat-history-summarizer",
+            "code-simplifier",
+            "Explore",
+            "frontend-designer",
+            "general-purpose",
+            "Plan",
+        ],
+        "ai_tools": {
+            "image_generation": True,
+            "image_editing": True,
+            "image_reference": True,
+            "video_generation": True,
+            "image_to_video": True,
+            "video_extend": True,
+            "text_to_3d": True,
+            "image_to_3d": True,
+            "tts": True,
+            "stt": True,
+        },
     },
 }
 
