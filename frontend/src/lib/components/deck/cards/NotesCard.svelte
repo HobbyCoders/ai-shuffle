@@ -18,6 +18,7 @@
 		type NoteTag
 	} from '$lib/api/client';
 	import { onMount } from 'svelte';
+	import { sanitizeHtml } from '$lib/utils/sanitize';
 
 	interface Props {
 		mobile?: boolean;
@@ -420,7 +421,7 @@
 			{#if showPreview}
 				<div class="preview-content">
 					{#if editorContent}
-						{@html renderMarkdown(editorContent)}
+						{@html sanitizeHtml(renderMarkdown(editorContent))}
 					{:else}
 						<p class="preview-empty">Nothing to preview</p>
 					{/if}

@@ -13,7 +13,7 @@ import logging
 import fnmatch
 from typing import Optional, Dict, Any, List, Literal, Union
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
@@ -42,7 +42,7 @@ class PermissionRequest:
     profile_id: str
     tool_name: str
     tool_input: Dict[str, Any]
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     # SDK context fields (SDK 0.1.52+) — enables disambiguating parallel requests
     tool_use_id: Optional[str] = None
@@ -62,7 +62,7 @@ class PermissionRule:
     tool_name: str
     tool_pattern: Optional[str]  # Optional pattern for tool input matching
     decision: PermissionDecision
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def matches(self, tool_name: str, tool_input: Dict[str, Any]) -> bool:
         """Check if this rule matches the given tool use"""

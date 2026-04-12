@@ -12,7 +12,8 @@ import DOMPurify from 'dompurify';
 // - Allow common HTML from markdown rendering
 // - Allow inline styles (needed for syntax highlighting, media)
 // - Allow data: URIs for base64 images
-// - Allow onclick for our overlay buttons (download, copy)
+// - onclick is allowed in ADD_ATTR but restricted by the afterSanitizeAttributes
+//   hook below to only app-generated buttons (code-copy-btn, image overlays)
 const PURIFY_CONFIG = {
 	ADD_TAGS: ['svg', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'g', 'defs', 'use'],
 	ADD_ATTR: [
@@ -25,6 +26,19 @@ const PURIFY_CONFIG = {
 	// Allow blob: and data: URIs for images/media
 	ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|blob|data):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
 } satisfies DOMPurify.Config;
+
+// Restrict onclick to only app-generated buttons (code copy, image download overlays).
+// Without this, any injected HTML with onclick would execute — e.g., via LLM prompt injection.
+const ALLOWED_ONCLICK_CLASSES = ['code-copy-btn', 'image-overlay-btn', 'image-download-btn'];
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+	if (node.hasAttribute('onclick')) {
+		const isAllowed = node.tagName === 'BUTTON' &&
+			ALLOWED_ONCLICK_CLASSES.some(cls => node.classList.contains(cls));
+		if (!isAllowed) {
+			node.removeAttribute('onclick');
+		}
+	}
+});
 
 /**
  * Sanitize HTML string to prevent XSS attacks.

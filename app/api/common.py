@@ -6,13 +6,18 @@ across multiple API modules (generated_images, generated_videos, shared_files,
 projects, github, git, project_agents, mcp, project_plugins, hooks).
 """
 
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import AsyncIterator
 
 from fastapi import HTTPException, Request, status
 
 from app.core.project_utils import get_project_working_dir_as_path
 from app.db import database
 from app.api.auth import get_api_user_from_request
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -88,3 +93,35 @@ def validate_project_access(request: Request, project_id: str) -> dict:
 def get_project_path_from_dict(project: dict) -> Path:
     """Get the resolved filesystem path for a project dict."""
     return get_project_working_dir_as_path(project)
+
+
+# =============================================================================
+# Error Handling
+# =============================================================================
+
+@asynccontextmanager
+async def api_error_handler(
+    action: str,
+    status_code: int = 500
+) -> AsyncIterator[None]:
+    """
+    Context manager for consistent API error handling.
+
+    Catches non-HTTP exceptions, logs them, and raises a standardized
+    HTTPException. Existing HTTPExceptions pass through unchanged.
+
+    Usage:
+        async with api_error_handler("tag session"):
+            sdk_tag_session(session_id=sdk_sid, tag=tag)
+            return {"status": "ok"}
+    """
+    try:
+        yield
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to {action}: {e}")
+        raise HTTPException(
+            status_code=status_code,
+            detail=f"Failed to {action}"
+        ) from e

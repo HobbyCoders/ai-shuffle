@@ -413,6 +413,7 @@ async def execute_query(
     except Exception as e:
         logger.warning(f"Failed to broadcast non-streaming session update: {e}")
 
+    full_response = "\n".join(response_text) if response_text else ""
     return {
         "response": full_response,
         "session_id": session_id,

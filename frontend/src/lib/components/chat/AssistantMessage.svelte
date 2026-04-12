@@ -228,7 +228,7 @@
 						link.href = '${dataUrl}';
 						link.download = '${alt || 'generated-image'}.png';
 						link.click();
-					})()" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
+					})()" class="image-download-btn p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
 						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
 						</svg>
@@ -347,6 +347,7 @@
 		if (!ttsText) return;
 
 		isReading = true;
+		let audioUrl: string | null = null;
 
 		try {
 			const response = await fetch('/api/v1/settings/tts/stream', {
@@ -366,7 +367,7 @@
 			}
 
 			const audioBlob = await response.blob();
-			const audioUrl = URL.createObjectURL(audioBlob);
+			audioUrl = URL.createObjectURL(audioBlob);
 
 			const audio = new Audio(audioUrl);
 			currentAudio = audio;
@@ -374,14 +375,14 @@
 			audio.onended = () => {
 				isReading = false;
 				currentAudio = null;
-				URL.revokeObjectURL(audioUrl);
+				if (audioUrl) URL.revokeObjectURL(audioUrl);
 			};
 
 			audio.onerror = () => {
 				console.error('Audio playback error');
 				isReading = false;
 				currentAudio = null;
-				URL.revokeObjectURL(audioUrl);
+				if (audioUrl) URL.revokeObjectURL(audioUrl);
 			};
 
 			await audio.play();
@@ -389,6 +390,7 @@
 			console.error('Failed to generate TTS:', e);
 			isReading = false;
 			currentAudio = null;
+			if (audioUrl) URL.revokeObjectURL(audioUrl);
 		}
 	}
 

@@ -101,28 +101,7 @@ export class ApiClient {
 	}
 
 	async delete<T>(path: string): Promise<T | void> {
-		const response = await fetch(`${API_BASE}${path}`, {
-			method: 'DELETE',
-			headers: {
-				'Content-Type': 'application/json'
-			},
-			credentials: 'include'
-		});
-
-		if (!response.ok) {
-			const detail = await extractErrorDetail(response);
-			throw {
-				detail,
-				status: response.status
-			} as ApiError;
-		}
-
-		// Handle 204 No Content
-		if (response.status === 204) {
-			return;
-		}
-
-		return response.json();
+		return this.request<T>('DELETE', path);
 	}
 
 	async uploadFile(path: string, file: File, sessionId?: string, worktreeId?: string): Promise<FileUploadResponse> {
@@ -154,6 +133,44 @@ export class ApiClient {
 }
 
 export const api = new ApiClient();
+
+/**
+ * Fetch a file from the API and trigger a browser download.
+ * Centralizes the common pattern of: fetch → check ok → extract filename → blob → download link.
+ */
+async function fetchAndDownload(path: string, fallbackFilename: string): Promise<void> {
+	const response = await fetch(`${API_BASE}${path}`, {
+		method: 'GET',
+		credentials: 'include'
+	});
+
+	if (!response.ok) {
+		const error = await response.json().catch(() => ({ detail: 'Export failed' }));
+		throw {
+			detail: error.detail || 'Export failed',
+			status: response.status
+		} as ApiError;
+	}
+
+	const contentDisposition = response.headers.get('Content-Disposition');
+	let filename = fallbackFilename;
+	if (contentDisposition) {
+		const match = contentDisposition.match(/filename="?([^"]+)"?/);
+		if (match) {
+			filename = match[1];
+		}
+	}
+
+	const blob = await response.blob();
+	const url = URL.createObjectURL(blob);
+	const a = document.createElement('a');
+	a.href = url;
+	a.download = filename;
+	document.body.appendChild(a);
+	a.click();
+	document.body.removeChild(a);
+	URL.revokeObjectURL(url);
+}
 
 // Auth types
 export interface AuthStatus {
@@ -483,39 +500,8 @@ export async function exportSession(
 	sessionId: string,
 	format: 'markdown' | 'json' = 'markdown'
 ): Promise<void> {
-	const response = await fetch(`${API_BASE}/sessions/${sessionId}/export?format=${format}`, {
-		method: 'GET',
-		credentials: 'include'
-	});
-
-	if (!response.ok) {
-		const error = await response.json().catch(() => ({ detail: 'Export failed' }));
-		throw {
-			detail: error.detail || 'Export failed',
-			status: response.status
-		} as ApiError;
-	}
-
-	// Get filename from Content-Disposition header
-	const contentDisposition = response.headers.get('Content-Disposition');
-	let filename = `session-export.${format === 'json' ? 'json' : 'md'}`;
-	if (contentDisposition) {
-		const match = contentDisposition.match(/filename="?([^"]+)"?/);
-		if (match) {
-			filename = match[1];
-		}
-	}
-
-	// Create blob and trigger download
-	const blob = await response.blob();
-	const url = URL.createObjectURL(blob);
-	const a = document.createElement('a');
-	a.href = url;
-	a.download = filename;
-	document.body.appendChild(a);
-	a.click();
-	document.body.removeChild(a);
-	URL.revokeObjectURL(url);
+	const fallback = `session-export.${format === 'json' ? 'json' : 'md'}`;
+	await fetchAndDownload(`/sessions/${sessionId}/export?format=${format}`, fallback);
 }
 
 // ============================================================================
@@ -776,39 +762,7 @@ export async function getTopSessions(startDate: string, endDate: string, limit: 
  */
 export async function exportAnalyticsCSV(startDate: string, endDate: string): Promise<void> {
 	const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
-	const response = await fetch(`${API_BASE}/analytics/export?${params.toString()}`, {
-		method: 'GET',
-		credentials: 'include'
-	});
-
-	if (!response.ok) {
-		const error = await response.json().catch(() => ({ detail: 'Export failed' }));
-		throw {
-			detail: error.detail || 'Export failed',
-			status: response.status
-		} as ApiError;
-	}
-
-	// Get filename from Content-Disposition header
-	const contentDisposition = response.headers.get('Content-Disposition');
-	let filename = `analytics-${startDate}-to-${endDate}.csv`;
-	if (contentDisposition) {
-		const match = contentDisposition.match(/filename="?([^"]+)"?/);
-		if (match) {
-			filename = match[1];
-		}
-	}
-
-	// Create blob and trigger download
-	const blob = await response.blob();
-	const url = URL.createObjectURL(blob);
-	const a = document.createElement('a');
-	a.href = url;
-	a.download = filename;
-	document.body.appendChild(a);
-	a.click();
-	document.body.removeChild(a);
-	URL.revokeObjectURL(url);
+	await fetchAndDownload(`/analytics/export?${params.toString()}`, `analytics-${startDate}-to-${endDate}.csv`);
 }
 
 // ============================================================================
@@ -993,39 +947,7 @@ export interface AgentImportRequest extends AgentExport {
  * Export an agent/profile as JSON and trigger download
  */
 export async function exportAgent(profileId: string): Promise<void> {
-	const response = await fetch(`${API_BASE}/profiles/${profileId}/export`, {
-		method: 'GET',
-		credentials: 'include'
-	});
-
-	if (!response.ok) {
-		const error = await response.json().catch(() => ({ detail: 'Export failed' }));
-		throw {
-			detail: error.detail || 'Export failed',
-			status: response.status
-		} as ApiError;
-	}
-
-	// Get filename from Content-Disposition header
-	const contentDisposition = response.headers.get('Content-Disposition');
-	let filename = `${profileId}-agent.json`;
-	if (contentDisposition) {
-		const match = contentDisposition.match(/filename="?([^"]+)"?/);
-		if (match) {
-			filename = match[1];
-		}
-	}
-
-	// Create blob and trigger download
-	const blob = await response.blob();
-	const url = URL.createObjectURL(blob);
-	const a = document.createElement('a');
-	a.href = url;
-	a.download = filename;
-	document.body.appendChild(a);
-	a.click();
-	document.body.removeChild(a);
-	URL.revokeObjectURL(url);
+	await fetchAndDownload(`/profiles/${profileId}/export`, `${profileId}-agent.json`);
 }
 
 /**

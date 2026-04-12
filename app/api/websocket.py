@@ -1401,33 +1401,33 @@ async def chat_websocket(
                 await sync_engine.unregister_device(device_id, current_session_id, websocket)
                 logger.debug(f"Cleanup: unregister device {device_id} from session {current_session_id}")
 
-                # Check if this was the last device for this session
-                # If so, and no active query is running, cleanup the session resources
-                remaining_devices = sync_engine.get_device_count(current_session_id)
+                # Check if this was the last device for this session.
+                # Hold a single lock across the entire check-and-cleanup to prevent
+                # a TOCTOU race where a new device connects or a new query starts
+                # between the condition check and the cleanup action.
                 async with _active_sessions_lock:
+                    remaining_devices = sync_engine.get_device_count(current_session_id)
                     active_task = _active_chat_sessions.get(current_session_id)
-                is_task_done = active_task is None or active_task.done()
+                    is_task_done = active_task is None or active_task.done()
 
-                if remaining_devices == 0 and is_task_done:
-                    # No more devices watching and no active query
-                    # Only cleanup sessions still in streaming state (abnormal);
-                    # ended sessions are handled by _delayed_session_cleanup
-                    logger.debug(f"Last device disconnected from session {current_session_id}")
-                    if live_session_store.has_session(current_session_id) and live_session_store.is_streaming(current_session_id):
-                        await live_session_store.cleanup_session(current_session_id)
-                        logger.debug(f"Cleaned up stuck streaming session {current_session_id}")
+                    if remaining_devices == 0 and is_task_done:
+                        # No more devices watching and no active query
+                        # Only cleanup sessions still in streaming state (abnormal);
+                        # ended sessions are handled by _delayed_session_cleanup
+                        logger.debug(f"Last device disconnected from session {current_session_id}")
+                        if live_session_store.has_session(current_session_id) and live_session_store.is_streaming(current_session_id):
+                            await live_session_store.cleanup_session(current_session_id)
+                            logger.debug(f"Cleaned up stuck streaming session {current_session_id}")
 
-                    # Remove from active chat sessions tracking
-                    async with _active_sessions_lock:
                         _active_chat_sessions.pop(current_session_id, None)
 
-                    # Clear streaming state in sync engine (no need to broadcast - no devices left)
-                    await sync_engine.clear_streaming_state(current_session_id)
+                        # Clear streaming state in sync engine (no need to broadcast - no devices left)
+                        await sync_engine.clear_streaming_state(current_session_id)
 
-                elif remaining_devices > 0:
-                    logger.debug(f"Session {current_session_id} still has {remaining_devices} device(s) connected")
-                elif not is_task_done:
-                    logger.debug(f"Session {current_session_id} has active query, deferring cleanup")
+                    elif remaining_devices > 0:
+                        logger.debug(f"Session {current_session_id} still has {remaining_devices} device(s) connected")
+                    elif not is_task_done:
+                        logger.debug(f"Session {current_session_id} has active query, deferring cleanup")
 
     except WebSocketDisconnect:
         logger.debug("Chat WebSocket disconnected")

@@ -51,6 +51,7 @@ from app.db.async_database import run_sync
 from app.db.tags import get_tags_for_sessions
 from app.db.sessions import get_fork_info_for_sessions
 from app.api.auth import require_auth, get_api_user_from_request
+from app.api.common import api_error_handler
 from app.core.project_utils import get_project_working_dir
 
 import logging
@@ -192,6 +193,27 @@ def check_session_access(request: Request, session: dict) -> None:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this session"
             )
+
+
+async def require_session(request: Request, session_id: str) -> dict:
+    """Fetch a session, verify it exists, and check access in one call.
+
+    Replaces the repeated pattern of:
+        existing = await run_sync(database.get_session, session_id)
+        if not existing: raise HTTPException(404)
+        check_session_access(request, existing)
+
+    Returns the session dict if valid.
+    Raises HTTPException(404) if not found, HTTPException(403) if access denied.
+    """
+    session = await run_sync(database.get_session, session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}"
+        )
+    check_session_access(request, session)
+    return session
 
 
 def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
@@ -727,14 +749,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
         session["worktree_deleted"] = True
 
     logger.debug(f"Returning session {session_id} with {len(messages)} messages")
-    try:
-        return session
-    except Exception as e:
-        logger.exception(f"Failed to serialize session {session_id}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to serialize session"
-        )
+    return session
 
 
 @router.get("/{session_id}/live")
@@ -1014,15 +1029,9 @@ async def tag_sdk_session(
             detail="Session has no SDK session ID"
         )
 
-    try:
+    async with api_error_handler("tag session"):
         sdk_tag_session(session_id=sdk_sid, tag=tag)
         return {"status": "ok", "session_id": session_id, "tag": tag}
-    except Exception as e:
-        logger.error(f"Failed to tag SDK session {sdk_sid}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to tag session: {e}"
-        )
 
 
 @router.get("/{session_id}/sdk-info")
@@ -1054,7 +1063,7 @@ async def get_sdk_session_info(
             detail="Session has no SDK session ID"
         )
 
-    try:
+    async with api_error_handler("get session info"):
         info = sdk_get_session_info(session_id=sdk_sid)
         if not info:
             raise HTTPException(
@@ -1073,14 +1082,6 @@ async def get_sdk_session_info(
             "last_modified": info.last_modified,
             "file_size": info.file_size,
         }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get SDK session info for {sdk_sid}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get session info: {e}"
-        )
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

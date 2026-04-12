@@ -9,6 +9,7 @@
 	 * - Lists of commands, agents, skills, and hooks
 	 */
 	import type { PluginDetails as PluginDetailsType } from '$lib/api/plugins';
+	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import '$lib/components/deck/cards/card-design-system.css';
 
 	interface Props {
@@ -322,7 +323,7 @@
 		{#if activeTab === 'overview'}
 			{#if plugin.readme}
 				<div class="plugin-detail-readme">
-					{@html renderMarkdown(plugin.readme)}
+					{@html sanitizeHtml(renderMarkdown(plugin.readme))}
 				</div>
 			{:else}
 				<div class="plugin-detail-empty">

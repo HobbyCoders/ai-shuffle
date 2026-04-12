@@ -5,16 +5,15 @@ This endpoint serves files from the workspace that the agent makes
 available for download, displaying them in the chat UI with download cards.
 
 Security: Files must be within the workspace directory. The API validates
-that requested file paths don't escape the workspace boundary.
-
-TODO: Add authentication to GET endpoints — currently any request with a
-valid path can download files without auth. Consider adding sharing tokens
-or requiring session auth.
+that requested file paths don't escape the workspace boundary. All endpoints
+require authentication via session token.
 """
 
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import FileResponse
+
+from app.api.auth import require_auth
 
 from app.core.config import settings
 from app.api.common import is_path_safe, format_file_size
@@ -106,7 +105,7 @@ def get_file_icon(filename: str) -> str:
 
 
 @router.get("/by-path")
-async def get_file_by_path(path: str = Query(..., description="Full path to the file")):
+async def get_file_by_path(path: str = Query(..., description="Full path to the file"), _token: str = Depends(require_auth)):
     """
     Serve a file by its full path.
 
@@ -141,7 +140,7 @@ async def get_file_by_path(path: str = Query(..., description="Full path to the 
 
 
 @router.get("/info")
-async def get_file_info(path: str = Query(..., description="Full path to the file")):
+async def get_file_info(path: str = Query(..., description="Full path to the file"), _token: str = Depends(require_auth)):
     """
     Get metadata about a file without downloading it.
 
@@ -182,7 +181,7 @@ async def get_file_info(path: str = Query(..., description="Full path to the fil
 
 
 @router.get("/{filename}")
-async def get_shared_file(filename: str):
+async def get_shared_file(filename: str, _token: str = Depends(require_auth)):
     """
     Serve a shared file by filename from the root workspace shared-files directory.
 
@@ -224,7 +223,7 @@ async def get_shared_file(filename: str):
 
 
 @router.get("/")
-async def list_shared_files():
+async def list_shared_files(_token: str = Depends(require_auth)):
     """
     List shared files from the default workspace location.
     For debugging/admin purposes.
