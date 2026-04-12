@@ -110,6 +110,34 @@ def _wrap_stderr_capture(original_stderr: Optional[Callable]) -> tuple[Callable[
     return capturing_stderr, captured
 
 
+def _extract_connection_error(exc: Exception, cli_stderr_lines: list[str]) -> str:
+    """Extract the most useful error message from a connection failure.
+
+    Priority order:
+    1. Captured CLI stderr lines (real subprocess output)
+    2. ProcessError.stderr attribute (if not a placeholder)
+    3. Exception message as-is
+    """
+    # 1. Prefer captured stderr lines — these are the real subprocess output
+    if cli_stderr_lines:
+        stderr_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
+        if stderr_msg:
+            return stderr_msg
+
+    # 2. Check ProcessError.stderr attribute from the SDK
+    from claude_agent_sdk._errors import ProcessError
+    if isinstance(exc, ProcessError) and exc.stderr:
+        # Skip the SDK's useless placeholder
+        if exc.stderr != "Check stderr output for details":
+            return f"Connection failed (exit code {exc.exit_code}): {exc.stderr}"
+        # Placeholder stderr — build message from exit code alone
+        if exc.exit_code is not None:
+            return f"Connection failed: CLI process exited with code {exc.exit_code}"
+
+    # 3. Fall back to raw exception message
+    return f"Connection failed: {exc}"
+
+
 async def _persist_turn_results(
     session_id: str,
     sdk_session_id: Optional[str],
@@ -587,12 +615,9 @@ async def stream_query(
             logger.error(f"Failed to connect to Claude SDK for session {session_id}: {e}")
             logger.error(f"Exception type: {type(e).__name__}")
             logger.error(f"Full traceback:\n{traceback.format_exc()}")
-            if cli_stderr_lines:
-                stderr_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
-                logger.error(f"CLI stderr: {stderr_msg}")
-                yield {"type": "error", "message": stderr_msg}
-            else:
-                yield {"type": "error", "message": f"Connection failed: {e}"}
+            error_msg = _extract_connection_error(e, cli_stderr_lines)
+            logger.error(f"User-facing error: {error_msg}")
+            yield {"type": "error", "message": error_msg}
             return
 
         state = SessionState(
@@ -989,10 +1014,7 @@ async def _run_background_query(
             logger.error(f"[Background] Timed out connecting to Claude SDK for session {session_id} (60s)")
             raise RuntimeError("Connection timed out — an MCP server may be unreachable")
         except Exception as e:
-            error_msg = str(e)
-            if cli_stderr_lines:
-                error_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
-                logger.error(f"[Background] CLI stderr: {error_msg}")
+            error_msg = _extract_connection_error(e, cli_stderr_lines)
             logger.error(f"[Background] Failed to connect to Claude SDK for session {session_id}: {error_msg}")
             # Clean up LiveSessionStore on connect failure
             try:
@@ -1770,12 +1792,9 @@ async def stream_to_websocket(
                 handle = SdkProcessHandle(adapter.sdk_client)
                 if handle.available and handle.returncode is not None:
                     logger.error(f"[WS] CLI process exited with code {handle.returncode} during initialization")
-            if cli_stderr_lines:
-                stderr_msg = " ".join(line.strip() for line in cli_stderr_lines if line.strip())
-                logger.error(f"[WS] CLI stderr: {stderr_msg}")
-                yield {"type": "error", "message": stderr_msg}
-            else:
-                yield {"type": "error", "message": f"Connection failed: {e}"}
+            error_msg = _extract_connection_error(e, cli_stderr_lines)
+            logger.error(f"[WS] User-facing error: {error_msg}")
+            yield {"type": "error", "message": error_msg}
             return
 
         state = SessionState(

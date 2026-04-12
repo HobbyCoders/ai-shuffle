@@ -1420,7 +1420,9 @@ class ChatWebSocketHandler:
 
         except Exception as e:
             ctx.error(logger, f"Query error: {e}", exc_info=True)
-            await self.send_json({"type": "error", "message": "An internal error occurred"})
+            # Surface the actual error to the user instead of a generic message
+            error_detail = str(e) if str(e) else type(e).__name__
+            await self.send_json({"type": "error", "message": f"Error: {error_detail}"})
 
             # End live session store on error
             # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
@@ -1438,7 +1440,7 @@ class ChatWebSocketHandler:
                 await sync_engine.broadcast_stream_end(
                     session_id=session_id,
                     message_id=message_id,
-                    metadata={"error": "An internal error occurred"},
+                    metadata={"error": error_detail},
                     interrupted=True,
                     source_device_id=None
                 )

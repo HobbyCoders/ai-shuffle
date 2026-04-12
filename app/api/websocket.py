@@ -534,7 +534,8 @@ async def chat_websocket(
         except Exception as e:
             query_wall_elapsed = time.monotonic() - query_wall_start
             ctx.error(logger, f"Query error after {query_wall_elapsed:.1f}s: {e}", exc_info=True)
-            await send_json({"type": "error", "message": "An internal error occurred"})
+            error_detail = str(e) if str(e) else type(e).__name__
+            await send_json({"type": "error", "message": f"Error: {error_detail}"})
 
             # End live session store on error
             # NOTE: end_streaming() now keeps messages in memory for reconnecting clients
@@ -552,7 +553,7 @@ async def chat_websocket(
                 await sync_engine.broadcast_stream_end(
                     session_id=session_id,
                     message_id=message_id,
-                    metadata={"error": "An internal error occurred"},
+                    metadata={"error": error_detail},
                     interrupted=True,
                     source_device_id=None
                 )
