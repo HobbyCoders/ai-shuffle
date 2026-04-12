@@ -59,8 +59,9 @@ DEFAULT_AI_PROFILE: Dict[str, Any] = {
         "permission_mode": "bypassPermissions",
         "thinking_mode": "default",
         "system_prompt": {
-            "type": "preset",
+            "type": "custom",
             "preset": "claude_code",
+            "content": "",
         },
         "include_partial_messages": False,
         "continue_conversation": False,
