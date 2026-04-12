@@ -32,6 +32,7 @@
 		CalendarClock,
 		BookOpen
 	} from 'lucide-svelte';
+	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
 	import { layout, activeView, sidebarCollapsed } from '$lib/stores/layout';
 	import type { ViewType } from '$lib/stores/layout';
 	import { appData, sessions, projects, apiUserSessions } from '$lib/stores/app-data';
@@ -519,7 +520,7 @@
 											title="Confirm delete"
 											disabled={deleteSessionLoading}
 										>
-											<Trash2 size={11} strokeWidth={2} />
+											<BrushCleaning size={11} strokeWidth={2} />
 										</button>
 										<button
 											class="session-delete-cancel"
@@ -535,9 +536,9 @@
 											tabindex="0"
 											onclick={(e) => handleDeleteSession(e, session.id)}
 											onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleDeleteSession(e, session.id); }}
-											title="Delete session"
+											title="Clear session"
 										>
-											<Trash2 size={11} strokeWidth={1.5} />
+											<BrushCleaning size={11} strokeWidth={1.5} />
 										</span>
 									{/if}
 								</button>
@@ -680,7 +681,7 @@
 														title="Confirm delete"
 														disabled={deleteSessionLoading}
 													>
-														<Trash2 size={11} strokeWidth={2} />
+														<BrushCleaning size={11} strokeWidth={2} />
 													</button>
 													<button
 														class="session-delete-cancel"
@@ -696,9 +697,9 @@
 														tabindex="0"
 														onclick={(e) => handleDeleteSession(e, session.id)}
 														onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleDeleteSession(e, session.id); }}
-														title="Delete session"
+														title="Clear session"
 													>
-														<Trash2 size={11} strokeWidth={1.5} />
+														<BrushCleaning size={11} strokeWidth={1.5} />
 													</span>
 												{/if}
 											</button>
@@ -784,7 +785,7 @@
 															title="Confirm delete"
 															disabled={deleteSessionLoading}
 														>
-															<Trash2 size={11} strokeWidth={2} />
+															<BrushCleaning size={11} strokeWidth={2} />
 														</button>
 														<button
 															class="session-delete-cancel"
@@ -800,9 +801,9 @@
 															tabindex="0"
 															onclick={(e) => handleDeleteSession(e, session.id)}
 															onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleDeleteSession(e, session.id); }}
-															title="Delete session"
+															title="Clear session"
 														>
-															<Trash2 size={11} strokeWidth={1.5} />
+															<BrushCleaning size={11} strokeWidth={1.5} />
 														</span>
 													{/if}
 												</button>
