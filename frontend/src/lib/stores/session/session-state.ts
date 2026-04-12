@@ -57,12 +57,19 @@ export const sessionState = {
 		todos: TodoItem[],
 		existingMessages?: ChatMessage[]
 	): void {
-		const before = sessionStateManager.getLastUpdateId(sessionId);
+		const beforeId = sessionStateManager.getLastUpdateId(sessionId);
+		const beforeSession = sessionStateManager.getSession(sessionId);
 		sessionStateManager.applyServerState(
 			sessionId, serverMessages, isStreaming, lastUpdateId, usage, todos, existingMessages
 		);
-		// Only notify writable store subscribers if something actually changed
-		if (sessionStateManager.getLastUpdateId(sessionId) !== before) {
+		// Notify writable store subscribers when data changed.
+		// Check both lastUpdateId AND session reference — for non-streaming
+		// sessions the server returns lastUpdateId=0 on every response, but
+		// the session data (messages, usage) still needs to propagate to
+		// derived stores that subscribe to the writable store.
+		const afterId = sessionStateManager.getLastUpdateId(sessionId);
+		const afterSession = sessionStateManager.getSession(sessionId);
+		if (afterId !== beforeId || afterSession !== beforeSession) {
 			_sync();
 		}
 	},

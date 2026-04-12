@@ -124,23 +124,36 @@ function preserveMessageIds(
 ): ChatMessage[] {
 	// Fast path: same length arrays (common during streaming text append)
 	if (incoming.length === existing.length && incoming.length > 0) {
-		// Scan backwards to find the first message that differs
-		let firstChangedFromEnd = -1;
-		for (let i = incoming.length - 1; i >= 0; i--) {
+		// Scan forward to find the first message that differs
+		let firstChanged = -1;
+		for (let i = 0; i < incoming.length; i++) {
 			const result = compareMessage(incoming[i], existing[i]);
 			if (result !== existing[i]) {
-				firstChangedFromEnd = i;
+				firstChanged = i;
 				break;
 			}
 		}
 
 		// Nothing changed — return the exact same array reference
-		if (firstChangedFromEnd === -1) return existing;
+		if (firstChanged === -1) return existing;
 
-		// Only the tail changed — reuse the unchanged prefix
-		const result = existing.slice(0, firstChangedFromEnd);
-		for (let i = firstChangedFromEnd; i < incoming.length; i++) {
+		// Scan backwards to find the last message that differs
+		let lastChanged = firstChanged;
+		for (let i = incoming.length - 1; i > firstChanged; i--) {
+			const result = compareMessage(incoming[i], existing[i]);
+			if (result !== existing[i]) {
+				lastChanged = i;
+				break;
+			}
+		}
+
+		// Build result: unchanged prefix + compared middle + unchanged suffix
+		const result = existing.slice(0, firstChanged);
+		for (let i = firstChanged; i <= lastChanged; i++) {
 			result.push(compareMessage(incoming[i], existing[i]));
+		}
+		for (let i = lastChanged + 1; i < existing.length; i++) {
+			result.push(existing[i]);
 		}
 		return result;
 	}

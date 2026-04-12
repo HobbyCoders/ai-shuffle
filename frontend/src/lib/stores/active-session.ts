@@ -685,10 +685,26 @@ function setupPollCallback() {
 
 					// 2. Fall back to position-based match for ID transitions
 					//    (e.g., synthetic ws-stream-* → server live-*)
+					//    Additional guard: for tool_use messages require toolName match,
+					//    and for text messages require content prefix match (first 50 chars).
+					//    This prevents false matches when client-only messages shift positions
+					//    and a same-role/type message at the wrong position gets matched.
 					if (!existing) {
 						const positional = s.messages[i];
 						if (positional && positional.role === msg.role && positional.type === msg.type) {
-							existing = positional;
+							let positionMatchValid = true;
+							if (msg.type === 'tool_use') {
+								// Tool messages must have the same tool name
+								positionMatchValid = msg.toolName === positional.toolName;
+							} else if (msg.type === 'text' && msg.content && positional.content) {
+								// Text messages: content prefix must match (handles streaming growth)
+								const shorter = Math.min(msg.content.length, positional.content.length, 50);
+								positionMatchValid = shorter === 0 ||
+									msg.content.slice(0, shorter) === positional.content.slice(0, shorter);
+							}
+							if (positionMatchValid) {
+								existing = positional;
+							}
 						}
 					}
 
@@ -815,8 +831,16 @@ function setupOnStreamEnd() {
 			messageCache.set(sessionId, finalSession.messages);
 		}
 
-		// Clean up sessionState
-		sessionState.removeSession(sessionId);
+		// NOTE: Do NOT call sessionState.removeSession() here.
+		// The pollFinal timer (scheduled 150ms earlier by handleDone) may still
+		// fire after this callback. If we remove the session now, pollFinal's
+		// poll recreates it from scratch WITHOUT ID preservation, causing
+		// Svelte's keyed {#each} to destroy and recreate ALL message DOM
+		// elements — a visible flash where messages briefly disappear.
+		// The session will be cleaned up lazily when:
+		// 1. The user switches to a different session (switchSession → removeSession)
+		// 2. A new query starts on this session (startStreaming → resetForPolling)
+		// 3. The page is unloaded (destroy → stopAll)
 	});
 }
 
