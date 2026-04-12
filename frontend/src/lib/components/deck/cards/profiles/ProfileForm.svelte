@@ -551,6 +551,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 28px;
+		flex: 1;
 	}
 
 	/* Sections */

@@ -39,7 +39,7 @@
 	</select>
 </div>
 
-<div class="pf-section">
+<div class="pf-section pf-section-prompt">
 	<div class="pf-section-header">
 		<MessageSquare size={16} />
 		<h3>Custom Prompt</h3>
@@ -52,7 +52,6 @@
 			value={systemPromptAppend}
 			oninput={(e) => onSystemPromptAppendChange((e.target as HTMLTextAreaElement).value)}
 			class="pf-textarea"
-			rows="8"
 			placeholder="Additional instructions to append to Claude Code's system prompt..."
 		></textarea>
 	{:else}
@@ -60,7 +59,6 @@
 			value={systemPromptContent}
 			oninput={(e) => onSystemPromptContentChange((e.target as HTMLTextAreaElement).value)}
 			class="pf-textarea"
-			rows="10"
 			placeholder="Enter your custom system prompt..."
 		></textarea>
 	{/if}
@@ -143,8 +141,13 @@
 		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
 	}
 
+	.pf-section-prompt {
+		flex: 1;
+	}
+
 	.pf-textarea {
 		width: 100%;
+		flex: 1;
 		min-height: 200px;
 		padding: 12px 14px;
 		background: var(--surface-1);
