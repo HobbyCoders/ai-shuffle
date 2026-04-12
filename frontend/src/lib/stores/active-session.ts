@@ -1217,6 +1217,14 @@ export const activeSession = {
 			console.warn('[ActiveSession] Cannot change project after session has started');
 			return;
 		}
+		// Same project — just update the selection without resetting worktree state.
+		// Without this guard, re-selecting the current project (e.g., from the
+		// WorkspaceSelector) silently resets executionMode to 'local', causing
+		// the auto-worktree flow to be skipped on sendMessage.
+		if (_state.project === projectId) {
+			switcher.saveSelectionToBackend(_state.profile, projectId);
+			return;
+		}
 		// Reset execution mode & worktree state when project changes —
 		// the previous worktree context is no longer valid for the new project.
 		_update(s => ({
