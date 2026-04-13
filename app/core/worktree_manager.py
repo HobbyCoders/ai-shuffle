@@ -961,19 +961,9 @@ class WorktreeManager:
             branch_name=branch_name,
         )
 
-        # Clear sdk_session_id on all linked sessions.
-        # The old SDK session's JSONL lived in the deleted worktree directory,
-        # so resuming it would fail with "CLI process exited with code 1".
-        # Clearing forces a fresh SDK subprocess on the next message.
-        sessions = database.get_sessions_for_worktree(worktree_id)
-        for sess in sessions:
-            sid = sess["id"]
-            if sess.get("sdk_session_id"):
-                database.update_session(sid, sdk_session_id="")
-                logger.debug(
-                    f"Cleared sdk_session_id for session {sid} "
-                    f"(worktree {worktree_id} reopened)"
-                )
+        # NOTE: sdk_session_id is intentionally preserved on reopen.
+        # JSONL history lives in ~/.claude/projects/ (not in the worktree dir),
+        # so the SDK can resume the conversation with full history intact.
 
         logger.info(
             f"Recreated worktree {worktree_id} at {worktree_path} "
