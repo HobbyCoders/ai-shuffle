@@ -17,6 +17,15 @@ from typing import List, Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Native git reader (pygit2) — falls back to CLI if unavailable
+try:
+    from app.core.git_native import GitNativeReader
+    _native_reader: "GitNativeReader | None" = GitNativeReader()
+    logger.info("Git read operations: using pygit2 (native)")
+except ImportError:
+    _native_reader = None
+    logger.info("Git read operations: using CLI subprocess (pygit2 not available)")
+
 # ---------------------------------------------------------------------------
 # Lightweight TTL cache for expensive git operations
 # ---------------------------------------------------------------------------
@@ -127,6 +136,14 @@ class GitService:
         a project directory sitting inside another repo (e.g. ai-shuffle)
         would incorrectly report as a git repo and show the parent's diff stats.
         """
+        if _native_reader is not None:
+            try:
+                return _native_reader.is_git_repo(working_dir)
+            except Exception as e:
+                logger.warning(f"pygit2 is_git_repo failed, CLI fallback: {e}")
+        return self._is_git_repo_cli(working_dir)
+
+    def _is_git_repo_cli(self, working_dir: str) -> bool:
         try:
             result = self._run_git(working_dir, ["rev-parse", "--show-toplevel"], timeout=5)
             if result.returncode != 0:
@@ -157,6 +174,8 @@ class GitService:
             )
             if result.returncode == 0:
                 logger.debug(f"Initialized git repository at {working_dir}")
+                if _native_reader is not None:
+                    _native_reader.invalidate_repo(working_dir)
                 return True
             logger.warning(f"Failed to init repo: {result.stderr}")
             return False
@@ -186,6 +205,8 @@ class GitService:
             )
             if result.returncode == 0:
                 logger.debug(f"Cloned repository from {clone_url} into {working_dir}")
+                if _native_reader is not None:
+                    _native_reader.invalidate_repo(working_dir)
                 return True, None
             error = result.stderr.strip() or "Unknown error"
             logger.warning(f"Failed to clone repo: {error}")
@@ -198,6 +219,14 @@ class GitService:
 
     def get_remote_url(self, working_dir: str) -> Optional[str]:
         """Get the remote URL for origin."""
+        if _native_reader is not None:
+            try:
+                return _native_reader.get_remote_url(working_dir)
+            except Exception as e:
+                logger.warning(f"pygit2 get_remote_url failed, CLI fallback: {e}")
+        return self._get_remote_url_cli(working_dir)
+
+    def _get_remote_url_cli(self, working_dir: str) -> Optional[str]:
         try:
             result = self._run_git(working_dir, ["remote", "get-url", "origin"], timeout=5)
             if result.returncode == 0:
@@ -209,6 +238,14 @@ class GitService:
 
     def get_current_branch(self, working_dir: str) -> Optional[str]:
         """Get the current branch name."""
+        if _native_reader is not None:
+            try:
+                return _native_reader.get_current_branch(working_dir)
+            except Exception as e:
+                logger.warning(f"pygit2 get_current_branch failed, CLI fallback: {e}")
+        return self._get_current_branch_cli(working_dir)
+
+    def _get_current_branch_cli(self, working_dir: str) -> Optional[str]:
         try:
             result = self._run_git(working_dir, ["rev-parse", "--abbrev-ref", "HEAD"], timeout=5)
             if result.returncode == 0:
@@ -230,6 +267,20 @@ class GitService:
         if cached is not None:
             return cached
 
+        # Try native reader
+        if _native_reader is not None:
+            try:
+                result = _native_reader.get_default_branch(working_dir)
+                _git_cache.put(cache_key, result)
+                return result
+            except Exception as e:
+                logger.warning(f"pygit2 get_default_branch failed, CLI fallback: {e}")
+
+        # CLI fallback
+        return self._get_default_branch_cli(working_dir)
+
+    def _get_default_branch_cli(self, working_dir: str) -> str:
+        cache_key = f"default_branch:{working_dir}"
         try:
             # Try to get remote HEAD
             result = self._run_git(
@@ -311,6 +362,18 @@ class GitService:
             - ahead: Commits ahead of tracking branch (local only)
             - behind: Commits behind tracking branch (local only)
         """
+        if _native_reader is not None:
+            try:
+                return _native_reader.list_branches(working_dir, include_remote)
+            except Exception as e:
+                logger.warning(f"pygit2 list_branches failed, CLI fallback: {e}")
+        return self._list_branches_cli(working_dir, include_remote)
+
+    def _list_branches_cli(
+        self,
+        working_dir: str,
+        include_remote: bool = True
+    ) -> List[Dict[str, Any]]:
         try:
             # Use for-each-ref for structured output.
             # Include %(refname) to reliably determine local vs remote.
@@ -655,6 +718,8 @@ class GitService:
             result = self._run_git(main_dir, args, timeout=30)
             if result.returncode == 0:
                 logger.debug(f"Added worktree at {path} for branch {branch}")
+                if _native_reader is not None:
+                    _native_reader.invalidate_repo(main_dir)
                 return True, None
 
             error_msg = result.stderr.strip() if result.stderr else "Unknown git error"
@@ -690,6 +755,8 @@ class GitService:
             result = self._run_git(main_dir, args, timeout=30)
             if result.returncode == 0:
                 logger.debug(f"Removed worktree at {path}")
+                if _native_reader is not None:
+                    _native_reader.invalidate_repo(main_dir)
                 return True
 
             logger.warning(f"Failed to remove worktree: {result.stderr}")
@@ -754,6 +821,19 @@ class GitService:
             - parents: List of parent SHAs
             - refs: List of refs pointing to this commit
         """
+        if _native_reader is not None:
+            try:
+                return _native_reader.get_commit_graph(working_dir, limit, branch)
+            except Exception as e:
+                logger.warning(f"pygit2 get_commit_graph failed, CLI fallback: {e}")
+        return self._get_commit_graph_cli(working_dir, limit, branch)
+
+    def _get_commit_graph_cli(
+        self,
+        working_dir: str,
+        limit: int = 100,
+        branch: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         try:
             # Format: SHA|short SHA|message|author|email|timestamp|parents|refs
             format_str = "%H|%h|%s|%an|%ae|%aI|%P|%D"
@@ -841,6 +921,24 @@ class GitService:
         if cached is not None:
             return cached
 
+        # Try native reader
+        if _native_reader is not None:
+            try:
+                result = _native_reader.get_diff_stats(working_dir, include_unstaged)
+                _git_cache.put(cache_key, result)
+                return result
+            except Exception as e:
+                logger.warning(f"pygit2 get_diff_stats failed, CLI fallback: {e}")
+
+        # CLI fallback
+        return self._get_diff_stats_cli(working_dir, include_unstaged)
+
+    def _get_diff_stats_cli(
+        self,
+        working_dir: str,
+        include_unstaged: bool = True
+    ) -> Dict[str, Any]:
+        cache_key = f"diff_stats:{working_dir}:{include_unstaged}"
         try:
             total_additions = 0
             total_deletions = 0
@@ -1056,6 +1154,20 @@ class GitService:
         Returns:
             Dictionary with: file, diff, is_binary, truncated
         """
+        if _native_reader is not None:
+            try:
+                return _native_reader.get_file_diff(working_dir, file_path, staged, max_chars)
+            except Exception as e:
+                logger.warning(f"pygit2 get_file_diff failed, CLI fallback: {e}")
+        return self._get_file_diff_cli(working_dir, file_path, staged, max_chars)
+
+    def _get_file_diff_cli(
+        self,
+        working_dir: str,
+        file_path: str,
+        staged: bool = False,
+        max_chars: int = 50000,
+    ) -> Dict[str, Any]:
         result_data: Dict[str, Any] = {
             "file": file_path,
             "diff": "",
@@ -1164,6 +1276,20 @@ class GitService:
         if cached is not None:
             return cached
 
+        # Try native reader
+        if _native_reader is not None:
+            try:
+                result = _native_reader.get_per_file_diff_stats(working_dir)
+                _git_cache.put(cache_key, result)
+                return result
+            except Exception as e:
+                logger.warning(f"pygit2 get_per_file_diff_stats failed, CLI fallback: {e}")
+
+        # CLI fallback
+        return self._get_per_file_diff_stats_cli(working_dir)
+
+    def _get_per_file_diff_stats_cli(self, working_dir: str) -> List[Dict[str, Any]]:
+        cache_key = f"per_file_diff:{working_dir}"
         files: List[Dict[str, Any]] = []
 
         try:
@@ -1475,6 +1601,20 @@ class GitService:
         if cached is not None:
             return cached
 
+        # Try native reader
+        if _native_reader is not None:
+            try:
+                result = _native_reader.get_status(working_dir)
+                _git_cache.put(cache_key, result)
+                return result
+            except Exception as e:
+                logger.warning(f"pygit2 get_status failed, CLI fallback: {e}")
+
+        # CLI fallback
+        return self._get_status_cli(working_dir)
+
+    def _get_status_cli(self, working_dir: str) -> Dict[str, Any]:
+        cache_key = f"status:{working_dir}"
         status = {
             "is_git_repo": False,
             "current_branch": None,
@@ -1612,6 +1752,19 @@ class GitService:
         Returns:
             Combined diff text, truncated to max_chars
         """
+        if _native_reader is not None:
+            try:
+                return _native_reader.get_diff_text(working_dir, include_unstaged, max_chars)
+            except Exception as e:
+                logger.warning(f"pygit2 get_diff_text failed, CLI fallback: {e}")
+        return self._get_diff_text_cli(working_dir, include_unstaged, max_chars)
+
+    def _get_diff_text_cli(
+        self,
+        working_dir: str,
+        include_unstaged: bool = True,
+        max_chars: int = 8000
+    ) -> str:
         parts = []
 
         # Staged changes
@@ -1649,6 +1802,19 @@ class GitService:
         Returns:
             Tuple of (commit_log, diff_stat) strings
         """
+        if _native_reader is not None:
+            try:
+                return _native_reader.get_branch_log(working_dir, base_branch, max_commits)
+            except Exception as e:
+                logger.warning(f"pygit2 get_branch_log failed, CLI fallback: {e}")
+        return self._get_branch_log_cli(working_dir, base_branch, max_commits)
+
+    def _get_branch_log_cli(
+        self,
+        working_dir: str,
+        base_branch: str = "main",
+        max_commits: int = 50
+    ) -> tuple:
         commit_log = ""
         diff_stat = ""
 
@@ -1685,6 +1851,14 @@ class GitService:
         Returns:
             Tuple of (ahead, behind) counts. (0, 0) on error.
         """
+        if _native_reader is not None:
+            try:
+                return _native_reader.get_ahead_behind_counts(working_dir)
+            except Exception as e:
+                logger.warning(f"pygit2 get_ahead_behind_counts failed, CLI fallback: {e}")
+        return self._get_ahead_behind_counts_cli(working_dir)
+
+    def _get_ahead_behind_counts_cli(self, working_dir: str) -> Tuple[int, int]:
         try:
             result = self._run_git(
                 working_dir,
