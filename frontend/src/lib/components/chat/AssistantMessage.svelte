@@ -5,6 +5,7 @@
 	import { marked } from 'marked';
 	import { onDestroy } from 'svelte';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
+	import { Typewriter } from '$lib/utils/typewriter';
 	import StreamingIndicator from './StreamingIndicator.svelte';
 	import MessageActions from './MessageActions.svelte';
 
@@ -90,6 +91,22 @@
 		return `$${cost.toFixed(4)}`;
 	}
 
+	// ── Typewriter animation ───────────────────────────────────────────────
+	// Smoothly reveals streaming content char-by-char via rAF instead of
+	// showing chunky 150ms poll bursts. Purely presentational — does not
+	// modify the data pipeline, WS buffer, or single-writer pattern.
+	let _twLength = $state(0);
+	const _tw = new Typewriter((len) => { _twLength = len; });
+
+	$effect(() => { _tw.setTarget(content || '', streaming); });
+
+	/** Content fed to the markdown renderer — smoothed during streaming */
+	const displayContent = $derived(
+		streaming && _twLength < (content || '').length
+			? (content || '').slice(0, _twLength)
+			: (content || '')
+	);
+
 	// ── Incremental markdown rendering ──────────────────────────────────────
 	// During streaming, content is only appended. We cache the rendered HTML
 	// for completed paragraph blocks and only re-parse the tail, reducing
@@ -102,7 +119,7 @@
 	// Mutating reactive `let` vars inside `$derived` corrupts the effect linked list.
 	const _cache = { content: '', html: '', wasStreaming: false, stablePrefixContent: '', stablePrefixHtml: '' };
 
-	const renderedHtml = $derived(sanitizeHtml(renderMarkdownMemoized(content, streaming)));
+	const renderedHtml = $derived(sanitizeHtml(renderMarkdownMemoized(displayContent, streaming)));
 
 	function renderMarkdownMemoized(text: string, isStreaming: boolean): string {
 		// Fast path: content and streaming flag unchanged
@@ -400,6 +417,7 @@
 			currentAudio.pause();
 			currentAudio = null;
 		}
+		_tw.destroy();
 	});
 </script>
 

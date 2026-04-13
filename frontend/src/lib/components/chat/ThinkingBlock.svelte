@@ -6,7 +6,9 @@
 	 * it from regular response content while keeping it readable.
 	 */
 	import { marked } from 'marked';
+	import { onDestroy } from 'svelte';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
+	import { Typewriter } from '$lib/utils/typewriter';
 	import StreamingIndicator from './StreamingIndicator.svelte';
 	import { chatPreferences } from '$lib/stores/chatPreferences';
 
@@ -77,6 +79,20 @@
 		return (lastSpace > 80 ? truncated.substring(0, lastSpace) : truncated) + '…';
 	}
 
+	// ── Typewriter animation ───────────────────────────────────────────────
+	// Smooth char-by-char reveal during streaming (same as AssistantMessage).
+	let _twLength = $state(0);
+	const _tw = new Typewriter((len) => { _twLength = len; });
+
+	$effect(() => { _tw.setTarget(content || '', streaming); });
+	onDestroy(() => _tw.destroy());
+
+	const displayContent = $derived(
+		streaming && _twLength < (content || '').length
+			? (content || '').slice(0, _twLength)
+			: (content || '')
+	);
+
 	// ── Incremental markdown rendering ──────────────────────────────────────
 	// During streaming, thinking content is only appended. Cache the rendered
 	// HTML for completed paragraphs and only re-parse the tail.
@@ -121,7 +137,7 @@
 		return _cache.html;
 	}
 
-	const renderedHtml = $derived(sanitizeHtml(renderMarkdownMemoized(content)));
+	const renderedHtml = $derived(sanitizeHtml(renderMarkdownMemoized(displayContent)));
 
 	// Derived: should show summary when collapsed
 	const showSummary = $derived(!isExpanded && prefs.showThinkingSummary && content);
