@@ -525,17 +525,37 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 	let prevLastMetadata = $state<string | null>(null);
 
 	// Get last message content for streaming detection (includes toolInput for TodoWrite)
+	// Also tracks thinking block content — thinking blocks are inserted before the
+	// streaming assistant message, so only watching the last message misses them.
 	const lastMessageContent = $derived.by(() => {
-		const lastMsg = $activeSession.messages[$activeSession.messages.length - 1];
-		if (!lastMsg) return '';
+		const msgs = $activeSession.messages;
+		if (msgs.length === 0) return '';
+
+		const lastMsg = msgs[msgs.length - 1];
+		let content = '';
+
 		// For tool_use messages, track toolInput changes (especially TodoWrite)
 		if (lastMsg.type === 'tool_use') {
-			if (lastMsg.toolInput) return JSON.stringify(lastMsg.toolInput);
+			if (lastMsg.toolInput) content = JSON.stringify(lastMsg.toolInput);
 			// During streaming, toolInput is not yet parsed — track partialToolInput
 			// so auto-scroll triggers as content streams in (e.g. TodoWrite).
-			if (lastMsg.partialToolInput) return lastMsg.partialToolInput;
+			else if (lastMsg.partialToolInput) content = lastMsg.partialToolInput;
+		} else {
+			content = lastMsg.content || '';
 		}
-		return lastMsg.content || '';
+
+		// Track thinking block content length so growing thinking triggers scroll.
+		// Thinking blocks sit before the streaming assistant message, so their
+		// content changes are invisible if we only watch the last message.
+		// Scan backwards (max 3 messages) to find the nearest thinking block.
+		for (let i = msgs.length - 1; i >= Math.max(0, msgs.length - 3); i--) {
+			if (msgs[i].type === 'thinking') {
+				content += `|t:${(msgs[i].content || '').length}`;
+				break;
+			}
+		}
+
+		return content;
 	});
 
 	// Get metadata for the last assistant message that has metadata (cost/duration
@@ -565,6 +585,18 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 		const hasNewMessage = currentLength !== prevMessagesLength;
 		const hasContentChange = currentContent !== prevLastContent;
 		const hasMetadataChange = currentMetadata !== prevLastMetadata;
+
+		// Bug fix: when user sends a message, the ChatInput shrinks (clears text),
+		// causing the scroll container to grow. The browser adjusts scrollTop downward,
+		// which handleScroll misinterprets as a user scroll-up and disables autoscroll.
+		// Force autoscroll back on when the new message is from the user — they always
+		// want to see the response to what they just sent.
+		if (hasNewMessage && currentLength > 0) {
+			const newestMsg = $activeSession.messages[currentLength - 1];
+			if (newestMsg?.role === 'user') {
+				shouldAutoScroll = true;
+			}
+		}
 
 		// Scroll to bottom on content changes if auto-scroll is active,
 		// OR if a session switch is pending scroll-to-bottom (messages just loaded).
