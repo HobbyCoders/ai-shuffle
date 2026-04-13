@@ -220,9 +220,9 @@ def build_options_from_profile(
         api_user_id: Optional API user ID for user-specific credential resolution
         session_id: Optional our session ID (for worktree lookup)
 
-    Note: On Windows local mode, --agents CLI flag has a bug where agents are not discovered.
-    Callers should use write_agents_to_filesystem() on Windows only. On Docker/Linux, agents
-    are passed directly via the SDK's --agents flag (which works correctly).
+    Note: Agents are always passed programmatically via options.agents for tool
+    enforcement. On Windows local mode, callers also write agent files to
+    .claude/agents/ for supplemental CLI discovery.
     """
     config = profile["config"]
     overrides = overrides or {}
@@ -599,9 +599,11 @@ def build_options_from_profile(
         # Token budget management (SDK 0.1.51+)
         **({"task_budget": config["task_budget"]} if config.get("task_budget") else {}),
 
-        # Subagents - On Docker/Linux, pass via --agents (works correctly)
-        # On Windows, agents=None because --agents CLI flag has a bug - must write to filesystem instead
-        agents=agents_dict if detect_deployment_mode() != DeploymentMode.LOCAL else None,
+        # Subagents - always pass programmatically so AgentDefinition.tools
+        # whitelist is enforced by the SDK.  Filesystem .claude/agents/ files
+        # are still written on Windows for prompt/description discovery, but
+        # only the programmatic path restricts tool access at runtime.
+        agents=agents_dict,
 
         # Permission callback - set if callback provided (handles AskUserQuestion in all modes)
         can_use_tool=can_use_tool if can_use_tool else None,
@@ -634,10 +636,9 @@ def build_options_from_profile(
 
     deployment_mode = detect_deployment_mode()
     logger.debug(f"Built options with model={model_to_use}, betas={betas_to_use}, settings={fast_mode_settings}, permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
+    logger.debug(f"Agents passed via SDK: {list(agents_dict.keys()) if agents_dict else 'None'}")
     if deployment_mode == DeploymentMode.LOCAL:
-        logger.debug(f"Windows local mode: Agents to write to filesystem: {list(agents_dict.keys()) if agents_dict else 'None'}")
-    else:
-        logger.debug(f"Docker mode: Agents passed via SDK: {list(agents_dict.keys()) if agents_dict else 'None'}")
+        logger.debug("Windows local mode: agents also written to filesystem for discovery")
 
     # Apply working directory (already computed above for env details)
     options.cwd = working_dir

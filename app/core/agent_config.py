@@ -21,12 +21,13 @@ def write_agents_to_filesystem(agents_dict: Dict[str, AgentDefinition], cwd: str
     """
     Write subagent definitions to .claude/agents/ directory in the working directory.
 
-    WINDOWS-ONLY WORKAROUND: The Claude Code CLI has a known bug where --agents flag
-    doesn't work properly on Windows. Instead, we write agent files to .claude/agents/
-    which the CLI discovers on startup.
+    SUPPLEMENTAL DISCOVERY: Writes agent .md files so the CLI can discover agent
+    names and descriptions for its internal routing. Tool restrictions are NOT
+    enforced by filesystem agent files — only the programmatic AgentDefinition.tools
+    (passed via options.agents) restricts tool access at runtime.
 
-    On Docker/Linux, agents are passed directly via the SDK's --agents flag (which works
-    correctly there) and this function should NOT be called.
+    On all platforms, agents are also passed programmatically via options.agents
+    for tool enforcement. This filesystem write is supplemental for Windows local mode.
 
     Args:
         agents_dict: Dict mapping agent IDs to AgentDefinition objects

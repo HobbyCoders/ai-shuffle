@@ -409,6 +409,29 @@ class SessionPool:
         return [sid for sid, s in self._pool.items() if s.is_streaming]
 
 
+def _agents_equivalent(old: Optional[Dict], new: Optional[Dict]) -> bool:
+    """Compare agent dicts by their serialisable fields.
+
+    AgentDefinition dataclasses don't implement __eq__, so we compare
+    the fields that affect subprocess behaviour: description, prompt,
+    tools, and model.
+    """
+    if old is None and new is None:
+        return True
+    if old is None or new is None:
+        return False
+    if set(old.keys()) != set(new.keys()):
+        return False
+    for key in old:
+        a, b = old[key], new[key]
+        if (getattr(a, 'description', None) != getattr(b, 'description', None)
+                or getattr(a, 'prompt', None) != getattr(b, 'prompt', None)
+                or getattr(a, 'tools', None) != getattr(b, 'tools', None)
+                or getattr(a, 'model', None) != getattr(b, 'model', None)):
+            return False
+    return True
+
+
 def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> bool:
     """Check if option changes between queries require a fresh subprocess.
 
@@ -430,6 +453,8 @@ def requires_reconnect(state: SessionState, new_options: ClaudeAgentOptions) -> 
     if (old.plugins or []) != (new_options.plugins or []):
         return True
     if (old.tools or []) != (new_options.tools or []):
+        return True
+    if not _agents_equivalent(old.agents, new_options.agents):
         return True
 
     # These can be changed at runtime — no reconnect needed

@@ -333,9 +333,8 @@ async def execute_query(
         session_id=session_id,
     )
 
-    # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
-    # On Docker/Linux, agents are already passed via SDK's --agents flag
-    # agents_dir created for local mode - used implicitly by SDK reading from filesystem
+    # On Windows local mode, also write agents to filesystem for CLI discovery.
+    # Tool restrictions are enforced via the programmatic agents dict (options.agents).
     _agents_dir = None
     if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
         _agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
@@ -563,8 +562,8 @@ async def stream_query(
         session_id=session_id
     )
 
-    # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
-    # On Docker/Linux, agents are already passed via SDK's --agents flag
+    # On Windows local mode, also write agents to filesystem for CLI discovery.
+    # Tool restrictions are enforced via the programmatic agents dict (options.agents).
     agents_dir = None
     written_agent_ids = []
     if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
@@ -971,8 +970,8 @@ async def _run_background_query(
         session_id=session_id
     )
 
-    # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
-    # On Docker/Linux, agents are already passed via SDK's --agents flag
+    # On Windows local mode, also write agents to filesystem for CLI discovery.
+    # Tool restrictions are enforced via the programmatic agents dict (options.agents).
     agents_dir = None
     written_agent_ids = []
     if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
@@ -1754,7 +1753,8 @@ async def stream_to_websocket(
                 options.hooks = hooks_config
                 logger.debug(f"[WS] Hooks configured: {list(hooks_config.keys())}")
 
-        # On Windows local mode, write agents to filesystem (workaround for --agents CLI bug)
+        # On Windows local mode, also write agents to filesystem for CLI discovery.
+        # Tool restrictions are enforced via the programmatic agents dict (options.agents).
         agents_dir = None
         written_agent_ids = []
         if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
