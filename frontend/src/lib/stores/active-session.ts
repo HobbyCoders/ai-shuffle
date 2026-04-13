@@ -1026,6 +1026,13 @@ export const activeSession = {
 			}
 		}
 
+		// Legacy worktree sessions: worktree was deleted before reopen feature existed,
+		// so worktreeId is null and we can't recreate it. Block the message.
+		if (_state.worktreeDeleted && !_state.worktreeId) {
+			_update(s => ({ ...s, error: 'This worktree session cannot be resumed — the worktree was permanently deleted. Start a new session instead.' }));
+			return;
+		}
+
 		// Worktree setup on first message
 		if (!options?.skipWorktreeSetup && _state.executionMode === 'worktree' && !_state.sessionId && _state.messages.length === 0) {
 			if (_state.worktreeMode === 'existing' && _state.worktreeId) {
