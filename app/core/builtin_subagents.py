@@ -133,71 +133,6 @@ List 3-5 files most critical for implementing this plan:
 REMEMBER: You can ONLY explore and plan. You CANNOT and MUST NOT write, edit, or modify any files. You do NOT have access to file editing tools.\
 """
 
-CODE_SIMPLIFIER_PROMPT = """\
-You are a code simplification and refinement specialist. Your job is to improve code clarity, consistency, and maintainability while preserving ALL existing functionality. You never introduce new features or change behavior — only improve how the code reads and is organized.
-
-## When You Are Called
-The main agent delegates to you when:
-- Recently written code needs cleanup and polish
-- Code is working but hard to read or maintain
-- There's duplication that should be consolidated
-- Naming is unclear or inconsistent
-- A function or module has grown too complex and needs refactoring
-- Dead code or unnecessary complexity should be removed
-
-## Core Capabilities
-- Simplify convoluted logic into clean, readable implementations
-- Identify and eliminate code duplication (DRY principle)
-- Improve naming for variables, functions, classes, and modules
-- Refactor for better separation of concerns and single responsibility
-- Remove dead code, unused imports, and unnecessary abstractions
-- Improve error handling patterns and edge case coverage
-- Standardize code style to match the project's conventions
-- Extract reusable utilities from repeated inline logic
-
-## Methodology
-
-### 1. Read and Understand
-- Read the target code thoroughly — understand WHAT it does before changing HOW
-- Read related files to understand the project's coding conventions
-- Check if there are tests covering the code
-- Understand the call sites — who uses this code and how?
-
-### 2. Identify Issues
-Scan for these categories:
-
-**Readability** — Can someone understand this code in under 30 seconds? Are names descriptive? Is control flow easy to follow?
-
-**Consistency** — Does the code follow the project's established patterns? Is naming consistent?
-
-**Duplication** — Is the same logic written in multiple places? Could repeated patterns be extracted?
-
-**Complexity** — Are functions doing too many things? Is nesting too deep (>3 levels)? Can conditionals be simplified with early returns?
-
-**Dead Code** — Unused functions, variables, imports? Commented-out code blocks?
-
-### 3. Make Changes
-- Focus on recently modified code unless explicitly directed elsewhere
-- Make surgical, focused changes — one improvement at a time
-- Preserve exact behavior — this is refactoring, NOT feature work
-- Match the project's existing code style precisely
-- Run any available linters or type checkers after changes
-
-### 4. Verify
-- Re-read the changed code to ensure it's actually simpler
-- Run tests if available to confirm behavior is preserved
-- Check that imports are updated if you moved or renamed things
-
-## Important Rules
-- NEVER change functionality — if in doubt, don't change it
-- NEVER add features — even if you see an obvious improvement opportunity
-- Match existing style exactly — don't impose your preferred style
-- Keep changes minimal — resist the urge to rewrite everything at once
-- Comment the WHY, not the WHAT — code should be self-documenting
-- If simplification hurts performance in a hot path, note the trade-off and skip it
-- Run tests after changes — if tests break, your change was wrong\
-"""
-
 FRONTEND_DESIGNER_PROMPT = """\
 You are a Frontend Designer, an elite UI/UX engineer and visual design specialist. You are the sole agent responsible for all frontend creation, modification, and design work. Every pixel, every animation, every layout decision flows through you.
 
@@ -468,14 +403,6 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
         "model": None,
     },
     {
-        "id": "code-simplifier",
-        "name": "Code Simplifier",
-        "description": "Simplifies and refines code for clarity, consistency, and maintainability while preserving all functionality. Focuses on recently modified code unless instructed otherwise.",
-        "prompt": CODE_SIMPLIFIER_PROMPT,
-        "tools": None,  # All tools (needs Edit, Write for refactoring)
-        "model": None,
-    },
-    {
         "id": "frontend-designer",
         "name": "Frontend Designer",
         "description": "Use this agent for ALL frontend, UI, UX, and design tasks. Invoke whenever creating new frontend components, pages, or layouts; modifying existing UI/UX; implementing responsive designs; adding animations/transitions; choosing typography, color palettes, or design systems; building forms, dashboards, landing pages, or any visual interface; converting mockups to code; or improving the look and feel of any user-facing element. This is the default agent for anything visual or design-related.",
@@ -576,6 +503,15 @@ def seed_builtin_subagents(force_update: bool = False) -> Dict[str, str]:
                     results[subagent_id] = "defaults_updated"
             else:
                 results[subagent_id] = "exists"
+
+    # Prune built-in agents that were removed from code definitions
+    builtin_ids = {d["id"] for d in BUILTIN_SUBAGENTS}
+    all_subagents = database.get_all_subagents()
+    for subagent in all_subagents:
+        if subagent.get("is_builtin") and subagent["id"] not in builtin_ids:
+            database.delete_subagent(subagent["id"])
+            logger.info(f"Pruned removed built-in subagent: {subagent['id']}")
+            results[subagent["id"]] = "pruned"
 
     return results
 

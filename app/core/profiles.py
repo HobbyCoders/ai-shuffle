@@ -70,7 +70,6 @@ DEFAULT_AI_PROFILE: Dict[str, Any] = {
         "enable_file_checkpointing": False,
         "enabled_agents": [
             "chat-history-summarizer",
-            "code-simplifier",
             "Explore",
             "frontend-designer",
             "general-purpose",
