@@ -49,9 +49,6 @@ class SessionState:
     last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     streaming_started_at: Optional[datetime] = None  # Track when streaming began (for timeout detection)
     background_task: Optional[asyncio.Task] = None
-    written_agent_ids: list = field(default_factory=list)
-    agents_dir: Optional[Path] = None
-
     # Mutable dict for callback indirection — updated each query, read by can_use_tool closure
     callback_refs: Dict[str, Any] = field(default_factory=lambda: {
         "broadcast_func": None,
@@ -200,10 +197,6 @@ class SessionPool:
                 await graceful_disconnect(state.adapter, session_id)
             except Exception as e:
                 logger.warning(f"[Pool] Error during eviction disconnect for {session_id}: {e}")
-        # Cleanup agent files
-        if state.agents_dir and state.written_agent_ids:
-            from app.core.query_engine import cleanup_agents_directory
-            cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
         logger.info(f"[Pool] Evicted session {session_id} (pool size: {len(self._pool)})")
         return session_id
 
@@ -220,9 +213,6 @@ class SessionPool:
                 await graceful_disconnect(state.adapter, session_id)
             except Exception as e:
                 logger.warning(f"[Pool] Error disconnecting session {session_id}: {e}")
-        if state.agents_dir and state.written_agent_ids:
-            from app.core.query_engine import cleanup_agents_directory
-            cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
         logger.info(f"[Pool] Removed session {session_id} (pool size: {len(self._pool)})")
         return state
 
@@ -234,9 +224,6 @@ class SessionPool:
         state = self._pool.pop(session_id, None)
         if state is None:
             return None
-        if state.agents_dir and state.written_agent_ids:
-            from app.core.query_engine import cleanup_agents_directory
-            cleanup_agents_directory(state.agents_dir, state.written_agent_ids)
         logger.info(f"[Pool] Removed dead session {session_id} (pool size: {len(self._pool)})")
         return state
 

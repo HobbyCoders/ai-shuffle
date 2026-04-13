@@ -35,8 +35,6 @@ from app.core.mcp_config import (  # noqa: F401
     _build_plugins_list,
 )
 from app.core.agent_config import (  # noqa: F401
-    write_agents_to_filesystem,
-    cleanup_agents_directory,
     resolve_note_references,
 )
 from app.core.environment import (  # noqa: F401

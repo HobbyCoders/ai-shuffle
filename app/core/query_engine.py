@@ -52,7 +52,6 @@ from app.core.session_pool import (
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
 from app.core.permission_handler import permission_handler
-from app.core.platform import detect_deployment_mode, DeploymentMode
 from app.core.user_question_handler import user_question_handler
 
 from app.core.live_session_store import live_session_store
@@ -69,8 +68,6 @@ from app.core.query_streaming import (  # noqa: F401 — re-exports
 )
 from app.core.query_options import (  # noqa: F401 — re-exports
     THINKING_TOKEN_BUDGETS,
-    write_agents_to_filesystem,
-    cleanup_agents_directory,
     cleanup_fast_mode_settings,
     resolve_note_references,
     DEFAULT_SECURITY_INSTRUCTIONS,
@@ -333,12 +330,6 @@ async def execute_query(
         session_id=session_id,
     )
 
-    # On Windows local mode, also write agents to filesystem for CLI discovery.
-    # Tool restrictions are enforced via the programmatic agents dict (options.agents).
-    _agents_dir = None
-    if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
-        _agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
-
     # Resolve virtual @Notes/note-id references to actual content
     prompt = resolve_note_references(prompt)
 
@@ -562,14 +553,6 @@ async def stream_query(
         session_id=session_id
     )
 
-    # On Windows local mode, also write agents to filesystem for CLI discovery.
-    # Tool restrictions are enforced via the programmatic agents dict (options.agents).
-    agents_dir = None
-    written_agent_ids = []
-    if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
-        agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
-        written_agent_ids = list(agents_dict.keys())
-
     # Yield init event
     yield {"type": "init", "session_id": session_id}
 
@@ -625,8 +608,6 @@ async def stream_query(
             adapter=adapter,
             sdk_session_id=resume_id,
             is_connected=True,
-            written_agent_ids=written_agent_ids,
-            agents_dir=agents_dir,
             connect_options=options,
         )
         pool.put(session_id, state)
@@ -970,14 +951,6 @@ async def _run_background_query(
         session_id=session_id
     )
 
-    # On Windows local mode, also write agents to filesystem for CLI discovery.
-    # Tool restrictions are enforced via the programmatic agents dict (options.agents).
-    agents_dir = None
-    written_agent_ids = []
-    if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
-        agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
-        written_agent_ids = list(agents_dict.keys())
-
     # --- Session Pool: Acquire or create SDK client ---
     pool = get_session_pool()
     existing_state = pool.get(session_id)
@@ -1035,8 +1008,6 @@ async def _run_background_query(
             adapter=adapter,
             sdk_session_id=resume_id,
             is_connected=True,
-            written_agent_ids=written_agent_ids,
-            agents_dir=agents_dir,
             connect_options=options,
         )
         pool.put(session_id, state)
@@ -1753,14 +1724,6 @@ async def stream_to_websocket(
                 options.hooks = hooks_config
                 logger.debug(f"[WS] Hooks configured: {list(hooks_config.keys())}")
 
-        # On Windows local mode, also write agents to filesystem for CLI discovery.
-        # Tool restrictions are enforced via the programmatic agents dict (options.agents).
-        agents_dir = None
-        written_agent_ids = []
-        if agents_dict and options.cwd and detect_deployment_mode() == DeploymentMode.LOCAL:
-            agents_dir = write_agents_to_filesystem(agents_dict, options.cwd)
-            written_agent_ids = list(agents_dict.keys())
-
         # Evict LRU session if pool is full
         evicted = await pool.evict_if_needed()
         if evicted:
@@ -1813,8 +1776,6 @@ async def stream_to_websocket(
             adapter=adapter,
             sdk_session_id=resume_id,
             is_connected=True,
-            written_agent_ids=written_agent_ids,
-            agents_dir=agents_dir,
             callback_refs=callback_refs,
             connect_options=options,
         )
