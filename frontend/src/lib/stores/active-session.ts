@@ -7,11 +7,15 @@
  *
  * Uses manual subscribe() pattern for backward compatibility with
  * $storeName auto-subscription in .svelte files.
+ *
+ * Sub-modules (in ./session/):
+ * - session-init.ts      — init/destroy lifecycle, poll & stream-end callbacks
+ * - message-sender.ts    — sendMessage, worktree creation, message queue
+ * - permission-handler.ts — permission/question responses
+ * - draft-manager.ts     — draft, scroll, error, system messages, rewind, takeover
  */
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
-import { api } from '$lib/api/client';
-import { generateBranchName, generateBranchNameLocal, migrateUploadsToWorktree } from '$lib/api/git';
 import { notifySessionComplete, notifyWaitingForResponse } from '$lib/services/notifications';
 
 // Session infrastructure
@@ -24,6 +28,12 @@ import {
 	createSessionSwitcher,
 	getPersistedProfile, getPersistedProject,
 } from './session/session-switcher';
+
+// Extracted sub-modules
+import { createSessionInit, setSkipRestore, bumpInitGeneration } from './session/session-init';
+import { createMessageSender } from './session/message-sender';
+import { createPermissionHandler } from './session/permission-handler';
+import { createDraftManager } from './session/draft-manager';
 
 // Caches and helpers
 import { messageCache } from './message-cache';
@@ -144,9 +154,6 @@ export interface PersistedSession {
 
 // ─── Module-Level Helpers ────────────────────────────────────────────────────
 
-// getOrCreateDeviceId() moved to ./device-id.ts to avoid circular imports
-// and allow session-switcher to scope preferences per device.
-
 function getAuthToken(): string | null {
 	const cookies = document.cookie.split(';');
 	for (const cookie of cookies) {
@@ -154,77 +161,6 @@ function getAuthToken(): string | null {
 		if (name === 'session') return value;
 	}
 	return null;
-}
-
-function formatWorktreeError(rawError: string, branchName: string): string {
-	const lower = rawError.toLowerCase();
-
-	// Git-specific errors
-	if (lower.includes('already checked out') || lower.includes('is already used by worktree')) {
-		return `Branch '${branchName}' already has an active worktree. Select it from Active Worktrees instead.`;
-	}
-	if (lower.includes('not a valid branch') || lower.includes('branch not found') ||
-		lower.includes('unknown revision') || (lower.includes('pathspec') && lower.includes('did not match'))) {
-		return `Branch '${branchName}' doesn't exist. Fetch from remote first or create a new branch.`;
-	}
-	if (lower.includes('already exists') && (lower.includes('path') || lower.includes('folder') || lower.includes('directory'))) {
-		return `A folder already exists at the worktree path for '${branchName}'. Try a different branch name.`;
-	}
-	if (lower.includes('.lock') || lower.includes('unable to lock') || lower.includes('index.lock')) {
-		return 'A git operation is in progress. Wait a moment and try again.';
-	}
-	if (lower.includes('permission denied') || lower.includes('access denied')) {
-		return 'Permission denied creating worktree. Check folder permissions on the server.';
-	}
-	if (lower.includes('not a git repository')) {
-		return 'The project directory is not a git repository. Initialize git first.';
-	}
-	if (lower.includes('dirty') || lower.includes('uncommitted') || lower.includes('unstaged')) {
-		return 'Uncommitted changes detected. Commit or stash your changes before creating a worktree.';
-	}
-
-	// Network / HTTP errors
-	if (lower.includes('could not resolve') || lower.includes('connection refused') ||
-		lower.includes('failed to fetch') || lower.includes('networkerror')) {
-		return 'Network error — cannot reach the server. Check your connection.';
-	}
-	if (lower.includes('timeout') || lower.includes('aborted')) {
-		return 'Request timed out. The server may be overloaded — try again.';
-	}
-
-	// HTTP status-based errors from the API client
-	if (lower.includes('bad request')) {
-		return `Invalid worktree request for '${branchName}'. Check the branch name and try again.`;
-	}
-	if (lower.includes('authentication required') || lower.includes('permission denied')) {
-		return 'Authentication error. Try refreshing the page and logging in again.';
-	}
-	if (lower.includes('not found') && lower.includes('resource')) {
-		return 'Project not found. It may have been deleted or moved.';
-	}
-	if (lower.includes('internal server error') || lower.includes('server error')) {
-		return `Server error creating worktree for '${branchName}'. Check the backend logs.`;
-	}
-
-	// Fallback with the raw error for debugging
-	return `Failed to create worktree for '${branchName}': ${rawError}`;
-}
-
-/** Build a partial store update from SessionUsage.
- *
- * Always returns token fields so that contextUsed is set even when the
- * server reports 0 (e.g. session with no JSONL data). Without this,
- * switchSession's contextUsed:null reset is never overwritten and the
- * component shows stale/wrong values on the next render.
- */
-function usageStoreUpdate(usage: SessionUsage): Partial<ActiveSessionState> {
-	return {
-		totalTokensIn: usage.inputTokens,
-		totalTokensOut: usage.outputTokens,
-		totalCacheCreationTokens: usage.cacheCreationTokens,
-		totalCacheReadTokens: usage.cacheReadTokens,
-		contextUsed: usage.contextUsed,
-	};
 }
 
 // ─── Default state ───────────────────────────────────────────────────────────
@@ -300,11 +236,7 @@ function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
 let stopTimeout: ReturnType<typeof setTimeout> | null = null;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
-// Fast mode is per-session — stored in _state.fastMode, not global preferences.
-
 // Shared mutable state — passed by reference to ws-message-handlers and session-switcher.
-// Simplified: removed waitingForHistory, expectedSessionId, streamEndCleanedUp,
-// streamingOnDisconnect — these were only needed for the dual-authority WS+poller pattern.
 const internal: InternalMutableState = {
 	pendingTools: new Set(),
 	interruptPending: false,
@@ -327,23 +259,14 @@ const wsConn: WsConnection = createWsConnection({
 
 		if (_state.sessionId) {
 			const sessionId = _state.sessionId;
-			// Register with SyncEngine to receive broadcast events from other devices
 			wsConn.send({ type: 'watch_session', session_id: sessionId });
 
-			// Only re-fetch from server if the session might have changed:
-			// - Currently streaming (need live updates)
-			// - No messages loaded yet (first connection or stale state)
-			// For completed sessions with messages already loaded, skip the
-			// re-fetch to avoid resetting contextUsed and causing phantom
-			// usage jumps. The data is already correct in the frontend state.
 			if (_state.isStreaming || _state.messages.length === 0) {
 				sessionPoller.loadSession(sessionId).then(pollData => {
 					console.debug(`[ActiveSession] onConnected loadSession result: streaming=${pollData?.isStreaming}, msgs=${pollData?.messages?.length ?? 0}`);
 					if (pollData && pollData.isStreaming) {
 						sessionPoller.startStreaming(sessionId);
 					} else if (!pollData && _state.sessionId === sessionId && _state.messages.length === 0) {
-						// loadSession failed and we have no cached messages —
-						// show error instead of leaving the UI in a frozen limbo state.
 						_update(s => ({
 							...s,
 							error: 'Failed to load session. Try starting a new chat.',
@@ -362,9 +285,6 @@ const wsConn: WsConnection = createWsConnection({
 
 		_update(s => ({ ...s, wsConnected: false }));
 
-		// If streaming was in progress, ensure poller keeps running.
-		// The poller works over HTTP — doesn't need WS — so it will
-		// continue delivering updates through Docker/Cloudflare disruptions.
 		if (wasStreaming && sessionId) {
 			sessionPoller.startStreaming(sessionId);
 		}
@@ -376,7 +296,6 @@ const wsConn: WsConnection = createWsConnection({
 		}
 	},
 	isStreaming: () => {
-		// Also check if poller is active — WS is secondary during streaming
 		return _state.isStreaming && (!_state.sessionId || !sessionPoller.isPolling(_state.sessionId));
 	},
 	hasPendingTools: () => internal.pendingTools.size > 0,
@@ -384,13 +303,11 @@ const wsConn: WsConnection = createWsConnection({
 		_update(s => ({ ...s, error: 'Connection lost. Please refresh the page.' }));
 	},
 	onVisibilityHidden: () => {
-		// Pause session polling — no one is looking at the UI
 		if (_state.sessionId && sessionPoller.isPolling(_state.sessionId)) {
 			sessionPoller.stop(_state.sessionId);
 		}
 	},
 	onVisibilityVisible: () => {
-		// Resume streaming poll if session was streaming
 		if (_state.isStreaming && _state.sessionId) {
 			sessionPoller.startStreaming(_state.sessionId);
 		}
@@ -411,7 +328,6 @@ const switcher = createSessionSwitcher({
 	onPersistTimerChanged: (timer) => { persistTimer = timer; },
 });
 
-// Alias for internal use (message handlers, queued messages, etc.)
 const persistSession = switcher.persistSession;
 
 // ─── WebSocket helpers (delegated to wsConn) ─────────────────────────────────
@@ -431,377 +347,6 @@ function disconnect() {
 
 	wsConn.disconnect();
 	_update(s => ({ ...s, wsConnected: false }));
-}
-
-// ─── Poll callback ───────────────────────────────────────────────────────────
-// Direct callback from the poller → activeSession, replacing the old bridge
-// subscription pattern. One _update() call per poll cycle — no double-update
-// risk that corrupted Svelte 5's effect linked-list.
-
-function setupPollCallback() {
-	sessionPoller.onPollApplied((sessionId, data) => {
-		if (sessionId !== _state.sessionId) {
-			console.debug(`[PollCB] skipped: poll for ${sessionId} but active is ${_state.sessionId}`);
-			return;
-		}
-
-		// During interrupt_and_query, stale polls from the old query can return
-		// with isStreaming=false and clobber the optimistic isStreaming=true set
-		// by the interrupt path. Skip all poll updates while the transition is
-		// in progress — the new query's 'start' event restarts polling cleanly.
-		if (internal.interruptPending) {
-			console.debug(`[PollCB] skipped: interruptPending for ${sessionId}`);
-			return;
-		}
-
-		// Build usage delta — don't overwrite a valid contextUsed with 0.
-		// During the brief window between sending a message and the first
-		// stream_start event, the server may return 0 usage. Slash commands
-		// may never trigger a stream_start at all. In both cases, preserve
-		// the last known context usage rather than flashing to 0%.
-		const usageDelta = usageStoreUpdate(data.usage);
-		if (usageDelta.contextUsed === 0 && _state.contextUsed && _state.contextUsed > 0) {
-			usageDelta.contextUsed = _state.contextUsed;
-		}
-		const usageHasUpdate = usageDelta.contextUsed !== _state.contextUsed;
-
-		const todosHaveUpdate = data.todos.length > 0;
-		const streamingChanged = _state.isStreaming !== data.isStreaming;
-
-		// Build worktree metadata delta from server (corrects stale client state)
-		const metaDelta: Partial<ActiveSessionState> = {};
-		if (data.sessionMeta) {
-			const meta = data.sessionMeta;
-			// Sync title from server — corrects stale 'New Chat' or ephemeral cache values
-			if (meta.title && meta.title !== _state.title) {
-				metaDelta.title = meta.title;
-			}
-			// Only apply if the server has definitive worktree info
-			if (meta.worktree_deleted !== undefined && meta.worktree_deleted !== _state.worktreeDeleted) {
-				metaDelta.worktreeDeleted = meta.worktree_deleted;
-			}
-			if (meta.worktree_id !== undefined && meta.worktree_id !== _state.worktreeId) {
-				metaDelta.worktreeId = meta.worktree_id;
-			}
-			if (meta.worktree_branch !== undefined && meta.worktree_branch !== null && meta.worktree_branch !== _state.worktreeBranch) {
-				metaDelta.worktreeBranch = meta.worktree_branch;
-			}
-			if (meta.execution_mode !== undefined && meta.execution_mode !== _state.executionMode) {
-				metaDelta.executionMode = meta.execution_mode as 'local' | 'worktree';
-			}
-		}
-		const metaHasUpdate = Object.keys(metaDelta).length > 0;
-
-		// Skip if nothing actually changed
-		const msgsMatch = _state.messages === data.messages;
-		if (msgsMatch && !todosHaveUpdate && !usageHasUpdate && !streamingChanged && !metaHasUpdate) {
-			console.debug(`[PollCB] skipped: no changes for ${sessionId}`);
-			return;
-		}
-
-		if (metaHasUpdate) {
-			console.debug(`[PollCB] applying worktree correction:`, metaDelta);
-		}
-		console.debug(`[PollCB] applying: ${data.messages.length} msgs, streaming=${data.isStreaming}, msgsChanged=${!msgsMatch}, streamingChanged=${streamingChanged}`);
-
-		// Single authoritative update — poller is the sole writer of session state.
-		// Three-phase merge:
-		// 1. Preserve client-side-only messages (hooks, status notifications)
-		// 2. Merge WS stream buffer when ahead of poller content
-		// 3. Stabilize message identity to prevent DOM recreation flicker
-		_update(s => {
-			let finalMessages = data.messages;
-			let finalWsContent = s.wsStreamContent;
-
-			// ── Phase 1: Preserve client-side-only messages ─────────────
-			// System messages (hooks, status, etc.) may be injected by the
-			// frontend or become orphaned between turns when the live session
-			// is recreated (system messages aren't persisted to JSONL).
-			// Without preservation, the poller wipes them every cycle.
-			//
-			// Position-anchored reinsertion: each client-only message is
-			// reinserted after the closest preceding message that still
-			// exists in the server response, preserving its original
-			// relative position instead of drifting to the bottom.
-			const serverIdSet = new Set(finalMessages.map(m => m.id));
-			const clientOnlyEntries: Array<{msg: ChatMessage; anchorId: string | null}> = [];
-			for (let i = 0; i < s.messages.length; i++) {
-				const m = s.messages[i];
-				if (m.type === 'system' && !serverIdSet.has(m.id)) {
-					// Walk backward to find the closest preceding message
-					// that exists in the new server response (our anchor).
-					let anchorId: string | null = null;
-					for (let j = i - 1; j >= 0; j--) {
-						if (serverIdSet.has(s.messages[j].id)) {
-							anchorId = s.messages[j].id;
-							break;
-						}
-					}
-					clientOnlyEntries.push({ msg: m, anchorId });
-				}
-			}
-			if (clientOnlyEntries.length > 0) {
-				finalMessages = [...finalMessages];
-				// Build an ID→index lookup for O(1) anchor resolution.
-				const idToIndex = new Map<string, number>();
-				for (let i = 0; i < finalMessages.length; i++) {
-					if (finalMessages[i].id) idToIndex.set(finalMessages[i].id, i);
-				}
-				// Insert in forward order; track cumulative offset from
-				// prior insertions so later anchors resolve correctly.
-				let offset = 0;
-				for (const { msg, anchorId } of clientOnlyEntries) {
-					let insertIdx: number;
-					if (anchorId && idToIndex.has(anchorId)) {
-						// Insert right after the anchor message
-						insertIdx = idToIndex.get(anchorId)! + 1 + offset;
-					} else {
-						// No anchor (system message was before all server
-						// messages) — insert at the very beginning.
-						insertIdx = 0 + offset;
-					}
-					insertIdx = Math.min(insertIdx, finalMessages.length);
-					finalMessages.splice(insertIdx, 0, msg);
-					offset++;
-				}
-			}
-
-			// ── Phase 2: WS stream buffer merge ────────────────────────
-			if (data.isStreaming) {
-				// Find a streaming assistant text message in the poller's data
-				let pollerStreamIdx = -1;
-				for (let i = finalMessages.length - 1; i >= 0; i--) {
-					if (finalMessages[i].role === 'assistant' && finalMessages[i].type === 'text' && finalMessages[i].streaming) {
-						pollerStreamIdx = i;
-						break;
-					}
-				}
-
-				if (pollerStreamIdx >= 0 && finalWsContent) {
-					// Poller has a streaming message — merge WS content if ahead
-					const pollerContent = finalMessages[pollerStreamIdx].content || '';
-					if (finalWsContent.length > pollerContent.length) {
-						finalMessages = [...finalMessages];
-						finalMessages[pollerStreamIdx] = { ...finalMessages[pollerStreamIdx], content: finalWsContent };
-					}
-					// Don't clear wsStreamContent when poller catches up.
-					// Keeping the full WS buffer lets components read it
-					// for sub-poll-interval display updates via typewriter.
-				} else if (pollerStreamIdx < 0) {
-					// Poller doesn't have a streaming assistant message yet.
-					// Preserve the synthetic one from our current state so the
-					// streaming indicator stays visible until real content arrives.
-					//
-					// Guard: only inject if the server hasn't already finalized
-					// a text message that matches the synthetic. Without this
-					// check, a stale streaming text from s.messages gets appended
-					// as a ghost duplicate when the real text was already finalized
-					// in the same poll cycle (text finalized + tool started).
-					const currentSynthetic = s.messages.find(
-						(m: ChatMessage) => m.role === 'assistant' && m.streaming && m.type === 'text'
-					);
-					if (currentSynthetic) {
-						const alreadyFinalized = finalMessages.some(
-							(m: ChatMessage) => m.role === 'assistant' && m.type === 'text' && !m.streaming &&
-								m.content === currentSynthetic.content
-						);
-						if (!alreadyFinalized) {
-							finalMessages = [...finalMessages, {
-								...currentSynthetic,
-								content: finalWsContent || currentSynthetic.content,
-							}];
-						}
-					}
-				} else {
-					// Poller has streaming message but no WS content — clear buffer
-					finalWsContent = '';
-				}
-			} else {
-				// Not streaming — clear buffer
-				finalWsContent = '';
-			}
-
-			// ── Phase 3: Stabilize message identity ────────────────────
-			// When IDs transition from client-side (user-*, ws-stream-*)
-			// to server-side (live-*), Svelte's keyed {#each} destroys and
-			// recreates DOM elements, causing scroll-position jumps.
-			//
-			// Strategy: ID-first lookup with position fallback.
-			// 1. Try exact ID match in existing messages (handles position shifts)
-			// 2. Fall back to position-based match (handles synthetic→real transitions)
-			// This avoids the pure position-based approach that breaks when messages
-			// are inserted mid-array (thinking blocks, system messages).
-			if (s.messages.length > 0 && finalMessages.length > 0) {
-				// Build ID→message lookup from previous state
-				const existingById = new Map<string, ChatMessage>();
-				for (const m of s.messages) {
-					if (m.id) existingById.set(m.id, m);
-				}
-
-				let needsStabilization = false;
-				const stabilized = finalMessages.map((msg, i) => {
-					// 1. Try exact ID match first (position-independent)
-					let existing = existingById.get(msg.id);
-
-					// 2. Fall back to position-based match for ID transitions
-					//    (e.g., synthetic ws-stream-* → server live-*)
-					//    Additional guard: for tool_use messages require toolName match,
-					//    and for text messages require content prefix match (first 50 chars).
-					//    This prevents false matches when client-only messages shift positions
-					//    and a same-role/type message at the wrong position gets matched.
-					if (!existing) {
-						const positional = s.messages[i];
-						if (positional && positional.role === msg.role && positional.type === msg.type) {
-							let positionMatchValid = true;
-							if (msg.type === 'tool_use') {
-								// Tool messages must have the same tool name
-								positionMatchValid = msg.toolName === positional.toolName;
-							} else if (msg.type === 'text' && msg.content && positional.content) {
-								// Text messages: content prefix must match (handles streaming growth)
-								const shorter = Math.min(msg.content.length, positional.content.length, 50);
-								positionMatchValid = shorter === 0 ||
-									msg.content.slice(0, shorter) === positional.content.slice(0, shorter);
-							}
-							if (positionMatchValid) {
-								existing = positional;
-							}
-						}
-					}
-
-					if (!existing) return msg;
-
-					// Subagent messages need special handling — their top-level
-					// content/streaming/toolResult/toolStatus don't change during
-					// execution; only agentChildren grows as the subagent runs.
-					// Reusing `existing` based on the generic check below would
-					// clobber live child updates and freeze the UI until the
-					// subagent completes.
-					if (msg.type === 'subagent') {
-						const existChildren = existing.agentChildren;
-						const incomChildren = msg.agentChildren;
-						const sameLen = (existChildren?.length ?? 0) === (incomChildren?.length ?? 0);
-						const existLast = existChildren?.[(existChildren?.length ?? 0) - 1];
-						const incomLast = incomChildren?.[(incomChildren?.length ?? 0) - 1];
-						const sameTail =
-							existLast?.content === incomLast?.content &&
-							existLast?.toolResult === incomLast?.toolResult &&
-							existLast?.toolStatus === incomLast?.toolStatus &&
-							existLast?.streaming === incomLast?.streaming;
-						if (
-							existing.agentStatus === msg.agentStatus &&
-							existing.streaming === msg.streaming &&
-							existing.content === msg.content &&
-							sameLen &&
-							sameTail
-						) {
-							if (existing !== msg) needsStabilization = true;
-							return existing;
-						}
-						// Children changed — emit a new object so downstream
-						// $derived/reactivity sees the update. Preserve the
-						// existing id for DOM stability.
-						if (existing.id !== msg.id) {
-							needsStabilization = true;
-							return { ...msg, id: existing.id };
-						}
-						return msg;
-					}
-
-					// Identical content — reuse exact same object to skip re-render
-					if (
-						existing.content === msg.content &&
-						existing.streaming === msg.streaming &&
-						existing.toolResult === msg.toolResult &&
-						existing.toolStatus === msg.toolStatus
-					) {
-						if (existing !== msg) needsStabilization = true;
-						return existing;
-					}
-					// Content changed but same logical message — preserve ID for key stability
-					if (existing.id !== msg.id) {
-						needsStabilization = true;
-						return { ...msg, id: existing.id };
-					}
-					return msg;
-				});
-				if (needsStabilization) finalMessages = stabilized;
-			}
-
-			// ── No-op detection ────────────────────────────────────────
-			// If nothing visibly changed, return same state reference so
-			// _update's identity check skips subscriber notification.
-			const msgsUnchanged = finalMessages === s.messages ||
-				(finalMessages.length === s.messages.length &&
-				 finalMessages.every((m, i) => m === s.messages[i]));
-			if (
-				msgsUnchanged &&
-				finalWsContent === s.wsStreamContent &&
-				data.isStreaming === s.isStreaming &&
-				!todosHaveUpdate && !usageHasUpdate && !streamingChanged && !metaHasUpdate
-			) {
-				return s;
-			}
-
-			return {
-				...s,
-				messages: msgsUnchanged ? s.messages : finalMessages,
-				isStreaming: data.isStreaming,
-				todos: todosHaveUpdate ? data.todos : s.todos,
-				streamStartTime: data.isStreaming ? s.streamStartTime : null,
-				wsStreamContent: finalWsContent,
-				...usageDelta,
-				...metaDelta,
-			};
-		});
-
-		// Persist corrected worktree state so the fix survives page refresh.
-		// This is rare (only when server corrects stale client state) and prevents
-		// the stale worktreeDeleted from being re-loaded on next page load.
-		if (metaHasUpdate) {
-			persistSession();
-		}
-	});
-}
-
-// ─── onStreamEnd callback ────────────────────────────────────────────────────
-// Caches messages, removes session from sessionState, refreshes sidebar,
-// and ensures isStreaming is cleared. The poll callback (onPollApplied) should
-// have already synced isStreaming from the server, but this is a safety net
-// for cases where the WS 'done' event was lost.
-
-function setupOnStreamEnd() {
-	sessionPoller.onStreamEnd((sessionId, _usage) => {
-		// If in interrupt_and_query transition for THIS session, skip cleanup.
-		// Guard against interruptPending applying to a different session's stream end.
-		if (internal.interruptPending && _state.sessionId === sessionId) return;
-
-		// If a new query started for THIS session, this callback is stale — skip it.
-		// Only skip when the actively-polling session matches the one that ended,
-		// otherwise we'd incorrectly skip cleanup for background sessions.
-		if (_state.isStreaming && _state.sessionId === sessionId && sessionPoller.isPolling(sessionId)) {
-			return;
-		}
-
-		// Refresh sessions list
-		appData.loadSessions();
-
-		// Cache final messages for instant rendering on next load
-		const finalSession = sessionState.getSession(sessionId);
-		if (finalSession && finalSession.messages.length > 0) {
-			messageCache.set(sessionId, finalSession.messages);
-		}
-
-		// NOTE: Do NOT call sessionState.removeSession() here.
-		// The pollFinal timer (scheduled 150ms earlier by handleDone) may still
-		// fire after this callback. If we remove the session now, pollFinal's
-		// poll recreates it from scratch WITHOUT ID preservation, causing
-		// Svelte's keyed {#each} to destroy and recreate ALL message DOM
-		// elements — a visible flash where messages briefly disappear.
-		// The session will be cleaned up lazily when:
-		// 1. The user switches to a different session (switchSession → removeSession)
-		// 2. A new query starts on this session (startStreaming → resetForPolling)
-		// 3. The page is unloaded (destroy → stopAll)
-	});
 }
 
 // ─── WebSocket Message Handler (extracted to session/ws-message-handlers.ts) ─
@@ -829,155 +374,66 @@ const { handleMessage } = createMessageHandlers({
 	clearStopTimeout: () => { if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; } },
 });
 
-// ─── Internal helper for worktree existing branch sessions ───────────────────
+// ─── Sub-module instances ────────────────────────────────────────────────────
 
-async function startSessionOnExistingWorktree(prompt: string) {
-	if (!_state.profile) { _update(s => ({ ...s, error: 'Please select a profile' })); return; }
-	if (!_state.project) { _update(s => ({ ...s, error: 'Please select a project' })); return; }
-	if (!_state.worktreeId) { _update(s => ({ ...s, error: 'Please select an existing worktree' })); return; }
+const sessionInitModule = createSessionInit({
+	update: _update,
+	getState: () => _state,
+	notifySubscribers: _notifySubscribers,
+	defaultState,
+	setState: (s) => { _state = s; },
+	internal,
+	sessionPoller,
+	sessionState,
+	wsConn,
+	switcher,
+	messageCache,
+	appData,
+	disconnect,
+	persistSession,
+	persistTimer: {
+		get: () => persistTimer,
+		clear: () => { if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; } },
+	},
+});
 
-	// Delegate to sendMessage() for the actual query. This ensures session
-	// lifecycle flags (awaitingNewSession) are managed by a single code path
-	// — the same one used by local sessions.
-	await activeSession.sendMessage(prompt, { skipWorktreeSetup: true });
-}
+const permissionHandler = createPermissionHandler({
+	wsSend: (data) => wsConn.send(data),
+});
 
-// ─── Init / Destroy ──────────────────────────────────────────────────────────
+const draftManager = createDraftManager({
+	update: _update,
+	getState: () => _state,
+	wsSend: (data) => wsConn.send(data),
+	wsIsConnected: () => wsConn.isConnected(),
+	sessionStateRemoveSession: (id) => sessionState.removeSession(id),
+	sessionPollerLoadSession: (id) => sessionPoller.loadSession(id),
+});
 
-// ── Session-restore guard ────────────────────────────────────────────────────
-// IMPORTANT: These use sessionStorage, NOT module-level variables.
-// Module-level `let` variables in .svelte.ts files reset when the component
-// remounts (Svelte re-evaluates the module), which defeated the previous
-// design.  sessionStorage survives module re-evaluation and component
-// destroy/init cycles within the same browser tab.
-
-const SKIP_RESTORE_KEY = '__aihub_skipSessionRestore';
-const INIT_GEN_KEY = '__aihub_initGeneration';
-
-function getSkipRestore(): boolean {
-	if (typeof window === 'undefined') return false;
-	return sessionStorage.getItem(SKIP_RESTORE_KEY) === '1';
-}
-function setSkipRestore(value: boolean) {
-	if (typeof window === 'undefined') return;
-	if (value) {
-		sessionStorage.setItem(SKIP_RESTORE_KEY, '1');
-	} else {
-		sessionStorage.removeItem(SKIP_RESTORE_KEY);
-	}
-}
-function getInitGeneration(): number {
-	if (typeof window === 'undefined') return 0;
-	return parseInt(sessionStorage.getItem(INIT_GEN_KEY) || '0', 10);
-}
-function bumpInitGeneration(): number {
-	const next = getInitGeneration() + 1;
-	if (typeof window !== 'undefined') {
-		sessionStorage.setItem(INIT_GEN_KEY, String(next));
-	}
-	return next;
-}
-
-async function init() {
-	const initGen = bumpInitGeneration();
-	setupOnStreamEnd();
-	setupPollCallback();
-
-	// Visibility change handling is managed by wsConn (ping/pong, reconnect).
-	// Polling pause/resume is handled via onVisibilityHidden/onVisibilityVisible callbacks.
-
-	const skipRestore = getSkipRestore();
-	// NOTE: Do NOT clear skipRestore here — let it persist until
-	// switchSession() explicitly clears it.  This ensures that if the component
-	// remounts multiple times, every init() call respects the "new chat" intent.
-	console.debug(`[ActiveSession] init(): skipRestore=${skipRestore}, initGen=${initGen}, currentSessionId=${_state.sessionId}, messages=${_state.messages.length}`);
-
-	try {
-		const backendSelection = await switcher.loadSelectionFromBackend();
-
-		// Stale init — a newer init() or newChat() was called while we awaited.
-		if (initGen !== getInitGeneration()) {
-			console.debug(`[ActiveSession] init(): stale (gen ${initGen} < ${getInitGeneration()}), bailing`);
-			return;
-		}
-
-		const defaultProfile = backendSelection?.selectedProfile || switcher.getPersistedProfile();
-		const defaultProject = backendSelection?.selectedProject || switcher.getPersistedProject();
-
-		if (skipRestore) {
-			// newChat() was called before this init — keep the cleared state,
-			// just apply default profile/project if not already set.
-			console.debug('[ActiveSession] init(): skipRestore=true, keeping cleared state');
-			_update(s => ({
-				...s,
-				profile: s.profile || defaultProfile,
-				project: s.project || defaultProject,
-			}));
-		} else {
-			const persisted = await switcher.loadPersistedSession();
-
-			// Stale init check after second await
-			if (initGen !== getInitGeneration()) {
-				console.debug(`[ActiveSession] init(): stale after loadPersistedSession (gen ${initGen} < ${getInitGeneration()}), bailing`);
-				return;
-			}
-
-			console.debug(`[ActiveSession] init(): persisted sessionId=${persisted?.sessionId ?? 'null'}`);
-
-			if (persisted) {
-				_update(s => ({
-					...s,
-					sessionId: persisted.sessionId,
-					title: persisted.title || 'New Chat',
-					profile: persisted.profile || defaultProfile,
-					project: persisted.project || defaultProject,
-					modelOverride: persisted.modelOverride ?? null,
-					permissionModeOverride: persisted.permissionModeOverride ?? null,
-					effortLevelOverride: persisted.effortLevelOverride ?? null,
-					executionMode: persisted.executionMode || 'local',
-					worktreeBranch: persisted.worktreeBranch || '',
-					worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',
-					worktreeId: persisted.worktreeId ?? null,
-					worktreeMode: persisted.worktreeMode || 'new',
-					selectedWorktreeBranch: persisted.selectedWorktreeBranch ?? null,
-					worktreeDeleted: persisted.worktreeDeleted ?? false,
-				}));
-
-				if (persisted.sessionId) {
-					const cached = await messageCache.get(persisted.sessionId);
-
-					// Stale init check after third await
-					if (initGen !== getInitGeneration()) {
-						console.debug(`[ActiveSession] init(): stale after messageCache (gen ${initGen} < ${getInitGeneration()}), bailing`);
-						return;
-					}
-
-					console.debug(`[ActiveSession] init(): cached messages for ${persisted.sessionId}: ${cached?.length ?? 0}`);
-					if (cached && cached.length > 0) {
-						_update(s => ({ ...s, messages: cached }));
-					}
-				}
-			} else {
-				_update(s => ({ ...s, profile: defaultProfile, project: defaultProject }));
-			}
-		}
-
-		wsConn.connect();
-	} catch (error) {
-		console.error('[ActiveSession] Failed to initialize:', error);
-		wsConn.connect();
-	}
-}
-
-function destroy() {
-	disconnect();
-	sessionPoller.stopAll();
-	wsConn.destroy();
-	switcher.destroy();
-	if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
-	_state = defaultState();
-	_notifySubscribers();
-}
+// Message sender needs a reference to activeSession for recursive calls
+// (sendMessage → createWorktree → sendMessage). We use a lazy getter.
+const messageSender = createMessageSender({
+	update: _update,
+	getState: () => _state,
+	internal,
+	wsConn: {
+		isConnected: () => wsConn.isConnected(),
+		connect: () => wsConn.connect(),
+		send: (data) => wsConn.send(data),
+		resetLastMessageTime: () => wsConn.resetLastMessageTime(),
+		resetReconnectAttempts: () => wsConn.resetReconnectAttempts(),
+	},
+	sessionPoller,
+	sessionState,
+	sessionEphemeralCache,
+	appData,
+	persistSession,
+	stopTimeout: {
+		get: () => stopTimeout,
+		set: (t) => { stopTimeout = t; },
+	},
+	getActiveSession: () => activeSession,
+});
 
 // ─── Exported Store ──────────────────────────────────────────────────────────
 
@@ -986,315 +442,35 @@ export const activeSession = {
 
 	subscribe: _subscribe,
 
-	init,
-	destroy,
+	init: sessionInitModule.init,
+	destroy: sessionInitModule.destroy,
 
 	// ── Session Navigation (delegated to session-switcher) ─────────
 
 	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: import('./session/session-switcher').SessionWorktreeInfo | null, title?: string | null) => {
-		// User explicitly navigated to a session — clear the "new chat" flag
-		// so that future init() calls can restore from the backend normally.
 		setSkipRestore(false);
 		switcher.switchSession(sessionId, projectId, worktreeInfo, title);
 	},
+
 	newChat: () => {
-		// Tell init() to skip restoring the old session if the component remounts.
-		// This must be set BEFORE switcher.newChat() because destroy() runs
-		// synchronously during remount and must not clear this flag.
 		setSkipRestore(true);
-		// Bump init generation to invalidate any in-flight init() calls that
-		// might overwrite the cleared state with stale backend data.
-		const gen = bumpInitGeneration();
+		bumpInitGeneration();
 		switcher.newChat();
 	},
 
-	// ── Messaging ───────────────────────────────────────────────────
+	// ── Messaging (delegated to message-sender) ─────────────────────
 
-	async sendMessage(prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[] }) {
-		// Reopen completed worktree before sending message
-		if (_state.worktreeDeleted && _state.worktreeId && _state.project) {
-			_update(s => ({ ...s, isReopeningWorktree: true, error: null }));
-			try {
-				const { reopenWorktree } = await import('$lib/api/git');
-				await reopenWorktree(_state.project, _state.worktreeId);
-				// Worktree recreated — clear the deleted flag and resume
-				_update(s => ({ ...s, worktreeDeleted: false, isReopeningWorktree: false }));
-			} catch (e: any) {
-				const msg = e?.message || String(e);
-				_update(s => ({ ...s, isReopeningWorktree: false, error: `Failed to reopen worktree: ${msg}` }));
-				return;
-			}
-		}
+	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[] }) =>
+		messageSender.sendMessage(prompt, options),
 
-		// Legacy worktree sessions: worktree was deleted before reopen feature existed,
-		// so worktreeId is null and we can't recreate it. Block the message.
-		if (_state.worktreeDeleted && !_state.worktreeId) {
-			_update(s => ({ ...s, error: 'This worktree session cannot be resumed — the worktree was permanently deleted. Start a new session instead.' }));
-			return;
-		}
+	stopGeneration: () => messageSender.stopGeneration(),
 
-		// Worktree setup on first message
-		if (!options?.skipWorktreeSetup && _state.executionMode === 'worktree' && !_state.sessionId && _state.messages.length === 0) {
-			if (_state.worktreeMode === 'existing' && _state.worktreeId) {
-				await startSessionOnExistingWorktree(prompt);
-				return;
-			} else if (_state.worktreeBranch) {
-				// Branch already selected (manually or from dropdown) — create worktree
-				await activeSession.createWorktree(prompt, options?.pendingUploadPaths);
-				return;
-			} else {
-				// Auto-worktree: no branch selected — generate branch name from message
-				await activeSession.autoCreateWorktree(prompt, options?.pendingUploadPaths);
-				return;
-			}
-		}
+	// ── Permission & Question Responses (delegated to permission-handler) ──
 
-		if (!wsConn.isConnected()) {
-			// Attempt reconnection instead of just showing an error
-			wsConn.resetReconnectAttempts();
-			wsConn.connect();
-			const connected = await new Promise<boolean>((resolve) => {
-				if (wsConn.isConnected()) { resolve(true); return; }
-				const timeout = setTimeout(() => { clearInterval(check); resolve(false); }, 3000);
-				const check = setInterval(() => {
-					if (wsConn.isConnected()) { clearTimeout(timeout); clearInterval(check); resolve(true); }
-				}, 100);
-			});
-			if (!connected) {
-				_update(s => ({ ...s, error: 'Unable to connect. Please check your connection and try again.' }));
-				return;
-			}
-		}
-
-		const userMsgId = `user-${Date.now()}`;
-		const isFirstMessage = _state.title === 'New Chat';
-		const newTitle = isFirstMessage
-			? prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '')
-			: _state.title;
-		const queryProfileId = _state.profile;
-
-		// Interrupt and re-query if currently streaming.
-		// Two-phase approach: send interrupt first, wait for backend confirmation
-		// that the interrupt + drain completed, THEN send the query. This prevents
-		// the race where the message is sent before the interrupt takes effect,
-		// causing message loss.
-		if (_state.isStreaming && _state.sessionId) {
-			const interruptSessionId = _state.sessionId;
-
-			// Cleanup first: stop poller and remove session to prevent
-			// the sessionState subscriber from overwriting our update
-			sessionPoller.stop(interruptSessionId);
-			sessionState.removeSession(interruptSessionId);
-			internal.interruptPending = true;
-
-			// Mark running tools as errored but DON'T append user message yet.
-			// The message is only appended after interrupt is confirmed.
-			// Store the prompt in pendingInterruptPrompt so the UI can restore
-			// it to the input if the interrupt fails.
-			_update(s => {
-				const updatedMessages = s.messages.map(m => {
-					if (m.type === 'tool_use' && m.toolStatus === 'running') {
-						return { ...m, streaming: false, toolStatus: 'error' as const };
-					}
-					return m.streaming ? { ...m, streaming: false } : m;
-				});
-				return {
-					...s,
-					messages: updatedMessages,
-					isStreaming: true,  // Keep streaming indicator while waiting for interrupt
-					error: null,
-					title: newTitle,
-					currentQueryProfileId: queryProfileId,
-					wsStreamContent: '',
-					pendingInterruptPrompt: prompt,
-				};
-			});
-
-			internal.pendingTools.clear();
-
-			// Phase 1: Send interrupt request (no prompt — just stop the stream)
-			wsConn.resetLastMessageTime();
-			const sent = wsConn.send({
-				type: 'interrupt_for_query',
-				session_id: interruptSessionId,
-			});
-
-			if (!sent) {
-				// WS send failed — restore state so user can retry
-				internal.interruptPending = false;
-				_update(s => ({ ...s, isStreaming: false, error: 'Failed to send interrupt. Please try again.' }));
-				return;
-			}
-
-			// Phase 2: Wait for backend confirmation (with timeout)
-			const INTERRUPT_TIMEOUT_MS = 12_000;
-			let timeoutId: ReturnType<typeof setTimeout>;
-
-			const confirmed = await new Promise<boolean>((resolve) => {
-				internal.interruptConfirmResolve = resolve;
-				timeoutId = setTimeout(() => {
-					if (internal.interruptConfirmResolve === resolve) {
-						internal.interruptConfirmResolve = null;
-						resolve(false);
-					}
-				}, INTERRUPT_TIMEOUT_MS);
-			});
-			clearTimeout(timeoutId!);
-
-			// If session changed during the wait, bail — user navigated away
-			if (_state.sessionId !== interruptSessionId) {
-				internal.interruptPending = false;
-				return;
-			}
-
-			if (!confirmed) {
-				// Interrupt failed or timed out — restore non-streaming state
-				// so user can retry. Message was never sent, so no loss.
-				internal.interruptPending = false;
-				_update(s => ({
-					...s,
-					isStreaming: false,
-					error: 'Interrupt timed out. Please try sending your message again.',
-				}));
-				return;
-			}
-
-			// Phase 3: Interrupt confirmed — now append user message and send query
-			// through the normal path. The session is confirmed idle.
-			internal.interruptPending = false;
-
-			_update(s => ({
-				...s,
-				messages: [...s.messages, {
-					id: userMsgId,
-					role: 'user' as const,
-					content: prompt,
-					profileId: queryProfileId,
-				}],
-				isStreaming: true,
-				error: null,
-				wsStreamContent: '',
-				pendingInterruptPrompt: null,
-			}));
-
-			const overrides: Record<string, string> = {};
-			if (_state.modelOverride) overrides.model = _state.modelOverride;
-			if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
-			if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
-			if (_state.fastMode) overrides.fast_mode = 'true';
-
-			wsConn.resetLastMessageTime();
-			wsConn.send({
-				type: 'query',
-				prompt,
-				session_id: interruptSessionId,
-				profile: _state.profile,
-				project: _state.project || undefined,
-				worktree_id: _state.worktreeId || undefined,
-				overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
-			});
-			return;
-		}
-
-		// Normal path (not currently streaming)
-
-		// Signal that we're awaiting a new session from the backend.
-		// The session_created/start WS handlers only accept events when this
-		// flag is true (or when the event matches the current sessionId).
-		// This prevents unsolicited streaming events from hijacking the chat.
-		internal.awaitingNewSession = true;
-		// If sending from new chat, clear the cached ephemeral so that the
-		// next "new session" click doesn't resurrect the draft we just sent.
-		if (!_state.sessionId) {
-			sessionEphemeralCache.remove('__new_chat__');
-		}
-		console.debug(`[ActiveSession] sendMessage: sessionId=${_state.sessionId}, awaitingNewSession=true, wsConnected=${wsConn.isConnected()}`);
-
-		// When called from autoCreateWorktree, the user message is already in the
-		// messages array (added optimistically). Skip appending a duplicate.
-		if (options?.skipMessageAppend) {
-			_update(s => ({
-				...s,
-				isStreaming: true,
-				error: null,
-				title: newTitle,
-				currentQueryProfileId: queryProfileId,
-				wsStreamContent: '',
-			}));
-		} else {
-			_update(s => ({
-				...s,
-				messages: [...s.messages, {
-					id: userMsgId,
-					role: 'user' as const,
-					content: prompt,
-					profileId: queryProfileId,
-				}],
-				isStreaming: true,
-				error: null,
-				title: newTitle,
-				currentQueryProfileId: queryProfileId,
-				wsStreamContent: '',
-			}));
-		}
-
-		const overrides: Record<string, string> = {};
-		if (_state.modelOverride) overrides.model = _state.modelOverride;
-		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
-		if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
-		if (_state.fastMode) overrides.fast_mode = 'true';
-
-		wsConn.resetLastMessageTime();
-		wsConn.send({
-			type: 'query',
-			prompt,
-			session_id: _state.sessionId,
-			profile: _state.profile,
-			project: _state.project || undefined,
-			worktree_id: _state.worktreeId || undefined,
-			overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
-		});
-	},
-
-	stopGeneration() {
-		if (_state.sessionId) {
-			wsConn.send({ type: 'stop', session_id: _state.sessionId });
-		}
-
-		if (stopTimeout) clearTimeout(stopTimeout);
-		stopTimeout = setTimeout(() => {
-			if (_state.isStreaming) {
-				console.warn('[ActiveSession] Stop confirmation timeout - forcing UI recovery');
-				_update(s => {
-					let messages = s.messages.map(m => {
-						if (m.type === 'tool_use' && m.toolStatus === 'running') return { ...m, streaming: false, toolStatus: 'error' as const };
-						return m.streaming ? { ...m, streaming: false } : m;
-					});
-					messages = messages.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content));
-					return { ...s, messages, isStreaming: false };
-				});
-			}
-			stopTimeout = null;
-		}, 10000);
-	},
-
-	// ── Permission & Question Responses ─────────────────────────────
-
-	sendPermissionResponse(requestId: string, decision: 'allow' | 'deny', remember?: 'none' | 'session' | 'profile', pattern?: string) {
-		wsConn.send({ type: 'permission_response', request_id: requestId, decision, remember: remember || 'none', pattern });
-	},
-
-	sendUserQuestionResponse(requestId: string, toolUseId: string, answers: Record<string, string | string[]>) {
-		wsConn.send({ type: 'user_question_response', request_id: requestId, tool_use_id: toolUseId, answers });
-	},
-
-	syncPendingPermissions() {
-		wsConn.send({ type: 'get_pending_permissions' });
-	},
-
-	syncPendingQuestions() {
-		wsConn.send({ type: 'get_pending_questions' });
-	},
+	sendPermissionResponse: permissionHandler.sendPermissionResponse,
+	sendUserQuestionResponse: permissionHandler.sendUserQuestionResponse,
+	syncPendingPermissions: permissionHandler.syncPendingPermissions,
+	syncPendingQuestions: permissionHandler.syncPendingQuestions,
 
 	// ── Profile & Project ───────────────────────────────────────────
 
@@ -1309,16 +485,10 @@ export const activeSession = {
 			console.warn('[ActiveSession] Cannot change project after session has started');
 			return;
 		}
-		// Same project — just update the selection without resetting worktree state.
-		// Without this guard, re-selecting the current project (e.g., from the
-		// WorkspaceSelector) silently resets executionMode to 'local', causing
-		// the auto-worktree flow to be skipped on sendMessage.
 		if (_state.project === projectId) {
 			switcher.saveSelectionToBackend(_state.profile, projectId);
 			return;
 		}
-		// Reset execution mode & worktree state when project changes —
-		// the previous worktree context is no longer valid for the new project.
 		_update(s => ({
 			...s,
 			project: projectId,
@@ -1343,26 +513,19 @@ export const activeSession = {
 	setEffortLevelOverride(level: string | null) { _update(s => ({ ...s, effortLevelOverride: level })); persistSession(); },
 	setFastMode(enabled: boolean) { _update(s => ({ ...s, fastMode: enabled })); },
 
-	// ── Ephemeral UI State ──────────────────────────────────────────
+	// ── Ephemeral UI State (delegated to draft-manager) ─────────────
 
-	setDraft(text: string) { _update(s => ({ ...s, draft: text })); },
-	clearPendingInterruptPrompt() { _update(s => s.pendingInterruptPrompt ? { ...s, pendingInterruptPrompt: null } : s); },
-	setScrollTop(pos: number) { _update(s => ({ ...s, scrollTop: pos })); },
-	clearError() { _update(s => ({ ...s, error: null })); },
-	clearWorktreeError() { _update(s => ({ ...s, worktreeError: null })); },
-	/** Clear all messages (e.g. before reloading after rewind). */
-	clearMessages() { _update(s => ({ ...s, messages: [], todos: [] })); },
-
-	/** Reload the current session from backend (e.g. after rewind).
-	 * Unlike WS-reconnect reloads, this is an explicit user action that
-	 * should do a full reset to pick up truncated/changed data. */
-	async reloadSession(_forceJsonl = false) {
-		if (_state.sessionId) {
-			// Force a fresh fetch by removing stale session state first
-			sessionState.removeSession(_state.sessionId);
-			await sessionPoller.loadSession(_state.sessionId);
-		}
-	},
+	setDraft: draftManager.setDraft,
+	clearPendingInterruptPrompt: draftManager.clearPendingInterruptPrompt,
+	setScrollTop: draftManager.setScrollTop,
+	clearError: draftManager.clearError,
+	clearWorktreeError: draftManager.clearWorktreeError,
+	clearMessages: draftManager.clearMessages,
+	reloadSession: draftManager.reloadSession,
+	addSystemMessage: draftManager.addSystemMessage,
+	acknowledgeError: draftManager.acknowledgeError,
+	rewindToMessage: draftManager.rewindToMessage,
+	takeOverSession: draftManager.takeOverSession,
 
 	// ── Execution Mode & Worktree ───────────────────────────────────
 
@@ -1376,410 +539,37 @@ export const activeSession = {
 		_update(s => ({ ...s, worktreeId, selectedWorktreeBranch: branch, worktreeMode: 'existing' as const }));
 	},
 
-	/** Reset worktree selection to auto mode (no branch selected) */
 	clearWorktreeSelection() {
 		_update(s => ({ ...s, worktreeId: null, selectedWorktreeBranch: null, worktreeBranch: '', worktreeMode: 'new' as const }));
 	},
 
 	markWorktreeDeleted() {
-		// Preserve worktreeId so the session can be reopened later.
-		// The worktreeDeleted flag controls UI state; worktreeId is needed
-		// for the reopen API call.
 		_update(s => ({ ...s, worktreeDeleted: true }));
 	},
 
-	async createWorktree(prompt?: string, pendingUploadPaths?: string[]) {
-		if (!_state.profile) { _update(s => ({ ...s, worktreeError: 'Please select a profile' })); return; }
-		if (!_state.project) { _update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
-		if (!_state.worktreeBranch) { _update(s => ({ ...s, worktreeError: 'Please select a branch' })); return; }
+	createWorktree: (prompt?: string, pendingUploadPaths?: string[]) =>
+		messageSender.createWorktree(prompt, pendingUploadPaths),
 
-		const creationGen = internal.worktreeCreationGeneration;
-		const projectId = _state.project;
-		const queryProfileId = _state.profile;
-		const branchName = _state.worktreeBranch;
+	autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) =>
+		messageSender.autoCreateWorktree(prompt, pendingUploadPaths),
 
-		_update(s => ({ ...s, isCreatingWorktree: true, worktreeError: null }));
+	// ── Queued Messages (delegated to message-sender) ──────────────
 
-		try {
-			const response = await api.post<{
-				session_id: string; worktree_id: string; branch_name: string;
-				base_branch: string; worktree_path: string; status: string;
-			}>('/sessions/with-worktree', {
-				project_id: projectId,
-				branch_name: branchName,
-				base_branch: _state.worktreeBaseBranch || 'main',
-				profile_id: queryProfileId,
-				create_new_branch: _state.worktreeCreateNewBranch,
-			});
+	queueMessage: (content: string) => messageSender.queueMessage(content),
+	removeQueuedMessage: (id: string) => messageSender.removeQueuedMessage(id),
+	clearQueuedMessages: () => messageSender.clearQueuedMessages(),
 
-			// Always refresh sidebar so the new session appears
-			appData.loadSessions();
-			appData.loadApiUserSessions();
+	// ── System Messages & Error Handling (delegated to draft-manager) ──
 
-			// User navigated away during worktree creation — send query
-			// in background but don't clobber active session state.
-			if (creationGen !== internal.worktreeCreationGeneration) {
-				console.debug('[Worktree] User navigated away during createWorktree, sending query in background');
-				if (prompt && wsConn.isConnected()) {
-					wsConn.send({
-						type: 'query',
-						prompt,
-						session_id: response.session_id,
-						profile: queryProfileId,
-						project: projectId,
-						worktree_id: response.worktree_id,
-					});
-				}
-				return;
-			}
+	// (already delegated above)
 
-			_update(s => ({
-				...s,
-				sessionId: response.session_id,
-				worktreeId: response.worktree_id,
-				isCreatingWorktree: false,
-			}));
+	// ── Rewind (delegated to draft-manager) ─────────────────────────
 
-			persistSession();
+	// (already delegated above)
 
-			// Migrate pending uploads to the new worktree
-			if (pendingUploadPaths?.length && projectId) {
-				try {
-					await migrateUploadsToWorktree(projectId, response.worktree_id, pendingUploadPaths);
-				} catch (e) {
-					console.warn('[Worktree] Failed to migrate uploads:', e);
-				}
-			}
+	// ── Session Takeover (delegated to draft-manager) ───────────────
 
-			// Send the user's message if provided. No need to disconnect/reconnect
-			// the WS — the query handler registers the device automatically.
-			if (prompt) {
-				if (!wsConn.isConnected()) {
-					wsConn.connect();
-					await new Promise<void>((resolve) => {
-						if (wsConn.isConnected()) { resolve(); return; }
-						const timeout = setTimeout(() => { clearInterval(check); resolve(); }, 3000);
-						const check = setInterval(() => {
-							if (wsConn.isConnected()) { clearTimeout(timeout); clearInterval(check); resolve(); }
-						}, 50);
-					});
-				}
-
-				// Final staleness check
-				if (creationGen !== internal.worktreeCreationGeneration) {
-					console.debug('[Worktree] User navigated away during WS connect wait');
-					wsConn.send({
-						type: 'query',
-						prompt,
-						session_id: response.session_id,
-						profile: queryProfileId,
-						project: projectId,
-						worktree_id: response.worktree_id,
-					});
-					return;
-				}
-
-				activeSession.sendMessage(prompt, { skipWorktreeSetup: true });
-			}
-		} catch (error) {
-			if (creationGen !== internal.worktreeCreationGeneration) return;
-
-			const err = error as { detail?: string; message?: string; status?: number };
-			const rawError = err.detail || err.message || '';
-			const formatted = rawError
-				? formatWorktreeError(rawError, branchName)
-				: `Failed to create worktree session for '${branchName}'. Check the backend logs for details.`;
-			_update(s => ({
-				...s,
-				isCreatingWorktree: false,
-				worktreeError: formatted,
-			}));
-		}
-	},
-
-	/**
-	 * Auto-worktree: Generate a branch name from the user's message and create a worktree.
-	 * Used when user sends a message in worktree mode without selecting a branch.
-	 */
-	async autoCreateWorktree(prompt: string, pendingUploadPaths?: string[]) {
-		if (!_state.profile) { _update(s => ({ ...s, worktreeError: 'Please select a profile' })); return; }
-		if (!_state.project) { _update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }
-
-		const queryProfileId = _state.profile;
-		const projectId = _state.project;
-		const baseBranch = _state.worktreeBaseBranch || 'main';
-		const modelOverrideSnap = _state.modelOverride;
-		const permissionModeOverrideSnap = _state.permissionModeOverride;
-		const effortLevelOverrideSnap = _state.effortLevelOverride;
-		const fastModeSnap = _state.fastMode;
-		const userMsgId = `user-${Date.now()}`;
-
-		// Capture the creation generation so we can detect if the user
-		// switched sessions during any of our await points below.
-		const creationGen = internal.worktreeCreationGeneration;
-
-		// Issue 1 fix: Show the user message immediately so it doesn't disappear
-		// while we create the worktree and generate a branch name.
-		_update(s => ({
-			...s,
-			isCreatingWorktree: true,
-			worktreeError: null,
-			messages: [...s.messages, {
-				id: userMsgId,
-				role: 'user' as const,
-				content: prompt,
-				profileId: queryProfileId,
-			}],
-		}));
-
-		try {
-			// Generate branch name from the message
-			let branchName: string;
-			try {
-				const result = await generateBranchName(projectId, prompt);
-				branchName = result.branch_name;
-			} catch {
-				// Fallback to client-side generation
-				branchName = generateBranchNameLocal(prompt);
-			}
-
-			// If user navigated away during branch name generation, we continue
-			// creating the worktree in the background — matching the symmetric
-			// behavior after worktree creation below. Otherwise, clicking New Chat
-			// mid-generation silently cancels the whole flow with no feedback.
-			const staleAfterBranchGen = creationGen !== internal.worktreeCreationGeneration;
-
-			if (!staleAfterBranchGen) {
-				// Set the generated branch name and create the worktree
-				_update(s => ({
-					...s,
-					worktreeBranch: branchName,
-					worktreeCreateNewBranch: true,
-				}));
-			}
-
-			// Now create the worktree with the generated branch name
-			const response = await api.post<{
-				session_id: string; worktree_id: string; branch_name: string;
-				base_branch: string; worktree_path: string; status: string;
-			}>('/sessions/with-worktree', {
-				project_id: projectId,
-				branch_name: branchName,
-				base_branch: baseBranch,
-				profile_id: queryProfileId,
-				create_new_branch: true,
-			});
-
-			// Always refresh sidebar so the new session appears, even if user navigated away.
-			appData.loadSessions();
-			appData.loadApiUserSessions();
-
-			// User switched sessions (either during branch gen or worktree creation)
-			// — don't clobber the active session state. The worktree + session exist
-			// on the backend, so fire the query in the background (the response will
-			// be persisted and visible when the user opens this session later).
-			if (staleAfterBranchGen || creationGen !== internal.worktreeCreationGeneration) {
-				console.debug('[Worktree] User navigated away, sending query in background');
-				const sendBackgroundQuery = () => {
-					const overrides: Record<string, string> = {};
-					if (modelOverrideSnap) overrides.model = modelOverrideSnap;
-					if (permissionModeOverrideSnap) overrides.permission_mode = permissionModeOverrideSnap;
-					if (effortLevelOverrideSnap) overrides.effort = effortLevelOverrideSnap;
-					if (fastModeSnap) overrides.fast_mode = 'true';
-					wsConn.send({
-						type: 'query',
-						prompt,
-						session_id: response.session_id,
-						profile: queryProfileId,
-						project: projectId,
-						worktree_id: response.worktree_id,
-						overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
-					});
-				};
-				if (wsConn.isConnected()) {
-					sendBackgroundQuery();
-				} else {
-					wsConn.connect();
-					const timeout = setTimeout(() => clearInterval(check), 3000);
-					const check = setInterval(() => {
-						if (wsConn.isConnected()) {
-							clearTimeout(timeout);
-							clearInterval(check);
-							sendBackgroundQuery();
-						}
-					}, 50);
-				}
-				return;
-			}
-
-			_update(s => ({
-				...s,
-				sessionId: response.session_id,
-				worktreeId: response.worktree_id,
-				selectedWorktreeBranch: response.branch_name,
-				isCreatingWorktree: false,
-			}));
-
-			persistSession();
-
-			// Migrate pending uploads to the new worktree
-			if (pendingUploadPaths?.length && projectId) {
-				try {
-					await migrateUploadsToWorktree(projectId, response.worktree_id, pendingUploadPaths);
-				} catch (e) {
-					console.warn('[Worktree] Failed to migrate uploads:', e);
-				}
-			}
-
-			// Issue 2 fix: Don't disconnect/reconnect the WebSocket — it causes
-			// message flicker and a racy 500ms setTimeout. The WS query handler
-			// registers the device with the session automatically when it receives
-			// the query with session_id. Just send the message directly.
-			if (!wsConn.isConnected()) {
-				wsConn.connect();
-				// Wait for connection before sending
-				await new Promise<void>((resolve) => {
-					if (wsConn.isConnected()) { resolve(); return; }
-					const timeout = setTimeout(() => { clearInterval(check); resolve(); }, 3000);
-					const check = setInterval(() => {
-						if (wsConn.isConnected()) { clearTimeout(timeout); clearInterval(check); resolve(); }
-					}, 50);
-				});
-			}
-
-			// Final staleness check after potential WS reconnection wait
-			if (creationGen !== internal.worktreeCreationGeneration) {
-				console.debug('[Worktree] User navigated away during WS connect wait, sending query in background');
-				wsConn.send({
-					type: 'query',
-					prompt,
-					session_id: response.session_id,
-					profile: queryProfileId,
-					project: projectId,
-					worktree_id: response.worktree_id,
-				});
-				return;
-			}
-
-			// Send the user's message — skip worktree setup since we just did it.
-			// skipMessageAppend avoids duplicating the user message we already
-			// added optimistically at the start of autoCreateWorktree.
-			activeSession.sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true });
-		} catch (error) {
-			// If user navigated away, don't show error in the new session's UI
-			if (creationGen !== internal.worktreeCreationGeneration) return;
-
-			const err = error as { detail?: string; message?: string; status?: number };
-			const rawError = err.detail || err.message || '';
-			const branchDisplay = _state.worktreeBranch || 'auto-generated branch';
-			const formatted = rawError
-				? formatWorktreeError(rawError, branchDisplay)
-				: `Failed to auto-create worktree. Check the backend logs for details.`;
-			_update(s => ({
-				...s,
-				isCreatingWorktree: false,
-				worktreeError: formatted,
-				// Remove the optimistic user message on failure
-				messages: s.messages.filter(m => m.id !== userMsgId),
-			}));
-		}
-	},
-
-	// ── Queued Messages (server-side queue) ─────────────────────────
-
-	queueMessage(content: string) {
-		if (!_state.sessionId) return;
-
-		// Optimistic local update — show the message in the queue bar immediately
-		// rather than waiting for the server roundtrip.  When the server's
-		// queue_updated event arrives it replaces this with the authoritative state.
-		const optimisticId = `queued-local-${Date.now()}`;
-		_update(s => ({
-			...s,
-			queuedMessages: [...s.queuedMessages, {
-				id: optimisticId,
-				content,
-				queuedAt: Date.now(),
-			}],
-		}));
-
-		const sent = wsConn.send({
-			type: 'queue_message',
-			session_id: _state.sessionId,
-			content,
-			profile: _state.currentQueryProfileId || _state.profile,
-			project: _state.project || undefined,
-		});
-
-		if (!sent) {
-			// WS send failed — remove the optimistic entry and surface an error
-			// so the user knows to retry.  The message text is preserved in the
-			// optimistic queue entry briefly; removing it here keeps state clean.
-			_update(s => ({
-				...s,
-				queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticId),
-				error: 'Failed to queue message — connection lost. Please try again.',
-			}));
-		}
-	},
-
-	removeQueuedMessage(id: string) {
-		wsConn.send({
-			type: 'remove_queued_message',
-			message_id: id,
-			session_id: _state.sessionId,
-		});
-	},
-
-	clearQueuedMessages() {
-		if (!_state.sessionId) return;
-		wsConn.send({
-			type: 'clear_queued_messages',
-			session_id: _state.sessionId,
-		});
-	},
-
-	// ── System Messages & Error Handling ────────────────────────────
-
-	addSystemMessage(content: string, subtype?: string) {
-		_update(s => ({
-			...s,
-			messages: [...s.messages, {
-				id: `system-${Date.now()}`,
-				role: 'system' as const,
-				content,
-				type: 'system' as MessageType,
-				systemSubtype: subtype,
-			}]
-		}));
-	},
-
-	acknowledgeError() { _update(s => ({ ...s, error: null })); },
-
-	// ── Rewind ──────────────────────────────────────────────────────
-
-	async rewindToMessage(_messageId: string) {
-		if (!_state.sessionId) return;
-		// After rewind completes externally (via MessageActions component),
-		// reload the session to pick up the truncated message list.
-		// Force reset since the JSONL was modified by the rewind.
-		sessionState.removeSession(_state.sessionId);
-		await sessionPoller.loadSession(_state.sessionId);
-	},
-
-	// ── Session Takeover ────────────────────────────────────────────
-
-	async takeOverSession() {
-		if (!_state.sessionId) return;
-		_update(s => ({ ...s, error: null, sessionLocked: false, sessionLockedBy: undefined }));
-		// Send takeover via WS (to acquire the lock), then load state via HTTP
-		if (wsConn.isConnected()) {
-			wsConn.send({ type: 'load_session', session_id: _state.sessionId, force: true });
-		}
-		// Force reset — takeover may load different state from another device
-		sessionState.removeSession(_state.sessionId);
-		await sessionPoller.loadSession(_state.sessionId);
-	},
+	// (already delegated above)
 
 	// ── Getters for derived stores ──────────────────────────────────
 

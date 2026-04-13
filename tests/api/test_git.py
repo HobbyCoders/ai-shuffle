@@ -13,12 +13,43 @@ Tests cover:
 """
 
 import pytest
+from contextlib import ExitStack
 from unittest.mock import patch, MagicMock, AsyncMock
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.git import router, require_auth
+
+
+def _enter_git_patches(
+    stack,
+    mock_git_service=None,
+    mock_worktree_manager=None,
+    mock_database=None,
+    mock_settings=None,
+    mock_api_user_return=...,
+):
+    """Push standard git-dependency patches onto an ``ExitStack``.
+
+    After splitting git.py into sub-modules, shared dependencies must be
+    patched in every module that imports them.
+    """
+    if mock_git_service is not None:
+        for m in ("app.api.git", "app.api.git_worktrees", "app.api.git_ai"):
+            stack.enter_context(patch(f"{m}.git_service", mock_git_service))
+    if mock_worktree_manager is not None:
+        for m in ("app.api.git", "app.api.git_worktrees"):
+            stack.enter_context(patch(f"{m}.worktree_manager", mock_worktree_manager))
+    if mock_database is not None:
+        for m in ("app.api.git", "app.api.git_helpers", "app.api.git_worktrees"):
+            stack.enter_context(patch(f"{m}.database", mock_database))
+    if mock_settings is not None:
+        stack.enter_context(patch("app.api.git.settings", mock_settings))
+    if mock_api_user_return is not ...:
+        stack.enter_context(
+            patch("app.api.git.get_api_user_from_request", return_value=mock_api_user_return)
+        )
 
 
 # =============================================================================
@@ -89,14 +120,17 @@ def app(mock_git_service, mock_worktree_manager, mock_database, mock_settings):
 @pytest.fixture
 def client(app, mock_git_service, mock_worktree_manager, mock_database, mock_settings):
     """Create a test client with mocked dependencies."""
-    with patch("app.api.git.git_service", mock_git_service):
-        with patch("app.api.git.worktree_manager", mock_worktree_manager):
-            with patch("app.api.git.database", mock_database):
-                with patch("app.api.git.settings", mock_settings):
-                    with patch("app.api.git.get_api_user_from_request") as mock_api_user:
-                        mock_api_user.return_value = None
-                        with TestClient(app) as test_client:
-                            yield test_client
+    with ExitStack() as stack:
+        _enter_git_patches(
+            stack,
+            mock_git_service=mock_git_service,
+            mock_worktree_manager=mock_worktree_manager,
+            mock_database=mock_database,
+            mock_settings=mock_settings,
+            mock_api_user_return=None,
+        )
+        with TestClient(app) as test_client:
+            yield test_client
 
 
 @pytest.fixture
@@ -266,8 +300,12 @@ class TestGetGitStatus:
         mock_git_service.is_git_repo.return_value = True
         mock_database.get_git_repository_by_project.return_value = sample_repository
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -285,7 +323,9 @@ class TestGetGitStatus:
         """Should return 404 for non-existent project."""
         mock_database.get_project.return_value = None
 
-        with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
             with patch("app.api.git.settings", mock_settings):
                 with patch("app.api.git.get_api_user_from_request", return_value=None):
                     client = TestClient(app)
@@ -316,8 +356,12 @@ class TestGetGitStatus:
         mock_git_service.is_git_repo.return_value = False
         mock_database.get_git_repository_by_project.return_value = None
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -354,8 +398,12 @@ class TestGetGitStatus:
         mock_git_service.is_git_repo.return_value = True
         mock_database.get_git_repository_by_project.return_value = sample_repository
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -391,8 +439,12 @@ class TestGetGitStatus:
             "last_synced_at": None
         }
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -407,7 +459,9 @@ class TestGetGitStatus:
         """Should deny access when API user tries to access different project."""
         mock_database.get_project.return_value = sample_project
 
-        with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
             with patch("app.api.git.settings", mock_settings):
                 # Set API user with different project access
                 with patch("app.api.git.get_api_user_from_request", return_value={
@@ -438,8 +492,12 @@ class TestListBranches:
         mock_git_service.list_branches.return_value = sample_branches
         mock_git_service.get_current_branch.return_value = "main"
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -465,8 +523,12 @@ class TestListBranches:
         ]
         mock_git_service.get_current_branch.return_value = "main"
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -486,8 +548,12 @@ class TestListBranches:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = False
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -500,7 +566,9 @@ class TestListBranches:
         """Should return 404 for non-existent project."""
         mock_database.get_project.return_value = None
 
-        with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
             with patch("app.api.git.settings", mock_settings):
                 with patch("app.api.git.get_api_user_from_request", return_value=None):
                     client = TestClient(app)
@@ -524,8 +592,12 @@ class TestCreateBranch:
         mock_git_service.is_git_repo.return_value = True
         mock_git_service.create_branch.return_value = True
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -547,8 +619,12 @@ class TestCreateBranch:
         mock_git_service.is_git_repo.return_value = True
         mock_git_service.create_branch.return_value = True
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -571,8 +647,12 @@ class TestCreateBranch:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = True
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -591,8 +671,12 @@ class TestCreateBranch:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = True
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -610,8 +694,12 @@ class TestCreateBranch:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = True
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -631,8 +719,12 @@ class TestCreateBranch:
         mock_git_service.is_git_repo.return_value = True
         mock_git_service.create_branch.return_value = False
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -651,8 +743,12 @@ class TestCreateBranch:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = False
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -681,8 +777,12 @@ class TestDeleteBranch:
         mock_git_service.get_current_branch.return_value = "main"
         mock_git_service.delete_branch.return_value = True
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -704,8 +804,12 @@ class TestDeleteBranch:
         mock_git_service.get_current_branch.return_value = "main"
         mock_git_service.delete_branch.return_value = True
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -726,8 +830,12 @@ class TestDeleteBranch:
         mock_git_service.is_git_repo.return_value = True
         mock_git_service.get_current_branch.return_value = "main"
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -747,8 +855,12 @@ class TestDeleteBranch:
         mock_git_service.get_current_branch.return_value = "main"
         mock_git_service.delete_branch.return_value = False
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -766,8 +878,12 @@ class TestDeleteBranch:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = False
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -796,8 +912,12 @@ class TestCheckout:
         }
         mock_git_service.checkout.return_value = True
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -825,8 +945,12 @@ class TestCheckout:
             "conflicts": []
         }
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -847,8 +971,12 @@ class TestCheckout:
         mock_git_service.get_status.return_value = {"is_clean": True}
         mock_git_service.checkout.return_value = False
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -867,8 +995,12 @@ class TestCheckout:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = False
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -896,8 +1028,12 @@ class TestCommitGraph:
         mock_git_service.is_git_repo.return_value = True
         mock_git_service.get_commit_graph.return_value = sample_commits
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -918,8 +1054,12 @@ class TestCommitGraph:
         mock_git_service.is_git_repo.return_value = True
         mock_git_service.get_commit_graph.return_value = sample_commits[:1]
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -941,8 +1081,12 @@ class TestCommitGraph:
         mock_git_service.is_git_repo.return_value = True
         mock_git_service.get_commit_graph.return_value = sample_commits
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -964,8 +1108,12 @@ class TestCommitGraph:
         mock_git_service.is_git_repo.return_value = True
         mock_git_service.get_commit_graph.return_value = sample_commits
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -985,8 +1133,12 @@ class TestCommitGraph:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = False
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1012,8 +1164,12 @@ class TestFetch:
         mock_git_service.fetch.return_value = True
         mock_database.get_git_repository_by_project.return_value = sample_repository
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1033,8 +1189,12 @@ class TestFetch:
         mock_git_service.fetch.return_value = True
         mock_database.get_git_repository_by_project.return_value = None
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1055,8 +1215,12 @@ class TestFetch:
         mock_git_service.is_git_repo.return_value = True
         mock_git_service.fetch.return_value = False
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1075,8 +1239,12 @@ class TestFetch:
         mock_git_service.fetch.return_value = True
         mock_database.get_git_repository_by_project.return_value = sample_repository
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1092,8 +1260,12 @@ class TestFetch:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = False
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1118,9 +1290,14 @@ class TestListWorktrees:
         mock_git_service.is_git_repo.return_value = True
         mock_worktree_manager.get_worktrees_for_project.return_value = [sample_worktree]
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.worktree_manager", mock_worktree_manager):
-                with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                     with patch("app.api.git.settings", mock_settings):
                         with patch("app.api.git.get_api_user_from_request", return_value=None):
                             client = TestClient(app)
@@ -1142,9 +1319,14 @@ class TestListWorktrees:
         mock_git_service.is_git_repo.return_value = True
         mock_worktree_manager.get_worktrees_for_project.return_value = []
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.worktree_manager", mock_worktree_manager):
-                with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                     with patch("app.api.git.settings", mock_settings):
                         with patch("app.api.git.get_api_user_from_request", return_value=None):
                             client = TestClient(app)
@@ -1180,9 +1362,14 @@ class TestListWorktrees:
         mock_git_service.is_git_repo.return_value = True
         mock_worktree_manager.get_worktrees_for_project.return_value = [worktree_with_session]
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.worktree_manager", mock_worktree_manager):
-                with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                     with patch("app.api.git.settings", mock_settings):
                         with patch("app.api.git.get_api_user_from_request", return_value=None):
                             client = TestClient(app)
@@ -1200,8 +1387,12 @@ class TestListWorktrees:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = False
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1227,9 +1418,14 @@ class TestCreateWorktree:
         mock_worktree_manager.create_worktree.return_value = sample_worktree
         mock_worktree_manager.get_worktree_details.return_value = sample_worktree
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.worktree_manager", mock_worktree_manager):
-                with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                     with patch("app.api.git.settings", mock_settings):
                         with patch("app.api.git.get_api_user_from_request", return_value=None):
                             client = TestClient(app)
@@ -1254,9 +1450,14 @@ class TestCreateWorktree:
         mock_worktree_manager.create_worktree.return_value = sample_worktree
         mock_worktree_manager.get_worktree_details.return_value = sample_worktree
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.worktree_manager", mock_worktree_manager):
-                with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                     with patch("app.api.git.settings", mock_settings):
                         with patch("app.api.git.get_api_user_from_request", return_value=None):
                             client = TestClient(app)
@@ -1292,9 +1493,14 @@ class TestCreateWorktree:
         mock_worktree_manager.create_worktree_session.return_value = (sample_worktree, session)
         mock_worktree_manager.get_worktree_details.return_value = sample_worktree
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.worktree_manager", mock_worktree_manager):
-                with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                     with patch("app.api.git.settings", mock_settings):
                         with patch("app.api.git.get_api_user_from_request", return_value=None):
                             client = TestClient(app)
@@ -1314,8 +1520,12 @@ class TestCreateWorktree:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = True
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1337,9 +1547,14 @@ class TestCreateWorktree:
         # Return None for worktree to simulate failure
         mock_worktree_manager.create_worktree_session.return_value = (None, None)
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.worktree_manager", mock_worktree_manager):
-                with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                     with patch("app.api.git.settings", mock_settings):
                         with patch("app.api.git.get_api_user_from_request", return_value=None):
                             client = TestClient(app)
@@ -1360,9 +1575,14 @@ class TestCreateWorktree:
         mock_git_service.is_git_repo.return_value = True
         mock_worktree_manager.create_worktree.return_value = None
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.worktree_manager", mock_worktree_manager):
-                with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                     with patch("app.api.git.settings", mock_settings):
                         with patch("app.api.git.get_api_user_from_request", return_value=None):
                             client = TestClient(app)
@@ -1381,8 +1601,12 @@ class TestCreateWorktree:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = False
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1410,9 +1634,14 @@ class TestGetWorktree:
         mock_worktree_manager.get_worktree_details.return_value = sample_worktree
         mock_database.get_git_repository_by_project.return_value = sample_repository
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.worktree_manager", mock_worktree_manager):
-                with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                     with patch("app.api.git.settings", mock_settings):
                         with patch("app.api.git.get_api_user_from_request", return_value=None):
                             client = TestClient(app)
@@ -1432,8 +1661,11 @@ class TestGetWorktree:
         mock_database.get_project.return_value = sample_project
         mock_worktree_manager.get_worktree_details.return_value = None
 
-        with patch("app.api.git.worktree_manager", mock_worktree_manager):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1455,8 +1687,11 @@ class TestGetWorktree:
             "project_id": "different-project"
         }
 
-        with patch("app.api.git.worktree_manager", mock_worktree_manager):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1483,8 +1718,11 @@ class TestGetWorktree:
         mock_worktree_manager.get_worktree_details.return_value = worktree_with_status
         mock_database.get_git_repository_by_project.return_value = sample_repository
 
-        with patch("app.api.git.worktree_manager", mock_worktree_manager):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1515,8 +1753,11 @@ class TestDeleteWorktree:
         mock_database.get_git_repository_by_project.return_value = sample_repository
         mock_worktree_manager.cleanup_worktree.return_value = True
 
-        with patch("app.api.git.worktree_manager", mock_worktree_manager):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1540,8 +1781,11 @@ class TestDeleteWorktree:
         mock_database.get_git_repository_by_project.return_value = sample_repository
         mock_worktree_manager.cleanup_worktree.return_value = True
 
-        with patch("app.api.git.worktree_manager", mock_worktree_manager):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1563,7 +1807,9 @@ class TestDeleteWorktree:
         mock_database.get_project.return_value = sample_project
         mock_database.get_worktree.return_value = None
 
-        with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
             with patch("app.api.git.settings", mock_settings):
                 with patch("app.api.git.get_api_user_from_request", return_value=None):
                     client = TestClient(app)
@@ -1583,7 +1829,9 @@ class TestDeleteWorktree:
             "id": "repo-different"
         }
 
-        with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
             with patch("app.api.git.settings", mock_settings):
                 with patch("app.api.git.get_api_user_from_request", return_value=None):
                     client = TestClient(app)
@@ -1603,8 +1851,11 @@ class TestDeleteWorktree:
         mock_database.get_git_repository_by_project.return_value = sample_repository
         mock_worktree_manager.cleanup_worktree.return_value = False
 
-        with patch("app.api.git.worktree_manager", mock_worktree_manager):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1636,9 +1887,14 @@ class TestSyncWorktrees:
             "errors": []
         }
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.worktree_manager", mock_worktree_manager):
-                with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                     with patch("app.api.git.settings", mock_settings):
                         with patch("app.api.git.get_api_user_from_request", return_value=None):
                             client = TestClient(app)
@@ -1667,9 +1923,14 @@ class TestSyncWorktrees:
             "errors": ["Failed to sync wt-abc123"]
         }
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.worktree_manager", mock_worktree_manager):
-                with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.worktree_manager", mock_worktree_manager),
+                 patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                     with patch("app.api.git.settings", mock_settings):
                         with patch("app.api.git.get_api_user_from_request", return_value=None):
                             client = TestClient(app)
@@ -1688,8 +1949,12 @@ class TestSyncWorktrees:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = False
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1726,8 +1991,10 @@ class TestHelperFunctions:
             "default_branch": "main"
         }
 
-        with patch("app.api.git.git_service", mock_git):
-            with patch("app.api.git.database", mock_db):
+        with (patch("app.api.git.git_service", mock_git),
+             patch("app.api.git_helpers.git_service", mock_git)):
+            with (patch("app.api.git.database", mock_db),
+                 patch("app.api.git_helpers.database", mock_db)):
                 with patch("app.api.git.settings", mock_settings_obj):
                     result = ensure_git_repository_record("test-project", "/test/path")
 
@@ -1748,8 +2015,10 @@ class TestHelperFunctions:
         mock_git.is_git_repo.return_value = True
         mock_db.get_git_repository_by_project.return_value = existing_repo
 
-        with patch("app.api.git.git_service", mock_git):
-            with patch("app.api.git.database", mock_db):
+        with (patch("app.api.git.git_service", mock_git),
+             patch("app.api.git_helpers.git_service", mock_git)):
+            with (patch("app.api.git.database", mock_db),
+                 patch("app.api.git_helpers.database", mock_db)):
                 with patch("app.api.git.settings", mock_settings_obj):
                     result = ensure_git_repository_record("test-project", "/test/path")
 
@@ -1766,8 +2035,10 @@ class TestHelperFunctions:
 
         mock_git.is_git_repo.return_value = False
 
-        with patch("app.api.git.git_service", mock_git):
-            with patch("app.api.git.database", mock_db):
+        with (patch("app.api.git.git_service", mock_git),
+             patch("app.api.git_helpers.git_service", mock_git)):
+            with (patch("app.api.git.database", mock_db),
+                 patch("app.api.git_helpers.database", mock_db)):
                 with patch("app.api.git.settings", mock_settings_obj):
                     result = ensure_git_repository_record("test-project", "/test/path")
 
@@ -1787,8 +2058,10 @@ class TestHelperFunctions:
         mock_git.get_default_branch.return_value = "main"
         mock_db.create_git_repository.return_value = {"id": "repo-new"}
 
-        with patch("app.api.git.git_service", mock_git):
-            with patch("app.api.git.database", mock_db):
+        with (patch("app.api.git.git_service", mock_git),
+             patch("app.api.git_helpers.git_service", mock_git)):
+            with (patch("app.api.git.database", mock_db),
+                 patch("app.api.git_helpers.database", mock_db)):
                 with patch("app.api.git.settings", mock_settings_obj):
                     ensure_git_repository_record("test-project", "/test/path")
 
@@ -1810,8 +2083,10 @@ class TestHelperFunctions:
         mock_git.get_default_branch.return_value = "main"
         mock_db.create_git_repository.return_value = {"id": "repo-new"}
 
-        with patch("app.api.git.git_service", mock_git):
-            with patch("app.api.git.database", mock_db):
+        with (patch("app.api.git.git_service", mock_git),
+             patch("app.api.git_helpers.git_service", mock_git)):
+            with (patch("app.api.git.database", mock_db),
+                 patch("app.api.git_helpers.database", mock_db)):
                 with patch("app.api.git.settings", mock_settings_obj):
                     result = ensure_git_repository_record("test-project", "/test/path")
 
@@ -1834,8 +2109,10 @@ class TestHelperFunctions:
         mock_git.get_default_branch.return_value = "main"
         mock_db.create_git_repository.return_value = {"id": "repo-new"}
 
-        with patch("app.api.git.git_service", mock_git):
-            with patch("app.api.git.database", mock_db):
+        with (patch("app.api.git.git_service", mock_git),
+             patch("app.api.git_helpers.git_service", mock_git)):
+            with (patch("app.api.git.database", mock_db),
+                 patch("app.api.git_helpers.database", mock_db)):
                 with patch("app.api.git.settings", mock_settings_obj):
                     result = ensure_git_repository_record("test-project", "/test/path")
 
@@ -1974,8 +2251,12 @@ class TestRequestValidation:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = True
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -1993,8 +2274,12 @@ class TestRequestValidation:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = True
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)
@@ -2012,8 +2297,12 @@ class TestRequestValidation:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = True
 
-        with patch("app.api.git.git_service", mock_git_service):
-            with patch("app.api.git.database", mock_database):
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
                 with patch("app.api.git.settings", mock_settings):
                     with patch("app.api.git.get_api_user_from_request", return_value=None):
                         client = TestClient(app)

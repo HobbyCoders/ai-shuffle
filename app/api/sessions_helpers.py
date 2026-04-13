@@ -1,0 +1,396 @@
+"""
+Session helper functions, models, and shared state.
+
+Extracted from sessions.py for maintainability. All symbols are
+re-exported from sessions.py for backward compatibility.
+"""
+
+from typing import List, Optional
+
+from fastapi import HTTPException, Request, status
+from pydantic import BaseModel
+
+import time
+
+from app.db import database
+from app.db.async_database import run_sync
+from app.db.tags import get_tags_for_sessions
+from app.db.sessions import get_fork_info_for_sessions
+from app.api.auth import get_api_user_from_request
+
+import logging
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Throttle for session sync — at most once per 60 s per project
+# ---------------------------------------------------------------------------
+_SESSION_SYNC_THROTTLE_S = 60.0
+_last_sync_times: dict[str, float] = {}  # project_id -> monotonic timestamp
+
+
+# ---------------------------------------------------------------------------
+# Request / Response models
+# ---------------------------------------------------------------------------
+
+class BatchDeleteRequest(BaseModel):
+    """Request body for batch delete operation"""
+    session_ids: List[str]
+
+
+class SessionImportData(BaseModel):
+    """Data structure for imported session"""
+    session: dict
+    messages: List[dict]
+    exported_at: Optional[str] = None
+    format_version: Optional[str] = None
+
+
+class SessionImportResponse(BaseModel):
+    """Response for session import"""
+    session_id: str
+    title: Optional[str]
+    message_count: int
+    status: str
+
+
+class ImportJSONLRequest(BaseModel):
+    """Request body for importing a JSONL session"""
+    jsonl_path: str
+    profile_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+
+class ImportJSONLResponse(BaseModel):
+    """Response for JSONL session import"""
+    session_id: str
+    sdk_session_id: str
+    title: Optional[str]
+    message_count: int
+    status: str
+
+
+class ForkSessionRequest(BaseModel):
+    """Request body for forking a session"""
+    message_index: int
+
+
+class ForkSessionResponse(BaseModel):
+    """Response for session fork"""
+    session_id: str
+    title: Optional[str]
+    parent_session_id: str
+    fork_point_message_index: int
+    message_count: int
+    status: str
+
+
+class CreateWorktreeSessionRequest(BaseModel):
+    """Request body for creating a session with a worktree"""
+    project_id: str
+    branch_name: str
+    base_branch: str = "main"
+    profile_id: Optional[str] = None
+    create_new_branch: bool = False  # False = use existing branch, True = create new branch
+
+
+class WorktreeSessionResponse(BaseModel):
+    """Response for worktree session creation"""
+    session_id: str
+    worktree_id: str
+    branch_name: str
+    base_branch: str
+    worktree_path: str
+    status: str
+
+
+# ---------------------------------------------------------------------------
+# SDK message transformation
+# ---------------------------------------------------------------------------
+
+def _transform_sdk_messages(sdk_messages: list) -> list:
+    """Transform SDK SessionMessage objects into our frontend-compatible format.
+
+    The SDK's get_session_messages() returns SessionMessage objects with
+    type ("user"/"assistant"), uuid, session_id, and message (raw Anthropic API dict).
+    This transforms them into the same shape our frontend expects.
+    """
+    messages = []
+    tool_id_to_name: dict[str, str] = {}  # Track tool_use_id → tool_name
+
+    for i, sdk_msg in enumerate(sdk_messages):
+        raw = sdk_msg.message  # Raw Anthropic API message dict
+        role = raw.get("role", sdk_msg.type)
+        content = raw.get("content", "")
+
+        if role == "assistant" and isinstance(content, list):
+            # Assistant messages contain content blocks (text, tool_use, thinking, etc.)
+            for block in content:
+                block_type = block.get("type")
+
+                if block_type == "text":
+                    messages.append({
+                        "id": f"{sdk_msg.uuid}-text-{len(messages)}",
+                        "role": "assistant",
+                        "content": block.get("text", ""),
+                        "type": "text",
+                        "created_at": None,
+                    })
+
+                elif block_type == "tool_use":
+                    tool_id = block.get("id")
+                    tool_name = block.get("name", "unknown")
+                    if tool_id:
+                        tool_id_to_name[tool_id] = tool_name
+                    messages.append({
+                        "id": f"{sdk_msg.uuid}-tool-{tool_id}",
+                        "role": "assistant",
+                        "content": f"Using tool: {tool_name}",
+                        "type": "tool_use",
+                        "toolName": tool_name,
+                        "toolInput": block.get("input"),
+                        "toolId": tool_id,
+                        "tool_name": tool_name,
+                        "tool_input": block.get("input"),
+                        "created_at": None,
+                    })
+
+                elif block_type == "thinking":
+                    messages.append({
+                        "id": f"{sdk_msg.uuid}-thinking-{len(messages)}",
+                        "role": "assistant",
+                        "content": block.get("thinking", ""),
+                        "type": "thinking",
+                        "created_at": None,
+                    })
+
+        elif role == "user":
+            if isinstance(content, list):
+                # User messages with tool results
+                for block in content:
+                    block_type = block.get("type")
+                    if block_type == "tool_result":
+                        tool_use_id = block.get("tool_use_id", "")
+                        tool_name = tool_id_to_name.get(tool_use_id, "unknown")
+                        result_content = block.get("content", "")
+                        if isinstance(result_content, list):
+                            # Flatten content blocks to text
+                            result_content = "\n".join(
+                                b.get("text", "") for b in result_content
+                                if b.get("type") == "text"
+                            ) or str(result_content)
+                        messages.append({
+                            "id": f"{sdk_msg.uuid}-result-{tool_use_id}",
+                            "role": "tool_result",
+                            "content": str(result_content)[:2000],
+                            "type": "tool_result",
+                            "toolName": tool_name,
+                            "toolId": tool_use_id,
+                            "tool_name": tool_name,
+                            "created_at": None,
+                        })
+                    elif block_type == "text":
+                        messages.append({
+                            "id": f"{sdk_msg.uuid}-{len(messages)}",
+                            "role": "user",
+                            "content": block.get("text", ""),
+                            "type": "text",
+                            "created_at": None,
+                        })
+            elif isinstance(content, str):
+                messages.append({
+                    "id": sdk_msg.uuid,
+                    "role": "user",
+                    "content": content,
+                    "type": "text",
+                    "created_at": None,
+                })
+
+    return messages
+
+
+# ---------------------------------------------------------------------------
+# Access control helpers
+# ---------------------------------------------------------------------------
+
+def check_session_access(request: Request, session: dict) -> None:
+    """Check if API user has access to a session based on project/profile restrictions."""
+    api_user = get_api_user_from_request(request)
+    if not api_user:
+        return  # Admin has full access
+
+    # Check project restriction
+    if api_user.get("project_id") and session.get("project_id"):
+        if api_user["project_id"] != session["project_id"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this session"
+            )
+
+    # Check profile restriction
+    if api_user.get("profile_id"):
+        if api_user["profile_id"] != session.get("profile_id"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this session"
+            )
+
+
+async def require_session(request: Request, session_id: str) -> dict:
+    """Fetch a session, verify it exists, and check access in one call.
+
+    Replaces the repeated pattern of:
+        existing = await run_sync(database.get_session, session_id)
+        if not existing: raise HTTPException(404)
+        check_session_access(request, existing)
+
+    Returns the session dict if valid.
+    Raises HTTPException(404) if not found, HTTPException(403) if access denied.
+    """
+    session = await run_sync(database.get_session, session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {session_id}"
+        )
+    check_session_access(request, session)
+    return session
+
+
+# ---------------------------------------------------------------------------
+# Enrichment helpers
+# ---------------------------------------------------------------------------
+
+def enrich_sessions_with_tags(sessions: List[dict]) -> List[dict]:
+    """Add tags array, has_forks field, and api_user_name to each session.
+
+    Uses batch DB queries (2 total) instead of per-session queries to avoid
+    O(N) round-trips that slow down with session count.
+    """
+    if not sessions:
+        return sessions
+
+    session_ids = [s["id"] for s in sessions]
+
+    # Batch-lookup API user names
+    api_user_ids = {s["api_user_id"] for s in sessions if s.get("api_user_id")}
+    api_user_names: dict[str, str] = {}
+    for uid in api_user_ids:
+        user = database.get_api_user(uid)
+        if user:
+            api_user_names[uid] = user.get("name") or user.get("username") or uid
+
+    # Batch: tags for all sessions (1 query instead of N)
+    tags_by_session = get_tags_for_sessions(session_ids)
+
+    # Batch: fork info for all sessions (2 queries instead of N)
+    fork_info_by_session = get_fork_info_for_sessions(session_ids)
+
+    for session in sessions:
+        sid = session["id"]
+        session["tags"] = tags_by_session.get(sid, [])
+        fork_info = fork_info_by_session.get(sid)
+        session["has_forks"] = fork_info["has_forks"] if fork_info else False
+        if session.get("api_user_id"):
+            session["api_user_name"] = api_user_names.get(session["api_user_id"])
+    return sessions
+
+
+def enrich_search_results_with_tags(results: list) -> list:
+    """Add tags array and has_forks field to each search result.
+
+    Uses batch DB queries (2 total) instead of per-result queries to avoid
+    O(N) round-trips that slow down with result count.
+    """
+    if not results:
+        return results
+
+    session_ids = [r["id"] for r in results]
+
+    # Batch: tags for all results (1 query instead of N)
+    tags_by_session = get_tags_for_sessions(session_ids)
+
+    # Batch: fork info for all results (2 queries instead of N)
+    fork_info_by_session = get_fork_info_for_sessions(session_ids)
+
+    for result in results:
+        sid = result["id"]
+        result["tags"] = tags_by_session.get(sid, [])
+        fork_info = fork_info_by_session.get(sid)
+        result["has_forks"] = fork_info["has_forks"] if fork_info else False
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Shared filter logic
+# ---------------------------------------------------------------------------
+
+def _apply_session_filters(
+    request: Request,
+    project_id: Optional[str],
+    profile_id: Optional[str],
+    api_user_id: Optional[str],
+    admin_only: bool,
+    api_users_only: bool,
+    sync_claude_sessions: bool,
+) -> tuple:
+    """Apply API user restrictions and sync Claude sessions.
+
+    Shared logic for list_sessions and list_sessions_paginated:
+    1. Force project/profile/api_user_id from API user restrictions
+    2. Auto-sync Claude Code sessions for the project
+    3. Build filter_api_user_id and filter_api_users_only from the flags
+
+    Returns (project_id, profile_id, filter_api_user_id, filter_api_users_only).
+    """
+    api_user = get_api_user_from_request(request)
+
+    # Force API user restrictions
+    if api_user:
+        if api_user.get("project_id"):
+            project_id = api_user["project_id"]
+        if api_user.get("profile_id"):
+            profile_id = api_user["profile_id"]
+        # API users can only see their own sessions
+        api_user_id = api_user["id"]
+        admin_only = False
+        api_users_only = False
+
+    # Auto-sync Claude Code sessions (only for specific project, not global).
+    # Throttled to at most once per 60 s per project — disk scan + N DB
+    # lookups is too expensive to run on every list request.
+    if sync_claude_sessions and project_id:
+        now = time.monotonic()
+        last = _last_sync_times.get(project_id, 0.0)
+        if now - last >= _SESSION_SYNC_THROTTLE_S:
+            try:
+                from app.core.session_sync import session_sync_service
+                _last_sync_times[project_id] = now
+                sync_result = session_sync_service.sync_project_sessions(
+                    project_id=project_id,
+                    profile_id=profile_id or "default"
+                )
+                if sync_result["imported_count"] > 0:
+                    logger.debug(
+                        f"Auto-imported {sync_result['imported_count']} Claude Code sessions "
+                        f"for project {project_id}"
+                    )
+            except Exception as e:
+                # Don't fail the request if sync fails - just log and continue
+                logger.warning(f"Failed to auto-sync Claude Code sessions: {e}")
+
+    # Determine api_user_id filter value:
+    # - admin_only=True  -> filter for sessions with api_user_id IS NULL
+    # - api_users_only=True -> filter for sessions with api_user_id IS NOT NULL
+    # - api_user_id set  -> filter for that specific user
+    # - otherwise        -> show all sessions
+    filter_api_user_id = None
+    filter_api_users_only = False
+    if admin_only:
+        filter_api_user_id = ""  # Empty string signals "IS NULL" in database.get_sessions
+    elif api_users_only:
+        filter_api_users_only = True
+    elif api_user_id:
+        filter_api_user_id = api_user_id
+
+    return project_id, profile_id, filter_api_user_id, filter_api_users_only
