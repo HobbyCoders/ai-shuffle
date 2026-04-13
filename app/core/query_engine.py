@@ -43,6 +43,7 @@ from claude_agent_sdk.types import StreamEvent, PermissionResultAllow, Permissio
 
 from app.db import database
 from app.db.async_database import run_sync
+from pathlib import Path
 from app.core.config import settings
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
@@ -1768,6 +1769,12 @@ async def stream_to_websocket(
         # Create and connect new client
         logger.debug(f"[WS] Creating ClaudeSDKClient for session {session_id} (resume={resume_id is not None}, include_partial={options.include_partial_messages})")
         logger.debug(f"[WS] Options cwd: {options.cwd}")
+
+        # Verify CWD exists before spawning subprocess
+        if options.cwd and not Path(options.cwd).is_dir():
+            logger.error(f"[WS] CWD does not exist: {options.cwd}")
+            yield {"type": "error", "message": f"Working directory does not exist: {options.cwd}"}
+            return
 
         # Wrap stderr callback to collect lines for error reporting
         options.stderr, cli_stderr_lines = _wrap_stderr_capture(options.stderr)

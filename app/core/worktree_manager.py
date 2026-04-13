@@ -946,6 +946,13 @@ class WorktreeManager:
         if not success:
             raise WorktreeError(f"Git failed to recreate worktree: {error_msg or 'Unknown error'}")
 
+        # Verify the worktree directory was actually created on disk
+        if not worktree_path.is_dir():
+            raise WorktreeError(
+                f"Git reported success but worktree directory not found: {worktree_path}"
+            )
+        logger.debug(f"Verified worktree directory exists: {worktree_path}")
+
         # Update existing DB record back to ACTIVE with new path
         updated = database.update_worktree(
             worktree_id,
@@ -954,16 +961,17 @@ class WorktreeManager:
             branch_name=branch_name,
         )
 
-        # Clear sdk_session_id on all sessions linked to this worktree.
+        # Clear sdk_session_id on all linked sessions.
         # The old SDK session's JSONL lived in the deleted worktree directory,
         # so resuming it would fail with "CLI process exited with code 1".
         # Clearing forces a fresh SDK subprocess on the next message.
         sessions = database.get_sessions_for_worktree(worktree_id)
         for sess in sessions:
+            sid = sess["id"]
             if sess.get("sdk_session_id"):
-                database.update_session(sess["id"], sdk_session_id="")
+                database.update_session(sid, sdk_session_id="")
                 logger.debug(
-                    f"Cleared sdk_session_id for session {sess['id']} "
+                    f"Cleared sdk_session_id for session {sid} "
                     f"(worktree {worktree_id} reopened)"
                 )
 

@@ -2087,6 +2087,17 @@ async def reopen_worktree(
             detail=str(e)
         )
 
+    # Evict stale pooled subprocesses whose CWD pointed to the old (deleted) worktree.
+    # Must be done here (async context) since recreate_worktree is sync.
+    from app.core.session_pool import get_session_pool
+    pool = get_session_pool()
+    sessions = database.get_sessions_for_worktree(worktree_id)
+    for sess in sessions:
+        sid = sess["id"]
+        if pool.get(sid):
+            await pool.remove(sid)
+            logger.debug(f"Evicted pooled session {sid} after worktree reopen")
+
     return _convert_worktree_to_info(updated)
 
 
