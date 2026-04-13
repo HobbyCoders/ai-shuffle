@@ -202,7 +202,7 @@
 		formPrompt = agent.prompt;
 		formTools = agent.tools || [];
 		formModel = agent.model || '';
-		toolSelectionMode = agent.tools && agent.tools.length > 0 ? 'select' : 'all';
+		toolSelectionMode = Array.isArray(agent.tools) ? 'select' : 'all';
 		viewMode = 'editor';
 	}
 
@@ -227,12 +227,8 @@
 				prompt: formPrompt,
 			};
 
-			// Always include tools — null means "all tools" (inherit)
-			if (toolSelectionMode === 'select' && formTools.length > 0) {
-				body.tools = formTools;
-			} else {
-				body.tools = null;
-			}
+			// tools: null = all tools (inherit), [] = no tools, [...] = specific tools
+			body.tools = toolSelectionMode === 'select' ? formTools : null;
 			// Always include model — null means "inherit from session"
 			body.model = formModel || null;
 
@@ -411,7 +407,7 @@
 		formPrompt = sub.prompt;
 		formTools = sub.tools || [];
 		formModel = sub.model || '';
-		toolSelectionMode = sub.tools && sub.tools.length > 0 ? 'select' : 'all';
+		toolSelectionMode = Array.isArray(sub.tools) ? 'select' : 'all';
 
 		viewMode = 'editor';
 	}
