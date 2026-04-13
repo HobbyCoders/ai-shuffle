@@ -111,9 +111,11 @@ def create_subagent(
         store_defaults: If True, also store current values as defaults (for built-in subagents)
     """
     now = datetime.now(timezone.utc).isoformat()
-    tools_json = json.dumps(tools) if tools else None
-    skills_json = json.dumps(skills) if skills else None
-    mcp_servers_json = json.dumps(mcp_servers) if mcp_servers else None
+    # Use `is not None` — empty list [] must serialize as "[]", not NULL.
+    # NULL means "inherit all", [] means "no tools allowed".
+    tools_json = json.dumps(tools) if tools is not None else None
+    skills_json = json.dumps(skills) if skills is not None else None
+    mcp_servers_json = json.dumps(mcp_servers) if mcp_servers is not None else None
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -177,19 +179,19 @@ def update_subagent(
         values.append(prompt)
     if tools is not ...:
         updates.append("tools = %s")
-        values.append(json.dumps(tools) if tools else None)
+        values.append(json.dumps(tools) if tools is not None else None)
     if model is not ...:
         updates.append("model = %s")
         values.append(model)
     if skills is not ...:
         updates.append("skills = %s")
-        values.append(json.dumps(skills) if skills else None)
+        values.append(json.dumps(skills) if skills is not None else None)
     if memory is not ...:
         updates.append("memory = %s")
         values.append(memory)
     if mcp_servers is not ...:
         updates.append("mcp_servers = %s")
-        values.append(json.dumps(mcp_servers) if mcp_servers else None)
+        values.append(json.dumps(mcp_servers) if mcp_servers is not None else None)
 
     if updates:
         updates.append("updated_at = %s")

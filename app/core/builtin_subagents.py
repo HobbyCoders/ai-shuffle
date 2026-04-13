@@ -522,7 +522,7 @@ def _update_builtin_defaults(subagent_id: str, definition: Dict[str, Any]) -> No
     from datetime import datetime, timezone
     from app.db.base import get_db
 
-    tools_json = json.dumps(definition.get("tools")) if definition.get("tools") else None
+    tools_json = json.dumps(definition.get("tools")) if definition.get("tools") is not None else None
 
     with get_db() as conn:
         cursor = conn.cursor()
