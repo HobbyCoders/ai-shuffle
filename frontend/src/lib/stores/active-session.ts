@@ -583,10 +583,10 @@ function setupPollCallback() {
 					if (finalWsContent.length > pollerContent.length) {
 						finalMessages = [...finalMessages];
 						finalMessages[pollerStreamIdx] = { ...finalMessages[pollerStreamIdx], content: finalWsContent };
-					} else {
-						// Poller caught up — clear WS buffer
-						finalWsContent = '';
 					}
+					// Don't clear wsStreamContent when poller catches up.
+					// Keeping the full WS buffer lets components read it
+					// for sub-poll-interval display updates via typewriter.
 				} else if (pollerStreamIdx < 0) {
 					// Poller doesn't have a streaming assistant message yet.
 					// Preserve the synthetic one from our current state so the

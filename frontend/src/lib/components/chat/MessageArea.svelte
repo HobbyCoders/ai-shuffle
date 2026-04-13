@@ -700,6 +700,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 					{:else if message.type === 'text' || !message.type}
 						<AssistantMessage
 							content={message.content}
+							wsContent={message.streaming && messageIndex === lastStreamingMessageIndex ? $activeSession.wsStreamContent : undefined}
 							messageIndex={messageIndex}
 							messageId={message.id}
 							messageUuid={message.jsonlUuid}

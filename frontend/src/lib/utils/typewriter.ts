@@ -35,6 +35,7 @@ export class Typewriter {
 	private _length = 0;
 	private _rafId: number | null = null;
 	private _lastFrame = 0;
+	private _initialized = false;
 	private readonly _onUpdate: (length: number) => void;
 
 	constructor(onUpdate: (length: number) => void) {
@@ -50,6 +51,18 @@ export class Typewriter {
 			this._target = text;
 			this._emit(text.length);
 			this._stop();
+			this._initialized = false;
+			return;
+		}
+
+		// First streaming call: show ALL existing content immediately.
+		// Only animate content that arrives AFTER this point.
+		// Fixes: component recreation mid-stream (Phase 3 ID transitions)
+		// causing displayContent='' because _length starts at 0.
+		if (!this._initialized) {
+			this._initialized = true;
+			this._target = text;
+			this._emit(text.length);
 			return;
 		}
 

@@ -17,6 +17,8 @@
 
 	interface Props {
 		content: string;
+		/** Real-time WS stream buffer — updates every delta, not just every poll */
+		wsContent?: string;
 		timestamp?: Date;
 		messageIndex: number;
 		messageId: string;
@@ -34,6 +36,7 @@
 
 	let {
 		content,
+		wsContent = '',
 		timestamp,
 		messageIndex,
 		messageId,
@@ -95,16 +98,26 @@
 	// Smoothly reveals streaming content char-by-char via rAF instead of
 	// showing chunky 150ms poll bursts. Purely presentational — does not
 	// modify the data pipeline, WS buffer, or single-writer pattern.
+	//
+	// Uses wsContent (WS buffer, updates every ~50-100ms) when available
+	// and longer than poller content, giving sub-poll-interval granularity.
 	let _twLength = $state(0);
 	const _tw = new Typewriter((len) => { _twLength = len; });
 
-	$effect(() => { _tw.setTarget(content || '', streaming); });
+	/** Best available content: WS buffer if ahead, otherwise poller content */
+	const _twBestContent = $derived(
+		streaming && wsContent && wsContent.length > (content || '').length
+			? wsContent
+			: (content || '')
+	);
+
+	$effect(() => { _tw.setTarget(_twBestContent, streaming); });
 
 	/** Content fed to the markdown renderer — smoothed during streaming */
 	const displayContent = $derived(
-		streaming && _twLength < (content || '').length
-			? (content || '').slice(0, _twLength)
-			: (content || '')
+		streaming && _twLength < _twBestContent.length
+			? _twBestContent.slice(0, _twLength)
+			: _twBestContent
 	);
 
 	// ── Incremental markdown rendering ──────────────────────────────────────
