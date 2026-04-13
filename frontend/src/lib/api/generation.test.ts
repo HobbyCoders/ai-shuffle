@@ -54,7 +54,8 @@ describe('AI Generation API', () => {
 			fork_session: false,
 			setting_sources: null,
 			enable_file_checkpointing: false,
-			env: null
+			env: null,
+			app_config_tools: null
 		}
 	};
 

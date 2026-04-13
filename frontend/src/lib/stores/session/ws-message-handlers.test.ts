@@ -104,6 +104,8 @@ function mockState(): ActiveSessionState {
 		sessionLocked: false,
 		sessionLockedBy: undefined,
 		fastMode: false,
+		wsStreamContent: '',
+		pendingInterruptPrompt: null,
 	};
 }
 
