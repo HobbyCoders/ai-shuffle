@@ -1443,7 +1443,7 @@ def _create_profile_tools(is_admin: bool) -> list:
                 },
                 "permission_mode": {
                     "type": "string",
-                    "enum": ["default", "acceptEdits", "plan", "bypassPermissions"],
+                    "enum": ["default", "auto", "acceptEdits", "plan", "bypassPermissions"],
                     "description": "Tool permission mode.",
                 },
                 "thinking_mode": {
@@ -1563,7 +1563,7 @@ def _create_profile_tools(is_admin: bool) -> list:
                 "name": {"type": "string"},
                 "description": {"type": "string"},
                 "model": {"type": "string", "enum": ["sonnet", "opus", "haiku"]},
-                "permission_mode": {"type": "string", "enum": ["default", "acceptEdits", "plan", "bypassPermissions"]},
+                "permission_mode": {"type": "string", "enum": ["default", "auto", "acceptEdits", "plan", "bypassPermissions"]},
                 "thinking_mode": {"type": "string", "enum": ["default", "disabled", "adaptive", "think", "think_harder", "ultra_think"]},
                 "tools_preset": {"type": "string", "enum": ["claude_code"]},
                 "max_turns": {"type": "integer"},

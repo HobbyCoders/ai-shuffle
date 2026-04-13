@@ -45,6 +45,7 @@
 					const modeLabels: Record<string, string> = {
 						plan: 'Plan Mode',
 						default: 'Default Mode',
+						auto: 'Auto Mode',
 						acceptEdits: 'Accept Edits',
 						bypassPermissions: 'Bypass Permissions',
 						delegate: 'Delegate Mode',

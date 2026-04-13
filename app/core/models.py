@@ -76,7 +76,7 @@ class ProfileConfig(BaseModel):
     """Claude Agent configuration stored in profile - maps to ClaudeAgentOptions"""
     # Core settings
     model: Optional[str] = "sonnet"
-    permission_mode: Optional[str] = "default"  # default, acceptEdits, plan, bypassPermissions
+    permission_mode: Optional[str] = "default"  # default, auto, acceptEdits, plan, bypassPermissions
     thinking_mode: Optional[str] = "default"  # default, disabled, adaptive, think, think_harder, ultra_think
     # Opus 4.6+ uses effort-based reasoning instead of token budgets
     # effort: low, medium, high, max (only used when model is opus)
@@ -350,7 +350,7 @@ class PaginatedSessionSearchResults(BaseModel):
 class QueryOverrides(BaseModel):
     """Optional overrides for a query"""
     model: Optional[str] = None
-    permission_mode: Optional[str] = None  # default, acceptEdits, plan, bypassPermissions
+    permission_mode: Optional[str] = None  # default, auto, acceptEdits, plan, bypassPermissions
     system_prompt_append: Optional[str] = None
     max_turns: Optional[int] = None
     thinking_mode: Optional[str] = None  # default, disabled, adaptive, think, think_harder, ultra_think
@@ -710,7 +710,7 @@ class AgentExportData(BaseModel):
     name: str
     description: Optional[str] = None
     model: Optional[str] = "sonnet"
-    permission_mode: Optional[str] = "default"
+    permission_mode: Optional[str] = "default"  # default, auto, acceptEdits, plan, bypassPermissions
     thinking_mode: Optional[str] = "default"
     effort: Optional[str] = None
     system_prompt_type: Optional[str] = "preset"

@@ -279,6 +279,7 @@
 					<label class="pf-label" for="profile-permission">Permission Mode</label>
 					<select id="profile-permission" class="pf-select" value={profileForm.permission_mode} onchange={(e) => onFormChange('permission_mode', (e.target as HTMLSelectElement).value)}>
 						<option value="default">Default</option>
+						<option value="auto">Auto</option>
 						<option value="acceptEdits">Accept Edits</option>
 						<option value="plan">Plan</option>
 						<option value="bypassPermissions">Bypass Permissions</option>
