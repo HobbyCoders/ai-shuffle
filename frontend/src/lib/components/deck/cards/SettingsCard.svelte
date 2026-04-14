@@ -30,6 +30,7 @@
 	import ChatBehaviorSection from './settings/ChatBehaviorSection.svelte';
 	import HotkeysSection from './settings/HotkeysSection.svelte';
 	import SystemTab from './settings/SystemTab.svelte';
+	import LogsTab from './settings/LogsTab.svelte';
 
 	interface Props {
 		mobile?: boolean;
@@ -40,14 +41,15 @@
 	}: Props = $props();
 
 	// Navigation - simplified to 3 main tabs
-	type Tab = 'account' | 'ai' | 'connectors' | 'system';
+	type Tab = 'account' | 'ai' | 'connectors' | 'system' | 'logs';
 	let activeTab: Tab = $state('account');
 
 	const settingsTabs = $derived([
 		{ id: 'account' as Tab, label: 'Account' },
 		{ id: 'ai' as Tab, label: 'AI Models' },
 		...($isAdmin ? [{ id: 'connectors' as Tab, label: 'Connectors' }] : []),
-		...($isAdmin ? [{ id: 'system' as Tab, label: 'System' }] : [])
+		...($isAdmin ? [{ id: 'system' as Tab, label: 'System' }] : []),
+		...($isAdmin ? [{ id: 'logs' as Tab, label: 'Logs' }] : [])
 	]);
 
 	// Collapsible sections state
@@ -509,6 +511,13 @@
 						onSaveSecurityInstructions={saveSecurityInstructions}
 						onRevertSecurityInstructions={revertSecurityInstructions}
 					/>
+				{/if}
+
+				<!-- LOGS TAB -->
+				{#if activeTab === 'logs' && $isAdmin}
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<LogsTab />
+					</div>
 				{/if}
 			</div>
 {/snippet}
