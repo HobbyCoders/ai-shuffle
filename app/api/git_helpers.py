@@ -45,10 +45,28 @@ async def run_git(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     import functools
 
     loop = asyncio.get_running_loop()
-    if kwargs:
-        fn = functools.partial(fn, *args, **kwargs)
-        return await loop.run_in_executor(_git_executor, fn)
-    return await loop.run_in_executor(_git_executor, fn, *args)
+
+    # Track queue depth and timing for slowdown diagnostics
+    pending = _git_executor._work_queue.qsize()
+    fn_name = getattr(fn, '__name__', str(fn))
+    if pending > 2:
+        logger.warning(f"[GitPool] queue depth={pending} before running {fn_name}")
+
+    start = time.monotonic()
+    try:
+        if kwargs:
+            fn = functools.partial(fn, *args, **kwargs)
+            result = await loop.run_in_executor(_git_executor, fn)
+        else:
+            result = await loop.run_in_executor(_git_executor, fn, *args)
+        elapsed = time.monotonic() - start
+        if elapsed > 5.0:
+            logger.warning(f"[GitPool] {fn_name} took {elapsed:.1f}s (queue_depth_at_submit={pending})")
+        return result
+    except Exception:
+        elapsed = time.monotonic() - start
+        logger.warning(f"[GitPool] {fn_name} FAILED after {elapsed:.1f}s")
+        raise
 
 
 class _RequestCoalescer:

@@ -31,6 +31,10 @@ _start_time: float = 0.0
 # Snapshot counter for trend tracking
 _snapshot_count: int = 0
 
+# Track RSS over time for growth rate detection
+_rss_history: list[tuple[float, float]] = []  # (monotonic_time, rss_mb)
+_RSS_HISTORY_MAX = 50  # Keep last ~4 hours of samples at 5-min interval
+
 
 async def _collect_metrics() -> dict:
     """Collect all resource metrics from across the application."""
@@ -142,10 +146,83 @@ async def _collect_metrics() -> dict:
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to collect process metrics: {e}")
 
+    # --- RSS growth rate (detect monotonic memory growth) ---
+    rss_mb = metrics.get("process_rss_mb", 0)
+    if rss_mb > 0:
+        now = time.monotonic()
+        _rss_history.append((now, rss_mb))
+        # Trim old entries
+        while len(_rss_history) > _RSS_HISTORY_MAX:
+            _rss_history.pop(0)
+        # Calculate growth rate if we have enough samples (at least 10 min of data)
+        if len(_rss_history) >= 3:
+            oldest_time, oldest_rss = _rss_history[0]
+            elapsed_hours = (now - oldest_time) / 3600
+            if elapsed_hours > 0.1:  # At least ~6 minutes of data
+                growth_mb_per_hour = (rss_mb - oldest_rss) / elapsed_hours
+                metrics["rss_growth_mb_per_hour"] = round(growth_mb_per_hour, 2)
+
     # --- asyncio task count ---
     try:
         all_tasks = asyncio.all_tasks()
         metrics["asyncio_tasks"] = len(all_tasks)
+    except Exception:
+        pass
+
+    # --- Event loop responsiveness ---
+    try:
+        loop = asyncio.get_running_loop()
+        lag_start = time.monotonic()
+        await asyncio.sleep(0)  # Yield to event loop
+        lag = time.monotonic() - lag_start
+        metrics["event_loop_lag_ms"] = round(lag * 1000, 1)
+    except Exception:
+        pass
+
+    # --- File descriptors ---
+    try:
+        fd_path = f"/proc/{os.getpid()}/fd"
+        if os.path.isdir(fd_path):
+            metrics["open_file_descriptors"] = len(os.listdir(fd_path))
+    except Exception:
+        pass
+
+    # --- Git caches ---
+    try:
+        from app.core.git_cache import _git_cache
+        metrics["git_cache_entries"] = len(_git_cache._data)
+    except Exception:
+        pass
+    try:
+        from app.api.git_helpers import _repo_record_cache
+        metrics["repo_record_cache_entries"] = len(_repo_record_cache)
+    except Exception:
+        pass
+    try:
+        from app.core.git_native import _fsmonitor_configured
+        metrics["fsmonitor_tracked_paths"] = len(_fsmonitor_configured)
+    except Exception:
+        pass
+
+    # --- Python GC stats (detect reference cycle pressure) ---
+    try:
+        import gc
+        counts = gc.get_count()
+        metrics["gc_gen0"] = counts[0]
+        metrics["gc_gen1"] = counts[1]
+        metrics["gc_gen2"] = counts[2]
+        # gc.get_stats() is O(1), unlike gc.get_objects() which is O(n)
+        stats = gc.get_stats()
+        metrics["gc_gen2_collections"] = stats[2].get("collections", 0)
+        metrics["gc_gen2_uncollectable"] = stats[2].get("uncollectable", 0)
+    except Exception:
+        pass
+
+    # --- Git thread pool ---
+    try:
+        from app.api.git_helpers import _git_executor
+        metrics["git_pool_queue_depth"] = _git_executor._work_queue.qsize()
+        metrics["git_pool_threads_active"] = len(_git_executor._threads)
     except Exception:
         pass
 
@@ -216,6 +293,31 @@ def _check_warnings(metrics: dict) -> list[str]:
     max_stream_secs = metrics.get("pool_max_streaming_seconds", 0)
     if max_stream_secs > 600:  # 10 minutes
         warnings.append(f"Longest streaming session: {max_stream_secs:.0f}s - may be stuck")
+
+    # RSS growth rate (sustained memory growth indicates leak)
+    rss_growth = metrics.get("rss_growth_mb_per_hour", 0)
+    if rss_growth > 10:
+        warnings.append(f"RSS growing at {rss_growth:.1f} MB/hour - sustained memory leak likely")
+
+    # Event loop lag
+    lag = metrics.get("event_loop_lag_ms", 0)
+    if lag > 100:
+        warnings.append(f"Event loop lag is {lag}ms - asyncio may be congested")
+
+    # File descriptor growth
+    fds = metrics.get("open_file_descriptors", 0)
+    if fds > 500:
+        warnings.append(f"{fds} open file descriptors - possible FD leak")
+
+    # GC uncollectable objects (reference cycles that can't be freed)
+    uncollectable = metrics.get("gc_gen2_uncollectable", 0)
+    if uncollectable > 0:
+        warnings.append(f"{uncollectable} uncollectable objects in GC gen2 - reference cycle leak")
+
+    # Git pool saturation
+    git_queue = metrics.get("git_pool_queue_depth", 0)
+    if git_queue > 4:
+        warnings.append(f"Git thread pool queue depth is {git_queue} - operations are backing up")
 
     return warnings
 
@@ -352,6 +454,40 @@ async def _periodic_cleanup() -> dict:
                 cleaned["orphaned_worktree_sessions"] = len(orphaned)
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to evict orphaned worktree sessions: {e}")
+
+    # Clean up done automation tasks from _running
+    try:
+        from app.core.automation_manager import automation_manager
+        async with automation_manager._lock:
+            done_auto_ids = [aid for aid, task in automation_manager._running.items() if task.done()]
+            for aid in done_auto_ids:
+                del automation_manager._running[aid]
+            if done_auto_ids:
+                cleaned["done_automation_tasks"] = len(done_auto_ids)
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to clean automation tasks: {e}")
+
+    # Purge expired git cache entries
+    try:
+        from app.core.git_cache import _git_cache
+        count = _git_cache.purge_expired()
+        if count:
+            cleaned["git_cache_expired"] = count
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to purge git cache: {e}")
+
+    # Purge expired repo record cache entries
+    try:
+        from app.api.git_helpers import _repo_record_cache, _REPO_RECORD_TTL
+        import time as _time
+        now = _time.monotonic()
+        expired_keys = [k for k, (_, ts) in _repo_record_cache.items() if (now - ts) > _REPO_RECORD_TTL * 2]
+        for k in expired_keys:
+            del _repo_record_cache[k]
+        if expired_keys:
+            cleaned["repo_record_cache_expired"] = len(expired_keys)
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to purge repo record cache: {e}")
 
     # Clean up expired rate limiter windows and stale config cache
     try:
