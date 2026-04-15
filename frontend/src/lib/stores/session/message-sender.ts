@@ -224,14 +224,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				: _state.title;
 			const queryProfileId = _state.profile;
 
-			// Interrupt and re-query if currently streaming.
+			// Stop current generation then send new message.
+			// Same as hitting stop button — interrupt is instant via SDK.
 			if (_state.isStreaming && _state.sessionId) {
-				const interruptSessionId = _state.sessionId;
+				// Fire stop (same code path as stop button)
+				wsConn.send({ type: 'stop', session_id: _state.sessionId });
 
-				sessionPoller.stop(interruptSessionId);
-				sessionState.removeSession(interruptSessionId);
-				internal.interruptPending = true;
-
+				// Clean up streaming UI immediately
 				update(s => {
 					const updatedMessages = s.messages.map(m => {
 						if (m.type === 'tool_use' && m.toolStatus === 'running') {
@@ -241,86 +240,18 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					});
 					return {
 						...s,
-						messages: updatedMessages,
-						isStreaming: true,
+						messages: updatedMessages.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content)),
+						isStreaming: false,
 						error: null,
 						title: newTitle,
 						currentQueryProfileId: queryProfileId,
 						wsStreamContent: '',
-						pendingInterruptPrompt: prompt,
 					};
 				});
 
 				internal.pendingTools.clear();
 
-				wsConn.resetLastMessageTime();
-				const sent = wsConn.send({
-					type: 'interrupt_for_query',
-					session_id: interruptSessionId,
-				});
-
-				if (!sent) {
-					internal.interruptPending = false;
-					update(s => ({ ...s, isStreaming: false, error: 'Failed to send interrupt. Please try again.' }));
-					return;
-				}
-
-				const INTERRUPT_TIMEOUT_MS = 12_000;
-				let timeoutId: ReturnType<typeof setTimeout>;
-
-				const confirmed = await new Promise<boolean>((resolve) => {
-					internal.interruptConfirmResolve = resolve;
-					timeoutId = setTimeout(() => {
-						if (internal.interruptConfirmResolve === resolve) {
-							internal.interruptConfirmResolve = null;
-							resolve(false);
-						}
-					}, INTERRUPT_TIMEOUT_MS);
-				});
-				clearTimeout(timeoutId!);
-
-				if (getState().sessionId !== interruptSessionId) {
-					internal.interruptPending = false;
-					return;
-				}
-
-				if (!confirmed) {
-					internal.interruptPending = false;
-					update(s => ({
-						...s,
-						isStreaming: false,
-						error: 'Interrupt timed out. Please try sending your message again.',
-					}));
-					return;
-				}
-
-				internal.interruptPending = false;
-
-				update(s => ({
-					...s,
-					messages: [...s.messages, {
-						id: userMsgId,
-						role: 'user' as const,
-						content: prompt,
-						profileId: queryProfileId,
-					}],
-					isStreaming: true,
-					error: null,
-					wsStreamContent: '',
-					pendingInterruptPrompt: null,
-				}));
-
-				wsConn.resetLastMessageTime();
-				wsConn.send({
-					type: 'query',
-					prompt,
-					session_id: interruptSessionId,
-					profile: getState().profile,
-					project: getState().project || undefined,
-					worktree_id: getState().worktreeId || undefined,
-					overrides: buildOverrides(),
-				});
-				return;
+				// Now send the query (falls through to normal send path below)
 			}
 
 			// Normal path (not currently streaming)

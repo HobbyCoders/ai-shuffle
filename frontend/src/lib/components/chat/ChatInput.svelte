@@ -112,17 +112,6 @@
 		}
 	});
 
-	// Restore message to editor when interrupt fails (pendingInterruptPrompt preserved, streaming stopped)
-	$effect(() => {
-		const pending = $activeSession.pendingInterruptPrompt;
-		const streaming = $activeSession.isStreaming;
-		if (pending && !streaming) {
-			// Interrupt failed/timed out — restore the user's message so they don't lose it
-			inputValue = pending;
-			editorRef?.setContent(pending);
-			activeSession.clearPendingInterruptPrompt();
-		}
-	});
 
 	let fileInputRef = $state<HTMLInputElement | null>(null);
 	let isUploading = $state(false);
@@ -633,7 +622,7 @@
 								</button>
 							{:else if $activeSession.isStreaming}
 								{#if plainTextValue.trim()}
-									<!-- Send Now: interrupts current response -->
+									<!-- Send Now: stops current response then sends -->
 									<button type="submit" class="send-btn" title="Send now (interrupts) — Enter">
 										<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 											<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7" />
