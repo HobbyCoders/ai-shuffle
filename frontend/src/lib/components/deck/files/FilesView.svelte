@@ -219,6 +219,7 @@
 	}
 
 	function handleItemClick(e: MouseEvent, item: FileItem) {
+		if (renameTarget?.path === item.path) return;
 		if (e.ctrlKey || e.metaKey) {
 			files.toggleSelection(item.path);
 		} else if (item.type === 'directory') {
@@ -590,20 +591,23 @@
 						</div>
 
 						{#if isRenaming}
+							<!-- svelte-ignore a11y_autofocus -->
 							<input
 								type="text"
 								class="rename-input"
 								bind:value={renameValue}
+								autofocus
+								onclick={(e) => e.stopPropagation()}
 								onkeydown={(e) => {
 									if (e.key === 'Enter') confirmRename();
 									if (e.key === 'Escape') cancelRename();
 								}}
 							/>
 							<div class="rename-actions">
-								<button class="folder-btn confirm" onclick={confirmRename}>
+								<button class="folder-btn confirm" onclick={(e) => { e.stopPropagation(); confirmRename(); }}>
 									<Check />
 								</button>
-								<button class="folder-btn cancel" onclick={cancelRename}>
+								<button class="folder-btn cancel" onclick={(e) => { e.stopPropagation(); cancelRename(); }}>
 									<X />
 								</button>
 							</div>
