@@ -103,6 +103,7 @@ async def lifespan(app: FastAPI):
     )
     from app.core.resource_monitor import start_resource_monitor, stop_resource_monitor
     from app.core.plugin_auto_update import start_plugin_auto_update, stop_plugin_auto_update
+    from app.core.generation_pool import generation_pool
 
     logger.info("=" * 60)
     logger.info(f"Starting AI Hub v{settings.version}")
@@ -117,6 +118,7 @@ async def lifespan(app: FastAPI):
     bg_tasks = start_background_tasks()
     monitor_task = await start_resource_monitor(interval_seconds=300)
     plugin_task = start_plugin_auto_update()
+    await generation_pool.start()
 
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
@@ -132,6 +134,11 @@ async def lifespan(app: FastAPI):
             pass
     await stop_plugin_auto_update(plugin_task)
     await stop_resource_monitor(monitor_task)
+    try:
+        from app.core.generation_pool import generation_pool
+        await generation_pool.stop()
+    except Exception:
+        logger.exception("generation_pool.stop failed")
     try:
         from app.core.team_transcript_watcher import team_transcript_watcher
         await team_transcript_watcher.stop_all()

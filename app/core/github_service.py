@@ -96,10 +96,15 @@ class GitHubService:
         logger.debug(f"Running gh command: {' '.join(cmd)}")
 
         try:
+            # Force UTF-8 on stdin/stdout/stderr. Default `text=True` uses the
+            # system locale (cp1252 on Windows), which fails to encode common
+            # AI-generated unicode like → (\u2192) or ✓ (\u2713) in PR bodies.
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 input=stdin_data,
             )
