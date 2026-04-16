@@ -450,7 +450,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// and bleed into the new session's messages.
 				const deltaSessionId = data.session_id as string | undefined;
 				const deltaState = getState();
-				if (deltaSessionId && deltaSessionId !== deltaState.sessionId) break;
+				// Reject if session_id missing OR doesn't match active session.
+				// Previously only rejected on mismatch, letting events without
+				// session_id through — root cause of cross-session bleed.
+				if (!deltaSessionId || deltaSessionId !== deltaState.sessionId) break;
 
 				const deltaType = data.delta_type as string;
 				if (deltaType === 'text') {
@@ -474,7 +477,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// non-active sessions to prevent cross-session bleed.
 				const chunkSessionId = data.session_id as string | undefined;
 				const chunkState = getState();
-				if (chunkSessionId && chunkSessionId !== chunkState.sessionId) break;
+				// Reject if session_id missing OR doesn't match (same fix as stream_delta)
+				if (!chunkSessionId || chunkSessionId !== chunkState.sessionId) break;
 
 				const chunkContent = data.content as string;
 				if (chunkContent) {
@@ -489,10 +493,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			case 'stream_block_start':
 			case 'stream_block_stop':
 			case 'system': {
+				// Session guard: reject events not targeting the active session
+				const sysSessionId = data.session_id as string | undefined;
+				const sysState = getState();
+				if (!sysSessionId || sysSessionId !== sysState.sessionId) break;
 				// Ensure polling is started if we're streaming but poller isn't running.
 				// This handles slash commands that don't trigger a 'start' event.
-				const sysState = getState();
-				if (sysState.isStreaming && sysState.sessionId && !sessionPoller.isPolling(sysState.sessionId)) {
+				if (sysState.isStreaming && !sessionPoller.isPolling(sysState.sessionId)) {
 					sessionPoller.startStreaming(sysState.sessionId);
 				}
 				break;
@@ -507,24 +514,32 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				break;
 
 			case 'tool_use': {
+				const tuSessionId = data.session_id as string | undefined;
+				if (!tuSessionId || tuSessionId !== getState().sessionId) break;
 				const toolId = data.id as string;
 				if (toolId) internal.pendingTools.add(toolId);
 				break;
 			}
 
 			case 'tool_result': {
+				const trSessionId = data.session_id as string | undefined;
+				if (!trSessionId || trSessionId !== getState().sessionId) break;
 				const toolUseId = data.tool_use_id as string;
 				if (toolUseId) internal.pendingTools.delete(toolUseId);
 				break;
 			}
 
 			case 'subagent_tool_use': {
+				const satuSessionId = data.session_id as string | undefined;
+				if (!satuSessionId || satuSessionId !== getState().sessionId) break;
 				const toolId = data.id as string;
 				if (toolId) internal.pendingTools.add(toolId);
 				break;
 			}
 
 			case 'subagent_tool_result': {
+				const satrSessionId = data.session_id as string | undefined;
+				if (!satrSessionId || satrSessionId !== getState().sessionId) break;
 				const toolUseId = data.tool_use_id as string;
 				if (toolUseId) internal.pendingTools.delete(toolUseId);
 				break;

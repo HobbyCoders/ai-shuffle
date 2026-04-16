@@ -1344,6 +1344,9 @@ class ChatWebSocketHandler:
                 # Important: Do NOT skip store updates if WebSocket fails!
                 # The live_session_store must be updated regardless of WebSocket state
                 # so that polling clients can receive updates.
+                # Tag every event with session_id so the frontend can reject
+                # late-arriving events from a previous session (cross-session guard).
+                event["session_id"] = session_id
                 ws_connected = await self.send_json(event)
                 if not ws_connected and not stream_state.connection_lost_logged:
                     stream_state.connection_lost_logged = True
