@@ -6,6 +6,7 @@ through the gh CLI.
 """
 
 import logging
+import time
 from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
@@ -255,12 +256,14 @@ async def create_pull_request(
 
     The head branch must be pushed to GitHub before creating the PR.
     """
+    t_start = time.perf_counter()
     check_project_access(request, project_id)
     check_github_auth()
 
     repo = get_repo_for_project(request, project_id)
 
     try:
+        t_gh_start = time.perf_counter()
         pr, error = github_service.create_pull(
             repo=repo,
             title=body.title,
@@ -268,6 +271,7 @@ async def create_pull_request(
             head=body.head,
             base=body.base
         )
+        t_gh_ms = (time.perf_counter() - t_gh_start) * 1000
     except Exception as e:
         logger.exception("Unhandled error creating pull request")
         raise HTTPException(
@@ -280,6 +284,12 @@ async def create_pull_request(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to create pull request: {error or 'unknown error'}"
         )
+
+    t_total_ms = (time.perf_counter() - t_start) * 1000
+    logger.info(
+        f"[ship-it-timing] create-pr project={project_id} repo={repo} "
+        f"head={body.head} total={t_total_ms:.0f}ms gh_cli={t_gh_ms:.0f}ms"
+    )
 
     return pr_to_response(pr)
 
@@ -300,6 +310,7 @@ async def merge_pull_request(
     - squash: Squash and merge
     - rebase: Rebase and merge
     """
+    t_start = time.perf_counter()
     check_project_access(request, project_id)
     check_github_auth()
 
@@ -308,7 +319,9 @@ async def merge_pull_request(
     repo = get_repo_for_project(request, project_id)
 
     try:
+        t_gh_start = time.perf_counter()
         success, error = github_service.merge_pull(repo, number, method=method)
+        t_gh_ms = (time.perf_counter() - t_gh_start) * 1000
     except Exception as e:
         logger.exception(f"Unhandled error merging pull request #{number}")
         raise HTTPException(
@@ -321,6 +334,12 @@ async def merge_pull_request(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to merge pull request #{number}: {error or 'unknown error'}"
         )
+
+    t_total_ms = (time.perf_counter() - t_start) * 1000
+    logger.info(
+        f"[ship-it-timing] merge-pr project={project_id} repo={repo} "
+        f"pr=#{number} method={method} total={t_total_ms:.0f}ms gh_cli={t_gh_ms:.0f}ms"
+    )
 
     return {"status": "ok", "message": f"Pull request #{number} merged successfully"}
 

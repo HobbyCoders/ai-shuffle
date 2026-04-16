@@ -17,6 +17,7 @@ Sub-modules:
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -1011,6 +1012,7 @@ async def create_commit(
     Optionally stages all changes (including unstaged) before committing.
     When worktree_id is provided, commits in the worktree directory.
     """
+    t_start = time.perf_counter()
     check_project_access(request, project_id)
     working_dir = get_working_dir(project_id, worktree_id)
 
@@ -1021,6 +1023,7 @@ async def create_commit(
         )
 
     # Stage files if requested
+    t_stage_start = time.perf_counter()
     if body.include_unstaged:
         success = await run_git(git_service.stage_files, working_dir, ["."])
         if not success:
@@ -1036,9 +1039,12 @@ async def create_commit(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No staged changes to commit"
             )
+    t_stage_ms = (time.perf_counter() - t_stage_start) * 1000
 
     # Create commit — on failure, sha_or_error contains the error message
+    t_commit_start = time.perf_counter()
     success, sha_or_error = await run_git(git_service.commit, working_dir, body.message)
+    t_commit_ms = (time.perf_counter() - t_commit_start) * 1000
 
     if not success:
         raise HTTPException(
@@ -1049,8 +1055,17 @@ async def create_commit(
     commit_sha = sha_or_error
 
     # Fetch inline git state for instant frontend update
+    t_refresh_start = time.perf_counter()
     inline_status = await run_git(git_service.get_status, working_dir)
     inline_diff = await run_git(git_service.get_diff_stats, working_dir)
+    t_refresh_ms = (time.perf_counter() - t_refresh_start) * 1000
+
+    t_total_ms = (time.perf_counter() - t_start) * 1000
+    logger.info(
+        f"[ship-it-timing] commit project={project_id} "
+        f"total={t_total_ms:.0f}ms stage={t_stage_ms:.0f}ms "
+        f"commit={t_commit_ms:.0f}ms refresh={t_refresh_ms:.0f}ms"
+    )
 
     return CommitResponse(
         success=True,
@@ -1074,6 +1089,7 @@ async def push_commits(
 
     When worktree_id is provided, pushes from the worktree directory.
     """
+    t_start = time.perf_counter()
     check_project_access(request, project_id)
     working_dir = get_working_dir(project_id, worktree_id)
 
@@ -1093,6 +1109,7 @@ async def push_commits(
                 detail="Could not determine current branch"
             )
 
+    t_push_start = time.perf_counter()
     success, error_msg = await run_git(
         git_service.push,
         working_dir,
@@ -1101,6 +1118,7 @@ async def push_commits(
         set_upstream=body.set_upstream,
         force=body.force,
     )
+    t_push_ms = (time.perf_counter() - t_push_start) * 1000
 
     if not success:
         raise HTTPException(
@@ -1109,7 +1127,16 @@ async def push_commits(
         )
 
     # Fetch inline git state for instant frontend update
+    t_refresh_start = time.perf_counter()
     inline_status = await run_git(git_service.get_status, working_dir)
+    t_refresh_ms = (time.perf_counter() - t_refresh_start) * 1000
+
+    t_total_ms = (time.perf_counter() - t_start) * 1000
+    logger.info(
+        f"[ship-it-timing] push project={project_id} branch={branch} "
+        f"total={t_total_ms:.0f}ms git_push={t_push_ms:.0f}ms "
+        f"refresh={t_refresh_ms:.0f}ms"
+    )
 
     return OperationResponse(
         success=True,

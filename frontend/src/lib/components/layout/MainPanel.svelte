@@ -822,6 +822,20 @@
 		pauseGitPoll();
 		git.setOperationInProgress(true);
 
+		// Timing instrumentation for ship-it pipeline
+		const tPipelineStart = performance.now();
+		const stepTimings: Record<string, number> = {};
+		async function timeStep(label: string, fn: () => Promise<any>): Promise<any> {
+			const t0 = performance.now();
+			try {
+				return await fn();
+			} finally {
+				const ms = performance.now() - t0;
+				stepTimings[label] = ms;
+				console.info(`[ship-it-timing] ${label} ${ms.toFixed(0)}ms`);
+			}
+		}
+
 		try {
 			// --- Step: Commit (if needed) ---
 			if (hasUncommittedChanges) {
@@ -829,9 +843,11 @@
 				advanceStep(); // generate-commit
 				let commitMessage: string;
 				try {
-					const generated = await generateCommitMessage(projectId, {
-						include_unstaged: prefs.includeUnstaged
-					}, worktreeId);
+					const generated = await timeStep('generate-commit-message', () =>
+						generateCommitMessage(projectId, {
+							include_unstaged: prefs.includeUnstaged
+						}, worktreeId)
+					);
 					commitMessage = generated.message;
 				} catch (e: any) {
 					progressError = e?.detail || e?.message || 'Failed to generate commit message';
@@ -840,12 +856,12 @@
 
 				// Commit
 				advanceStep(); // commit
-				await git.commitChanges(commitMessage, prefs.includeUnstaged);
+				await timeStep('commit', () => git.commitChanges(commitMessage, prefs.includeUnstaged));
 			}
 
 			// --- Step: Push ---
 			advanceStep(); // push
-			await git.pushCommits(branch, true);
+			await timeStep('push', () => git.pushCommits(branch, true));
 
 			// --- Step: Create PR (if none exists) ---
 			let prNumber: number;
@@ -856,9 +872,11 @@
 				let prTitle: string;
 				let prBody: string;
 				try {
-					const generated = await generatePRDescription(projectId, {
-						base_branch: defaultBranch
-					}, worktreeId);
+					const generated = await timeStep('generate-pr-description', () =>
+						generatePRDescription(projectId, {
+							base_branch: defaultBranch
+						}, worktreeId)
+					);
 					prTitle = generated.title;
 					prBody = generated.body;
 				} catch {
@@ -869,15 +887,17 @@
 				// Create PR
 				advanceStep(); // create-pr
 				if (branch) {
-					const pr = await createPullRequest(projectId, {
-						title: prTitle,
-						body: prBody,
-						head: branch,
-						base: defaultBranch
-					});
+					const pr = await timeStep('create-pr', () =>
+						createPullRequest(projectId, {
+							title: prTitle,
+							body: prBody,
+							head: branch,
+							base: defaultBranch
+						})
+					);
 					prNumber = pr.number;
 					// Update branchPR state so Finish logic works
-					await checkPullRequests(projectId, branch);
+					await timeStep('check-pr-after-create', () => checkPullRequests(projectId, branch));
 				} else {
 					progressError = 'No branch detected';
 					return;
@@ -888,18 +908,24 @@
 
 			// --- Step: Merge ---
 			advanceStep(); // merge
-			await mergePullRequest(projectId, prNumber, prefs.mergeMethod);
+			await timeStep('merge-pr', () => mergePullRequest(projectId, prNumber, prefs.mergeMethod));
 
 			// --- Step: Cleanup (if enabled) ---
 			if (prefs.cleanupAfterMerge) {
 				advanceStep(); // cleanup
 				if (isWorktreeMode && worktreeId) {
-					await deleteWorktree(projectId, worktreeId, false);
+					await timeStep('cleanup-worktree', () => deleteWorktree(projectId, worktreeId, false));
 				} else if (branch && branch !== defaultBranch) {
-					await git.checkout(defaultBranch);
-					await git.deleteBranch(branch);
+					await timeStep('cleanup-checkout', () => git.checkout(defaultBranch));
+					await timeStep('cleanup-delete-branch', () => git.deleteBranch(branch));
 				}
 			}
+
+			const tPipelineMs = performance.now() - tPipelineStart;
+			console.info(
+				`[ship-it-timing] PIPELINE TOTAL ${tPipelineMs.toFixed(0)}ms`,
+				stepTimings
+			);
 
 			progressCompleted = true;
 			branchPR = null;

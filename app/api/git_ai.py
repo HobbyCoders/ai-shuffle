@@ -108,6 +108,7 @@ async def generate_commit_message(
     """
     from app.api.generation import generate_with_claude
 
+    t_start = time.perf_counter()
     check_project_access(request, project_id)
     working_dir = get_working_dir(project_id, worktree_id)
 
@@ -117,9 +118,11 @@ async def generate_commit_message(
             detail="Project is not a git repository"
         )
 
+    t_diff_start = time.perf_counter()
     diff_text = await run_git(
         git_service.get_diff_text, working_dir, include_unstaged=body.include_unstaged
     )
+    t_diff_ms = (time.perf_counter() - t_diff_start) * 1000
     if not diff_text.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -137,7 +140,9 @@ Return ONLY the commit message text, nothing else.
 </diff>"""
 
     # Use the Default AI profile's model (no explicit override - respects user config)
+    t_ai_start = time.perf_counter()
     response_text = await generate_with_claude(prompt)
+    t_ai_ms = (time.perf_counter() - t_ai_start) * 1000
 
     # Clean up: remove any markdown code blocks the model may have wrapped around the message
     message = response_text.strip()
@@ -145,6 +150,13 @@ Return ONLY the commit message text, nothing else.
         lines = message.split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
         message = "\n".join(lines).strip()
+
+    t_total_ms = (time.perf_counter() - t_start) * 1000
+    logger.info(
+        f"[ship-it-timing] generate-commit-message project={project_id} "
+        f"total={t_total_ms:.0f}ms diff_fetch={t_diff_ms:.0f}ms "
+        f"ai_call={t_ai_ms:.0f}ms diff_bytes={len(diff_text)}"
+    )
 
     return GenerateCommitMessageResponse(message=message)
 
@@ -164,6 +176,7 @@ async def generate_pr_description(
     """
     from app.api.generation import generate_with_claude, extract_json_from_response
 
+    t_start = time.perf_counter()
     check_project_access(request, project_id)
     working_dir = get_working_dir(project_id, worktree_id)
 
@@ -173,9 +186,11 @@ async def generate_pr_description(
             detail="Project is not a git repository"
         )
 
+    t_log_start = time.perf_counter()
     commit_log, diff_stat = await run_git(
         git_service.get_branch_log, working_dir, base_branch=body.base_branch
     )
+    t_log_ms = (time.perf_counter() - t_log_start) * 1000
 
     if not commit_log.strip():
         raise HTTPException(
@@ -200,7 +215,9 @@ The body should have a "## Summary" section with bullet points describing what c
 Return ONLY the JSON object, no markdown code blocks or explanation."""
 
     # Use the Default AI profile's model (no explicit override - respects user config)
+    t_ai_start = time.perf_counter()
     response_text = await generate_with_claude(prompt)
+    t_ai_ms = (time.perf_counter() - t_ai_start) * 1000
 
     try:
         parsed = extract_json_from_response(response_text)
@@ -217,6 +234,13 @@ Return ONLY the JSON object, no markdown code blocks or explanation."""
     if not title:
         first_line = commit_log.split("\n")[0] if commit_log else "Update"
         title = " ".join(first_line.split()[1:]) if " " in first_line else first_line
+
+    t_total_ms = (time.perf_counter() - t_start) * 1000
+    logger.info(
+        f"[ship-it-timing] generate-pr-description project={project_id} "
+        f"total={t_total_ms:.0f}ms branch_log={t_log_ms:.0f}ms "
+        f"ai_call={t_ai_ms:.0f}ms log_bytes={len(commit_log)}"
+    )
 
     return GeneratePRDescriptionResponse(title=title, body=pr_body)
 
