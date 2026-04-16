@@ -705,10 +705,29 @@
 		to { transform: rotate(360deg); }
 	}
 
-	/* Mobile: tighter branch name limit */
+	/* Mobile: tighter branch name limit + center dropdown */
 	@media (max-width: 639px) {
 		.branch-name {
 			max-width: min(120px, 30vw);
+		}
+
+		.branch-dropdown {
+			right: auto;
+			left: 50%;
+			transform: translateX(-50%);
+			min-width: min(240px, calc(100vw - 24px));
+			animation: branchDropdownMobile 120ms cubic-bezier(0.16, 1, 0.3, 1);
+		}
+
+		@keyframes branchDropdownMobile {
+			from {
+				opacity: 0;
+				transform: translateX(-50%) translateY(4px);
+			}
+			to {
+				opacity: 1;
+				transform: translateX(-50%) translateY(0);
+			}
 		}
 	}
 
