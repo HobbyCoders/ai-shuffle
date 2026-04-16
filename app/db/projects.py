@@ -77,6 +77,7 @@ def update_project(
     project_id: str,
     name: Optional[str] = None,
     description: Optional[str] = None,
+    path: Optional[str] = None,
     settings_dict: Optional[Dict[str, Any]] = None
 ) -> Optional[ProjectRow]:
     """Update a project"""
@@ -92,6 +93,9 @@ def update_project(
     if description is not None:
         updates.append("description = %s")
         values.append(description)
+    if path is not None:
+        updates.append("path = %s")
+        values.append(path)
     if settings_dict is not None:
         updates.append("settings = %s")
         values.append(json.dumps(settings_dict))
