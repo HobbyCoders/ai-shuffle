@@ -282,6 +282,24 @@ async def chat_websocket(
                         except Exception as e:
                             ctx.warning(logger, f"Failed to load history for live store: {e}")
 
+        # Strip the current user message from DB-loaded initial messages.
+        # The user message was already written to DB (above) before run_query starts,
+        # so load_messages_from_db includes it. But add_user_message (below) re-adds
+        # it with a proper live-store ID. Without this filter, the live store ends up
+        # with two copies of the user message — one from DB load, one from add_user_message.
+        # JSONL and live-store paths don't have this issue (JSONL hasn't been written yet,
+        # and ended live-store messages predate the current prompt).
+        if initial_messages:
+            # Remove the last message if it matches the current prompt (DB-loaded duplicate).
+            # The current user message is always the most recently inserted DB row, so it
+            # will be the last element in the list.
+            last = initial_messages[-1]
+            if (
+                last.get("role") == "user"
+                and last.get("content") == prompt
+            ):
+                initial_messages = initial_messages[:-1]
+
         # Start live session with existing messages
         await live_session_store.start_streaming(session_id, initial_messages)
 
