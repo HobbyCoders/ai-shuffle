@@ -90,6 +90,7 @@
 	let formPrompt = $state('');
 	let formTools = $state<string[]>([]);
 	let formModel = $state('');
+	let customModelMode = $state(false);
 	let saving = $state(false);
 
 	// Tools state
@@ -180,6 +181,13 @@
 		return `card-badge--${model}`;
 	}
 
+	// Detect whether a model value is a preset (including Inherit) or a custom string
+	function isCustomModel(model?: string): boolean {
+		if (!model) return false;
+		const presets = MODEL_OPTIONS.map(o => o.value);
+		return !presets.includes(model);
+	}
+
 	// Open editor for new subagent
 	function handleCreate() {
 		editingSubagent = null;
@@ -189,6 +197,7 @@
 		formPrompt = '';
 		formTools = [];
 		formModel = '';
+		customModelMode = false;
 		toolSelectionMode = 'all';
 		viewMode = 'editor';
 	}
@@ -202,6 +211,7 @@
 		formPrompt = agent.prompt;
 		formTools = agent.tools || [];
 		formModel = agent.model || '';
+		customModelMode = isCustomModel(agent.model);
 		toolSelectionMode = Array.isArray(agent.tools) ? 'select' : 'all';
 		viewMode = 'editor';
 	}
@@ -407,6 +417,7 @@
 		formPrompt = sub.prompt;
 		formTools = sub.tools || [];
 		formModel = sub.model || '';
+		customModelMode = isCustomModel(sub.model);
 		toolSelectionMode = Array.isArray(sub.tools) ? 'select' : 'all';
 
 		viewMode = 'editor';
@@ -475,6 +486,8 @@
 		onFormToolsChange={(v) => formTools = v}
 		{formModel}
 		onFormModelChange={(v) => formModel = v}
+		{customModelMode}
+		onCustomModelModeChange={(custom, model) => { customModelMode = custom; formModel = model; }}
 		{toolSelectionMode}
 		onToolSelectionModeChange={(v) => toolSelectionMode = v}
 		{availableTools}

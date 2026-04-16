@@ -66,6 +66,8 @@
 		onFormToolsChange: (value: string[]) => void;
 		formModel: string;
 		onFormModelChange: (value: string) => void;
+		customModelMode: boolean;
+		onCustomModelModeChange: (custom: boolean, model: string) => void;
 		toolSelectionMode: 'all' | 'select';
 		onToolSelectionModeChange: (value: 'all' | 'select') => void;
 		availableTools: ToolsResponse;
@@ -107,6 +109,8 @@
 		onFormToolsChange,
 		formModel,
 		onFormModelChange,
+		customModelMode,
+		onCustomModelModeChange,
 		toolSelectionMode,
 		onToolSelectionModeChange,
 		availableTools,
@@ -264,13 +268,31 @@
 				<select
 					id="agent-model"
 					class="card-form-input"
-					value={formModel}
-					onchange={(e) => { onFormModelChange((e.target as HTMLSelectElement).value); }}
+					value={customModelMode ? '__custom__' : formModel}
+					onchange={(e) => {
+						const v = (e.target as HTMLSelectElement).value;
+						if (v === '__custom__') {
+							onCustomModelModeChange(true, '');
+						} else {
+							onCustomModelModeChange(false, v);
+						}
+					}}
 				>
 					{#each MODEL_OPTIONS as opt}
 						<option value={opt.value}>{opt.label}</option>
 					{/each}
+					<option value="__custom__">Custom...</option>
 				</select>
+				{#if customModelMode}
+					<input
+						type="text"
+						value={formModel}
+						oninput={(e) => onFormModelChange((e.target as HTMLInputElement).value)}
+						class="card-form-input card-form-input--mono"
+						placeholder="e.g. claude-opus-4-6"
+						style="margin-top: 6px;"
+					/>
+				{/if}
 			</div>
 
 			{#if isEditMode && editingSubagent}
