@@ -72,6 +72,21 @@
 	}
 
 	/**
+	 * Create a new chat session with a specific project pre-selected
+	 */
+	function handleNewSessionForProject(projectId: string) {
+		activeSession.newChat();
+		activeSession.setProject(projectId);
+
+		if ($sidebarOverlay && !$sidebarCollapsed) {
+			layout.setSidebarCollapsed(true);
+			requestAnimationFrame(() => layout.openChat(null));
+		} else {
+			layout.openChat(null);
+		}
+	}
+
+	/**
 	 * Open an existing session by ID
 	 */
 	function handleOpenSession(sessionId: string) {
@@ -344,6 +359,7 @@
 	<AppLayout
 		isAdmin={$isAdmin}
 		onNewSession={handleNewSession}
+		onNewSessionForProject={handleNewSessionForProject}
 		onOpenSession={handleOpenSession}
 		onOpenFeature={handleOpenFeature}
 		onOpenPlugins={() => handleOpenFeature('plugins')}

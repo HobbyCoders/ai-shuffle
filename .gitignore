@@ -91,3 +91,6 @@ docs/insights-report.html
 htmlcov/
 build-frontend.bat
 tools/mockups/profile-design-1-sidebar.html
+
+# Remember plugin temp files
+.remember/tmp/

@@ -44,6 +44,7 @@
 	interface Props {
 		isAdmin?: boolean;
 		onNewSession: () => void;
+		onNewSessionForProject?: (projectId: string) => void;
 		onOpenSession: (sessionId: string) => void;
 		onOpenFeature: (type: ViewType) => void;
 	}
@@ -51,6 +52,7 @@
 	let {
 		isAdmin = false,
 		onNewSession,
+		onNewSessionForProject,
 		onOpenSession,
 		onOpenFeature
 	}: Props = $props();
@@ -632,6 +634,13 @@
 												<X size={12} strokeWidth={2} />
 											</button>
 										{:else}
+											<button
+												class="project-new-session-btn"
+												onclick={(e) => { e.stopPropagation(); onNewSessionForProject?.(group.project!.id); }}
+												title="New chat in this project"
+											>
+												<Plus size={12} strokeWidth={1.5} />
+											</button>
 											<button
 												class="project-delete-btn"
 												onclick={(e) => handleDeleteProject(e, group.project!.id)}
@@ -1232,6 +1241,33 @@
 		padding-right: 28px;
 	}
 
+	/* Project new session button */
+	.project-new-session-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 20px;
+		height: 20px;
+		padding: 0;
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius) - 4px);
+		color: var(--muted-foreground);
+		cursor: pointer;
+		opacity: 0;
+		flex-shrink: 0;
+		transition: opacity 150ms ease, color 150ms ease, background-color 150ms ease;
+	}
+
+	.project-group-header:hover .project-new-session-btn {
+		opacity: 1;
+	}
+
+	.project-new-session-btn:hover {
+		color: var(--primary, #3b82f6);
+		background: color-mix(in oklch, var(--primary, #3b82f6) 12%, transparent);
+	}
+
 	/* Project delete button */
 	.project-delete-btn {
 		display: flex;
@@ -1311,14 +1347,16 @@
 		background: var(--hover-overlay);
 	}
 
-	/* Touch devices: always show delete button */
+	/* Touch devices: always show action buttons */
 	@media (pointer: coarse) {
+		.project-new-session-btn,
 		.project-delete-btn {
 			opacity: 0.5;
 		}
 	}
 
 	@media (max-width: 639px) {
+		.project-new-session-btn,
 		.project-delete-btn {
 			opacity: 0.5;
 			min-width: 32px;

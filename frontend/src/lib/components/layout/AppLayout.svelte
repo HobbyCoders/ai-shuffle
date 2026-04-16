@@ -18,6 +18,7 @@
 	interface Props {
 		isAdmin?: boolean;
 		onNewSession: () => void;
+		onNewSessionForProject?: (projectId: string) => void;
 		onOpenSession: (sessionId: string) => void;
 		onOpenFeature: (type: ViewType) => void;
 		onOpenPlugins?: () => void;
@@ -26,6 +27,7 @@
 	let {
 		isAdmin = false,
 		onNewSession,
+		onNewSessionForProject,
 		onOpenSession,
 		onOpenFeature,
 		onOpenPlugins
@@ -121,6 +123,7 @@
 	<SidePanel
 		{isAdmin}
 		{onNewSession}
+		{onNewSessionForProject}
 		{onOpenSession}
 		{onOpenFeature}
 	/>
