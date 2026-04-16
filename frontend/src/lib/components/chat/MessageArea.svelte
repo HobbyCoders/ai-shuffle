@@ -175,7 +175,14 @@
 
 const displayItems: DisplayItem[] = $derived.by(() => {
 		const messages = $activeSession.messages;
+		const isStreamingNow = $activeSession.isStreaming;
 		const items: DisplayItem[] = [];
+		// Diagnostic: log when displayItems re-evaluates after streaming ends
+		if (!isStreamingNow && messages.length > 0) {
+			const aTexts = messages.filter((m: ChatMessage) => m.role === 'assistant' && m.type === 'text');
+			const hasStrmMsg = messages.some((m: ChatMessage) => m.streaming);
+			console.debug(`[displayItems] re-eval: ${messages.length} msgs, streaming=${isStreamingNow}, hasStreamingMsg=${hasStrmMsg}, aTexts=${aTexts.length} [${aTexts.map((m: ChatMessage) => `len=${(m.content||'').length}`).join(',')}]`);
+		}
 		// Deduplicate by message ID to prevent Svelte 5 each_key_duplicate crashes.
 		// Duplicates can originate from delta merge edge cases or corrupted caches.
 		const seenIds = new Set<string>();

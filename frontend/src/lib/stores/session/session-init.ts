@@ -201,6 +201,23 @@ export function createSessionInit(deps: SessionInitDeps) {
 			}
 			console.debug(`[PollCB] applying: ${data.messages.length} msgs, streaming=${data.isStreaming}, msgsChanged=${!msgsMatch}, streamingChanged=${streamingChanged}`);
 
+			// ── Diagnostic: trace streaming→ended transition ────────────
+			if (streamingChanged && !data.isStreaming) {
+				const assistantTexts = data.messages.filter(
+					(m: ChatMessage) => m.role === 'assistant' && m.type === 'text'
+				);
+				const activeAssistantTexts = _state.messages.filter(
+					(m: ChatMessage) => m.role === 'assistant' && m.type === 'text'
+				);
+				console.warn(
+					`[PollCB:StreamEnd] streaming→false transition`,
+					`\n  server assistant texts: ${assistantTexts.length} [${assistantTexts.map((m: ChatMessage) => `id=${m.id} len=${(m.content||'').length} streaming=${m.streaming}`).join(', ')}]`,
+					`\n  active assistant texts: ${activeAssistantTexts.length} [${activeAssistantTexts.map((m: ChatMessage) => `id=${m.id} len=${(m.content||'').length} streaming=${m.streaming}`).join(', ')}]`,
+					`\n  wsStreamContent len: ${_state.wsStreamContent.length}`,
+					`\n  total server msgs: ${data.messages.length}, total active msgs: ${_state.messages.length}`
+				);
+			}
+
 			// Single authoritative update — poller is the sole writer of session state.
 			// Three-phase merge:
 			// 1. Preserve client-side-only messages (hooks, status notifications)
@@ -385,6 +402,21 @@ export function createSessionInit(deps: SessionInitDeps) {
 					...metaDelta,
 				};
 			});
+
+			// ── Diagnostic: verify post-update state ────────────────
+			if (streamingChanged && !data.isStreaming) {
+				const postState = getState();
+				const postAssistantTexts = postState.messages.filter(
+					(m: ChatMessage) => m.role === 'assistant' && m.type === 'text'
+				);
+				console.warn(
+					`[PollCB:StreamEnd:POST] after update`,
+					`\n  isStreaming: ${postState.isStreaming}`,
+					`\n  total msgs: ${postState.messages.length}`,
+					`\n  assistant texts: ${postAssistantTexts.length} [${postAssistantTexts.map((m: ChatMessage) => `id=${m.id} len=${(m.content||'').length} streaming=${m.streaming}`).join(', ')}]`,
+					`\n  wsStreamContent len: ${postState.wsStreamContent.length}`
+				);
+			}
 
 			// Persist corrected worktree state so the fix survives page refresh.
 			if (metaHasUpdate) {

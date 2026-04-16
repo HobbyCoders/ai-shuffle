@@ -154,6 +154,18 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			clearStopTimeout();
 			internal.pendingTools.clear();
 			// Clear WS stream buffer — poller's final poll is authoritative
+			const preState = getState();
+			const preAssistantTexts = preState.messages.filter(
+				(m: { role: string; type: string; content?: string; id: string; streaming?: boolean }) =>
+					m.role === 'assistant' && m.type === 'text'
+			);
+			console.warn(
+				`[handleDone] clearing wsStreamContent`,
+				`\n  wsStreamContent len: ${preState.wsStreamContent.length}`,
+				`\n  isStreaming: ${preState.isStreaming}`,
+				`\n  msgs: ${preState.messages.length}`,
+				`\n  assistant texts: ${preAssistantTexts.length} [${preAssistantTexts.map(m => `id=${m.id} len=${(m.content||'').length} streaming=${m.streaming}`).join(', ')}]`
+			);
 			update(s => s.wsStreamContent ? { ...s, wsStreamContent: '' } : s);
 
 			// Fire completion notification with metadata from the WS event.

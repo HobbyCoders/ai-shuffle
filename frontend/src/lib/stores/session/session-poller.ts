@@ -463,6 +463,18 @@ class SessionPoller {
 				(usageRaw.cache_read_tokens || 0),
 		};
 
+		// ── Diagnostic: log streaming→ended transition data ──────
+		if (streamingJustEnded) {
+			const assistantTexts = messages.filter(m => m.role === 'assistant' && m.type === 'text');
+			console.warn(
+				`[Poller:StreamEnd] streamingJustEnded`,
+				`\n  rawServerMsgs: ${serverMessages.length}, afterFilter: ${streamingMessages.length}, afterMerge: ${messages.length}`,
+				`\n  initialMessageCount: ${initialMessageCount}, isStreaming: ${isStreaming}`,
+				`\n  assistantTexts: ${assistantTexts.length} [${assistantTexts.map(m => `id=${m.id} len=${(m.content||'').length} streaming=${m.streaming}`).join(', ')}]`,
+				`\n  existingMsgs: ${existingMessages?.length ?? 'none'}, updateId: ${existing?.lastUpdateId ?? 'none'} → ${newUpdateId}`
+			);
+		}
+
 		// Apply to store — ONLY place state gets written
 		sessionState.applyServerState(
 			sessionId,

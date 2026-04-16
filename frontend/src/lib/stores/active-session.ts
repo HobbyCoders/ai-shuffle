@@ -225,8 +225,19 @@ const { subscribe: _subscribe, notifySubscribers: _notifySubscribers, createDeri
 	);
 
 function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
-	const next = fn(untrack(() => _state));
-	if (next === _state) return; // Identity check — skip notification when nothing changed
+	const prev = untrack(() => _state);
+	const next = fn(prev);
+	if (next === _state) {
+		// Diagnostic: detect skipped streaming→ended transitions
+		if (prev.isStreaming && !next.isStreaming) {
+			console.error(`[_update] IDENTITY SKIP on streaming→false transition! This should not happen.`);
+		}
+		return; // Identity check — skip notification when nothing changed
+	}
+	// Diagnostic: log streaming transitions
+	if (prev.isStreaming !== next.isStreaming) {
+		console.warn(`[_update] isStreaming ${prev.isStreaming} → ${next.isStreaming}, msgs: ${prev.messages.length} → ${next.messages.length}, msgsChanged: ${prev.messages !== next.messages}`);
+	}
 	_state = next;
 	_notifySubscribers();
 }
