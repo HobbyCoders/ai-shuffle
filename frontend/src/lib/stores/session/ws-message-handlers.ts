@@ -276,6 +276,25 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				update(s => ({ ...s, queuedMessages: messages.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime() })) }));
 			}
 
+			// session_updated carries metadata changes (e.g. a backfilled title
+			// for sessions created without one, like via auto-worktree). Apply
+			// the title to the active session immediately and refresh the
+			// sidebar list so the new title is visible everywhere.
+			if (eventType === 'session_updated') {
+				const syncData = data.data as Record<string, unknown> | undefined;
+				const updates = (syncData?.updates ?? {}) as Record<string, unknown>;
+				const updatedTitle = typeof updates.title === 'string' ? updates.title : undefined;
+				if (updatedTitle) {
+					const updatedSessionId = data.session_id as string | undefined;
+					const currentState = getState();
+					if (updatedSessionId && updatedSessionId === currentState.sessionId) {
+						update(s => ({ ...s, title: updatedTitle }));
+						onPersistSession();
+					}
+					appLoadSessions();
+				}
+			}
+
 			// message_added from server-side queue processing (_process_next_queued).
 			// The notifier gate above may skip this event when not streaming, so
 			// handle it directly: trigger a poll so the user message appears in chat.

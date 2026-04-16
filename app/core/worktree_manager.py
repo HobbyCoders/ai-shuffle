@@ -605,16 +605,17 @@ class WorktreeManager:
                 raise WorktreeError(f"Branch '{branch_name}' already has an active worktree (created by concurrent request).")
             raise WorktreeError(f"Failed to create worktree record: {str(e)}")
 
-        # Create session with worktree_id (new relationship model)
+        # Create session with worktree_id (new relationship model).
+        # Title is left NULL so it can be derived from the user's first message
+        # (matching the behavior of normal sessions created via WebSocket).
         session_id = f"ses-{uuid.uuid4().hex[:12]}"
-        session_title = f"Branch: {branch_name}"
 
         try:
             session = database.create_session(
                 session_id=session_id,
                 profile_id=profile_id,
                 project_id=project_id,
-                title=session_title,
+                title=None,
                 worktree_id=worktree_id,  # Link session to worktree via new model
                 worktree_branch=branch_name,
                 worktree_path=relative_worktree_path

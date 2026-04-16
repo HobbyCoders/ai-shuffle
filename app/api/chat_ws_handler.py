@@ -424,6 +424,27 @@ class ChatWebSocketHandler:
 
         # Store user message for existing sessions (new sessions already stored atomically above)
         if not is_new_session:
+            # Backfill title from first user message for sessions created without
+            # one (e.g. via the auto-worktree REST endpoint, which creates the
+            # session before any user prompt exists).
+            existing_session = await run_sync(database.get_session, session_id)
+            if existing_session and not (existing_session.get("title") or "").strip():
+                derived_title = prompt[:100].strip()
+                if len(prompt) > 100:
+                    derived_title = derived_title.rsplit(' ', 1)[0] + "..."
+                if derived_title:
+                    await run_sync(
+                        database.update_session,
+                        session_id=session_id,
+                        title=derived_title,
+                    )
+                    # Notify all devices (including this one) so sidebars refresh.
+                    await sync_engine.broadcast_session_updated(
+                        session_id=session_id,
+                        updates={"title": derived_title},
+                        source_device_id=None,
+                    )
+
             _msg_role = "user"
             _msg_meta = None
             if prompt.strip().startswith("/"):

@@ -673,6 +673,7 @@ async def chat_websocket(
                             continue
 
                         # Create or get session
+                        is_new_session = not session_id
                         if not session_id:
                             # Validate worktree access if provided
                             if worktree_id:
@@ -737,6 +738,27 @@ async def chat_websocket(
                             # Register to new session
                             await sync_engine.register_device(device_id, session_id, websocket)
                             current_session_id = session_id
+
+                        # Backfill missing title from first user message for existing
+                        # sessions (e.g. created via the auto-worktree REST endpoint
+                        # before any prompt existed).
+                        if not is_new_session:
+                            existing_session = await run_sync(database.get_session, session_id)
+                            if existing_session and not (existing_session.get("title") or "").strip():
+                                derived_title = prompt[:100].strip()
+                                if len(prompt) > 100:
+                                    derived_title = derived_title.rsplit(' ', 1)[0] + "..."
+                                if derived_title:
+                                    await run_sync(
+                                        database.update_session,
+                                        session_id=session_id,
+                                        title=derived_title,
+                                    )
+                                    await sync_engine.broadcast_session_updated(
+                                        session_id=session_id,
+                                        updates={"title": derived_title},
+                                        source_device_id=None,
+                                    )
 
                         # Store user message with profile_id for per-query tracking
                         await run_sync(
