@@ -146,7 +146,15 @@
 	);
 
 	let sortedLevels = $derived(
-		[...availableLevels].sort((a, b) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b))
+		Array.from(new Set([...LEVEL_ORDER, ...availableLevels]))
+			.sort((a, b) => {
+				const ai = LEVEL_ORDER.indexOf(a);
+				const bi = LEVEL_ORDER.indexOf(b);
+				if (ai === -1 && bi === -1) return a.localeCompare(b);
+				if (ai === -1) return 1;
+				if (bi === -1) return -1;
+				return ai - bi;
+			})
 	);
 </script>
 
@@ -281,7 +289,6 @@
 	.level-select {
 		width: 130px;
 		flex-shrink: 0;
-		appearance: auto;
 	}
 
 	.search-input {
