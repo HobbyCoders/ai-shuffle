@@ -632,7 +632,7 @@ def get_session_messages(session_id: str) -> List[SessionMessageRow]:
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"SELECT * FROM session_messages WHERE session_id = {ph()} ORDER BY created_at ASC",
+            f"SELECT * FROM session_messages WHERE session_id = {ph()} ORDER BY created_at ASC, id ASC",
             (session_id,)
         )
         rows = rows_to_list(cursor.fetchall())
