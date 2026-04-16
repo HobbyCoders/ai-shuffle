@@ -186,6 +186,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 				if (meta.execution_mode !== undefined && meta.execution_mode !== _state.executionMode) {
 					metaDelta.executionMode = meta.execution_mode as 'local' | 'worktree';
 				}
+				if (meta.session_type !== undefined && meta.session_type !== _state.sessionType) {
+					metaDelta.sessionType = meta.session_type;
+				}
 			}
 			const metaHasUpdate = Object.keys(metaDelta).length > 0;
 
@@ -499,6 +502,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 						worktreeMode: persisted.worktreeMode || 'new',
 						selectedWorktreeBranch: persisted.selectedWorktreeBranch ?? null,
 						worktreeDeleted: persisted.worktreeDeleted ?? false,
+						sessionType: persisted.sessionType || 'chat',
 					}));
 
 					if (persisted.sessionId) {

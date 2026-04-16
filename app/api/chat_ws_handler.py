@@ -119,6 +119,7 @@ class ChatWebSocketHandler:
             "queue_message": self.handle_queue_message,
             "remove_queued_message": self.handle_remove_queued_message,
             "clear_queued_messages": self.handle_clear_queued_messages,
+            "voice_audio": self.handle_voice_audio,
         }
 
     # ------------------------------------------------------------------
@@ -1127,6 +1128,201 @@ class ChatWebSocketHandler:
             "session_id": session_id,
             "data": {"queued_messages": []},
         })
+
+    # ------------------------------------------------------------------
+    # handle_voice_audio — voice pipeline: STT -> Claude -> TTS
+    # ------------------------------------------------------------------
+
+    async def handle_voice_audio(self, data: dict) -> None:
+        """Handle incoming voice audio from client.
+
+        Flow: receive audio -> STT -> store user msg -> Claude query -> TTS -> send back
+        """
+        from app.api.voice_pipeline import transcribe_audio, generate_speech
+
+        session_id = data.get("session_id")
+        audio_data = data.get("audio_data")  # base64 encoded
+        mime_type = data.get("mime_type", "audio/webm")
+        session_type = data.get("session_type", "voice")
+        profile_id = data.get("profile", "claude-code")
+        project_id = data.get("project")
+
+        if not audio_data:
+            await self.send_json({"type": "voice_error", "error": "No audio data provided"})
+            return
+
+        # 1. Transcribe audio to text
+        try:
+            transcript = await transcribe_audio(audio_data, mime_type)
+        except ValueError as e:
+            await self.send_json({"type": "voice_error", "error": str(e)})
+            return
+        except Exception:
+            logger.exception("Voice transcription failed")
+            await self.send_json({"type": "voice_error", "error": "Transcription failed"})
+            return
+
+        if not transcript or not transcript.strip():
+            await self.send_json({"type": "voice_error", "error": "Could not transcribe audio"})
+            return
+
+        # 2. Send transcript back to client immediately
+        await self.send_json({
+            "type": "voice_transcript",
+            "role": "user",
+            "text": transcript,
+            "session_id": session_id,
+        })
+
+        # 3. Create session if needed
+        is_new_session = False
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            is_new_session = True
+            title = transcript[:100].strip()
+            if len(transcript) > 100:
+                title = title.rsplit(" ", 1)[0] + "..."
+
+            from app.db.base import transaction
+
+            def _create_voice_session():
+                with transaction() as txn:
+                    database.create_session(
+                        session_id=session_id,
+                        profile_id=profile_id,
+                        project_id=project_id,
+                        api_user_id=self.api_user_id,
+                        title=title,
+                        session_type=session_type,
+                        _conn=txn,
+                    )
+                    database.add_session_message(
+                        session_id=session_id,
+                        role="user",
+                        content=transcript,
+                        profile_id=profile_id,
+                        _conn=txn,
+                    )
+
+            await run_sync(_create_voice_session)
+
+            await self.send_json({
+                "type": "session_created",
+                "session_id": session_id,
+                "title": title,
+                "session_type": session_type,
+            })
+        else:
+            # Store user message for existing session
+            await run_sync(
+                database.add_session_message,
+                session_id=session_id,
+                role="user",
+                content=transcript,
+                profile_id=profile_id,
+            )
+
+        # Track current session
+        if session_id != self.current_session_id:
+            if self.current_session_id:
+                await sync_engine.unregister_device(self.device_id, self.current_session_id)
+            await sync_engine.register_device(self.device_id, session_id, self.websocket)
+            self.current_session_id = session_id
+
+        # 4. Run Claude query with transcript as the prompt.
+        #    We collect the full response text by running the query via
+        #    run_query (which streams tokens normally) and then reading the
+        #    final assistant message from the DB after the task completes.
+        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
+
+        # Cancel any existing query
+        async with _active_sessions_lock:
+            existing_task = _active_chat_sessions.get(session_id)
+        if existing_task:
+            existing_task.cancel()
+            try:
+                await existing_task
+            except asyncio.CancelledError:
+                pass
+
+        # Signal that voice TTS should follow this query
+        voice_done_event = asyncio.Event()
+        query_task = asyncio.create_task(
+            self._run_voice_query(
+                transcript, session_id, profile_id, project_id, voice_done_event
+            )
+        )
+        async with _active_sessions_lock:
+            _active_chat_sessions[session_id] = query_task
+        self.query_task = query_task
+
+    async def _run_voice_query(
+        self,
+        prompt: str,
+        session_id: str,
+        profile_id: str,
+        project_id: Optional[str],
+        done_event: asyncio.Event,
+    ) -> None:
+        """Run a Claude query for voice, then generate TTS from the response.
+
+        This wraps run_query: it runs the normal streaming query, waits for it
+        to complete, reads the final assistant response from the DB, generates
+        TTS audio, and sends the voice_response_audio message to the client.
+        """
+        from app.api.voice_pipeline import generate_speech
+
+        try:
+            # Run the standard query (streams text tokens to the client)
+            await self.run_query(prompt, session_id, profile_id, project_id)
+        except Exception:
+            logger.exception(f"Voice query failed for session {session_id}")
+            await self.send_json({
+                "type": "voice_error",
+                "error": "Query failed",
+                "session_id": session_id,
+            })
+            return
+        finally:
+            done_event.set()
+
+        # 5. Get the full assistant response text from the last assistant message
+        try:
+            messages = await run_sync(database.get_session_messages, session_id)
+            response_text = ""
+            for msg in reversed(messages):
+                if msg.get("role") == "assistant":
+                    response_text = msg.get("content", "")
+                    break
+
+            if not response_text:
+                logger.warning(f"No assistant response found for voice session {session_id}")
+                await self.send_json({
+                    "type": "voice_response_audio",
+                    "audio_url": None,
+                    "text": "",
+                    "session_id": session_id,
+                })
+                return
+
+            # 6. Generate TTS audio from response
+            audio_url = await generate_speech(response_text)
+
+            # 7. Send audio + transcript back to client
+            await self.send_json({
+                "type": "voice_response_audio",
+                "audio_url": audio_url,
+                "text": response_text,
+                "session_id": session_id,
+            })
+
+        except Exception:
+            logger.exception(f"Voice TTS generation failed for session {session_id}")
+            await self.send_json({
+                "type": "voice_error",
+                "error": "TTS generation failed",
+                "session_id": session_id,
+            })
 
     # ------------------------------------------------------------------
     # _process_next_queued — auto-send next queued message

@@ -106,6 +106,9 @@ function mockState(): ActiveSessionState {
 		fastMode: false,
 		wsStreamContent: '',
 		pendingInterruptPrompt: null,
+		sessionType: 'chat',
+		voiceResponseAudioUrl: null,
+		voiceResponseText: null,
 	};
 }
 

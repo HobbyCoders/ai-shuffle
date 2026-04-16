@@ -31,6 +31,7 @@
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import AdvancedSearch from '$lib/components/AdvancedSearch.svelte';
 	import GlobalSttIndicator from '$lib/components/GlobalSttIndicator.svelte';
+	import SessionTypeSelector from '$lib/components/layout/SessionTypeSelector.svelte';
 	import { initGlobalStt } from '$lib/services/globalStt';
 	import { requestPermissionIfNeeded } from '$lib/services/notifications';
 
@@ -43,6 +44,7 @@
 	let showKnowledgeModal = $state(false);
 	let showSpotlight = $state(false);
 	let showAdvancedSearch = $state(false);
+	let showSessionTypeSelector = $state(false);
 
 	// Tag state
 	let allTags: Tag[] = $state([]);
@@ -58,10 +60,23 @@
 	// ============================================
 
 	/**
-	 * Create a new chat session and navigate to it
+	 * Show session type selector (Chat or Voice)
 	 */
 	function handleNewSession() {
-		activeSession.newChat();
+		showSessionTypeSelector = true;
+	}
+
+	/**
+	 * Create a new session of the selected type
+	 */
+	function handleSessionTypeSelect(type: 'chat' | 'voice') {
+		showSessionTypeSelector = false;
+
+		if (type === 'voice') {
+			activeSession.newVoiceSession();
+		} else {
+			activeSession.newChat();
+		}
 
 		if ($sidebarOverlay && !$sidebarCollapsed) {
 			layout.setSidebarCollapsed(true);
@@ -237,7 +252,8 @@
 				category: 'general',
 				allowInInput: true,
 				action: () => {
-					if (showKeyboardShortcuts) showKeyboardShortcuts = false;
+					if (showSessionTypeSelector) showSessionTypeSelector = false;
+					else if (showKeyboardShortcuts) showKeyboardShortcuts = false;
 					else if (showAdvancedSearch) showAdvancedSearch = false;
 					else if (showSpotlight) showSpotlight = false;
 					else if (showImportModal) showImportModal = false;
@@ -317,8 +333,8 @@
 	}
 
 	function handleSpotlightNewChat() {
-		handleNewSession();
 		showSpotlight = false;
+		handleSessionTypeSelect('chat');
 	}
 
 	function handleSpotlightOpenSettings() {
@@ -416,6 +432,13 @@
 			onclose={() => showKnowledgeModal = false}
 		/>
 	{/if}
+
+	<!-- Session Type Selector (New Chat vs Voice) -->
+	<SessionTypeSelector
+		open={showSessionTypeSelector}
+		onSelect={handleSessionTypeSelect}
+		onClose={() => showSessionTypeSelector = false}
+	/>
 
 	<!-- Global STT Indicator -->
 	<GlobalSttIndicator />

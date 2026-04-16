@@ -30,7 +30,8 @@
 		KeyRound,
 		FolderKanban,
 		CalendarClock,
-		BookOpen
+		BookOpen,
+		Mic
 	} from 'lucide-svelte';
 	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
 	import { layout, activeView, sidebarCollapsed } from '$lib/stores/layout';
@@ -496,7 +497,7 @@
 										<div class="attention-dot"></div>
 									{/if}
 									<div class="session-info">
-										<span class="session-title">{session.title || 'Untitled'}</span>
+										<span class="session-title">{#if session.session_type === 'voice'}<Mic size={11} strokeWidth={1.75} class="voice-session-icon" />{/if}{session.title || 'Untitled'}</span>
 										{#if session.total_cost_usd > 0}
 											<span class="session-meta">
 												{formatCost(session.total_cost_usd)} · {formatSessionDuration(session.created_at, session.updated_at || session.created_at)}{#if session.turn_count > 0} · {session.turn_count} {session.turn_count === 1 ? 'turn' : 'turns'}{/if}
@@ -664,7 +665,7 @@
 													<div class="streaming-dot"></div>
 												{/if}
 												<div class="session-info">
-													<span class="session-title">{session.title || 'Untitled'}</span>
+													<span class="session-title">{#if session.session_type === 'voice'}<Mic size={11} strokeWidth={1.75} class="voice-session-icon" />{/if}{session.title || 'Untitled'}</span>
 													{#if session.total_cost_usd > 0}
 														<span class="session-meta">
 															{formatCost(session.total_cost_usd)} · {formatSessionDuration(session.created_at, session.updated_at || session.created_at)}{#if session.turn_count > 0} · {session.turn_count} {session.turn_count === 1 ? 'turn' : 'turns'}{/if}
@@ -779,7 +780,7 @@
 														<div class="streaming-dot"></div>
 													{/if}
 													<div class="session-info">
-														<span class="session-title">{session.title || 'Untitled'}</span>
+														<span class="session-title">{#if session.session_type === 'voice'}<Mic size={11} strokeWidth={1.75} class="voice-session-icon" />{/if}{session.title || 'Untitled'}</span>
 														{#if session.total_cost_usd > 0}
 															<span class="session-meta">
 																{formatCost(session.total_cost_usd)} · {formatSessionDuration(session.created_at, session.updated_at || session.created_at)}{#if session.turn_count > 0} · {session.turn_count} {session.turn_count === 1 ? 'turn' : 'turns'}{/if}
@@ -1433,6 +1434,15 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		font-weight: 400;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+	}
+
+	.session-title :global(.voice-session-icon) {
+		flex-shrink: 0;
+		color: oklch(0.65 0.2 25);
+		opacity: 0.8;
 	}
 
 	.session-meta {

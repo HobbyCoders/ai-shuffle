@@ -40,6 +40,7 @@ export interface Session {
 	worktree_branch?: string | null;
 	worktree_path?: string | null;
 	worktree_deleted?: boolean;
+	session_type?: 'chat' | 'voice';
 	created_at: string;
 	updated_at: string;
 }

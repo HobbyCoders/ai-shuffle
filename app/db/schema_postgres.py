@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 42
 
 
 def create_postgres_schema(cursor) -> None:
@@ -185,6 +185,7 @@ def create_postgres_schema(cursor) -> None:
             parent_session_id TEXT,
             fork_point_message_index INTEGER,
             instance_id TEXT,
+            session_type TEXT DEFAULT 'chat',
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
             FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,

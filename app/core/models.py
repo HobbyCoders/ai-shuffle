@@ -261,6 +261,7 @@ class SessionBase(BaseModel):
     profile_id: Optional[str] = None  # Nullable: sessions persist after profile deletion
     project_id: Optional[str] = None
     title: Optional[str] = None
+    session_type: str = "chat"  # "chat" or "voice"
 
 
 class SessionCreate(SessionBase):

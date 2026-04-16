@@ -80,7 +80,13 @@ async def get_internal_api_key(key_name: str, _: str = Depends(require_admin)):
     Only allows specific key names to prevent arbitrary setting access.
     Requires admin authentication to prevent unauthorized access.
     """
-    allowed_keys = ["fal_api_key"]
+    allowed_keys = [
+        "fal_api_key",
+        "deepgram_api_key",
+        "cartesia_api_key",
+        "elevenlabs_api_key",
+        "groq_api_key",
+    ]
 
     if key_name not in allowed_keys:
         raise HTTPException(status_code=400, detail=f"Invalid key name. Allowed: {allowed_keys}")
@@ -101,6 +107,15 @@ class IntegrationSettingsResponse(BaseModel):
     """Response containing integration configuration status"""
     fal_api_key_set: bool
     fal_api_key_masked: str
+    # Realtime voice providers (Phase 0 — Pipecat pipeline)
+    deepgram_api_key_set: bool = False
+    deepgram_api_key_masked: str = ""
+    cartesia_api_key_set: bool = False
+    cartesia_api_key_masked: str = ""
+    elevenlabs_api_key_set: bool = False
+    elevenlabs_api_key_masked: str = ""
+    groq_api_key_set: bool = False
+    groq_api_key_masked: str = ""
     # Model selections (all fal.ai model IDs)
     image_model: Optional[str] = None
     image_edit_model: Optional[str] = None
@@ -141,6 +156,10 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     Returns whether API keys are configured (without exposing the actual keys).
     """
     fal_key = get_decrypted_api_key("fal_api_key")
+    deepgram_key = get_decrypted_api_key("deepgram_api_key")
+    cartesia_key = get_decrypted_api_key("cartesia_api_key")
+    elevenlabs_key = get_decrypted_api_key("elevenlabs_api_key")
+    groq_key = get_decrypted_api_key("groq_api_key")
     image_model = database.get_system_setting("image_model")
     image_edit_model = database.get_system_setting("image_edit_model")
     video_model = database.get_system_setting("video_model")
@@ -165,6 +184,14 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     return IntegrationSettingsResponse(
         fal_api_key_set=bool(fal_key),
         fal_api_key_masked=mask_api_key(fal_key) if fal_key else "",
+        deepgram_api_key_set=bool(deepgram_key),
+        deepgram_api_key_masked=mask_api_key(deepgram_key) if deepgram_key else "",
+        cartesia_api_key_set=bool(cartesia_key),
+        cartesia_api_key_masked=mask_api_key(cartesia_key) if cartesia_key else "",
+        elevenlabs_api_key_set=bool(elevenlabs_key),
+        elevenlabs_api_key_masked=mask_api_key(elevenlabs_key) if elevenlabs_key else "",
+        groq_api_key_set=bool(groq_key),
+        groq_api_key_masked=mask_api_key(groq_key) if groq_key else "",
         image_model=image_model,
         image_edit_model=image_edit_model,
         video_model=video_model,
@@ -234,6 +261,119 @@ async def remove_fal_api_key(token: str = Depends(require_admin)):
     Remove the fal.ai API key (admin only).
     """
     database.delete_system_setting("fal_api_key")
+    return {"success": True}
+
+
+# ============================================================================
+# Realtime Voice Providers (Deepgram / Cartesia / ElevenLabs / Groq)
+# ============================================================================
+
+class VoiceProviderKeyRequest(BaseModel):
+    """Request to set a realtime voice provider API key."""
+    api_key: str
+
+
+class VoiceProviderKeyResponse(BaseModel):
+    """Response after setting a realtime voice provider API key."""
+    success: bool
+    masked_key: str
+    valid: bool = True
+
+
+async def _validate_provider_key(provider: str, api_key: str) -> bool:
+    """
+    Lightweight validation: hit a low-cost endpoint per provider.
+    Returns True if validated, False if definitively invalid.
+    Swallows network/timeout errors (treated as unknown — save anyway).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            if provider == "deepgram":
+                resp = await client.get(
+                    "https://api.deepgram.com/v1/projects",
+                    headers={"Authorization": f"Token {api_key}"},
+                )
+                return resp.status_code != 401
+            if provider == "cartesia":
+                resp = await client.get(
+                    "https://api.cartesia.ai/voices",
+                    headers={
+                        "X-API-Key": api_key,
+                        "Cartesia-Version": "2024-06-10",
+                    },
+                )
+                return resp.status_code != 401
+            if provider == "elevenlabs":
+                resp = await client.get(
+                    "https://api.elevenlabs.io/v1/user",
+                    headers={"xi-api-key": api_key},
+                )
+                return resp.status_code != 401
+            if provider == "groq":
+                resp = await client.get(
+                    "https://api.groq.com/openai/v1/models",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                return resp.status_code != 401
+    except httpx.TimeoutException:
+        logger.warning(f"{provider} validation timed out; saving key anyway")
+        return True
+    except Exception as e:
+        logger.warning(f"{provider} validation error: {e}")
+        return True
+    return True
+
+
+def _provider_setting_name(provider: str) -> str:
+    mapping = {
+        "deepgram": "deepgram_api_key",
+        "cartesia": "cartesia_api_key",
+        "elevenlabs": "elevenlabs_api_key",
+        "groq": "groq_api_key",
+    }
+    if provider not in mapping:
+        raise HTTPException(status_code=404, detail=f"Unknown voice provider: {provider}")
+    return mapping[provider]
+
+
+@router.post("/integrations/voice/{provider}", response_model=VoiceProviderKeyResponse)
+async def set_voice_provider_key(
+    provider: str,
+    request: VoiceProviderKeyRequest,
+    token: str = Depends(require_admin),
+):
+    """
+    Set a realtime voice provider API key (admin only).
+
+    Providers: deepgram | cartesia | elevenlabs | groq
+    """
+    setting_name = _provider_setting_name(provider)
+    api_key = request.api_key.strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key cannot be empty")
+
+    valid = await _validate_provider_key(provider, api_key)
+    if not valid:
+        raise HTTPException(status_code=400, detail="Invalid API key. Authentication failed.")
+
+    set_encrypted_api_key(setting_name, api_key)
+    return VoiceProviderKeyResponse(
+        success=True,
+        masked_key=mask_api_key(api_key),
+        valid=valid,
+    )
+
+
+@router.delete("/integrations/voice/{provider}")
+async def remove_voice_provider_key(
+    provider: str,
+    token: str = Depends(require_admin),
+):
+    """
+    Remove a realtime voice provider API key (admin only).
+    """
+    setting_name = _provider_setting_name(provider)
+    database.delete_system_setting(setting_name)
     return {"success": True}
 
 

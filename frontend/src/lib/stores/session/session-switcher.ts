@@ -67,6 +67,7 @@ export interface SessionWorktreeInfo {
 export interface SessionSwitcher {
 	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null) => Promise<void>;
 	newChat: () => void;
+	newVoiceSession: () => void;
 	persistSession: () => void;
 	loadPersistedSession: () => Promise<PersistedSession | null>;
 	getPersistedProfile: () => string;
@@ -199,6 +200,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 				selectedWorktreeBranch: state.selectedWorktreeBranch,
 				worktreeMode: state.worktreeMode,
 				worktreeDeleted: state.worktreeDeleted,
+				sessionType: state.sessionType,
 			} satisfies PersistedSession,
 		});
 	}
@@ -459,6 +461,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			fastMode: false,
 			sessionLocked: false,
 			sessionLockedBy: undefined,
+			sessionType: 'chat' as const,
 		}));
 
 		const afterState = getState();
@@ -479,9 +482,26 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		}
 	}
 
+	function newVoiceSession() {
+		// Use newChat() for all cleanup/teardown, then override title and
+		// sessionType in one shot. newChat() already calls persistSessionImmediate(),
+		// so we just update the two fields and persist again. To avoid the
+		// double-update Svelte 5 pitfall documented above, we do a single
+		// update + single persist here (newChat's persist will be a no-op
+		// since persistSessionImmediate cancels any pending timer first).
+		newChat();
+		update(s => ({
+			...s,
+			title: 'Voice Session',
+			sessionType: 'voice' as const,
+		}));
+		persistSessionImmediate();
+	}
+
 	return {
 		switchSession,
 		newChat,
+		newVoiceSession,
 		persistSession,
 		loadPersistedSession,
 		getPersistedProfile,

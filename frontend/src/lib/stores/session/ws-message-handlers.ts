@@ -663,6 +663,44 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				break;
 			}
 
+			// ── Voice session messages ────────────────────────────────
+
+			case 'voice_transcript': {
+				// Server transcribed user's speech — trigger poll to pick up the new message
+				const vtSessionId = data.session_id as string | undefined;
+				if (vtSessionId && vtSessionId === state.sessionId) {
+					sessionPoller.pollNow(vtSessionId);
+				}
+				break;
+			}
+
+			case 'voice_response_audio': {
+				// Server generated TTS audio for Claude's response
+				// Store the audio URL so VoiceChatView can play it
+				const vraSessionId = data.session_id as string | undefined;
+				const audioUrl = data.audio_url as string | null;
+				const responseText = data.text as string | undefined;
+				if (vraSessionId && vraSessionId === state.sessionId) {
+					update(s => ({
+						...s,
+						voiceResponseAudioUrl: audioUrl ?? null,
+						voiceResponseText: responseText ?? null,
+					}));
+					// Also trigger poll to pick up the assistant message
+					sessionPoller.pollNow(vraSessionId);
+				}
+				break;
+			}
+
+			case 'voice_error': {
+				const veSessionId = data.session_id as string | undefined;
+				const veError = data.error as string;
+				if (!veSessionId || veSessionId === state.sessionId) {
+					update(s => ({ ...s, error: veError || 'Voice processing error' }));
+				}
+				break;
+			}
+
 			case 'ping': {
 				wsSend({ type: 'pong' });
 				break;

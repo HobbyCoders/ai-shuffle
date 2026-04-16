@@ -18,6 +18,7 @@
 	import { generateCommitMessage, generatePRDescription, deleteWorktree } from '$lib/api/git';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import ChatView from './ChatView.svelte';
+	import VoiceChatView from './VoiceChatView.svelte';
 	import PageHeader from './PageHeader.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
@@ -1007,7 +1008,14 @@
 			</PageHeader>
 		{/if}
 		{#if $activeView.type === 'chat'}
-			<ChatView />
+			{#if $activeSession.sessionType === 'voice'}
+				<VoiceChatView
+					onSpeechEnd={(blob) => activeSession.sendVoiceAudio(blob)}
+					onInterrupt={() => activeSession.stopGeneration()}
+				/>
+			{:else}
+				<ChatView />
+			{/if}
 		{:else if $activeView.type === 'profile'}
 			<!-- Embedded: uses FeaturePageLayout with its own header -->
 			<div class="feature-panel">

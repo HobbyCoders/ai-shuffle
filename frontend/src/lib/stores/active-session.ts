@@ -132,6 +132,12 @@ export interface ActiveSessionState {
 	 *  If the interrupt fails/times out, ChatInput restores this to the editor
 	 *  so the user doesn't lose their message. Cleared on success or session switch. */
 	pendingInterruptPrompt: string | null;
+	/** Session type: 'chat' (default) or 'voice' for realtime voice sessions */
+	sessionType: 'chat' | 'voice';
+	/** URL of the latest TTS audio response from the voice pipeline */
+	voiceResponseAudioUrl: string | null;
+	/** Text of the latest voice response (for transcript display) */
+	voiceResponseText: string | null;
 }
 
 /** Minimal shape persisted to the backend. */
@@ -150,6 +156,7 @@ export interface PersistedSession {
 	selectedWorktreeBranch?: string | null;
 	worktreeMode?: 'new' | 'existing';
 	worktreeDeleted?: boolean;
+	sessionType?: 'chat' | 'voice';
 }
 
 // ─── Module-Level Helpers ────────────────────────────────────────────────────
@@ -209,6 +216,9 @@ function defaultState(): ActiveSessionState {
 		sessionLockedBy: undefined,
 		wsStreamContent: '',
 		pendingInterruptPrompt: null,
+		sessionType: 'chat',
+		voiceResponseAudioUrl: null,
+		voiceResponseText: null,
 	};
 }
 
@@ -469,12 +479,52 @@ export const activeSession = {
 		switcher.newChat();
 	},
 
+	newVoiceSession: () => {
+		setSkipRestore(true);
+		bumpInitGeneration();
+		switcher.newVoiceSession();
+	},
+
 	// ── Messaging (delegated to message-sender) ─────────────────────
 
 	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[] }) =>
 		messageSender.sendMessage(prompt, options),
 
 	stopGeneration: () => messageSender.stopGeneration(),
+
+	/** Send voice audio to the backend for STT → Claude → TTS pipeline */
+	sendVoiceAudio: async (audioBlob: Blob) => {
+		// If no session exists yet, signal that we expect a session_created
+		// response — mirrors what sendMessage() does in message-sender.ts.
+		if (!_state.sessionId) {
+			internal.awaitingNewSession = true;
+		}
+
+		const reader = new FileReader();
+		const base64 = await new Promise<string>((resolve, reject) => {
+			reader.onload = () => {
+				const dataUrl = reader.result as string;
+				// Strip data URI prefix to get raw base64
+				const base64Data = dataUrl.split(',')[1] || '';
+				resolve(base64Data);
+			};
+			reader.onerror = reject;
+			reader.readAsDataURL(audioBlob);
+		});
+
+		wsConn.send({
+			type: 'voice_audio',
+			session_id: _state.sessionId,
+			audio_data: base64,
+			mime_type: audioBlob.type || 'audio/webm',
+			session_type: 'voice',
+			profile: _state.profile,
+			project: _state.project,
+		});
+
+		// Clear previous voice response
+		_update(s => ({ ...s, voiceResponseAudioUrl: null, voiceResponseText: null }));
+	},
 
 	// ── Permission & Question Responses (delegated to permission-handler) ──
 
