@@ -6,7 +6,7 @@
  * while preserving safe HTML from markdown rendering.
  */
 
-import DOMPurify from 'dompurify';
+import DOMPurify, { type Config } from 'dompurify';
 
 // Configure DOMPurify for our use case:
 // - Allow common HTML from markdown rendering
@@ -25,7 +25,7 @@ const PURIFY_CONFIG = {
 	ALLOW_DATA_ATTR: true,
 	// Allow blob: and data: URIs for images/media
 	ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|blob|data):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
-} satisfies DOMPurify.Config;
+} satisfies Config;
 
 // Restrict onclick to only app-generated buttons (code copy, image download overlays).
 // Without this, any injected HTML with onclick would execute — e.g., via LLM prompt injection.
@@ -45,5 +45,5 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
  * Safe to use with Svelte's {@html} directive.
  */
 export function sanitizeHtml(dirty: string): string {
-	return DOMPurify.sanitize(dirty, PURIFY_CONFIG);
+	return DOMPurify.sanitize(dirty, PURIFY_CONFIG) as string;
 }
