@@ -66,14 +66,30 @@ async def _persist_turn_results(
     profile_id: Optional[str],
     interrupted: bool = False,
     log_prefix: str = "",
+    thinking_blocks: Optional[list] = None,
+    system_messages: Optional[list] = None,
+    plugin_messages: Optional[list] = None,
 ) -> Optional[dict]:
     """Persist a completed turn's data to the database in batched writes.
 
-    Combines tool messages + assistant response into a single transaction
-    (one DB connection, one commit) instead of N+1 individual writes.
+    Combines tool messages + assistant response + thinking blocks + system
+    messages into a single transaction (one DB connection, one commit)
+    instead of N+1 individual writes.
+
+    New in db-backed-sessions:
+    - thinking_blocks: list of {"content": str} dicts
+    - system_messages: list of {"content": str, "subtype": str, "data": dict}
+    - plugin_messages: list of {"plugin": str, "message": str, "severity": str}
+    - Subagent tool_use (name in Task/Agent) stored with role="subagent"
+
     Returns the assistant message dict if one was stored, else None.
     """
     from app.db.sessions import add_session_messages_batch
+
+    # Normalise optional lists
+    thinking_blocks = thinking_blocks or []
+    system_messages = system_messages or []
+    plugin_messages = plugin_messages or []
 
     # 1. Update session metadata (sdk_session_id, cost, tokens, turns)
     try:
@@ -95,28 +111,92 @@ async def _persist_turn_results(
     full_response = "\n".join(response_text) if response_text else ""
     batch: list[dict] = []
 
+    # 2a. Thinking blocks (before tool/text — mirrors streaming order)
+    for tb in thinking_blocks:
+        batch.append({
+            "session_id": session_id,
+            "role": "thinking",
+            "content": tb.get("content", ""),
+            "metadata": {"model": metadata.get("model")},
+            "profile_id": profile_id,
+        })
+
+    # 2b. Tool messages — detect subagent tool_use (Task/Agent)
+    _SUBAGENT_TOOLS = {"Task", "Agent"}
     for tool_msg in tool_messages:
         msg_type = tool_msg.get("type")
+        tool_name = tool_msg.get("name", "unknown")
         if msg_type == "tool_use":
-            batch.append({
-                "session_id": session_id,
-                "role": "tool_use",
-                "content": f"Using tool: {tool_msg.get('name', 'unknown')}",
-                "tool_name": tool_msg.get("name", "unknown"),
-                "tool_input": tool_msg.get("input"),
-                "metadata": {"tool_id": tool_msg.get("tool_id")},
-                "profile_id": profile_id,
-            })
+            if tool_name in _SUBAGENT_TOOLS:
+                # Store as subagent role with rich metadata
+                tool_input = tool_msg.get("input") or {}
+                batch.append({
+                    "session_id": session_id,
+                    "role": "subagent",
+                    "content": tool_input.get("description", ""),
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                    "metadata": {
+                        "tool_id": tool_msg.get("tool_id"),
+                        "agent_type": (
+                            tool_input.get("subagent_type")
+                            or tool_input.get("description")
+                            or "Agent"
+                        ),
+                        "agent_description": tool_input.get("description", ""),
+                        "agent_prompt": tool_input.get("prompt", ""),
+                        "agent_status": "completed",
+                    },
+                    "profile_id": profile_id,
+                })
+            else:
+                batch.append({
+                    "session_id": session_id,
+                    "role": "tool_use",
+                    "content": f"Using tool: {tool_name}",
+                    "tool_name": tool_name,
+                    "tool_input": tool_msg.get("input"),
+                    "metadata": {"tool_id": tool_msg.get("tool_id")},
+                    "profile_id": profile_id,
+                })
         elif msg_type == "tool_result":
             batch.append({
                 "session_id": session_id,
                 "role": "tool_result",
                 "content": tool_msg.get("output", ""),
-                "tool_name": tool_msg.get("name", "unknown"),
+                "tool_name": tool_name,
                 "metadata": {"tool_id": tool_msg.get("tool_id")},
                 "profile_id": profile_id,
             })
 
+    # 2c. System messages (compact_boundary, api_error, local_command, etc.)
+    for sm in system_messages:
+        batch.append({
+            "session_id": session_id,
+            "role": "system",
+            "content": sm.get("content", ""),
+            "metadata": {
+                "subtype": sm.get("subtype", ""),
+                "system_data": sm.get("data", {}),
+            },
+            "profile_id": profile_id,
+        })
+
+    # 2d. Plugin/hook warning messages
+    for pm in plugin_messages:
+        batch.append({
+            "session_id": session_id,
+            "role": "system",
+            "content": pm.get("message", ""),
+            "metadata": {
+                "subtype": "plugin_warning",
+                "plugin_name": pm.get("plugin", ""),
+                "severity": pm.get("severity", "info"),
+            },
+            "profile_id": profile_id,
+        })
+
+    # 2e. Assistant text response (always last)
     assistant_msg = None
     if full_response or interrupted or tool_messages:
         batch.append({

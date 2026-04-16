@@ -1086,6 +1086,9 @@ async def stream_to_websocket(
     # Note: SDK built-in commands like /context and /compact are passed directly to the SDK
     response_text = []
     tool_messages = []  # Collect tool use/result messages for storage
+    thinking_blocks = []  # Collect thinking blocks for DB persistence
+    system_messages_acc = []  # Collect system messages for DB persistence
+    plugin_messages_acc = []  # Collect plugin/hook warnings for DB persistence
     task_tool_uses = {}  # Track Task (subagent) tool uses by tool_id
     tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
     metadata = {}
@@ -1093,6 +1096,7 @@ async def stream_to_websocket(
     include_partial = options.include_partial_messages  # Track if streaming events are enabled
     has_visible_content = False  # Track if any content was yielded to the frontend
     is_slash_command = prompt.strip().startswith("/")
+    _current_thinking = []  # Accumulate thinking deltas into blocks
 
     # Helper to drain stderr queue and yield plugin messages
     async def drain_stderr_queue():
@@ -1132,6 +1136,9 @@ async def stream_to_websocket(
             # Drain stderr queue and yield any plugin messages
             for stderr_msg in await drain_stderr_queue():
                 logger.debug(f"[WS] Yielding plugin message to websocket: {stderr_msg.get('type')}")
+                # Accumulate for DB persistence
+                if stderr_msg.get("type") == "plugin_message":
+                    plugin_messages_acc.append(stderr_msg)
                 yield stderr_msg
 
             # Check typed task messages before generic SystemMessage
@@ -1200,6 +1207,15 @@ async def stream_to_websocket(
                     elif message.subtype not in SUPPRESSED_SUBTYPES:
                         has_visible_content = True
                         logger.debug(f"[WS] Forwarding SystemMessage to frontend: subtype={message.subtype}")
+                        # Accumulate for DB persistence
+                        sys_content = ""
+                        if isinstance(message.data, dict) and "content" in message.data:
+                            sys_content = str(message.data["content"])
+                        system_messages_acc.append({
+                            "content": sys_content,
+                            "subtype": message.subtype,
+                            "data": message.data,
+                        })
                         yield {
                             "type": "system",
                             "subtype": message.subtype,
@@ -1237,6 +1253,10 @@ async def stream_to_websocket(
                     delta_type = delta.get("type")
 
                     if delta_type == "text_delta" and delta.get("text"):
+                        # Finalize any accumulated thinking block
+                        if _current_thinking:
+                            thinking_blocks.append({"content": "".join(_current_thinking)})
+                            _current_thinking.clear()
                         # Real-time text streaming chunk
                         text = delta["text"]
                         has_visible_content = True
@@ -1248,7 +1268,8 @@ async def stream_to_websocket(
                             "index": event.get("index", 0)
                         }
                     elif delta_type == "thinking_delta" and delta.get("thinking"):
-                        # Thinking block streaming
+                        # Thinking block streaming — accumulate for DB persistence
+                        _current_thinking.append(delta["thinking"])
                         yield {
                             "type": "stream_delta",
                             "delta_type": "thinking",
@@ -1663,8 +1684,15 @@ async def stream_to_websocket(
             interrupted = True
             logger.debug(f"[WS] Streaming loop ended after interrupt for session {session_id}")
 
+        # Finalize any trailing thinking block
+        if _current_thinking:
+            thinking_blocks.append({"content": "".join(_current_thinking)})
+            _current_thinking.clear()
+
         # Final drain of stderr queue after streaming loop completes
         for stderr_msg in await drain_stderr_queue():
+            if stderr_msg.get("type") == "plugin_message":
+                plugin_messages_acc.append(stderr_msg)
             yield stderr_msg
 
     except asyncio.CancelledError:
@@ -1709,6 +1737,9 @@ async def stream_to_websocket(
         profile_id=profile_id,
         interrupted=interrupted,
         log_prefix="[WS] ",
+        thinking_blocks=thinking_blocks,
+        system_messages=system_messages_acc,
+        plugin_messages=plugin_messages_acc,
     )
 
     # For slash commands that produced no visible content, yield a notification

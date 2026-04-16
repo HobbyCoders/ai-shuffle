@@ -246,27 +246,41 @@ async def chat_websocket(
             initial_messages = [m.to_dict() for m in existing_live.messages]
             ctx.debug(logger, f"Using {len(initial_messages)} messages from live store (interrupted session)")
         else:
-            # Fall back to JSONL parsing (normal path: no interrupted session in memory)
+            # DB-first loading (fast path: indexed query + simple transform)
+            from app.core.db_message_loader import load_messages_from_db
+
             initial_messages = []
-            session_data = await run_sync(database.get_session, session_id)
-            if session_data:
-                sdk_session_id = session_data.get("sdk_session_id")
-                if sdk_session_id:
-                    working_dir = str(settings.workspace_dir)
-                    if project_id:
-                        project = await run_sync(database.get_project, project_id)
-                        if project:
-                            working_dir = get_project_working_dir(project)
-                    try:
-                        jsonl_start = time.monotonic()
-                        initial_messages, _usage = await run_sync(parse_session_history, sdk_session_id, working_dir)
-                        jsonl_elapsed = time.monotonic() - jsonl_start
-                        if jsonl_elapsed > 1.0:
-                            ctx.warning(logger, f"JSONL parse took {jsonl_elapsed:.1f}s ({len(initial_messages)} messages)")
-                        else:
-                            ctx.debug(logger, f"JSONL parse: {jsonl_elapsed:.2f}s ({len(initial_messages)} messages)")
-                    except Exception as e:
-                        ctx.warning(logger, f"Failed to load history for live store: {e}")
+            try:
+                db_start = time.monotonic()
+                db_messages, has_db = await run_sync(load_messages_from_db, session_id)
+                db_elapsed = time.monotonic() - db_start
+                if has_db:
+                    initial_messages = db_messages
+                    ctx.debug(logger, f"DB message load: {db_elapsed:.2f}s ({len(db_messages)} messages)")
+            except Exception as e:
+                ctx.warning(logger, f"DB message load failed, falling back to JSONL: {e}")
+
+            # Fallback to JSONL for legacy sessions without DB messages
+            if not initial_messages:
+                session_data = await run_sync(database.get_session, session_id)
+                if session_data:
+                    sdk_session_id = session_data.get("sdk_session_id")
+                    if sdk_session_id:
+                        working_dir = str(settings.workspace_dir)
+                        if project_id:
+                            project = await run_sync(database.get_project, project_id)
+                            if project:
+                                working_dir = get_project_working_dir(project)
+                        try:
+                            jsonl_start = time.monotonic()
+                            initial_messages, _usage = await run_sync(parse_session_history, sdk_session_id, working_dir)
+                            jsonl_elapsed = time.monotonic() - jsonl_start
+                            if jsonl_elapsed > 1.0:
+                                ctx.warning(logger, f"JSONL fallback took {jsonl_elapsed:.1f}s ({len(initial_messages)} messages)")
+                            else:
+                                ctx.debug(logger, f"JSONL fallback: {jsonl_elapsed:.2f}s ({len(initial_messages)} messages)")
+                        except Exception as e:
+                            ctx.warning(logger, f"Failed to load history for live store: {e}")
 
         # Start live session with existing messages
         await live_session_store.start_streaming(session_id, initial_messages)
@@ -911,13 +925,24 @@ async def chat_websocket(
                                     if project:
                                         working_dir = get_project_working_dir(project)
 
-                                # Fall back to JSONL if live store didn't have data
+                                # DB-first loading (fast path: ~10-60ms)
+                                if not messages:
+                                    from app.core.db_message_loader import load_messages_from_db
+                                    try:
+                                        db_msgs, has_db = await run_sync(load_messages_from_db, session_id)
+                                        if has_db:
+                                            messages = db_msgs
+                                            logger.debug(f"Loaded {len(messages)} messages from DB for session {session_id}")
+                                    except Exception as e:
+                                        logger.warning(f"DB message load failed for {session_id}: {e}")
+
+                                # Fallback: JSONL parsing (legacy sessions)
                                 if not messages and sdk_session_id:
                                     try:
                                         from app.core.jsonl_parser import parse_session_history
 
                                         messages, usage_data = await run_sync(parse_session_history, sdk_session_id, working_dir)
-                                        logger.debug(f"Loaded {len(messages)} messages from JSONL for session {session_id}")
+                                        logger.debug(f"JSONL fallback: {len(messages)} messages for session {session_id}")
 
                                         # Merge profile_id using cached map (avoids loading all DB messages)
                                         from app.core.cost_utils import get_cached_profile_map
@@ -946,33 +971,6 @@ async def chat_websocket(
                                     except Exception as e:
                                         logger.error(f"Failed to parse JSONL for session {session_id}: {e}")
                                         messages = []
-
-                                # Fall back to database if JSONL not available or failed
-                                if not messages:
-                                    db_messages = await run_sync(database.get_session_messages, session_id)
-                                    # Transform DB messages to streaming format
-                                    for m in db_messages:
-                                        msg_type_value = None
-                                        if m.get("tool_name"):
-                                            msg_type_value = "tool_use"
-                                        elif m.get("role") == "assistant":
-                                            msg_type_value = "text"
-                                        elif m.get("role") in ("tool_use", "tool_result"):
-                                            msg_type_value = m.get("role")
-
-                                        messages.append({
-                                            "id": f"msg-{m.get('id', 0)}",
-                                            "role": "assistant" if m.get("role") in ("tool_use", "tool_result") else m.get("role"),
-                                            "content": m.get("content", ""),
-                                            "type": msg_type_value,
-                                            "toolName": m.get("tool_name"),
-                                            "toolId": m.get("tool_id"),
-                                            "toolInput": m.get("tool_input"),
-                                            "metadata": m.get("metadata"),
-                                            "profile_id": m.get("profile_id"),
-                                            "streaming": False
-                                        })
-                                    logger.debug(f"Loaded {len(messages)} messages from DB for session {session_id}")
 
                                 # Attach cost/duration metadata to final assistant messages (cached, O(N))
                                 from app.core.cost_utils import attach_cost_metadata

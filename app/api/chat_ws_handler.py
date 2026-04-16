@@ -375,10 +375,20 @@ class ChatWebSocketHandler:
                         worktree_path=wt_path,
                         _conn=txn
                     )
+                    _msg_role = "user"
+                    _msg_meta = None
+                    if prompt.strip().startswith("/"):
+                        _parts = prompt.strip().split(None, 1)
+                        _msg_role = "command"
+                        _msg_meta = {
+                            "command_name": _parts[0],
+                            "command_args": _parts[1] if len(_parts) > 1 else "",
+                        }
                     database.add_session_message(
                         session_id=session_id,
-                        role="user",
+                        role=_msg_role,
                         content=prompt,
+                        metadata=_msg_meta,
                         profile_id=profile_id,
                         _conn=txn
                     )
@@ -414,11 +424,21 @@ class ChatWebSocketHandler:
 
         # Store user message for existing sessions (new sessions already stored atomically above)
         if not is_new_session:
+            _msg_role = "user"
+            _msg_meta = None
+            if prompt.strip().startswith("/"):
+                _parts = prompt.strip().split(None, 1)
+                _msg_role = "command"
+                _msg_meta = {
+                    "command_name": _parts[0],
+                    "command_args": _parts[1] if len(_parts) > 1 else "",
+                }
             await run_sync(
                 database.add_session_message,
                 session_id=session_id,
-                role="user",
+                role=_msg_role,
                 content=prompt,
+                metadata=_msg_meta,
                 profile_id=profile_id,
             )
 
@@ -606,10 +626,20 @@ class ChatWebSocketHandler:
                         pass
 
             # Step 3: Store user message with profile_id for per-query tracking
+            _msg_role = "user"
+            _msg_meta = None
+            if prompt.strip().startswith("/"):
+                _parts = prompt.strip().split(None, 1)
+                _msg_role = "command"
+                _msg_meta = {
+                    "command_name": _parts[0],
+                    "command_args": _parts[1] if len(_parts) > 1 else "",
+                }
             database.add_session_message(
                 session_id=session_id,
-                role="user",
+                role=_msg_role,
                 content=prompt,
+                metadata=_msg_meta,
                 profile_id=profile_id
             )
 
@@ -1108,12 +1138,22 @@ class ChatWebSocketHandler:
             queue = await run_sync(database.get_queued_messages, session_id)
             await sync_engine.broadcast_queue_updated(session_id, queue)
 
-            # Store user message in DB
+            # Store user message in DB (detect slash commands)
+            _msg_role = "user"
+            _msg_meta = None
+            if content.strip().startswith("/"):
+                _parts = content.strip().split(None, 1)
+                _msg_role = "command"
+                _msg_meta = {
+                    "command_name": _parts[0],
+                    "command_args": _parts[1] if len(_parts) > 1 else "",
+                }
             await run_sync(
                 database.add_session_message,
                 session_id=session_id,
-                role="user",
+                role=_msg_role,
                 content=content,
+                metadata=_msg_meta,
                 profile_id=profile_id,
             )
 
@@ -1366,12 +1406,22 @@ class ChatWebSocketHandler:
                     remaining_queue = await run_sync(database.get_queued_messages, session_id)
                     await sync_engine.broadcast_queue_updated(session_id, remaining_queue)
 
-                    # Store user message in DB
+                    # Store user message in DB (detect slash commands)
+                    _msg_role = "user"
+                    _msg_meta = None
+                    if q_content.strip().startswith("/"):
+                        _parts = q_content.strip().split(None, 1)
+                        _msg_role = "command"
+                        _msg_meta = {
+                            "command_name": _parts[0],
+                            "command_args": _parts[1] if len(_parts) > 1 else "",
+                        }
                     await run_sync(
                         database.add_session_message,
                         session_id=session_id,
-                        role="user",
+                        role=_msg_role,
                         content=q_content,
+                        metadata=_msg_meta,
                         profile_id=q_profile,
                     )
 

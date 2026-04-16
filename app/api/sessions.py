@@ -600,13 +600,24 @@ async def get_live_session(
                     live_data["session_meta"] = session_meta
                 return live_data
 
-    # Not streaming - load from JSONL (same as get_session but simpler response)
+    # Not streaming — load from DB first (fast path), fall back to JSONL
     sdk_session_id = session.get("sdk_session_id")
     messages = []
     working_dir = "/workspace"
     usage_data = None
 
-    if sdk_session_id:
+    # Fast path: DB message loader (~10-60ms vs 6-20s JSONL parse)
+    from app.core.db_message_loader import load_messages_from_db
+    try:
+        db_messages, has_db = await run_sync(load_messages_from_db, session_id)
+        if has_db:
+            messages = db_messages
+            logger.debug(f"Live endpoint: loaded {len(messages)} messages from DB for {session_id}")
+    except Exception as e:
+        logger.warning(f"DB message load failed for live {session_id}: {e}")
+
+    # Fallback 1: JSONL parsing (legacy sessions without DB messages)
+    if not messages and sdk_session_id:
         try:
             from app.core.jsonl_parser import parse_session_history
             from app.core.config import settings
@@ -664,25 +675,6 @@ async def get_live_session(
                 )
         except Exception as e:
             logger.warning(f"SDK get_session_messages fallback failed for live {session_id}: {e}")
-
-    # Fallback 3: DB messages
-    if not messages:
-        db_messages = await run_sync(database.get_session_messages, session_id)
-        for m in db_messages:
-            msg = {
-                "id": str(m.get("id", "")),
-                "role": m.get("role", "user"),
-                "type": "tool_use" if m.get("tool_name") else "text",
-                "content": m.get("content", ""),
-                "streaming": False,
-            }
-            if m.get("tool_name"):
-                msg["toolName"] = m.get("tool_name")
-            if m.get("tool_id"):
-                msg["toolId"] = m.get("tool_id")
-            if m.get("tool_input"):
-                msg["toolInput"] = m.get("tool_input")
-            messages.append(msg)
 
     # Attach cost/duration metadata to final assistant messages (cached, O(N))
     # This ensures the poller gets cost data on the first poll after streaming ends
