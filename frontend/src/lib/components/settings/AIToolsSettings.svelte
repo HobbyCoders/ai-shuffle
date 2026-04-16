@@ -17,6 +17,8 @@
 	import { catalogStore } from '$lib/stores/catalog';
 	import ToolCategoryCard from './ToolCategoryCard.svelte';
 	import ModelBrowser from './ModelBrowser.svelte';
+	import VoiceProviderKeys from './VoiceProviderKeys.svelte';
+	import VoiceSettings from './VoiceSettings.svelte';
 	import type { CatalogModel } from '$lib/types/ai-models';
 
 	// ─── API Key State ───
@@ -276,6 +278,12 @@
 				{#if falKeyError}<span class="feedback-error">{falKeyError}</span>{/if}
 			</div>
 		</div>
+
+		<!-- Realtime Voice Provider Keys (Deepgram / Cartesia / ElevenLabs / Groq) -->
+		<VoiceProviderKeys />
+
+		<!-- Realtime Voice Pipeline Settings (provider selection, voice, turn detector) -->
+		<VoiceSettings />
 
 		<!-- Tool Category Cards -->
 		{#if loaded}
