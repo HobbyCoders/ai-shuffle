@@ -39,6 +39,15 @@ try:
 except ImportError:
     sdk_delete_session = None
 
+try:
+    from claude_agent_sdk import (
+        list_subagents as sdk_list_subagents,
+        get_subagent_messages as sdk_get_subagent_messages,
+    )
+except ImportError:
+    sdk_list_subagents = None
+    sdk_get_subagent_messages = None
+
 from app.core.models import (
     Session,
     SessionWithMessages,
@@ -818,6 +827,87 @@ async def get_sdk_session_info(
             "created_at": info.created_at,
             "last_modified": info.last_modified,
             "file_size": info.file_size,
+        }
+
+
+@router.get("/{session_id}/subagents")
+async def list_session_subagents(
+    request: Request,
+    session_id: str,
+    token: str = Depends(require_auth)
+):
+    """List subagent IDs spawned during a session (SDK 0.1.60+)."""
+    if not sdk_list_subagents:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="SDK list_subagents not available (requires SDK 0.1.60+)"
+        )
+
+    existing = await require_session(request, session_id)
+
+    sdk_sid = existing.get("sdk_session_id")
+    if not sdk_sid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Session has no SDK session ID"
+        )
+
+    async with api_error_handler("list session subagents"):
+        project = await run_sync(database.get_project, existing.get("project_id")) if existing.get("project_id") else None
+        working_dir = get_project_working_dir(project) if project else None
+        agent_ids = await run_sync(sdk_list_subagents, session_id=sdk_sid, directory=working_dir)
+        return {"session_id": session_id, "subagents": agent_ids}
+
+
+@router.get("/{session_id}/subagents/{agent_id}/messages")
+async def get_session_subagent_messages(
+    request: Request,
+    session_id: str,
+    agent_id: str,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    token: str = Depends(require_auth)
+):
+    """Read a subagent's transcript messages in chronological order (SDK 0.1.60+)."""
+    if not sdk_get_subagent_messages:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="SDK get_subagent_messages not available (requires SDK 0.1.60+)"
+        )
+
+    existing = await require_session(request, session_id)
+
+    sdk_sid = existing.get("sdk_session_id")
+    if not sdk_sid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Session has no SDK session ID"
+        )
+
+    async with api_error_handler("get subagent messages"):
+        project = await run_sync(database.get_project, existing.get("project_id")) if existing.get("project_id") else None
+        working_dir = get_project_working_dir(project) if project else None
+        messages = await run_sync(
+            sdk_get_subagent_messages,
+            session_id=sdk_sid,
+            agent_id=agent_id,
+            directory=working_dir,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "messages": [
+                {
+                    "type": m.type,
+                    "uuid": m.uuid,
+                    "session_id": m.session_id,
+                    "message": m.message,
+                    "parent_tool_use_id": m.parent_tool_use_id,
+                }
+                for m in messages
+            ],
         }
 
 
