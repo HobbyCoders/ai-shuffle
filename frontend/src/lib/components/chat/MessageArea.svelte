@@ -23,6 +23,7 @@
 	import AssistantMessage from './AssistantMessage.svelte';
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import ToolUseGroup from './ToolUseGroup.svelte';
+	import SystemMessageGroup from './SystemMessageGroup.svelte';
 	import ThinkingBlock from './ThinkingBlock.svelte';
 	import CommandMessage from './CommandMessage.svelte';
 	// Note: ToolResultMessage is intentionally not imported - tool_result messages are
@@ -166,13 +167,33 @@
 	// TodoWrite, Task, and Agent tools are excluded from grouping.
 	type DisplayItem =
 		| { kind: 'message'; message: ChatMessage; index: number }
-		| { kind: 'tool_group'; tools: ChatMessage[]; indices: number[] };
+		| { kind: 'tool_group'; tools: ChatMessage[]; indices: number[] }
+		| { kind: 'system_group'; messages: ChatMessage[]; indices: number[] };
 
 	function isGroupableTool(msg: ChatMessage): boolean {
 		return msg.type === 'tool_use'
 			&& msg.toolName !== 'TodoWrite'
 			&& msg.toolName !== 'Task'
 			&& msg.toolName !== 'Agent';
+	}
+
+	// Subtypes considered low-signal / hook-related — group into a collapsible
+	// summary when they arrive consecutively. Important system messages
+	// (errors, compact boundaries, mode changes, /context, local commands,
+	// agent launches, rewind notices) are intentionally excluded so they stay
+	// visible as full cards.
+	const GROUPABLE_SYSTEM_SUBTYPES = new Set([
+		'hook_started',
+		'hook_response',
+		'stop_hook_summary',
+		'turn_duration',
+		'task_started',
+		'task_progress'
+	]);
+
+	function isGroupableSystem(msg: ChatMessage): boolean {
+		return msg.type === 'system'
+			&& GROUPABLE_SYSTEM_SUBTYPES.has(msg.systemSubtype || '');
 	}
 
 const displayItems: DisplayItem[] = $derived.by(() => {
@@ -213,6 +234,26 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 
 				if (tools.length >= 2) {
 					items.push({ kind: 'tool_group', tools, indices });
+				} else {
+					items.push({ kind: 'message', message: msg, index: i });
+				}
+				i = j;
+			} else if (isGroupableSystem(msg)) {
+				// Group consecutive low-signal system/hook messages.
+				const sysMsgs: ChatMessage[] = [msg];
+				const indices: number[] = [i];
+				let j = i + 1;
+				while (j < messages.length && isGroupableSystem(messages[j])) {
+					const sysMsg = messages[j];
+					if (sysMsg.id && seenIds.has(sysMsg.id)) { j++; continue; }
+					if (sysMsg.id) seenIds.add(sysMsg.id);
+					sysMsgs.push(sysMsg);
+					indices.push(j);
+					j++;
+				}
+
+				if (sysMsgs.length >= 2) {
+					items.push({ kind: 'system_group', messages: sysMsgs, indices });
 				} else {
 					items.push({ kind: 'message', message: msg, index: i });
 				}
@@ -676,12 +717,15 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 	{:else}
 		<!-- Messages -->
 		<div class="max-w-5xl mx-auto px-4 sm:px-8 py-4 space-y-4">
-			{#each displayItems as item (item.kind === 'tool_group' ? 'tg-' + item.tools[0].id : item.message.id)}
+			{#each displayItems as item (item.kind === 'tool_group' ? 'tg-' + item.tools[0].id : item.kind === 'system_group' ? 'sg-' + item.messages[0].id : item.message.id)}
 				<!-- content-visibility: auto lets the browser skip paint/layout for off-screen messages -->
 				<div class="msg-virtualized">
 				{#if item.kind === 'tool_group'}
 					<!-- Grouped tool calls (2+ consecutive regular tools from the same turn) -->
 					<ToolUseGroup tools={item.tools} />
+				{:else if item.kind === 'system_group'}
+					<!-- Grouped system/hook messages (2+ consecutive low-signal events) -->
+					<SystemMessageGroup messages={item.messages} />
 				{:else}
 					{@const message = item.message}
 					{@const messageIndex = item.index}
