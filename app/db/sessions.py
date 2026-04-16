@@ -36,7 +36,6 @@ class SessionRow(TypedDict):
     updated_at: str
     parent_session_id: Optional[str]
     fork_point_message_index: Optional[int]
-    session_type: str
 
 
 class SessionSearchResult(TypedDict):
@@ -365,7 +364,6 @@ def create_session(
     worktree_id: Optional[str] = None,
     worktree_branch: Optional[str] = None,
     worktree_path: Optional[str] = None,
-    session_type: str = "chat",
     _conn=None
 ) -> SessionRow:
     """Create a new session
@@ -381,17 +379,16 @@ def create_session(
         worktree_id: Optional worktree to link this session to
         worktree_branch: Optional branch name (persisted for display after worktree deletion)
         worktree_path: Optional worktree path (persisted for display after worktree deletion)
-        session_type: Session type - "chat" or "voice"
         _conn: Optional existing DB connection for transaction grouping
     """
     from app.core.config import settings
     now = datetime.now(timezone.utc).isoformat()
     instance_id = settings.effective_instance_id
     _ph = ph()
-    _phs14 = ", ".join([_ph] * 14)
-    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, session_type, instance_id, created_at, updated_at)
-               VALUES ({_phs14})"""
-    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, session_type, instance_id, now, now)
+    _phs13 = ", ".join([_ph] * 13)
+    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, instance_id, created_at, updated_at)
+               VALUES ({_phs13})"""
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, instance_id, now, now)
     if _conn is not None:
         cursor = get_cursor(_conn)
         cursor.execute(sql, params)
@@ -413,8 +410,7 @@ def create_session_with_stats(
     total_tokens_in: int = 0,
     total_tokens_out: int = 0,
     turn_count: int = 0,
-    created_at: Optional[str] = None,
-    session_type: str = "chat"
+    created_at: Optional[str] = None
 ) -> SessionRow:
     """Create a new session with all stats in a single atomic transaction.
 
@@ -433,25 +429,24 @@ def create_session_with_stats(
         total_tokens_out: Total output tokens
         turn_count: Number of conversation turns
         created_at: Optional creation timestamp (ISO format), defaults to now
-        session_type: Session type - "chat" or "voice"
     """
     from app.core.config import settings
     now = datetime.now(timezone.utc).isoformat()
     ts_created = created_at or now
     instance_id = settings.effective_instance_id
     _ph = ph()
-    _phs14 = ", ".join([_ph] * 14)
+    _phs13 = ", ".join([_ph] * 13)
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
             f"""INSERT INTO sessions (
                 id, profile_id, project_id, title, api_user_id,
                 sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
-                session_type, instance_id, created_at, updated_at
-            ) VALUES ({_phs14})""",
+                instance_id, created_at, updated_at
+            ) VALUES ({_phs13})""",
             (session_id, profile_id, project_id, title, api_user_id,
              sdk_session_id, total_cost_usd, total_tokens_in, total_tokens_out, turn_count,
-             session_type, instance_id, ts_created, now)
+             instance_id, ts_created, now)
         )
     return get_session(session_id)
 

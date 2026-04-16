@@ -43,7 +43,6 @@ export interface SessionMeta {
 	worktree_branch?: string | null;
 	worktree_deleted?: boolean;
 	execution_mode?: string;
-	session_type?: 'chat' | 'voice';
 }
 
 /** Data shape returned by the onPollApplied callback */

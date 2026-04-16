@@ -76,8 +76,7 @@ def _safe_json(value):
 # v38: Add message_template to project_hooks, make project_id nullable
 # v39: Add queued_messages table for server-side message queueing
 # v40: Add instance_id column to sessions for per-instance isolation
-# v41: Add session_type column to sessions for voice/chat differentiation
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 41
 
 
 def _run_column_migrations(cursor):
@@ -257,11 +256,6 @@ def _run_column_migrations(cursor):
                 migrations_applied.append(f"sessions.instance_id_backfill({cursor.rowcount} rows)")
         except _DB_ERRORS:
             pass
-
-    # Add session_type column for voice/chat differentiation (v41)
-    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "session_type"):
-        cursor.execute("ALTER TABLE sessions ADD COLUMN session_type TEXT DEFAULT 'chat'")
-        migrations_applied.append("sessions.session_type")
 
     # Ensure performance-critical indexes exist (idempotent, no version gate).
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")

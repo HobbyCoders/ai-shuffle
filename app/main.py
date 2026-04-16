@@ -340,18 +340,6 @@ app.include_router(catalog.router)
 app.include_router(claude_status.router)
 app.include_router(logs.router)
 
-# Realtime voice (Pipecat pipeline — Deepgram/Cartesia/Groq/ElevenLabs).
-# Import is guarded so a missing optional dep doesn't break app startup.
-try:
-    from app.api import voice_realtime, voice_settings as voice_settings_api
-    app.include_router(voice_realtime.router)
-    app.include_router(voice_settings_api.router)
-except ImportError as _e:  # pragma: no cover
-    import logging as _logging
-    _logging.getLogger(__name__).warning(
-        "Realtime voice routers not loaded (optional): %s", _e
-    )
-
 # Serve static files (Svelte build) if they exist
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():

@@ -567,11 +567,6 @@ async def get_live_session(
     if session_title:
         session_meta["title"] = session_title
 
-    # Include session_type so the frontend can restore voice vs chat on reload
-    session_type = session.get("session_type")
-    if session_type:
-        session_meta["session_type"] = session_type
-
     wt_id = session.get("worktree_id")
     if wt_id:
         wt = await run_sync(database.get_worktree, wt_id)
