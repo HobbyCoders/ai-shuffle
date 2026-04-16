@@ -73,6 +73,18 @@ MEDIA_TYPES = {
     '.sqlite': 'application/x-sqlite3',
     '.db': 'application/x-sqlite3',
     '.parquet': 'application/vnd.apache.parquet',
+    # Images
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.bmp': 'image/bmp',
+    '.svg': 'image/svg+xml',
+    '.avif': 'image/avif',
+    '.ico': 'image/x-icon',
+    '.tif': 'image/tiff',
+    '.tiff': 'image/tiff',
     # Other
     '.exe': 'application/x-msdownload',
     '.dmg': 'application/x-apple-diskimage',

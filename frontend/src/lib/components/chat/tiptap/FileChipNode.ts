@@ -77,16 +77,30 @@ export const FileChipNode = Node.create({
 
 	renderHTML({ HTMLAttributes, node }) {
 		const attrs = node.attrs as FileChipAttributes;
+		const isImage = attrs.type === 'file' && isImageFile(attrs.filename);
 		const typeClass = attrs.type === 'chat_history'
 			? 'file-chip-chat-history'
 			: attrs.type === 'note'
 				? 'file-chip-note'
 				: attrs.type === 'subagent'
 					? 'file-chip-subagent'
-					: '';
+					: isImage
+						? 'file-chip-image'
+						: '';
 
-		// Get appropriate icon based on type
-		const icon = getFileIcon(attrs.type);
+		// For image files, render a thumbnail; otherwise fall back to the type-based icon.
+		const iconContents: unknown = isImage
+			? [
+				'img',
+				{
+					src: buildThumbnailUrl(attrs.fullPath),
+					alt: attrs.filename,
+					class: 'file-chip-thumb',
+					loading: 'lazy',
+					draggable: 'false'
+				}
+			]
+			: getFileIcon(attrs.type);
 
 		return [
 			'span',
@@ -101,7 +115,7 @@ export const FileChipNode = Node.create({
 			[
 				'span',
 				{ class: 'file-chip-icon' },
-				icon
+				iconContents
 			],
 			[
 				'span',
@@ -140,12 +154,15 @@ export const FileChipNode = Node.create({
 
 			// Set classes
 			dom.className = 'file-chip-node';
+			const isImage = attrs.type === 'file' && isImageFile(attrs.filename);
 			if (attrs.type === 'chat_history') {
 				dom.classList.add('file-chip-chat-history');
 			} else if (attrs.type === 'note') {
 				dom.classList.add('file-chip-note');
 			} else if (attrs.type === 'subagent') {
 				dom.classList.add('file-chip-subagent');
+			} else if (isImage) {
+				dom.classList.add('file-chip-image');
 			}
 
 			dom.setAttribute('data-file-chip', '');
@@ -153,10 +170,10 @@ export const FileChipNode = Node.create({
 			dom.setAttribute('data-type', attrs.type);
 			dom.contentEditable = 'false';
 
-			// Icon
+			// Icon or thumbnail
 			const iconSpan = document.createElement('span');
 			iconSpan.className = 'file-chip-icon';
-			iconSpan.innerHTML = getFileIcon(attrs.type);
+			renderChipIconContents(iconSpan, attrs, isImage);
 			dom.appendChild(iconSpan);
 
 			// Filename
@@ -206,7 +223,9 @@ export const FileChipNode = Node.create({
 						return false;
 					}
 					nameSpan.textContent = newAttrs.filename;
-					iconSpan.innerHTML = getFileIcon(newAttrs.type);
+					const newIsImage = newAttrs.type === 'file' && isImageFile(newAttrs.filename);
+					renderChipIconContents(iconSpan, newAttrs, newIsImage);
+					dom.classList.toggle('file-chip-image', newIsImage);
 					dom.setAttribute('data-path', newAttrs.path);
 					dom.setAttribute('data-type', newAttrs.type);
 					return true;
@@ -250,6 +269,64 @@ function getFileIcon(type: string): string {
 				<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
 				<polyline points="13,2 13,9 20,9"></polyline>
 			</svg>`;
+	}
+}
+
+/**
+ * Image extensions that can be rendered as thumbnails in chips.
+ * Kept in sync with the MIME types served by /api/files/by-path.
+ */
+const IMAGE_EXTENSIONS = new Set([
+	'png',
+	'jpg',
+	'jpeg',
+	'gif',
+	'webp',
+	'bmp',
+	'svg',
+	'avif',
+	'ico',
+	'tif',
+	'tiff'
+]);
+
+/**
+ * Returns true when the filename ends in a renderable image extension.
+ */
+function isImageFile(filename: string): boolean {
+	const dot = filename.lastIndexOf('.');
+	if (dot === -1 || dot === filename.length - 1) return false;
+	return IMAGE_EXTENSIONS.has(filename.slice(dot + 1).toLowerCase());
+}
+
+/**
+ * Build the URL used to fetch the image thumbnail. The endpoint authenticates
+ * via the session cookie that is already present on same-origin requests.
+ */
+function buildThumbnailUrl(fullPath: string): string {
+	return `/api/files/by-path?path=${encodeURIComponent(fullPath)}`;
+}
+
+/**
+ * Populate the chip icon slot with either an <img> thumbnail (for image files)
+ * or the SVG icon for the file type. Used by the NodeView for live DOM updates.
+ */
+function renderChipIconContents(
+	iconSpan: HTMLElement,
+	attrs: FileChipAttributes,
+	isImage: boolean
+): void {
+	if (isImage) {
+		iconSpan.textContent = '';
+		const img = document.createElement('img');
+		img.className = 'file-chip-thumb';
+		img.src = buildThumbnailUrl(attrs.fullPath);
+		img.alt = attrs.filename;
+		img.loading = 'lazy';
+		img.draggable = false;
+		iconSpan.appendChild(img);
+	} else {
+		iconSpan.innerHTML = getFileIcon(attrs.type);
 	}
 }
 

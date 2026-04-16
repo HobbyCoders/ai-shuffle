@@ -356,6 +356,25 @@
 		height: 12px;
 	}
 
+	/* Image thumbnail inside a chip — larger than the icon slot and flush to the
+	   left edge so the preview reads clearly without dwarfing the filename. */
+	.tiptap-editor :global(.file-chip-node.file-chip-image) {
+		padding-left: 0.125rem;
+	}
+
+	.tiptap-editor :global(.file-chip-image .file-chip-icon) {
+		opacity: 1;
+	}
+
+	.tiptap-editor :global(.file-chip-thumb) {
+		width: 20px;
+		height: 20px;
+		object-fit: cover;
+		border-radius: calc(var(--radius, 0.75rem) * 0.33);
+		display: block;
+		background: var(--muted);
+	}
+
 	/* Chip filename */
 	.tiptap-editor :global(.file-chip-name) {
 		max-width: 120px;
