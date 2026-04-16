@@ -44,8 +44,11 @@
 		onkeydown={handleKeydown}
 	>
 		<div class="selector-modal">
-			<h2 class="selector-heading">New Session</h2>
-			<p class="selector-subtext">Choose how you want to interact</p>
+			<div class="selector-header">
+				<span class="selector-eyebrow">Start</span>
+				<h2 class="selector-heading">New session</h2>
+				<p class="selector-subtext">Choose how you want to interact with Claude.</p>
+			</div>
 
 			<div class="selector-cards">
 				<!-- Chat card -->
@@ -53,11 +56,14 @@
 					class="type-card"
 					onclick={() => handleSelect('chat')}
 				>
-					<div class="type-card-icon type-card-icon-chat">
-						<MessageSquare size={32} strokeWidth={1.5} />
+					<div class="type-card-icon">
+						<MessageSquare size={26} strokeWidth={1.75} />
 					</div>
-					<h3 class="type-card-title">New Chat</h3>
-					<p class="type-card-desc">Text conversation with Claude</p>
+					<div class="type-card-body">
+						<h3 class="type-card-title">Chat</h3>
+						<p class="type-card-desc">Text conversation</p>
+					</div>
+					<span class="type-card-arrow" aria-hidden="true">→</span>
 				</button>
 
 				<!-- Voice card -->
@@ -65,11 +71,14 @@
 					class="type-card"
 					onclick={() => handleSelect('voice')}
 				>
-					<div class="type-card-icon type-card-icon-voice">
-						<Mic size={32} strokeWidth={1.5} />
+					<div class="type-card-icon">
+						<Mic size={26} strokeWidth={1.75} />
 					</div>
-					<h3 class="type-card-title">Voice Session</h3>
-					<p class="type-card-desc">Talk to Claude in real-time</p>
+					<div class="type-card-body">
+						<h3 class="type-card-title">Voice</h3>
+						<p class="type-card-desc">Real-time audio</p>
+					</div>
+					<span class="type-card-arrow" aria-hidden="true">→</span>
 				</button>
 			</div>
 		</div>
@@ -85,9 +94,9 @@
 		align-items: center;
 		justify-content: center;
 		padding: 1rem;
-		background: color-mix(in oklch, var(--background) 70%, transparent);
-		backdrop-filter: blur(8px);
-		-webkit-backdrop-filter: blur(8px);
+		background: var(--modal-overlay, color-mix(in oklch, var(--background) 70%, transparent));
+		backdrop-filter: blur(10px);
+		-webkit-backdrop-filter: blur(10px);
 		animation: selector-fade-in 0.2s ease-out;
 	}
 
@@ -97,14 +106,32 @@
 	}
 
 	.selector-modal {
+		position: relative;
 		background: var(--card);
 		border: 1px solid var(--border);
 		border-radius: 1rem;
-		padding: 2rem;
-		max-width: 480px;
+		padding: 1.75rem;
+		max-width: 460px;
 		width: 100%;
-		box-shadow: var(--shadow-l, 0 8px 32px rgba(0,0,0,0.25));
+		box-shadow: var(--shadow-l, 0 10px 40px rgba(0, 0, 0, 0.35));
 		animation: selector-slide-up 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+		overflow: hidden;
+	}
+
+	/* Subtle top accent line */
+	.selector-modal::before {
+		content: '';
+		position: absolute;
+		top: 0;
+		left: 1.75rem;
+		right: 1.75rem;
+		height: 1px;
+		background: linear-gradient(
+			90deg,
+			transparent,
+			color-mix(in oklch, var(--primary) 40%, transparent),
+			transparent
+		);
 	}
 
 	@keyframes selector-slide-up {
@@ -118,53 +145,77 @@
 		}
 	}
 
+	.selector-header {
+		margin-bottom: 1.25rem;
+	}
+
+	.selector-eyebrow {
+		display: inline-block;
+		font-size: 0.6875rem;
+		font-weight: 600;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		color: var(--muted-foreground);
+		margin-bottom: 0.375rem;
+	}
+
 	.selector-heading {
-		font-size: 1.25rem;
+		font-size: 1.375rem;
 		font-weight: 700;
 		color: var(--foreground);
 		margin: 0 0 0.25rem;
 		letter-spacing: -0.02em;
+		line-height: 1.15;
 	}
 
 	.selector-subtext {
 		font-size: 0.8125rem;
 		color: var(--muted-foreground);
-		margin: 0 0 1.5rem;
+		margin: 0;
+		line-height: 1.5;
 	}
 
 	.selector-cards {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 0.75rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
 	}
 
 	/* ─── Type Card ─── */
 
 	.type-card {
+		position: relative;
 		display: flex;
-		flex-direction: column;
 		align-items: center;
-		gap: 0.75rem;
-		padding: 1.5rem 1rem;
-		background: var(--background);
+		gap: 0.875rem;
+		padding: 0.875rem 1rem;
+		background: color-mix(in oklch, var(--muted) 40%, transparent);
 		border: 1px solid var(--border);
 		border-radius: 0.75rem;
 		cursor: pointer;
-		transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-		text-align: center;
+		transition:
+			background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+			border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+			transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+			box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+		text-align: left;
+		color: var(--foreground);
+		width: 100%;
 	}
 
 	.type-card:hover {
-		border-color: var(--primary);
-		background: color-mix(in oklch, var(--primary) 5%, var(--background));
-		box-shadow: 0 0 0 1px color-mix(in oklch, var(--primary) 30%, transparent),
-			0 4px 16px color-mix(in oklch, var(--primary) 10%, transparent);
-		transform: translateY(-2px);
+		border-color: color-mix(in oklch, var(--primary) 50%, var(--border));
+		background: color-mix(in oklch, var(--primary) 6%, var(--card));
+		transform: translateY(-1px);
+		box-shadow:
+			0 1px 0 color-mix(in oklch, var(--primary) 15%, transparent) inset,
+			0 6px 18px color-mix(in oklch, var(--primary) 12%, transparent);
 	}
 
 	.type-card:focus-visible {
-		outline: 2px solid var(--primary);
-		outline-offset: 2px;
+		outline: none;
+		border-color: var(--primary);
+		box-shadow: 0 0 0 2px var(--ring);
 	}
 
 	.type-card:active {
@@ -172,33 +223,34 @@
 	}
 
 	.type-card-icon {
+		flex-shrink: 0;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 64px;
-		height: 64px;
-		border-radius: 50%;
-		transition: all 0.2s ease;
+		width: 44px;
+		height: 44px;
+		border-radius: 0.625rem;
+		background: color-mix(in oklch, var(--muted) 70%, transparent);
+		border: 1px solid color-mix(in oklch, var(--border) 80%, transparent);
+		color: var(--muted-foreground);
+		transition:
+			background-color 0.2s ease,
+			color 0.2s ease,
+			border-color 0.2s ease;
 	}
 
-	.type-card-icon-chat {
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
+	.type-card:hover .type-card-icon {
+		background: color-mix(in oklch, var(--primary) 14%, var(--card));
+		border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
 		color: var(--primary);
 	}
 
-	.type-card:hover .type-card-icon-chat {
-		background: color-mix(in oklch, var(--primary) 20%, transparent);
-		box-shadow: 0 0 20px color-mix(in oklch, var(--primary) 15%, transparent);
-	}
-
-	.type-card-icon-voice {
-		background: color-mix(in oklch, oklch(0.65 0.2 25) 12%, transparent);
-		color: oklch(0.65 0.2 25);
-	}
-
-	.type-card:hover .type-card-icon-voice {
-		background: color-mix(in oklch, oklch(0.65 0.2 25) 20%, transparent);
-		box-shadow: 0 0 20px color-mix(in oklch, oklch(0.65 0.2 25) 15%, transparent);
+	.type-card-body {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.125rem;
 	}
 
 	.type-card-title {
@@ -206,24 +258,49 @@
 		font-weight: 600;
 		color: var(--foreground);
 		margin: 0;
+		letter-spacing: -0.01em;
 	}
 
 	.type-card-desc {
 		font-size: 0.75rem;
 		color: var(--muted-foreground);
 		margin: 0;
-		line-height: 1.4;
+		line-height: 1.3;
+	}
+
+	.type-card-arrow {
+		flex-shrink: 0;
+		font-size: 1rem;
+		color: var(--muted-foreground);
+		opacity: 0.5;
+		transform: translateX(-4px);
+		transition:
+			transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+			opacity 0.2s ease,
+			color 0.2s ease;
+	}
+
+	.type-card:hover .type-card-arrow {
+		color: var(--primary);
+		opacity: 1;
+		transform: translateX(0);
 	}
 
 	/* ─── Responsive ─── */
 
 	@media (max-width: 360px) {
-		.selector-cards {
-			grid-template-columns: 1fr;
+		.selector-modal {
+			padding: 1.25rem;
 		}
 
-		.selector-modal {
-			padding: 1.5rem;
+		.type-card {
+			padding: 0.75rem 0.875rem;
+			gap: 0.75rem;
+		}
+
+		.type-card-icon {
+			width: 40px;
+			height: 40px;
 		}
 	}
 
@@ -232,8 +309,13 @@
 		.selector-modal {
 			animation: none;
 		}
-		.type-card {
+		.type-card,
+		.type-card-icon,
+		.type-card-arrow {
 			transition: none;
+		}
+		.type-card:hover {
+			transform: none;
 		}
 	}
 </style>
