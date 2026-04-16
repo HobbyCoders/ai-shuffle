@@ -282,22 +282,22 @@ const wsConn: WsConnection = createWsConnection({
 			const sessionId = _state.sessionId;
 			wsConn.send({ type: 'watch_session', session_id: sessionId });
 
-			if (_state.isStreaming || _state.messages.length === 0) {
-				sessionPoller.loadSession(sessionId).then(pollData => {
-					console.debug(`[ActiveSession] onConnected loadSession result: streaming=${pollData?.isStreaming}, msgs=${pollData?.messages?.length ?? 0}`);
-					if (pollData && pollData.isStreaming) {
-						sessionPoller.startStreaming(sessionId);
-					} else if (!pollData && _state.sessionId === sessionId && _state.messages.length === 0) {
-						_update(s => ({
-							...s,
-							error: 'Failed to load session. Try starting a new chat.',
-							contextUsed: 0,
-						}));
-					}
-				});
-			} else {
-				console.debug(`[ActiveSession] onConnected: skipping re-fetch for completed session ${sessionId} (${_state.messages.length} msgs already loaded)`);
-			}
+			// Always re-sync on (re)connect. We may have missed messages during
+			// the disconnect window (e.g. phone lock / network drop). The poller's
+			// shallow-equality check in onPollApplied prevents redundant renders
+			// when nothing actually changed.
+			sessionPoller.loadSession(sessionId).then(pollData => {
+				console.debug(`[ActiveSession] onConnected loadSession result: streaming=${pollData?.isStreaming}, msgs=${pollData?.messages?.length ?? 0}`);
+				if (pollData && pollData.isStreaming) {
+					sessionPoller.startStreaming(sessionId);
+				} else if (!pollData && _state.sessionId === sessionId && _state.messages.length === 0) {
+					_update(s => ({
+						...s,
+						error: 'Failed to load session. Try starting a new chat.',
+						contextUsed: 0,
+					}));
+				}
+			});
 		}
 	},
 	onDisconnected: (code, _reason, wasClean) => {
@@ -329,8 +329,15 @@ const wsConn: WsConnection = createWsConnection({
 		}
 	},
 	onVisibilityVisible: () => {
-		if (_state.isStreaming && _state.sessionId) {
+		if (!_state.sessionId) return;
+		// Always fire an immediate HTTP poll — this renders fresh messages
+		// before the WS reconnect handshake completes. Critical for mobile
+		// unlock latency. No-op updates are filtered by shallow-equality in
+		// the poller, so this is cheap even when nothing changed.
+		if (_state.isStreaming) {
 			sessionPoller.startStreaming(_state.sessionId);
+		} else {
+			sessionPoller.pollNow(_state.sessionId);
 		}
 	},
 });

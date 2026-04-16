@@ -87,6 +87,8 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 
 	// Visibility change handler reference (for cleanup)
 	let visibilityHandler: (() => void) | null = null;
+	let onlineHandler: (() => void) | null = null;
+	let pageShowHandler: ((e: PageTransitionEvent) => void) | null = null;
 
 	// Track visibility health-check timeout so it can be cancelled
 	let visibilityCheckTimer: ReturnType<typeof setTimeout> | null = null;
@@ -290,14 +292,16 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 						connect();
 						return;
 					}
-					// If no server message arrives within 5s, force reconnect
+					// If no server message arrives within 2s, force reconnect.
+					// Shorter window minimises perceived stall after phone unlock /
+					// network resume where the underlying socket is usually dead.
 					visibilityCheckTimer = setTimeout(() => {
 						visibilityCheckTimer = null;
 						if (lastMessageTime === preVisibilityTime && ws?.readyState === WebSocket.OPEN) {
 							console.warn('[WsConnection] No server response after tab return, forcing reconnect');
 							ws.close(4000, 'Half-open connection detected');
 						}
-					}, 5000);
+					}, 2000);
 				}
 			}
 		};
@@ -305,8 +309,47 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 		document.addEventListener('visibilitychange', visibilityHandler);
 	}
 
+	// ── Network / BFCache Resume Handlers ────────────────────────────────
+
+	function forceReconnectIfNeeded(reason: string) {
+		if (destroyed) return;
+		// Notify consumer so it can trigger an immediate HTTP poll in parallel
+		// with the WS reconnect. This is the key latency win on phone unlock:
+		// fresh messages render before the socket handshake completes.
+		config.onVisibilityVisible?.();
+
+		if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+			reconnectAttempts = 0;
+			connect();
+			return;
+		}
+		if (ws.readyState === WebSocket.OPEN) {
+			// Close suspect socket; reconnect path handles the rest.
+			console.warn(`[WsConnection] Force reconnect: ${reason}`);
+			try { ws.close(4000, reason); } catch { /* ignore */ }
+		}
+	}
+
+	function setupNetworkHandlers() {
+		if (typeof window === 'undefined') return;
+
+		onlineHandler = () => {
+			forceReconnectIfNeeded('network online');
+		};
+		window.addEventListener('online', onlineHandler);
+
+		// pageshow with persisted=true fires on BFCache restore (common on
+		// mobile Safari when unlocking). visibilitychange may not fire in
+		// that case, so we need a dedicated hook.
+		pageShowHandler = (e: PageTransitionEvent) => {
+			if (e.persisted) forceReconnectIfNeeded('pageshow persisted');
+		};
+		window.addEventListener('pageshow', pageShowHandler);
+	}
+
 	// Set up visibility handler immediately
 	setupVisibilityHandler();
+	setupNetworkHandlers();
 
 	// ── Public API ───────────────────────────────────────────────────────
 
@@ -339,6 +382,17 @@ export function createWsConnection(config: WsConnectionConfig): WsConnection {
 			if (visibilityHandler && typeof document !== 'undefined') {
 				document.removeEventListener('visibilitychange', visibilityHandler);
 				visibilityHandler = null;
+			}
+
+			if (typeof window !== 'undefined') {
+				if (onlineHandler) {
+					window.removeEventListener('online', onlineHandler);
+					onlineHandler = null;
+				}
+				if (pageShowHandler) {
+					window.removeEventListener('pageshow', pageShowHandler);
+					pageShowHandler = null;
+				}
 			}
 		},
 	};
