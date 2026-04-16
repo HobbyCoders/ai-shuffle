@@ -499,6 +499,50 @@ export async function getSubagentsForAutocomplete(
 }
 
 // ============================================================================
+// Agent Teams API Types and Functions
+// ============================================================================
+
+export interface Teammate {
+	team_name: string;
+	teammate_name: string;
+	teammate_session_id?: string;
+	pid?: number;
+	status: 'running' | 'completed' | 'error' | 'killed';
+	usage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number };
+}
+
+export interface Team {
+	team_name: string;
+	parent_session_id: string;
+	teammates: Teammate[];
+}
+
+/**
+ * List all agent teams (and their teammates) for a parent session.
+ */
+export async function listTeams(sessionId: string): Promise<Team[]> {
+	const r = await fetch(`${API_BASE}/teams/${sessionId}`, { credentials: 'include' });
+	if (!r.ok) throw new Error(`listTeams: ${r.status}`);
+	return r.json();
+}
+
+/**
+ * Kill a running teammate subprocess by its team/name pair.
+ */
+export async function killTeammate(
+	sessionId: string,
+	teamName: string,
+	teammateName: string
+): Promise<{ success: boolean; pid?: number }> {
+	const r = await fetch(
+		`${API_BASE}/teams/${sessionId}/${encodeURIComponent(teamName)}/members/${encodeURIComponent(teammateName)}/kill`,
+		{ method: 'POST', credentials: 'include' }
+	);
+	if (!r.ok) throw new Error(`killTeammate: ${r.status}`);
+	return r.json();
+}
+
+// ============================================================================
 // Utility functions
 // ============================================================================
 

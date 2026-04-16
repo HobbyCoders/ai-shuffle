@@ -55,6 +55,29 @@ class MutableStreamState:
     connection_lost_logged: bool = False
     final_metadata: Dict[str, Any] = field(default_factory=dict)
     query_start_time: float = field(default_factory=time.time)
+    # Buffer of in-flight team-tool invocations keyed by tool_id so that
+    # `handle_tool_result` can recover the original tool_input / tool_name
+    # without re-parsing the live store.
+    team_tool_buffer: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_working_dir(ectx: EventContext) -> Optional[str]:
+    """Best-effort lookup of the parent session's working directory."""
+    try:
+        if ectx.project_id:
+            proj = database.get_project(ectx.project_id)
+            if proj:
+                return get_project_working_dir(proj)
+    except Exception:
+        logger.debug("resolve_working_dir: project lookup failed", exc_info=True)
+    try:
+        return str(settings.workspace_dir)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -227,14 +250,42 @@ async def handle_tool_use(
     await _maybe_broadcast_first_start("tool_use", ectx, state)
 
     tool_id = event.get("id")
+    tool_name = event.get("name")
+    tool_input = event.get("input") or {}
     state.current_tool_id = tool_id
-    state.current_tool_name = event.get("name")
+    state.current_tool_name = tool_name
     await live_session_store.add_tool_use(
         session_id=ectx.session_id,
         tool_id=tool_id,
-        name=event.get("name"),
-        tool_input=event.get("input", {}),
+        name=tool_name,
+        tool_input=tool_input,
     )
+
+    # Team tools are handled opportunistically — buffer input for the result
+    # handler and notify the registry immediately so the UI sees the team
+    # node appear as soon as the call is issued. `Task` is ambiguous (also
+    # used for regular subagents) so it only counts when `team_name` is set.
+    from app.core.team_registry import TEAM_TOOLS, team_registry
+    is_team_tool = (
+        tool_name in TEAM_TOOLS
+        and (tool_name != "Task" or "team_name" in (tool_input or {}))
+    )
+    if is_team_tool:
+        working_dir = _resolve_working_dir(ectx)
+        state.team_tool_buffer[tool_id or ""] = {
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "working_dir": working_dir,
+        }
+        try:
+            await team_registry.handle_team_tool_use(
+                parent_session_id=ectx.session_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                working_dir=working_dir,
+            )
+        except Exception:
+            logger.exception("team_registry.handle_team_tool_use failed")
     chunk_data = {
         "content": "",
         "tool_name": event.get("name"),
@@ -261,6 +312,26 @@ async def handle_tool_result(
     state.current_tool_id = None
     state.current_tool_name = None
     output = event.get("output", "")
+
+    # Team-tool follow-up: discover teammates and spin up transcript tailers.
+    buffered = state.team_tool_buffer.pop(tool_id or "", None)
+    if buffered:
+        from app.core.team_registry import team_registry
+        from app.core.team_transcript_watcher import team_transcript_watcher
+        try:
+            changed = await team_registry.handle_team_tool_result(
+                parent_session_id=ectx.session_id,
+                tool_name=buffered["tool_name"],
+                tool_input=buffered["tool_input"],
+                tool_output=output,
+                working_dir=buffered.get("working_dir"),
+            )
+            for rec in changed:
+                await team_transcript_watcher.ensure_watching(
+                    ectx.session_id, rec
+                )
+        except Exception:
+            logger.exception("team_registry.handle_team_tool_result failed")
     if not output:
         logger.warning(
             f"handle_tool_result: EMPTY output for tool {tool_name} ({tool_id}) "

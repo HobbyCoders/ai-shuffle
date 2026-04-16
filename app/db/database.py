@@ -452,6 +452,7 @@ from app.db.sessions import (  # noqa: F401
     get_session_forks,
     get_session_messages,
     add_session_message,
+    upsert_team_member_message,
     delete_session_message,
     delete_session_messages_after,
     search_sessions,

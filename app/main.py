@@ -18,7 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.config import settings
 
 # Import API routers
-from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog, claude_status, logs
+from app.api import auth, profiles, projects, sessions, query, system, websocket, commands, preferences, subagents, permission_rules, import_export, settings as settings_api, generated_images, generated_videos, shared_files, tags, analytics, search, templates, webhooks, security, rate_limits, github, git, studio, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, mobile, internal, workspace_files, connectors, automations, api_users, documentation, catalog, claude_status, logs, teams
 
 # Import middleware
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -132,6 +132,11 @@ async def lifespan(app: FastAPI):
             pass
     await stop_plugin_auto_update(plugin_task)
     await stop_resource_monitor(monitor_task)
+    try:
+        from app.core.team_transcript_watcher import team_transcript_watcher
+        await team_transcript_watcher.stop_all()
+    except Exception:
+        logger.exception("team_transcript_watcher.stop_all failed")
     await shutdown_services()
     logger.info("Shutting down AI Hub...")
 
@@ -299,6 +304,7 @@ app.include_router(websocket.router)
 app.include_router(commands.router)
 app.include_router(preferences.router)
 app.include_router(subagents.router)
+app.include_router(teams.router)
 app.include_router(permission_rules.router)
 app.include_router(import_export.router)
 app.include_router(settings_api.router)

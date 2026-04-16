@@ -29,6 +29,8 @@
 	// always merged into tool_use messages to prevent flickering during streaming
 	import SystemMessage from '$lib/components/SystemMessage.svelte';
 	import SubagentMessage from '$lib/components/SubagentMessage.svelte';
+	import TeamMemberMessage from '$lib/components/TeamMemberMessage.svelte';
+	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
 
 	// Non-reactive scroll position cache to avoid triggering effects.
@@ -765,6 +767,12 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 						<div class="w-full">
 							<div class="min-w-0">
 								<SubagentMessage {message} />
+							</div>
+						</div>
+					{:else if message.type === 'team_member'}
+						<div class="w-full">
+							<div class="min-w-0">
+								<TeamMemberMessage {message} parentSessionId={$activeSession.sessionId ?? ''} />
 							</div>
 						</div>
 					{/if}

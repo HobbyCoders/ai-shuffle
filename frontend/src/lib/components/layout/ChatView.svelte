@@ -12,6 +12,7 @@
 	import { untrack } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
+	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import QueuedMessages from '$lib/components/chat/QueuedMessages.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
@@ -104,6 +105,9 @@
 		<!-- Active chat: Messages + input -->
 		<div class="chat-column">
 			<div class="message-area-wrapper">
+				{#if $activeSession.sessionId}
+					<TeamStatusBar sessionId={$activeSession.sessionId} />
+				{/if}
 				<!-- MessageArea handles session-switch scroll save/restore internally
 				     via $effect watching sessionId. No {#key} needed — avoiding
 				     component destruction prevents a Svelte 5 reactivity edge case

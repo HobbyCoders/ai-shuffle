@@ -95,6 +95,13 @@ class LiveMessage:
     agent_children: Optional[List[SubagentChild]] = None
     agent_usage: Optional[Dict[str, Any]] = None  # {total_tokens, tool_uses, duration_ms}
 
+    # For team_member messages (Claude Code agent-teams feature)
+    team_name: Optional[str] = None
+    teammate_name: Optional[str] = None
+    teammate_session_id: Optional[str] = None
+    teammate_pid: Optional[int] = None
+    teammate_status: Optional[str] = None  # 'running' | 'completed' | 'error' | 'killed'
+
     # For system messages
     system_subtype: Optional[str] = None
     system_data: Optional[Dict[str, Any]] = None
@@ -139,6 +146,18 @@ class LiveMessage:
             result["agentChildren"] = [c.to_dict() for c in self.agent_children]
         if self.agent_usage:
             result["agentUsage"] = self.agent_usage
+
+        # Team member fields
+        if self.team_name:
+            result["teamName"] = self.team_name
+        if self.teammate_name:
+            result["teammateName"] = self.teammate_name
+        if self.teammate_session_id:
+            result["teammateSessionId"] = self.teammate_session_id
+        if self.teammate_pid:
+            result["teammatePid"] = self.teammate_pid
+        if self.teammate_status:
+            result["teammateStatus"] = self.teammate_status
 
         # System message fields
         if self.system_subtype:
@@ -296,6 +315,12 @@ class LiveSessionStore:
                         agent_status=m.get("agentStatus") or m.get("agent_status"),
                         agent_children=hydrated_children,
                         agent_usage=m.get("agentUsage") or m.get("agent_usage"),
+                        # Team member fields
+                        team_name=m.get("teamName") or m.get("team_name"),
+                        teammate_name=m.get("teammateName") or m.get("teammate_name"),
+                        teammate_session_id=m.get("teammateSessionId") or m.get("teammate_session_id"),
+                        teammate_pid=m.get("teammatePid") or m.get("teammate_pid"),
+                        teammate_status=m.get("teammateStatus") or m.get("teammate_status"),
                         # System message fields
                         system_subtype=m.get("systemSubtype") or m.get("subtype"),
                         system_data=m.get("systemData") or m.get("data"),
@@ -879,6 +904,230 @@ class LiveSessionStore:
 
             return False
 
+    # ------------------------------------------------------------------
+    # Team member methods (Claude Code agent-teams feature)
+    # ------------------------------------------------------------------
+
+    def _find_team_member(
+        self,
+        session: LiveSession,
+        team_name: str,
+        teammate_name: str,
+    ) -> Optional[LiveMessage]:
+        for msg in session.messages:
+            if (
+                msg.type == "team_member"
+                and msg.team_name == team_name
+                and msg.teammate_name == teammate_name
+            ):
+                return msg
+        return None
+
+    async def start_team_member(
+        self,
+        session_id: str,
+        team_name: str,
+        teammate_name: str,
+        teammate_session_id: Optional[str] = None,
+        pid: Optional[int] = None,
+        prompt: Optional[str] = None,
+    ) -> None:
+        """Add a team_member message (idempotent — updates existing entry)."""
+        async with self._get_session_lock(session_id):
+            session = self._sessions.get(session_id)
+            if not session:
+                logger.warning(
+                    f"start_team_member: session {session_id} not found (team {team_name}/{teammate_name} dropped)"
+                )
+                return
+
+            existing = self._find_team_member(session, team_name, teammate_name)
+            if existing:
+                # Refresh metadata in case it was sparse at first.
+                if teammate_session_id:
+                    existing.teammate_session_id = teammate_session_id
+                if pid:
+                    existing.teammate_pid = pid
+                if prompt and not existing.agent_prompt:
+                    existing.agent_prompt = prompt
+                if existing.teammate_status in (None, ""):
+                    existing.teammate_status = "running"
+                self._increment_update_id(session)
+                return
+
+            # Finalize any currently streaming text/thinking so the team_member
+            # block renders in visual sequence.
+            for msg in reversed(session.messages):
+                if msg.role == "assistant" and msg.streaming and msg.type in ("text", "thinking"):
+                    msg.streaming = False
+
+            msg = LiveMessage(
+                id=f"team-{team_name}-{teammate_name}",
+                role="assistant",
+                type="team_member",
+                content="",
+                streaming=True,
+                agent_prompt=prompt,
+                agent_children=[],
+                team_name=team_name,
+                teammate_name=teammate_name,
+                teammate_session_id=teammate_session_id,
+                teammate_pid=pid,
+                teammate_status="running",
+            )
+            session.messages.append(msg)
+            self._increment_update_id(session)
+            logger.debug(
+                f"Started team_member {team_name}/{teammate_name} in session {session_id}"
+            )
+
+    async def append_team_member_text(
+        self,
+        session_id: str,
+        team_name: str,
+        teammate_name: str,
+        content: str,
+    ) -> None:
+        """Append a text chunk to the teammate's output."""
+        if not content:
+            return
+        async with self._get_session_lock(session_id):
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+            msg = self._find_team_member(session, team_name, teammate_name)
+            if not msg:
+                return
+            if msg.agent_children is None:
+                msg.agent_children = []
+
+            # Coalesce into the current streaming text child when present.
+            text_child = None
+            for child in msg.agent_children:
+                if child.type == "text" and child.streaming:
+                    text_child = child
+                    break
+            if text_child:
+                text_child.content += content
+            else:
+                text_child = SubagentChild(
+                    id=f"{team_name}-{teammate_name}-text-{len(msg.agent_children)}",
+                    type="text",
+                    content=content,
+                    streaming=True,
+                )
+                msg.agent_children.append(text_child)
+            self._increment_update_id(session)
+
+    async def add_team_member_tool_use(
+        self,
+        session_id: str,
+        team_name: str,
+        teammate_name: str,
+        tool_id: str,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+    ) -> None:
+        async with self._get_session_lock(session_id):
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+            msg = self._find_team_member(session, team_name, teammate_name)
+            if not msg:
+                return
+            if msg.agent_children is None:
+                msg.agent_children = []
+
+            # Close any streaming text child; tool_use starts a new group.
+            for child in msg.agent_children:
+                if child.type == "text" and child.streaming:
+                    child.streaming = False
+
+            # Skip duplicates if the same tool_id arrives twice.
+            for child in msg.agent_children:
+                if child.type == "tool_use" and child.tool_id == tool_id:
+                    return
+
+            tool_child = SubagentChild(
+                id=f"{team_name}-{teammate_name}-tool-{tool_id}",
+                type="tool_use",
+                content="",
+                streaming=True,
+                tool_name=tool_name,
+                tool_id=tool_id,
+                tool_input=tool_input,
+                tool_status=ToolStatus.RUNNING.value,
+            )
+            msg.agent_children.append(tool_child)
+            self._increment_update_id(session)
+
+    async def add_team_member_tool_result(
+        self,
+        session_id: str,
+        team_name: str,
+        teammate_name: str,
+        tool_id: str,
+        result: str,
+        is_error: bool = False,
+    ) -> None:
+        async with self._get_session_lock(session_id):
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+            msg = self._find_team_member(session, team_name, teammate_name)
+            if not msg or not msg.agent_children:
+                return
+
+            for child in msg.agent_children:
+                if child.type == "tool_use" and child.tool_id == tool_id:
+                    child.tool_result = result
+                    child.tool_status = (
+                        ToolStatus.ERROR.value if is_error else ToolStatus.COMPLETE.value
+                    )
+                    child.streaming = False
+                    self._increment_update_id(session)
+                    return
+
+    async def update_team_member_status(
+        self,
+        session_id: str,
+        team_name: str,
+        teammate_name: str,
+        status: Optional[str] = None,
+        usage: Optional[Dict[str, Any]] = None,
+        pid: Optional[int] = None,
+    ) -> None:
+        async with self._get_session_lock(session_id):
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+            msg = self._find_team_member(session, team_name, teammate_name)
+            if not msg:
+                return
+            if status:
+                msg.teammate_status = status
+                # Bring the header indicator in sync with the lifecycle.
+                if status in ("completed", "error", "killed"):
+                    msg.streaming = False
+                    if msg.agent_children:
+                        for c in msg.agent_children:
+                            c.streaming = False
+            if usage:
+                msg.agent_usage = usage
+            if pid:
+                msg.teammate_pid = pid
+            self._increment_update_id(session)
+
+    def has_active_team_members(self, session_id: str) -> bool:
+        """True if any team_member in the session is still running."""
+        session = self._sessions.get(session_id)
+        if not session:
+            return False
+        for msg in session.messages:
+            if msg.type == "team_member" and msg.teammate_status == "running":
+                return True
+        return False
+
     async def update_usage(
         self,
         session_id: str,
@@ -1000,6 +1249,14 @@ class LiveSessionStore:
             if session:
                 if session.is_streaming:
                     logger.info(f"Skipping cleanup of session {session_id}: still streaming (new query took over)")
+                    return False
+                # Keep the session alive while team members are still doing
+                # background work — otherwise the watcher's updates would
+                # land on a missing session and be dropped silently.
+                if self.has_active_team_members(session_id):
+                    logger.info(
+                        f"Skipping cleanup of session {session_id}: active team members"
+                    )
                     return False
                 msg_count = len(session.messages)
                 del self._sessions[session_id]

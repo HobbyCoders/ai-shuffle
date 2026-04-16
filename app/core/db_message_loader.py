@@ -175,6 +175,38 @@ def _transform_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "agentId": meta.get("agent_id"),
         }
 
+    if role == "team_member":
+        raw_children = meta.get("agent_children", []) or []
+        normalized_children = []
+        for c in raw_children:
+            if not isinstance(c, dict):
+                continue
+            normalized_children.append({
+                "id": c.get("id") or c.get("tool_id"),
+                "type": c.get("type", "tool_use"),
+                "content": c.get("content", "") or "",
+                "streaming": False,
+                "toolName": c.get("toolName") or c.get("tool_name"),
+                "toolId": c.get("toolId") or c.get("tool_id"),
+                "toolInput": c.get("toolInput") or c.get("tool_input"),
+                "toolResult": c.get("toolResult") or c.get("tool_result"),
+                "toolStatus": c.get("toolStatus") or c.get("tool_status") or "complete",
+            })
+        return {
+            **base,
+            "role": "assistant",
+            "content": row.get("content", ""),
+            "type": "team_member",
+            "teamName": meta.get("team_name"),
+            "teammateName": meta.get("teammate_name"),
+            "teammateSessionId": meta.get("teammate_session_id"),
+            "teammatePid": meta.get("teammate_pid"),
+            "teammateStatus": meta.get("teammate_status", "completed"),
+            "agentPrompt": meta.get("agent_prompt"),
+            "agentChildren": normalized_children,
+            "agentUsage": meta.get("agent_usage"),
+        }
+
     if role == "system":
         subtype = meta.get("subtype", "")
         return {

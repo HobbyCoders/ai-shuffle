@@ -12,7 +12,9 @@ export type { Session, Profile, PermissionRequestType, UserQuestionRequest };
 
 // ─── API & Message Types ─────────────────────────────────────────────────────
 
-export type MessageType = 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'system' | 'subagent' | 'command' | 'plugin_warning';
+export type MessageType = 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'system' | 'subagent' | 'team_member' | 'command' | 'plugin_warning';
+
+export type TeammateStatus = 'running' | 'completed' | 'error' | 'killed';
 
 // Subagent child message - represents a single tool call or text from a subagent
 export interface SubagentChildMessage {
@@ -67,7 +69,13 @@ export interface ChatMessage {
 	agentPrompt?: string; // The initial prompt sent to the subagent
 	agentStatus?: 'pending' | 'running' | 'completed' | 'error'; // Current status
 	agentChildren?: SubagentChildMessage[]; // Nested messages from subagent execution
-	agentUsage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number }; // Task progress stats
+	agentUsage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number; input_tokens?: number; output_tokens?: number }; // Task progress stats
+	// Team member fields (Claude Code agent-teams feature)
+	teamName?: string;
+	teammateName?: string;
+	teammateSessionId?: string;
+	teammatePid?: number;
+	teammateStatus?: TeammateStatus;
 	// Command-specific fields (for slash commands like /commit, /ralph-loop)
 	commandId?: string; // Internal command identifier (e.g., 'commit-commands:commit')
 	commandName?: string; // Display name with slash (e.g., '/commit')
