@@ -1214,8 +1214,23 @@ async def stream_to_websocket(
                         (not parent_tool_id and len(task_tool_uses) > 0)
                     )
 
+                    # Suppress no-op "status" system messages emitted by the SDK
+                    # on every stream_request_start (status="requesting"). These
+                    # are internal telemetry with no user-visible value and were
+                    # cluttering the chat between tools. Keep meaningful status
+                    # updates (compacting, permissionMode changes).
+                    data_dict = message.data if isinstance(message.data, dict) else {}
+                    status_val = data_dict.get("status")
+                    is_noop_status = (
+                        message.subtype == "status"
+                        and status_val in (None, "", "requesting")
+                        and not data_dict.get("permissionMode")
+                    )
+
                     if is_from_subagent:
                         logger.debug(f"[WS] Suppressed subagent SystemMessage: subtype={message.subtype}")
+                    elif is_noop_status:
+                        logger.debug(f"[WS] Suppressed no-op status SystemMessage: status={status_val}")
                     elif message.subtype not in SUPPRESSED_SUBTYPES:
                         has_visible_content = True
                         logger.debug(f"[WS] Forwarding SystemMessage to frontend: subtype={message.subtype}")

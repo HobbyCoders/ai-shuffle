@@ -72,6 +72,26 @@
 					};
 				}
 
+				// Hide no-op SDK telemetry status values. The SDK emits
+				// subtype=status with status="requesting" on every stream_request_start
+				// (once per model API call). These carry no user-relevant info and
+				// clutter the chat between tool messages. Also hides older persisted
+				// rows from before the backend filter was added.
+				const NOOP_STATUS_VALUES = new Set([
+					'requesting',
+					'completed',
+					'idle'
+				]);
+				if (NOOP_STATUS_VALUES.has(status)) {
+					return {
+						title: 'Status',
+						content: status,
+						badge: status,
+						badgeColor: 'blue',
+						hidden: true
+					};
+				}
+
 				return {
 					title: 'Status',
 					content: status,
