@@ -253,6 +253,31 @@ class LiveSessionStore:
             messages: List[LiveMessage] = []
             if initial_messages:
                 for i, m in enumerate(initial_messages):
+                    # Rehydrate SubagentChild dicts (from DB persistence) back into
+                    # dataclass instances so the live store serializes them
+                    # consistently with messages produced during active streaming.
+                    raw_children = m.get("agentChildren") or m.get("agent_children")
+                    hydrated_children: Optional[List[SubagentChild]] = None
+                    if raw_children:
+                        hydrated_children = []
+                        for c in raw_children:
+                            if isinstance(c, SubagentChild):
+                                hydrated_children.append(c)
+                                continue
+                            if not isinstance(c, dict):
+                                continue
+                            hydrated_children.append(SubagentChild(
+                                id=str(c.get("id") or c.get("tool_id") or f"child-{len(hydrated_children)}"),
+                                type=c.get("type", "tool_use"),
+                                content=c.get("content", "") or "",
+                                streaming=bool(c.get("streaming", False)),
+                                tool_name=c.get("toolName") or c.get("tool_name"),
+                                tool_id=c.get("toolId") or c.get("tool_id"),
+                                tool_input=c.get("toolInput") or c.get("tool_input"),
+                                tool_result=c.get("toolResult") or c.get("tool_result"),
+                                tool_status=c.get("toolStatus") or c.get("tool_status"),
+                            ))
+
                     msg = LiveMessage(
                         id=str(m.get("id", f"history-{i}")),
                         role=m.get("role", "user"),
@@ -267,7 +292,10 @@ class LiveSessionStore:
                         agent_id=m.get("agentId") or m.get("agent_id"),
                         agent_type=m.get("agentType") or m.get("agent_type"),
                         agent_description=m.get("agentDescription") or m.get("agent_description"),
+                        agent_prompt=m.get("agentPrompt") or m.get("agent_prompt"),
                         agent_status=m.get("agentStatus") or m.get("agent_status"),
+                        agent_children=hydrated_children,
+                        agent_usage=m.get("agentUsage") or m.get("agent_usage"),
                         # System message fields
                         system_subtype=m.get("systemSubtype") or m.get("subtype"),
                         system_data=m.get("systemData") or m.get("data"),

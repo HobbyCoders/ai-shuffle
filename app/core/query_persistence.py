@@ -57,6 +57,100 @@ def _extract_connection_error(exc: Exception, cli_stderr_lines: list[str]) -> st
     return f"Connection failed: {exc}"
 
 
+_SUBAGENT_TOOLS = {"Task", "Agent"}
+
+
+def _row_for_tool_use(session_id: str, tool_msg: dict, profile_id: Optional[str],
+                      subagent_children: Optional[dict] = None) -> dict:
+    """Build a DB row for a tool_use entry. Task/Agent stored with role=subagent."""
+    tool_name = tool_msg.get("name", "unknown")
+    tool_id = tool_msg.get("tool_id")
+    tool_input = tool_msg.get("input") or {}
+
+    if tool_name in _SUBAGENT_TOOLS:
+        # Embed collected subagent children into the parent's metadata so
+        # reload rebuilds the full nested display.
+        children = (subagent_children or {}).get(tool_id, [])
+        return {
+            "session_id": session_id,
+            "role": "subagent",
+            "content": tool_input.get("description", ""),
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "metadata": {
+                "tool_id": tool_id,
+                "agent_type": (
+                    tool_input.get("subagent_type")
+                    or tool_input.get("description")
+                    or "Agent"
+                ),
+                "agent_description": tool_input.get("description", ""),
+                "agent_prompt": tool_input.get("prompt", ""),
+                "agent_status": "completed",
+                "agent_children": children,
+            },
+            "profile_id": profile_id,
+        }
+
+    return {
+        "session_id": session_id,
+        "role": "tool_use",
+        "content": f"Using tool: {tool_name}",
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "metadata": {"tool_id": tool_id},
+        "profile_id": profile_id,
+    }
+
+
+def _row_for_tool_result(session_id: str, tool_msg: dict, profile_id: Optional[str]) -> dict:
+    return {
+        "session_id": session_id,
+        "role": "tool_result",
+        "content": tool_msg.get("output", ""),
+        "tool_name": tool_msg.get("name", "unknown"),
+        "metadata": {"tool_id": tool_msg.get("tool_id")},
+        "profile_id": profile_id,
+    }
+
+
+def _row_for_thinking(session_id: str, tb: dict, profile_id: Optional[str], model: Optional[str]) -> dict:
+    return {
+        "session_id": session_id,
+        "role": "thinking",
+        "content": tb.get("content", ""),
+        "metadata": {"model": model},
+        "profile_id": profile_id,
+    }
+
+
+def _row_for_system(session_id: str, sm: dict, profile_id: Optional[str]) -> dict:
+    return {
+        "session_id": session_id,
+        "role": "system",
+        "content": sm.get("content", ""),
+        "metadata": {
+            "subtype": sm.get("subtype", ""),
+            "system_data": sm.get("data", {}),
+        },
+        "profile_id": profile_id,
+    }
+
+
+def _row_for_plugin(session_id: str, pm: dict, profile_id: Optional[str]) -> dict:
+    return {
+        "session_id": session_id,
+        "role": "system",
+        "content": pm.get("message", ""),
+        "metadata": {
+            "subtype": "plugin_warning",
+            "plugin_name": pm.get("plugin", ""),
+            "severity": pm.get("severity", "info"),
+        },
+        "profile_id": profile_id,
+    }
+
+
 async def _persist_turn_results(
     session_id: str,
     sdk_session_id: Optional[str],
@@ -69,6 +163,8 @@ async def _persist_turn_results(
     thinking_blocks: Optional[list] = None,
     system_messages: Optional[list] = None,
     plugin_messages: Optional[list] = None,
+    turn_events: Optional[list] = None,
+    subagent_children: Optional[dict] = None,
 ) -> Optional[dict]:
     """Persist a completed turn's data to the database in batched writes.
 
@@ -76,11 +172,19 @@ async def _persist_turn_results(
     messages into a single transaction (one DB connection, one commit)
     instead of N+1 individual writes.
 
-    New in db-backed-sessions:
-    - thinking_blocks: list of {"content": str} dicts
-    - system_messages: list of {"content": str, "subtype": str, "data": dict}
-    - plugin_messages: list of {"plugin": str, "message": str, "severity": str}
-    - Subagent tool_use (name in Task/Agent) stored with role="subagent"
+    Ordering:
+    - When turn_events is provided, rows are emitted in the exact order the
+      events occurred during streaming (thinking, tool_use, tool_result,
+      subagent, system, plugin, asst_text-last). This preserves the visual
+      flow of the turn on session reload.
+    - Legacy path (no turn_events): rows are bucketed thinking → tools →
+      system → plugin → asst_text.
+
+    Subagent handling:
+    - Task/Agent tool_use entries are stored with role="subagent".
+    - Their child tool_use/tool_result entries are embedded into the
+      parent's metadata.agent_children (NOT emitted as top-level rows) so
+      the nested display reconstructs correctly on reload.
 
     Returns the assistant message dict if one was stored, else None.
     """
@@ -90,6 +194,7 @@ async def _persist_turn_results(
     thinking_blocks = thinking_blocks or []
     system_messages = system_messages or []
     plugin_messages = plugin_messages or []
+    subagent_children = subagent_children or {}
 
     # 1. Update session metadata (sdk_session_id, cost, tokens, turns)
     try:
@@ -111,92 +216,52 @@ async def _persist_turn_results(
     full_response = "\n".join(response_text) if response_text else ""
     batch: list[dict] = []
 
-    # 2a. Thinking blocks (before tool/text — mirrors streaming order)
-    for tb in thinking_blocks:
-        batch.append({
-            "session_id": session_id,
-            "role": "thinking",
-            "content": tb.get("content", ""),
-            "metadata": {"model": metadata.get("model")},
-            "profile_id": profile_id,
-        })
+    if turn_events:
+        # Ordered path — preserves stream order, skips subagent children
+        # (they're embedded in their parent subagent's metadata).
+        model = metadata.get("model")
+        for ev in turn_events:
+            kind = ev.get("kind")
+            payload = ev.get("payload") or {}
+            if kind == "thinking":
+                batch.append(_row_for_thinking(session_id, payload, profile_id, model))
+            elif kind == "tool_use":
+                # Skip subagent children — they go inside the parent's metadata
+                if payload.get("parent_tool_id"):
+                    continue
+                batch.append(_row_for_tool_use(session_id, payload, profile_id, subagent_children))
+            elif kind == "subagent":
+                batch.append(_row_for_tool_use(session_id, payload, profile_id, subagent_children))
+            elif kind == "tool_result":
+                if payload.get("parent_tool_id"):
+                    continue
+                batch.append(_row_for_tool_result(session_id, payload, profile_id))
+            elif kind == "system":
+                batch.append(_row_for_system(session_id, payload, profile_id))
+            elif kind == "plugin":
+                batch.append(_row_for_plugin(session_id, payload, profile_id))
+    else:
+        # Legacy bucketed path (for call sites that don't pass turn_events)
+        for tb in thinking_blocks:
+            batch.append(_row_for_thinking(session_id, tb, profile_id, metadata.get("model")))
 
-    # 2b. Tool messages — detect subagent tool_use (Task/Agent)
-    _SUBAGENT_TOOLS = {"Task", "Agent"}
-    for tool_msg in tool_messages:
-        msg_type = tool_msg.get("type")
-        tool_name = tool_msg.get("name", "unknown")
-        if msg_type == "tool_use":
-            if tool_name in _SUBAGENT_TOOLS:
-                # Store as subagent role with rich metadata
-                tool_input = tool_msg.get("input") or {}
-                batch.append({
-                    "session_id": session_id,
-                    "role": "subagent",
-                    "content": tool_input.get("description", ""),
-                    "tool_name": tool_name,
-                    "tool_input": tool_input,
-                    "metadata": {
-                        "tool_id": tool_msg.get("tool_id"),
-                        "agent_type": (
-                            tool_input.get("subagent_type")
-                            or tool_input.get("description")
-                            or "Agent"
-                        ),
-                        "agent_description": tool_input.get("description", ""),
-                        "agent_prompt": tool_input.get("prompt", ""),
-                        "agent_status": "completed",
-                    },
-                    "profile_id": profile_id,
-                })
-            else:
-                batch.append({
-                    "session_id": session_id,
-                    "role": "tool_use",
-                    "content": f"Using tool: {tool_name}",
-                    "tool_name": tool_name,
-                    "tool_input": tool_msg.get("input"),
-                    "metadata": {"tool_id": tool_msg.get("tool_id")},
-                    "profile_id": profile_id,
-                })
-        elif msg_type == "tool_result":
-            batch.append({
-                "session_id": session_id,
-                "role": "tool_result",
-                "content": tool_msg.get("output", ""),
-                "tool_name": tool_name,
-                "metadata": {"tool_id": tool_msg.get("tool_id")},
-                "profile_id": profile_id,
-            })
+        for tool_msg in tool_messages:
+            # Skip children of subagents — parent row embeds them
+            if tool_msg.get("parent_tool_id"):
+                continue
+            msg_type = tool_msg.get("type")
+            if msg_type == "tool_use":
+                batch.append(_row_for_tool_use(session_id, tool_msg, profile_id, subagent_children))
+            elif msg_type == "tool_result":
+                batch.append(_row_for_tool_result(session_id, tool_msg, profile_id))
 
-    # 2c. System messages (compact_boundary, api_error, local_command, etc.)
-    for sm in system_messages:
-        batch.append({
-            "session_id": session_id,
-            "role": "system",
-            "content": sm.get("content", ""),
-            "metadata": {
-                "subtype": sm.get("subtype", ""),
-                "system_data": sm.get("data", {}),
-            },
-            "profile_id": profile_id,
-        })
+        for sm in system_messages:
+            batch.append(_row_for_system(session_id, sm, profile_id))
 
-    # 2d. Plugin/hook warning messages
-    for pm in plugin_messages:
-        batch.append({
-            "session_id": session_id,
-            "role": "system",
-            "content": pm.get("message", ""),
-            "metadata": {
-                "subtype": "plugin_warning",
-                "plugin_name": pm.get("plugin", ""),
-                "severity": pm.get("severity", "info"),
-            },
-            "profile_id": profile_id,
-        })
+        for pm in plugin_messages:
+            batch.append(_row_for_plugin(session_id, pm, profile_id))
 
-    # 2e. Assistant text response (always last)
+    # Assistant text response (always last — closes the turn visually)
     assistant_msg = None
     if full_response or interrupted or tool_messages:
         batch.append({

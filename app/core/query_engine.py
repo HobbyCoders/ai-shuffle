@@ -22,7 +22,7 @@ import re
 import time
 import uuid
 import asyncio
-from typing import Optional, Dict, Any, AsyncGenerator, Callable
+from typing import Optional, Dict, Any, AsyncGenerator, Callable, List
 from datetime import datetime, timezone
 
 from claude_agent_sdk import query, ClaudeAgentOptions
@@ -1089,6 +1089,16 @@ async def stream_to_websocket(
     thinking_blocks = []  # Collect thinking blocks for DB persistence
     system_messages_acc = []  # Collect system messages for DB persistence
     plugin_messages_acc = []  # Collect plugin/hook warnings for DB persistence
+    # Preserve stream order for DB persistence. Each entry is tagged with a
+    # `kind` field so query_persistence can emit rows in the exact sequence
+    # they arrived, instead of bucketing all-thinking→all-tools→all-text.
+    turn_events: list = []
+    # Subagent (Task/Agent) child tool invocations keyed by parent_tool_id.
+    # These are embedded into the parent subagent's agent_children metadata
+    # at persistence time so reloading a session reconstructs the subagent's
+    # internal tool usage. Child tool_use entries are NOT persisted as
+    # top-level rows (they'd be orphaned without their parent context).
+    subagent_children: Dict[str, List[Dict[str, Any]]] = {}
     task_tool_uses = {}  # Track Task (subagent) tool uses by tool_id
     tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
     metadata = {}
@@ -1097,6 +1107,7 @@ async def stream_to_websocket(
     has_visible_content = False  # Track if any content was yielded to the frontend
     is_slash_command = prompt.strip().startswith("/")
     _current_thinking = []  # Accumulate thinking deltas into blocks
+    _current_text_parts: list = []  # Accumulate asst text between blocks for ordered persistence
 
     # Helper to drain stderr queue and yield plugin messages
     async def drain_stderr_queue():
@@ -1139,6 +1150,7 @@ async def stream_to_websocket(
                 # Accumulate for DB persistence
                 if stderr_msg.get("type") == "plugin_message":
                     plugin_messages_acc.append(stderr_msg)
+                    turn_events.append({"kind": "plugin", "payload": stderr_msg})
                 yield stderr_msg
 
             # Check typed task messages before generic SystemMessage
@@ -1211,11 +1223,13 @@ async def stream_to_websocket(
                         sys_content = ""
                         if isinstance(message.data, dict) and "content" in message.data:
                             sys_content = str(message.data["content"])
-                        system_messages_acc.append({
+                        sys_entry = {
                             "content": sys_content,
                             "subtype": message.subtype,
                             "data": message.data,
-                        })
+                        }
+                        system_messages_acc.append(sys_entry)
+                        turn_events.append({"kind": "system", "payload": sys_entry})
                         yield {
                             "type": "system",
                             "subtype": message.subtype,
@@ -1255,7 +1269,9 @@ async def stream_to_websocket(
                     if delta_type == "text_delta" and delta.get("text"):
                         # Finalize any accumulated thinking block
                         if _current_thinking:
-                            thinking_blocks.append({"content": "".join(_current_thinking)})
+                            thinking_entry = {"content": "".join(_current_thinking)}
+                            thinking_blocks.append(thinking_entry)
+                            turn_events.append({"kind": "thinking", "payload": thinking_entry})
                             _current_thinking.clear()
                         # Real-time text streaming chunk
                         text = delta["text"]
@@ -1394,13 +1410,18 @@ async def stream_to_websocket(
                         if tool_id:
                             tool_id_to_name[tool_id] = block.name
 
-                        # Collect tool use for storage
-                        tool_messages.append({
+                        # Tag tool_messages entries with parent_tool_id so persistence
+                        # can identify subagent children and embed them into the parent
+                        # subagent's agent_children metadata instead of emitting them
+                        # as orphaned top-level rows.
+                        tool_entry = {
                             "type": "tool_use",
                             "name": block.name,
                             "tool_id": tool_id,
-                            "input": tool_input
-                        })
+                            "input": tool_input,
+                            "parent_tool_id": parent_tool_id if (parent_tool_id and parent_tool_id in task_tool_uses) else None,
+                        }
+                        tool_messages.append(tool_entry)
 
                         # Check if this is a subagent invocation (SDK ≤0.1.30 "Task", SDK ≥0.1.48 "Agent")
                         if block.name in ("Task", "Agent"):
@@ -1417,6 +1438,10 @@ async def stream_to_websocket(
                                 "description": tool_input.get("description", ""),
                                 "prompt": tool_input.get("prompt", "")
                             }
+                            # Initialize children collector for this subagent
+                            subagent_children[tool_id] = []
+                            # Record subagent in ordered turn events for persistence
+                            turn_events.append({"kind": "subagent", "payload": tool_entry})
 
                             # Yield subagent_start event
                             yield {
@@ -1429,6 +1454,20 @@ async def stream_to_websocket(
                             }
                         # Check if this tool use is from a subagent
                         elif parent_tool_id and parent_tool_id in task_tool_uses:
+                            # Record as child of the parent subagent (not top-level)
+                            child_entry = {
+                                "id": tool_id,
+                                "type": "tool_use",
+                                "content": "",
+                                "streaming": False,
+                                "tool_name": block.name,
+                                "tool_id": tool_id,
+                                "tool_input": tool_input,
+                                "tool_result": None,
+                                "tool_status": "running",
+                            }
+                            subagent_children.setdefault(parent_tool_id, []).append(child_entry)
+
                             # Tool use from subagent - send as subagent_tool_use
                             yield {
                                 "type": "subagent_tool_use",
@@ -1438,6 +1477,8 @@ async def stream_to_websocket(
                                 "input": tool_input
                             }
                         else:
+                            # Regular top-level tool — record in ordered turn events
+                            turn_events.append({"kind": "tool_use", "payload": tool_entry})
                             yield {
                                 "type": "tool_use",
                                 "name": block.name,
@@ -1462,13 +1503,16 @@ async def stream_to_websocket(
                                 f"content_type={content_type}, content_repr={content_repr}"
                             )
 
-                        # Collect tool result for storage
-                        tool_messages.append({
+                        # Tag with parent_tool_id when this result belongs to a
+                        # subagent child so persistence can skip top-level emission.
+                        result_entry = {
                             "type": "tool_result",
                             "name": tool_name,
                             "tool_id": tool_use_id,
-                            "output": output
-                        })
+                            "output": output,
+                            "parent_tool_id": parent_tool_id if (parent_tool_id and parent_tool_id in task_tool_uses) else None,
+                        }
+                        tool_messages.append(result_entry)
 
                         # Check if this is a result for a Task tool (subagent)
                         if tool_use_id in task_tool_uses:
@@ -1485,6 +1529,16 @@ async def stream_to_websocket(
                             del task_tool_uses[tool_use_id]
                         # Check if this tool result is from a subagent
                         elif parent_tool_id and parent_tool_id in task_tool_uses:
+                            # Merge result into the matching child entry under the parent subagent
+                            children = subagent_children.get(parent_tool_id, [])
+                            for child in children:
+                                if child.get("tool_id") == tool_use_id:
+                                    child["tool_result"] = output
+                                    child["tool_status"] = (
+                                        "error" if getattr(block, 'is_error', False) else "complete"
+                                    )
+                                    break
+
                             # Tool result from subagent - send as subagent_tool_result
                             yield {
                                 "type": "subagent_tool_result",
@@ -1495,6 +1549,8 @@ async def stream_to_websocket(
                                 "is_error": getattr(block, 'is_error', False)
                             }
                         else:
+                            # Regular top-level tool_result — record in ordered events
+                            turn_events.append({"kind": "tool_result", "payload": result_entry})
                             event = {
                                 "type": "tool_result",
                                 "name": tool_name,
@@ -1598,13 +1654,16 @@ async def stream_to_websocket(
                                 f"block.content falsy={not block.content}"
                             )
 
-                        # Collect tool result for storage
-                        tool_messages.append({
+                        # Collect tool result for storage (tagged with parent_tool_id
+                        # if it's a subagent child so persistence skips top-level emission)
+                        result_entry = {
                             "type": "tool_result",
                             "name": tool_name,
                             "tool_id": tool_use_id,
-                            "output": output
-                        })
+                            "output": output,
+                            "parent_tool_id": parent_tool_id if (parent_tool_id and parent_tool_id in task_tool_uses) else None,
+                        }
+                        tool_messages.append(result_entry)
 
                         # Check if this is a result for a Task tool (subagent)
                         if tool_use_id in task_tool_uses:
@@ -1621,6 +1680,13 @@ async def stream_to_websocket(
                             del task_tool_uses[tool_use_id]
                         # Check if this tool result is from a subagent
                         elif parent_tool_id and parent_tool_id in task_tool_uses:
+                            # Merge result into the matching child entry under the parent subagent
+                            children = subagent_children.get(parent_tool_id, [])
+                            for child in children:
+                                if child.get("tool_id") == tool_use_id:
+                                    child["tool_result"] = output
+                                    child["tool_status"] = "error" if block.is_error else "complete"
+                                    break
                             # Tool result from subagent - send as subagent_tool_result
                             yield {
                                 "type": "subagent_tool_result",
@@ -1631,6 +1697,8 @@ async def stream_to_websocket(
                                 "is_error": block.is_error
                             }
                         else:
+                            # Regular top-level tool_result — record in ordered events
+                            turn_events.append({"kind": "tool_result", "payload": result_entry})
                             event = {
                                 "type": "tool_result",
                                 "name": tool_name,
@@ -1686,13 +1754,16 @@ async def stream_to_websocket(
 
         # Finalize any trailing thinking block
         if _current_thinking:
-            thinking_blocks.append({"content": "".join(_current_thinking)})
+            thinking_entry = {"content": "".join(_current_thinking)}
+            thinking_blocks.append(thinking_entry)
+            turn_events.append({"kind": "thinking", "payload": thinking_entry})
             _current_thinking.clear()
 
         # Final drain of stderr queue after streaming loop completes
         for stderr_msg in await drain_stderr_queue():
             if stderr_msg.get("type") == "plugin_message":
                 plugin_messages_acc.append(stderr_msg)
+                turn_events.append({"kind": "plugin", "payload": stderr_msg})
             yield stderr_msg
 
     except asyncio.CancelledError:
@@ -1728,6 +1799,10 @@ async def stream_to_websocket(
             logger.debug(f"[WS] Kept session {session_id} in pool for reuse")
 
     # Persist session data to database in a batched write.
+    # turn_events provides the stream-ordered sequence so rows are inserted
+    # in the same order the events arrived (fixes visual flow on reload).
+    # subagent_children embeds subagent internal tool usage into the parent's
+    # agent_children metadata so the UI can rebuild nested displays on reload.
     await _persist_turn_results(
         session_id=session_id,
         sdk_session_id=sdk_session_id,
@@ -1740,6 +1815,8 @@ async def stream_to_websocket(
         thinking_blocks=thinking_blocks,
         system_messages=system_messages_acc,
         plugin_messages=plugin_messages_acc,
+        turn_events=turn_events,
+        subagent_children=subagent_children,
     )
 
     # For slash commands that produced no visible content, yield a notification

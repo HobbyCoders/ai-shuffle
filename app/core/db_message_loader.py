@@ -140,6 +140,26 @@ def _transform_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         }
 
     if role == "subagent":
+        # Normalize children snake_case → camelCase. The persistence layer
+        # stores child entries as snake_case dicts (tool_name, tool_input, …),
+        # but the frontend expects camelCase keys (toolName, toolInput, …).
+        raw_children = meta.get("agent_children", []) or []
+        normalized_children = []
+        for c in raw_children:
+            if not isinstance(c, dict):
+                continue
+            normalized_children.append({
+                "id": c.get("id") or c.get("tool_id"),
+                "type": c.get("type", "tool_use"),
+                "content": c.get("content", "") or "",
+                "streaming": bool(c.get("streaming", False)),
+                "toolName": c.get("toolName") or c.get("tool_name"),
+                "toolId": c.get("toolId") or c.get("tool_id"),
+                "toolInput": c.get("toolInput") or c.get("tool_input"),
+                "toolResult": c.get("toolResult") or c.get("tool_result"),
+                "toolStatus": c.get("toolStatus") or c.get("tool_status") or "complete",
+            })
+
         return {
             **base,
             "role": "assistant",
@@ -151,7 +171,7 @@ def _transform_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "agentDescription": meta.get("agent_description"),
             "agentPrompt": meta.get("agent_prompt"),
             "agentStatus": meta.get("agent_status", "completed"),
-            "agentChildren": meta.get("agent_children", []),
+            "agentChildren": normalized_children,
             "agentId": meta.get("agent_id"),
         }
 
