@@ -41,6 +41,7 @@ from app.api.ws_cleanup import (  # noqa: F401
     _active_sessions_lock,
     _pending_cleanup_tasks,
     cancel_pending_cleanup,
+    cleanup_session_handlers,
     schedule_delayed_cleanup,
 )
 from app.api.ws_utils import ping_loop  # noqa: F401
@@ -311,6 +312,7 @@ async def chat_websocket(
             if not await send_json({"type": "start", "session_id": session_id, "message_id": message_id}):
                 ctx.warning(logger, "Connection lost before query could start")
                 await live_session_store.cleanup_session(session_id)
+                await cleanup_session_handlers(session_id)
                 return  # Exit early - connection is dead
 
             # NOTE: Don't call start_assistant_message here!
@@ -496,6 +498,7 @@ async def chat_websocket(
             if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
                 ctx.debug(logger, "Cleaning up live session store (finally block - streaming never ended)")
                 await live_session_store.cleanup_session(session_id)
+                await cleanup_session_handlers(session_id)
 
             # ALWAYS ensure streaming state is cleared, even if stream_started was never set
             # This prevents stuck streaming state after errors or early termination
@@ -547,6 +550,7 @@ async def chat_websocket(
                 if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
                     # Only force-cleanup if still marked as streaming (abnormal state)
                     await live_session_store.cleanup_session(session_id)
+                    await cleanup_session_handlers(session_id)
                     ctx.debug(logger, "Cleaned up stuck streaming session")
 
             # Auto-process next queued message (server-side, no browser needed).
@@ -1320,6 +1324,7 @@ async def chat_websocket(
                         logger.debug(f"Last device disconnected from session {current_session_id}")
                         if live_session_store.has_session(current_session_id) and live_session_store.is_streaming(current_session_id):
                             await live_session_store.cleanup_session(current_session_id)
+                            await cleanup_session_handlers(current_session_id)
                             logger.debug(f"Cleaned up stuck streaming session {current_session_id}")
 
                         _active_chat_sessions.pop(current_session_id, None)

@@ -378,6 +378,28 @@ class RateLimiter:
         for window in self._windows.values():
             window.cleanup_old(cutoff)
 
+        # Remove empty window entries to prevent unbounded dict growth.
+        # A window is safe to remove when it has no timestamps and no
+        # in-flight requests (concurrent_count == 0).
+        empty_keys = [
+            key for key, window in self._windows.items()
+            if not window.timestamps and window.concurrent_count == 0
+        ]
+        for key in empty_keys:
+            del self._windows[key]
+        if empty_keys:
+            logger.debug(f"Removed {len(empty_keys)} empty rate limiter window(s)")
+
+        # Evict expired config cache entries (TTL-checked on read but
+        # stale entries for keys no longer queried linger forever).
+        now = datetime.now(timezone.utc)
+        stale_configs = [
+            key for key, (_, cached_at) in self._config_cache.items()
+            if now - cached_at >= self._config_cache_ttl
+        ]
+        for key in stale_configs:
+            del self._config_cache[key]
+
         # Also clean up old request logs from database
         try:
             deleted = database.cleanup_old_request_logs(cutoff)

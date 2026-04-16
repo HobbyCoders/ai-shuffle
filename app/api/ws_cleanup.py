@@ -4,6 +4,8 @@ import asyncio
 import logging
 
 from app.core.live_session_store import live_session_store
+from app.core.permission_handler import permission_handler
+from app.core.user_question_handler import user_question_handler
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +17,24 @@ _active_sessions_lock = asyncio.Lock()
 # new query starts for the same session (prevents the race condition where an
 # old cleanup fires and removes a newly-started streaming session from memory).
 _pending_cleanup_tasks: dict[str, asyncio.Task] = {}
+
+
+async def cleanup_session_handlers(session_id: str) -> None:
+    """Clean up session-keyed data from global handler singletons.
+
+    Called alongside live_session_store cleanup to prevent unbounded
+    growth of _pending_requests, _session_rules, and _pending_questions
+    dicts over the process lifetime.
+    """
+    try:
+        await permission_handler.cancel_all_requests(session_id)
+        permission_handler.clear_session_rules(session_id)
+    except Exception:
+        logger.debug(f"Permission handler cleanup failed for {session_id}", exc_info=True)
+    try:
+        await user_question_handler.cancel_all(session_id)
+    except Exception:
+        logger.debug(f"Question handler cleanup failed for {session_id}", exc_info=True)
 
 
 def cancel_pending_cleanup(session_id: str) -> bool:
@@ -50,6 +70,8 @@ async def _delayed_session_cleanup(session_id: str, delay_seconds: int = 30) -> 
     try:
         await asyncio.sleep(delay_seconds)
         cleaned = await live_session_store.cleanup_ended_session(session_id)
+        if cleaned:
+            await cleanup_session_handlers(session_id)
         logger.info(f"Delayed cleanup for session {session_id}: {'removed' if cleaned else 'skipped (still streaming or not found)'}")
     except asyncio.CancelledError:
         logger.debug(f"Delayed cleanup cancelled for session {session_id} (new query started)")

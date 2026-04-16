@@ -226,6 +226,25 @@ async def _collect_metrics() -> dict:
     except Exception:
         pass
 
+    # --- Handler accumulation tracking ---
+    try:
+        from app.core.permission_handler import permission_handler
+        metrics["perm_pending_sessions"] = len(permission_handler._pending_requests)
+        metrics["perm_session_rules"] = len(permission_handler._session_rules)
+    except Exception:
+        pass
+    try:
+        from app.core.user_question_handler import user_question_handler
+        metrics["question_pending_sessions"] = len(user_question_handler._pending_questions)
+    except Exception:
+        pass
+    try:
+        from app.core.rate_limiter import rate_limiter
+        metrics["rate_limiter_windows"] = len(rate_limiter._windows)
+        metrics["rate_limiter_config_cache"] = len(rate_limiter._config_cache)
+    except Exception:
+        pass
+
     return metrics
 
 
@@ -350,6 +369,12 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
             await sync_engine.clear_streaming_state(session_id)
         except Exception as e:
             logger.debug(f"{_PREFIX} Failed to clear sync engine state for {session_id}: {e}")
+
+        try:
+            from app.api.ws_cleanup import cleanup_session_handlers
+            await cleanup_session_handlers(session_id)
+        except Exception as e:
+            logger.debug(f"{_PREFIX} Failed to clean session handlers for {session_id}: {e}")
 
 
 async def _periodic_cleanup() -> dict:
