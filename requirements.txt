@@ -1,6 +1,6 @@
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
-pydantic==2.10.3
+pydantic==2.10.6
 pydantic-settings==2.6.1
 python-dotenv==1.0.1
 httpx==0.27.2
@@ -22,7 +22,7 @@ google-auth-oauthlib>=1.1.0  # Google OAuth2 authentication
 google-auth-httplib2>=0.2.0  # Google auth HTTP transport
 # Realtime voice pipeline (Pipecat + providers)
 # Pinned exact due to Pipecat API churn; see docs/voice-architecture.md
-pipecat-ai[anthropic,deepgram,cartesia,silero,webrtc,groq,elevenlabs]==0.0.47
+pipecat-ai[anthropic,deepgram,cartesia,silero,webrtc,groq,elevenlabs]==1.0.0
 aiortc>=1.9.0  # WebRTC transport (SmallWebRTCTransport)
 onnxruntime>=1.17.0  # Silero VAD + SmartTurnAnalyzer inference (CPU)
 numpy>=1.26.0  # Audio buffer manipulation
