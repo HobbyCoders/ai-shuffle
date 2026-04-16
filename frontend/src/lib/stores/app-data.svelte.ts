@@ -326,27 +326,54 @@ export const appData = {
 	},
 
 	async deleteSession(sessionId: string) {
-		await api.delete(`/sessions/${sessionId}`);
-		await appData.loadSessions();
+		// Optimistic removal — splice from local state immediately for instant UI feedback.
+		// Snapshot previous state so we can roll back if the API call fails.
+		const prevSessions = _state.sessions;
+		const prevTotal = _state.sessionsTotal;
+		_update(s => ({
+			...s,
+			sessions: s.sessions.filter(x => x.id !== sessionId),
+			sessionsTotal: Math.max(0, s.sessionsTotal - 1),
+		}));
 		messageCache.delete(sessionId);
+
+		try {
+			await api.delete(`/sessions/${sessionId}`);
+		} catch (err) {
+			// Rollback optimistic removal on error, then resync from server.
+			_update(s => ({ ...s, sessions: prevSessions, sessionsTotal: prevTotal }));
+			await appData.loadSessions();
+			throw err;
+		}
 	},
 
 	async deleteSelectedSessions() {
 		const sessionIds = Array.from(_state.selectedSessionIds);
 		if (sessionIds.length === 0) return;
 
-		await api.post('/sessions/batch-delete', { session_ids: sessionIds });
-		await appData.loadSessions();
+		const idSet = new Set(sessionIds);
+		const prevSessions = _state.sessions;
+		const prevTotal = _state.sessionsTotal;
 
+		// Optimistic removal of all selected sessions.
+		_update(s => ({
+			...s,
+			sessions: s.sessions.filter(x => !idSet.has(x.id)),
+			sessionsTotal: Math.max(0, s.sessionsTotal - idSet.size),
+			selectionMode: false,
+			selectedSessionIds: new Set<string>(),
+		}));
 		for (const id of sessionIds) {
 			messageCache.delete(id);
 		}
 
-		_update(s => ({
-			...s,
-			selectionMode: false,
-			selectedSessionIds: new Set<string>(),
-		}));
+		try {
+			await api.post('/sessions/batch-delete', { session_ids: sessionIds });
+		} catch (err) {
+			_update(s => ({ ...s, sessions: prevSessions, sessionsTotal: prevTotal }));
+			await appData.loadSessions();
+			throw err;
+		}
 	},
 
 	// ── Search ──────────────────────────────────────────────────────────

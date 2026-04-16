@@ -12,7 +12,7 @@ All public symbols are re-exported here for backward compatibility.
 
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Depends, Query, status, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query, status, Request
 
 try:
     from claude_agent_sdk import get_session_messages as sdk_get_session_messages
@@ -911,21 +911,21 @@ async def get_session_subagent_messages(
         }
 
 
-@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_session(request: Request, session_id: str, token: str = Depends(require_auth)):
-    """Delete a session and its messages. API users can only delete their accessible sessions."""
-    existing = await require_session(request, session_id)
+async def _cleanup_session_artifacts(session_id: str, sdk_sid: Optional[str], project_id: Optional[str]):
+    """Background cleanup: terminate pooled subprocess + delete SDK JSONL.
 
-    # Evict from session pool before deleting — terminates subprocess if alive
-    from app.core.session_pool import get_session_pool
-    await get_session_pool().remove(session_id)
+    Runs after the HTTP response returns so clients don't block on subprocess
+    teardown (which can hold worktree CWD locks and take time to exit).
+    """
+    try:
+        from app.core.session_pool import get_session_pool
+        await get_session_pool().remove(session_id)
+    except Exception as e:
+        logger.warning(f"Background session_pool.remove failed for {session_id}: {e}")
 
-    # Delete SDK session JSONL files if available (SDK 0.1.51+)
-    sdk_sid = existing.get("sdk_session_id")
     if sdk_sid and sdk_delete_session:
         try:
-            # Resolve working directory for JSONL file location
-            project = await run_sync(database.get_project, existing.get("project_id")) if existing.get("project_id") else None
+            project = await run_sync(database.get_project, project_id) if project_id else None
             working_dir = get_project_working_dir(project) if project else None
             await run_sync(sdk_delete_session, session_id=sdk_sid, directory=working_dir)
             logger.debug(f"Deleted SDK session JSONL for {sdk_sid}")
@@ -933,19 +933,48 @@ async def delete_session(request: Request, session_id: str, token: str = Depends
             # Non-fatal — DB record is the primary source of truth
             logger.warning(f"Failed to delete SDK session JSONL for {sdk_sid}: {e}")
 
+
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    request: Request,
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    token: str = Depends(require_auth),
+):
+    """Delete a session and its messages. API users can only delete their accessible sessions.
+
+    DB row is deleted synchronously so the client sees the session gone immediately.
+    Subprocess teardown + SDK JSONL cleanup run as background tasks to avoid blocking
+    the HTTP response on slow worktree/subprocess lock release.
+    """
+    existing = await require_session(request, session_id)
+
+    # Delete DB row first — cheap and authoritative for the UI.
     await run_sync(database.delete_session, session_id)
+
+    # Defer slow cleanup (subprocess termination, JSONL file I/O) to background.
+    background_tasks.add_task(
+        _cleanup_session_artifacts,
+        session_id,
+        existing.get("sdk_session_id"),
+        existing.get("project_id"),
+    )
 
 
 @router.post("/batch-delete", status_code=status.HTTP_200_OK)
 async def batch_delete_sessions(
     request: Request,
     body: BatchDeleteRequest,
+    background_tasks: BackgroundTasks,
     token: str = Depends(require_auth)
 ):
     """
     Delete multiple sessions at once.
     API users can only delete sessions they have access to.
     Returns count of successfully deleted sessions.
+
+    DB rows deleted synchronously; subprocess teardown + SDK JSONL cleanup run
+    as background tasks to avoid blocking the response.
     """
     deleted_count = 0
     errors = []
@@ -953,10 +982,13 @@ async def batch_delete_sessions(
     for session_id in body.session_ids:
         try:
             existing = await require_session(request, session_id)
-            # Evict from session pool before deleting
-            from app.core.session_pool import get_session_pool
-            await get_session_pool().remove(session_id)
             await run_sync(database.delete_session, session_id)
+            background_tasks.add_task(
+                _cleanup_session_artifacts,
+                session_id,
+                existing.get("sdk_session_id"),
+                existing.get("project_id"),
+            )
             deleted_count += 1
         except HTTPException as e:
             errors.append(f"Access denied for session {session_id}: {e.detail}")
