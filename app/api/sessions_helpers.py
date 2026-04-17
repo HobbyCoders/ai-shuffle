@@ -92,6 +92,14 @@ class CreateWorktreeSessionRequest(BaseModel):
     base_branch: str = "main"
     profile_id: Optional[str] = None
     create_new_branch: bool = False  # False = use existing branch, True = create new branch
+    # Optional first-prompt kickoff — when ``prompt`` is set the backend
+    # persists the user message, migrates any pending uploads into the new
+    # worktree, and launches ``run_query`` in a detached task. This lets the
+    # user lock their phone / switch sessions during creation without losing
+    # the in-flight query (it runs server-side regardless of WS state).
+    prompt: Optional[str] = None
+    overrides: Optional[dict] = None
+    pending_upload_paths: Optional[List[str]] = None
 
 
 class WorktreeSessionResponse(BaseModel):
@@ -102,6 +110,11 @@ class WorktreeSessionResponse(BaseModel):
     base_branch: str
     worktree_path: str
     status: str
+    # True when ``prompt`` was provided and the backend has already spawned
+    # a ``run_query`` task for the new session. Frontend uses this flag to
+    # skip sending a redundant WS ``query`` message.
+    query_started: bool = False
+    upload_migration_errors: Optional[List[str]] = None
 
 
 # ---------------------------------------------------------------------------

@@ -53,6 +53,13 @@ async function extractErrorDetail(response: Response): Promise<string> {
 export interface RequestOptions {
 	/** AbortSignal for cancelling the request (e.g., timeout or component unmount) */
 	signal?: AbortSignal;
+	/**
+	 * If ``true``, the browser is allowed to keep the request alive even if
+	 * the page is backgrounded / the tab unloads. Used for fire-and-forget
+	 * POSTs where the user might lock their phone or switch sessions mid-
+	 * flight (e.g. auto-create worktree). Limited to ~64 KB payload.
+	 */
+	keepalive?: boolean;
 }
 
 export class ApiClient {
@@ -69,7 +76,8 @@ export class ApiClient {
 			},
 			credentials: 'include',
 			body: body ? JSON.stringify(body) : undefined,
-			signal: options?.signal
+			signal: options?.signal,
+			keepalive: options?.keepalive
 		});
 
 		if (!response.ok) {

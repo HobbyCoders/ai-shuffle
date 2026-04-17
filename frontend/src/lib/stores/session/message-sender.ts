@@ -478,16 +478,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 			const creationGen = internal.worktreeCreationGeneration;
 
-			// Abort controller so session-switcher can cancel an in-flight
-			// worktree create when the user navigates away. Prevents orphan
-			// worktrees / branches that would later collide with a retry.
-			const abortController = new AbortController();
-			if (internal.worktreeCreateAbort) {
-				// Defensive: shouldn't happen (switch aborts first), but if an
-				// older autoCreateWorktree is still pending, cancel it.
-				internal.worktreeCreateAbort.abort();
-			}
-			internal.worktreeCreateAbort = abortController;
+			// NOTE: intentionally no AbortController. The backend now creates the
+			// worktree AND kicks off the first Claude query in a single request,
+			// so we want the POST to finish even if the user navigates away,
+			// locks their phone, or closes the tab. Using ``keepalive: true``
+			// lets the browser complete the POST in the background.
+			const overridesPayload: Record<string, string> = {};
+			if (modelOverrideSnap) overridesPayload.model = modelOverrideSnap;
+			if (permissionModeOverrideSnap) overridesPayload.permission_mode = permissionModeOverrideSnap;
+			if (effortLevelOverrideSnap) overridesPayload.effort = effortLevelOverrideSnap;
+			if (fastModeSnap) overridesPayload.fast_mode = 'true';
 
 			update(s => ({
 				...s,
@@ -510,49 +510,50 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					branchName = generateBranchNameLocal(prompt);
 				}
 
-				// If the user has already navigated away, don't POST. Creating
-				// the worktree server-side here would orphan it (the response
-				// can't be applied), and a deterministic branch-name retry
-				// from the same prompt would later hit "branch already exists".
-				if (creationGen !== internal.worktreeCreationGeneration) {
-					if (internal.worktreeCreateAbort === abortController) {
-						internal.worktreeCreateAbort = null;
-					}
-					return;
+				// Update the branch label even if the user has navigated away —
+				// generation guard only matters for state that binds to the
+				// current view. Continue the POST regardless of navigation so
+				// the backend spawns the query.
+				if (creationGen === internal.worktreeCreationGeneration) {
+					update(s => ({
+						...s,
+						worktreeBranch: branchName,
+						worktreeCreateNewBranch: true,
+					}));
 				}
-
-				update(s => ({
-					...s,
-					worktreeBranch: branchName,
-					worktreeCreateNewBranch: true,
-				}));
 
 				const response = await api.post<{
 					session_id: string; worktree_id: string; branch_name: string;
 					base_branch: string; worktree_path: string; status: string;
+					query_started?: boolean;
+					upload_migration_errors?: string[] | null;
 				}>('/sessions/with-worktree', {
 					project_id: projectId,
 					branch_name: branchName,
 					base_branch: baseBranch,
 					profile_id: queryProfileId,
 					create_new_branch: true,
-				}, { signal: abortController.signal });
-
-				if (internal.worktreeCreateAbort === abortController) {
-					internal.worktreeCreateAbort = null;
-				}
+					prompt,
+					overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
+					pending_upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
+				}, { keepalive: true });
 
 				appData.loadSessions();
 				appData.loadApiUserSessions();
 
+				if (response.upload_migration_errors?.length) {
+					console.warn('[Worktree] Upload migration had errors:', response.upload_migration_errors);
+				}
+
+				// User navigated away during POST: backend still created the
+				// worktree + session and (if query_started) kicked off the
+				// query. Nothing left to do on the old view — do NOT mutate
+				// the current (switched) session's state.
 				if (creationGen !== internal.worktreeCreationGeneration) {
-					console.debug('[Worktree] User navigated away, sending query in background');
-					const sendBackgroundQuery = () => {
-						const overrides: Record<string, string> = {};
-						if (modelOverrideSnap) overrides.model = modelOverrideSnap;
-						if (permissionModeOverrideSnap) overrides.permission_mode = permissionModeOverrideSnap;
-						if (effortLevelOverrideSnap) overrides.effort = effortLevelOverrideSnap;
-						if (fastModeSnap) overrides.fast_mode = 'true';
+					console.debug('[Worktree] User navigated away — backend query already running in background');
+					// Fallback only needed if backend didn't start the query
+					// (e.g. spawn failed). In that case fire WS query if we can.
+					if (!response.query_started && wsConn.isConnected()) {
 						wsConn.send({
 							type: 'query',
 							prompt,
@@ -560,21 +561,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							profile: queryProfileId,
 							project: projectId,
 							worktree_id: response.worktree_id,
-							overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
+							overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
 						});
-					};
-					if (wsConn.isConnected()) {
-						sendBackgroundQuery();
-					} else {
-						wsConn.connect();
-						const timeout = setTimeout(() => clearInterval(check), 3000);
-						const check = setInterval(() => {
-							if (wsConn.isConnected()) {
-								clearTimeout(timeout);
-								clearInterval(check);
-								sendBackgroundQuery();
-							}
-						}, 50);
 					}
 					return;
 				}
@@ -589,6 +577,21 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 				persistSession();
 
+				if (response.query_started) {
+					// Backend already persisted the user message, migrated
+					// uploads, and launched run_query. Ensure WS is connected
+					// so we can stream live updates — but the query itself
+					// keeps running regardless of WS state.
+					if (!wsConn.isConnected()) {
+						wsConn.connect();
+						await waitForConnectionVoid();
+					}
+					update(s => ({ ...s, isStreaming: true, wsStreamContent: '' }));
+					return;
+				}
+
+				// Fallback path: backend failed to spawn the query (rare).
+				// Migrate uploads client-side if backend didn't, then send via WS.
 				if (pendingUploadPaths?.length && projectId) {
 					try {
 						await migrateUploadsToWorktree(projectId, response.worktree_id, pendingUploadPaths);
@@ -603,7 +606,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				}
 
 				if (creationGen !== internal.worktreeCreationGeneration) {
-					console.debug('[Worktree] User navigated away during WS connect wait, sending query in background');
 					wsConn.send({
 						type: 'query',
 						prompt,
@@ -617,15 +619,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 				getActiveSession().sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true });
 			} catch (error) {
-				if (internal.worktreeCreateAbort === abortController) {
-					internal.worktreeCreateAbort = null;
-				}
-
-				// Request was aborted by session-switcher (user navigated away
-				// during the POST). This is expected — swallow silently without
-				// surfacing an error banner in the old session.
-				const isAbort = error instanceof DOMException && error.name === 'AbortError';
-				if (isAbort || creationGen !== internal.worktreeCreationGeneration) return;
+				// User navigation guard — don't surface errors in a session
+				// the user already left.
+				if (creationGen !== internal.worktreeCreationGeneration) return;
 
 				const err = error as { detail?: string; message?: string; status?: number };
 				const rawError = err.detail || err.message || '';

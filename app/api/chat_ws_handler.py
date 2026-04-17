@@ -146,6 +146,14 @@ class ChatWebSocketHandler:
             if not self.connection_healthy:
                 return False
 
+            # Headless path: no websocket attached (e.g. server-side query
+            # kicked off by the /sessions/with-worktree REST endpoint).
+            # Silently "succeed" so run_query doesn't early-exit; state
+            # propagates via sync_engine broadcasts to any registered
+            # devices instead of via direct-to-WS sends.
+            if self.websocket is None:
+                return True
+
             if self.websocket.client_state != WebSocketState.CONNECTED:
                 self.connection_healthy = False
                 logger.debug(f"WebSocket disconnected, cannot send message type: {data.get('type')}")
@@ -1670,7 +1678,7 @@ class ChatWebSocketHandler:
                 #
                 # If the user disconnected and reconnected during streaming, their NEW websocket
                 # is already registered via load_session. We must NOT replace it with this old one.
-                if self.websocket.client_state == WebSocketState.CONNECTED:
+                if self.websocket is not None and self.websocket.client_state == WebSocketState.CONNECTED:
                     # Check if a different websocket is already registered for this device
                     # (This happens when user refreshes the page during streaming)
                     current_connection = sync_engine._connections.get(session_id, {}).get(self.device_id)

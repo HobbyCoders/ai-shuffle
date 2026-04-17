@@ -263,12 +263,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		internal.interruptPending = false;
 		internal.awaitingNewSession = false;
 		internal.worktreeCreationGeneration++;
-		// Abort any in-flight autoCreateWorktree fetch so the backend doesn't
-		// complete an orphan worktree the frontend can no longer apply.
-		if (internal.worktreeCreateAbort) {
-			internal.worktreeCreateAbort.abort();
-			internal.worktreeCreateAbort = null;
-		}
+		// NOTE: do NOT abort an in-flight autoCreateWorktree POST on nav —
+		// the backend now creates the worktree + session AND kicks off the
+		// first query in one request. Aborting would cancel the user's
+		// intended work. The generation counter still prevents stale
+		// responses from mutating the now-current session.
+		internal.worktreeCreateAbort = null;
 		if (internal.interruptConfirmResolve) {
 			internal.interruptConfirmResolve(false);
 			internal.interruptConfirmResolve = null;
@@ -413,12 +413,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		internal.interruptPending = false;
 		internal.awaitingNewSession = false;
 		internal.worktreeCreationGeneration++;
-		// Abort any in-flight autoCreateWorktree fetch so the backend doesn't
-		// complete an orphan worktree the frontend can no longer apply.
-		if (internal.worktreeCreateAbort) {
-			internal.worktreeCreateAbort.abort();
-			internal.worktreeCreateAbort = null;
-		}
+		// NOTE: do NOT abort an in-flight autoCreateWorktree POST on nav —
+		// the backend now creates the worktree + session AND kicks off the
+		// first query in one request. Aborting would cancel the user's
+		// intended work. The generation counter still prevents stale
+		// responses from mutating the now-current session.
+		internal.worktreeCreateAbort = null;
 		if (internal.interruptConfirmResolve) {
 			internal.interruptConfirmResolve(false);
 			internal.interruptConfirmResolve = null;
