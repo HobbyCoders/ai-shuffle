@@ -53,6 +53,7 @@
 		<ContextUsageBar />
 		{#if $activeSession.fastMode}
 			<button
+				type="button"
 				class="fast-mode-badge"
 				class:active={fastModeActive}
 				class:inactive={!isOpusModel}

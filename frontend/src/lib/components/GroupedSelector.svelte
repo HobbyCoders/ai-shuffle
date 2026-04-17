@@ -144,6 +144,7 @@
 				<!-- No groups: show flat list -->
 				{#each items as item (item.id)}
 					<button
+						type="button"
 						class="menu-item"
 						class:selected={selectedId === item.id}
 						onclick={() => handleSelect(item.id)}
@@ -164,6 +165,7 @@
 				<!-- Grouped: show group headers + ungrouped items -->
 				{#each populatedGroups as group (group.name)}
 					<button
+						type="button"
 						class="menu-item group-item"
 						onclick={() => openGroup(group.name)}
 					>
@@ -180,6 +182,7 @@
 					{/if}
 					{#each organized.ungrouped as item (item.id)}
 						<button
+							type="button"
 							class="menu-item"
 							class:selected={selectedId === item.id}
 							onclick={() => handleSelect(item.id)}
@@ -200,7 +203,7 @@
 
 		{#if addLabel && onAdd}
 			<div class="menu-divider"></div>
-			<button class="menu-item add-item" onclick={onAdd}>
+			<button type="button" class="menu-item add-item" onclick={onAdd}>
 				<FolderPlus size={16} strokeWidth={1.5} />
 				<span class="item-name">{addLabel}</span>
 			</button>
@@ -215,7 +218,7 @@
 		class:offscreen-right={activeGroup === null}
 		bind:this={subPanelEl}
 	>
-		<button class="back-button" onclick={goBack}>
+		<button type="button" class="back-button" onclick={goBack}>
 			<ChevronLeft size={16} strokeWidth={1.5} />
 			<span class="back-label">{activeGroup ?? ''}</span>
 		</button>
@@ -225,6 +228,7 @@
 		<div class="panel-scroll">
 			{#each activeGroupItems as item (item.id)}
 				<button
+					type="button"
 					class="menu-item"
 					class:selected={selectedId === item.id}
 					onclick={() => handleSelect(item.id)}
