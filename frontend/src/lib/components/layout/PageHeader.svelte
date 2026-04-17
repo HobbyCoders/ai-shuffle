@@ -6,7 +6,7 @@
 	 * optional project or worktree context, and a sidebar toggle when
 	 * the sidebar is collapsed.
 	 */
-	import { PanelLeftOpen, GitBranch, FolderClosed, Mic, Archive } from 'lucide-svelte';
+	import { PanelLeftOpen, GitBranch, FolderClosed, Mic } from 'lucide-svelte';
 	import { layout, sidebarCollapsed } from '$lib/stores/layout';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
 	import { globalSttState, triggerToggle } from '$lib/services/globalStt';
@@ -78,11 +78,8 @@
 			{#if worktreeBranch}
 				<span
 					class="context-badge"
-					class:is-deleted={worktreeDeleted}
 					aria-disabled={worktreeDeleted ? 'true' : undefined}
-					title={worktreeDeleted
-						? `${projectName ? projectName + ' · ' : ''}Worktree branch: ${worktreeBranch} (cleaned up — read-only)`
-						: `${projectName ? projectName + ' · ' : ''}Worktree branch: ${worktreeBranch}`}
+					title="{projectName ? projectName + ' · ' : ''}Worktree branch: {worktreeBranch}"
 				>
 					{#if projectName}
 						<FolderClosed size={12} strokeWidth={1.5} />
@@ -91,12 +88,6 @@
 					{/if}
 					<GitBranch size={12} strokeWidth={1.5} />
 					<span class="context-label">{worktreeBranch}</span>
-					{#if worktreeDeleted}
-						<span class="deleted-marker" aria-label="Worktree cleaned up">
-							<Archive size={10} strokeWidth={1.5} />
-							<span class="deleted-label">cleaned up</span>
-						</span>
-					{/if}
 				</span>
 			{:else if projectName}
 				<span class="context-badge" title="Project: {projectName}">
@@ -219,41 +210,6 @@
 		flex-shrink: 0;
 	}
 
-	/* Read-only (cleaned-up worktree) variant — muted styling so it's clearly
-	   informational and not interactive. */
-	.context-badge.is-deleted {
-		opacity: 0.65;
-		border-style: dashed;
-		background: color-mix(in oklch, var(--muted) 20%, transparent);
-		cursor: default;
-	}
-
-	.context-badge.is-deleted .context-label {
-		text-decoration: line-through;
-		text-decoration-color: color-mix(in oklch, var(--muted-foreground) 50%, transparent);
-		text-decoration-thickness: 1px;
-	}
-
-	.deleted-marker {
-		display: inline-flex;
-		align-items: center;
-		gap: 3px;
-		margin-left: 4px;
-		padding: 1px 5px;
-		border-radius: 999px;
-		background: color-mix(in oklch, var(--muted-foreground) 12%, transparent);
-		color: var(--muted-foreground);
-		flex-shrink: 0;
-	}
-
-	.deleted-label {
-		font-size: 0.625rem;
-		font-weight: 500;
-		line-height: 1;
-		letter-spacing: 0.02em;
-		text-transform: uppercase;
-		white-space: nowrap;
-	}
 
 	/* Header action buttons */
 	.header-btn {
