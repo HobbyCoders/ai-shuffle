@@ -263,6 +263,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		internal.interruptPending = false;
 		internal.awaitingNewSession = false;
 		internal.worktreeCreationGeneration++;
+		// Abort any in-flight autoCreateWorktree fetch so the backend doesn't
+		// complete an orphan worktree the frontend can no longer apply.
+		if (internal.worktreeCreateAbort) {
+			internal.worktreeCreateAbort.abort();
+			internal.worktreeCreateAbort = null;
+		}
 		if (internal.interruptConfirmResolve) {
 			internal.interruptConfirmResolve(false);
 			internal.interruptConfirmResolve = null;
@@ -407,6 +413,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		internal.interruptPending = false;
 		internal.awaitingNewSession = false;
 		internal.worktreeCreationGeneration++;
+		// Abort any in-flight autoCreateWorktree fetch so the backend doesn't
+		// complete an orphan worktree the frontend can no longer apply.
+		if (internal.worktreeCreateAbort) {
+			internal.worktreeCreateAbort.abort();
+			internal.worktreeCreateAbort = null;
+		}
 		if (internal.interruptConfirmResolve) {
 			internal.interruptConfirmResolve(false);
 			internal.interruptConfirmResolve = null;

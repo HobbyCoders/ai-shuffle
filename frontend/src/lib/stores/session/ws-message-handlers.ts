@@ -32,6 +32,11 @@ export interface InternalMutableState {
 	 *  during an await, preventing the async callback from clobbering the
 	 *  active session after the user navigated away. */
 	worktreeCreationGeneration: number;
+	/** AbortController for the currently in-flight autoCreateWorktree request,
+	 *  if any. session-switcher aborts this on every session switch / new-chat
+	 *  so we don't leak orphan worktrees on the backend when the user navigates
+	 *  away mid-creation (e.g. phone lock). */
+	worktreeCreateAbort: AbortController | null;
 	/** Resolve callback for the interrupt_confirmed promise.
 	 *  Set by sendMessage's interrupt path, called by the interrupt_confirmed
 	 *  WS handler so the frontend waits for backend confirmation before

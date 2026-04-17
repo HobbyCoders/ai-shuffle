@@ -18,6 +18,7 @@ function createMockInternal(): InternalMutableState {
 		interruptPending: false,
 		awaitingNewSession: false,
 		worktreeCreationGeneration: 0,
+		worktreeCreateAbort: null,
 		interruptConfirmResolve: null,
 	};
 }

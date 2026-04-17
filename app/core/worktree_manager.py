@@ -529,6 +529,35 @@ class WorktreeManager:
                 logger.debug(f"Cleaning up stale worktree record: '{wt.get('worktree_path')}' (invalid worktree)")
                 database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
 
+        # Idempotency: if an active, valid worktree already exists for this
+        # (repo, branch), reuse it. This handles the case where a previous
+        # create request succeeded on the backend but the frontend lost the
+        # response (phone lock, session switch, WS drop) and the user retried
+        # the same prompt — branch-name generation is deterministic for the
+        # same prompt, so we see the orphan on retry. Without this, the
+        # retry fails with "Branch already exists".
+        existing_wt = database.get_worktree_by_branch(repo["id"], branch_name)
+        if existing_wt and existing_wt.get("status") == WorktreeStatus.ACTIVE:
+            try:
+                valid = self.is_worktree_valid(existing_wt)
+            except (ValueError, TypeError, KeyError):
+                valid = False
+            if valid:
+                logger.info(
+                    f"Reusing existing worktree {existing_wt['id']} for branch "
+                    f"'{branch_name}' (idempotent retry)"
+                )
+                return self._attach_new_session_to_worktree(
+                    existing_wt, project_id, project, profile_id, branch_name, base_branch
+                )
+            else:
+                # Mark stale record deleted and fall through to fresh creation
+                logger.debug(
+                    f"Existing worktree record {existing_wt['id']} is invalid on disk; "
+                    f"marking deleted and recreating"
+                )
+                database.update_worktree(existing_wt["id"], status=WorktreeStatus.DELETED)
+
         # Verify the branch exists if not creating a new one
         if not create_new_branch:
             branches = self.git_service.list_branches(main_dir, include_remote=False)
@@ -628,6 +657,56 @@ class WorktreeManager:
             raise WorktreeError(f"Failed to create chat session: {str(e)}")
 
         logger.debug(f"Created worktree {worktree_id} at {worktree_path} for branch {branch_name} with session {session_id}")
+        return worktree, session
+
+    def _attach_new_session_to_worktree(
+        self,
+        worktree: Dict,
+        project_id: str,
+        project: Dict,
+        profile_id: Optional[str],
+        branch_name: str,
+        base_branch: Optional[str],
+    ) -> Tuple[Dict, Dict]:
+        """
+        Create a new chat session attached to an already-existing worktree.
+
+        Used by the idempotent retry path in create_worktree_session when a
+        previous request already created the git worktree + DB row but the
+        frontend lost the response. Instead of erroring with
+        "branch already exists", we simply create a fresh session on top of
+        the existing worktree — the user observes the same end state.
+        """
+        # Resolve profile id the same way create_worktree_session does
+        if not profile_id:
+            project_settings = project.get("settings", {})
+            profile_id = project_settings.get("default_profile_id")
+            if not profile_id:
+                profiles = database.get_all_profiles()
+                if profiles:
+                    profile_id = profiles[0]["id"]
+                else:
+                    raise WorktreeError("No profiles available. Please create a profile first.")
+
+        session_id = f"ses-{uuid.uuid4().hex[:12]}"
+        try:
+            session = database.create_session(
+                session_id=session_id,
+                profile_id=profile_id,
+                project_id=project_id,
+                title=None,
+                worktree_id=worktree["id"],
+                worktree_branch=branch_name,
+                worktree_path=worktree["worktree_path"],
+            )
+        except Exception as e:
+            logger.error(f"Failed to create session on reused worktree {worktree['id']}: {e}")
+            raise WorktreeError(f"Failed to create chat session: {str(e)}")
+
+        logger.debug(
+            f"Attached new session {session_id} to existing worktree {worktree['id']} "
+            f"for branch {branch_name}"
+        )
         return worktree, session
 
     def get_worktree_by_session(self, session_id: str) -> Optional[Dict]:

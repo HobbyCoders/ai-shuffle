@@ -478,6 +478,17 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 			const creationGen = internal.worktreeCreationGeneration;
 
+			// Abort controller so session-switcher can cancel an in-flight
+			// worktree create when the user navigates away. Prevents orphan
+			// worktrees / branches that would later collide with a retry.
+			const abortController = new AbortController();
+			if (internal.worktreeCreateAbort) {
+				// Defensive: shouldn't happen (switch aborts first), but if an
+				// older autoCreateWorktree is still pending, cancel it.
+				internal.worktreeCreateAbort.abort();
+			}
+			internal.worktreeCreateAbort = abortController;
+
 			update(s => ({
 				...s,
 				isCreatingWorktree: true,
@@ -499,15 +510,22 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					branchName = generateBranchNameLocal(prompt);
 				}
 
-				const staleAfterBranchGen = creationGen !== internal.worktreeCreationGeneration;
-
-				if (!staleAfterBranchGen) {
-					update(s => ({
-						...s,
-						worktreeBranch: branchName,
-						worktreeCreateNewBranch: true,
-					}));
+				// If the user has already navigated away, don't POST. Creating
+				// the worktree server-side here would orphan it (the response
+				// can't be applied), and a deterministic branch-name retry
+				// from the same prompt would later hit "branch already exists".
+				if (creationGen !== internal.worktreeCreationGeneration) {
+					if (internal.worktreeCreateAbort === abortController) {
+						internal.worktreeCreateAbort = null;
+					}
+					return;
 				}
+
+				update(s => ({
+					...s,
+					worktreeBranch: branchName,
+					worktreeCreateNewBranch: true,
+				}));
 
 				const response = await api.post<{
 					session_id: string; worktree_id: string; branch_name: string;
@@ -518,12 +536,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					base_branch: baseBranch,
 					profile_id: queryProfileId,
 					create_new_branch: true,
-				});
+				}, { signal: abortController.signal });
+
+				if (internal.worktreeCreateAbort === abortController) {
+					internal.worktreeCreateAbort = null;
+				}
 
 				appData.loadSessions();
 				appData.loadApiUserSessions();
 
-				if (staleAfterBranchGen || creationGen !== internal.worktreeCreationGeneration) {
+				if (creationGen !== internal.worktreeCreationGeneration) {
 					console.debug('[Worktree] User navigated away, sending query in background');
 					const sendBackgroundQuery = () => {
 						const overrides: Record<string, string> = {};
@@ -595,7 +617,15 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 				getActiveSession().sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true });
 			} catch (error) {
-				if (creationGen !== internal.worktreeCreationGeneration) return;
+				if (internal.worktreeCreateAbort === abortController) {
+					internal.worktreeCreateAbort = null;
+				}
+
+				// Request was aborted by session-switcher (user navigated away
+				// during the POST). This is expected — swallow silently without
+				// surfacing an error banner in the old session.
+				const isAbort = error instanceof DOMException && error.name === 'AbortError';
+				if (isAbort || creationGen !== internal.worktreeCreationGeneration) return;
 
 				const err = error as { detail?: string; message?: string; status?: number };
 				const rawError = err.detail || err.message || '';
