@@ -94,7 +94,7 @@
 					class="fp-btn fp-btn--secondary"
 					title="Generate with AI"
 				>
-					<Sparkles size={14} /> <span class="btn-label">AI Generate</span>
+					<Sparkles size={14} /> <span class="btn-label">Generate</span>
 				</button>
 				<button
 					onclick={onTriggerImport}

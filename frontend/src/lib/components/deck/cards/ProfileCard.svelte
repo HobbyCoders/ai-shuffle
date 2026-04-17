@@ -905,7 +905,7 @@
 							<Upload size={14} /> <span class="btn-label">Import</span>
 						</button>
 						<button class="fp-btn fp-btn--secondary" onclick={() => showGenerateDialog = true} title="AI Generate">
-							<Sparkles size={14} /> <span class="btn-label">AI Generate</span>
+							<Sparkles size={14} /> <span class="btn-label">Generate</span>
 						</button>
 					</div>
 					<div class="pf-footer-right">
