@@ -370,6 +370,52 @@
 				};
 			}
 
+			case 'task_updated':
+			case 'task_notification': {
+				// SDK task state patches (status changes, timing, usage).
+				// Internal telemetry — keep collapsible so users can inspect
+				// the raw patch without a huge JSON card dominating the chat.
+				const patch = (data.patch as Record<string, unknown>) || {};
+				const taskId = (data.task_id as string) || '';
+				const status =
+					(patch.status as string) ||
+					(data.status as string) ||
+					'';
+				const description =
+					(patch.description as string) ||
+					(data.description as string) ||
+					(data.summary as string) ||
+					'';
+
+				const summaryParts = [
+					taskId ? `task ${taskId.slice(0, 8)}` : '',
+					status,
+					description
+				].filter(Boolean);
+
+				const statusColor =
+					status === 'failed' ? 'red'
+					: status === 'completed' ? 'green'
+					: status === 'stopped' ? 'amber'
+					: 'gray';
+
+				let rawOutput: string | undefined;
+				try {
+					rawOutput = JSON.stringify(data, null, 2);
+				} catch {
+					rawOutput = undefined;
+				}
+
+				return {
+					title: subtype === 'task_notification' ? 'Task Notification' : 'Task Updated',
+					content: summaryParts.join(' \u00b7 ') || 'task state changed',
+					badge: status || subtype,
+					badgeColor: statusColor,
+					collapsible: true,
+					rawOutput
+				};
+			}
+
 			case 'stop_hook_summary': {
 				// Stop hook completion summary
 				const hookCount = data.hookCount as number || 0;

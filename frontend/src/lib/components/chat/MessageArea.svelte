@@ -188,7 +188,9 @@
 		'stop_hook_summary',
 		'turn_duration',
 		'task_started',
-		'task_progress'
+		'task_progress',
+		'task_updated',
+		'task_notification'
 	]);
 
 	function isGroupableSystem(msg: ChatMessage): boolean {
