@@ -248,12 +248,14 @@ export function createSessionInit(deps: SessionInitDeps) {
 				// Optimistic msgs use id `user-${Date.now()}`; server persists
 				// them under a different DB id, so id-based matching alone would
 				// leave both in the merged list (duplicate). Here we pair each
-				// trailing optimistic user msg with the first unclaimed server
-				// user msg of identical content (+ profileId). Matched ones are
-				// considered replaced by server → not preserved. Unmatched ones
-				// (server still racing persistence) ARE preserved to prevent DOM
-				// shrink, scrollTop clamp, false scroll-up detection, and
-				// auto-scroll disable.
+				// trailing optimistic user msg with the nearest unclaimed server
+				// user msg of identical content. Matched ones are considered
+				// replaced by server → not preserved. Unmatched ones (server
+				// still racing persistence) ARE preserved to prevent DOM shrink,
+				// scrollTop clamp, false scroll-up detection, and auto-scroll
+				// disable. We do NOT compare profileId because the field is
+				// snake_case on the server payload and camelCase on the
+				// optimistic msg — content+role+tail-position is sufficient.
 				const claimedServerIdx = new Set<number>();
 				const findMatchingServerUserIdx = (opt: ChatMessage): number => {
 					for (let k = finalMessages.length - 1; k >= 0; k--) {
@@ -261,7 +263,6 @@ export function createSessionInit(deps: SessionInitDeps) {
 						const sm = finalMessages[k];
 						if (sm.role !== 'user') continue;
 						if ((sm.content || '') !== (opt.content || '')) continue;
-						if ((sm.profileId ?? null) !== (opt.profileId ?? null)) continue;
 						return k;
 					}
 					return -1;
