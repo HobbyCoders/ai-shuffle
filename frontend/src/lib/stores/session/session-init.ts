@@ -243,6 +243,29 @@ export function createSessionInit(deps: SessionInitDeps) {
 						clientOnlyEntries.push({ msg: m, anchorId });
 					}
 				}
+
+				// Preserve trailing optimistic user messages that the server has
+				// not yet persisted. Without this, a poll that races ahead of
+				// backend query persistence drops the optimistic msg, shrinks
+				// the DOM, the browser clamps scrollTop downward, handleScroll
+				// misreads the layout shift as a user scroll-up and disables
+				// auto-scroll. Only walk the trailing contiguous run of
+				// optimistic user msgs (id starts with "user-") so we stop at
+				// the first server-known message.
+				for (let i = s.messages.length - 1; i >= 0; i--) {
+					const m = s.messages[i];
+					if (serverIdSet.has(m.id)) break;
+					if (m.role !== 'user' || !m.id?.startsWith('user-')) continue;
+					let anchorId: string | null = null;
+					for (let j = i - 1; j >= 0; j--) {
+						if (serverIdSet.has(s.messages[j].id)) {
+							anchorId = s.messages[j].id;
+							break;
+						}
+					}
+					// Prepend so insertion order still reflects original positions
+					clientOnlyEntries.unshift({ msg: m, anchorId });
+				}
 				if (clientOnlyEntries.length > 0) {
 					finalMessages = [...finalMessages];
 					const idToIndex = new Map<string, number>();
