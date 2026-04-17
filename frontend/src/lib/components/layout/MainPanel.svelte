@@ -98,22 +98,29 @@
 	const headerProjectName = $derived(
 		activeTab ? $projects.find(p => p.id === activeTab.project)?.name : undefined
 	);
-	// When GitHub CLI is authenticated, GitHeaderActions shows the project name in its combined badge,
-	// so we hide the separate PageHeader badge to avoid redundancy.
-	const headerProjectNameForBadge = $derived(
-		$githubAuthenticated ? undefined : headerProjectName
-	);
 
 	// Worktree branch for header context.
-	// When GitHub CLI is authenticated, the GitHeaderActions branch selector shows this instead,
-	// so we hide the separate badge to avoid redundancy.
 	const activeWorktreeBranch = $derived.by(() => {
 		if (!activeTab) return undefined;
 		if (activeTab.executionMode !== 'worktree' || activeTab.messages.length === 0) return undefined;
 		return activeTab.selectedWorktreeBranch || activeTab.worktreeBranch || undefined;
 	});
+
+	// A cleaned-up worktree session keeps the badge visible (read-only) so the user
+	// knows which project/branch the session belonged to even after cleanup.
+	const isWorktreeBadgeDeleted = $derived(
+		!!activeTab?.worktreeDeleted && !!activeWorktreeBranch
+	);
+
+	// When GitHub CLI is authenticated, GitHeaderActions normally shows project + branch,
+	// so we hide the separate PageHeader badge to avoid redundancy — UNLESS the worktree
+	// has been cleaned up, in which case GitHeaderActions is hidden and the read-only
+	// badge becomes the only contextual indicator of what the session belonged to.
+	const headerProjectNameForBadge = $derived(
+		$githubAuthenticated && !isWorktreeBadgeDeleted ? undefined : headerProjectName
+	);
 	const headerWorktreeBranch = $derived(
-		$githubAuthenticated ? undefined : activeWorktreeBranch
+		$githubAuthenticated && !isWorktreeBadgeDeleted ? undefined : activeWorktreeBranch
 	);
 
 	// =========================================================================
@@ -1001,6 +1008,7 @@
 				title={headerTitle}
 				projectName={headerProjectNameForBadge}
 				worktreeBranch={headerWorktreeBranch}
+				worktreeDeleted={isWorktreeBadgeDeleted}
 				showSidebarToggle={$sidebarCollapsed}
 				{isMobile}
 				hideGlobalStt={$activeView?.type === 'chat'}
