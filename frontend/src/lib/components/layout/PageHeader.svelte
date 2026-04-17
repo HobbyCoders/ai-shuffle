@@ -87,7 +87,7 @@
 						<span class="context-separator">/</span>
 					{/if}
 					<GitBranch size={12} strokeWidth={1.5} />
-					<span class="context-label">{worktreeBranch}</span>
+					<span class="context-label branch">{worktreeBranch}</span>
 				</span>
 			{:else if projectName}
 				<span class="context-badge" title="Project: {projectName}">
@@ -200,6 +200,20 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+		min-width: 0;
+	}
+
+	/* Branch names can be long (feat/add-foo-bar-baz…) — cap them so the badge
+	   doesn't dominate the header. Project name still shows in full before the
+	   separator. */
+	.context-label.branch {
+		max-width: 140px;
+	}
+
+	@media (max-width: 639px) {
+		.context-label.branch {
+			max-width: 100px;
+		}
 	}
 
 	.context-separator {
