@@ -286,6 +286,35 @@
 						// Ignore stringify failures.
 					}
 				}
+
+				// Fallback: if no recognized input field was present, surface any
+				// remaining metadata fields so the Input box is not empty when the
+				// SDK/CLI emits a non-standard schema. Excludes the fields already
+				// rendered elsewhere on the card (title/badge/output).
+				if (inputParts.length === 0) {
+					const CONSUMED_KEYS = new Set([
+						'output', 'stdout', 'stderr', 'error', 'message',
+						'exitCode', 'exit_code', 'success',
+						'hook_name', 'hookName', 'name',
+						'command', 'hook_command',
+						'matcher', 'hook_matcher',
+						'hook_event_name', 'hookEventName', 'event', 'source',
+						'hook_input', 'hookInput', 'input', 'stdin'
+					]);
+					const remaining: Record<string, unknown> = {};
+					for (const [key, value] of Object.entries(data)) {
+						if (CONSUMED_KEYS.has(key)) continue;
+						if (value === null || value === undefined || value === '') continue;
+						remaining[key] = value;
+					}
+					if (Object.keys(remaining).length > 0) {
+						try {
+							inputParts.push(JSON.stringify(remaining, null, 2));
+						} catch {
+							// Ignore stringify failures.
+						}
+					}
+				}
 				const rawInput = inputParts.join('\n\n');
 
 				// Short summary for header — hook name + truncated first line
