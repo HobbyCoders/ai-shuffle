@@ -230,8 +230,27 @@ async def init_repository(
     # Step 2: Optional initial commit
     if body.create_initial_commit:
         staged = await run_git(git_service.stage_files, working_dir, ["."])
-        if staged:
-            await run_git(git_service.commit, working_dir, "Initial commit")
+        if not staged:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to stage files for initial commit"
+            )
+        committed, commit_err = await run_git(
+            git_service.commit, working_dir, "Initial commit"
+        )
+        if not committed:
+            # Surface git identity errors clearly — common in container deployments
+            detail = f"Failed to create initial commit: {commit_err or 'unknown error'}"
+            if commit_err and "identity unknown" in commit_err.lower():
+                detail += (
+                    ". Configure git identity with "
+                    "'git config --global user.email \"you@example.com\"' and "
+                    "'git config --global user.name \"Your Name\"'."
+                )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=detail
+            )
 
     # Step 3: Optional GitHub repo creation
     if body.create_github_repo and body.github_repo_name:
