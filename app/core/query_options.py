@@ -497,6 +497,13 @@ def build_options_from_profile(
         mcp_allowed_tools.extend(get_app_config_tool_names())
         logger.debug("App-config MCP tools added to allowed_tools")
 
+    # Always expose Claude Code builtin bridge tools (ScheduleWakeup, Monitor,
+    # EnterWorktree, CronCreate, PushNotification, ToolSearch, etc). These are
+    # harness-level tools that the CLI ships natively; under the SDK we provide
+    # our own implementations bridged to AI Shuffle infrastructure.
+    from app.mcp.builtin_tools import get_builtin_tool_names
+    mcp_allowed_tools.extend(get_builtin_tool_names())
+
     # Build final allowed_tools list:
     # - When sdk_tools is set (preset), built-in tools are handled by the preset.
     #   Only MCP tool names need to go in allowed_tools.
@@ -543,6 +550,23 @@ def build_options_from_profile(
                 logger.debug("App-config MCP server registered for admin session")
         except Exception:
             logger.exception("Failed to create app-config MCP server")
+
+    # Register Claude Code builtin bridge tools for every session.
+    # Session context (session_id, profile_id, project_id) is baked in so
+    # ScheduleWakeup can re-fire prompts back at this session.
+    try:
+        from app.mcp.builtin_tools import create_builtin_tools_server
+        builtins_srv = create_builtin_tools_server(
+            session_id=session_id,
+            profile_id=profile.get("id"),
+            project_id=project.get("id") if project else None,
+            is_admin=not api_user_id,
+        )
+        if builtins_srv:
+            mcp_servers_dict["builtins"] = builtins_srv
+            logger.debug("Builtin bridge MCP server registered")
+    except Exception:
+        logger.exception("Failed to create builtin bridge MCP server")
 
     # Build options with all ClaudeAgentOptions fields
     # Note: We don't set cli_path - let the SDK use its bundled CLI or find system CLI automatically

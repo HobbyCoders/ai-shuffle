@@ -77,7 +77,7 @@
 	}
 
 	// Tool icon categories - returns icon type for SVG rendering
-	type IconType = 'image' | 'video' | 'cube' | 'file' | 'pencil' | 'search' | 'terminal' | 'globe' | 'bot' | 'list' | 'cog';
+	type IconType = 'image' | 'video' | 'cube' | 'file' | 'pencil' | 'search' | 'terminal' | 'globe' | 'bot' | 'list' | 'cog' | 'clock' | 'bell' | 'eye' | 'branch' | 'stop' | 'send';
 
 	const TOOL_ICON_MAP: Record<string, IconType> = {
 		// Image generation
@@ -89,17 +89,26 @@
 		// File operations
 		Read: 'file', Write: 'pencil', Edit: 'pencil', NotebookEdit: 'pencil',
 		// Search
-		Glob: 'search', Grep: 'search',
+		Glob: 'search', Grep: 'search', ToolSearch: 'search',
 		// Terminal
-		Bash: 'terminal',
+		Bash: 'terminal', KillShell: 'terminal', SlashCommand: 'terminal', LSP: 'terminal',
 		// Web
 		WebFetch: 'globe', WebSearch: 'globe',
 		// Agent / Skills
-		Task: 'bot', Skill: 'bot',
+		Task: 'bot', Skill: 'bot', Agent: 'bot',
 		// Todo
 		TodoWrite: 'list',
 		// Plan mode / Questions
 		EnterPlanMode: 'list', ExitPlanMode: 'list', AskUserQuestion: 'bot',
+		// Scheduling
+		ScheduleWakeup: 'clock', CronCreate: 'clock', CronList: 'clock', CronDelete: 'clock',
+		RemoteTrigger: 'send',
+		// Worktree
+		EnterWorktree: 'branch', ExitWorktree: 'branch',
+		// Monitor / background tasks
+		Monitor: 'eye', TaskOutput: 'eye', TaskStop: 'stop',
+		// Notifications
+		PushNotification: 'bell',
 	};
 
 	function getToolIconType(toolName: string): IconType {
@@ -283,6 +292,38 @@
 						<line x1="3" y1="6" x2="3.01" y2="6"/>
 						<line x1="3" y1="12" x2="3.01" y2="12"/>
 						<line x1="3" y1="18" x2="3.01" y2="18"/>
+					</svg>
+				{:else if getToolIconType(name) === 'clock'}
+					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+						<circle cx="12" cy="12" r="10"/>
+						<polyline points="12 6 12 12 16 14"/>
+					</svg>
+				{:else if getToolIconType(name) === 'bell'}
+					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+						<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+						<path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+					</svg>
+				{:else if getToolIconType(name) === 'eye'}
+					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+						<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+						<circle cx="12" cy="12" r="3"/>
+					</svg>
+				{:else if getToolIconType(name) === 'branch'}
+					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+						<line x1="6" y1="3" x2="6" y2="15"/>
+						<circle cx="18" cy="6" r="3"/>
+						<circle cx="6" cy="18" r="3"/>
+						<path d="M18 9a9 9 0 0 1-9 9"/>
+					</svg>
+				{:else if getToolIconType(name) === 'stop'}
+					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+						<circle cx="12" cy="12" r="10"/>
+						<rect x="9" y="9" width="6" height="6"/>
+					</svg>
+				{:else if getToolIconType(name) === 'send'}
+					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+						<line x1="22" y1="2" x2="11" y2="13"/>
+						<polygon points="22 2 15 22 11 13 2 9 22 2"/>
 					</svg>
 				{:else}
 					<svg class="w-4 h-4 text-primary flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">

@@ -40,6 +40,18 @@ TOOL_CATEGORIES = {
         "name": "Execution tools",
         "description": "Tools that execute commands or code"
     },
+    "scheduling": {
+        "name": "Scheduling tools",
+        "description": "Tools that schedule, trigger, or delay work"
+    },
+    "worktree": {
+        "name": "Worktree tools",
+        "description": "Tools that manage isolated git worktrees"
+    },
+    "notification": {
+        "name": "Notification tools",
+        "description": "Tools that send push/desktop notifications"
+    },
     "mcp": {
         "name": "MCP tools",
         "description": "Tools from MCP servers"
@@ -59,6 +71,7 @@ BUILTIN_TOOLS = [
     {"name": "WebFetch", "category": "read_only", "description": "Fetch and analyze web content"},
     {"name": "WebSearch", "category": "read_only", "description": "Search the web"},
     {"name": "TaskOutput", "category": "read_only", "description": "Get output from background task"},
+    {"name": "ToolSearch", "category": "read_only", "description": "Search available tools by name or keyword"},
 
     # Edit tools
     {"name": "Edit", "category": "edit", "description": "Edit file contents"},
@@ -70,6 +83,22 @@ BUILTIN_TOOLS = [
     {"name": "Task", "category": "execution", "description": "Launch subagent tasks"},
     {"name": "Agent", "category": "execution", "description": "Launch subagent tasks"},
     {"name": "KillShell", "category": "execution", "description": "Kill background shell"},
+    {"name": "Monitor", "category": "execution", "description": "Stream output from a long-running command"},
+    {"name": "TaskStop", "category": "execution", "description": "Stop a background task"},
+
+    # Scheduling tools
+    {"name": "ScheduleWakeup", "category": "scheduling", "description": "Pause and resume the session after a delay"},
+    {"name": "CronCreate", "category": "scheduling", "description": "Create a recurring scheduled task"},
+    {"name": "CronList", "category": "scheduling", "description": "List scheduled tasks"},
+    {"name": "CronDelete", "category": "scheduling", "description": "Delete a scheduled task"},
+    {"name": "RemoteTrigger", "category": "scheduling", "description": "Trigger a remote automation"},
+
+    # Worktree tools
+    {"name": "EnterWorktree", "category": "worktree", "description": "Enter an isolated git worktree"},
+    {"name": "ExitWorktree", "category": "worktree", "description": "Exit the current worktree"},
+
+    # Notification tools
+    {"name": "PushNotification", "category": "notification", "description": "Send a push notification"},
 
     # Other tools
     {"name": "TodoWrite", "category": "other", "description": "Manage task lists"},
@@ -89,6 +118,7 @@ TOOL_DESCRIPTIONS = {
     "WebFetch": "Fetch and analyze web content",
     "WebSearch": "Search the web",
     "TaskOutput": "Get output from background task",
+    "ToolSearch": "Search available tools by name or keyword",
     "Edit": "Edit file contents",
     "Write": "Write new files",
     "NotebookEdit": "Edit Jupyter notebooks",
@@ -96,6 +126,16 @@ TOOL_DESCRIPTIONS = {
     "Task": "Launch subagent tasks",
     "Agent": "Launch subagent tasks",
     "KillShell": "Kill background shell",
+    "Monitor": "Stream output from a long-running command",
+    "TaskStop": "Stop a background task",
+    "ScheduleWakeup": "Pause and resume the session after a delay",
+    "CronCreate": "Create a recurring scheduled task",
+    "CronList": "List scheduled tasks",
+    "CronDelete": "Delete a scheduled task",
+    "RemoteTrigger": "Trigger a remote automation",
+    "EnterWorktree": "Enter an isolated git worktree",
+    "ExitWorktree": "Exit the current worktree",
+    "PushNotification": "Send a push notification",
     "TodoWrite": "Manage task lists",
     "Skill": "Execute skills",
     "SlashCommand": "Run slash commands",
@@ -107,9 +147,12 @@ TOOL_DESCRIPTIONS = {
 
 # Categorization rules for tools
 TOOL_CATEGORY_RULES = {
-    "read_only": ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TaskOutput"],
+    "read_only": ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TaskOutput", "ToolSearch"],
     "edit": ["Edit", "Write", "NotebookEdit"],
-    "execution": ["Bash", "Task", "Agent", "KillShell"],
+    "execution": ["Bash", "Task", "Agent", "KillShell", "Monitor", "TaskStop"],
+    "scheduling": ["ScheduleWakeup", "CronCreate", "CronList", "CronDelete", "RemoteTrigger"],
+    "worktree": ["EnterWorktree", "ExitWorktree"],
+    "notification": ["PushNotification"],
 }
 
 # Cache for dynamically discovered tools
