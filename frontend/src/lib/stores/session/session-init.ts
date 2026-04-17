@@ -244,21 +244,28 @@ export function createSessionInit(deps: SessionInitDeps) {
 					}
 				}
 
-				// Reconcile trailing optimistic user messages with server state.
-				// Optimistic msgs use id `user-${Date.now()}`; server persists
-				// them under a different DB id, so id-based matching alone would
-				// leave both in the merged list (duplicate). Here we pair each
-				// trailing optimistic user msg with the nearest unclaimed server
-				// user msg of identical content. Matched ones are considered
-				// replaced by server → not preserved. Unmatched ones (server
-				// still racing persistence) ARE preserved to prevent DOM shrink,
-				// scrollTop clamp, false scroll-up detection, and auto-scroll
-				// disable. We do NOT compare profileId because the field is
-				// snake_case on the server payload and camelCase on the
-				// optimistic msg — content+role+tail-position is sufficient.
+				// Reconcile ALL optimistic user messages in state with server
+				// payload. Optimistic msgs use id `user-${Date.now()}`; server
+				// persists them under a different DB id (`msg-N`), so id-based
+				// matching alone leaves both in the merged list (duplicate).
+				//
+				// Algorithm: for every optimistic `user-*` msg anywhere in
+				// s.messages (not just trailing — a prior merge may have placed
+				// it mid-list when no anchor existed), find the first unclaimed
+				// server `role:user` msg of identical content. Match → drop
+				// optimistic (server absorbed it). No match → preserve optimistic
+				// (server race — still persisting). Preserving prevents DOM
+				// shrink, scrollTop clamp, false scroll-up detection, and
+				// auto-scroll disable.
+				//
+				// We do NOT compare profileId — server payload uses snake_case
+				// (`profile_id`) while optimistic uses camelCase (`profileId`);
+				// they wouldn't match. Content+role is sufficient because the
+				// full text prompt is unique enough and claim-once-per-server-msg
+				// prevents cross-pairing when the session has repeats.
 				const claimedServerIdx = new Set<number>();
 				const findMatchingServerUserIdx = (opt: ChatMessage): number => {
-					for (let k = finalMessages.length - 1; k >= 0; k--) {
+					for (let k = 0; k < finalMessages.length; k++) {
 						if (claimedServerIdx.has(k)) continue;
 						const sm = finalMessages[k];
 						if (sm.role !== 'user') continue;
@@ -267,9 +274,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 					}
 					return -1;
 				};
-				for (let i = s.messages.length - 1; i >= 0; i--) {
+				for (let i = 0; i < s.messages.length; i++) {
 					const m = s.messages[i];
-					if (serverIdSet.has(m.id)) break;
+					if (serverIdSet.has(m.id)) continue;
 					if (m.role !== 'user' || !m.id?.startsWith('user-')) continue;
 					const matchIdx = findMatchingServerUserIdx(m);
 					if (matchIdx >= 0) {
@@ -277,6 +284,12 @@ export function createSessionInit(deps: SessionInitDeps) {
 						claimedServerIdx.add(matchIdx);
 						continue;
 					}
+					// No server match — preserve optimistic. Anchor to the most
+					// recent server-known msg before this position. If none
+					// exists (new session, first msg), anchor to the last server
+					// msg in finalMessages so the optimistic appends at the tail
+					// (where the user actually sent it) rather than prepending
+					// to the head of the chat.
 					let anchorId: string | null = null;
 					for (let j = i - 1; j >= 0; j--) {
 						if (serverIdSet.has(s.messages[j].id)) {
@@ -284,8 +297,10 @@ export function createSessionInit(deps: SessionInitDeps) {
 							break;
 						}
 					}
-					// Prepend so insertion order still reflects original positions
-					clientOnlyEntries.unshift({ msg: m, anchorId });
+					if (!anchorId && finalMessages.length > 0) {
+						anchorId = finalMessages[finalMessages.length - 1].id;
+					}
+					clientOnlyEntries.push({ msg: m, anchorId });
 				}
 				if (clientOnlyEntries.length > 0) {
 					finalMessages = [...finalMessages];
