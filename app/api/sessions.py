@@ -697,12 +697,13 @@ async def get_live_session(
     # For non-streaming (historical) sessions, use last_input_tokens from JSONL
     # which is the last turn's input_tokens (= context window non-cached portion).
     output_tokens = session.get("total_tokens_out", 0)
-    cache_creation = session.get("cache_creation_tokens", 0)
-    cache_read = session.get("cache_read_tokens", 0)
-    # Default to 0 — we want per-turn, not cumulative
-    input_tokens = 0
+    cache_creation = session.get("cache_creation_tokens", 0) or 0
+    cache_read = session.get("cache_read_tokens", 0) or 0
+    # Per-turn input (last turn), persisted on sessions row by _persist_turn_results
+    input_tokens = session.get("last_input_tokens", 0) or 0
 
-    # Override with JSONL data if available
+    # Override with JSONL data if available (legacy sessions without
+    # persisted per-turn columns — usage_data only populated when JSONL fallback ran)
     if sdk_session_id and usage_data:
         # Use last_input_tokens (per-turn) for context window calculation,
         # NOT total_tokens_in (cumulative sum across all turns)

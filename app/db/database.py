@@ -76,7 +76,7 @@ def _safe_json(value):
 # v38: Add message_template to project_hooks, make project_id nullable
 # v39: Add queued_messages table for server-side message queueing
 # v40: Add instance_id column to sessions for per-instance isolation
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 42
 
 
 def _run_column_migrations(cursor):
@@ -256,6 +256,16 @@ def _run_column_migrations(cursor):
                 migrations_applied.append(f"sessions.instance_id_backfill({cursor.rowcount} rows)")
         except _DB_ERRORS:
             pass
+
+    # Persist per-session context-window usage so the context bar can
+    # render correctly after loading a session from history (no JSONL scan
+    # required). Populated by _persist_turn_results on every turn.
+    if table_exists(cursor, "sessions"):
+        for col in ("last_input_tokens", "cache_creation_tokens", "cache_read_tokens"):
+            if not column_exists(cursor, "sessions", col):
+                _validate_identifier(col, "column name")
+                cursor.execute(f"ALTER TABLE sessions ADD COLUMN {col} INTEGER DEFAULT 0")
+                migrations_applied.append(f"sessions.{col}")
 
     # Ensure performance-critical indexes exist (idempotent, no version gate).
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")

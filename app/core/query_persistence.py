@@ -206,7 +206,12 @@ async def _persist_turn_results(
                 cost_increment=metadata.get("total_cost_usd", 0),
                 tokens_in_increment=metadata.get("tokens_in", 0),
                 tokens_out_increment=metadata.get("tokens_out", 0),
-                turn_increment=metadata.get("num_turns", 0)
+                turn_increment=metadata.get("num_turns", 0),
+                # Persist per-turn context-window values so /live can render
+                # the context bar on session reload without scanning JSONL.
+                last_input_tokens=metadata.get("tokens_in", 0),
+                cache_creation_tokens=metadata.get("cache_creation_tokens", 0),
+                cache_read_tokens=metadata.get("cache_read_tokens", 0),
             )
             logger.debug(f"{log_prefix}Updated session {session_id}, sdk_session_id={sdk_session_id}")
     except Exception as e:

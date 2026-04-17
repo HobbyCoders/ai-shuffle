@@ -460,12 +460,18 @@ def update_session(
     tokens_in_increment: int = 0,
     tokens_out_increment: int = 0,
     turn_increment: int = 0,
-    worktree_id: Optional[str] = None
+    worktree_id: Optional[str] = None,
+    last_input_tokens: Optional[int] = None,
+    cache_creation_tokens: Optional[int] = None,
+    cache_read_tokens: Optional[int] = None,
 ) -> Optional[SessionRow]:
     """Update a session with usage stats
 
     Args:
         worktree_id: Set to a worktree ID to link, or empty string "" to unlink
+        last_input_tokens / cache_creation_tokens / cache_read_tokens: absolute
+            per-turn context-window values for the latest turn. These overwrite
+            (not increment) so the context bar reflects the most recent turn.
     """
     _ph = ph()
     updates = [f"updated_at = {_ph}"]
@@ -496,6 +502,15 @@ def update_session(
         updates.append(f"worktree_id = {_ph}")
         # Empty string means unlink (set to NULL)
         values.append(worktree_id if worktree_id else None)
+    if last_input_tokens is not None:
+        updates.append(f"last_input_tokens = {_ph}")
+        values.append(last_input_tokens)
+    if cache_creation_tokens is not None:
+        updates.append(f"cache_creation_tokens = {_ph}")
+        values.append(cache_creation_tokens)
+    if cache_read_tokens is not None:
+        updates.append(f"cache_read_tokens = {_ph}")
+        values.append(cache_read_tokens)
 
     values.append(session_id)
 

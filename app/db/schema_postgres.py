@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 42
 
 
 def create_postgres_schema(cursor) -> None:
@@ -179,6 +179,9 @@ def create_postgres_schema(cursor) -> None:
             total_cost_usd DOUBLE PRECISION DEFAULT 0,
             total_tokens_in INTEGER DEFAULT 0,
             total_tokens_out INTEGER DEFAULT 0,
+            last_input_tokens INTEGER DEFAULT 0,
+            cache_creation_tokens INTEGER DEFAULT 0,
+            cache_read_tokens INTEGER DEFAULT 0,
             turn_count INTEGER DEFAULT 0,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
