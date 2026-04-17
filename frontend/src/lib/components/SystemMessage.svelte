@@ -22,7 +22,7 @@
 	}
 
 	// Get formatted content based on subtype
-	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string; hidden?: boolean; compact?: boolean; collapsible?: boolean; rawOutput?: string } {
+	function getFormattedContent(): { title: string; content: string; badge?: string; badgeColor?: string; hidden?: boolean; compact?: boolean; collapsible?: boolean; rawOutput?: string; rawInput?: string } {
 		const subtype = message.systemSubtype || 'system';
 		const data: Record<string, unknown> = message.systemData || {};
 
@@ -243,7 +243,7 @@
 			}
 
 			case 'hook_response': {
-				// Hook completion — collapsible with raw output
+				// Hook completion — collapsible with raw input + output
 				const exitCode = (data.exitCode as number) ?? (data.exit_code as number) ?? null;
 				// Default to success if no explicit error indicators
 				const hasError = exitCode !== null && exitCode !== 0;
@@ -253,6 +253,41 @@
 				const outMsg = (data.output as string) || (data.stdout as string) || (data.message as string) || '';
 				const hookNameResp = (data.hook_name as string) || (data.hookName as string) || (data.name as string) || '';
 				const rawOutput = errMsg || outMsg;
+
+				// Build input summary. Hook events can carry the command that ran,
+				// the stdin payload, the matcher, and/or the event name. Surface
+				// whichever fields the SDK provided so users can see what was sent
+				// to the hook (mirrors the Input/Output layout of tool messages).
+				const command = (data.command as string) || (data.hook_command as string) || '';
+				const matcher = (data.matcher as string) || (data.hook_matcher as string) || '';
+				const eventName = (data.hook_event_name as string) || (data.hookEventName as string) || (data.event as string) || '';
+				const source = (data.source as string) || '';
+				const hookInputRaw =
+					(data.hook_input as unknown) ??
+					(data.hookInput as unknown) ??
+					(data.input as unknown) ??
+					(data.stdin as unknown) ??
+					null;
+
+				const inputParts: string[] = [];
+				if (command) inputParts.push(command);
+				const trigger = [eventName, source || matcher].filter(Boolean).join(':');
+				if (trigger && trigger !== hookNameResp) inputParts.push(`trigger: ${trigger}`);
+				if (hookInputRaw !== null && hookInputRaw !== undefined) {
+					try {
+						const stdinStr =
+							typeof hookInputRaw === 'string'
+								? hookInputRaw
+								: JSON.stringify(hookInputRaw, null, 2);
+						if (stdinStr && stdinStr !== '{}' && stdinStr !== '""') {
+							inputParts.push(stdinStr);
+						}
+					} catch {
+						// Ignore stringify failures.
+					}
+				}
+				const rawInput = inputParts.join('\n\n');
+
 				// Short summary for header — hook name + truncated first line
 				const firstLine = rawOutput.split('\n')[0] || '';
 				const shortSnippet = firstLine.length > 60 ? firstLine.slice(0, 60) + '\u2026' : firstLine;
@@ -263,6 +298,7 @@
 					badge: success ? 'success' : 'failed',
 					badgeColor: success ? 'green' : 'red',
 					collapsible: true,
+					rawInput: rawInput || undefined,
 					rawOutput: rawOutput || undefined
 				};
 			}
@@ -474,12 +510,20 @@
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 					</svg>
 				</summary>
-				{#if formatted.rawOutput}
-					<div class="px-3 pb-3 pt-1">
-						<div class="p-2 bg-muted/50 rounded border border-zinc-500/20">
-							<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Output</div>
-							<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{formatted.rawOutput}</pre>
-						</div>
+				{#if formatted.rawInput || formatted.rawOutput}
+					<div class="px-3 pb-3 pt-1 space-y-2">
+						{#if formatted.rawInput}
+							<div class="p-2 bg-muted/50 rounded border border-zinc-500/20">
+								<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Input</div>
+								<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{formatted.rawInput}</pre>
+							</div>
+						{/if}
+						{#if formatted.rawOutput}
+							<div class="p-2 bg-muted/50 rounded border border-zinc-500/20">
+								<div class="text-xs text-muted-foreground/70 mb-1 font-medium">Output</div>
+								<pre class="text-xs text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap break-words font-mono">{formatted.rawOutput}</pre>
+							</div>
+						{/if}
 					</div>
 				{/if}
 			</details>
