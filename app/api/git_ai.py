@@ -291,7 +291,11 @@ Message: "{body.message[:500]}"
 
 Return ONLY the branch name, nothing else."""
 
-        response_text = await generate_with_claude(prompt, model="haiku")
+        # Use Default AI profile's model (same as commit-msg / PR-desc endpoints).
+        # Keeps the generation pool client reusable across all AI calls — any
+        # explicit model override here would force a pool recycle if the default
+        # model differs.
+        response_text = await generate_with_claude(prompt)
         branch_name = response_text.strip().strip('"').strip("'").strip('`')
 
         # Validate the generated name
