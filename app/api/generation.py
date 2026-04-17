@@ -164,34 +164,40 @@ def extract_json_from_response(text: str) -> dict:
 
 async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
     """
-    Generate a response using Claude SDK.
+    Generate a response using Claude SDK, honoring the Default AI profile.
 
-    Uses the Default AI profile's model setting unless an explicit model override
-    is provided. This allows users to control which model is used for all
-    internal AI generation (commit messages, PR descriptions, profile generation, etc.)
-    by editing the built-in "Default AI" profile.
+    The Default AI profile is the user-facing control for all internal AI
+    generation (commit messages, PR descriptions, branch names, profile /
+    subagent generation, etc.). This function pulls the full profile config —
+    model, permission_mode, setting_sources, thinking_mode, effort,
+    system_prompt, env, extra_args — and passes them to the SDK. Tools / MCP /
+    agents / hooks are always forced off for one-shot generation.
 
     Fast path: tries to acquire a pre-warmed `ClaudeSDKClient` from
-    `generation_pool`. Saves the 8-15s subprocess cold-start cost. Falls back
-    to a one-shot `query()` if the pool is busy, warming, model-mismatched,
-    or unavailable.
+    `generation_pool` whose fingerprint matches the current profile config.
+    Saves the 8-15s `claude.exe` cold-start cost. Falls back to a one-shot
+    `query()` when the pool is busy, warming, or fingerprint-mismatched.
 
     Args:
         prompt: The prompt to send to Claude
-        model: Optional model override (haiku, sonnet, opus). If None, uses the
-               model from the Default AI profile.
+        model: Optional model override (haiku, sonnet, opus). If None, uses
+               the model from the Default AI profile.
 
     Returns:
         Text response from Claude
     """
-    from app.core.profiles import get_default_ai_model
-    from app.core.generation_pool import generation_pool
+    from app.core.profiles import get_default_ai_profile
+    from app.core.generation_pool import (
+        build_generation_options,
+        generation_pool,
+    )
 
-    # Use the model from the Default AI profile unless explicitly overridden
-    effective_model = model or get_default_ai_model()
+    profile = get_default_ai_profile()
+    profile_config = (profile or {}).get("config") if profile else None
+    effective_model = model or (profile_config or {}).get("model") or "sonnet"
 
     # --- Fast path: warm pooled client ---
-    pooled = await generation_pool.acquire(effective_model)
+    pooled = await generation_pool.acquire(profile_config, model_override=model)
     if pooled is not None:
         t0 = time.perf_counter()
         response_text: list[str] = []
@@ -219,14 +225,12 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
         return "".join(response_text)
 
     # --- Slow path: one-shot subprocess ---
-    options = ClaudeAgentOptions(
-        model=effective_model,
+    # Same profile-honoring options as the pool, but with max_turns=1 since
+    # this subprocess is spawned only for a single query.
+    options = build_generation_options(
+        profile_config,
+        model_override=model,
         max_turns=1,
-        permission_mode="bypassPermissions",
-        tools=[],  # No tools needed for generation
-        # Strip CLAUDECODE env var to prevent "nested session" detection when
-        # the server is started from within a Claude Code session.
-        env={"CLAUDECODE": ""},
     )
 
     t0 = time.perf_counter()
