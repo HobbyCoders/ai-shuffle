@@ -1305,6 +1305,16 @@ class ChatWebSocketHandler:
         heartbeat_task: Optional[asyncio.Task] = None
         heartbeat_stop = asyncio.Event()
 
+        # Set to True when pre-close queue processing spawned a successor
+        # run_query task for the next queued message. When True, the finally
+        # block below MUST NOT touch live_session_store, sync_engine streaming
+        # state, or the SyncEngine device registration for this session — the
+        # successor task now owns all of that. Touching them here would race
+        # with the successor's start_streaming/unregister_device calls and
+        # leave the session in a frozen "locked" state with no stream events
+        # reaching the client.
+        handed_off_to_queued = False
+
         async def send_heartbeats():
             """Send periodic heartbeat events while streaming.
             Includes pending permission/question counts so the frontend can
@@ -1475,7 +1485,12 @@ class ChatWebSocketHandler:
                         async with _active_sessions_lock:
                             _active_chat_sessions[session_id] = task
                         self.query_task = task
-                        ctx.debug(logger, "Queue: new query started for queued message")
+                        # Mark that ownership passed to the successor task. The
+                        # finally block will skip live_session_store cleanup,
+                        # sync_engine streaming teardown, and device re-register
+                        # to avoid racing with the successor's setup.
+                        handed_off_to_queued = True
+                        ctx.debug(logger, "Queue: new query started for queued message (handed off)")
                         return  # Exit this run_query — the new task continues streaming
                     except Exception as exc:
                         # Re-queue on failure so the message isn't lost
@@ -1613,82 +1628,95 @@ class ChatWebSocketHandler:
                 except asyncio.TimeoutError:
                     heartbeat_task.cancel()
 
-            # Only cleanup live session store if end_streaming was never called
-            # (i.e., an exception occurred before the normal done/error/cancel paths ran).
-            # If end_streaming WAS called, the session is kept in memory intentionally
-            # for ~30 seconds so reconnecting clients can retrieve messages.
-            if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
-                ctx.debug(logger, "Cleaning up live session store (finally block - streaming never ended)")
-                await live_session_store.cleanup_session(session_id)
-
-            # ALWAYS ensure streaming state is cleared, even if stream_started was never set
-            # This prevents stuck streaming state after errors or early termination
-            if sync_engine.is_session_streaming(session_id):
-                if not stream_state.stream_started:
-                    # Stream was marked but never actually started - clean up silently
-                    ctx.debug(logger, "Cleaning up streaming state (never started)")
-                    await sync_engine.broadcast_stream_end(
-                        session_id=session_id,
-                        message_id=message_id,
-                        metadata={},
-                        interrupted=True,
-                        source_device_id=None
-                    )
-
-            # Re-register device with SyncEngine now that streaming is complete,
-            # but ONLY if:
-            # 1. This websocket is still connected
-            # 2. No newer websocket has been registered for this device (e.g., user refreshed page)
-            #
-            # If the user disconnected and reconnected during streaming, their NEW websocket
-            # is already registered via load_session. We must NOT replace it with this old one.
-            if self.websocket.client_state == WebSocketState.CONNECTED:
-                # Check if a different websocket is already registered for this device
-                # (This happens when user refreshes the page during streaming)
-                current_connection = sync_engine._connections.get(session_id, {}).get(self.device_id)
-                if current_connection is not None and current_connection.websocket is not self.websocket:
-                    # A newer connection exists - don't replace it with this old websocket
-                    ctx.debug(logger, "Skipping re-register - newer connection already exists")
-                else:
-                    await sync_engine.register_device(self.device_id, session_id, self.websocket)
-                    ctx.debug(logger, "Re-registered device after streaming complete")
+            if handed_off_to_queued:
+                # Ownership of session_id streaming state belongs to the
+                # successor run_query task spawned in the pre-close queue
+                # branch. Any cleanup / broadcast / device re-register here
+                # would race with its setup and leave the session locked.
+                # Only safely drop our task-reference if it is still us.
+                current_task = asyncio.current_task()
+                if _active_chat_sessions.get(session_id) is current_task:
+                    # Successor replaced this entry at hand-off time, so this
+                    # branch normally won't fire — guard is defensive only.
+                    del _active_chat_sessions[session_id]
+                ctx.debug(logger, "run_query finally: handed off to queued successor — skipping cleanup")
             else:
-                ctx.debug(logger, "Skipping re-register - websocket disconnected during streaming")
-
-            # Clean up task reference only if it's still our task (avoid TOCTOU race
-            # where a different device started a new query for the same session)
-            current_task = asyncio.current_task()
-            if _active_chat_sessions.get(session_id) is current_task:
-                del _active_chat_sessions[session_id]
-
-            # If no devices are connected after query finished, schedule cleanup
-            # (don't destroy immediately — user may reopen within 30s)
-            remaining_devices = sync_engine.get_device_count(session_id)
-            if remaining_devices == 0:
-                ctx.debug(logger, "Query finished but no devices connected, scheduling cleanup")
+                # Only cleanup live session store if end_streaming was never called
+                # (i.e., an exception occurred before the normal done/error/cancel paths ran).
+                # If end_streaming WAS called, the session is kept in memory intentionally
+                # for ~30 seconds so reconnecting clients can retrieve messages.
                 if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
-                    # Only force-cleanup if still marked as streaming (abnormal state)
+                    ctx.debug(logger, "Cleaning up live session store (finally block - streaming never ended)")
                     await live_session_store.cleanup_session(session_id)
-                    ctx.debug(logger, "Cleaned up stuck streaming session")
 
-            # Fallback queue processing for error/cancel paths.
-            # The normal completion path handles queued messages pre-close
-            # (before end_streaming), so this only fires when:
-            #  - Query was cancelled (CancelledError) or errored
-            #  - A queued message arrived during the cancel/error teardown
-            if session_id in _interrupt_pending_sessions:
-                ctx.debug(logger, "Skipping queue processing — interrupt_and_query pending")
-            elif session_id in _stopped_sessions:
-                _stopped_sessions.discard(session_id)
-                ctx.debug(logger, "Skipping queue processing — user stopped session")
-            else:
-                # Check if a new query was already spawned by pre-close processing
-                async with _active_sessions_lock:
-                    active_task = _active_chat_sessions.get(session_id)
-                if active_task and not active_task.done():
-                    ctx.debug(logger, "Skipping fallback queue processing — new query already active")
+                # ALWAYS ensure streaming state is cleared, even if stream_started was never set
+                # This prevents stuck streaming state after errors or early termination
+                if sync_engine.is_session_streaming(session_id):
+                    if not stream_state.stream_started:
+                        # Stream was marked but never actually started - clean up silently
+                        ctx.debug(logger, "Cleaning up streaming state (never started)")
+                        await sync_engine.broadcast_stream_end(
+                            session_id=session_id,
+                            message_id=message_id,
+                            metadata={},
+                            interrupted=True,
+                            source_device_id=None
+                        )
+
+                # Re-register device with SyncEngine now that streaming is complete,
+                # but ONLY if:
+                # 1. This websocket is still connected
+                # 2. No newer websocket has been registered for this device (e.g., user refreshed page)
+                #
+                # If the user disconnected and reconnected during streaming, their NEW websocket
+                # is already registered via load_session. We must NOT replace it with this old one.
+                if self.websocket.client_state == WebSocketState.CONNECTED:
+                    # Check if a different websocket is already registered for this device
+                    # (This happens when user refreshes the page during streaming)
+                    current_connection = sync_engine._connections.get(session_id, {}).get(self.device_id)
+                    if current_connection is not None and current_connection.websocket is not self.websocket:
+                        # A newer connection exists - don't replace it with this old websocket
+                        ctx.debug(logger, "Skipping re-register - newer connection already exists")
+                    else:
+                        await sync_engine.register_device(self.device_id, session_id, self.websocket)
+                        ctx.debug(logger, "Re-registered device after streaming complete")
                 else:
-                    try:
-                        await self._process_next_queued(session_id)
-                    except Exception as queue_err:
-                        logger.warning(f"[Queue] Fallback queue processing failed: {queue_err}")
+                    ctx.debug(logger, "Skipping re-register - websocket disconnected during streaming")
+
+                # Clean up task reference only if it's still our task (avoid TOCTOU race
+                # where a different device started a new query for the same session)
+                current_task = asyncio.current_task()
+                if _active_chat_sessions.get(session_id) is current_task:
+                    del _active_chat_sessions[session_id]
+
+                # If no devices are connected after query finished, schedule cleanup
+                # (don't destroy immediately — user may reopen within 30s)
+                remaining_devices = sync_engine.get_device_count(session_id)
+                if remaining_devices == 0:
+                    ctx.debug(logger, "Query finished but no devices connected, scheduling cleanup")
+                    if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
+                        # Only force-cleanup if still marked as streaming (abnormal state)
+                        await live_session_store.cleanup_session(session_id)
+                        ctx.debug(logger, "Cleaned up stuck streaming session")
+
+                # Fallback queue processing for error/cancel paths.
+                # The normal completion path handles queued messages pre-close
+                # (before end_streaming), so this only fires when:
+                #  - Query was cancelled (CancelledError) or errored
+                #  - A queued message arrived during the cancel/error teardown
+                if session_id in _interrupt_pending_sessions:
+                    ctx.debug(logger, "Skipping queue processing — interrupt_and_query pending")
+                elif session_id in _stopped_sessions:
+                    _stopped_sessions.discard(session_id)
+                    ctx.debug(logger, "Skipping queue processing — user stopped session")
+                else:
+                    # Check if a new query was already spawned by pre-close processing
+                    async with _active_sessions_lock:
+                        active_task = _active_chat_sessions.get(session_id)
+                    if active_task and not active_task.done():
+                        ctx.debug(logger, "Skipping fallback queue processing — new query already active")
+                    else:
+                        try:
+                            await self._process_next_queued(session_id)
+                        except Exception as queue_err:
+                            logger.warning(f"[Queue] Fallback queue processing failed: {queue_err}")

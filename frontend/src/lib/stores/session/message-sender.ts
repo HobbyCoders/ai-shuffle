@@ -224,67 +224,107 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				: _state.title;
 			const queryProfileId = _state.profile;
 
-			// Stop current generation then send new message.
-			// Same as hitting stop button — interrupt is instant via SDK.
-			if (_state.isStreaming && _state.sessionId) {
-				// Fire stop (same code path as stop button)
-				wsConn.send({ type: 'stop', session_id: _state.sessionId });
+			// Interrupting a live stream: use the two-phase interrupt_for_query
+			// path (backend interrupts, drains, sends 'interrupt_confirmed') so
+			// the new query only starts after the old one has fully released the
+			// SDK pipe. Gate poll updates via interruptPending so stale polls
+			// from the old query don't flip isStreaming false between interrupt
+			// and start, which caused a visible gap + user-msg flicker.
+			const mustInterrupt = !!(_state.isStreaming && _state.sessionId);
+			if (mustInterrupt) {
+				internal.interruptPending = true;
+				internal.pendingTools.clear();
 
-				// Clean up streaming UI immediately
-				update(s => {
-					const updatedMessages = s.messages.map(m => {
-						if (m.type === 'tool_use' && m.toolStatus === 'running') {
-							return { ...m, streaming: false, toolStatus: 'error' as const };
-						}
-						return m.streaming ? { ...m, streaming: false } : m;
+				const sessionIdForInterrupt = _state.sessionId!;
+				const confirmed = await new Promise<boolean>((resolve) => {
+					internal.interruptConfirmResolve = resolve;
+					const sent = wsConn.send({
+						type: 'interrupt_for_query',
+						session_id: sessionIdForInterrupt,
 					});
+					if (!sent) {
+						internal.interruptConfirmResolve = null;
+						resolve(false);
+						return;
+					}
+					// Safety timeout matches backend drain (8s) + buffer.
+					setTimeout(() => {
+						if (internal.interruptConfirmResolve === resolve) {
+							internal.interruptConfirmResolve = null;
+							resolve(false);
+						}
+					}, 10000);
+				});
+
+				if (!confirmed) {
+					// Interrupt failed — abort the send and let the user retry.
+					// Clear interruptPending so subsequent polls work.
+					internal.interruptPending = false;
+					update(s => ({ ...s, error: 'Unable to interrupt the active generation. Please try again.' }));
+					return;
+				}
+			}
+
+			internal.awaitingNewSession = true;
+			if (!_state.sessionId) {
+				sessionEphemeralCache.remove('__new_chat__');
+			}
+			console.debug(`[ActiveSession] sendMessage: sessionId=${_state.sessionId}, awaitingNewSession=true, wsConnected=${wsConn.isConnected()}, mustInterrupt=${mustInterrupt}`);
+
+			// Single atomic update — avoids intermediate render where streaming
+			// is cleared but the new user message hasn't been appended yet.
+			// When mustInterrupt, also strip streaming artifacts from the old
+			// query (running tool_use → error, streaming text finalized, empty
+			// assistant placeholders dropped).
+			if (options?.skipMessageAppend) {
+				update(s => {
+					const messages = mustInterrupt
+						? s.messages
+							.map(m => {
+								if (m.type === 'tool_use' && m.toolStatus === 'running') {
+									return { ...m, streaming: false, toolStatus: 'error' as const };
+								}
+								return m.streaming ? { ...m, streaming: false } : m;
+							})
+							.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content))
+						: s.messages;
 					return {
 						...s,
-						messages: updatedMessages.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content)),
-						isStreaming: false,
+						messages,
+						isStreaming: true,
 						error: null,
 						title: newTitle,
 						currentQueryProfileId: queryProfileId,
 						wsStreamContent: '',
 					};
 				});
-
-				internal.pendingTools.clear();
-
-				// Now send the query (falls through to normal send path below)
-			}
-
-			// Normal path (not currently streaming)
-			internal.awaitingNewSession = true;
-			if (!_state.sessionId) {
-				sessionEphemeralCache.remove('__new_chat__');
-			}
-			console.debug(`[ActiveSession] sendMessage: sessionId=${_state.sessionId}, awaitingNewSession=true, wsConnected=${wsConn.isConnected()}`);
-
-			if (options?.skipMessageAppend) {
-				update(s => ({
-					...s,
-					isStreaming: true,
-					error: null,
-					title: newTitle,
-					currentQueryProfileId: queryProfileId,
-					wsStreamContent: '',
-				}));
 			} else {
-				update(s => ({
-					...s,
-					messages: [...s.messages, {
-						id: userMsgId,
-						role: 'user' as const,
-						content: prompt,
-						profileId: queryProfileId,
-					}],
-					isStreaming: true,
-					error: null,
-					title: newTitle,
-					currentQueryProfileId: queryProfileId,
-					wsStreamContent: '',
-				}));
+				update(s => {
+					const baseMessages = mustInterrupt
+						? s.messages
+							.map(m => {
+								if (m.type === 'tool_use' && m.toolStatus === 'running') {
+									return { ...m, streaming: false, toolStatus: 'error' as const };
+								}
+								return m.streaming ? { ...m, streaming: false } : m;
+							})
+							.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content))
+						: s.messages;
+					return {
+						...s,
+						messages: [...baseMessages, {
+							id: userMsgId,
+							role: 'user' as const,
+							content: prompt,
+							profileId: queryProfileId,
+						}],
+						isStreaming: true,
+						error: null,
+						title: newTitle,
+						currentQueryProfileId: queryProfileId,
+						wsStreamContent: '',
+					};
+				});
 			}
 
 			wsConn.resetLastMessageTime();
@@ -297,6 +337,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				worktree_id: _state.worktreeId || undefined,
 				overrides: buildOverrides(),
 			});
+			// interruptPending cleared by 'start' handler (ws-message-handlers.ts:395)
+			// once the new query's stream_start event arrives.
 		},
 
 		stopGeneration() {
