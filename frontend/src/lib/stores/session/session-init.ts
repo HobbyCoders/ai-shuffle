@@ -244,18 +244,38 @@ export function createSessionInit(deps: SessionInitDeps) {
 					}
 				}
 
-				// Preserve trailing optimistic user messages that the server has
-				// not yet persisted. Without this, a poll that races ahead of
-				// backend query persistence drops the optimistic msg, shrinks
-				// the DOM, the browser clamps scrollTop downward, handleScroll
-				// misreads the layout shift as a user scroll-up and disables
-				// auto-scroll. Only walk the trailing contiguous run of
-				// optimistic user msgs (id starts with "user-") so we stop at
-				// the first server-known message.
+				// Reconcile trailing optimistic user messages with server state.
+				// Optimistic msgs use id `user-${Date.now()}`; server persists
+				// them under a different DB id, so id-based matching alone would
+				// leave both in the merged list (duplicate). Here we pair each
+				// trailing optimistic user msg with the first unclaimed server
+				// user msg of identical content (+ profileId). Matched ones are
+				// considered replaced by server → not preserved. Unmatched ones
+				// (server still racing persistence) ARE preserved to prevent DOM
+				// shrink, scrollTop clamp, false scroll-up detection, and
+				// auto-scroll disable.
+				const claimedServerIdx = new Set<number>();
+				const findMatchingServerUserIdx = (opt: ChatMessage): number => {
+					for (let k = finalMessages.length - 1; k >= 0; k--) {
+						if (claimedServerIdx.has(k)) continue;
+						const sm = finalMessages[k];
+						if (sm.role !== 'user') continue;
+						if ((sm.content || '') !== (opt.content || '')) continue;
+						if ((sm.profileId ?? null) !== (opt.profileId ?? null)) continue;
+						return k;
+					}
+					return -1;
+				};
 				for (let i = s.messages.length - 1; i >= 0; i--) {
 					const m = s.messages[i];
 					if (serverIdSet.has(m.id)) break;
 					if (m.role !== 'user' || !m.id?.startsWith('user-')) continue;
+					const matchIdx = findMatchingServerUserIdx(m);
+					if (matchIdx >= 0) {
+						// Server persisted this msg under its own id → drop optimistic.
+						claimedServerIdx.add(matchIdx);
+						continue;
+					}
 					let anchorId: string | null = null;
 					for (let j = i - 1; j >= 0; j--) {
 						if (serverIdSet.has(s.messages[j].id)) {

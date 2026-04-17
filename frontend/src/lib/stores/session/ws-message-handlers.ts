@@ -156,8 +156,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			// Clear WS stream buffer — poller's final poll is authoritative
 			const preState = getState();
 			const preAssistantTexts = preState.messages.filter(
-				(m: { role: string; type: string; content?: string; id: string; streaming?: boolean }) =>
-					m.role === 'assistant' && m.type === 'text'
+				(m) => m.role === 'assistant' && m.type === 'text'
 			);
 			console.warn(
 				`[handleDone] clearing wsStreamContent`,

@@ -417,7 +417,7 @@
 		formPrompt = sub.prompt;
 		formTools = sub.tools || [];
 		formModel = sub.model || '';
-		customModelMode = isCustomModel(sub.model);
+		customModelMode = isCustomModel(sub.model ?? undefined);
 		toolSelectionMode = Array.isArray(sub.tools) ? 'select' : 'all';
 
 		viewMode = 'editor';
