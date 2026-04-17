@@ -83,34 +83,43 @@ _THINKING_TOKEN_BUDGETS: Dict[str, int] = {
 
 def _resolve_setting_sources(
     profile_config: Optional[Dict[str, Any]],
-) -> Optional[List[str]]:
+) -> List[str]:
     """
     Resolve `setting_sources` for generation calls from the Default AI profile.
 
-    Works around an SDK quirk: `subprocess_cli.py` uses
+    Generation calls (commit messages, PR descriptions, branch names, etc.) are
+    short one-shot prompts that have nothing to do with user-global Claude Code
+    settings. We therefore default to blocking user + project settings and only
+    opt-in to extra scopes when the user explicitly configures a non-empty list.
+
+    Blocking matters because `~/.claude/settings.json` commonly carries
+    `effortLevel: medium`. Haiku doesn't support effort, and when the CLI
+    receives it the call takes a slow fallback path (12-17s for a 50-byte
+    prompt vs 1-3s baseline). Chat sessions use their own options builder and
+    are unaffected by this default.
+
+    SDK quirk worked around here: `subprocess_cli.py:283` uses
     `if self._options.setting_sources:` to decide whether to emit
     `--setting-sources`. An empty list is falsy, so the flag is omitted and
-    `claude.exe` falls back to loading ALL user/project/local settings —
-    including `~/.claude/settings.json` which may carry `effortLevel: medium`.
-    Applied to haiku (which doesn't support effort), the CLI takes a slow
-    fallback path (12-17s vs 3-6s sonnet).
+    `claude.exe` falls back to loading ALL scopes. We therefore always return a
+    non-empty list so the flag is emitted.
 
     Behavior:
-    - `None`: not configured — return `None` (SDK default, loads all scopes).
-    - `[]`: user explicitly disabled all sources — return `["local"]` as a
-      workaround. Forces SDK to emit the flag, and `local` only loads
-      `.claude/settings.local.json` in the working directory (rare), so the
-      leak path (user-global `effortLevel`) is cut off.
-    - non-empty list: pass through unchanged.
+    - Non-empty list in profile: pass through unchanged — user explicitly opted
+      in to loading those scopes for generation tasks.
+    - `None`, `[]`, missing key, or non-list value: return `["local"]`. Forces
+      the flag to be emitted and scopes it to `.claude/settings.local.json` in
+      the working directory (usually absent), cutting off the user-global
+      leak path.
     """
-    if not profile_config:
-        return None
-    sources = profile_config.get("setting_sources")
-    if sources is None or not isinstance(sources, list):
-        return None
-    if len(sources) == 0:
-        return ["local"]
-    return sources
+    if profile_config:
+        sources = profile_config.get("setting_sources")
+        if isinstance(sources, list) and len(sources) > 0:
+            return sources
+    # All "fall back to default" cases — still return a non-empty list so the
+    # SDK emits the flag. `local` is the safest sentinel since the file it
+    # points at rarely exists and never carries `effortLevel`.
+    return ["local"]
 
 
 def _resolve_thinking_and_effort(
@@ -212,9 +221,9 @@ def build_generation_options(
     if max_turns is not None:
         kwargs["max_turns"] = max_turns
 
-    sources = _resolve_setting_sources(config)
-    if sources is not None:
-        kwargs["setting_sources"] = sources
+    # `_resolve_setting_sources` always returns a non-empty list so the SDK
+    # reliably emits `--setting-sources` (workaround for falsy-check quirk).
+    kwargs["setting_sources"] = _resolve_setting_sources(config)
 
     # Thinking / effort / max_thinking_tokens — spread into options.
     kwargs.update(_resolve_thinking_and_effort(config))
