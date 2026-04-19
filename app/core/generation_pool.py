@@ -43,8 +43,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shutil
-import tempfile
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -54,24 +52,36 @@ from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 logger = logging.getLogger(__name__)
 
 
-# Dedicated working directory for ALL generation-subprocess spawns (pool +
-# one-shot fallback). Isolating cwd is critical on self-hosted AI Shuffle
-# where the server runs from a project root containing `CLAUDE.md` and
-# `.claude/` (agents, settings, memory). The Claude Code CLI auto-discovers
-# those files and injects their content into every call's context — a 60-line
-# CLAUDE.md turns a 50-byte commit-msg prompt into ~10KB of tokens per call,
-# which makes haiku take 8-15s instead of 1-2s.
-#
-# We point generation calls at an empty tempdir so the CLI finds nothing to
-# auto-load. Ensured at pool.start(); torn down at pool.stop().
-_gen_cwd: Optional[str] = None
-
-
+# Working directory for ALL generation-subprocess spawns (pool + one-shot
+# fallback). Resolved to the configured workspace_dir on first use so CLAUDE.md
+# / .claude/ auto-discovery behavior is predictable across installs (as opposed
+# to a random tempdir which can confuse hooks or downstream tools that key off
+# the cwd). Plugin loading is suppressed separately via the `settings` override
+# below, so the cwd's proximity to user-level config files no longer matters
+# for per-call latency.
 def get_generation_cwd() -> Optional[str]:
-    """Return the isolated cwd used for generation subprocess calls, or None
-    if the pool hasn't been started yet (in which case callers should skip
-    setting cwd and accept the CLAUDE.md bloat rather than crashing)."""
-    return _gen_cwd
+    """Return the cwd used for generation subprocess calls.
+
+    Uses the configured workspace directory so the subprocess runs somewhere
+    stable and mirrors the user's dev environment. Returns None if settings
+    aren't importable yet (startup race) — callers skip cwd in that case.
+    """
+    try:
+        from app.core.config import settings
+        return str(settings.effective_workspace_dir)
+    except Exception:
+        return None
+
+
+# JSON merged into `--settings` for every generation subprocess spawn. Forces
+# `enabledPlugins` to the empty map so user-global plugins registered in
+# `~/.claude/settings.json` (e.g. caveman, skill packs) don't attach their
+# SessionStart / UserPromptSubmit hooks to generation calls. Those hooks
+# typically shell out to PowerShell/bash per query; on Windows each PowerShell
+# spawn is ~1-3s cold, which stacks into a 6-10s floor on short prompts even
+# with a pre-warmed SDK client. Generation calls never need plugin behavior
+# (commit messages, PR descriptions, branch names — all short one-shots).
+_GEN_SETTINGS_OVERRIDE = json.dumps({"enabledPlugins": {}})
 
 
 # Tune these based on expected usage:
@@ -266,10 +276,17 @@ def build_generation_options(
     if isinstance(extra_args, dict) and extra_args:
         kwargs["extra_args"] = extra_args
 
-    # Isolated cwd prevents CLAUDE.md / .claude/ auto-discovery bloat.
+    # Use the configured workspace dir as cwd so the subprocess spawns in a
+    # stable, user-expected location.
     cwd = get_generation_cwd()
     if cwd:
         kwargs["cwd"] = cwd
+
+    # Suppress user-global plugins (caveman, skill packs, etc.) whose hooks
+    # run per-query and dominate the latency floor for short generation calls.
+    # This merges with `setting_sources=["local"]` — the local settings file
+    # still loads if present, but `enabledPlugins` is forcibly emptied.
+    kwargs["settings"] = _GEN_SETTINGS_OVERRIDE
 
     return ClaudeAgentOptions(**kwargs)
 
@@ -358,21 +375,17 @@ class GenerationPool:
 
     async def start(self) -> None:
         """Begin pre-warming the first client. Returns immediately."""
-        global _gen_cwd
         if self._started:
             return
         self._started = True
         self._stopped = False
-        # Create the isolated cwd before spawning any generation subprocess.
-        if _gen_cwd is None:
-            _gen_cwd = tempfile.mkdtemp(prefix="ai-shuffle-gen-")
-            logger.info(f"[GenerationPool] Isolated cwd: {_gen_cwd}")
+        cwd = get_generation_cwd()
+        logger.info(f"[GenerationPool] Working dir: {cwd or '<unresolved>'}")
         self._kick_warmup()
         logger.info("[GenerationPool] Started; warmup kicked off in background")
 
     async def stop(self) -> None:
         """Disconnect the current client and cancel any in-flight warmup."""
-        global _gen_cwd
         self._stopped = True
         if self._warmup_task and not self._warmup_task.done():
             self._warmup_task.cancel()
@@ -381,13 +394,6 @@ class GenerationPool:
             except (asyncio.CancelledError, Exception):
                 pass
         await self._disconnect_current()
-        # Remove the isolated cwd. Ignore errors — the OS temp cleaner will
-        # get it eventually even if we can't unlink right now.
-        if _gen_cwd:
-            try:
-                shutil.rmtree(_gen_cwd, ignore_errors=True)
-            finally:
-                _gen_cwd = None
         logger.info("[GenerationPool] Stopped")
 
     # ------------------------------------------------------------------
