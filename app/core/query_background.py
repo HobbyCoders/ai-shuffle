@@ -314,6 +314,26 @@ async def _run_background_query(
 
                 metadata["model"] = message.model
 
+                # Track per-API-call usage so we can persist the LAST call's
+                # values (= current context window size). ResultMessage.usage
+                # is cumulative across the agent loop and would inflate.
+                if getattr(message, "usage", None):
+                    metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
+                    metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
+                    metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+                    # Keep live store in sync on each API call so late-joining
+                    # devices and pre_seed_parse_cache see correct values.
+                    try:
+                        await live_session_store.update_usage(
+                            session_id,
+                            input_tokens=message.usage.get("input_tokens", 0),
+                            output_tokens=message.usage.get("output_tokens", 0),
+                            cache_creation_tokens=message.usage.get("cache_creation_input_tokens", 0),
+                            cache_read_tokens=message.usage.get("cache_read_input_tokens", 0),
+                        )
+                    except Exception as e:
+                        logger.warning(f"[Background] Failed to update per-call usage in live store for {session_id}: {e}")
+
             elif isinstance(message, UserMessage):
                 # UserMessage contains tool results from Claude's tool executions
                 for block in message.content:
@@ -365,24 +385,16 @@ async def _run_background_query(
                 if result_errors:
                     metadata["errors"] = result_errors
                     logger.warning(f"[Background] ResultMessage contains errors: {result_errors}")
-                # Extract token counts from usage dict
+                # Extract token counts from usage dict.
+                # ResultMessage.usage is CUMULATIVE across every API call in
+                # the agent loop — safe for increment totals, unsafe as a
+                # context-window snapshot. The live store is already updated
+                # per-AssistantMessage above with the correct per-call values.
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
                     metadata["tokens_out"] = message.usage.get("output_tokens", 0)
                     metadata["cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
                     metadata["cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
-
-                    # Update LiveSessionStore usage for late-joining devices
-                    try:
-                        await live_session_store.update_usage(
-                            session_id,
-                            input_tokens=message.usage.get("input_tokens", 0),
-                            output_tokens=message.usage.get("output_tokens", 0),
-                            cache_creation_tokens=message.usage.get("cache_creation_input_tokens", 0),
-                            cache_read_tokens=message.usage.get("cache_read_input_tokens", 0),
-                        )
-                    except Exception as e:
-                        logger.warning(f"[Background] Failed to update usage in live store for {session_id}: {e}")
 
     except asyncio.CancelledError:
         interrupted = True

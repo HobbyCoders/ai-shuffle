@@ -197,8 +197,33 @@ async def _persist_turn_results(
     subagent_children = subagent_children or {}
 
     # 1. Update session metadata (sdk_session_id, cost, tokens, turns)
+    #
+    # Context-window columns must store the LAST API call's per-call usage,
+    # not ResultMessage aggregates. SDK's ResultMessage.usage sums every API
+    # hop in the agent loop (one user turn can make many calls via tools), so
+    # `metadata["tokens_in"]` and cache fields there are cumulative per turn
+    # and inflate the context bar on reload.
+    #
+    # Each AssistantMessage in the query loop writes the per-call values into
+    # metadata["last_call_*"], overwriting so the final value is the last API
+    # call's usage == current context window size. We fall back to the
+    # ResultMessage aggregate only when the per-call capture is missing
+    # (pre-fix metadata, non-streaming paths without AssistantMessages, etc.)
+    # so the update is still safe.
     try:
         if sdk_session_id:
+            last_input_tokens = metadata.get(
+                "last_call_tokens_in",
+                metadata.get("tokens_in", 0),
+            )
+            last_cache_creation = metadata.get(
+                "last_call_cache_creation_tokens",
+                metadata.get("cache_creation_tokens", 0),
+            )
+            last_cache_read = metadata.get(
+                "last_call_cache_read_tokens",
+                metadata.get("cache_read_tokens", 0),
+            )
             await run_sync(
                 database.update_session,
                 session_id=session_id,
@@ -209,9 +234,9 @@ async def _persist_turn_results(
                 turn_increment=metadata.get("num_turns", 0),
                 # Persist per-turn context-window values so /live can render
                 # the context bar on session reload without scanning JSONL.
-                last_input_tokens=metadata.get("tokens_in", 0),
-                cache_creation_tokens=metadata.get("cache_creation_tokens", 0),
-                cache_read_tokens=metadata.get("cache_read_tokens", 0),
+                last_input_tokens=last_input_tokens,
+                cache_creation_tokens=last_cache_creation,
+                cache_read_tokens=last_cache_read,
             )
             logger.debug(f"{log_prefix}Updated session {session_id}, sdk_session_id={sdk_session_id}")
     except Exception as e:

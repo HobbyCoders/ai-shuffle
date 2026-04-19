@@ -236,6 +236,14 @@ async def execute_query(
                         })
                 metadata["model"] = message.model
 
+                # Track per-API-call usage so we can persist the LAST call's
+                # values (= current context window size). ResultMessage.usage
+                # is cumulative across the agent loop and would inflate.
+                if getattr(message, "usage", None):
+                    metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
+                    metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
+                    metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
+
             elif isinstance(message, UserMessage):
                 # UserMessage contains tool results from Claude's tool executions
                 for block in message.content:
@@ -610,6 +618,12 @@ async def stream_query(
 
                 # Per-turn usage from AssistantMessage (SDK 0.1.49+)
                 if message.usage:
+                    # Track per-API-call values (overwrite → last call wins).
+                    # Used by _persist_turn_results as the real context-window
+                    # size; ResultMessage.usage is cumulative and unusable here.
+                    metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
+                    metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
+                    metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
                     yield {
                         "type": "turn_usage",
                         "usage": message.usage
@@ -1582,6 +1596,12 @@ async def stream_to_websocket(
 
                 # Per-turn usage from AssistantMessage (SDK 0.1.49+)
                 if message.usage:
+                    # Track per-API-call values (overwrite → last call wins).
+                    # Used by _persist_turn_results as the real context-window
+                    # size; ResultMessage.usage is cumulative and unusable here.
+                    metadata["last_call_tokens_in"] = message.usage.get("input_tokens", 0)
+                    metadata["last_call_cache_creation_tokens"] = message.usage.get("cache_creation_input_tokens", 0)
+                    metadata["last_call_cache_read_tokens"] = message.usage.get("cache_read_input_tokens", 0)
                     yield {
                         "type": "turn_usage",
                         "usage": message.usage

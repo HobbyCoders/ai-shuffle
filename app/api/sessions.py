@@ -390,14 +390,14 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     if sdk_session_id:
         try:
             from app.core.jsonl_parser import parse_session_history
+            from app.core.message_resolver import resolve_working_dir
             from app.core.config import settings
 
-            # Get working dir from project if available
-            project_id = session.get("project_id")
-            if project_id:
-                project = await run_sync(database.get_project, project_id)
-                if project:
-                    working_dir = get_project_working_dir(project)
+            # Resolve working dir preferring worktree → project → default.
+            # Worktree sessions store JSONL under the worktree's encoded path;
+            # falling straight to the project path misses the direct lookup
+            # and relies on a cross-dir scan to recover.
+            working_dir = await run_sync(resolve_working_dir, dict(session))
 
             jsonl_messages, usage_data = await run_sync(parse_session_history, sdk_session_id, working_dir)
             if jsonl_messages:
@@ -455,6 +455,15 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                 if session.get("total_tokens_in", 0) == 0 and session.get("total_tokens_out", 0) == 0:
                     session["total_tokens_in"] = usage_data.get("total_tokens_in", 0)
                     session["total_tokens_out"] = usage_data.get("total_tokens_out", 0)
+            else:
+                # No JSONL usage available (file missing, worktree removed, etc.)
+                # Compute context from the per-turn DB columns that
+                # _persist_turn_results maintains. These hold the last API
+                # call's absolute values (not cumulative).
+                last_input = session.get("last_input_tokens", 0) or 0
+                cache_creation = session.get("cache_creation_tokens", 0) or 0
+                cache_read = session.get("cache_read_tokens", 0) or 0
+                session["context_tokens"] = last_input + cache_creation + cache_read
             logger.debug(f"[Session API] Final token values: tokens_in={session.get('total_tokens_in')}, tokens_out={session.get('total_tokens_out')}, cache_creation={session.get('cache_creation_tokens')}, cache_read={session.get('cache_read_tokens')}, context={session.get('context_tokens')}")
         except Exception as e:
             # Log the error but don't fail - fall back to database
@@ -629,13 +638,11 @@ async def get_live_session(
     if not messages and sdk_session_id:
         try:
             from app.core.jsonl_parser import parse_session_history
+            from app.core.message_resolver import resolve_working_dir
             from app.core.config import settings
 
-            project_id = session.get("project_id")
-            if project_id:
-                project = await run_sync(database.get_project, project_id)
-                if project:
-                    working_dir = get_project_working_dir(project)
+            # Worktree-aware working dir (worktree → project → default).
+            working_dir = await run_sync(resolve_working_dir, dict(session))
 
             jsonl_messages, usage_data = await run_sync(parse_session_history, sdk_session_id, working_dir)
             if jsonl_messages:
