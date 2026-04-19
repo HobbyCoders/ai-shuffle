@@ -86,6 +86,7 @@ export interface MessageSenderDeps {
 	// External modules
 	sessionPoller: {
 		stop: (sessionId: string) => void;
+		startStreaming: (sessionId: string) => void;
 	};
 	sessionState: {
 		removeSession: (sessionId: string) => void;
@@ -589,6 +590,16 @@ export function createMessageSender(deps: MessageSenderDeps) {
 						await waitForConnectionVoid();
 					}
 					update(s => ({ ...s, isStreaming: true, wsStreamContent: '' }));
+					// Kick the poller explicitly. The headless query runner
+					// (sessions_worktree.py → launch_headless_query) starts
+					// run_query WITHOUT a WebSocket attached, so session-level
+					// sync_engine broadcasts (stream_start / stream_chunk /
+					// message_added) are dropped because no device is
+					// registered to this freshly-created session_id. Without
+					// this call the poller never starts, the user sees no
+					// streaming output, and only a page refresh recovers the
+					// state via HTTP load_session.
+					sessionPoller.startStreaming(response.session_id);
 					return;
 				}
 
