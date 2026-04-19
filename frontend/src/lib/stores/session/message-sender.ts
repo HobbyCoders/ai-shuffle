@@ -570,36 +570,51 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					return;
 				}
 
+				// Atomic state commit: sessionId + streaming flags land in the
+				// same update so reactive consumers (session-switcher, typing
+				// indicator, streaming placeholder) never observe a new
+				// sessionId with isStreaming=false. Previously these were
+				// split across two update() calls with an `await` (WS connect)
+				// between them, which produced a visible gap where the typing
+				// indicator and streaming UI were missing on auto-worktree
+				// sessions.
 				update(s => ({
 					...s,
 					sessionId: response.session_id,
 					worktreeId: response.worktree_id,
 					selectedWorktreeBranch: response.branch_name,
 					isCreatingWorktree: false,
+					...(response.query_started
+						? { isStreaming: true, wsStreamContent: '', error: null }
+						: {}),
 				}));
 
 				persistSession();
 
 				if (response.query_started) {
-					// Backend already persisted the user message, migrated
-					// uploads, and launched run_query. Ensure WS is connected
-					// so we can stream live updates — but the query itself
-					// keeps running regardless of WS state.
+					// Kick the poller FIRST — before any async WS work. The
+					// headless query runner (sessions_worktree.py →
+					// launch_headless_query) starts run_query WITHOUT a
+					// WebSocket attached, so session-level sync_engine
+					// broadcasts (stream_start / stream_chunk /
+					// message_added) are dropped because no device is
+					// registered to this freshly-created session_id.
+					// The poller is the PRIMARY data source for
+					// auto-worktree streams; starting it synchronously
+					// (with isStreaming already true in state) ensures the
+					// onPollApplied guard in session-init doesn't reject
+					// the first response due to sessionId mismatch, and
+					// that typing indicators render immediately.
+					sessionPoller.startStreaming(response.session_id);
+
+					// Ensure WS is connected for side-channel delivery of
+					// future events — but the query itself keeps running
+					// regardless of WS state, and the poller already owns
+					// the streaming UI state.
 					if (!wsConn.isConnected()) {
 						wsConn.connect();
 						await waitForConnectionVoid();
 					}
-					update(s => ({ ...s, isStreaming: true, wsStreamContent: '' }));
-					// Kick the poller explicitly. The headless query runner
-					// (sessions_worktree.py → launch_headless_query) starts
-					// run_query WITHOUT a WebSocket attached, so session-level
-					// sync_engine broadcasts (stream_start / stream_chunk /
-					// message_added) are dropped because no device is
-					// registered to this freshly-created session_id. Without
-					// this call the poller never starts, the user sees no
-					// streaming output, and only a page refresh recovers the
-					// state via HTTP load_session.
-					sessionPoller.startStreaming(response.session_id);
 					return;
 				}
 
