@@ -263,9 +263,14 @@ export function createSessionInit(deps: SessionInitDeps) {
 				// they wouldn't match. Content+role is sufficient because the
 				// full text prompt is unique enough and claim-once-per-server-msg
 				// prevents cross-pairing when the session has repeats.
+				// Scan server msgs from newest→oldest: the optimistic is always
+				// the most-recently-typed prompt, so it must pair with the LAST
+				// matching server user msg. Forward-scan would incorrectly claim
+				// an older identical-content msg (e.g., user sends same text
+				// twice), leaving the new server msg unclaimed → both render.
 				const claimedServerIdx = new Set<number>();
 				const findMatchingServerUserIdx = (opt: ChatMessage): number => {
-					for (let k = 0; k < finalMessages.length; k++) {
+					for (let k = finalMessages.length - 1; k >= 0; k--) {
 						if (claimedServerIdx.has(k)) continue;
 						const sm = finalMessages[k];
 						if (sm.role !== 'user') continue;
