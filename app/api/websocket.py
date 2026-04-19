@@ -294,11 +294,17 @@ async def chat_websocket(
             # The current user message is always the most recently inserted DB row, so it
             # will be the last element in the list.
             last = initial_messages[-1]
+            logger.warning(
+                f"[STRIP-DEBUG] last_role={last.get('role')!r} last_type={last.get('type')!r} "
+                f"last_content_preview={repr((last.get('content') or '')[:80])} "
+                f"prompt_preview={repr(prompt[:80])} match={last.get('role') == 'user' and last.get('content') == prompt}"
+            )
             if (
                 last.get("role") == "user"
                 and last.get("content") == prompt
             ):
                 initial_messages = initial_messages[:-1]
+                logger.warning("[STRIP-DEBUG] stripped last user message")
 
         # Start live session with existing messages
         await live_session_store.start_streaming(session_id, initial_messages)
