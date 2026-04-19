@@ -161,6 +161,11 @@
 			loadAllTags()
 		]);
 
+		// Persisted profile may point to an ID that no longer exists
+		// (deleted on another device / tab). Reconcile against the freshly
+		// loaded profiles list before any new session is created.
+		activeSession.validateSelectedProfile(appData.current.profiles);
+
 		// Sync layout.activeView with the restored session from activeSession.init().
 		// These two stores persist independently (localStorage vs backend API) and can
 		// diverge. Generally the backend-persisted session is authoritative, EXCEPT

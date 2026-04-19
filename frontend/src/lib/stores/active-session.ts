@@ -15,7 +15,7 @@
  * - draft-manager.ts     — draft, scroll, error, system messages, rewind, takeover
  */
 
-import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
+import type { PermissionRequest as PermissionRequestType, UserQuestionRequest, Profile } from '$lib/api/client';
 import { notifySessionComplete, notifyWaitingForResponse } from '$lib/services/notifications';
 
 // Session infrastructure
@@ -497,6 +497,37 @@ export const activeSession = {
 		_update(s => ({ ...s, profile: profileId }));
 		switcher.saveSelectionToBackend(profileId, _state.project);
 		persistSession();
+	},
+
+	/**
+	 * Validate that the currently-selected profile still exists in the given
+	 * profiles list. If it's missing (e.g. deleted on this device or another),
+	 * fall back to a known profile so new sessions never load a null profile.
+	 *
+	 * Preference order for the replacement:
+	 *   1. First built-in profile (most stable default)
+	 *   2. First available profile
+	 *   3. Empty string if the list is empty (UI will show "Profile" fallback)
+	 *
+	 * Persists the correction through `setProfile` so it survives reloads.
+	 * No-op when the current selection is valid or unset.
+	 */
+	validateSelectedProfile(profilesList: Profile[]): boolean {
+		const current = _state.profile;
+		if (!current) return false;
+		if (profilesList.some(p => p.id === current)) return false;
+
+		const fallback =
+			profilesList.find(p => p.is_builtin)?.id ??
+			profilesList[0]?.id ??
+			'';
+
+		console.warn(
+			`[ActiveSession] Selected profile "${current}" no longer exists. ` +
+			`Falling back to "${fallback || '(none)'}".`
+		);
+		activeSession.setProfile(fallback);
+		return true;
 	},
 
 	setProject(projectId: string) {

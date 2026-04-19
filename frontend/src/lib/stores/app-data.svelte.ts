@@ -273,6 +273,15 @@ export const appData = {
 	async deleteProfile(profileId: string) {
 		await api.delete(`/profiles/${profileId}`);
 		await appData.loadProfiles();
+		// If the deleted profile was currently selected, pick a replacement so
+		// new sessions don't load a null profile. Dynamic import avoids the
+		// static cycle between app-data and active-session.
+		try {
+			const { activeSession } = await import('./active-session');
+			activeSession.validateSelectedProfile(_state.profiles);
+		} catch (e) {
+			console.error('[appData] Failed to validate profile after delete:', e);
+		}
 	},
 
 	async restoreProfile(profileId: string) {
