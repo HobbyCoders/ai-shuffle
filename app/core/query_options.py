@@ -182,8 +182,9 @@ def _build_thinking_config(config: Dict[str, Any], model: Optional[str], overrid
     # 'default' or unrecognized: omit thinking field, let SDK use its default
 
     # Resolve effort: override takes priority over profile config (independent of thinking)
+    # 'xhigh' is only valid for Opus 4.7+ models
     effort = overrides.get('effort') or config.get('effort')
-    if effort and effort in ('low', 'medium', 'high', 'max'):
+    if effort and effort in ('low', 'medium', 'high', 'max', 'xhigh'):
         result['effort'] = effort
         logger.debug(f"Using effort={effort}")
 
@@ -407,25 +408,12 @@ def build_options_from_profile(
     def stderr_callback(line: str):
         logger.debug("[Claude CLI stderr] %s", line)
 
-    # Process model selection
-    # Models like "opus[1m]" are native CLI aliases — pass them through as-is.
-    # Only map custom shorthand names (e.g., "sonnet-1m") that the CLI doesn't
-    # natively recognize to base model + beta headers.
+    # Process model selection.
+    # All supported model IDs (claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-6,
+    # claude-opus-4-7) and their [1m] variants are native CLI aliases — pass through as-is.
     raw_model = overrides.get("model") or config.get("model")
     model_to_use = raw_model
     betas_to_use = []
-
-    # Map custom shorthand names to base model + beta headers.
-    # Do NOT map CLI-native aliases like "opus[1m]" — the CLI handles those directly.
-    MODEL_1M_MAPPING = {
-        "sonnet-1m": ("sonnet", ["context-1m-2025-08-07"]),
-        "claude-sonnet-4-5-1m": ("claude-sonnet-4-5-20250514", ["context-1m-2025-08-07"]),
-        "claude-sonnet-4-1m": ("claude-sonnet-4-20250514", ["context-1m-2025-08-07"]),
-    }
-
-    if raw_model in MODEL_1M_MAPPING:
-        model_to_use, betas_to_use = MODEL_1M_MAPPING[raw_model]
-        logger.debug(f"1M context model selected: {raw_model} -> model={model_to_use}, betas={betas_to_use}")
 
     # Fast mode: three-pronged approach to enable fastMode reliably.
     #

@@ -22,7 +22,7 @@
 	const effectiveModel = $derived.by(() => {
 		if ($activeSession.modelOverride) return $activeSession.modelOverride;
 		const profile = $profiles.find(p => p.id === $activeSession.profile);
-		return profile?.config?.model || 'sonnet';
+		return profile?.config?.model || 'claude-sonnet-4-6';
 	});
 
 	// Fast mode is only meaningful with Opus models (per-session state)
@@ -43,7 +43,8 @@
 		{ value: 'low', label: 'Low', description: 'Quick, minimal reasoning' },
 		{ value: 'medium', label: 'Medium', description: 'Balanced reasoning' },
 		{ value: 'high', label: 'High', description: 'Thorough reasoning' },
-		{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' }
+		{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' },
+		{ value: 'xhigh', label: 'XHigh', description: 'Opus 4.7+ extreme reasoning' }
 	];
 </script>
 
@@ -57,7 +58,7 @@
 				class="fast-mode-badge"
 				class:active={fastModeActive}
 				class:inactive={!isOpusModel}
-				title={isOpusModel ? 'Fast mode active (Opus 4.6)' : 'Fast mode enabled but requires Opus model'}
+				title={isOpusModel ? 'Fast mode active' : 'Fast mode enabled but requires Opus model'}
 				onclick={() => activeSession.setFastMode(false)}
 			>
 				<span class="fast-icon">↯</span>

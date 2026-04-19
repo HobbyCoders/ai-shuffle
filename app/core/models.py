@@ -75,12 +75,12 @@ class SystemPromptConfig(BaseModel):
 class ProfileConfig(BaseModel):
     """Claude Agent configuration stored in profile - maps to ClaudeAgentOptions"""
     # Core settings
-    model: Optional[str] = "sonnet"
+    model: Optional[str] = "claude-sonnet-4-6"
     permission_mode: Optional[str] = "default"  # default, auto, acceptEdits, plan, bypassPermissions
     thinking_mode: Optional[str] = "default"  # default, disabled, adaptive, think, think_harder, ultra_think
     # Opus 4.6+ uses effort-based reasoning instead of token budgets
-    # effort: low, medium, high, max (only used when model is opus)
-    effort: Optional[str] = None  # low, medium, high, max - for Opus 4.6+ models
+    # effort: low, medium, high, max, xhigh (xhigh only for Opus 4.7+)
+    effort: Optional[str] = None  # low, medium, high, max, xhigh - for Opus 4.6+ models
     max_turns: Optional[int] = None
 
     # Tool configuration - SDK 0.1.12+ supports new 'tools' option
@@ -354,7 +354,7 @@ class QueryOverrides(BaseModel):
     system_prompt_append: Optional[str] = None
     max_turns: Optional[int] = None
     thinking_mode: Optional[str] = None  # default, disabled, adaptive, think, think_harder, ultra_think
-    effort: Optional[str] = None  # low, medium, high, max
+    effort: Optional[str] = None  # low, medium, high, max, xhigh (xhigh only for Opus 4.7+)
 
 
 class QueryRequest(BaseModel):
@@ -709,10 +709,10 @@ class AgentExportData(BaseModel):
     """Agent configuration data for export"""
     name: str
     description: Optional[str] = None
-    model: Optional[str] = "sonnet"
+    model: Optional[str] = "claude-sonnet-4-6"
     permission_mode: Optional[str] = "default"  # default, auto, acceptEdits, plan, bypassPermissions
     thinking_mode: Optional[str] = "default"
-    effort: Optional[str] = None
+    effort: Optional[str] = None  # low, medium, high, max, xhigh (xhigh only for Opus 4.7+)
     system_prompt_type: Optional[str] = "preset"
     system_prompt_preset: Optional[str] = "claude_code"
     system_prompt_content: Optional[str] = None

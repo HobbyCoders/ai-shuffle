@@ -203,7 +203,7 @@ def build_generation_options(
     config: Dict[str, Any] = profile_config or {}
 
     # Model: explicit override > profile > hard fallback
-    model = model_override or config.get("model") or "sonnet"
+    model = model_override or config.get("model") or "claude-sonnet-4-6"
 
     # Permission mode: profile value or bypassPermissions
     permission_mode = config.get("permission_mode") or "bypassPermissions"
@@ -260,7 +260,7 @@ def generation_fingerprint(
     """
     config: Dict[str, Any] = profile_config or {}
 
-    model = model_override or config.get("model") or "sonnet"
+    model = model_override or config.get("model") or "claude-sonnet-4-6"
     permission_mode = config.get("permission_mode") or "bypassPermissions"
     sources = _resolve_setting_sources(config)
     sources_tuple: Tuple[str, ...] = tuple(sources) if sources else ()

@@ -59,7 +59,7 @@
 		enabled_agents: string[];
 		include_partial_messages: boolean;
 		thinking_mode: 'default' | 'disabled' | 'adaptive' | 'think' | 'think_harder' | 'ultra_think';
-		effort: 'low' | 'medium' | 'high' | 'max' | null;
+		effort: 'low' | 'medium' | 'high' | 'max' | 'xhigh' | null;
 		system_prompt_type: string;
 		system_prompt_preset: string;
 		system_prompt_append: string;
@@ -265,14 +265,17 @@
 				<div class="pf-field">
 					<label class="pf-label" for="profile-model">Model</label>
 					<select id="profile-model" class="pf-select" value={customModelMode ? '__custom__' : profileForm.model} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v === '__custom__') { onCustomModelModeChange(true, ''); } else { onCustomModelModeChange(false, v); } }}>
-						<option value="haiku">Haiku</option>
-						<option value="sonnet">Sonnet</option>
-						<option value="opus">Opus</option>
-						<option value="opus[1m]">Opus 1M</option>
+						<option value="claude-haiku-4-5">Haiku 4.5</option>
+						<option value="claude-sonnet-4-6">Sonnet 4.6</option>
+						<option value="claude-sonnet-4-6[1m]">Sonnet 4.6 1M</option>
+						<option value="claude-opus-4-6">Opus 4.6</option>
+						<option value="claude-opus-4-6[1m]">Opus 4.6 1M</option>
+						<option value="claude-opus-4-7">Opus 4.7</option>
+						<option value="claude-opus-4-7[1m]">Opus 4.7 1M</option>
 						<option value="__custom__">Custom...</option>
 					</select>
 					{#if customModelMode}
-						<input type="text" value={profileForm.model} oninput={(e) => onFormChange('model', (e.target as HTMLInputElement).value)} class="pf-input pf-input--mono" placeholder="e.g. claude-opus-4-6" style="margin-top: 6px;" />
+						<input type="text" value={profileForm.model} oninput={(e) => onFormChange('model', (e.target as HTMLInputElement).value)} class="pf-input pf-input--mono" placeholder="e.g. claude-opus-4-7" style="margin-top: 6px;" />
 					{/if}
 				</div>
 				<div class="pf-field">
@@ -304,6 +307,7 @@
 						<option value="medium">Medium</option>
 						<option value="high">High</option>
 						<option value="max">Max</option>
+						<option value="xhigh">XHigh (Opus 4.7+)</option>
 					</select>
 				</div>
 				<div class="pf-field">

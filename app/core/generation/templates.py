@@ -20,7 +20,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "description_pattern": "Use this agent to review code for {focus_areas}. Invoke when reviewing PRs, auditing existing code, or ensuring code quality.",
         "domain": "code-review",
         "tools": ["Read", "Grep", "Glob"],
-        "model": "sonnet",
+        "model": "claude-sonnet-4-6",
         "thinking_mode": "think",
         "ai_tools": [],
         "prompt_sections": [
@@ -52,7 +52,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
                     "Cryptographic implementation",
                     "Secret/credential exposure",
                 ],
-                "model": "opus",  # Security needs extra scrutiny
+                "model": "claude-opus-4-7",  # Security needs extra scrutiny
                 "thinking_mode": "think_harder",
             },
             "performance": {
@@ -75,7 +75,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "description_pattern": "Use this agent to write {test_type} tests for {lang} code. Invoke when adding test coverage, implementing TDD, or verifying functionality.",
         "domain": "testing",
         "tools": ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
-        "model": "sonnet",
+        "model": "claude-sonnet-4-6",
         "thinking_mode": "think",
         "ai_tools": [],
         "prompt_sections": [
@@ -112,7 +112,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "description_pattern": "Use this agent for comprehensive security audits. Invoke for penetration testing preparation, vulnerability assessment, or security compliance reviews.",
         "domain": "security",
         "tools": ["Read", "Grep", "Glob", "WebSearch"],
-        "model": "opus",
+        "model": "claude-opus-4-7",
         "thinking_mode": "think_harder",
         "ai_tools": [],
         "prompt_sections": [
@@ -132,7 +132,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "description_pattern": "Use this agent to write {doc_type} documentation. Invoke when creating READMEs, API docs, architecture docs, or inline documentation.",
         "domain": "documentation",
         "tools": ["Read", "Write", "Edit", "Glob", "Grep"],
-        "model": "sonnet",
+        "model": "claude-sonnet-4-6",
         "thinking_mode": "default",
         "ai_tools": [],
         "prompt_sections": [
@@ -168,7 +168,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "description_pattern": "Use this agent to analyze pull requests for quality, impact, and potential issues. Invoke before merging PRs or when reviewing complex changes.",
         "domain": "pr-review",
         "tools": ["Read", "Grep", "Glob", "Bash"],
-        "model": "sonnet",
+        "model": "claude-sonnet-4-6",
         "thinking_mode": "think",
         "ai_tools": [],
         "prompt_sections": [
@@ -186,7 +186,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "description_pattern": "Use this agent to research {topic}. Invoke when exploring new technologies, comparing solutions, or gathering technical information.",
         "domain": "research",
         "tools": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
-        "model": "sonnet",
+        "model": "claude-sonnet-4-6",
         "thinking_mode": "think",
         "ai_tools": [],
         "prompt_sections": [
@@ -204,7 +204,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "description_pattern": "Use this agent for code refactoring tasks. Invoke when restructuring code, extracting modules, or improving code organization.",
         "domain": "refactoring",
         "tools": ["Read", "Write", "Edit", "Grep", "Glob", "Bash"],
-        "model": "opus",
+        "model": "claude-opus-4-6",
         "thinking_mode": "think_harder",
         "ai_tools": [],
         "prompt_sections": [
@@ -223,7 +223,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "description_pattern": "Use this agent to quickly explore and understand codebases. Invoke when you need to find files, understand structure, or locate specific code.",
         "domain": "exploration",
         "tools": ["Read", "Grep", "Glob"],
-        "model": "haiku",  # Fast for exploration
+        "model": "claude-haiku-4-5",  # Fast for exploration
         "thinking_mode": "default",
         "ai_tools": [],
         "prompt_sections": [
@@ -240,7 +240,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "description_pattern": "Use this agent to plan implementations and design solutions. Invoke before starting complex features, refactors, or architectural changes.",
         "domain": "planning",
         "tools": ["Read", "Grep", "Glob"],
-        "model": "opus",
+        "model": "claude-opus-4-7",
         "thinking_mode": "ultra_think",
         "ai_tools": [],
         "prompt_sections": [
@@ -258,7 +258,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "description_pattern": "Use this agent to debug issues and trace problems. Invoke when encountering errors, unexpected behavior, or performance issues.",
         "domain": "debugging",
         "tools": ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
-        "model": "sonnet",
+        "model": "claude-sonnet-4-6",
         "thinking_mode": "think",
         "ai_tools": [],
         "prompt_sections": [
@@ -276,7 +276,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "description_pattern": "Use this agent for creative tasks involving images, design, or visual content. Invoke when generating images, creating visuals, or design work.",
         "domain": "creative",
         "tools": ["Read", "Write", "Edit", "Glob"],
-        "model": "sonnet",
+        "model": "claude-sonnet-4-6",
         "thinking_mode": "default",
         "ai_tools": ["image_generation", "image_editing", "image_reference"],
         "prompt_sections": [

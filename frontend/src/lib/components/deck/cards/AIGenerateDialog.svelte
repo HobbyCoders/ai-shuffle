@@ -25,7 +25,7 @@
 	let description = $state('');
 	let referenceMaterial = $state('');
 	let showReferenceMaterial = $state(false);
-	let selectedModel = $state('sonnet');
+	let selectedModel = $state('claude-sonnet-4-6');
 	let dialogState = $state<DialogState>('initial');
 	let error = $state('');
 
@@ -55,7 +55,7 @@
 			description = '';
 			referenceMaterial = '';
 			showReferenceMaterial = false;
-			selectedModel = 'sonnet';
+			selectedModel = 'claude-sonnet-4-6';
 			dialogState = 'initial';
 			error = '';
 			clarificationQuestions = [];
@@ -335,12 +335,16 @@
 					<div class="form-section">
 						<label class="form-label" for="model"> Generation Model </label>
 						<select id="model" class="model-select" bind:value={selectedModel} disabled={isLoading}>
-							<option value="haiku">Haiku (Fast)</option>
-							<option value="sonnet">Sonnet (Recommended)</option>
-							<option value="opus">Opus (Best Quality)</option>
+							<option value="claude-haiku-4-5">Haiku 4.5 (Fast)</option>
+							<option value="claude-sonnet-4-6">Sonnet 4.6 (Recommended)</option>
+							<option value="claude-sonnet-4-6[1m]">Sonnet 4.6 1M</option>
+							<option value="claude-opus-4-6">Opus 4.6</option>
+							<option value="claude-opus-4-6[1m]">Opus 4.6 1M</option>
+							<option value="claude-opus-4-7">Opus 4.7 (Best Quality)</option>
+							<option value="claude-opus-4-7[1m]">Opus 4.7 1M</option>
 						</select>
 						<div class="model-hint">
-							Sonnet is recommended for comprehensive generation. Use Opus for complex configurations.
+							Sonnet 4.6 is recommended for comprehensive generation. Use Opus 4.7 for complex configurations.
 						</div>
 					</div>
 

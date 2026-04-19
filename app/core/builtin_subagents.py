@@ -392,7 +392,7 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
         "description": "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. \"src/components/**/*.tsx\"), search code for keywords (eg. \"API endpoints\"), or answer questions about the codebase (eg. \"how do API endpoints work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions.",
         "prompt": EXPLORE_PROMPT,
         "tools": ["Read", "Grep", "Glob", "Bash", "Skill"],
-        "model": "haiku",
+        "model": "claude-haiku-4-5",
     },
     {
         "id": "Plan",
@@ -408,7 +408,7 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
         "description": "Use this agent for ALL frontend, UI, UX, and design tasks. Invoke whenever creating new frontend components, pages, or layouts; modifying existing UI/UX; implementing responsive designs; adding animations/transitions; choosing typography, color palettes, or design systems; building forms, dashboards, landing pages, or any visual interface; converting mockups to code; or improving the look and feel of any user-facing element. This is the default agent for anything visual or design-related.",
         "prompt": FRONTEND_DESIGNER_PROMPT,
         "tools": None,  # All tools
-        "model": "opus",
+        "model": "claude-opus-4-6",
     },
     {
         "id": "chat-history-summarizer",
@@ -416,7 +416,7 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
         "description": "Use this agent when the user references a chat history file (.jsonl from ~/.claude/projects/) or asks about a previous conversation. This agent reads and summarizes chat history efficiently without burning main context.",
         "prompt": CHAT_HISTORY_SUMMARIZER_PROMPT,
         "tools": ["Read", "Grep", "Glob"],
-        "model": "haiku",
+        "model": "claude-haiku-4-5",
     },
 ]
 

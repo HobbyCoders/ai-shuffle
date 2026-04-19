@@ -801,7 +801,7 @@ async def export_profile(
     agent_data = AgentExportData(
         name=profile.get("name", profile_id),
         description=profile.get("description"),
-        model=config.get("model", "sonnet"),
+        model=config.get("model", "claude-sonnet-4-6"),
         permission_mode=config.get("permission_mode", "default"),
         thinking_mode=config.get("thinking_mode", "default"),
         effort=config.get("effort"),
@@ -909,7 +909,7 @@ async def import_profile(
 
     # Build config from agent data
     config = {
-        "model": agent_data.model or "sonnet",
+        "model": agent_data.model or "claude-sonnet-4-6",
         "permission_mode": agent_data.permission_mode or "default",
         "thinking_mode": agent_data.thinking_mode or "default",
         "include_partial_messages": agent_data.include_partial_messages if agent_data.include_partial_messages is not None else True,

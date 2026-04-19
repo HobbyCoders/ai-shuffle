@@ -510,14 +510,20 @@
 
 	function getModelDisplay(model?: string): string {
 		switch (model) {
-			case 'haiku':
-				return 'Haiku';
-			case 'sonnet':
-				return 'Sonnet';
-			case 'opus':
-				return 'Opus';
-			case 'opus[1m]':
-				return 'Opus 1M';
+			case 'claude-haiku-4-5':
+				return 'Haiku 4.5';
+			case 'claude-sonnet-4-6':
+				return 'Sonnet 4.6';
+			case 'claude-sonnet-4-6[1m]':
+				return 'Sonnet 4.6 1M';
+			case 'claude-opus-4-6':
+				return 'Opus 4.6';
+			case 'claude-opus-4-6[1m]':
+				return 'Opus 4.6 1M';
+			case 'claude-opus-4-7':
+				return 'Opus 4.7';
+			case 'claude-opus-4-7[1m]':
+				return 'Opus 4.7 1M';
 			default:
 				return model || 'Default';
 		}
@@ -525,12 +531,15 @@
 
 	function getModelBadgeClass(model?: string): string {
 		switch (model) {
-			case 'haiku':
+			case 'claude-haiku-4-5':
 				return 'card-badge--haiku';
-			case 'sonnet':
+			case 'claude-sonnet-4-6':
+			case 'claude-sonnet-4-6[1m]':
 				return 'card-badge--sonnet';
-			case 'opus':
-			case 'opus[1m]':
+			case 'claude-opus-4-6':
+			case 'claude-opus-4-6[1m]':
+			case 'claude-opus-4-7':
+			case 'claude-opus-4-7[1m]':
 				return 'card-badge--opus';
 			default:
 				return 'card-badge--muted';

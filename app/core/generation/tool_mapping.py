@@ -162,20 +162,20 @@ DOMAIN_KEYWORDS: Dict[str, List[str]] = {
 # ============================================================================
 
 MODEL_BY_DOMAIN: Dict[str, str] = {
-    "code-review": "sonnet",
-    "security": "opus",  # Security needs careful analysis
-    "testing": "sonnet",
-    "documentation": "sonnet",
-    "refactoring": "opus",  # Complex restructuring
-    "exploration": "haiku",  # Fast searches
-    "planning": "opus",  # Complex reasoning
-    "research": "sonnet",
-    "debugging": "sonnet",
-    "pr-review": "sonnet",
-    "creative": "sonnet",
-    "data-science": "sonnet",
-    "web-browsing": "sonnet",
-    "general": "sonnet",
+    "code-review": "claude-sonnet-4-6",
+    "security": "claude-opus-4-7",  # Security needs careful analysis
+    "testing": "claude-sonnet-4-6",
+    "documentation": "claude-sonnet-4-6",
+    "refactoring": "claude-opus-4-6",  # Complex restructuring
+    "exploration": "claude-haiku-4-5",  # Fast searches
+    "planning": "claude-opus-4-7",  # Complex reasoning
+    "research": "claude-sonnet-4-6",
+    "debugging": "claude-sonnet-4-6",
+    "pr-review": "claude-sonnet-4-6",
+    "creative": "claude-sonnet-4-6",
+    "data-science": "claude-sonnet-4-6",
+    "web-browsing": "claude-sonnet-4-6",
+    "general": "claude-sonnet-4-6",
 }
 
 # ============================================================================
@@ -269,9 +269,9 @@ def get_model_for_domain(domain: str) -> str:
         domain: Domain identifier
 
     Returns:
-        Model name (haiku, sonnet, opus)
+        Model string (e.g., claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7)
     """
-    return MODEL_BY_DOMAIN.get(domain, "sonnet")
+    return MODEL_BY_DOMAIN.get(domain, "claude-sonnet-4-6")
 
 
 def get_thinking_mode_for_domain(domain: str) -> str:

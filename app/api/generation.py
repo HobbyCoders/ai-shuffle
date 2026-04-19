@@ -194,7 +194,7 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
 
     profile = get_default_ai_profile()
     profile_config = (profile or {}).get("config") if profile else None
-    effective_model = model or (profile_config or {}).get("model") or "sonnet"
+    effective_model = model or (profile_config or {}).get("model") or "claude-sonnet-4-6"
 
     # --- Fast path: warm pooled client ---
     pooled = await generation_pool.acquire(profile_config, model_override=model)
@@ -329,7 +329,7 @@ async def _generate_profile_internal(
     agent_data = AgentExportData(
         name=generated.get("name", "Generated Profile"),
         description=generated.get("description"),
-        model=generated.get("model", "sonnet"),
+        model=generated.get("model", "claude-sonnet-4-6"),
         permission_mode=generated.get("permission_mode", "default"),
         system_prompt_type=generated.get("system_prompt_type", "preset"),
         system_prompt_preset=generated.get("system_prompt_preset", "claude_code"),

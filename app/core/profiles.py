@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 # Default profile configuration template (for reference when creating new profiles)
-# Model names for Claude Code SDK: opus, sonnet, haiku
+# Supported model strings: claude-haiku-4-5, claude-sonnet-4-6, claude-sonnet-4-6[1m],
+# claude-opus-4-6, claude-opus-4-6[1m], claude-opus-4-7, claude-opus-4-7[1m]
 #
 # NOTE on setting_sources:
 # - "user": Loads user-level settings from ~/.claude/settings.json
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Auto-compact is enabled by default in Claude Code's user settings.
 # Without "user" in setting_sources, auto-compact won't trigger automatically.
 DEFAULT_PROFILE_CONFIG: Dict[str, Any] = {
-    "model": "sonnet",
+    "model": "claude-sonnet-4-6",
     "allowed_tools": [],
     "permission_mode": "default",
     "system_prompt": {
@@ -55,7 +56,7 @@ DEFAULT_AI_PROFILE: Dict[str, Any] = {
                    "PR descriptions, profile/subagent generation, and other internal AI tasks. "
                    "Edit this profile to change the model and settings used by these features.",
     "config": {
-        "model": "sonnet",
+        "model": "claude-sonnet-4-6",
         "permission_mode": "bypassPermissions",
         "thinking_mode": "default",
         "system_prompt": {
@@ -102,12 +103,12 @@ def get_default_ai_profile() -> Optional[Dict[str, Any]]:
 def get_default_ai_model() -> str:
     """Get the model configured in the default AI profile.
 
-    Falls back to 'sonnet' if the profile doesn't exist or has no model set.
+    Falls back to 'claude-sonnet-4-6' if the profile doesn't exist or has no model set.
     """
     profile = get_default_ai_profile()
     if profile:
-        return profile.get("config", {}).get("model", "sonnet") or "sonnet"
-    return "sonnet"
+        return profile.get("config", {}).get("model", "claude-sonnet-4-6") or "claude-sonnet-4-6"
+    return "claude-sonnet-4-6"
 
 
 def run_migrations():

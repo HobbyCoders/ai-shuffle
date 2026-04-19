@@ -82,7 +82,7 @@ def _create_profile_tools(is_admin: bool) -> list:
                 "description": {"type": "string"},
                 "model": {
                     "type": "string",
-                    "enum": ["sonnet", "opus", "haiku"],
+                    "enum": ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-4-6[1m]", "claude-opus-4-6", "claude-opus-4-6[1m]", "claude-opus-4-7", "claude-opus-4-7[1m]"],
                     "description": "AI model to use.",
                 },
                 "tools_preset": {
@@ -145,7 +145,7 @@ def _create_profile_tools(is_admin: bool) -> list:
 
         # Build config
         config: Dict[str, Any] = {
-            "model": args.get("model", "sonnet"),
+            "model": args.get("model", "claude-sonnet-4-6"),
             "permission_mode": args.get("permission_mode", "default"),
             "tools_preset": args.get("tools_preset", "claude_code"),
         }
@@ -211,7 +211,7 @@ def _create_profile_tools(is_admin: bool) -> list:
                 "profile_id": {"type": "string"},
                 "name": {"type": "string"},
                 "description": {"type": "string"},
-                "model": {"type": "string", "enum": ["sonnet", "opus", "haiku"]},
+                "model": {"type": "string", "enum": ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-4-6[1m]", "claude-opus-4-6", "claude-opus-4-6[1m]", "claude-opus-4-7", "claude-opus-4-7[1m]"]},
                 "permission_mode": {"type": "string", "enum": ["default", "auto", "acceptEdits", "plan", "bypassPermissions"]},
                 "thinking_mode": {"type": "string", "enum": ["default", "disabled", "adaptive", "think", "think_harder", "ultra_think"]},
                 "tools_preset": {"type": "string", "enum": ["claude_code"]},
