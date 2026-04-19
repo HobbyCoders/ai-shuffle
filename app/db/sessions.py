@@ -347,7 +347,8 @@ def get_sessions_cursor(
         next_cursor_id: Optional[str] = None
         if rows and has_more:
             last = rows[-1]
-            next_cursor = last["updated_at"]
+            last_updated = last["updated_at"]
+            next_cursor = last_updated.isoformat() if hasattr(last_updated, "isoformat") else last_updated
             next_cursor_id = last["id"]
 
         return rows, next_cursor, next_cursor_id, has_more
