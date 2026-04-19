@@ -171,6 +171,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 	return {
 		async sendMessage(prompt: string, options?: SendMessageOptions) {
+			prompt = prompt.trim();
 			const _state = getState();
 
 			// Reopen completed worktree before sending message
@@ -463,6 +464,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		},
 
 		async autoCreateWorktree(prompt: string, pendingUploadPaths?: string[]) {
+			prompt = prompt.trim();
 			const _state = getState();
 			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return; }
 			if (!_state.project) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return; }

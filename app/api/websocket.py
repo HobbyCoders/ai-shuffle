@@ -240,10 +240,12 @@ async def chat_websocket(
         # During interrupt_and_query, end_streaming() preserves messages in memory, but
         # the JSONL file may be incomplete (subprocess killed before flushing).
         # Using live store messages prevents context loss on interrupt transitions.
+        logger.debug(f"[RUN_QUERY] session={session_id} prompt={prompt[:80]!r}")
         existing_live = live_session_store.get_session(session_id)
         if existing_live and not existing_live.is_streaming and existing_live.messages:
             # Use complete messages from the interrupted session's live store
             initial_messages = [m.to_dict() for m in existing_live.messages]
+            logger.debug(f"[RUN_QUERY] using LIVE_STORE branch, {len(initial_messages)} msgs, last={initial_messages[-1].get('role')!r}/{repr((initial_messages[-1].get('content') or '')[:60])}")
             ctx.debug(logger, f"Using {len(initial_messages)} messages from live store (interrupted session)")
         else:
             # DB-first loading (fast path: indexed query + simple transform)
@@ -294,23 +296,19 @@ async def chat_websocket(
             # The current user message is always the most recently inserted DB row, so it
             # will be the last element in the list.
             last = initial_messages[-1]
-            logger.warning(
-                f"[STRIP-DEBUG] last_role={last.get('role')!r} last_type={last.get('type')!r} "
-                f"last_content_preview={repr((last.get('content') or '')[:80])} "
-                f"prompt_preview={repr(prompt[:80])} match={last.get('role') == 'user' and last.get('content') == prompt}"
-            )
             if (
                 last.get("role") == "user"
                 and last.get("content") == prompt
             ):
                 initial_messages = initial_messages[:-1]
-                logger.warning("[STRIP-DEBUG] stripped last user message")
 
         # Start live session with existing messages
+        logger.debug(f"[RUN_QUERY] seeding live store with {len(initial_messages)} msgs")
         await live_session_store.start_streaming(session_id, initial_messages)
 
         # Add user message to live store
         user_message_id = f"user-{uuid.uuid4()}"
+        logger.debug(f"[RUN_QUERY] add_user_message id={user_message_id}")
         await live_session_store.add_user_message(session_id, prompt, user_message_id)
 
         # Heartbeat task to keep WebSocket alive during long operations (tool execution, subagents)
