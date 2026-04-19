@@ -173,10 +173,10 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
     system_prompt, env, extra_args — and passes them to the SDK. Tools / MCP /
     agents / hooks are always forced off for one-shot generation.
 
-    Fast path: tries to acquire a pre-warmed `ClaudeSDKClient` from
-    `generation_pool` whose fingerprint matches the current profile config.
-    Saves the 8-15s `claude.exe` cold-start cost. Falls back to a one-shot
-    `query()` when the pool is busy, warming, or fingerprint-mismatched.
+    Each call spawns a fresh `claude.exe` subprocess via the SDK's top-level
+    `query()`. No warm pool, no cross-call context bleed. The configured
+    workspace directory is used as cwd so CLAUDE.md / .claude/ auto-discovery
+    is predictable.
 
     Args:
         prompt: The prompt to send to Claude
@@ -187,46 +187,13 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
         Text response from Claude
     """
     from app.core.profiles import get_default_ai_profile
-    from app.core.generation_pool import (
-        build_generation_options,
-        generation_pool,
-    )
+    from app.core.generation_options import build_generation_options
 
     profile = get_default_ai_profile()
     profile_config = (profile or {}).get("config") if profile else None
     effective_model = model or (profile_config or {}).get("model") or "claude-sonnet-4-6"
 
-    # --- Fast path: warm pooled client ---
-    pooled = await generation_pool.acquire(profile_config, model_override=model)
-    if pooled is not None:
-        t0 = time.perf_counter()
-        response_text: list[str] = []
-        ok = True
-        try:
-            async with api_error_handler("run AI generation (pooled)"):
-                await pooled.client.query(prompt)
-                async for message in pooled.client.receive_response():
-                    if isinstance(message, AssistantMessage):
-                        for block in message.content:
-                            if isinstance(block, TextBlock):
-                                response_text.append(block.text)
-        except Exception:
-            ok = False
-            raise
-        finally:
-            # Destroy the client on failure — it may be in a bad state.
-            await generation_pool.release(pooled, destroy=not ok)
-            if ok:
-                logger.info(
-                    f"[generate_with_claude] pooled call model={effective_model} "
-                    f"took {(time.perf_counter() - t0) * 1000:.0f}ms"
-                )
-
-        return "".join(response_text)
-
-    # --- Slow path: one-shot subprocess ---
-    # Same profile-honoring options as the pool, but with max_turns=1 since
-    # this subprocess is spawned only for a single query.
+    # Single-shot subprocess: max_turns=1 since we only send one prompt.
     options = build_generation_options(
         profile_config,
         model_override=model,
@@ -234,7 +201,7 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
     )
 
     t0 = time.perf_counter()
-    response_text = []
+    response_text: list[str] = []
 
     async with api_error_handler("run AI generation"):
         async for message in query(prompt=prompt, options=options):
@@ -245,7 +212,7 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
 
     logger.info(
         f"[generate_with_claude] one-shot call model={effective_model} "
-        f"took {(time.perf_counter() - t0) * 1000:.0f}ms (pool unavailable)"
+        f"took {(time.perf_counter() - t0) * 1000:.0f}ms"
     )
     return "".join(response_text)
 
