@@ -516,21 +516,28 @@
 										<Star size={12} strokeWidth={1.5} fill={session.is_favorite ? 'currentColor' : 'none'} />
 									</span>
 									{#if deletingSessionId === session.id}
-										<button
+										<span
 											class="session-delete-confirm"
-											onclick={(e) => handleDeleteSession(e, session.id)}
+											class:is-disabled={deleteSessionLoading}
+											role="button"
+											tabindex="0"
+											aria-disabled={deleteSessionLoading}
+											onclick={(e) => { if (!deleteSessionLoading) handleDeleteSession(e, session.id); }}
+											onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && !deleteSessionLoading) handleDeleteSession(e, session.id); }}
 											title="Confirm delete"
-											disabled={deleteSessionLoading}
 										>
 											<BrushCleaning size={11} strokeWidth={2} />
-										</button>
-										<button
+										</span>
+										<span
 											class="session-delete-cancel"
+											role="button"
+											tabindex="0"
 											onclick={(e) => cancelDeleteSession(e)}
+											onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') cancelDeleteSession(e); }}
 											title="Cancel"
 										>
 											<X size={11} strokeWidth={2} />
-										</button>
+										</span>
 									{:else}
 										<span
 											class="session-delete-btn"
@@ -684,21 +691,28 @@
 													<Star size={12} strokeWidth={1.5} fill={session.is_favorite ? 'currentColor' : 'none'} />
 												</span>
 												{#if deletingSessionId === session.id}
-													<button
+													<span
 														class="session-delete-confirm"
-														onclick={(e) => handleDeleteSession(e, session.id)}
+														class:is-disabled={deleteSessionLoading}
+														role="button"
+														tabindex="0"
+														aria-disabled={deleteSessionLoading}
+														onclick={(e) => { if (!deleteSessionLoading) handleDeleteSession(e, session.id); }}
+														onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && !deleteSessionLoading) handleDeleteSession(e, session.id); }}
 														title="Confirm delete"
-														disabled={deleteSessionLoading}
 													>
 														<BrushCleaning size={11} strokeWidth={2} />
-													</button>
-													<button
+													</span>
+													<span
 														class="session-delete-cancel"
+														role="button"
+														tabindex="0"
 														onclick={(e) => cancelDeleteSession(e)}
+														onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') cancelDeleteSession(e); }}
 														title="Cancel"
 													>
 														<X size={11} strokeWidth={2} />
-													</button>
+													</span>
 												{:else}
 													<span
 														class="session-delete-btn"
@@ -788,21 +802,28 @@
 													</div>
 													<span class="session-time">{formatRelativeTime(session.updated_at || session.created_at)}</span>
 													{#if deletingSessionId === session.id}
-														<button
+														<span
 															class="session-delete-confirm"
-															onclick={(e) => handleDeleteSession(e, session.id)}
+															class:is-disabled={deleteSessionLoading}
+															role="button"
+															tabindex="0"
+															aria-disabled={deleteSessionLoading}
+															onclick={(e) => { if (!deleteSessionLoading) handleDeleteSession(e, session.id); }}
+															onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && !deleteSessionLoading) handleDeleteSession(e, session.id); }}
 															title="Confirm delete"
-															disabled={deleteSessionLoading}
 														>
 															<BrushCleaning size={11} strokeWidth={2} />
-														</button>
-														<button
+														</span>
+														<span
 															class="session-delete-cancel"
+															role="button"
+															tabindex="0"
 															onclick={(e) => cancelDeleteSession(e)}
+															onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') cancelDeleteSession(e); }}
 															title="Cancel"
 														>
 															<X size={11} strokeWidth={2} />
-														</button>
+														</span>
 													{:else}
 														<span
 															class="session-delete-btn"
@@ -1554,9 +1575,13 @@
 		background: color-mix(in oklch, var(--destructive, #ef4444) 25%, transparent);
 	}
 
-	.session-delete-confirm:disabled {
+	.session-delete-confirm.is-disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+
+	.session-delete-confirm.is-disabled:hover {
+		background: color-mix(in oklch, var(--destructive, #ef4444) 15%, transparent);
 	}
 
 	.session-delete-cancel {

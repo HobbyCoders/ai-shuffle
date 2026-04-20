@@ -9,7 +9,7 @@ import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { ExecutionMode } from '../types';
 import { api } from '$lib/api/client';
-import { generateBranchName, generateBranchNameLocal, migrateUploadsToWorktree } from '$lib/api/git';
+import { generateBranchName, generateBranchNameLocal, migrateUploadsToWorktree, reopenWorktree } from '$lib/api/git';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -179,7 +179,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			if (_state.worktreeDeleted && _state.worktreeId && _state.project) {
 				update(s => ({ ...s, isReopeningWorktree: true, error: null }));
 				try {
-					const { reopenWorktree } = await import('$lib/api/git');
 					await reopenWorktree(_state.project, _state.worktreeId);
 					update(s => ({ ...s, worktreeDeleted: false, isReopeningWorktree: false }));
 				} catch (e: any) {

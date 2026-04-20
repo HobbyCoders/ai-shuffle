@@ -13,6 +13,7 @@ import { api, searchSessionsPaginated } from '$lib/api/client';
 import type { Project } from './types';
 import { messageCache } from './message-cache';
 import { createSubscribers } from './store-utils';
+import { activeSession } from './active-session';
 
 // Re-export the Project type so consumers migrating from the old file get it
 export type { Project };
@@ -274,10 +275,11 @@ export const appData = {
 		await api.delete(`/profiles/${profileId}`);
 		await appData.loadProfiles();
 		// If the deleted profile was currently selected, pick a replacement so
-		// new sessions don't load a null profile. Dynamic import avoids the
-		// static cycle between app-data and active-session.
+		// new sessions don't load a null profile. The cycle between app-data
+		// and active-session is handled by ESM live bindings — both modules
+		// only reference each other inside deferred callbacks, never at
+		// module-init time.
 		try {
-			const { activeSession } = await import('./active-session');
 			activeSession.validateSelectedProfile(_state.profiles);
 		} catch (e) {
 			console.error('[appData] Failed to validate profile after delete:', e);
