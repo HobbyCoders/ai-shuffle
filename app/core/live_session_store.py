@@ -252,6 +252,66 @@ class LiveSessionStore:
         """Increment the update ID for change detection."""
         session.last_update_id += 1
 
+    @staticmethod
+    def _boundary_token(subtype: str, data: Optional[Dict[str, Any]]) -> Optional[int]:
+        """Extract the identifying token count for a compaction boundary.
+
+        Handles both snake_case (as normalized by jsonl_parser for compact_boundary)
+        and camelCase (as emitted raw by the SDK stream and used for microcompact).
+        Returns None if the token cannot be determined.
+        """
+        if not isinstance(data, dict):
+            return None
+        if subtype == "compact_boundary":
+            meta = data.get("compact_metadata") or data.get("compactMetadata") or {}
+            if not isinstance(meta, dict):
+                return None
+            value = meta.get("pre_tokens")
+            if value is None:
+                value = meta.get("preTokens")
+            return value
+        if subtype == "microcompact_boundary":
+            meta = (
+                data.get("microcompactMetadata")
+                or data.get("microcompact_metadata")
+                or {}
+            )
+            if not isinstance(meta, dict):
+                return None
+            value = meta.get("tokensSaved")
+            if value is None:
+                value = meta.get("tokens_saved")
+            return value
+        return None
+
+    def _has_matching_boundary(
+        self,
+        messages: List[LiveMessage],
+        subtype: str,
+        data: Optional[Dict[str, Any]]
+    ) -> bool:
+        """Check if a compaction boundary message already exists.
+
+        Matches by subtype and identifying token count to detect duplicates
+        when stream replay includes events already in JSONL history.
+
+        Returns False when the new event's token cannot be extracted — we
+        cannot positively identify a duplicate without it, and we must not
+        collapse distinct events just because both have missing metadata.
+        """
+        new_token = self._boundary_token(subtype, data)
+        if new_token is None:
+            return False
+
+        for msg in messages:
+            if msg.system_subtype != subtype:
+                continue
+            existing_token = self._boundary_token(subtype, msg.system_data)
+            if existing_token is not None and existing_token == new_token:
+                return True
+
+        return False
+
     async def start_streaming(
         self,
         session_id: str,
@@ -644,7 +704,20 @@ class LiveSessionStore:
             # returns ALL messages (initial_message_count=0). This forces
             # the frontend to do a full replace instead of a delta merge,
             # preventing stale history from being shown after compaction.
+            #
+            # Order matters: dedup must run BEFORE mutating session state so
+            # that a duplicate event (stream replay of a JSONL-loaded boundary)
+            # is a complete no-op. Setting needs_full_refresh for a duplicate
+            # would latch the flag onto the next unrelated update and force a
+            # spurious full refresh on the frontend.
             if subtype in ('compact_boundary', 'microcompact_boundary'):
+                if self._has_matching_boundary(session.messages, subtype, data):
+                    logger.debug(
+                        f"Skipping duplicate {subtype} message for session {session_id} "
+                        f"(already present in history)"
+                    )
+                    return
+
                 session.needs_full_refresh = True
                 logger.debug(
                     f"Compaction boundary: flagged needs_full_refresh "

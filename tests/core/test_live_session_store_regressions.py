@@ -534,3 +534,293 @@ class TestCompactionStreamEndRace:
         # Flag should be cleared
         session = store_with_history.get_session("s1")
         assert session.needs_full_refresh is False
+
+
+# =============================================================================
+# Bug: Duplicate compaction messages on session resume with streaming replay
+#
+# When a session's JSONL contains a compact_boundary message and streaming
+# replays that same event, the message can be added twice:
+# 1. From JSONL history (via initial_messages in start_streaming)
+# 2. From streamed event (via handle_system -> add_system_message)
+#
+# The duplicate has different IDs (original UUID vs random system-*) so
+# no dedup logic catches it. Result: message appears twice in UI.
+# =============================================================================
+
+class TestDuplicateCompactionMessages:
+
+    async def test_no_duplicate_compact_boundary_on_stream_replay(self, store):
+        """When streaming replays a compact_boundary that's already in history,
+        should not add it twice.
+
+        Reproduces bug: session loaded from JSONL with compact_boundary,
+        then same event arrives in stream.
+        """
+        # Simulate: JSONL history with a compact_boundary message
+        history = [
+            {
+                "id": "user-1",
+                "role": "user",
+                "type": "text",
+                "content": "Hello",
+                "streaming": False,
+            },
+            {
+                "id": "compact-uuid-123",
+                "role": "system",
+                "type": "system",
+                "subtype": "compact_boundary",
+                "systemSubtype": "compact_boundary",
+                "content": "Context was automatically compacted.",
+                "systemData": {
+                    "compact_metadata": {
+                        "trigger": "auto",
+                        "pre_tokens": 167000,
+                    }
+                },
+                "streaming": False,
+            },
+            {
+                "id": "user-2",
+                "role": "user",
+                "type": "text",
+                "content": "Continue...",
+                "streaming": False,
+            },
+        ]
+
+        # Start streaming with history
+        await store.start_streaming("s1", initial_messages=history)
+        session = store.get_session("s1")
+
+        # Verify history loaded correctly
+        assert len(session.messages) == 3
+        compact_msgs = [m for m in session.messages if m.system_subtype == "compact_boundary"]
+        assert len(compact_msgs) == 1
+        assert compact_msgs[0].content == "Context was automatically compacted."
+
+        # Now simulate: same compact_boundary event arrives in stream
+        # (this can happen due to timing or SDK re-sending)
+        await store.add_system_message(
+            "s1",
+            content="Context was automatically compacted.",
+            subtype="compact_boundary",
+            data={"compact_metadata": {"trigger": "auto", "pre_tokens": 167000}},
+        )
+
+        # VERIFY: no duplicate was added
+        # Should still have 3 messages (1 user + 1 compact + 1 user)
+        session = store.get_session("s1")
+        assert len(session.messages) == 3, f"Expected 3 messages but got {len(session.messages)}"
+
+        # Should still have only 1 compact_boundary
+        compact_msgs = [m for m in session.messages if m.system_subtype == "compact_boundary"]
+        assert len(compact_msgs) == 1, f"Expected 1 compact_boundary but got {len(compact_msgs)}"
+
+    async def test_no_duplicate_microcompact_boundary_on_stream_replay(self, store):
+        """Similar to compact_boundary: microcompact_boundary should not duplicate."""
+        history = [
+            {
+                "id": "user-1",
+                "role": "user",
+                "type": "text",
+                "content": "Hello",
+                "streaming": False,
+            },
+            {
+                "id": "microcompact-uuid-456",
+                "role": "system",
+                "type": "system",
+                "subtype": "microcompact_boundary",
+                "systemSubtype": "microcompact_boundary",
+                "content": "Context was microcompacted.",
+                "systemData": {
+                    "microcompactMetadata": {
+                        "trigger": "auto",
+                        "tokensSaved": 5000,
+                        "preTokens": 100000,
+                    }
+                },
+                "streaming": False,
+            },
+        ]
+
+        await store.start_streaming("s1", initial_messages=history)
+        session = store.get_session("s1")
+
+        # Verify history loaded
+        assert len(session.messages) == 2
+        microcompact_msgs = [m for m in session.messages if m.system_subtype == "microcompact_boundary"]
+        assert len(microcompact_msgs) == 1
+
+        # Stream replays the same event
+        await store.add_system_message(
+            "s1",
+            content="Context was microcompacted.",
+            subtype="microcompact_boundary",
+            data={
+                "microcompactMetadata": {
+                    "trigger": "auto",
+                    "tokensSaved": 5000,
+                    "preTokens": 100000,
+                }
+            },
+        )
+
+        # No duplicate
+        session = store.get_session("s1")
+        assert len(session.messages) == 2
+        microcompact_msgs = [m for m in session.messages if m.system_subtype == "microcompact_boundary"]
+        assert len(microcompact_msgs) == 1
+
+    async def test_different_compaction_events_are_both_added(self, store):
+        """Edge case: different compaction events (different token counts) should
+        both appear — they're not duplicates, just similar types.
+        """
+        history = [
+            {
+                "id": "compact-1",
+                "role": "system",
+                "type": "system",
+                "subtype": "compact_boundary",
+                "content": "First compaction.",
+                "systemData": {
+                    "compact_metadata": {"trigger": "auto", "pre_tokens": 100000}
+                },
+                "streaming": False,
+            },
+        ]
+
+        await store.start_streaming("s1", initial_messages=history)
+        session = store.get_session("s1")
+        assert len(session.messages) == 1
+
+        # Add a DIFFERENT compaction event (different token count = different event)
+        await store.add_system_message(
+            "s1",
+            content="Second compaction.",
+            subtype="compact_boundary",
+            data={"compact_metadata": {"trigger": "auto", "pre_tokens": 50000}},
+        )
+
+        # Both should be added (different events)
+        session = store.get_session("s1")
+        assert len(session.messages) == 2
+        compact_msgs = [m for m in session.messages if m.system_subtype == "compact_boundary"]
+        assert len(compact_msgs) == 2
+
+    async def test_dedup_matches_jsonl_snake_case_against_stream_camel_case(self, store):
+        """Real-world scenario: JSONL parser stores compact_boundary metadata
+        under snake_case (compact_metadata.pre_tokens), but the SDK stream
+        emits the raw camelCase shape (compactMetadata.preTokens).
+
+        The dedup helper must recognize these as the same event, otherwise
+        the fix does nothing in production for compact_boundary.
+        """
+        history = [
+            {
+                "id": "compact-uuid-xyz",
+                "role": "system",
+                "type": "system",
+                "subtype": "compact_boundary",
+                "systemSubtype": "compact_boundary",
+                "content": "Context was automatically compacted.",
+                "systemData": {
+                    # As normalized by jsonl_parser (snake_case)
+                    "compact_metadata": {
+                        "trigger": "auto",
+                        "pre_tokens": 167000,
+                    }
+                },
+                "streaming": False,
+            },
+        ]
+
+        await store.start_streaming("s1", initial_messages=history)
+        assert len(store.get_session("s1").messages) == 1
+
+        # Stream replay arrives with raw SDK camelCase shape
+        await store.add_system_message(
+            "s1",
+            content="Context was automatically compacted.",
+            subtype="compact_boundary",
+            data={"compactMetadata": {"trigger": "auto", "preTokens": 167000}},
+        )
+
+        session = store.get_session("s1")
+        compact_msgs = [m for m in session.messages if m.system_subtype == "compact_boundary"]
+        assert len(compact_msgs) == 1, (
+            f"Dedup must bridge snake_case vs camelCase; got {len(compact_msgs)} messages"
+        )
+
+    async def test_missing_metadata_does_not_collapse_distinct_events(self, store):
+        """Two compact_boundary events that both lack identifying token counts
+        must NOT be treated as duplicates. Without a token we cannot positively
+        identify a duplicate, so we err on the side of keeping both.
+        """
+        history = [
+            {
+                "id": "compact-a",
+                "role": "system",
+                "type": "system",
+                "subtype": "compact_boundary",
+                "systemSubtype": "compact_boundary",
+                "content": "First.",
+                "systemData": {"compact_metadata": {"trigger": "manual"}},
+                "streaming": False,
+            },
+        ]
+        await store.start_streaming("s1", initial_messages=history)
+
+        await store.add_system_message(
+            "s1",
+            content="Second.",
+            subtype="compact_boundary",
+            data={"compact_metadata": {"trigger": "manual"}},
+        )
+
+        session = store.get_session("s1")
+        compact_msgs = [m for m in session.messages if m.system_subtype == "compact_boundary"]
+        assert len(compact_msgs) == 2, (
+            "Events with missing pre_tokens must not collapse via None==None"
+        )
+
+    async def test_duplicate_boundary_does_not_latch_needs_full_refresh(self, store):
+        """When a duplicate compact_boundary is skipped, needs_full_refresh
+        must NOT be flipped on. Otherwise the flag latches onto the next
+        unrelated update and forces a spurious full refresh on the frontend.
+        """
+        history = [
+            {
+                "id": "compact-uuid-1",
+                "role": "system",
+                "type": "system",
+                "subtype": "compact_boundary",
+                "systemSubtype": "compact_boundary",
+                "content": "Compacted.",
+                "systemData": {
+                    "compact_metadata": {"trigger": "auto", "pre_tokens": 42000}
+                },
+                "streaming": False,
+            },
+        ]
+        await store.start_streaming("s1", initial_messages=history)
+
+        # Ensure flag starts clean after history load
+        session = store.get_session("s1")
+        session.needs_full_refresh = False
+
+        # Replay the same boundary — should be deduplicated without mutating state
+        await store.add_system_message(
+            "s1",
+            content="Compacted.",
+            subtype="compact_boundary",
+            data={"compact_metadata": {"trigger": "auto", "pre_tokens": 42000}},
+        )
+
+        session = store.get_session("s1")
+        assert session.needs_full_refresh is False, (
+            "Duplicate boundary must not flip needs_full_refresh — flag would "
+            "latch onto the next unrelated update."
+        )
