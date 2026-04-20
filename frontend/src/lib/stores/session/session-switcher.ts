@@ -248,7 +248,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null) {
 		const generation = ++_switchGeneration;
 		const state = getState();
-		// switchSession: gen=${generation}, leaving=${state.sessionId}
+		// eslint-disable-next-line no-console
+		console.log(`[AS] switchSession CALLED gen=${generation} from=${state.sessionId} to=${sessionId} visibility=${typeof document !== 'undefined' ? document.visibilityState : 'n/a'}`);
 
 		// Stop polling and clean up session state for the session we're leaving.
 		// Without removeSession, the old session lingers in sessionState with

@@ -411,11 +411,15 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 	// Restore scroll position only on mount - not on every reactive update
 	onMount(() => {
 		isMounted = true;
+		// eslint-disable-next-line no-console
+		console.log(`[AS] onMount sid=${$activeSession.sessionId} msgLen=${$activeSession.messages.length}`);
 		// Wait for DOM to be ready
 		requestAnimationFrame(() => {
 			if (!containerRef) return;
 
 			const cacheKey = $activeSession.sessionId ?? 'new';
+			// eslint-disable-next-line no-console
+			console.log(`[AS] onMount-raf cacheKey=${cacheKey} cachedPos=${scrollPositionCache.get(cacheKey)} cachedAutoS=${autoScrollCache.get(cacheKey)} sessionScrollTop=${$activeSession.scrollTop} SH=${containerRef.scrollHeight} ST=${containerRef.scrollTop} CH=${containerRef.clientHeight}`);
 
 			// Check if user had explicitly scrolled up before this component
 			// was destroyed. autoScrollCache tracks shouldAutoScroll state:
@@ -460,6 +464,8 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 	// Mobile browsers often restore a stale scroll position from their history state,
 	// causing the chat to appear scrolled to the middle instead of the bottom.
 	function handleVisibilityChange() {
+		// eslint-disable-next-line no-console
+		console.log(`[AS] visibility=${document.visibilityState} autoS=${shouldAutoScroll} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
 		if (document.visibilityState === 'visible' && shouldAutoScroll && containerRef) {
 			// Use double RAF to ensure browser has finished any scroll restoration
 			requestAnimationFrame(() => {
@@ -494,6 +500,8 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 		const cacheKey = $activeSession.sessionId ?? 'new';
 
 		if (containerRef) {
+			// eslint-disable-next-line no-console
+			console.log(`[AS] onDestroy saving cacheKey=${cacheKey} ST=${containerRef.scrollTop} autoS=${shouldAutoScroll} SH=${containerRef.scrollHeight} CH=${containerRef.clientHeight}`);
 			scrollPositionCache.set(cacheKey, containerRef.scrollTop);
 			activeSession.setScrollTop(containerRef.scrollTop);
 			// Persist auto-scroll state so remounting this component
