@@ -21,6 +21,83 @@ from claude_agent_sdk import AssistantMessage, TextBlock
 from app.api.auth import require_auth
 from app.api.common import api_error_handler
 from app.core.model_registry import DEFAULT_MODEL
+
+# ---------------------------------------------------------------------------
+# [gen-debug] Diagnostic instrumentation for one-shot generation latency.
+# Monkey-patches SDK's SubprocessCLITransport._build_command to log the final
+# argv list sent to claude.exe (flags, settings JSON, env-relevant values).
+# Also logs the merged env dict. Active unconditionally — remove after the
+# commit-msg / PR-desc latency investigation closes. Cheap: one log line per
+# one-shot generation call, no hot-path impact.
+# ---------------------------------------------------------------------------
+try:
+    import os as _gen_debug_os
+    from claude_agent_sdk._internal.transport.subprocess_cli import (
+        SubprocessCLITransport as _SubprocessCLITransport,
+    )
+
+    if not getattr(_SubprocessCLITransport, "_ai_shuffle_gen_debug_patched", False):
+        _orig_build_command = _SubprocessCLITransport._build_command
+
+        def _patched_build_command(self):
+            cmd = _orig_build_command(self)
+            try:
+                # Redact large JSON payloads but keep flag names and short values.
+                redacted = []
+                skip_next = False
+                for i, tok in enumerate(cmd):
+                    if skip_next:
+                        if isinstance(tok, str) and len(tok) > 200:
+                            redacted.append(f"<{len(tok)} chars>")
+                        else:
+                            redacted.append(tok)
+                        skip_next = False
+                        continue
+                    redacted.append(tok)
+                    if tok in (
+                        "--system-prompt",
+                        "--append-system-prompt",
+                        "--settings",
+                        "--mcp-config",
+                        "--json-schema",
+                    ):
+                        skip_next = True
+                logger.info(f"[gen-debug] CLI argv ({len(cmd)} tokens): {redacted}")
+                # Dump relevant env leaks that could silently change behavior
+                leak_keys = [
+                    "ANTHROPIC_MODEL",
+                    "ANTHROPIC_SMALL_FAST_MODEL",
+                    "ANTHROPIC_BASE_URL",
+                    "CLAUDE_CODE_USE_BEDROCK",
+                    "CLAUDE_CODE_USE_VERTEX",
+                    "DISABLE_PROMPT_CACHING",
+                    "MAX_THINKING_TOKENS",
+                    "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK",
+                ]
+                env_snapshot = {
+                    k: _gen_debug_os.environ.get(k, "<unset>")
+                    for k in leak_keys
+                }
+                logger.info(f"[gen-debug] env snapshot: {env_snapshot}")
+                logger.info(
+                    f"[gen-debug] options: model={self._options.model!r} "
+                    f"effort={self._options.effort!r} "
+                    f"thinking={self._options.thinking!r} "
+                    f"max_thinking_tokens={self._options.max_thinking_tokens!r} "
+                    f"setting_sources={self._options.setting_sources!r} "
+                    f"settings={(self._options.settings or '')[:200]!r} "
+                    f"cwd={self._options.cwd!r} "
+                    f"max_turns={self._options.max_turns!r}"
+                )
+            except Exception as _e:
+                logger.warning(f"[gen-debug] instrumentation failure: {_e}")
+            return cmd
+
+        _SubprocessCLITransport._build_command = _patched_build_command
+        _SubprocessCLITransport._ai_shuffle_gen_debug_patched = True
+        logger.info("[gen-debug] SubprocessCLITransport._build_command patched")
+except Exception as _patch_err:
+    logger.warning(f"[gen-debug] failed to install SDK patch: {_patch_err}")
 from app.core.models import (
     AgentExport,
     AgentExportData,
@@ -204,16 +281,55 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
     t0 = time.perf_counter()
     response_text: list[str] = []
 
+    # [gen-debug] Per-message timing. Capture time-to-first-event and
+    # time-to-first-text so we can split "subprocess boot + init handshake"
+    # from "model reasoning + token streaming." Expect:
+    #   t_first_event  = SDK connect + CLI init + initialize RPC
+    #   t_first_text   = above + model inference latency
+    #   t_last_event   = above + full response streaming
+    t_first_event: Optional[float] = None
+    t_first_text: Optional[float] = None
+    msg_count = 0
+    msg_types: list[str] = []
+
+    logger.info(
+        f"[gen-debug] entering query() model={effective_model} "
+        f"prompt_bytes={len(prompt)}"
+    )
+
     async with api_error_handler("run AI generation"):
         async for message in query(prompt=prompt, options=options):
+            now = time.perf_counter()
+            if t_first_event is None:
+                t_first_event = now - t0
+                logger.info(
+                    f"[gen-debug] first event received after "
+                    f"{t_first_event * 1000:.0f}ms type={type(message).__name__}"
+                )
+            msg_count += 1
+            msg_types.append(type(message).__name__)
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
+                        if t_first_text is None:
+                            t_first_text = now - t0
+                            logger.info(
+                                f"[gen-debug] first text block after "
+                                f"{t_first_text * 1000:.0f}ms "
+                                f"len={len(block.text)}"
+                            )
                         response_text.append(block.text)
 
+    t_total = time.perf_counter() - t0
     logger.info(
         f"[generate_with_claude] one-shot call model={effective_model} "
-        f"took {(time.perf_counter() - t0) * 1000:.0f}ms"
+        f"took {t_total * 1000:.0f}ms"
+    )
+    logger.info(
+        f"[gen-debug] breakdown total={t_total * 1000:.0f}ms "
+        f"first_event={((t_first_event or 0) * 1000):.0f}ms "
+        f"first_text={((t_first_text or 0) * 1000):.0f}ms "
+        f"msg_count={msg_count} types={msg_types}"
     )
     return "".join(response_text)
 
