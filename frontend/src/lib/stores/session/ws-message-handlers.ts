@@ -130,7 +130,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	// ── Handler: done ────────────────────────────────────────────────
 
 	function handleDone(data: Record<string, unknown>): void {
-		// During interrupt_and_query, the OLD query drains naturally and yields
+		// During interrupt_for_query, the OLD query drains naturally and yields
 		// a 'done' event (SDK interrupt doesn't raise CancelledError, so the
 		// generator exits normally). If we process it, we'd clear interruptPending,
 		// trigger pollFinal (which returns isStreaming=false for the ended old query),
@@ -405,7 +405,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					// Set sessionId, streamStartTime, and inject a synthetic streaming
 					// assistant message so the streaming indicator appears immediately
 					// (don't wait for the poller to deliver the first assistant message).
-					// Also explicitly set isStreaming: true — during interrupt_and_query,
+					// Also explicitly set isStreaming: true — during interrupt_for_query,
 					// a stale poll from the old streaming session can clobber isStreaming
 					// to false between the interrupt and this start event.
 					const messageId = data.message_id as string || `ws-stream-${Date.now()}`;

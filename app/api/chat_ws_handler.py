@@ -30,12 +30,15 @@ from app.db.base import WorktreeStatus
 
 logger = logging.getLogger(__name__)
 
-# Module-level set tracking sessions with a pending interrupt_and_query or
-# user-initiated stop.  Checked by run_query's finally block to decide
-# whether to auto-process the next queued message.  Module-level (not
-# per-handler) so the flag is visible regardless of which device set it.
-_interrupt_pending_sessions: set[str] = set()
-_stopped_sessions: set[str] = set()
+# Shared module-level sets tracking sessions with a pending two-phase
+# ``interrupt_for_query`` or a user-initiated stop.  Checked by run_query's
+# finally block to decide whether to auto-process the next queued message.
+# Defined in ``ws_cleanup`` so both this module and ``app/api/websocket.py``
+# see the same flag regardless of which endpoint set it.
+from app.api.ws_cleanup import (  # noqa: E402  (after logger by design)
+    _interrupt_pending_sessions,
+    _stopped_sessions,
+)
 
 
 class WebSocketRateLimiter:
@@ -106,7 +109,6 @@ class ChatWebSocketHandler:
         self._handlers: Dict[str, Callable[[dict], Any]] = {
             "query": self.handle_query,
             "stop": self.handle_stop,
-            "interrupt_and_query": self.handle_interrupt_and_query,
             "interrupt_for_query": self.handle_interrupt_for_query,
             "load_session": self.handle_load_session,
             "close_session": self.handle_close_session,
@@ -570,7 +572,7 @@ class ChatWebSocketHandler:
             logger.debug(f"interrupt_for_query: interrupt session {session_id}: {interrupted}")
 
             # Step 2: Wait for the streaming task to drain fully.
-            # Same logic as handle_interrupt_and_query — we MUST let
+            # Drain wait — we MUST let
             # receive_response() drain before the frontend sends a new query.
             async with _active_sessions_lock:
                 task = _active_chat_sessions.get(session_id)
@@ -591,106 +593,6 @@ class ChatWebSocketHandler:
         except Exception as e:
             logger.error(f"interrupt_for_query failed for {session_id}: {e}")
             await self.send_json({"type": "interrupt_failed", "session_id": session_id, "message": str(e)})
-        finally:
-            _interrupt_pending_sessions.discard(session_id)
-
-    # ------------------------------------------------------------------
-    # handle_interrupt_and_query (legacy — kept for backward compatibility)
-    # ------------------------------------------------------------------
-
-    async def handle_interrupt_and_query(self, data: dict) -> None:
-        """Handle 'interrupt_and_query' message type."""
-        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
-
-        session_id = data.get("session_id") or self.current_session_id
-        prompt = data.get("prompt", "").strip()
-        profile_id = data.get("profile", "claude-code")
-        project_id = data.get("project")
-        overrides = data.get("overrides")
-        worktree_id = data.get("worktree_id")
-
-        if not prompt:
-            await self.send_json({"type": "error", "message": "Empty prompt"})
-            return
-
-        if not session_id:
-            await self.send_json({"type": "error", "message": "No active session"})
-            return
-
-        from app.core.query_engine import interrupt_session
-
-        # Mark this session as having a pending interrupt_and_query so the old
-        # task's finally block skips _process_next_queued (prevents race where
-        # queue processing starts a competing query on the same SDK client).
-        # Module-level set so the flag is visible to ALL handler instances.
-        _interrupt_pending_sessions.add(session_id)
-
-        try:
-            # Step 1: Interrupt the SDK-level streaming
-            interrupted = await interrupt_session(session_id)
-            logger.debug(f"Interrupt session {session_id} before new query: {interrupted}")
-
-            # Step 2: Wait for the streaming task to finish naturally.
-            # The SDK interrupt() causes receive_response() to end with a
-            # ResultMessage.  We MUST let receive_response() drain fully
-            # before sending a new query — cancelling the task prematurely
-            # leaves unread messages in the subprocess pipe, and the next
-            # receive_response() reads the stale ResultMessage and completes
-            # instantly (0 events / empty response).
-            #
-            # Use asyncio.wait() (not wait_for) because wait_for cancels
-            # the inner task on timeout, which is exactly what we want to
-            # avoid until we're sure the drain didn't happen.
-            async with _active_sessions_lock:
-                task = _active_chat_sessions.get(session_id)
-            if task and not task.done():
-                done, pending = await asyncio.wait({task}, timeout=8.0)
-                if pending:
-                    # Interrupt didn't cause natural completion in time — force cancel
-                    logger.warning(f"Interrupt drain timed out for {session_id}, force cancelling")
-                    task.cancel()
-                    try:
-                        await task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-
-            # Step 3: Store user message with profile_id for per-query tracking
-            _msg_role = "user"
-            _msg_meta = None
-            if prompt.strip().startswith("/"):
-                _parts = prompt.strip().split(None, 1)
-                _msg_role = "command"
-                _msg_meta = {
-                    "command_name": _parts[0],
-                    "command_args": _parts[1] if len(_parts) > 1 else "",
-                }
-            database.add_session_message(
-                session_id=session_id,
-                role=_msg_role,
-                content=prompt,
-                metadata=_msg_meta,
-                profile_id=profile_id
-            )
-
-            # Step 4: Broadcast user message to other devices
-            await sync_engine.broadcast_message_added(
-                session_id=session_id,
-                message={
-                    "role": "user",
-                    "content": prompt,
-                    "profile_id": profile_id
-                },
-                source_device_id=self.device_id
-            )
-
-            # Step 5: Start new query task
-            self.query_task = asyncio.create_task(
-                self.run_query(prompt, session_id, profile_id, project_id, overrides, worktree_id)
-            )
-            async with _active_sessions_lock:
-                _active_chat_sessions[session_id] = self.query_task
-            logger.debug(f"Started new query after interrupt for session {session_id}")
-
         finally:
             _interrupt_pending_sessions.discard(session_id)
 
@@ -1713,7 +1615,7 @@ class ChatWebSocketHandler:
                 #  - Query was cancelled (CancelledError) or errored
                 #  - A queued message arrived during the cancel/error teardown
                 if session_id in _interrupt_pending_sessions:
-                    ctx.debug(logger, "Skipping queue processing — interrupt_and_query pending")
+                    ctx.debug(logger, "Skipping queue processing — interrupt_for_query pending")
                 elif session_id in _stopped_sessions:
                     _stopped_sessions.discard(session_id)
                     ctx.debug(logger, "Skipping queue processing — user stopped session")

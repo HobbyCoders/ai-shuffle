@@ -44,20 +44,16 @@ export interface WsClientStop {
 	session_id: string;
 }
 
-/** Interrupt the current query and immediately start a new one. */
-export interface WsClientInterruptAndQuery {
-	type: 'interrupt_and_query';
-	prompt: string;
+/**
+ * Phase 1 of the two-phase interrupt+query protocol. The client asks the
+ * server to interrupt the currently streaming query and drain the SDK pipe.
+ * On success, the server replies with `interrupt_confirmed` and the client
+ * then sends a regular `query` message. On failure the server replies with
+ * `interrupt_failed` so the client can restore the user input.
+ */
+export interface WsClientInterruptForQuery {
+	type: 'interrupt_for_query';
 	session_id: string;
-	profile: string;
-	project?: string | null;
-	overrides?: {
-		model?: string;
-		permission_mode?: string;
-		thinking_mode?: string;
-		effort?: string;
-	};
-	worktree_id?: string | null;
 }
 
 /** Load/switch to an existing session. Server responds with `history`. */
@@ -119,7 +115,7 @@ export interface WsClientPong {
 export type ClientMessage =
 	| WsClientQuery
 	| WsClientStop
-	| WsClientInterruptAndQuery
+	| WsClientInterruptForQuery
 	| WsClientLoadSession
 	| WsClientCloseSession
 	| WsClientPermissionResponse
@@ -315,6 +311,26 @@ export interface WsServerInterrupted {
 	type: 'interrupted';
 	session_id?: string;
 	metadata?: Record<string, unknown>;
+}
+
+/**
+ * Phase-1 ACK of a `interrupt_for_query` request. The streaming pipe has
+ * been drained and the client may now send its follow-up `query`.
+ */
+export interface WsServerInterruptConfirmed {
+	type: 'interrupt_confirmed';
+	session_id: string;
+}
+
+/**
+ * Phase-1 NACK of a `interrupt_for_query` request. The client should
+ * surface an error and restore the user input instead of silently
+ * dropping it.
+ */
+export interface WsServerInterruptFailed {
+	type: 'interrupt_failed';
+	session_id: string | null;
+	message: string;
 }
 
 /** Error occurred during query or message processing. */
@@ -660,6 +676,8 @@ export type ServerMessage =
 	| WsServerDone
 	| WsServerStopped
 	| WsServerInterrupted
+	| WsServerInterruptConfirmed
+	| WsServerInterruptFailed
 	// Tool events
 	| WsServerToolUse
 	| WsServerToolResult

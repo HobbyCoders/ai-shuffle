@@ -151,7 +151,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 			// eslint-disable-next-line no-console
 			console.log(`[AS] poll-apply start sid=${sessionId.slice(0,8)} stateLen=${_state.messages.length} stateLastId=${_state.messages[_state.messages.length - 1]?.id} stateLastRole=${_state.messages[_state.messages.length - 1]?.role} dataLen=${data.messages.length} dataLastId=${data.messages[data.messages.length - 1]?.id} dataLastRole=${data.messages[data.messages.length - 1]?.role} streaming=${data.isStreaming}`);
 
-			// During interrupt_and_query, stale polls from the old query can return
+			// During interrupt_for_query, stale polls from the old query can return
 			// with isStreaming=false and clobber the optimistic isStreaming=true set
 			// by the interrupt path. Skip all poll updates while the transition is
 			// in progress — the new query's 'start' event restarts polling cleanly.

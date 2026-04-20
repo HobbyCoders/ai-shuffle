@@ -110,7 +110,7 @@ export interface MessageSenderDeps {
 	/** Reference to the activeSession object for recursive calls
 	 *  (sendMessage calls itself after worktree creation). */
 	getActiveSession: () => {
-		sendMessage: (prompt: string, options?: SendMessageOptions) => Promise<void>;
+		sendMessage: (prompt: string, options?: SendMessageOptions) => Promise<boolean>;
 		createWorktree: (prompt?: string, pendingUploadPaths?: string[]) => Promise<void>;
 		autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) => Promise<void>;
 	};
@@ -171,7 +171,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 	}
 
 	return {
-		async sendMessage(prompt: string, options?: SendMessageOptions) {
+		async sendMessage(prompt: string, options?: SendMessageOptions): Promise<boolean> {
 			prompt = prompt.trim();
 			const _state = getState();
 
@@ -184,27 +184,27 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				} catch (e: any) {
 					const msg = e?.message || String(e);
 					update(s => ({ ...s, isReopeningWorktree: false, error: `Failed to reopen worktree: ${msg}` }));
-					return;
+					return false;
 				}
 			}
 
 			// Legacy worktree sessions: worktree was deleted before reopen feature existed
 			if (_state.worktreeDeleted && !_state.worktreeId) {
 				update(s => ({ ...s, error: 'This worktree session cannot be resumed — the worktree was permanently deleted. Start a new session instead.' }));
-				return;
+				return false;
 			}
 
 			// Worktree setup on first message
 			if (!options?.skipWorktreeSetup && _state.executionMode === 'worktree' && !_state.sessionId && _state.messages.length === 0) {
 				if (_state.worktreeMode === 'existing' && _state.worktreeId) {
 					await startSessionOnExistingWorktree(prompt);
-					return;
+					return true;
 				} else if (_state.worktreeBranch) {
 					await getActiveSession().createWorktree(prompt, options?.pendingUploadPaths);
-					return;
+					return true;
 				} else {
 					await getActiveSession().autoCreateWorktree(prompt, options?.pendingUploadPaths);
-					return;
+					return true;
 				}
 			}
 
@@ -214,7 +214,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				const connected = await waitForConnection();
 				if (!connected) {
 					update(s => ({ ...s, error: 'Unable to connect. Please check your connection and try again.' }));
-					return;
+					return false;
 				}
 			}
 
@@ -262,7 +262,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// Clear interruptPending so subsequent polls work.
 					internal.interruptPending = false;
 					update(s => ({ ...s, error: 'Unable to interrupt the active generation. Please try again.' }));
-					return;
+					return false;
 				}
 			}
 
@@ -331,7 +331,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			}
 
 			wsConn.resetLastMessageTime();
-			wsConn.send({
+			const querySent = wsConn.send({
 				type: 'query',
 				prompt,
 				session_id: _state.sessionId,
@@ -342,6 +342,18 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			});
 			// interruptPending cleared by 'start' handler (ws-message-handlers.ts:395)
 			// once the new query's stream_start event arrives.
+			if (!querySent) {
+				// WS dropped between the interrupt confirm and the query send.
+				// Surface an error so the caller can restore the input.
+				internal.interruptPending = false;
+				update(s => ({
+					...s,
+					isStreaming: false,
+					error: 'Connection lost before the message was sent. Please try again.',
+				}));
+				return false;
+			}
+			return true;
 		},
 
 		stopGeneration() {
@@ -673,9 +685,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 		// ── Queued Messages (server-side queue) ─────────────────────────
 
-		queueMessage(content: string) {
+		queueMessage(content: string): boolean {
 			const _state = getState();
-			if (!_state.sessionId) return;
+			if (!_state.sessionId) return false;
 
 			const optimisticId = `queued-local-${Date.now()}`;
 			update(s => ({
@@ -701,7 +713,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					queuedMessages: s.queuedMessages.filter(m => m.id !== optimisticId),
 					error: 'Failed to queue message — connection lost. Please try again.',
 				}));
+				return false;
 			}
+			return true;
 		},
 
 		removeQueuedMessage(id: string) {

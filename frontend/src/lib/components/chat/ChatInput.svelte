@@ -239,7 +239,7 @@
 	}
 
 	// Actually send the message (or queue it for later)
-	function sendMessage(finalPrompt: string, sendLater: boolean = false) {
+	async function sendMessage(finalPrompt: string, sendLater: boolean = false) {
 		// Mark that we're sending - prevents onDestroy from overwriting the cleared draft
 		// This is critical for the first message when the component gets destroyed/recreated
 		messageSent = true;
@@ -257,6 +257,12 @@
 			pendingPaths = allPaths.length ? allPaths : undefined;
 		}
 
+		// Snapshot state needed to restore the input on failure. Capturing BEFORE
+		// clearing means a failed interrupt / dropped WS doesn't lose the user's
+		// typed prompt or uploaded attachments — we repopulate the editor.
+		const priorInputValue = inputValue;
+		const priorUploadedFiles = uploadedFiles;
+
 		inputValue = '';
 		uploadedFiles = [];
 
@@ -267,12 +273,30 @@
 		// the component may be destroyed/recreated when isEmptyState changes
 		saveDraftImmediately('');
 
-		if (sendLater && $activeSession.isStreaming) {
-			// Queue for when current stream completes naturally
-			activeSession.queueMessage(finalPrompt);
-		} else {
-			// Send immediately (interrupt → confirm → query if streaming, normal query if not)
-			activeSession.sendMessage(finalPrompt, pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : undefined);
+		const restoreOnFailure = () => {
+			inputValue = priorInputValue;
+			uploadedFiles = priorUploadedFiles;
+			editorRef?.setContent(finalPrompt);
+			saveDraftImmediately(finalPrompt);
+			messageSent = false;
+		};
+
+		try {
+			if (sendLater && $activeSession.isStreaming) {
+				// Queue for when current stream completes naturally
+				const queued = activeSession.queueMessage(finalPrompt);
+				if (queued === false) restoreOnFailure();
+			} else {
+				// Send immediately (interrupt → confirm → query if streaming, normal query if not)
+				const sent = await activeSession.sendMessage(
+					finalPrompt,
+					pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : undefined,
+				);
+				if (sent === false) restoreOnFailure();
+			}
+		} catch (err) {
+			console.error('[ChatInput] sendMessage threw', err);
+			restoreOnFailure();
 		}
 	}
 

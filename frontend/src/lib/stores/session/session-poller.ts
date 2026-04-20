@@ -232,7 +232,7 @@ class SessionPoller {
 		// from the old generation are correctly detected as stale. Deleting it
 		// resets the counter to 0, allowing stale polls with higher generation
 		// numbers to bypass the staleness check and clobber the new streaming
-		// session (the root cause of interrupt_and_query getting stuck).
+		// session (the root cause of interrupt_for_query getting stuck).
 
 		const pending = this._pendingPollNow.get(sessionId);
 		if (pending) {

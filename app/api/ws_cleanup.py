@@ -18,6 +18,19 @@ _active_sessions_lock = asyncio.Lock()
 # old cleanup fires and removes a newly-started streaming session from memory).
 _pending_cleanup_tasks: dict[str, asyncio.Task] = {}
 
+# Module-level set tracking sessions with a pending ``interrupt_for_query``
+# (two-phase interrupt + query). Consulted by the streaming query's finally
+# block to skip automatic queue-drain processing so the in-flight interrupt
+# path is not raced by a successor task. Shared across websocket.py (primary
+# chat endpoint) and chat_ws_handler.py (HeadlessChatHandler / run_query).
+_interrupt_pending_sessions: set[str] = set()
+
+# Module-level set tracking sessions the user explicitly stopped. Consulted
+# by the streaming query's finally block to skip queue-drain processing when
+# the user intended to halt (auto-processing a queued message would surprise
+# the user). Entry is cleared by the finally-block consumer.
+_stopped_sessions: set[str] = set()
+
 
 async def cleanup_session_handlers(session_id: str) -> None:
     """Clean up session-keyed data from global handler singletons.

@@ -863,31 +863,57 @@ class TestSessionCreatedEvent:
 
 
 # =============================================================================
-# Test Interrupt and Query
+# Test Interrupt For Query (two-phase interrupt+query)
 # =============================================================================
 
-class TestInterruptAndQuery:
-    """Tests for interrupt_and_query message type."""
+class TestInterruptForQuery:
+    """Tests for the two-phase ``interrupt_for_query`` message type.
 
-    def test_interrupt_and_query_message_format(self):
-        """Interrupt and query message should have correct format."""
+    The legacy single-message ``interrupt_and_query`` was removed. Clients now:
+      1. Send ``interrupt_for_query`` with only ``session_id``.
+      2. Await an ``interrupt_confirmed`` (or ``interrupt_failed``) response.
+      3. Only on confirmed, follow up with a regular ``query`` message.
+    """
+
+    def test_interrupt_for_query_message_format(self):
+        """Client phase-1 message has type + session_id (no prompt)."""
         message = {
-            "type": "interrupt_and_query",
+            "type": "interrupt_for_query",
             "session_id": "session-123",
-            "prompt": "New query after interrupt",
-            "profile": "claude-code",
-            "project": None,
-            "overrides": None
         }
 
-        assert message["type"] == "interrupt_and_query"
-        assert "prompt" in message
+        assert message["type"] == "interrupt_for_query"
+        assert message["session_id"] == "session-123"
+        assert "prompt" not in message
 
-    def test_interrupt_and_query_requires_session(self):
-        """Should require active session for interrupt_and_query."""
-        # When no session_id and no current_session_id
-        error = {"type": "error", "message": "No active session"}
-        assert "active session" in error["message"].lower()
+    def test_interrupt_for_query_requires_session(self):
+        """Without a session_id the server must respond with interrupt_failed."""
+        failed = {
+            "type": "interrupt_failed",
+            "session_id": None,
+            "message": "No active session",
+        }
+        assert failed["type"] == "interrupt_failed"
+        assert "active session" in failed["message"].lower()
+
+    def test_interrupt_confirmed_format(self):
+        """Phase-1 ACK carries the session_id the interrupt applied to."""
+        confirmed = {
+            "type": "interrupt_confirmed",
+            "session_id": "session-123",
+        }
+        assert confirmed["type"] == "interrupt_confirmed"
+        assert confirmed["session_id"] == "session-123"
+
+    def test_interrupt_failed_format(self):
+        """Phase-1 NACK carries a session_id (or None) and a reason."""
+        failed = {
+            "type": "interrupt_failed",
+            "session_id": "session-123",
+            "message": "Failed to interrupt session",
+        }
+        assert failed["type"] == "interrupt_failed"
+        assert "message" in failed
 
 
 # =============================================================================
