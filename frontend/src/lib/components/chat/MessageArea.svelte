@@ -101,16 +101,25 @@
 		if (pendingScrollTimer) clearInterval(pendingScrollTimer);
 		let lastScrollHeight = 0;
 		let stableCount = 0;
+		let tick = 0;
+		// eslint-disable-next-line no-console
+		console.log('[AS] stable START', { initSH: containerRef?.scrollHeight, initST: containerRef?.scrollTop, msgLen: $activeSession.messages.length });
 		pendingScrollTimer = setInterval(() => {
 			if (!containerRef) {
 				if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
 				return;
 			}
+			tick++;
+			const shBefore = containerRef.scrollHeight;
 			scrollToBottom();
+			const shAfter = containerRef.scrollHeight;
+			// eslint-disable-next-line no-console
+			console.log('[AS] stable tick', { tick, shBefore, shAfter, st: containerRef.scrollTop, ch: containerRef.clientHeight, stableCount, msgLen: $activeSession.messages.length });
 			if (containerRef.scrollHeight === lastScrollHeight) {
 				stableCount++;
 				if (stableCount >= 3) {
-					// scrollHeight stable for 3 consecutive checks — done
+					// eslint-disable-next-line no-console
+					console.log('[AS] stable DONE', { finalSH: containerRef.scrollHeight, finalST: containerRef.scrollTop, tick });
 					if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
 				}
 			} else {
@@ -120,7 +129,11 @@
 		}, 50);
 		// Safety: stop after 1s regardless
 		setTimeout(() => {
-			if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
+			if (pendingScrollTimer) {
+				// eslint-disable-next-line no-console
+				console.log('[AS] stable TIMEOUT (1s)', { finalSH: containerRef?.scrollHeight, finalST: containerRef?.scrollTop });
+				clearInterval(pendingScrollTimer); pendingScrollTimer = null;
+			}
 		}, 1000);
 	}
 
@@ -508,6 +521,9 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 
 		if (currentId === prevId) return;
 
+		// eslint-disable-next-line no-console
+		console.log('[AS] session-switch effect', { from: prevId, to: currentId, msgLen: $activeSession.messages.length, lastId: $activeSession.messages[$activeSession.messages.length - 1]?.id, lastRole: $activeSession.messages[$activeSession.messages.length - 1]?.role, scrollHeight: containerRef?.scrollHeight, scrollTop: containerRef?.scrollTop, clientHeight: containerRef?.clientHeight });
+
 		// Save scroll state for the old session (if any)
 		if (prevId && containerRef) {
 			scrollPositionCache.set(prevId, containerRef.scrollTop);
@@ -523,7 +539,11 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 		// Skip scroll restore for initial sessionId assignment on new sessions
 		// (undefined → new ID). The component is already at the correct position
 		// (bottom) from onMount, and restoring would fight the initial render.
-		if (!prevId) return;
+		if (!prevId) {
+			// eslint-disable-next-line no-console
+			console.log('[AS] session-switch SKIP (no prevId)', { to: currentId });
+			return;
+		}
 
 		// Always scroll to bottom on session switch. The autoScrollCache can
 		// have stale false entries from race conditions (DOM shifts during async
@@ -562,6 +582,8 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 			// If auto-scroll is enabled and we're supposed to be at bottom,
 			// ensure we stay at bottom after resize
 			if (shouldAutoScroll && containerRef) {
+				// eslint-disable-next-line no-console
+				console.log('[AS] resizeObserver → scrollToBottom', { sh: containerRef.scrollHeight, st: containerRef.scrollTop, ch: containerRef.clientHeight });
 				// Use requestAnimationFrame to ensure layout is complete
 				requestAnimationFrame(() => {
 					scrollToBottom();
