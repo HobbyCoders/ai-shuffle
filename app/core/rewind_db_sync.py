@@ -247,9 +247,20 @@ def _delete_rows_after(
     anchor_id: int,
     include_response: bool,
 ) -> int:
-    """Delete session_messages rows with id > anchor_id. If *include_response*
-    is True, widen the anchor to the first following assistant row so the
-    response to the anchored user message survives the delete.
+    """Delete session_messages rows to mirror a JSONL rewind.
+
+    Semantics must match ``JSONLRewindService.truncate_to_checkpoint``:
+
+    - ``include_response=False`` (typical for user-target rewinds):
+      JSONL drops the target entry itself (``keep_entries = entries[:target_index]``).
+      DB must therefore delete rows with ``id >= anchor_id`` — the anchor
+      row is the target and goes too.
+
+    - ``include_response=True`` (typical for assistant-target rewinds or
+      "keep response" user rewinds): JSONL keeps the target and its
+      trailing assistant reply. DB widens the anchor to the first
+      following assistant row and deletes rows strictly after that,
+      preserving both the target and its response.
     """
     from app.db.base import get_db, get_cursor
     from app.db.compat import ph
@@ -257,8 +268,9 @@ def _delete_rows_after(
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
-        effective_anchor = anchor_id
+
         if include_response:
+            effective_anchor = anchor_id
             cursor.execute(
                 f"SELECT id FROM session_messages "
                 f"WHERE session_id = {_ph} AND id > {_ph} AND role = 'assistant' "
@@ -268,10 +280,17 @@ def _delete_rows_after(
             row = cursor.fetchone()
             if row is not None:
                 effective_anchor = row["id"] if isinstance(row, dict) else row[0]
-        cursor.execute(
-            f"DELETE FROM session_messages WHERE session_id = {_ph} AND id > {_ph}",
-            (session_id, effective_anchor),
-        )
+            cursor.execute(
+                f"DELETE FROM session_messages WHERE session_id = {_ph} AND id > {_ph}",
+                (session_id, effective_anchor),
+            )
+        else:
+            # Drop anchor row and everything after it (matches JSONL's
+            # entries[:target_index] slice).
+            cursor.execute(
+                f"DELETE FROM session_messages WHERE session_id = {_ph} AND id >= {_ph}",
+                (session_id, anchor_id),
+            )
         return cursor.rowcount or 0
 
 

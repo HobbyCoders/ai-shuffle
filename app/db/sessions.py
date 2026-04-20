@@ -937,10 +937,14 @@ def delete_session_messages_after_jsonl_uuid(
     """Truncate DB rows to mirror a JSONL rewind checkpoint.
 
     Finds the row whose ``jsonl_uuid`` matches ``target_uuid`` in
-    ``session_id``, then deletes all later rows (by ``id``, which matches
-    insertion order). If ``include_response`` is True, the first later
-    ``assistant`` row is kept — matching the JSONL service's behaviour when
-    the user wants to preserve Claude's reply to the target message.
+    ``session_id`` and deletes rows to match JSONL semantics:
+
+    - ``include_response=False``: delete the anchor row **and** everything
+      after it (mirrors JSONL's ``entries[:target_index]`` truncation,
+      where the target message itself is dropped).
+    - ``include_response=True``: keep the anchor row and widen to the first
+      following assistant row; delete strictly after that so the anchored
+      message and its reply survive.
 
     Returns the number of rows deleted. Returns 0 if ``target_uuid`` is not
     found; the caller is responsible for any fallback (e.g. timestamp cut
@@ -961,8 +965,9 @@ def delete_session_messages_after_jsonl_uuid(
             return 0
         anchor_id = row["id"] if isinstance(row, dict) else row[0]
 
-        # Optionally widen the anchor to include the first following assistant row.
         if include_response:
+            # Widen the anchor to include the first following assistant row,
+            # then delete strictly after the widened anchor.
             cursor.execute(
                 f"SELECT id FROM session_messages "
                 f"WHERE session_id = {_ph} AND id > {_ph} AND role = 'assistant' "
@@ -972,11 +977,17 @@ def delete_session_messages_after_jsonl_uuid(
             next_asst = cursor.fetchone()
             if next_asst is not None:
                 anchor_id = next_asst["id"] if isinstance(next_asst, dict) else next_asst[0]
-
-        cursor.execute(
-            f"DELETE FROM session_messages WHERE session_id = {_ph} AND id > {_ph}",
-            (session_id, anchor_id)
-        )
+            cursor.execute(
+                f"DELETE FROM session_messages WHERE session_id = {_ph} AND id > {_ph}",
+                (session_id, anchor_id)
+            )
+        else:
+            # Drop the anchor row and everything after it — JSONL drops the
+            # target entry when include_response is False, so the DB must too.
+            cursor.execute(
+                f"DELETE FROM session_messages WHERE session_id = {_ph} AND id >= {_ph}",
+                (session_id, anchor_id)
+            )
         return cursor.rowcount or 0
 
 
