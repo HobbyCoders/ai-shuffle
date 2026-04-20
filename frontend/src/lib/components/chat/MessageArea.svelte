@@ -335,8 +335,13 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 	function scrollToBottom() {
 		if (containerRef) {
 			programmaticScrollDepth++;
+			const preSH = containerRef.scrollHeight;
+			const preST = containerRef.scrollTop;
+			const preCH = containerRef.clientHeight;
 			containerRef.scrollTop = containerRef.scrollHeight;
 			lastKnownScrollTop = containerRef.scrollTop;
+			// eslint-disable-next-line no-console
+			console.log('[AS] scrollToBottom', { preSH, preST, preCH, postST: containerRef.scrollTop, postSH: containerRef.scrollHeight, depth: programmaticScrollDepth });
 			// Use double RAF to ensure scroll events from this programmatic scroll are ignored
 			// Single RAF isn't enough - browser may fire scroll events across multiple frames
 			requestAnimationFrame(() => {
@@ -378,6 +383,8 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 				// which would falsely disable auto-scroll for the entire stream).
 				const scrollUpDelta = lastKnownScrollTop - currentScrollTop;
 				if (scrollUpDelta > 10) {
+					// eslint-disable-next-line no-console
+					console.log('[AS] handleScroll DISABLE autoScroll', { currentScrollTop, lastKnownScrollTop, scrollUpDelta, scrollHeight: containerRef.scrollHeight, clientHeight: containerRef.clientHeight });
 					shouldAutoScroll = false;
 				}
 			}
@@ -648,6 +655,30 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 			if (newestMsg?.role === 'user') {
 				shouldAutoScroll = true;
 			}
+		}
+
+		// eslint-disable-next-line no-console
+		if (hasNewMessage || hasContentChange) {
+			const newest = $activeSession.messages[currentLength - 1];
+			const prevNewest = $activeSession.messages[currentLength - 2];
+			console.log('[AS] effect', {
+				len: currentLength,
+				prevLen: prevMessagesLength,
+				hasNewMessage,
+				hasContentChange,
+				shouldAutoScroll,
+				pendingScrollToBottom,
+				newestId: newest?.id,
+				newestRole: newest?.role,
+				newestType: newest?.type,
+				newestStreaming: newest?.streaming,
+				newestContentLen: (newest?.content || '').length,
+				prevNewestId: prevNewest?.id,
+				prevNewestRole: prevNewest?.role,
+				scrollHeight: containerRef?.scrollHeight,
+				scrollTop: containerRef?.scrollTop,
+				clientHeight: containerRef?.clientHeight
+			});
 		}
 
 		// Scroll to bottom on content changes if auto-scroll is active,

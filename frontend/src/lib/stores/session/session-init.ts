@@ -148,6 +148,18 @@ export function createSessionInit(deps: SessionInitDeps) {
 				return;
 			}
 
+			// eslint-disable-next-line no-console
+			console.log('[AS] poll-apply start', {
+				sessionId,
+				stateLen: _state.messages.length,
+				stateLastId: _state.messages[_state.messages.length - 1]?.id,
+				stateLastRole: _state.messages[_state.messages.length - 1]?.role,
+				dataMsgLen: data.messages.length,
+				dataLastId: data.messages[data.messages.length - 1]?.id,
+				dataLastRole: data.messages[data.messages.length - 1]?.role,
+				isStreaming: data.isStreaming
+			});
+
 			// During interrupt_and_query, stale polls from the old query can return
 			// with isStreaming=false and clobber the optimistic isStreaming=true set
 			// by the interrupt path. Skip all poll updates while the transition is
@@ -286,6 +298,8 @@ export function createSessionInit(deps: SessionInitDeps) {
 					const matchIdx = findMatchingServerUserIdx(m);
 					if (matchIdx >= 0) {
 						// Server persisted this msg under its own id → drop optimistic.
+						// eslint-disable-next-line no-console
+						console.log('[AS] phase1 drop-optimistic', { optId: m.id, serverId: finalMessages[matchIdx]?.id, serverIdx: matchIdx, contentPrefix: (m.content || '').slice(0, 40) });
 						claimedServerIdx.add(matchIdx);
 						continue;
 					}
@@ -434,6 +448,8 @@ export function createSessionInit(deps: SessionInitDeps) {
 							return existing;
 						}
 						if (existing.id !== msg.id) {
+							// eslint-disable-next-line no-console
+							console.log('[AS] phase3 id-swap', { fromServerId: msg.id, toExistingId: existing.id, role: msg.role, type: msg.type, contentPrefix: (msg.content || '').slice(0, 40) });
 							needsStabilization = true;
 							return { ...msg, id: existing.id };
 						}
