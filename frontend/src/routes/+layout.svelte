@@ -13,6 +13,7 @@
 	import { files } from '$lib/stores/files';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
+	import { hydrateModelRegistry } from '$lib/constants/models';
 	import { onDestroy } from 'svelte';
 	import type { Snippet } from 'svelte';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
@@ -79,7 +80,8 @@
 					theme.syncFromServer(),
 					files.syncFromServer(),
 					gitActionPreferences.syncFromServer(),
-					timezonePreference.syncFromServer()
+					timezonePreference.syncFromServer(),
+					hydrateModelRegistry()
 				]);
 			}
 

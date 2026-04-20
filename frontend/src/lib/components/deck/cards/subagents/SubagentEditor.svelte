@@ -4,7 +4,7 @@
 	import type { SubagentExport } from '$lib/api/client';
 	import AIGenerateDialog from '../AIGenerateDialog.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
-	import { MODELS, CUSTOM_VALUE, INHERIT_VALUE } from '$lib/constants/models';
+	import { getModels, CUSTOM_VALUE, INHERIT_VALUE } from '$lib/constants/models';
 	import '../card-design-system.css';
 
 	interface Subagent {
@@ -275,7 +275,7 @@
 					}}
 				>
 					<option value={INHERIT_VALUE}>Inherit</option>
-					{#each MODELS as model (model.value)}
+					{#each getModels() as model (model.value)}
 						<option value={model.value}>{model.label}</option>
 					{/each}
 					<option value={CUSTOM_VALUE}>Custom...</option>

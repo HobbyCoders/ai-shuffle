@@ -8,7 +8,7 @@
 		type AgentExport,
 		type SubagentExport
 	} from '$lib/api/client';
-	import { MODELS, DEFAULT_MODEL } from '$lib/constants/models';
+	import { getModels, getDefaultModel } from '$lib/constants/models';
 
 	type GenerationType = 'profile' | 'subagent';
 	type DialogState = 'initial' | 'generating' | 'clarifying' | 'continuing';
@@ -26,7 +26,7 @@
 	let description = $state('');
 	let referenceMaterial = $state('');
 	let showReferenceMaterial = $state(false);
-	let selectedModel = $state(DEFAULT_MODEL);
+	let selectedModel = $state(getDefaultModel());
 	let dialogState = $state<DialogState>('initial');
 	let error = $state('');
 
@@ -56,7 +56,7 @@
 			description = '';
 			referenceMaterial = '';
 			showReferenceMaterial = false;
-			selectedModel = DEFAULT_MODEL;
+			selectedModel = getDefaultModel();
 			dialogState = 'initial';
 			error = '';
 			clarificationQuestions = [];
@@ -336,7 +336,7 @@
 					<div class="form-section">
 						<label class="form-label" for="model"> Generation Model </label>
 						<select id="model" class="model-select" bind:value={selectedModel} disabled={isLoading}>
-							{#each MODELS as model (model.value)}
+							{#each getModels() as model (model.value)}
 								<option value={model.value}>{model.label}</option>
 							{/each}
 						</select>

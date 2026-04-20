@@ -13,7 +13,7 @@
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data';
 	import { groups as groupsStore } from '$lib/stores/groups';
 	import {
-		DEFAULT_MODEL,
+		getDefaultModel,
 		getModelBadgeClass as getModelBadgeClassShared,
 		getModelLabel,
 		isPresetModel,
@@ -131,7 +131,7 @@
 		id: '',
 		name: '',
 		description: '',
-		model: DEFAULT_MODEL,
+		model: getDefaultModel(),
 		permission_mode: 'default',
 		max_turns: null as number | null,
 		allowed_tools: [] as string[],
@@ -280,7 +280,7 @@
 			id: '',
 			name: '',
 			description: '',
-			model: DEFAULT_MODEL,
+			model: getDefaultModel(),
 			permission_mode: 'default',
 			max_turns: null,
 			allowed_tools: [],
@@ -346,13 +346,13 @@
 			toolSelectionMode = 'all';
 		}
 
-		customModelMode = !isPresetModel(config.model || DEFAULT_MODEL);
+		customModelMode = !isPresetModel(config.model || getDefaultModel());
 
 		profileForm = {
 			id: profile.id,
 			name: profile.name,
 			description: profile.description || '',
-			model: normalizeModel(config.model) || DEFAULT_MODEL,
+			model: normalizeModel(config.model) || getDefaultModel(),
 			permission_mode: config.permission_mode || 'default',
 			max_turns: config.max_turns || null,
 			allowed_tools: allowedTools,
@@ -741,13 +741,13 @@
 			spAppend = agent.system_prompt_append || '';
 		}
 
-		customModelMode = !isPresetModel(agent.model || DEFAULT_MODEL);
+		customModelMode = !isPresetModel(agent.model || getDefaultModel());
 
 		profileForm = {
 			id: '',
 			name: agent.name,
 			description: agent.description || '',
-			model: normalizeModel(agent.model) || DEFAULT_MODEL,
+			model: normalizeModel(agent.model) || getDefaultModel(),
 			permission_mode: agent.permission_mode || 'default',
 			max_turns: agent.max_turns || null,
 			allowed_tools: allowedTools,

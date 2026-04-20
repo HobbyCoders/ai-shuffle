@@ -9,7 +9,7 @@
 	import { Users, Settings, Wrench, Bot, FileText, SlidersHorizontal, Check, Plus, Trash2 } from 'lucide-svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
-	import { MODELS, CUSTOM_VALUE } from '$lib/constants/models';
+	import { getModels, CUSTOM_VALUE } from '$lib/constants/models';
 
 	interface ToolCategory {
 		id: string;
@@ -266,7 +266,7 @@
 				<div class="pf-field">
 					<label class="pf-label" for="profile-model">Model</label>
 					<select id="profile-model" class="pf-select" value={customModelMode ? CUSTOM_VALUE : profileForm.model} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v === CUSTOM_VALUE) { onCustomModelModeChange(true, ''); } else { onCustomModelModeChange(false, v); } }}>
-						{#each MODELS as model (model.value)}
+						{#each getModels() as model (model.value)}
 							<option value={model.value}>{model.label}</option>
 						{/each}
 						<option value={CUSTOM_VALUE}>Custom...</option>
