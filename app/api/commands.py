@@ -27,6 +27,7 @@ from app.core.slash_commands import (
 )
 # New V2 rewind services - direct JSONL manipulation
 from app.core.jsonl_rewind import jsonl_rewind_service
+from app.core.rewind_db_sync import resolve_rewind_anchor, apply_rewind_delete
 from app.core.sync_engine import sync_engine
 from app.core.live_session_store import live_session_store
 from app.core.models import (
@@ -570,6 +571,24 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
 
     # Execute chat rewind using JSONL rewind service
     if request.restore_chat:
+        # Resolve the DB anchor BEFORE truncating the JSONL. The fallback
+        # content-matcher (B) needs the JSONL intact to look up the target
+        # uuid's text when user rows lack a persisted jsonl_uuid. This also
+        # runs the (A) backfill so subsequent rewinds hit the fast path.
+        anchor_id: Optional[int] = None
+        try:
+            anchor_id = resolve_rewind_anchor(
+                session_id=session_id,
+                sdk_session_id=sdk_session_id,
+                working_dir=working_dir,
+                target_uuid=request.target_uuid,
+            )
+        except Exception as anchor_err:
+            logger.error(
+                f"Rewind DB anchor resolution failed for session {session_id}: {anchor_err}",
+                exc_info=True,
+            )
+
         result = jsonl_rewind_service.truncate_to_checkpoint(
             sdk_session_id=sdk_session_id,
             target_uuid=request.target_uuid,
@@ -580,28 +599,35 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
         if result.success:
             chat_rewound = True
             messages_removed = result.messages_removed or 0
-            # Sync the DB `session_messages` table to match the truncated JSONL.
-            # Without this, rewind only truncates the SDK transcript and leaves
-            # orphan rows that the UI still renders on reload — the original
-            # symptom users reported as "rewind doesn't stick".
-            # Best-effort: a DB failure here does not invalidate the successful
-            # JSONL truncation; we log and surface it as a soft error.
-            try:
-                db_removed = database.delete_session_messages_after_jsonl_uuid(
-                    session_id=session_id,
-                    target_uuid=request.target_uuid,
-                    include_response=request.include_response,
+            # Mirror the JSONL truncation into session_messages. Without this,
+            # rewind leaves orphan rows the UI renders on reload (the original
+            # "rewind doesn't stick" symptom). Best-effort: a DB failure here
+            # does not invalidate the successful JSONL truncation.
+            db_removed = 0
+            if anchor_id is not None:
+                try:
+                    db_removed = apply_rewind_delete(
+                        session_id=session_id,
+                        anchor_id=anchor_id,
+                        include_response=request.include_response,
+                    )
+                except Exception as db_err:
+                    logger.error(
+                        f"Rewind DB sync failed for session {session_id}: {db_err}",
+                        exc_info=True,
+                    )
+                    errors.append(f"DB sync failed: {db_err}")
+            else:
+                logger.warning(
+                    f"Rewind DB sync skipped: no anchor row resolved for "
+                    f"session={session_id} target={request.target_uuid}. "
+                    f"UI may show stale messages until next reload with backfill."
                 )
-                logger.info(
-                    f"Rewind DB sync: session={session_id}, target_uuid={request.target_uuid}, "
-                    f"db_rows_removed={db_removed}, jsonl_messages_removed={messages_removed}"
-                )
-            except Exception as db_err:
-                logger.error(
-                    f"Rewind DB sync failed for session {session_id}: {db_err}",
-                    exc_info=True,
-                )
-                errors.append(f"DB sync failed: {db_err}")
+                errors.append("DB sync skipped: could not resolve anchor row")
+            logger.info(
+                f"Rewind DB sync: session={session_id}, target_uuid={request.target_uuid}, "
+                f"db_rows_removed={db_removed}, jsonl_messages_removed={messages_removed}"
+            )
             # Clear stale messages from live_session_store so the next
             # load_session reads from the truncated JSONL instead of
             # serving pre-rewind data from memory.
