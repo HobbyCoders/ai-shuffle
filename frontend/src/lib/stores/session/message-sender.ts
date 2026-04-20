@@ -312,7 +312,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content))
 						: s.messages;
 					// eslint-disable-next-line no-console
-					console.log('[AS] optimistic append (send path A)', { userMsgId, prevLen: baseMessages.length, newLen: baseMessages.length + 1, promptPrefix: prompt.slice(0, 40) });
+					console.log(`[AS] optimistic append A id=${userMsgId} prevLen=${baseMessages.length} "${prompt.slice(0, 30)}"`);
 					return {
 						...s,
 						messages: [...baseMessages, {
@@ -495,7 +495,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 			update(s => {
 				// eslint-disable-next-line no-console
-				console.log('[AS] optimistic append (send path B - worktree)', { userMsgId, prevLen: s.messages.length, newLen: s.messages.length + 1, promptPrefix: prompt.slice(0, 40) });
+				console.log(`[AS] optimistic append B-worktree id=${userMsgId} prevLen=${s.messages.length} "${prompt.slice(0, 30)}"`);
 				return {
 					...s,
 					isCreatingWorktree: true,

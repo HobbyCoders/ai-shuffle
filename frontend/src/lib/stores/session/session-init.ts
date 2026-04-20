@@ -149,16 +149,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 			}
 
 			// eslint-disable-next-line no-console
-			console.log('[AS] poll-apply start', {
-				sessionId,
-				stateLen: _state.messages.length,
-				stateLastId: _state.messages[_state.messages.length - 1]?.id,
-				stateLastRole: _state.messages[_state.messages.length - 1]?.role,
-				dataMsgLen: data.messages.length,
-				dataLastId: data.messages[data.messages.length - 1]?.id,
-				dataLastRole: data.messages[data.messages.length - 1]?.role,
-				isStreaming: data.isStreaming
-			});
+			console.log(`[AS] poll-apply start sid=${sessionId.slice(0,8)} stateLen=${_state.messages.length} stateLastId=${_state.messages[_state.messages.length - 1]?.id} stateLastRole=${_state.messages[_state.messages.length - 1]?.role} dataLen=${data.messages.length} dataLastId=${data.messages[data.messages.length - 1]?.id} dataLastRole=${data.messages[data.messages.length - 1]?.role} streaming=${data.isStreaming}`);
 
 			// During interrupt_and_query, stale polls from the old query can return
 			// with isStreaming=false and clobber the optimistic isStreaming=true set
@@ -299,7 +290,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 					if (matchIdx >= 0) {
 						// Server persisted this msg under its own id → drop optimistic.
 						// eslint-disable-next-line no-console
-						console.log('[AS] phase1 drop-optimistic', { optId: m.id, serverId: finalMessages[matchIdx]?.id, serverIdx: matchIdx, contentPrefix: (m.content || '').slice(0, 40) });
+						console.log(`[AS] phase1 drop-optimistic optId=${m.id} serverId=${finalMessages[matchIdx]?.id} serverIdx=${matchIdx} "${(m.content || '').slice(0, 30)}"`);
 						claimedServerIdx.add(matchIdx);
 						continue;
 					}
@@ -449,7 +440,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 						}
 						if (existing.id !== msg.id) {
 							// eslint-disable-next-line no-console
-							console.log('[AS] phase3 id-swap', { fromServerId: msg.id, toExistingId: existing.id, role: msg.role, type: msg.type, contentPrefix: (msg.content || '').slice(0, 40) });
+							console.log(`[AS] phase3 id-swap from=${msg.id} to=${existing.id} role=${msg.role} type=${msg.type} "${(msg.content || '').slice(0, 30)}"`);
 							needsStabilization = true;
 							return { ...msg, id: existing.id };
 						}

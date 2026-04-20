@@ -103,7 +103,7 @@
 		let stableCount = 0;
 		let tick = 0;
 		// eslint-disable-next-line no-console
-		console.log('[AS] stable START', { initSH: containerRef?.scrollHeight, initST: containerRef?.scrollTop, msgLen: $activeSession.messages.length });
+		console.log(`[AS] stable START initSH=${containerRef?.scrollHeight} initST=${containerRef?.scrollTop} msgLen=${$activeSession.messages.length}`);
 		pendingScrollTimer = setInterval(() => {
 			if (!containerRef) {
 				if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
@@ -114,12 +114,12 @@
 			scrollToBottom();
 			const shAfter = containerRef.scrollHeight;
 			// eslint-disable-next-line no-console
-			console.log('[AS] stable tick', { tick, shBefore, shAfter, st: containerRef.scrollTop, ch: containerRef.clientHeight, stableCount, msgLen: $activeSession.messages.length });
+			console.log(`[AS] stable tick=${tick} shBefore=${shBefore} shAfter=${shAfter} ST=${containerRef.scrollTop} CH=${containerRef.clientHeight} stable=${stableCount} msgLen=${$activeSession.messages.length}`);
 			if (containerRef.scrollHeight === lastScrollHeight) {
 				stableCount++;
 				if (stableCount >= 3) {
 					// eslint-disable-next-line no-console
-					console.log('[AS] stable DONE', { finalSH: containerRef.scrollHeight, finalST: containerRef.scrollTop, tick });
+					console.log(`[AS] stable DONE finalSH=${containerRef.scrollHeight} finalST=${containerRef.scrollTop} tick=${tick}`);
 					if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
 				}
 			} else {
@@ -354,7 +354,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 			containerRef.scrollTop = containerRef.scrollHeight;
 			lastKnownScrollTop = containerRef.scrollTop;
 			// eslint-disable-next-line no-console
-			console.log('[AS] scrollToBottom', { preSH, preST, preCH, postST: containerRef.scrollTop, postSH: containerRef.scrollHeight, depth: programmaticScrollDepth });
+			console.log(`[AS] scrollToBottom preSH=${preSH} preST=${preST} preCH=${preCH} postST=${containerRef.scrollTop} postSH=${containerRef.scrollHeight} depth=${programmaticScrollDepth}`);
 			// Use double RAF to ensure scroll events from this programmatic scroll are ignored
 			// Single RAF isn't enough - browser may fire scroll events across multiple frames
 			requestAnimationFrame(() => {
@@ -397,7 +397,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 				const scrollUpDelta = lastKnownScrollTop - currentScrollTop;
 				if (scrollUpDelta > 10) {
 					// eslint-disable-next-line no-console
-					console.log('[AS] handleScroll DISABLE autoScroll', { currentScrollTop, lastKnownScrollTop, scrollUpDelta, scrollHeight: containerRef.scrollHeight, clientHeight: containerRef.clientHeight });
+					console.log(`[AS] handleScroll DISABLE currST=${currentScrollTop} lastST=${lastKnownScrollTop} delta=${scrollUpDelta} SH=${containerRef.scrollHeight} CH=${containerRef.clientHeight}`);
 					shouldAutoScroll = false;
 				}
 			}
@@ -522,7 +522,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 		if (currentId === prevId) return;
 
 		// eslint-disable-next-line no-console
-		console.log('[AS] session-switch effect', { from: prevId, to: currentId, msgLen: $activeSession.messages.length, lastId: $activeSession.messages[$activeSession.messages.length - 1]?.id, lastRole: $activeSession.messages[$activeSession.messages.length - 1]?.role, scrollHeight: containerRef?.scrollHeight, scrollTop: containerRef?.scrollTop, clientHeight: containerRef?.clientHeight });
+		console.log(`[AS] session-switch effect from=${prevId} to=${currentId} msgLen=${$activeSession.messages.length} lastId=${$activeSession.messages[$activeSession.messages.length - 1]?.id} lastRole=${$activeSession.messages[$activeSession.messages.length - 1]?.role} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
 
 		// Save scroll state for the old session (if any)
 		if (prevId && containerRef) {
@@ -541,7 +541,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 		// (bottom) from onMount, and restoring would fight the initial render.
 		if (!prevId) {
 			// eslint-disable-next-line no-console
-			console.log('[AS] session-switch SKIP (no prevId)', { to: currentId });
+			console.log(`[AS] session-switch SKIP (no prevId) to=${currentId}`);
 			return;
 		}
 
@@ -583,7 +583,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 			// ensure we stay at bottom after resize
 			if (shouldAutoScroll && containerRef) {
 				// eslint-disable-next-line no-console
-				console.log('[AS] resizeObserver → scrollToBottom', { sh: containerRef.scrollHeight, st: containerRef.scrollTop, ch: containerRef.clientHeight });
+				console.log(`[AS] resizeObserver → scrollToBottom SH=${containerRef.scrollHeight} ST=${containerRef.scrollTop} CH=${containerRef.clientHeight}`);
 				// Use requestAnimationFrame to ensure layout is complete
 				requestAnimationFrame(() => {
 					scrollToBottom();
@@ -679,28 +679,10 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 			}
 		}
 
-		// eslint-disable-next-line no-console
 		if (hasNewMessage || hasContentChange) {
 			const newest = $activeSession.messages[currentLength - 1];
-			const prevNewest = $activeSession.messages[currentLength - 2];
-			console.log('[AS] effect', {
-				len: currentLength,
-				prevLen: prevMessagesLength,
-				hasNewMessage,
-				hasContentChange,
-				shouldAutoScroll,
-				pendingScrollToBottom,
-				newestId: newest?.id,
-				newestRole: newest?.role,
-				newestType: newest?.type,
-				newestStreaming: newest?.streaming,
-				newestContentLen: (newest?.content || '').length,
-				prevNewestId: prevNewest?.id,
-				prevNewestRole: prevNewest?.role,
-				scrollHeight: containerRef?.scrollHeight,
-				scrollTop: containerRef?.scrollTop,
-				clientHeight: containerRef?.clientHeight
-			});
+			// eslint-disable-next-line no-console
+			console.log(`[AS] effect len=${currentLength} prevLen=${prevMessagesLength} newMsg=${hasNewMessage} contentChg=${hasContentChange} autoS=${shouldAutoScroll} pend=${pendingScrollToBottom} newestId=${newest?.id} newestRole=${newest?.role} newestType=${newest?.type} newestStreaming=${newest?.streaming} cLen=${(newest?.content || '').length} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
 		}
 
 		// Scroll to bottom on content changes if auto-scroll is active,
