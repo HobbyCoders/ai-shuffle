@@ -151,13 +151,25 @@ export function createSessionInit(deps: SessionInitDeps) {
 			// eslint-disable-next-line no-console
 			console.log(`[AS] poll-apply start sid=${sessionId.slice(0,8)} stateLen=${_state.messages.length} stateLastId=${_state.messages[_state.messages.length - 1]?.id} stateLastRole=${_state.messages[_state.messages.length - 1]?.role} dataLen=${data.messages.length} dataLastId=${data.messages[data.messages.length - 1]?.id} dataLastRole=${data.messages[data.messages.length - 1]?.role} streaming=${data.isStreaming}`);
 
-			// During interrupt_for_query, stale polls from the old query can return
-			// with isStreaming=false and clobber the optimistic isStreaming=true set
-			// by the interrupt path. Skip all poll updates while the transition is
-			// in progress — the new query's 'start' event restarts polling cleanly.
+			// During interrupt_for_query, STALE polls from the old query can
+			// return with `isStreaming=false` and would clobber the optimistic
+			// `isStreaming=true` set by the interrupt path. But fresh polls
+			// where the server already sees the NEW query as streaming are
+			// safe — and vital, because they carry the stream buffer merge
+			// that renders `wsStreamContent` into the UI. Previously we
+			// blanket-skipped all polls while `interruptPending` was true,
+			// which meant `stream_delta` events piled into `wsStreamContent`
+			// but never rendered until the late `start` event cleared the
+			// gate — UI lag of 1-3s after send-now on a paragraph-sized
+			// response. Now: skip only stale polls; accept the first fresh
+			// poll and clear the gate so buffer merge resumes immediately.
 			if (internal.interruptPending) {
-				console.debug(`[PollCB] skipped: interruptPending for ${sessionId}`);
-				return;
+				if (!data.isStreaming) {
+					console.debug(`[PollCB] skipped: interruptPending stale poll for ${sessionId}`);
+					return;
+				}
+				console.debug(`[PollCB] interruptPending cleared by fresh poll (isStreaming=true) for ${sessionId}`);
+				internal.interruptPending = false;
 			}
 
 			// Build usage delta — don't overwrite a valid contextUsed with 0.
