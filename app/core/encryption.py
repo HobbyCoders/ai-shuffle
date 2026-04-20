@@ -197,6 +197,7 @@ def re_encrypt_all_secrets(old_password: str, new_password: str, db_module) -> b
         "gemini_api_key",
         "image_api_key",
         "video_api_key",
+        "anthropic_api_key",
     ]
 
     # Collect all values to re-encrypt
@@ -253,6 +254,7 @@ def encrypt_existing_plaintext_keys(db_module) -> int:
         "gemini_api_key",
         "image_api_key",
         "video_api_key",
+        "anthropic_api_key",
     ]
 
     count = 0

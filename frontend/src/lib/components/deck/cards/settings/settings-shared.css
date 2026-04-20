@@ -415,6 +415,21 @@
 	background: var(--muted-foreground);
 }
 
+/* Anthropic brand — warm clay gradient matching their palette */
+.connection-icon.anthropic {
+	background: linear-gradient(135deg, #cc785c, #8b4a3a);
+}
+
+.error-text {
+	font-size: 0.8125rem;
+	color: var(--destructive, #dc2626);
+}
+
+.success-text {
+	font-size: 0.8125rem;
+	color: var(--success);
+}
+
 .connection-icon svg {
 	width: 20px;
 	height: 20px;

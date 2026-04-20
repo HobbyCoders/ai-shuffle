@@ -101,6 +101,12 @@ class IntegrationSettingsResponse(BaseModel):
     """Response containing integration configuration status"""
     fal_api_key_set: bool
     fal_api_key_masked: str
+    # Anthropic API key (drives the direct-HTTP path for one-shot AI
+    # generation — commit messages, PR descriptions, branch names, profile
+    # generation). When unset, those calls fall through to the SDK
+    # subprocess path.
+    anthropic_api_key_set: bool = False
+    anthropic_api_key_masked: str = ""
     # Model selections (all fal.ai model IDs)
     image_model: Optional[str] = None
     image_edit_model: Optional[str] = None
@@ -133,6 +139,17 @@ class FalAIKeyResponse(BaseModel):
     masked_key: str
 
 
+class AnthropicKeyRequest(BaseModel):
+    """Request to set Anthropic API key"""
+    api_key: str
+
+
+class AnthropicKeyResponse(BaseModel):
+    """Response after setting Anthropic API key"""
+    success: bool
+    masked_key: str
+
+
 @router.get("/integrations", response_model=IntegrationSettingsResponse)
 async def get_integration_settings(token: str = Depends(require_auth)):
     """
@@ -141,6 +158,7 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     Returns whether API keys are configured (without exposing the actual keys).
     """
     fal_key = get_decrypted_api_key("fal_api_key")
+    anthropic_key = get_decrypted_api_key("anthropic_api_key")
     image_model = database.get_system_setting("image_model")
     image_edit_model = database.get_system_setting("image_edit_model")
     video_model = database.get_system_setting("video_model")
@@ -165,6 +183,8 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     return IntegrationSettingsResponse(
         fal_api_key_set=bool(fal_key),
         fal_api_key_masked=mask_api_key(fal_key) if fal_key else "",
+        anthropic_api_key_set=bool(anthropic_key),
+        anthropic_api_key_masked=mask_api_key(anthropic_key) if anthropic_key else "",
         image_model=image_model,
         image_edit_model=image_edit_model,
         video_model=video_model,
@@ -234,6 +254,76 @@ async def remove_fal_api_key(token: str = Depends(require_admin)):
     Remove the fal.ai API key (admin only).
     """
     database.delete_system_setting("fal_api_key")
+    return {"success": True}
+
+
+@router.post("/integrations/anthropic", response_model=AnthropicKeyResponse)
+async def set_anthropic_api_key(
+    request: AnthropicKeyRequest,
+    token: str = Depends(require_admin)
+):
+    """
+    Set the Anthropic API key (admin only).
+
+    Used by the direct-HTTP path in `app.api.generation.generate_with_claude`
+    for one-shot AI generation calls (commit messages, PR descriptions,
+    branch names, profile/subagent generation). When unset, those calls
+    fall through to the Claude Agent SDK subprocess path.
+
+    Get your API key from: https://console.anthropic.com/settings/keys
+    """
+    from app.core.anthropic_generation import (
+        validate_api_key,
+        AnthropicAuthError,
+        AnthropicRateLimitError,
+        AnthropicNetworkError,
+        AnthropicApiError,
+    )
+
+    api_key = request.api_key.strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key cannot be empty")
+
+    # Validate the key by making a 1-token messages.create call. Cheapest
+    # possible request to confirm auth works before committing the key to
+    # storage. Auth errors are rejected; network or server errors save the
+    # key anyway (transient issues shouldn't block setup).
+    try:
+        await validate_api_key(api_key)
+    except AnthropicAuthError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid API key. Anthropic rejected authentication."
+        )
+    except AnthropicRateLimitError:
+        raise HTTPException(
+            status_code=429,
+            detail="Anthropic rate-limited the validation call. Try again in a moment."
+        )
+    except AnthropicNetworkError as e:
+        logger.warning(f"Anthropic validation network error, saving key anyway: {e}")
+    except AnthropicApiError as e:
+        # Malformed / unexpected response — surface so the user can investigate
+        raise HTTPException(status_code=400, detail=f"Anthropic API error: {e}")
+
+    # Save to database (encrypted if encryption is ready)
+    set_encrypted_api_key("anthropic_api_key", api_key)
+
+    return AnthropicKeyResponse(
+        success=True,
+        masked_key=mask_api_key(api_key)
+    )
+
+
+@router.delete("/integrations/anthropic")
+async def remove_anthropic_api_key(token: str = Depends(require_admin)):
+    """
+    Remove the Anthropic API key (admin only).
+
+    Generation calls will fall back to the SDK subprocess path until a new
+    key is configured.
+    """
+    database.delete_system_setting("anthropic_api_key")
     return {"success": True}
 
 

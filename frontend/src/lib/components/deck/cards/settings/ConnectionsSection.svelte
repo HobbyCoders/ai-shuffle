@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
+	import { onMount } from 'svelte';
 	import { claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth';
 	import './settings-shared.css';
 
@@ -39,6 +40,90 @@
 		onConnectGithub,
 		onDisconnectGithub,
 	}: Props = $props();
+
+	// ----- Anthropic API key (self-contained: this section owns its state) -----
+	// Enables the direct-HTTP path for one-shot AI generation (commit msgs,
+	// PR descriptions, branch names). Without it, those calls fall through
+	// to the slower SDK subprocess path.
+	let anthropicKeySet = $state(false);
+	let anthropicKeyMasked = $state('');
+	let anthropicKeyInput = $state('');
+	let anthropicSaving = $state(false);
+	let anthropicError = $state('');
+	let anthropicSuccess = $state('');
+
+	async function loadAnthropicKey() {
+		try {
+			const res = await fetch('/api/v1/settings/integrations', { credentials: 'include' });
+			if (!res.ok) return;
+			const data = await res.json();
+			anthropicKeySet = !!data.anthropic_api_key_set;
+			anthropicKeyMasked = data.anthropic_api_key_masked ?? '';
+		} catch (e) {
+			// Silent — non-critical, user can retry by reopening settings
+			console.warn('Failed to load Anthropic key status', e);
+		}
+	}
+
+	async function saveAnthropicKey() {
+		if (!anthropicKeyInput.trim()) return;
+		anthropicSaving = true;
+		anthropicError = '';
+		anthropicSuccess = '';
+		try {
+			const res = await fetch('/api/v1/settings/integrations/anthropic', {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ api_key: anthropicKeyInput.trim() }),
+			});
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({}));
+				anthropicError = body.detail ?? `Save failed (${res.status})`;
+				return;
+			}
+			const data = await res.json();
+			anthropicKeySet = true;
+			anthropicKeyMasked = data.masked_key ?? '';
+			anthropicKeyInput = '';
+			anthropicSuccess = 'Saved';
+			setTimeout(() => (anthropicSuccess = ''), 2500);
+		} catch (e) {
+			anthropicError = e instanceof Error ? e.message : 'Network error';
+		} finally {
+			anthropicSaving = false;
+		}
+	}
+
+	async function removeAnthropicKey() {
+		anthropicSaving = true;
+		anthropicError = '';
+		anthropicSuccess = '';
+		try {
+			const res = await fetch('/api/v1/settings/integrations/anthropic', {
+				method: 'DELETE',
+				credentials: 'include',
+			});
+			if (!res.ok) {
+				anthropicError = `Remove failed (${res.status})`;
+				return;
+			}
+			anthropicKeySet = false;
+			anthropicKeyMasked = '';
+			anthropicSuccess = 'Removed';
+			setTimeout(() => (anthropicSuccess = ''), 2500);
+		} catch (e) {
+			anthropicError = e instanceof Error ? e.message : 'Network error';
+		} finally {
+			anthropicSaving = false;
+		}
+	}
+
+	// Fetch on mount. No reactivity needed — key status only changes via this
+	// component's own save/remove actions.
+	onMount(() => {
+		loadAnthropicKey();
+	});
 </script>
 
 <section class="section">
@@ -96,6 +181,65 @@
 					{/if}
 				</div>
 			</div>
+
+			<!-- Anthropic API key — drives fast HTTP path for AI generation -->
+			<div class="connection-row">
+				<div class="connection-info">
+					<div class="connection-icon anthropic">
+						<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+							<path d="M6.5 4h3l5.5 16h-3l-1.2-3.6H6.2L5 20H2L6.5 4zm.4 9.6h3.2L8.5 8.3 6.9 13.6zM15.5 4h3L22 20h-3L15.5 4z"/>
+						</svg>
+					</div>
+					<div>
+						<span class="connection-name">Anthropic API</span>
+						{#if anthropicKeySet}
+							<span class="badge success">Connected</span>
+						{:else}
+							<span class="badge muted">Optional — speeds up AI generation</span>
+						{/if}
+					</div>
+				</div>
+				<div class="connection-actions">
+					{#if anthropicKeySet}
+						<span class="connected-text"><code>{anthropicKeyMasked}</code></span>
+						<button
+							onclick={removeAnthropicKey}
+							disabled={anthropicSaving}
+							class="btn danger compact"
+						>
+							Remove
+						</button>
+					{:else}
+						<div class="oauth-flow">
+							<input
+								type="password"
+								autocomplete="off"
+								value={anthropicKeyInput}
+								oninput={(e) => (anthropicKeyInput = e.currentTarget.value)}
+								placeholder="sk-ant-..."
+								class="input compact"
+							/>
+							<button
+								onclick={saveAnthropicKey}
+								disabled={anthropicSaving || !anthropicKeyInput.trim()}
+								class="btn primary compact"
+							>
+								{anthropicSaving ? '...' : 'Save'}
+							</button>
+						</div>
+					{/if}
+				</div>
+			</div>
+			{#if anthropicError}
+				<div class="connection-row" role="alert">
+					<span class="error-text">{anthropicError}</span>
+				</div>
+			{/if}
+			{#if anthropicSuccess}
+				<div class="connection-row">
+					<span class="success-text">{anthropicSuccess}</span>
+				</div>
+			{/if}
 
 			<!-- GitHub -->
 			<div class="connection-row">

@@ -21,16 +21,29 @@ from claude_agent_sdk import AssistantMessage, TextBlock
 from app.api.auth import require_auth
 from app.api.common import api_error_handler
 from app.core.model_registry import DEFAULT_MODEL
+from app.core.models import (
+    AgentExport,
+    AgentExportData,
+    ClarificationQuestionModel,
+    GenerationResponseModel,
+)
+from app.core.generation import (
+    build_profile_generation_prompt,
+    build_subagent_generation_prompt,
+    should_ask_clarification,
+    get_clarification_questions,
+)
+from app.core.generation.clarification import format_clarification_context
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # [gen-debug] Diagnostic instrumentation for one-shot generation latency.
 # Monkey-patches SDK's SubprocessCLITransport._build_command to log the final
-# argv list sent to claude.exe (flags, settings JSON, env-relevant values).
-# Also logs the merged env dict. Active unconditionally — remove after the
-# commit-msg / PR-desc latency investigation closes. Cheap: one log line per
-# one-shot generation call, no hot-path impact.
+# argv list sent to claude.exe. Only fires on the SDK fallback path — the
+# HTTP path never touches SubprocessCLITransport. Cheap one-time patch; no
+# hot-path impact. Safe to remove once the investigation closes; idempotent
+# via `_ai_shuffle_gen_debug_patched` marker if left in place.
 # ---------------------------------------------------------------------------
 try:
     import os as _gen_debug_os
@@ -47,7 +60,7 @@ try:
                 # Redact large JSON payloads but keep flag names and short values.
                 redacted = []
                 skip_next = False
-                for i, tok in enumerate(cmd):
+                for tok in cmd:
                     if skip_next:
                         if isinstance(tok, str) and len(tok) > 200:
                             redacted.append(f"<{len(tok)} chars>")
@@ -100,19 +113,7 @@ try:
         logger.info("[gen-debug] SubprocessCLITransport._build_command patched")
 except Exception as _patch_err:
     logger.warning(f"[gen-debug] failed to install SDK patch: {_patch_err}")
-from app.core.models import (
-    AgentExport,
-    AgentExportData,
-    ClarificationQuestionModel,
-    GenerationResponseModel,
-)
-from app.core.generation import (
-    build_profile_generation_prompt,
-    build_subagent_generation_prompt,
-    should_ask_clarification,
-    get_clarification_questions,
-)
-from app.core.generation.clarification import format_clarification_context
+
 
 router = APIRouter(prefix="/api/v1/generate", tags=["Generation"])
 
@@ -240,21 +241,53 @@ def extract_json_from_response(text: str) -> dict:
         raise ValueError(f"Invalid JSON in response: {e}")
 
 
+def _extract_system_prompt_text(profile_config: Optional[Dict]) -> Optional[str]:
+    """Pull a plain-text system prompt out of a Default AI profile config.
+
+    The profile's `system_prompt` field can be:
+    - A string → use as-is (when non-empty)
+    - A dict with `{type: "custom", content: "..."}` → use content
+    - A dict with `{type: "preset", preset: "claude_code"}` → no text to
+      extract (SDK subprocess path applies the preset; HTTP path has no
+      equivalent and skips it — the one-shot prompts are self-contained)
+
+    Returns None when there's nothing to pass as a system message.
+    """
+    if not profile_config:
+        return None
+    sp = profile_config.get("system_prompt")
+    if isinstance(sp, str):
+        return sp.strip() or None
+    if isinstance(sp, dict):
+        content = sp.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    return None
+
+
 async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
     """
-    Generate a response using Claude SDK, honoring the Default AI profile.
+    Generate a response using Claude, honoring the Default AI profile.
 
     The Default AI profile is the user-facing control for all internal AI
     generation (commit messages, PR descriptions, branch names, profile /
-    subagent generation, etc.). This function pulls the full profile config —
-    model, permission_mode, setting_sources, thinking_mode, effort,
-    system_prompt, env, extra_args — and passes them to the SDK. Tools / MCP /
-    agents / hooks are always forced off for one-shot generation.
+    subagent generation, etc.). This function pulls the profile's model and
+    system prompt, then dispatches to one of two backends:
 
-    Each call spawns a fresh `claude.exe` subprocess via the SDK's top-level
-    `query()`. No warm pool, no cross-call context bleed. The configured
-    workspace directory is used as cwd so CLAUDE.md / .claude/ auto-discovery
-    is predictable.
+    1. **Direct HTTP (preferred)** — When an Anthropic API key is configured
+       in Settings, we POST directly to `api.anthropic.com/v1/messages`. No
+       subprocess spawn, no CLI handshake, no agent loop. Typical latency
+       for Haiku: 0.8-1.5s vs 3-6s for the SDK path.
+
+    2. **SDK subprocess (fallback)** — When no API key is configured, or when
+       the HTTP path hits auth/network errors, we fall back to the Claude
+       Agent SDK's `query()`. This spawns a fresh `claude.exe` subprocess
+       using the full profile config (permission_mode, setting_sources,
+       thinking_mode, effort, env, extra_args). Tools / MCP / agents / hooks
+       are always forced off for one-shot generation.
+
+    Rate-limit errors from the HTTP path propagate — retrying via the SDK
+    would hit the same quota on the same account.
 
     Args:
         prompt: The prompt to send to Claude
@@ -266,11 +299,59 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
     """
     from app.core.profiles import get_default_ai_profile
     from app.core.generation_options import build_generation_options
+    from app.core.anthropic_generation import (
+        is_http_generation_available,
+        generate_via_http,
+        AnthropicAuthError,
+        AnthropicNetworkError,
+        AnthropicRateLimitError,
+        AnthropicApiError,
+    )
 
     profile = get_default_ai_profile()
     profile_config = (profile or {}).get("config") if profile else None
     effective_model = model or (profile_config or {}).get("model") or DEFAULT_MODEL
 
+    # HTTP path — preferred when the user has configured an API key.
+    # Auth / network errors fall back to SDK; rate-limit errors propagate.
+    if is_http_generation_available():
+        system_prompt = _extract_system_prompt_text(profile_config)
+        t_http = time.perf_counter()
+        try:
+            text = await generate_via_http(
+                prompt=prompt,
+                model=effective_model,
+                system_prompt=system_prompt,
+            )
+            logger.info(
+                f"[generate_with_claude] HTTP path model={effective_model} "
+                f"took {(time.perf_counter() - t_http) * 1000:.0f}ms"
+            )
+            return text
+        except AnthropicRateLimitError:
+            # Don't silently fall back — SDK hits the same quota, user should
+            # see the throttle and either wait or investigate.
+            raise HTTPException(
+                status_code=429,
+                detail="Anthropic API rate limit reached. Try again shortly."
+            )
+        except AnthropicAuthError as e:
+            # Key is bad or revoked. Fall through to SDK so the request still
+            # completes, but log loudly so the user knows to re-enter the key.
+            logger.warning(
+                f"[generate_with_claude] HTTP auth failed, falling back to SDK: {e}"
+            )
+        except AnthropicNetworkError as e:
+            logger.warning(
+                f"[generate_with_claude] HTTP network error, falling back to SDK: {e}"
+            )
+        except AnthropicApiError as e:
+            # Unexpected 4xx/5xx. Fall back to SDK for robustness.
+            logger.warning(
+                f"[generate_with_claude] HTTP API error, falling back to SDK: {e}"
+            )
+
+    # SDK subprocess path — full profile config applied.
     # Single-shot subprocess: max_turns=1 since we only send one prompt.
     options = build_generation_options(
         profile_config,
@@ -322,7 +403,7 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
 
     t_total = time.perf_counter() - t0
     logger.info(
-        f"[generate_with_claude] one-shot call model={effective_model} "
+        f"[generate_with_claude] SDK path model={effective_model} "
         f"took {t_total * 1000:.0f}ms"
     )
     logger.info(
