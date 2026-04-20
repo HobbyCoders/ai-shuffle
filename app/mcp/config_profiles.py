@@ -8,6 +8,7 @@ permission mode, system prompt, etc.).
 import logging
 from typing import Any, Dict
 
+from app.core.model_registry import DEFAULT_MODEL, model_values
 from app.mcp.config_helpers import _tool_result, _error
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,7 @@ def _create_profile_tools(is_admin: bool) -> list:
                 "description": {"type": "string"},
                 "model": {
                     "type": "string",
-                    "enum": ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-4-6[1m]", "claude-opus-4-6", "claude-opus-4-6[1m]", "claude-opus-4-7", "claude-opus-4-7[1m]"],
+                    "enum": model_values(),
                     "description": "AI model to use.",
                 },
                 "tools_preset": {
@@ -145,7 +146,7 @@ def _create_profile_tools(is_admin: bool) -> list:
 
         # Build config
         config: Dict[str, Any] = {
-            "model": args.get("model", "claude-sonnet-4-6"),
+            "model": args.get("model", DEFAULT_MODEL),
             "permission_mode": args.get("permission_mode", "default"),
             "tools_preset": args.get("tools_preset", "claude_code"),
         }
@@ -211,7 +212,7 @@ def _create_profile_tools(is_admin: bool) -> list:
                 "profile_id": {"type": "string"},
                 "name": {"type": "string"},
                 "description": {"type": "string"},
-                "model": {"type": "string", "enum": ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-4-6[1m]", "claude-opus-4-6", "claude-opus-4-6[1m]", "claude-opus-4-7", "claude-opus-4-7[1m]"]},
+                "model": {"type": "string", "enum": model_values()},
                 "permission_mode": {"type": "string", "enum": ["default", "auto", "acceptEdits", "plan", "bypassPermissions"]},
                 "thinking_mode": {"type": "string", "enum": ["default", "disabled", "adaptive", "think", "think_harder", "ultra_think"]},
                 "tools_preset": {"type": "string", "enum": ["claude_code"]},

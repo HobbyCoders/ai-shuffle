@@ -21,6 +21,7 @@ from claude_agent_sdk import ClaudeAgentOptions, AgentDefinition
 
 from app.db import database
 from app.core.config import settings
+from app.core.model_registry import is_fast_mode_eligible
 from app.core.platform import detect_deployment_mode, DeploymentMode
 
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
@@ -438,7 +439,11 @@ def build_options_from_profile(
     # temp file, and we only write TRUE to the shared file (never false).
     fast_mode_requested = overrides.get("fast_mode") == "true"
     fast_mode_settings: Optional[str] = None
-    if fast_mode_requested and model_to_use and "opus" in str(model_to_use).lower():
+    # Fast-mode eligibility is a per-model capability declared in the
+    # registry (app/core/model_registry.py) rather than inferred from the
+    # model ID — a future non-Opus model could ship fast mode, and the old
+    # substring check would have silently misfired.
+    if fast_mode_requested and is_fast_mode_eligible(model_to_use):
         # Per-session temp file — no race with concurrent queries
         fast_mode_settings = _create_fast_mode_settings_file(session_id or "default")
         # Also write to shared settings as backup (no false-write race now)

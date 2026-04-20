@@ -62,6 +62,9 @@ class SubagentDefinition(BaseModel):
 # This ensures the model always matches available tools - no manual sync needed
 from app.core.ai_tools import AIToolsConfig  # noqa: E402
 
+# Single source of truth for selectable Claude models.
+from app.core.model_registry import DEFAULT_MODEL  # noqa: E402
+
 
 class SystemPromptConfig(BaseModel):
     """System prompt configuration"""
@@ -75,7 +78,7 @@ class SystemPromptConfig(BaseModel):
 class ProfileConfig(BaseModel):
     """Claude Agent configuration stored in profile - maps to ClaudeAgentOptions"""
     # Core settings
-    model: Optional[str] = "claude-sonnet-4-6"
+    model: Optional[str] = DEFAULT_MODEL
     permission_mode: Optional[str] = "default"  # default, auto, acceptEdits, plan, bypassPermissions
     thinking_mode: Optional[str] = "default"  # default, disabled, adaptive, think, think_harder, ultra_think
     # Opus 4.6+ uses effort-based reasoning instead of token budgets
@@ -709,7 +712,7 @@ class AgentExportData(BaseModel):
     """Agent configuration data for export"""
     name: str
     description: Optional[str] = None
-    model: Optional[str] = "claude-sonnet-4-6"
+    model: Optional[str] = DEFAULT_MODEL
     permission_mode: Optional[str] = "default"  # default, auto, acceptEdits, plan, bypassPermissions
     thinking_mode: Optional[str] = "default"
     effort: Optional[str] = None  # low, medium, high, max, xhigh (xhigh only for Opus 4.7+)

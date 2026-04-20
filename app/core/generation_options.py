@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional
 
 from claude_agent_sdk import ClaudeAgentOptions
 
+from app.core.model_registry import DEFAULT_MODEL
+
 logger = logging.getLogger(__name__)
 
 
@@ -202,7 +204,7 @@ def build_generation_options(
     config: Dict[str, Any] = profile_config or {}
 
     # Model: explicit override > profile > hard fallback
-    model = model_override or config.get("model") or "claude-sonnet-4-6"
+    model = model_override or config.get("model") or DEFAULT_MODEL
 
     # Permission mode: profile value or bypassPermissions
     permission_mode = config.get("permission_mode") or "bypassPermissions"

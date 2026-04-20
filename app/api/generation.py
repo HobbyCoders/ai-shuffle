@@ -20,6 +20,7 @@ from claude_agent_sdk import AssistantMessage, TextBlock
 
 from app.api.auth import require_auth
 from app.api.common import api_error_handler
+from app.core.model_registry import DEFAULT_MODEL
 from app.core.models import (
     AgentExport,
     AgentExportData,
@@ -47,7 +48,7 @@ class GenerateProfileRequest(BaseModel):
     """Request to generate a profile configuration"""
     description: str = Field(..., min_length=10, max_length=5000, description="Description of the desired profile")
     reference_material: Optional[str] = Field(None, max_length=15000, description="Optional reference material like existing prompts or examples to incorporate")
-    model: Optional[str] = Field(None, description="Model to use for generation (haiku, sonnet, opus)")
+    model: Optional[str] = Field(None, description="Model to use for generation (see /api/v1/models)")
     skip_clarification: bool = Field(False, description="Skip clarification questions")
 
 
@@ -55,7 +56,7 @@ class GenerateSubagentRequest(BaseModel):
     """Request to generate a subagent configuration"""
     description: str = Field(..., min_length=10, max_length=5000, description="Description of the desired subagent")
     reference_material: Optional[str] = Field(None, max_length=15000, description="Optional reference material like existing prompts or examples to incorporate")
-    model: Optional[str] = Field(None, description="Model to use for generation (haiku, sonnet, opus)")
+    model: Optional[str] = Field(None, description="Model to use for generation (see /api/v1/models)")
     skip_clarification: bool = Field(False, description="Skip clarification questions")
 
 
@@ -191,7 +192,7 @@ async def generate_with_claude(prompt: str, model: Optional[str] = None) -> str:
 
     profile = get_default_ai_profile()
     profile_config = (profile or {}).get("config") if profile else None
-    effective_model = model or (profile_config or {}).get("model") or "claude-sonnet-4-6"
+    effective_model = model or (profile_config or {}).get("model") or DEFAULT_MODEL
 
     # Single-shot subprocess: max_turns=1 since we only send one prompt.
     options = build_generation_options(
@@ -296,7 +297,7 @@ async def _generate_profile_internal(
     agent_data = AgentExportData(
         name=generated.get("name", "Generated Profile"),
         description=generated.get("description"),
-        model=generated.get("model", "claude-sonnet-4-6"),
+        model=generated.get("model", DEFAULT_MODEL),
         permission_mode=generated.get("permission_mode", "default"),
         system_prompt_type=generated.get("system_prompt_type", "preset"),
         system_prompt_preset=generated.get("system_prompt_preset", "claude_code"),

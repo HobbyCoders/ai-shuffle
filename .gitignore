@@ -48,7 +48,8 @@ logs/
 
 # Docker
 docker-compose.override.yml
-/.claude
+/.claude/*
+!/.claude/.progress
 /.remember
 Claude Code.bat
 

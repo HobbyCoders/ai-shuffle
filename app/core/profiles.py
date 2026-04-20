@@ -9,14 +9,16 @@ Built-in profiles can be edited but not deleted.
 
 import logging
 from typing import Dict, Any, Optional
+from app.core.model_registry import DEFAULT_MODEL
 from app.db import database
 
 logger = logging.getLogger(__name__)
 
 
 # Default profile configuration template (for reference when creating new profiles)
-# Supported model strings: claude-haiku-4-5, claude-sonnet-4-6, claude-sonnet-4-6[1m],
-# claude-opus-4-6, claude-opus-4-6[1m], claude-opus-4-7, claude-opus-4-7[1m]
+# Supported models are enumerated in app.core.model_registry.MODELS — edit that
+# module to add or remove a model; it's the single source of truth across
+# backend and frontend (frontend/src/lib/constants/models.ts mirrors it).
 #
 # NOTE on setting_sources:
 # - "user": Loads user-level settings from ~/.claude/settings.json
@@ -27,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Auto-compact is enabled by default in Claude Code's user settings.
 # Without "user" in setting_sources, auto-compact won't trigger automatically.
 DEFAULT_PROFILE_CONFIG: Dict[str, Any] = {
-    "model": "claude-sonnet-4-6",
+    "model": DEFAULT_MODEL,
     "allowed_tools": [],
     "permission_mode": "default",
     "system_prompt": {
@@ -56,7 +58,7 @@ DEFAULT_AI_PROFILE: Dict[str, Any] = {
                    "PR descriptions, profile/subagent generation, and other internal AI tasks. "
                    "Edit this profile to change the model and settings used by these features.",
     "config": {
-        "model": "claude-sonnet-4-6",
+        "model": DEFAULT_MODEL,
         "permission_mode": "bypassPermissions",
         "thinking_mode": "default",
         "system_prompt": {
@@ -103,12 +105,13 @@ def get_default_ai_profile() -> Optional[Dict[str, Any]]:
 def get_default_ai_model() -> str:
     """Get the model configured in the default AI profile.
 
-    Falls back to 'claude-sonnet-4-6' if the profile doesn't exist or has no model set.
+    Falls back to the registry's ``DEFAULT_MODEL`` if the profile doesn't
+    exist or has no model set.
     """
     profile = get_default_ai_profile()
     if profile:
-        return profile.get("config", {}).get("model", "claude-sonnet-4-6") or "claude-sonnet-4-6"
-    return "claude-sonnet-4-6"
+        return profile.get("config", {}).get("model", DEFAULT_MODEL) or DEFAULT_MODEL
+    return DEFAULT_MODEL
 
 
 def run_migrations():

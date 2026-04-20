@@ -21,6 +21,7 @@ from app.core.plugin_service import get_plugin_service
 from app.core.project_utils import get_project_working_dir_as_path, get_worktree_working_dir_as_path
 from app.core.project_agent_service import get_project_agent_service
 from app.core.config import settings
+from app.core.model_registry import DEFAULT_MODEL
 from app.core.profiles import get_builtin_profile_defaults
 
 logger = logging.getLogger(__name__)
@@ -801,7 +802,7 @@ async def export_profile(
     agent_data = AgentExportData(
         name=profile.get("name", profile_id),
         description=profile.get("description"),
-        model=config.get("model", "claude-sonnet-4-6"),
+        model=config.get("model", DEFAULT_MODEL),
         permission_mode=config.get("permission_mode", "default"),
         thinking_mode=config.get("thinking_mode", "default"),
         effort=config.get("effort"),
@@ -909,7 +910,7 @@ async def import_profile(
 
     # Build config from agent data
     config = {
-        "model": agent_data.model or "claude-sonnet-4-6",
+        "model": agent_data.model or DEFAULT_MODEL,
         "permission_mode": agent_data.permission_mode or "default",
         "thinking_mode": agent_data.thinking_mode or "default",
         "include_partial_messages": agent_data.include_partial_messages if agent_data.include_partial_messages is not None else True,
