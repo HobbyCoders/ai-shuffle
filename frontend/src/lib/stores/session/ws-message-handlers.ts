@@ -127,6 +127,61 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		clearStopTimeout,
 	} = deps;
 
+	// ── Helper: unblock the UI on the first sign of new-query activity ──
+	//
+	// Between `interrupt_confirmed` and the new query's `start` event, the
+	// poller is gated by `internal.interruptPending` (to prevent stale
+	// old-query polls from clobbering `isStreaming=true`). Problem: the SDK
+	// can take hundreds of ms to emit its first message, during which the
+	// backend may already be streaming `stream_delta` / `chunk` / `tool_use`
+	// events. Those are buffered into `wsStreamContent` but never rendered
+	// because the poller (sole writer of message content) is still skipped.
+	// Result: visible gap between "send now" and the new response appearing.
+	//
+	// Any of those new-query events is definitive proof the new query is
+	// live (the old query can't emit them — it's drained). Clearing the
+	// gate on the first event + injecting the synthetic streaming message
+	// lets the poller merge `wsStreamContent` into UI immediately.
+	function unblockInterruptOnNewStream(sessionId: string | undefined, messageId?: string): void {
+		if (!internal.interruptPending) return;
+		const st = getState();
+		if (!sessionId || sessionId !== st.sessionId) return;
+		internal.interruptPending = false;
+		update(s => {
+			const hasStreamingAssistant = s.messages.some(
+				m => m.role === 'assistant' && m.streaming,
+			);
+			if (hasStreamingAssistant) {
+				// Keep the existing placeholder; ensure flags line up so the
+				// poller starts merging on its next tick.
+				return {
+					...s,
+					isStreaming: true,
+					streamStartTime: s.streamStartTime ?? Date.now(),
+				};
+			}
+			return {
+				...s,
+				isStreaming: true,
+				streamStartTime: s.streamStartTime ?? Date.now(),
+				messages: [...s.messages, {
+					id: messageId || `ws-stream-${Date.now()}`,
+					role: 'assistant' as const,
+					type: 'text' as const,
+					content: '',
+					streaming: true,
+				}],
+			};
+		});
+		// Kick the poller so it merges `wsStreamContent` into the
+		// placeholder without waiting for the next scheduled tick.
+		if (!sessionPoller.isPolling(sessionId)) {
+			sessionPoller.startStreaming(sessionId);
+		} else {
+			sessionPoller.pollNow(sessionId);
+		}
+	}
+
 	// ── Handler: done ────────────────────────────────────────────────
 
 	function handleDone(data: Record<string, unknown>): void {
@@ -415,7 +470,18 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 							m => m.role === 'assistant' && m.streaming
 						);
 						if (hasStreamingAssistant) {
-							return { ...s, sessionId, isStreaming: true, streamStartTime: Date.now(), wsStreamContent: '' };
+							// Placeholder already present — either injected by
+							// `unblockInterruptOnNewStream` (in which case
+							// `wsStreamContent` may already hold real deltas we
+							// must NOT wipe) or held over from a prior turn.
+							// Preserve buffer; the poller will drain it on its
+							// next merge.
+							return {
+								...s,
+								sessionId,
+								isStreaming: true,
+								streamStartTime: s.streamStartTime ?? Date.now(),
+							};
 						}
 						return {
 							...s,
@@ -485,6 +551,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						update(s => ({ ...s, wsStreamContent: s.wsStreamContent + content }));
 					}
 				}
+				// First sign of new-query activity after an interrupt: unblock
+				// the poller / inject the streaming placeholder so the buffer
+				// renders without waiting for the late `start` event.
+				unblockInterruptOnNewStream(deltaSessionId);
 				// Ensure polling is started
 				if (deltaState.isStreaming && deltaState.sessionId && !sessionPoller.isPolling(deltaState.sessionId)) {
 					sessionPoller.startStreaming(deltaState.sessionId);
@@ -507,6 +577,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				if (chunkContent) {
 					update(s => ({ ...s, wsStreamContent: s.wsStreamContent + chunkContent }));
 				}
+				unblockInterruptOnNewStream(chunkSessionId);
 				if (chunkState.isStreaming && chunkState.sessionId && !sessionPoller.isPolling(chunkState.sessionId)) {
 					sessionPoller.startStreaming(chunkState.sessionId);
 				}
@@ -520,6 +591,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const sysSessionId = data.session_id as string | undefined;
 				const sysState = getState();
 				if (!sysSessionId || sysSessionId !== sysState.sessionId) break;
+				// Unblock post-interrupt UI on any of these events too — they
+				// also indicate the new query is already producing output.
+				unblockInterruptOnNewStream(sysSessionId);
 				// Ensure polling is started if we're streaming but poller isn't running.
 				// This handles slash commands that don't trigger a 'start' event.
 				if (sysState.isStreaming && !sessionPoller.isPolling(sysState.sessionId)) {
@@ -539,6 +613,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			case 'tool_use': {
 				const tuSessionId = data.session_id as string | undefined;
 				if (!tuSessionId || tuSessionId !== getState().sessionId) break;
+				unblockInterruptOnNewStream(tuSessionId);
 				const toolId = data.id as string;
 				if (toolId) internal.pendingTools.add(toolId);
 				break;
