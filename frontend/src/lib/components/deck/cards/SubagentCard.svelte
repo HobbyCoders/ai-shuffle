@@ -15,6 +15,13 @@
 	 */
 	import { api, type SubagentExport } from '$lib/api/client';
 	import { groups } from '$lib/stores/groups';
+	import {
+		getModelBadgeClass as getModelBadgeClassShared,
+		getModelLabel,
+		isPresetModel,
+		normalizeModel,
+		INHERIT_VALUE
+	} from '$lib/constants/models';
 	import './card-design-system.css';
 
 	import SubagentList from './subagents/SubagentList.svelte';
@@ -106,18 +113,6 @@
 	let creatingGroup = $state(false);
 	let newGroupName = $state('');
 
-	// Model options (must match ProfileForm.svelte dropdown)
-	const MODEL_OPTIONS = [
-		{ value: '', label: 'Inherit' },
-		{ value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
-		{ value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-		{ value: 'claude-sonnet-4-6[1m]', label: 'Sonnet 4.6 1M' },
-		{ value: 'claude-opus-4-6', label: 'Opus 4.6' },
-		{ value: 'claude-opus-4-6[1m]', label: 'Opus 4.6 1M' },
-		{ value: 'claude-opus-4-7', label: 'Opus 4.7' },
-		{ value: 'claude-opus-4-7[1m]', label: 'Opus 4.7 1M' }
-	];
-
 	// Filtered subagents
 	const filteredSubagents = $derived(() => {
 		if (!searchQuery.trim()) return subagents;
@@ -172,41 +167,20 @@
 		loadTools();
 	});
 
-	// Map legacy short slugs to canonical model IDs so existing subagent data
-	// saved under old dropdown values (e.g. "sonnet") stays recognized.
-	const LEGACY_MODEL_MAP: Record<string, string> = {
-		haiku: 'claude-haiku-4-5',
-		sonnet: 'claude-sonnet-4-6',
-		'sonnet[1m]': 'claude-sonnet-4-6[1m]',
-		opus: 'claude-opus-4-7',
-		'opus[1m]': 'claude-opus-4-7[1m]'
-	};
-
-	function normalizeModel(model?: string | null): string {
-		if (!model) return '';
-		return LEGACY_MODEL_MAP[model] ?? model;
-	}
-
-	// Get model display info
+	// Subagents show "Inherit" when no model is set; otherwise the shared
+	// registry handles label/badge/preset logic.
 	function getModelDisplay(model?: string): string {
-		const normalized = normalizeModel(model);
-		const opt = MODEL_OPTIONS.find(o => o.value === normalized);
-		return opt?.label || 'Inherit';
+		if (!model) return 'Inherit';
+		return getModelLabel(model);
 	}
 
-	function getModelBadgeClass(model?: string): string {
-		if (!model || model === '') return 'card-badge--inherit';
-		if (model.startsWith('claude-haiku') || model === 'haiku') return 'card-badge--haiku';
-		if (model.startsWith('claude-sonnet') || model === 'sonnet') return 'card-badge--sonnet';
-		if (model.startsWith('claude-opus') || model.startsWith('opus')) return 'card-badge--opus';
-		return 'card-badge--muted';
-	}
+	const getModelBadgeClass = getModelBadgeClassShared;
 
-	// Detect whether a model value is a preset (including Inherit) or a custom string
+	// Detect whether a model value needs the "Custom..." free-text input.
+	// Empty (Inherit) is a preset sentinel — not custom.
 	function isCustomModel(model?: string): boolean {
 		if (!model) return false;
-		const presets = MODEL_OPTIONS.map(o => o.value);
-		return !presets.includes(normalizeModel(model));
+		return !isPresetModel(model);
 	}
 
 	// Open editor for new subagent
@@ -217,7 +191,7 @@
 		formDescription = '';
 		formPrompt = '';
 		formTools = [];
-		formModel = '';
+		formModel = INHERIT_VALUE;
 		customModelMode = false;
 		toolSelectionMode = 'all';
 		viewMode = 'editor';

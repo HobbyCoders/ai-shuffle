@@ -7,6 +7,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { claudeAuthenticated } from '$lib/stores/auth';
 	import { profiles } from '$lib/stores/app-data';
+	import { DEFAULT_MODEL, getModelFamily } from '$lib/constants/models';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';
@@ -22,11 +23,11 @@
 	const effectiveModel = $derived.by(() => {
 		if ($activeSession.modelOverride) return $activeSession.modelOverride;
 		const profile = $profiles.find(p => p.id === $activeSession.profile);
-		return profile?.config?.model || 'claude-sonnet-4-6';
+		return profile?.config?.model || DEFAULT_MODEL;
 	});
 
 	// Fast mode is only meaningful with Opus models (per-session state)
-	const isOpusModel = $derived(/opus/i.test(effectiveModel));
+	const isOpusModel = $derived(getModelFamily(effectiveModel) === 'opus');
 	const fastModeActive = $derived(!!($activeSession.fastMode && isOpusModel));
 
 	const permissionModes = [

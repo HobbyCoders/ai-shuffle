@@ -12,6 +12,13 @@
 	import { Users, Upload, Sparkles, Plus, Wrench, Bot, Settings, FileText, SlidersHorizontal, Check } from 'lucide-svelte';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data';
 	import { groups as groupsStore } from '$lib/stores/groups';
+	import {
+		DEFAULT_MODEL,
+		getModelBadgeClass as getModelBadgeClassShared,
+		getModelLabel,
+		isPresetModel,
+		normalizeModel
+	} from '$lib/constants/models';
 	import './card-design-system.css';
 
 	// Sub-components
@@ -124,7 +131,7 @@
 		id: '',
 		name: '',
 		description: '',
-		model: 'sonnet',
+		model: DEFAULT_MODEL,
 		permission_mode: 'default',
 		max_turns: null as number | null,
 		allowed_tools: [] as string[],
@@ -273,7 +280,7 @@
 			id: '',
 			name: '',
 			description: '',
-			model: 'claude-sonnet-4-6',
+			model: DEFAULT_MODEL,
 			permission_mode: 'default',
 			max_turns: null,
 			allowed_tools: [],
@@ -339,22 +346,13 @@
 			toolSelectionMode = 'all';
 		}
 
-		const presetModels = [
-			'claude-haiku-4-5',
-			'claude-sonnet-4-6',
-			'claude-sonnet-4-6[1m]',
-			'claude-opus-4-6',
-			'claude-opus-4-6[1m]',
-			'claude-opus-4-7',
-			'claude-opus-4-7[1m]'
-		];
-		customModelMode = !presetModels.includes(config.model || 'claude-sonnet-4-6');
+		customModelMode = !isPresetModel(config.model || DEFAULT_MODEL);
 
 		profileForm = {
 			id: profile.id,
 			name: profile.name,
 			description: profile.description || '',
-			model: config.model || 'claude-sonnet-4-6',
+			model: normalizeModel(config.model) || DEFAULT_MODEL,
 			permission_mode: config.permission_mode || 'default',
 			max_turns: config.max_turns || null,
 			allowed_tools: allowedTools,
@@ -516,43 +514,10 @@
 		}
 	}
 
-	function getModelDisplay(model?: string): string {
-		switch (model) {
-			case 'claude-haiku-4-5':
-				return 'Haiku 4.5';
-			case 'claude-sonnet-4-6':
-				return 'Sonnet 4.6';
-			case 'claude-sonnet-4-6[1m]':
-				return 'Sonnet 4.6 1M';
-			case 'claude-opus-4-6':
-				return 'Opus 4.6';
-			case 'claude-opus-4-6[1m]':
-				return 'Opus 4.6 1M';
-			case 'claude-opus-4-7':
-				return 'Opus 4.7';
-			case 'claude-opus-4-7[1m]':
-				return 'Opus 4.7 1M';
-			default:
-				return model || 'Default';
-		}
-	}
-
-	function getModelBadgeClass(model?: string): string {
-		switch (model) {
-			case 'claude-haiku-4-5':
-				return 'card-badge--haiku';
-			case 'claude-sonnet-4-6':
-			case 'claude-sonnet-4-6[1m]':
-				return 'card-badge--sonnet';
-			case 'claude-opus-4-6':
-			case 'claude-opus-4-6[1m]':
-			case 'claude-opus-4-7':
-			case 'claude-opus-4-7[1m]':
-				return 'card-badge--opus';
-			default:
-				return 'card-badge--muted';
-		}
-	}
+	// Model display delegates to the shared registry so dropdowns, badges
+	// and labels stay in sync everywhere.
+	const getModelDisplay = getModelLabel;
+	const getModelBadgeClass = getModelBadgeClassShared;
 
 	// Handle form field changes from sub-component
 	function handleFormChange(field: string, value: any) {
@@ -776,22 +741,13 @@
 			spAppend = agent.system_prompt_append || '';
 		}
 
-		const presetModelsAgent = [
-			'claude-haiku-4-5',
-			'claude-sonnet-4-6',
-			'claude-sonnet-4-6[1m]',
-			'claude-opus-4-6',
-			'claude-opus-4-6[1m]',
-			'claude-opus-4-7',
-			'claude-opus-4-7[1m]'
-		];
-		customModelMode = !presetModelsAgent.includes(agent.model || 'claude-sonnet-4-6');
+		customModelMode = !isPresetModel(agent.model || DEFAULT_MODEL);
 
 		profileForm = {
 			id: '',
 			name: agent.name,
 			description: agent.description || '',
-			model: agent.model || 'claude-sonnet-4-6',
+			model: normalizeModel(agent.model) || DEFAULT_MODEL,
 			permission_mode: agent.permission_mode || 'default',
 			max_turns: agent.max_turns || null,
 			allowed_tools: allowedTools,

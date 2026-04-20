@@ -15,6 +15,10 @@
 		projectAgentCount
 	} from '$lib/stores/projectAgents';
 	import { Search, Bot, Trash2, X, ChevronRight } from 'lucide-svelte';
+	import {
+		getModelBadgeClass as getModelBadgeClassShared,
+		getModelLabel
+	} from '$lib/constants/models';
 	import './card-design-system.css';
 
 	interface Props {
@@ -48,25 +52,14 @@
 		);
 	});
 
-	// Model display helpers
-	const MODEL_OPTIONS = [
-		{ value: '', label: 'Inherit' },
-		{ value: 'haiku', label: 'Haiku' },
-		{ value: 'sonnet', label: 'Sonnet' },
-		{ value: 'opus', label: 'Opus' },
-		{ value: 'opus[1m]', label: 'Opus 1M' }
-	];
-
-	function getModelBadgeClass(model?: string | null): string {
-		if (!model || model === '') return 'card-badge--inherit';
-		if (model.startsWith('opus')) return 'card-badge--opus';
-		return `card-badge--${model}`;
-	}
-
+	// Project agents display "Inherit" when no model is set; otherwise the
+	// shared registry handles label + badge lookup.
 	function getModelDisplay(model?: string | null): string {
-		const opt = MODEL_OPTIONS.find(o => o.value === model);
-		return opt?.label || 'Inherit';
+		if (!model) return 'Inherit';
+		return getModelLabel(model);
 	}
+
+	const getModelBadgeClass = getModelBadgeClassShared;
 
 	// Delete agent
 	async function handleDelete(agentName: string) {

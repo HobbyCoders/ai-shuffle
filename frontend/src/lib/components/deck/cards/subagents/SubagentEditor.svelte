@@ -4,6 +4,7 @@
 	import type { SubagentExport } from '$lib/api/client';
 	import AIGenerateDialog from '../AIGenerateDialog.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import { MODELS, CUSTOM_VALUE, INHERIT_VALUE } from '$lib/constants/models';
 	import '../card-design-system.css';
 
 	interface Subagent {
@@ -40,17 +41,8 @@
 
 	type EditorTab = 'identity' | 'config' | 'prompt';
 
-	// Must match ProfileForm.svelte and SubagentCard.svelte MODEL_OPTIONS.
-	const MODEL_OPTIONS = [
-		{ value: '', label: 'Inherit' },
-		{ value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
-		{ value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-		{ value: 'claude-sonnet-4-6[1m]', label: 'Sonnet 4.6 1M' },
-		{ value: 'claude-opus-4-6', label: 'Opus 4.6' },
-		{ value: 'claude-opus-4-6[1m]', label: 'Opus 4.6 1M' },
-		{ value: 'claude-opus-4-7', label: 'Opus 4.7' },
-		{ value: 'claude-opus-4-7[1m]', label: 'Opus 4.7 1M' }
-	];
+	// Model options come from the shared registry. Subagents prepend the
+	// "Inherit" sentinel to let an agent fall back to the session's model.
 
 	interface Props {
 		editingSubagent: Subagent | null;
@@ -272,20 +264,21 @@
 				<select
 					id="agent-model"
 					class="card-form-input"
-					value={customModelMode ? '__custom__' : formModel}
+					value={customModelMode ? CUSTOM_VALUE : formModel}
 					onchange={(e) => {
 						const v = (e.target as HTMLSelectElement).value;
-						if (v === '__custom__') {
+						if (v === CUSTOM_VALUE) {
 							onCustomModelModeChange(true, '');
 						} else {
 							onCustomModelModeChange(false, v);
 						}
 					}}
 				>
-					{#each MODEL_OPTIONS as opt}
-						<option value={opt.value}>{opt.label}</option>
+					<option value={INHERIT_VALUE}>Inherit</option>
+					{#each MODELS as model (model.value)}
+						<option value={model.value}>{model.label}</option>
 					{/each}
-					<option value="__custom__">Custom...</option>
+					<option value={CUSTOM_VALUE}>Custom...</option>
 				</select>
 				{#if customModelMode}
 					<input

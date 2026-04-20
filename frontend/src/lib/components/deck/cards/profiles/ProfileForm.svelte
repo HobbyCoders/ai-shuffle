@@ -9,6 +9,7 @@
 	import { Users, Settings, Wrench, Bot, FileText, SlidersHorizontal, Check, Plus, Trash2 } from 'lucide-svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
+	import { MODELS, CUSTOM_VALUE } from '$lib/constants/models';
 
 	interface ToolCategory {
 		id: string;
@@ -264,15 +265,11 @@
 			<div class="pf-field-grid">
 				<div class="pf-field">
 					<label class="pf-label" for="profile-model">Model</label>
-					<select id="profile-model" class="pf-select" value={customModelMode ? '__custom__' : profileForm.model} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v === '__custom__') { onCustomModelModeChange(true, ''); } else { onCustomModelModeChange(false, v); } }}>
-						<option value="claude-haiku-4-5">Haiku 4.5</option>
-						<option value="claude-sonnet-4-6">Sonnet 4.6</option>
-						<option value="claude-sonnet-4-6[1m]">Sonnet 4.6 1M</option>
-						<option value="claude-opus-4-6">Opus 4.6</option>
-						<option value="claude-opus-4-6[1m]">Opus 4.6 1M</option>
-						<option value="claude-opus-4-7">Opus 4.7</option>
-						<option value="claude-opus-4-7[1m]">Opus 4.7 1M</option>
-						<option value="__custom__">Custom...</option>
+					<select id="profile-model" class="pf-select" value={customModelMode ? CUSTOM_VALUE : profileForm.model} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v === CUSTOM_VALUE) { onCustomModelModeChange(true, ''); } else { onCustomModelModeChange(false, v); } }}>
+						{#each MODELS as model (model.value)}
+							<option value={model.value}>{model.label}</option>
+						{/each}
+						<option value={CUSTOM_VALUE}>Custom...</option>
 					</select>
 					{#if customModelMode}
 						<input type="text" value={profileForm.model} oninput={(e) => onFormChange('model', (e.target as HTMLInputElement).value)} class="pf-input pf-input--mono" placeholder="e.g. claude-opus-4-7" style="margin-top: 6px;" />

@@ -13,6 +13,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles } from '$lib/stores/app-data';
 	import { getContextMaxForModel, AUTO_COMPACTION_BASE } from '$lib/constants/chat';
+	import { DEFAULT_MODEL } from '$lib/constants/models';
 
 	function formatTokenCount(count: number): string {
 		if (count >= 1000000) {
@@ -28,7 +29,7 @@
 	const effectiveModel = $derived.by(() => {
 		if ($activeSession.modelOverride) return $activeSession.modelOverride;
 		const profile = $profiles.find(p => p.id === $activeSession.profile);
-		return profile?.config?.model || 'sonnet';
+		return profile?.config?.model || DEFAULT_MODEL;
 	});
 
 	// Full context window (200k or 1M) — shown as the bar maximum so users

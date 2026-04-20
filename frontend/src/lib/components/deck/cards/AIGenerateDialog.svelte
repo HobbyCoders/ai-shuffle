@@ -8,6 +8,7 @@
 		type AgentExport,
 		type SubagentExport
 	} from '$lib/api/client';
+	import { MODELS, DEFAULT_MODEL } from '$lib/constants/models';
 
 	type GenerationType = 'profile' | 'subagent';
 	type DialogState = 'initial' | 'generating' | 'clarifying' | 'continuing';
@@ -25,7 +26,7 @@
 	let description = $state('');
 	let referenceMaterial = $state('');
 	let showReferenceMaterial = $state(false);
-	let selectedModel = $state('claude-sonnet-4-6');
+	let selectedModel = $state(DEFAULT_MODEL);
 	let dialogState = $state<DialogState>('initial');
 	let error = $state('');
 
@@ -55,7 +56,7 @@
 			description = '';
 			referenceMaterial = '';
 			showReferenceMaterial = false;
-			selectedModel = 'claude-sonnet-4-6';
+			selectedModel = DEFAULT_MODEL;
 			dialogState = 'initial';
 			error = '';
 			clarificationQuestions = [];
@@ -335,13 +336,9 @@
 					<div class="form-section">
 						<label class="form-label" for="model"> Generation Model </label>
 						<select id="model" class="model-select" bind:value={selectedModel} disabled={isLoading}>
-							<option value="claude-haiku-4-5">Haiku 4.5 (Fast)</option>
-							<option value="claude-sonnet-4-6">Sonnet 4.6 (Recommended)</option>
-							<option value="claude-sonnet-4-6[1m]">Sonnet 4.6 1M</option>
-							<option value="claude-opus-4-6">Opus 4.6</option>
-							<option value="claude-opus-4-6[1m]">Opus 4.6 1M</option>
-							<option value="claude-opus-4-7">Opus 4.7 (Best Quality)</option>
-							<option value="claude-opus-4-7[1m]">Opus 4.7 1M</option>
+							{#each MODELS as model (model.value)}
+								<option value={model.value}>{model.label}</option>
+							{/each}
 						</select>
 						<div class="model-hint">
 							Sonnet 4.6 is recommended for comprehensive generation. Use Opus 4.7 for complex configurations.
