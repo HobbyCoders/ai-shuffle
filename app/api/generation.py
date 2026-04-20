@@ -22,6 +22,8 @@ from app.api.auth import require_auth
 from app.api.common import api_error_handler
 from app.core.model_registry import DEFAULT_MODEL
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # [gen-debug] Diagnostic instrumentation for one-shot generation latency.
 # Monkey-patches SDK's SubprocessCLITransport._build_command to log the final
@@ -111,8 +113,6 @@ from app.core.generation import (
     get_clarification_questions,
 )
 from app.core.generation.clarification import format_clarification_context
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/generate", tags=["Generation"])
 
