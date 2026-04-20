@@ -186,7 +186,7 @@
 	{/if}
 
 	<!-- Content Area -->
-	<div class="flex-1 overflow-y-auto overflow-x-hidden">
+	<div class="flex-1 overflow-auto diff-scroll-container">
 		{#if loading}
 			<div class="flex flex-col items-center justify-center py-20 gap-3">
 				<Loader2 size={24} class="text-muted-foreground animate-spin" />
@@ -258,7 +258,7 @@
 						<div class="flex diff-line-header">
 							<div class="gutter-col diff-header-gutter">···</div>
 							<div class="gutter-col diff-header-gutter">···</div>
-							<div class="flex-1 px-3 font-mono text-[11px] diff-header-text whitespace-pre select-none overflow-x-auto leading-[1.375rem]">
+							<div class="flex-1 px-3 font-mono text-[11px] diff-header-text whitespace-pre select-none leading-[1.375rem]">
 								{line.content}
 							</div>
 						</div>
@@ -266,7 +266,7 @@
 						<div class="flex diff-line-add transition-colors duration-75">
 							<div class="gutter-col diff-gutter-blank"></div>
 							<div class="gutter-col diff-gutter-add">{line.newLineNumber}</div>
-							<div class="flex-1 px-3 font-mono text-sm diff-text-add whitespace-pre overflow-x-auto">
+							<div class="flex-1 px-3 font-mono text-sm diff-text-add whitespace-pre">
 								<span class="diff-prefix-add select-none mr-1">+</span>{line.content}
 							</div>
 						</div>
@@ -274,7 +274,7 @@
 						<div class="flex diff-line-del transition-colors duration-75">
 							<div class="gutter-col diff-gutter-del">{line.oldLineNumber}</div>
 							<div class="gutter-col diff-gutter-blank"></div>
-							<div class="flex-1 px-3 font-mono text-sm diff-text-del whitespace-pre overflow-x-auto">
+							<div class="flex-1 px-3 font-mono text-sm diff-text-del whitespace-pre">
 								<span class="diff-prefix-del select-none mr-1">-</span>{line.content}
 							</div>
 						</div>
@@ -282,7 +282,7 @@
 						<div class="flex diff-line-ctx transition-colors duration-75">
 							<div class="gutter-col diff-gutter-ctx">{line.oldLineNumber}</div>
 							<div class="gutter-col diff-gutter-ctx">{line.newLineNumber}</div>
-							<div class="flex-1 px-3 font-mono text-sm text-muted-foreground whitespace-pre overflow-x-auto">
+							<div class="flex-1 px-3 font-mono text-sm text-muted-foreground whitespace-pre">
 								<span class="diff-gutter-ctx select-none mr-1">&nbsp;</span>{line.content}
 							</div>
 						</div>
@@ -399,20 +399,30 @@
 		border-bottom: 1px dashed color-mix(in oklch, var(--border) 30%, transparent);
 	}
 
-	.diff-content :global(.overflow-x-auto) {
+	/* Unified diff: grow container to widest line so scroll host
+	   (.diff-scroll-container) produces a single horizontal scrollbar
+	   instead of one per line. */
+	.diff-content {
+		display: flex;
+		flex-direction: column;
+		min-width: max-content;
+	}
+
+	.diff-scroll-container {
 		scrollbar-width: thin;
 		scrollbar-color: var(--scrollbar-thumb) transparent;
 	}
 
-	.diff-content :global(.overflow-x-auto::-webkit-scrollbar) {
-		height: 4px;
+	.diff-scroll-container::-webkit-scrollbar {
+		width: 8px;
+		height: 8px;
 	}
 
-	.diff-content :global(.overflow-x-auto::-webkit-scrollbar-track) {
+	.diff-scroll-container::-webkit-scrollbar-track {
 		background: transparent;
 	}
 
-	.diff-content :global(.overflow-x-auto::-webkit-scrollbar-thumb) {
+	.diff-scroll-container::-webkit-scrollbar-thumb {
 		background: var(--scrollbar-thumb);
 		border-radius: calc(var(--radius) * 0.33);
 	}
