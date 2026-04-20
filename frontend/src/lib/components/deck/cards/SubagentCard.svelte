@@ -106,13 +106,16 @@
 	let creatingGroup = $state(false);
 	let newGroupName = $state('');
 
-	// Model options
+	// Model options (must match ProfileForm.svelte dropdown)
 	const MODEL_OPTIONS = [
 		{ value: '', label: 'Inherit' },
-		{ value: 'haiku', label: 'Haiku' },
-		{ value: 'sonnet', label: 'Sonnet' },
-		{ value: 'opus', label: 'Opus' },
-		{ value: 'opus[1m]', label: 'Opus 1M' }
+		{ value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+		{ value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+		{ value: 'claude-sonnet-4-6[1m]', label: 'Sonnet 4.6 1M' },
+		{ value: 'claude-opus-4-6', label: 'Opus 4.6' },
+		{ value: 'claude-opus-4-6[1m]', label: 'Opus 4.6 1M' },
+		{ value: 'claude-opus-4-7', label: 'Opus 4.7' },
+		{ value: 'claude-opus-4-7[1m]', label: 'Opus 4.7 1M' }
 	];
 
 	// Filtered subagents
@@ -169,23 +172,41 @@
 		loadTools();
 	});
 
+	// Map legacy short slugs to canonical model IDs so existing subagent data
+	// saved under old dropdown values (e.g. "sonnet") stays recognized.
+	const LEGACY_MODEL_MAP: Record<string, string> = {
+		haiku: 'claude-haiku-4-5',
+		sonnet: 'claude-sonnet-4-6',
+		'sonnet[1m]': 'claude-sonnet-4-6[1m]',
+		opus: 'claude-opus-4-7',
+		'opus[1m]': 'claude-opus-4-7[1m]'
+	};
+
+	function normalizeModel(model?: string | null): string {
+		if (!model) return '';
+		return LEGACY_MODEL_MAP[model] ?? model;
+	}
+
 	// Get model display info
 	function getModelDisplay(model?: string): string {
-		const opt = MODEL_OPTIONS.find(o => o.value === model);
+		const normalized = normalizeModel(model);
+		const opt = MODEL_OPTIONS.find(o => o.value === normalized);
 		return opt?.label || 'Inherit';
 	}
 
 	function getModelBadgeClass(model?: string): string {
 		if (!model || model === '') return 'card-badge--inherit';
-		if (model.startsWith('opus')) return 'card-badge--opus';
-		return `card-badge--${model}`;
+		if (model.startsWith('claude-haiku') || model === 'haiku') return 'card-badge--haiku';
+		if (model.startsWith('claude-sonnet') || model === 'sonnet') return 'card-badge--sonnet';
+		if (model.startsWith('claude-opus') || model.startsWith('opus')) return 'card-badge--opus';
+		return 'card-badge--muted';
 	}
 
 	// Detect whether a model value is a preset (including Inherit) or a custom string
 	function isCustomModel(model?: string): boolean {
 		if (!model) return false;
 		const presets = MODEL_OPTIONS.map(o => o.value);
-		return !presets.includes(model);
+		return !presets.includes(normalizeModel(model));
 	}
 
 	// Open editor for new subagent
@@ -210,7 +231,7 @@
 		formDescription = agent.description;
 		formPrompt = agent.prompt;
 		formTools = agent.tools || [];
-		formModel = agent.model || '';
+		formModel = normalizeModel(agent.model);
 		customModelMode = isCustomModel(agent.model);
 		toolSelectionMode = Array.isArray(agent.tools) ? 'select' : 'all';
 		viewMode = 'editor';
@@ -416,7 +437,7 @@
 		formDescription = sub.description;
 		formPrompt = sub.prompt;
 		formTools = sub.tools || [];
-		formModel = sub.model || '';
+		formModel = normalizeModel(sub.model);
 		customModelMode = isCustomModel(sub.model ?? undefined);
 		toolSelectionMode = Array.isArray(sub.tools) ? 'select' : 'all';
 

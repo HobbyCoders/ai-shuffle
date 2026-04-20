@@ -273,7 +273,7 @@
 			id: '',
 			name: '',
 			description: '',
-			model: 'sonnet',
+			model: 'claude-sonnet-4-6',
 			permission_mode: 'default',
 			max_turns: null,
 			allowed_tools: [],
@@ -339,14 +339,22 @@
 			toolSelectionMode = 'all';
 		}
 
-		const presetModels = ['haiku', 'sonnet', 'opus', 'opus[1m]'];
-		customModelMode = !presetModels.includes(config.model || 'sonnet');
+		const presetModels = [
+			'claude-haiku-4-5',
+			'claude-sonnet-4-6',
+			'claude-sonnet-4-6[1m]',
+			'claude-opus-4-6',
+			'claude-opus-4-6[1m]',
+			'claude-opus-4-7',
+			'claude-opus-4-7[1m]'
+		];
+		customModelMode = !presetModels.includes(config.model || 'claude-sonnet-4-6');
 
 		profileForm = {
 			id: profile.id,
 			name: profile.name,
 			description: profile.description || '',
-			model: config.model || 'sonnet',
+			model: config.model || 'claude-sonnet-4-6',
 			permission_mode: config.permission_mode || 'default',
 			max_turns: config.max_turns || null,
 			allowed_tools: allowedTools,
@@ -768,14 +776,22 @@
 			spAppend = agent.system_prompt_append || '';
 		}
 
-		const presetModelsAgent = ['haiku', 'sonnet', 'opus', 'opus[1m]'];
-		customModelMode = !presetModelsAgent.includes(agent.model || 'sonnet');
+		const presetModelsAgent = [
+			'claude-haiku-4-5',
+			'claude-sonnet-4-6',
+			'claude-sonnet-4-6[1m]',
+			'claude-opus-4-6',
+			'claude-opus-4-6[1m]',
+			'claude-opus-4-7',
+			'claude-opus-4-7[1m]'
+		];
+		customModelMode = !presetModelsAgent.includes(agent.model || 'claude-sonnet-4-6');
 
 		profileForm = {
 			id: '',
 			name: agent.name,
 			description: agent.description || '',
-			model: agent.model || 'sonnet',
+			model: agent.model || 'claude-sonnet-4-6',
 			permission_mode: agent.permission_mode || 'default',
 			max_turns: agent.max_turns || null,
 			allowed_tools: allowedTools,

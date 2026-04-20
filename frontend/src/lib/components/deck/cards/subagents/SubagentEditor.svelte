@@ -40,12 +40,16 @@
 
 	type EditorTab = 'identity' | 'config' | 'prompt';
 
+	// Must match ProfileForm.svelte and SubagentCard.svelte MODEL_OPTIONS.
 	const MODEL_OPTIONS = [
 		{ value: '', label: 'Inherit' },
-		{ value: 'haiku', label: 'Haiku' },
-		{ value: 'sonnet', label: 'Sonnet' },
-		{ value: 'opus', label: 'Opus' },
-		{ value: 'opus[1m]', label: 'Opus 1M' }
+		{ value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+		{ value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+		{ value: 'claude-sonnet-4-6[1m]', label: 'Sonnet 4.6 1M' },
+		{ value: 'claude-opus-4-6', label: 'Opus 4.6' },
+		{ value: 'claude-opus-4-6[1m]', label: 'Opus 4.6 1M' },
+		{ value: 'claude-opus-4-7', label: 'Opus 4.7' },
+		{ value: 'claude-opus-4-7[1m]', label: 'Opus 4.7 1M' }
 	];
 
 	interface Props {
