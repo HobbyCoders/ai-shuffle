@@ -117,7 +117,10 @@
 			console.log(`[AS] stable tick=${tick} shBefore=${shBefore} shAfter=${shAfter} ST=${containerRef.scrollTop} CH=${containerRef.clientHeight} stable=${stableCount} msgLen=${$activeSession.messages.length}`);
 			if (containerRef.scrollHeight === lastScrollHeight) {
 				stableCount++;
-				if (stableCount >= 3) {
+				// Require 5 stable ticks (~250ms) before declaring done. Large content
+				// (tables, code blocks, markdown trees) can render in bursts, so brief
+				// stability does not mean the layout has settled.
+				if (stableCount >= 5) {
 					// eslint-disable-next-line no-console
 					console.log(`[AS] stable DONE finalSH=${containerRef.scrollHeight} finalST=${containerRef.scrollTop} tick=${tick}`);
 					if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
@@ -127,14 +130,16 @@
 				lastScrollHeight = containerRef.scrollHeight;
 			}
 		}, 50);
-		// Safety: stop after 1s regardless
+		// Safety: stop after 3s regardless. Prior 1s was too aggressive — on large
+		// sessions the scrollHeight kept growing past the 1s mark (e.g. 18k → 30k px),
+		// leaving the viewport anchored at stale content.
 		setTimeout(() => {
 			if (pendingScrollTimer) {
 				// eslint-disable-next-line no-console
-				console.log('[AS] stable TIMEOUT (1s)', { finalSH: containerRef?.scrollHeight, finalST: containerRef?.scrollTop });
+				console.log('[AS] stable TIMEOUT (3s)', { finalSH: containerRef?.scrollHeight, finalST: containerRef?.scrollTop });
 				clearInterval(pendingScrollTimer); pendingScrollTimer = null;
 			}
-		}, 1000);
+		}, 3000);
 	}
 
 	// Current profile for message settings (uses current UI selection)
@@ -395,7 +400,12 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 				// a message causes the browser to adjust scrollTop by a few pixels,
 				// which would falsely disable auto-scroll for the entire stream).
 				const scrollUpDelta = lastKnownScrollTop - currentScrollTop;
-				if (scrollUpDelta > 10) {
+				// Threshold must exceed browser scroll-anchoring drift (~10-20px)
+				// that occurs when late-rendering content (tables, code blocks) shifts
+				// the scroll container after scrollToBottomUntilStable stops. A value
+				// too low causes the handler to treat post-switch layout drift as a
+				// user scroll-up and silently disable auto-scroll mid-render.
+				if (scrollUpDelta > 50) {
 					// eslint-disable-next-line no-console
 					console.log(`[AS] handleScroll DISABLE currST=${currentScrollTop} lastST=${lastKnownScrollTop} delta=${scrollUpDelta} SH=${containerRef.scrollHeight} CH=${containerRef.clientHeight}`);
 					shouldAutoScroll = false;
@@ -449,9 +459,14 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 					scrollToBottom();
 				}
 			} else if ($activeSession.messages.length > 0) {
-				// Auto-scroll was on, or first visit - always show latest content
+				// Auto-scroll was on, or first visit - always show latest content.
+				// Use scrollToBottomUntilStable so late-rendering content (tables,
+				// code blocks) doesn't leave the viewport pinned above the bottom.
+				// Covers the session-switch SKIP (no prevId) path where the switch
+				// effect returns early and only this onMount scroll runs.
 				shouldAutoScroll = true;
-				scrollToBottom();
+				pendingScrollToBottom = true;
+				scrollToBottomUntilStable();
 			}
 		});
 	});
