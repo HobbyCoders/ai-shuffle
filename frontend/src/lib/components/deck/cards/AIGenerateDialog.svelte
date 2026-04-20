@@ -8,8 +8,6 @@
 		type AgentExport,
 		type SubagentExport
 	} from '$lib/api/client';
-	import { getModels, getDefaultModel } from '$lib/constants/models';
-
 	type GenerationType = 'profile' | 'subagent';
 	type DialogState = 'initial' | 'generating' | 'clarifying' | 'continuing';
 
@@ -26,7 +24,6 @@
 	let description = $state('');
 	let referenceMaterial = $state('');
 	let showReferenceMaterial = $state(false);
-	let selectedModel = $state(getDefaultModel());
 	let dialogState = $state<DialogState>('initial');
 	let error = $state('');
 
@@ -56,7 +53,6 @@
 			description = '';
 			referenceMaterial = '';
 			showReferenceMaterial = false;
-			selectedModel = getDefaultModel();
 			dialogState = 'initial';
 			error = '';
 			clarificationQuestions = [];
@@ -109,9 +105,9 @@
 			let response: GenerationResponse;
 			const refMaterial = referenceMaterial.trim() || undefined;
 			if (type === 'profile') {
-				response = await generateProfile(description, selectedModel, false, refMaterial);
+				response = await generateProfile(description, undefined, false, refMaterial);
 			} else {
-				response = await generateSubagent(description, selectedModel, false, refMaterial);
+				response = await generateSubagent(description, undefined, false, refMaterial);
 			}
 			handleResponse(response);
 		} catch (e) {
@@ -138,7 +134,7 @@
 				type,
 				description,
 				clarificationAnswers,
-				selectedModel,
+				undefined,
 				refMaterial
 			);
 			handleResponse(response);
@@ -333,18 +329,6 @@
 						{/if}
 					</div>
 
-					<div class="form-section">
-						<label class="form-label" for="model"> Generation Model </label>
-						<select id="model" class="model-select" bind:value={selectedModel} disabled={isLoading}>
-							{#each getModels() as model (model.value)}
-								<option value={model.value}>{model.label}</option>
-							{/each}
-						</select>
-						<div class="model-hint">
-							Sonnet 4.6 is recommended for comprehensive generation. Use Opus 4.7 for complex configurations.
-						</div>
-					</div>
-
 					{#if error}
 						<div class="error-message">
 							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -531,35 +515,6 @@
 
 	.char-count.error {
 		color: var(--destructive);
-	}
-
-	.model-select {
-		width: 100%;
-		padding: 10px 12px;
-		font-size: 0.875rem;
-		font-family: inherit;
-		color: var(--foreground);
-		background: var(--background);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		cursor: pointer;
-		transition: border-color 150ms ease;
-	}
-
-	.model-select:focus {
-		outline: none;
-		border-color: var(--primary);
-	}
-
-	.model-select:disabled {
-		opacity: 0.6;
-		cursor: not-allowed;
-	}
-
-	.model-hint {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		margin-top: 6px;
 	}
 
 	/* Reference Material Toggle */
