@@ -209,6 +209,7 @@ def create_postgres_schema(cursor) -> None:
             tool_input JSONB,
             metadata JSONB,
             profile_id TEXT,
+            jsonl_uuid TEXT,
             version INTEGER DEFAULT 1,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -902,6 +903,12 @@ def create_postgres_schema(cursor) -> None:
 
     # -- session_messages
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id)")
+    # Rewind DB<->JSONL sync: fast lookup of a message by its SDK JSONL uuid
+    # within a session (used by delete_session_messages_after_jsonl_uuid).
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_messages_session_uuid "
+        "ON session_messages(session_id, jsonl_uuid)"
+    )
 
     # -- usage_log
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_usage_log_created ON usage_log(created_at)")

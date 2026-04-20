@@ -580,6 +580,28 @@ async def execute_rewind(session_id: str, request: RewindRequestV2):
         if result.success:
             chat_rewound = True
             messages_removed = result.messages_removed or 0
+            # Sync the DB `session_messages` table to match the truncated JSONL.
+            # Without this, rewind only truncates the SDK transcript and leaves
+            # orphan rows that the UI still renders on reload — the original
+            # symptom users reported as "rewind doesn't stick".
+            # Best-effort: a DB failure here does not invalidate the successful
+            # JSONL truncation; we log and surface it as a soft error.
+            try:
+                db_removed = database.delete_session_messages_after_jsonl_uuid(
+                    session_id=session_id,
+                    target_uuid=request.target_uuid,
+                    include_response=request.include_response,
+                )
+                logger.info(
+                    f"Rewind DB sync: session={session_id}, target_uuid={request.target_uuid}, "
+                    f"db_rows_removed={db_removed}, jsonl_messages_removed={messages_removed}"
+                )
+            except Exception as db_err:
+                logger.error(
+                    f"Rewind DB sync failed for session {session_id}: {db_err}",
+                    exc_info=True,
+                )
+                errors.append(f"DB sync failed: {db_err}")
             # Clear stale messages from live_session_store so the next
             # load_session reads from the truncated JSONL instead of
             # serving pre-rewind data from memory.

@@ -66,6 +66,7 @@ def _row_for_tool_use(session_id: str, tool_msg: dict, profile_id: Optional[str]
     tool_name = tool_msg.get("name", "unknown")
     tool_id = tool_msg.get("tool_id")
     tool_input = tool_msg.get("input") or {}
+    jsonl_uuid = tool_msg.get("uuid")
 
     if tool_name in _SUBAGENT_TOOLS:
         # Embed collected subagent children into the parent's metadata so
@@ -90,6 +91,7 @@ def _row_for_tool_use(session_id: str, tool_msg: dict, profile_id: Optional[str]
                 "agent_children": children,
             },
             "profile_id": profile_id,
+            "jsonl_uuid": jsonl_uuid,
         }
 
     return {
@@ -100,6 +102,7 @@ def _row_for_tool_use(session_id: str, tool_msg: dict, profile_id: Optional[str]
         "tool_input": tool_input,
         "metadata": {"tool_id": tool_id},
         "profile_id": profile_id,
+        "jsonl_uuid": jsonl_uuid,
     }
 
 
@@ -111,6 +114,7 @@ def _row_for_tool_result(session_id: str, tool_msg: dict, profile_id: Optional[s
         "tool_name": tool_msg.get("name", "unknown"),
         "metadata": {"tool_id": tool_msg.get("tool_id")},
         "profile_id": profile_id,
+        "jsonl_uuid": tool_msg.get("uuid"),
     }
 
 
@@ -121,6 +125,7 @@ def _row_for_thinking(session_id: str, tb: dict, profile_id: Optional[str], mode
         "content": tb.get("content", ""),
         "metadata": {"model": model},
         "profile_id": profile_id,
+        "jsonl_uuid": tb.get("uuid"),
     }
 
 
@@ -134,6 +139,7 @@ def _row_for_system(session_id: str, sm: dict, profile_id: Optional[str]) -> dic
             "system_data": sm.get("data", {}),
         },
         "profile_id": profile_id,
+        "jsonl_uuid": sm.get("uuid"),
     }
 
 
@@ -148,6 +154,7 @@ def _row_for_plugin(session_id: str, pm: dict, profile_id: Optional[str]) -> dic
             "severity": pm.get("severity", "info"),
         },
         "profile_id": profile_id,
+        "jsonl_uuid": pm.get("uuid"),
     }
 
 
@@ -294,12 +301,16 @@ async def _persist_turn_results(
     # Assistant text response (always last — closes the turn visually)
     assistant_msg = None
     if full_response or interrupted or tool_messages:
+        # Capture the assistant message's JSONL uuid so rewind can map a
+        # DB row back to its transcript entry for truncation.
+        assistant_uuid = metadata.get("jsonl_uuid") or metadata.get("last_assistant_uuid")
         batch.append({
             "session_id": session_id,
             "role": "assistant",
             "content": full_response + ("\n[Interrupted]" if interrupted else ""),
             "metadata": metadata,
             "profile_id": profile_id,
+            "jsonl_uuid": assistant_uuid,
         })
 
     # 3. Insert all messages in one transaction

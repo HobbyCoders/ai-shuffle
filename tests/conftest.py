@@ -465,12 +465,17 @@ def create_test_schema(cursor: sqlite3.Cursor):
             tool_input JSON,
             metadata JSON,
             profile_id TEXT,
+            jsonl_uuid TEXT,
             version INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         )
     """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_messages_session_uuid "
+        "ON session_messages(session_id, jsonl_uuid)"
+    )
 
     # Sync log for tracking changes
     cursor.execute("""

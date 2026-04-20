@@ -267,6 +267,19 @@ def _run_column_migrations(cursor):
                 cursor.execute(f"ALTER TABLE sessions ADD COLUMN {col} INTEGER DEFAULT 0")
                 migrations_applied.append(f"sessions.{col}")
 
+    # Rewind DB<->JSONL sync: store the Claude SDK JSONL uuid on each message
+    # row so a rewind can truncate both stores consistently. A dedicated column
+    # (rather than nesting inside metadata JSON) keeps rewind's lookup indexed
+    # and portable across SQLite/Postgres. See fix/rewind-db-history-sync.
+    if table_exists(cursor, "session_messages"):
+        if not column_exists(cursor, "session_messages", "jsonl_uuid"):
+            cursor.execute("ALTER TABLE session_messages ADD COLUMN jsonl_uuid TEXT")
+            migrations_applied.append("session_messages.jsonl_uuid")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_messages_session_uuid "
+            "ON session_messages(session_id, jsonl_uuid)"
+        )
+
     # Ensure performance-critical indexes exist (idempotent, no version gate).
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
 
@@ -456,9 +469,12 @@ from app.db.sessions import (  # noqa: F401
     get_session_forks,
     get_session_messages,
     add_session_message,
+    add_session_messages_batch,
     upsert_team_member_message,
     delete_session_message,
     delete_session_messages_after,
+    delete_session_messages_after_jsonl_uuid,
+    set_message_jsonl_uuid,
     search_sessions,
     search_sessions_paginated,
     add_sync_log,

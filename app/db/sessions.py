@@ -668,6 +668,7 @@ def add_session_message(
     tool_input: Optional[Dict[str, Any]] = None,
     metadata: Optional[Dict[str, Any]] = None,
     profile_id: Optional[str] = None,
+    jsonl_uuid: Optional[str] = None,
     _conn=None
 ) -> SessionMessageRow:
     """Add a message to a session
@@ -680,6 +681,10 @@ def add_session_message(
         tool_input: Optional tool input for tool_use messages
         metadata: Optional metadata dict
         profile_id: Optional profile ID that created this message (for per-query tracking)
+        jsonl_uuid: Optional Claude SDK JSONL entry uuid. Persisting this
+            enables rewind to truncate DB rows and JSONL entries together.
+            For user rows written before the SDK echoes them, leave this
+            None and backfill later via ``set_message_jsonl_uuid``.
         _conn: Optional existing DB connection for transaction grouping
     """
     now = datetime.now(timezone.utc).isoformat()
@@ -687,11 +692,13 @@ def add_session_message(
               json.dumps(tool_input) if tool_input else None,
               json.dumps(metadata) if metadata else None,
               profile_id,
+              jsonl_uuid,
               now)
     _ph = ph()
-    _phs8 = ", ".join([_ph] * 8)
-    sql = f"""INSERT INTO session_messages (session_id, role, content, tool_name, tool_input, metadata, profile_id, created_at)
-             VALUES ({_phs8}) RETURNING id"""
+    _phs9 = ", ".join([_ph] * 9)
+    sql = f"""INSERT INTO session_messages
+             (session_id, role, content, tool_name, tool_input, metadata, profile_id, jsonl_uuid, created_at)
+             VALUES ({_phs9}) RETURNING id"""
 
     if _conn is not None:
         cursor = get_cursor(_conn)
@@ -712,6 +719,7 @@ def add_session_message(
         "tool_input": tool_input,
         "metadata": metadata,
         "profile_id": profile_id,
+        "jsonl_uuid": jsonl_uuid,
         "created_at": now
     }
 
@@ -730,7 +738,7 @@ def add_session_messages_batch(
     """Insert multiple session messages in a single transaction.
 
     Each dict in *messages* must have keys: session_id, role, content.
-    Optional keys: tool_name, tool_input, metadata, profile_id.
+    Optional keys: tool_name, tool_input, metadata, profile_id, jsonl_uuid.
 
     Returns the list of inserted message dicts (with ids assigned).
     """
@@ -739,10 +747,10 @@ def add_session_messages_batch(
 
     now = datetime.now(timezone.utc).isoformat()
     _ph = ph()
-    _phs8 = ", ".join([_ph] * 8)
+    _phs9 = ", ".join([_ph] * 9)
     sql = f"""INSERT INTO session_messages
-             (session_id, role, content, tool_name, tool_input, metadata, profile_id, created_at)
-             VALUES ({_phs8}) RETURNING id"""
+             (session_id, role, content, tool_name, tool_input, metadata, profile_id, jsonl_uuid, created_at)
+             VALUES ({_phs9}) RETURNING id"""
 
     results: List[SessionMessageRow] = []
 
@@ -751,6 +759,7 @@ def add_session_messages_batch(
         for msg in messages:
             tool_input = msg.get("tool_input")
             metadata = msg.get("metadata")
+            jsonl_uuid = msg.get("jsonl_uuid")
             params = (
                 msg["session_id"],
                 msg["role"],
@@ -759,6 +768,7 @@ def add_session_messages_batch(
                 json.dumps(tool_input) if tool_input else None,
                 json.dumps(metadata) if metadata else None,
                 msg.get("profile_id"),
+                jsonl_uuid,
                 now,
             )
             cursor.execute(sql, params)
@@ -772,6 +782,7 @@ def add_session_messages_batch(
                 "tool_input": tool_input,
                 "metadata": metadata,
                 "profile_id": msg.get("profile_id"),
+                "jsonl_uuid": jsonl_uuid,
                 "created_at": now,
             })
 
@@ -896,6 +907,77 @@ def delete_session_messages_after(session_id: str, message_id: int) -> int:
             (session_id, message_id)
         )
         return cursor.rowcount
+
+
+def set_message_jsonl_uuid(message_id: int, jsonl_uuid: str) -> bool:
+    """Backfill the JSONL uuid on an existing message row.
+
+    User messages are persisted synchronously (before the SDK sees them), so
+    their uuid is not known at insert time. When the SDK later streams the
+    echoed ``UserMessage``, the caller invokes this to link the DB row back
+    to its JSONL entry.
+
+    Returns True if a row was updated, False if the id did not match.
+    """
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"UPDATE session_messages SET jsonl_uuid = {_ph} WHERE id = {_ph}",
+            (jsonl_uuid, message_id)
+        )
+        return cursor.rowcount > 0
+
+
+def delete_session_messages_after_jsonl_uuid(
+    session_id: str,
+    target_uuid: str,
+    include_response: bool = False,
+) -> int:
+    """Truncate DB rows to mirror a JSONL rewind checkpoint.
+
+    Finds the row whose ``jsonl_uuid`` matches ``target_uuid`` in
+    ``session_id``, then deletes all later rows (by ``id``, which matches
+    insertion order). If ``include_response`` is True, the first later
+    ``assistant`` row is kept — matching the JSONL service's behaviour when
+    the user wants to preserve Claude's reply to the target message.
+
+    Returns the number of rows deleted. Returns 0 if ``target_uuid`` is not
+    found; the caller is responsible for any fallback (e.g. timestamp cut
+    for legacy rows that predate uuid persistence).
+    """
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+
+        # Locate the anchor row by (session_id, jsonl_uuid).
+        cursor.execute(
+            f"SELECT id FROM session_messages "
+            f"WHERE session_id = {_ph} AND jsonl_uuid = {_ph}",
+            (session_id, target_uuid)
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return 0
+        anchor_id = row["id"] if isinstance(row, dict) else row[0]
+
+        # Optionally widen the anchor to include the first following assistant row.
+        if include_response:
+            cursor.execute(
+                f"SELECT id FROM session_messages "
+                f"WHERE session_id = {_ph} AND id > {_ph} AND role = 'assistant' "
+                f"ORDER BY id ASC LIMIT 1",
+                (session_id, anchor_id)
+            )
+            next_asst = cursor.fetchone()
+            if next_asst is not None:
+                anchor_id = next_asst["id"] if isinstance(next_asst, dict) else next_asst[0]
+
+        cursor.execute(
+            f"DELETE FROM session_messages WHERE session_id = {_ph} AND id > {_ph}",
+            (session_id, anchor_id)
+        )
+        return cursor.rowcount or 0
 
 
 def _fts_query_term(query: str) -> str:

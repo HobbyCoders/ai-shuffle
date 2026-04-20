@@ -117,6 +117,10 @@ class MockRewindResult:
     code_rewound: bool = False
     messages_removed: int = 0
     error: Optional[str] = None
+    # Mirror the real RewindResult schema so tests exercising execute_rewind,
+    # which reads this to update session turn_count, don't blow up with
+    # AttributeError. See app/core/jsonl_rewind.py:RewindResult.
+    remaining_user_turns: Optional[int] = None
 
 
 # =============================================================================
@@ -795,6 +799,176 @@ class TestExecuteRewindEndpoint:
         await asyncio.sleep(0.1)
 
         mock_sync_engine.broadcast_session_rewound.assert_called_once()
+
+
+# =============================================================================
+# Tests for execute_rewind DB/JSONL sync (fix/rewind-db-history-sync)
+# =============================================================================
+
+@dataclass
+class _RewindResultStub:
+    """Full-shape stub for app.core.jsonl_rewind.RewindResult, including the
+    ``remaining_user_turns`` field that ``execute_rewind`` reads."""
+    success: bool
+    message: str
+    chat_rewound: bool = False
+    messages_removed: int = 0
+    remaining_user_turns: Optional[int] = None
+    error: Optional[str] = None
+
+
+class TestExecuteRewindDbSync:
+    """
+    After the JSONL file is truncated, ``execute_rewind`` must also truncate
+    the ``session_messages`` rows in the database so the two stores stay in
+    sync. These tests drive the new plumbing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_rewind_truncates_db_messages_on_success(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """On successful JSONL truncation, execute_rewind must also purge DB rows."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+
+        mock_database.get_session.return_value = {
+            "id": "session-1",
+            "sdk_session_id": "sdk-session-1",
+            "project_id": None,
+            "turn_count": 5,
+        }
+        mock_database.get_project.return_value = None
+        mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = _RewindResultStub(
+            success=True,
+            message="Rewind successful",
+            chat_rewound=True,
+            messages_removed=4,
+            remaining_user_turns=1,
+        )
+        # The new helper must be a MagicMock we can assert on.
+        mock_database.delete_session_messages_after_jsonl_uuid.return_value = 4
+
+        request = RewindRequestV2(
+            target_uuid="uuid-target",
+            restore_chat=True,
+            include_response=True,
+            target_role="user",
+        )
+
+        response = await execute_rewind("session-1", request)
+
+        assert response.success is True
+        mock_database.delete_session_messages_after_jsonl_uuid.assert_called_once()
+        call_kwargs = mock_database.delete_session_messages_after_jsonl_uuid.call_args
+        # Accept kwargs or positional — normalise.
+        bound = call_kwargs.kwargs if call_kwargs.kwargs else {
+            "session_id": call_kwargs.args[0],
+            "target_uuid": call_kwargs.args[1],
+            "include_response": call_kwargs.args[2] if len(call_kwargs.args) > 2 else False,
+        }
+        assert bound["session_id"] == "session-1"
+        assert bound["target_uuid"] == "uuid-target"
+        assert bound["include_response"] is True
+
+    @pytest.mark.asyncio
+    async def test_rewind_does_not_truncate_db_when_jsonl_truncation_fails(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """If JSONL truncation fails, DB must not be touched (no partial state)."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+
+        mock_database.get_session.return_value = {
+            "id": "session-1",
+            "sdk_session_id": "sdk-session-1",
+            "project_id": None,
+            "turn_count": 5,
+        }
+        mock_database.get_project.return_value = None
+        mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = _RewindResultStub(
+            success=False,
+            message="Failed",
+            chat_rewound=False,
+            messages_removed=0,
+            error="Target uuid not found in JSONL",
+            remaining_user_turns=None,
+        )
+
+        request = RewindRequestV2(
+            target_uuid="uuid-target",
+            restore_chat=True,
+            include_response=False,
+        )
+
+        response = await execute_rewind("session-1", request)
+
+        assert response.success is False
+        mock_database.delete_session_messages_after_jsonl_uuid.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rewind_passes_include_response_false_to_db_delete(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """include_response flag must propagate to the DB helper so it keeps/drops the trailing assistant row consistently with JSONL."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+
+        mock_database.get_session.return_value = {
+            "id": "session-1",
+            "sdk_session_id": "sdk-session-1",
+            "project_id": None,
+            "turn_count": 3,
+        }
+        mock_database.get_project.return_value = None
+        mock_jsonl_rewind_service.truncate_to_checkpoint.return_value = _RewindResultStub(
+            success=True,
+            message="ok",
+            chat_rewound=True,
+            messages_removed=2,
+            remaining_user_turns=1,
+        )
+        mock_database.delete_session_messages_after_jsonl_uuid.return_value = 2
+
+        request = RewindRequestV2(
+            target_uuid="uuid-target",
+            restore_chat=True,
+            include_response=False,
+            target_role="user",
+        )
+
+        await execute_rewind("session-1", request)
+
+        call = mock_database.delete_session_messages_after_jsonl_uuid.call_args
+        bound = call.kwargs if call.kwargs else {
+            "session_id": call.args[0],
+            "target_uuid": call.args[1],
+            "include_response": call.args[2] if len(call.args) > 2 else False,
+        }
+        assert bound["include_response"] is False
+
+    @pytest.mark.asyncio
+    async def test_rewind_skipped_when_restore_chat_false(
+        self, mock_database, mock_jsonl_rewind_service, mock_sync_engine, mock_settings
+    ):
+        """If the caller opted out of chat restore, DB truncation must also be skipped."""
+        from app.api.commands import execute_rewind, RewindRequestV2
+
+        mock_database.get_session.return_value = {
+            "id": "session-1",
+            "sdk_session_id": "sdk-session-1",
+            "project_id": None,
+            "turn_count": 3,
+        }
+        mock_database.get_project.return_value = None
+
+        request = RewindRequestV2(
+            target_uuid="uuid-target",
+            restore_chat=False,
+            restore_files=False,
+        )
+
+        await execute_rewind("session-1", request)
+
+        mock_jsonl_rewind_service.truncate_to_checkpoint.assert_not_called()
+        mock_database.delete_session_messages_after_jsonl_uuid.assert_not_called()
 
 
 # =============================================================================

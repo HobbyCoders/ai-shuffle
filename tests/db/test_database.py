@@ -186,6 +186,7 @@ def _create_test_schema(cursor: sqlite3.Cursor):
             tool_input JSON,
             metadata JSON,
             profile_id TEXT,
+            jsonl_uuid TEXT,
             version INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

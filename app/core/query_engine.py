@@ -1411,6 +1411,15 @@ async def stream_to_websocket(
                 # Check if this message is from a subagent using parent_tool_use_id
                 parent_tool_id = message.parent_tool_use_id
 
+                # Capture the JSONL transcript uuid for this AssistantMessage.
+                # The uuid is the same for every block inside this message and
+                # lets rewind map a DB row back to a transcript entry. Track the
+                # most recent non-subagent assistant uuid in metadata so the
+                # final assistant row inherits it at persistence time.
+                asst_uuid = getattr(message, "uuid", None)
+                if asst_uuid and not parent_tool_id:
+                    metadata["last_assistant_uuid"] = asst_uuid
+
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         # Check if this text is from a subagent
@@ -1449,6 +1458,7 @@ async def stream_to_websocket(
                             "tool_id": tool_id,
                             "input": tool_input,
                             "parent_tool_id": parent_tool_id if (parent_tool_id and parent_tool_id in task_tool_uses) else None,
+                            "uuid": asst_uuid,
                         }
                         tool_messages.append(tool_entry)
 
@@ -1540,6 +1550,7 @@ async def stream_to_websocket(
                             "tool_id": tool_use_id,
                             "output": output,
                             "parent_tool_id": parent_tool_id if (parent_tool_id and parent_tool_id in task_tool_uses) else None,
+                            "uuid": asst_uuid,
                         }
                         tool_messages.append(result_entry)
 
@@ -1613,6 +1624,8 @@ async def stream_to_websocket(
                 # 2. Local command output like /context, /compact (TextBlock with <local-command-stdout>)
                 # Check if this message is from a subagent using parent_tool_use_id
                 parent_tool_id = message.parent_tool_use_id
+                # JSONL transcript uuid — shared by every block in this UserMessage.
+                user_msg_uuid = getattr(message, "uuid", None)
                 logger.debug(f"[WS] UserMessage received: content_type={type(message.content).__name__}, parent_tool_id={parent_tool_id}")
 
                 # Suppress local command output from subagent UserMessages
@@ -1697,6 +1710,7 @@ async def stream_to_websocket(
                             "tool_id": tool_use_id,
                             "output": output,
                             "parent_tool_id": parent_tool_id if (parent_tool_id and parent_tool_id in task_tool_uses) else None,
+                            "uuid": user_msg_uuid,
                         }
                         tool_messages.append(result_entry)
 
