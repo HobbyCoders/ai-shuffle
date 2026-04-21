@@ -302,25 +302,49 @@ export const falImageProvider: ImageProvider = {
     try {
       fal.config({ credentials: credentials.apiKey });
 
-      // Use Flux Kontext for reference-based generation
-      const kontextModel = 'fal-ai/flux-pro/kontext';
-
-      // Convert first reference image to data URI
-      const refDataUri = imageToDataUri(input.reference_images[0].path);
-      if (!refDataUri) {
-        return { success: false, error: `Reference image not found: ${input.reference_images[0].path}` };
+      // Convert every reference image to data URIs up front
+      const refDataUris: string[] = [];
+      for (const ref of input.reference_images) {
+        const dataUri = imageToDataUri(ref.path);
+        if (!dataUri) {
+          return { success: false, error: `Reference image not found: ${ref.path}` };
+        }
+        refDataUris.push(dataUri);
       }
 
-      const falInput: Record<string, any> = {
-        prompt: input.prompt.trim(),
-        image_url: refDataUri,
-      };
+      // Route to the correct reference endpoint based on the selected model.
+      // Reference-based generation uses the edit/multi endpoints for each
+      // model family; respecting the caller's model selection is required so
+      // that the user's configured image-edit model is actually invoked.
+      const isMulti = refDataUris.length > 1;
+      let referenceModel: string;
+      let falInput: Record<string, any>;
+
+      if (model === 'fal-ai/nano-banana-2' || model === 'fal-ai/nano-banana-2/edit') {
+        referenceModel = 'fal-ai/nano-banana-2/edit';
+        falInput = { prompt: input.prompt.trim(), image_urls: refDataUris };
+      } else if (model.includes('nano-banana')) {
+        referenceModel = 'fal-ai/nano-banana-pro/edit';
+        falInput = { prompt: input.prompt.trim(), image_urls: refDataUris };
+      } else if (model.includes('kontext')) {
+        // Kontext has a dedicated multi-image endpoint
+        referenceModel = isMulti ? 'fal-ai/flux-pro/kontext/multi' : model;
+        falInput = isMulti
+          ? { prompt: input.prompt.trim(), image_urls: refDataUris }
+          : { prompt: input.prompt.trim(), image_url: refDataUris[0] };
+      } else {
+        // Unknown model — fall back to Kontext (safe default that supports references)
+        referenceModel = isMulti ? 'fal-ai/flux-pro/kontext/multi' : 'fal-ai/flux-pro/kontext';
+        falInput = isMulti
+          ? { prompt: input.prompt.trim(), image_urls: refDataUris }
+          : { prompt: input.prompt.trim(), image_url: refDataUris[0] };
+      }
 
       if (input.seed !== undefined) {
         falInput.seed = input.seed;
       }
 
-      const result = await fal.subscribe(kontextModel, {
+      const result = await fal.subscribe(referenceModel, {
         input: falInput as any,
       }) as any;
 

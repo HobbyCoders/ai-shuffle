@@ -6,7 +6,9 @@
  *
  * Environment Variables:
  *   FAL_KEY - fal.ai API key
- *   IMAGE_MODEL - Model to use (optional, defaults to fal-ai/flux-pro/kontext)
+ *   IMAGE_EDIT_MODEL - Preferred model for reference/edit workflows (optional)
+ *   IMAGE_MODEL - Fallback model if no edit-specific model configured
+ *     (defaults to fal-ai/flux-pro/kontext)
  *
  * Usage:
  *   import { generateWithReference } from '/opt/ai-tools/dist/image-generation/generateWithReference.js';
@@ -79,6 +81,13 @@ export interface GenerateWithReferenceInput {
    * @default "allow_adult"
    */
   person_generation?: 'dont_allow' | 'allow_adult' | 'allow_all';
+
+  /**
+   * Override the reference/edit model for this call.
+   * When omitted, falls back to IMAGE_EDIT_MODEL, then IMAGE_MODEL env vars,
+   * then a Flux Kontext default.
+   */
+  model?: string;
 }
 
 /** Single generated image result */
@@ -194,8 +203,14 @@ export async function generateWithReference(input: GenerateWithReferenceInput): 
     };
   }
 
-  // Get model
-  const modelId = process.env.IMAGE_MODEL || 'fal-ai/flux-pro/kontext';
+  // Resolve model: explicit input > IMAGE_EDIT_MODEL > IMAGE_MODEL > default.
+  // Reference-based generation is an image-to-image workflow, so prefer the
+  // user's configured edit model over the general text-to-image model.
+  const modelId =
+    input.model ||
+    process.env.IMAGE_EDIT_MODEL ||
+    process.env.IMAGE_MODEL ||
+    'fal-ai/flux-pro/kontext';
 
   // Normalize reference images to the unified format
   const referenceImages = input.reference_images.map(ref => {

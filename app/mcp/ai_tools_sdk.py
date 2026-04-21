@@ -75,7 +75,7 @@ def _create_image_tools(worker: NodeWorker) -> list:
 
     tools.append(edit_image)
 
-    @tool("generateWithReference", "Generate an image using reference images for character/style consistency (fal.ai: Flux Kontext)", {
+    @tool("generateWithReference", "Generate an image using reference images for character/style consistency (fal.ai: uses the configured image-edit model — Flux Kontext or Nano Banana)", {
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the image to generate"},
@@ -83,7 +83,8 @@ def _create_image_tools(worker: NodeWorker) -> list:
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Paths to reference images (up to 14)"
-            }
+            },
+            "model": {"type": "string", "description": "Optional fal.ai model ID override (e.g. fal-ai/nano-banana-pro, fal-ai/flux-pro/kontext). Defaults to the user's configured image-edit model."}
         },
         "required": ["prompt", "reference_images"]
     }, annotations=_LARGE_RESULT_ANNOTATIONS)
