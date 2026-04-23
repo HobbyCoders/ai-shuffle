@@ -857,6 +857,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 							result={message.toolResult}
 							status={message.toolStatus || 'running'}
 							streaming={message.streaming}
+							serverSide={message.serverSide ?? message.server_side ?? false}
 						/>
 					{:else if message.type === 'tool_result'}
 						<!-- Skip standalone tool_result messages - they should be merged into tool_use -->

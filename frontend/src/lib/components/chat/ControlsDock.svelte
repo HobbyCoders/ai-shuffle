@@ -33,7 +33,7 @@
 	const permissionModes = [
 		{ value: null, label: 'Default', description: 'Use profile setting' },
 		{ value: 'default', label: 'Ask', description: 'Confirm before tools' },
-		{ value: 'auto', label: 'Auto', description: 'SDK decides permissions' },
+		{ value: 'auto', label: 'Auto', description: 'Model classifier decides per tool call' },
 		{ value: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve edits' },
 		{ value: 'plan', label: 'Plan Only', description: 'Plan without executing' },
 		{ value: 'bypassPermissions', label: 'Bypass', description: 'Execute all tools' }

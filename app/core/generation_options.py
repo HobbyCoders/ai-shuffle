@@ -160,6 +160,21 @@ def _resolve_thinking_and_effort(
     return result
 
 
+def _resolve_thinking_display(profile_config: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Mirror of ``query_options._resolve_thinking_display`` for generation calls.
+
+    Returned value is applied to ``options.extra_args["thinking-display"]``
+    after construction so it reaches the CLI regardless of whether the
+    installed 0.1.65 wheel includes the typed ``display`` field.
+    """
+    if not profile_config:
+        return None
+    value = profile_config.get("thinking_display")
+    if value in ("summarized", "omitted"):
+        return value
+    return None
+
+
 def _resolve_env(profile_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
     """
     Merge profile's env with the fixed generation overrides.
@@ -241,8 +256,11 @@ def build_generation_options(
         kwargs["system_prompt"] = system_prompt
 
     # Extra args pass-through for future CLI flags the user may configure.
-    extra_args = config.get("extra_args")
-    if isinstance(extra_args, dict) and extra_args:
+    extra_args = dict(config.get("extra_args") or {})
+    thinking_display = _resolve_thinking_display(config)
+    if thinking_display is not None:
+        extra_args["thinking-display"] = thinking_display
+    if extra_args:
         kwargs["extra_args"] = extra_args
 
     # Use the configured workspace dir as cwd so the subprocess spawns in a

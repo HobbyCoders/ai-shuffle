@@ -81,6 +81,7 @@
 						result={tool.toolResult}
 						status={tool.toolStatus || 'running'}
 						streaming={tool.streaming}
+						serverSide={tool.serverSide ?? tool.server_side ?? false}
 					/>
 				{/each}
 			</div>

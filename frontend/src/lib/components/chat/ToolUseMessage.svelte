@@ -11,9 +11,10 @@
 		result?: string;
 		status: 'running' | 'complete' | 'error';
 		streaming?: boolean;
+		serverSide?: boolean;
 	}
 
-	let { name, input, partialInput, result, status, streaming = false }: Props = $props();
+	let { name, input, partialInput, result, status, streaming = false, serverSide = false }: Props = $props();
 
 	// Chat preferences (reactive via .current getter)
 	const prefs = $derived(chatPreferences.current);
@@ -333,6 +334,13 @@
 				{/if}
 				<!-- Tool name -->
 				<span class="text-sm font-medium text-foreground flex-shrink-0">{name}</span>
+				<!-- Server-side badge -->
+				{#if serverSide}
+					<span
+						class="text-[10px] font-medium px-1.5 py-0.5 rounded border border-primary/30 bg-primary/10 text-primary flex-shrink-0 uppercase tracking-wide"
+						title="Executed server-side by Anthropic API"
+					>server</span>
+				{/if}
 				<!-- Summary (if available) -->
 				{#if summary}
 					<span class="text-muted-foreground flex-shrink-0">&bull;</span>

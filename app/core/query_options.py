@@ -192,6 +192,28 @@ def _build_thinking_config(config: Dict[str, Any], model: Optional[str], overrid
     return result
 
 
+def _resolve_thinking_display(
+    config: Dict[str, Any],
+    overrides: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Resolve the thinking-display CLI flag value ("summarized" | "omitted").
+
+    SDK 0.1.65 / CLI 2.1.111+: Opus 4.7 silently defaults ``display`` to
+    ``"omitted"`` (signature-only, no thinking text). Callers that want
+    summarized thinking text must pass ``summarized``.
+
+    Forwarded via ``extra_args={"thinking-display": ...}`` rather than the
+    typed ``ThinkingConfig.display`` field because the 0.1.65 wheel on PyPI
+    does not yet contain PR #830 — the field is silently dropped by the
+    SubprocessCLITransport there. The raw CLI flag is stable either way.
+    """
+    overrides = overrides or {}
+    value = overrides.get('thinking_display') or config.get('thinking_display')
+    if value in ('summarized', 'omitted'):
+        return value
+    return None
+
+
 def build_options_from_profile(
     profile: Dict[str, Any],
     project: Optional[Dict[str, Any]] = None,
@@ -657,6 +679,13 @@ def build_options_from_profile(
 
     # Apply working directory (already computed above for env details)
     options.cwd = working_dir
+
+    # Forward thinking-display as a raw CLI flag (see _resolve_thinking_display).
+    thinking_display = _resolve_thinking_display(config, overrides)
+    if thinking_display is not None:
+        if options.extra_args is None:
+            options.extra_args = {}
+        options.extra_args["thinking-display"] = thinking_display
 
     # Additional directories
     add_dirs = config.get("add_dirs")

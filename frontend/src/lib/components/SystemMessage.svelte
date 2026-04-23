@@ -49,7 +49,7 @@
 						acceptEdits: 'Accept Edits',
 						bypassPermissions: 'Bypass Permissions',
 						delegate: 'Delegate Mode',
-						dontAsk: 'Auto-Approve'
+						dontAsk: 'Deny Unapproved'
 					};
 					const label = modeLabels[permissionMode] || permissionMode;
 					return {
