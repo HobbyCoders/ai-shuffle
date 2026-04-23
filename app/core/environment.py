@@ -258,6 +258,13 @@ def _build_extra_args(
     if deployment_mode and deployment_mode != DeploymentMode.LOCAL:
         if settings.log_level.upper() == "DEBUG" and "debug-to-stderr" not in extra_args:
             extra_args["debug-to-stderr"] = None
+            # NOTE (SDK 0.1.65): the transport no longer *detects* this flag to
+            # decide whether to pipe stderr — piping is now controlled solely
+            # by whether a ``stderr=`` callback is registered on options (we
+            # always register one via ``hook_service.stderr_callback``). We
+            # still pass the flag because the CLI uses it to raise its own
+            # log verbosity; it will be removed from the CLI in a future
+            # release, at which point this block should be deleted.
             logger.debug("Added --debug-to-stderr for Docker CLI diagnostics (LOG_LEVEL=DEBUG)")
 
     # Get tool names from hooks

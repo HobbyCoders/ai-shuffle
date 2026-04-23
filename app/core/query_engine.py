@@ -31,6 +31,17 @@ from claude_agent_sdk import (
     AssistantMessage, UserMessage, TextBlock, ToolUseBlock, ToolResultBlock,
     ResultMessage, SystemMessage,
 )
+# SDK 0.1.65+ surfaces server-side tool calls (advisor, web_search, web_fetch)
+# as discrete content blocks instead of dropping them silently. Guard the
+# import so we stay runnable against older pinned wheels in dev.
+try:
+    from claude_agent_sdk import ServerToolUseBlock, ServerToolResultBlock
+    _SERVER_TOOL_TYPES: tuple = (ServerToolUseBlock,)
+    _SERVER_TOOL_RESULT_TYPES: tuple = (ServerToolResultBlock,)
+except ImportError:  # SDK < 0.1.65
+    ServerToolUseBlock = ServerToolResultBlock = None  # type: ignore[assignment]
+    _SERVER_TOOL_TYPES = ()
+    _SERVER_TOOL_RESULT_TYPES = ()
 try:
     from claude_agent_sdk import TaskStartedMessage, TaskProgressMessage, TaskNotificationMessage
 except ImportError:
@@ -233,6 +244,26 @@ async def execute_query(
                             "name": getattr(block, 'name', 'unknown'),
                             "tool_id": getattr(block, 'tool_use_id', None),
                             "output": output
+                        })
+                    elif _SERVER_TOOL_TYPES and isinstance(block, _SERVER_TOOL_TYPES):
+                        # Server-executed tool call (advisor, web_search, web_fetch).
+                        # Caller never runs these; we still surface them so the UI
+                        # can badge "server tool" and the transcript is complete.
+                        tool_messages.append({
+                            "type": "tool_use",
+                            "name": block.name,
+                            "tool_id": block.id,
+                            "input": block.input,
+                            "server_side": True,
+                        })
+                    elif _SERVER_TOOL_RESULT_TYPES and isinstance(block, _SERVER_TOOL_RESULT_TYPES):
+                        # Server-tool result — content is an opaque dict, not str.
+                        tool_messages.append({
+                            "type": "tool_result",
+                            "name": "server_tool",
+                            "tool_id": getattr(block, 'tool_use_id', None),
+                            "output": truncate_large_payload(block.content),
+                            "server_side": True,
                         })
                 metadata["model"] = message.model
 
@@ -611,6 +642,57 @@ async def stream_query(
                             message_id=assistant_msg_id,
                             chunk_type="tool_result",
                             chunk_data={"name": tool_name, "output": output},
+                            source_device_id=device_id
+                        )
+
+                    elif _SERVER_TOOL_TYPES and isinstance(block, _SERVER_TOOL_TYPES):
+                        # Server-executed tool call (advisor, web_search, web_fetch).
+                        tool_id = block.id
+                        if tool_id:
+                            tool_id_to_name[tool_id] = block.name
+                        yield {
+                            "type": "tool_use",
+                            "name": block.name,
+                            "input": block.input,
+                            "server_side": True,
+                        }
+                        tool_messages.append({
+                            "type": "tool_use",
+                            "name": block.name,
+                            "tool_id": tool_id,
+                            "input": block.input,
+                            "server_side": True,
+                        })
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=assistant_msg_id,
+                            chunk_type="tool_use",
+                            chunk_data={"name": block.name, "input": block.input, "server_side": True},
+                            source_device_id=device_id
+                        )
+
+                    elif _SERVER_TOOL_RESULT_TYPES and isinstance(block, _SERVER_TOOL_RESULT_TYPES):
+                        tool_use_id = getattr(block, 'tool_use_id', None)
+                        tool_name = tool_id_to_name.get(tool_use_id, "server_tool")
+                        output = truncate_large_payload(block.content)
+                        yield {
+                            "type": "tool_result",
+                            "name": tool_name,
+                            "output": output,
+                            "server_side": True,
+                        }
+                        tool_messages.append({
+                            "type": "tool_result",
+                            "name": tool_name,
+                            "tool_id": tool_use_id,
+                            "output": output,
+                            "server_side": True,
+                        })
+                        await sync_engine.broadcast_stream_chunk(
+                            session_id=session_id,
+                            message_id=assistant_msg_id,
+                            chunk_type="tool_result",
+                            chunk_data={"name": tool_name, "output": output, "server_side": True},
                             source_device_id=device_id
                         )
 
@@ -1602,6 +1684,59 @@ async def stream_to_websocket(
                             if screenshot_b64:
                                 event["screenshot"] = screenshot_b64
                             yield event
+
+                    elif _SERVER_TOOL_TYPES and isinstance(block, _SERVER_TOOL_TYPES):
+                        # Server-executed tool call. Treated like a top-level
+                        # tool_use for persistence/UI, flagged `server_side` so
+                        # the client can badge it (we never get a caller-side
+                        # result to pair with).
+                        tool_id = block.id
+                        if tool_id:
+                            tool_id_to_name[tool_id] = block.name
+                        has_visible_content = True
+                        tool_entry = {
+                            "type": "tool_use",
+                            "name": block.name,
+                            "tool_id": tool_id,
+                            "input": block.input,
+                            "parent_tool_id": None,
+                            "uuid": asst_uuid,
+                            "server_side": True,
+                        }
+                        tool_messages.append(tool_entry)
+                        turn_events.append({"kind": "tool_use", "payload": tool_entry})
+                        yield {
+                            "type": "tool_use",
+                            "name": block.name,
+                            "id": tool_id,
+                            "input": block.input,
+                            "server_side": True,
+                        }
+
+                    elif _SERVER_TOOL_RESULT_TYPES and isinstance(block, _SERVER_TOOL_RESULT_TYPES):
+                        tool_use_id = getattr(block, 'tool_use_id', None)
+                        tool_name = tool_id_to_name.get(tool_use_id, "server_tool")
+                        output = truncate_large_payload(block.content)
+                        has_visible_content = True
+                        result_entry = {
+                            "type": "tool_result",
+                            "name": tool_name,
+                            "tool_id": tool_use_id,
+                            "output": output,
+                            "parent_tool_id": None,
+                            "uuid": asst_uuid,
+                            "server_side": True,
+                        }
+                        tool_messages.append(result_entry)
+                        turn_events.append({"kind": "tool_result", "payload": result_entry})
+                        yield {
+                            "type": "tool_result",
+                            "name": tool_name,
+                            "tool_use_id": tool_use_id,
+                            "output": output,
+                            "is_error": False,
+                            "server_side": True,
+                        }
 
                 metadata["model"] = message.model
 

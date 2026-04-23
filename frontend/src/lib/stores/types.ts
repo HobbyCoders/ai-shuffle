@@ -28,6 +28,8 @@ export interface SubagentChildMessage {
 	partialToolInput?: string; // Streaming JSON accumulator for incomplete tool_input
 	toolResult?: string; // Result content for tool_use (grouped with tool call)
 	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
+	serverSide?: boolean;
+	server_side?: boolean;
 	timestamp?: string;
 }
 
@@ -56,6 +58,8 @@ export interface ChatMessage {
 	toolInput?: Record<string, unknown>;
 	toolResult?: string; // Result content for tool_use messages (grouped with tool call)
 	toolStatus?: 'running' | 'complete' | 'error'; // Status of tool execution
+	serverSide?: boolean; // True for server-executed tools (advisor, web_search, web_fetch) — SDK 0.1.65+
+	server_side?: boolean; // Snake-case alias emitted by backend on some paths
 	metadata?: Record<string, unknown>;
 	streaming?: boolean;
 	partialToolInput?: string; // Accumulator for streaming tool input JSON

@@ -1164,6 +1164,79 @@ def _parse_session_history_uncached(
                                 if tool_id:
                                     messages_by_tool_id[tool_id] = len(messages) - 1
 
+                        elif block_type == "server_tool_use":
+                            # SDK 0.1.65+: server-executed tool calls (advisor,
+                            # web_search, web_fetch). Render identically to a
+                            # tool_use with a server_side badge; we never get a
+                            # caller-side result, only the matching
+                            # server_tool_result block below.
+                            msg_counter += 1
+                            tool_id = block.get("id")
+                            tool_name = block.get("name")
+                            tool_input = block.get("input", {})
+                            if tool_id and tool_name:
+                                tool_names_by_id[tool_id] = tool_name
+                            messages.append({
+                                "id": f"tool-{uuid}-{tool_id or msg_counter}",
+                                "uuid": uuid,
+                                "role": "assistant",
+                                "content": "",
+                                "type": "tool_use",
+                                "toolName": tool_name,
+                                "toolId": tool_id,
+                                "toolInput": tool_input,
+                                "toolStatus": "running",
+                                "serverSide": True,
+                                "metadata": {"timestamp": timestamp},
+                                "streaming": False
+                            })
+                            if tool_id:
+                                messages_by_tool_id[tool_id] = len(messages) - 1
+
+                        elif block_type == "server_tool_result":
+                            # SDK 0.1.65+: paired with server_tool_use above.
+                            # Content is a dict, not a string. Attach to the
+                            # prior tool_use row if present, else emit standalone.
+                            tool_use_id = block.get("tool_use_id")
+                            raw_content = block.get("content")
+                            if isinstance(raw_content, (dict, list)):
+                                import json as _json
+                                output_text = _json.dumps(raw_content)
+                            else:
+                                output_text = str(raw_content) if raw_content is not None else ""
+                            if tool_use_id and tool_use_id in messages_by_tool_id:
+                                idx = messages_by_tool_id[tool_use_id]
+                                messages[idx]["toolResult"] = output_text
+                                messages[idx]["toolStatus"] = "complete"
+                            else:
+                                # Emit as a synthetic tool_use row with the
+                                # result pre-attached. MessageArea.svelte
+                                # unconditionally skips `type: "tool_result"`
+                                # (standalone results are expected to merge
+                                # into a prior tool_use), so a standalone
+                                # tool_result here would silently render
+                                # nothing. Rendering through the tool_use
+                                # path preserves the server badge and result
+                                # panel. ToolUseMessage.svelte gates its
+                                # input section on Object.keys(input).length,
+                                # so an empty toolInput renders cleanly.
+                                msg_counter += 1
+                                messages.append({
+                                    "id": f"tool-{uuid}-{tool_use_id or msg_counter}",
+                                    "uuid": uuid,
+                                    "role": "assistant",
+                                    "content": "",
+                                    "type": "tool_use",
+                                    "toolName": tool_names_by_id.get(tool_use_id, "server_tool"),
+                                    "toolId": tool_use_id,
+                                    "toolInput": {},
+                                    "toolResult": output_text,
+                                    "toolStatus": "complete",
+                                    "serverSide": True,
+                                    "metadata": {"timestamp": timestamp},
+                                    "streaming": False
+                                })
+
             elif isinstance(content, str) and content:
                 # Plain string content (less common)
                 msg_counter += 1
