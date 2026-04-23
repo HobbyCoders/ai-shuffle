@@ -2,7 +2,6 @@
 Settings API routes - audio (TTS/STT) endpoints.
 """
 
-import base64
 import logging
 import os
 import uuid
@@ -304,6 +303,67 @@ def _extract_audio_url(result: dict) -> Optional[str]:
     return result.get("audio_url")
 
 
+def _normalize_mime(content_type: str, fallback: str = "audio/webm") -> str:
+    """Strip codec parameters (e.g. 'audio/webm;codecs=opus') and return a clean MIME."""
+    if not content_type:
+        return fallback
+    return content_type.split(";", 1)[0].strip() or fallback
+
+
+async def _upload_to_fal_storage(
+    client: httpx.AsyncClient,
+    fal_key: str,
+    data: bytes,
+    content_type: str,
+    file_name: str,
+) -> str:
+    """
+    Upload bytes to fal.ai storage and return a public file URL suitable
+    for use as `audio_url` / `image_url` in fal model payloads.
+
+    fal.ai does not accept base64 data URIs for Whisper and most STT models
+    — a real HTTPS URL is required. This helper performs the two-step
+    initiate+PUT flow that `fal_client.upload` wraps internally.
+    """
+    initiate_resp = await client.post(
+        "https://rest.alpha.fal.ai/storage/upload/initiate",
+        headers={
+            "Authorization": f"Key {fal_key}",
+            "Content-Type": "application/json",
+        },
+        json={"content_type": content_type, "file_name": file_name},
+        timeout=30.0,
+    )
+    if initiate_resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"fal.ai storage initiate failed: {initiate_resp.status_code} {initiate_resp.text}",
+        )
+
+    initiate = initiate_resp.json()
+    upload_url = initiate.get("upload_url")
+    file_url = initiate.get("file_url")
+    if not upload_url or not file_url:
+        raise HTTPException(
+            status_code=502,
+            detail="fal.ai storage initiate returned no upload_url/file_url",
+        )
+
+    put_resp = await client.put(
+        upload_url,
+        content=data,
+        headers={"Content-Type": content_type},
+        timeout=60.0,
+    )
+    if put_resp.status_code not in (200, 201, 204):
+        raise HTTPException(
+            status_code=502,
+            detail=f"fal.ai storage upload failed: {put_resp.status_code} {put_resp.text}",
+        )
+
+    return file_url
+
+
 # ============================================================================
 # Audio Endpoints
 # ============================================================================
@@ -538,19 +598,26 @@ async def transcribe_audio(
     if len(audio_data) > 25 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Audio file too large. Maximum size is 25MB.")
 
-    # Build a data URI from the audio bytes (same approach as the Node.js STT tool).
-    # This avoids a separate file upload step — fal.ai accepts data URIs in audio_url.
-    mime_type = content_type or "audio/webm"
-    audio_b64 = base64.b64encode(audio_data).decode("ascii")
-    audio_data_uri = f"data:{mime_type};base64,{audio_b64}"
+    # fal.ai Whisper (and other STT models) reject base64 `data:` URIs with
+    # HTTP 422 "Unsupported data URL". Upload the bytes to fal storage first
+    # to obtain a real HTTPS URL, then reference that URL in the STT payload.
+    mime_type = _normalize_mime(content_type, fallback="audio/webm")
 
-    # Call fal.ai STT model with the data URI
+    # Call fal.ai STT model with the uploaded file URL
     stt_model = database.get_system_setting("stt_model") or "fal-ai/whisper"
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
+            audio_url = await _upload_to_fal_storage(
+                client,
+                fal_key,
+                audio_data,
+                content_type=mime_type,
+                file_name=filename,
+            )
+
             payload = {
-                "audio_url": audio_data_uri,
+                "audio_url": audio_url,
                 "task": "transcribe",
                 "chunk_level": "segment",
             }
