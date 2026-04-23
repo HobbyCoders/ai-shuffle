@@ -58,7 +58,11 @@
 		pattern?: string;
 	}) {
 		const { request_id, decision, remember, pattern } = detail;
-		activeSession.sendPermissionResponse(request_id, decision, remember, pattern);
+		const sessionId =
+			$activeSession.pendingPermissions.find(req => req.request_id === request_id)?.session_id ??
+			$activeSession.sessionId ??
+			undefined;
+		activeSession.sendPermissionResponse(request_id, decision, remember, pattern, sessionId);
 	}
 
 	// Handle question response
@@ -68,7 +72,11 @@
 		answers: Record<string, string | string[]>;
 	}) {
 		const { request_id, tool_use_id, answers } = detail;
-		activeSession.sendUserQuestionResponse(request_id, tool_use_id, answers);
+		const sessionId =
+			$activeSession.pendingQuestions.find(q => q.request_id === request_id)?.session_id ??
+			$activeSession.sessionId ??
+			undefined;
+		activeSession.sendUserQuestionResponse(request_id, tool_use_id, answers, sessionId);
 	}
 
 	// Handle project selection from WorkspaceSelector

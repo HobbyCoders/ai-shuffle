@@ -86,7 +86,6 @@ function mockState(): ActiveSessionState {
 		effortLevelOverride: null,
 		pendingPermissions: [],
 		pendingQuestions: [],
-		todos: [],
 		queuedMessages: [],
 		draft: '',
 		scrollTop: 0,
@@ -318,6 +317,52 @@ describe('ws-message-handlers', () => {
 
 			expect(deps.update).toHaveBeenCalled();
 			expect(updatedPermissions.length).toBe(1);
+		});
+
+		it('should keep permission requests for inactive sessions out of the active modal', () => {
+			const state = mockState();
+			state.sessionId = 'session-2';
+			state.pendingPermissions = [];
+
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'permission_request',
+				session_id: 'session-1',
+				request_id: 'perm-1',
+				tool_name: 'Bash',
+				tool_input: { command: 'ls' },
+			});
+
+			expect(deps.update).not.toHaveBeenCalled();
+			expect(deps.backgroundPermissions.update).toHaveBeenCalled();
+		});
+	});
+
+	describe('question handling', () => {
+		it('should keep user questions for inactive sessions out of the active modal', () => {
+			const state = mockState();
+			state.sessionId = 'session-2';
+			state.pendingQuestions = [];
+
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'user_question',
+				session_id: 'session-1',
+				request_id: 'question-1',
+				tool_use_id: 'tool-1',
+				questions: [{ question: 'Proceed?', header: 'Confirm' }],
+			});
+
+			expect(deps.update).not.toHaveBeenCalled();
+			expect(deps.backgroundPermissions.update).toHaveBeenCalled();
 		});
 	});
 

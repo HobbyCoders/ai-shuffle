@@ -54,7 +54,7 @@ export function createDraftManager(deps: DraftManagerDeps) {
 
 		/** Clear all messages (e.g. before reloading after rewind). */
 		clearMessages() {
-			update(s => ({ ...s, messages: [], todos: [] }));
+			update(s => ({ ...s, messages: [] }));
 		},
 
 		/** Reload the current session from backend (e.g. after rewind).

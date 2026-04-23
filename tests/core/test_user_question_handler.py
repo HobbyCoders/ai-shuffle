@@ -123,6 +123,7 @@ class TestRequestAnswers(TestUserQuestionHandler):
         mock_broadcast.assert_called_once()
         call_args = mock_broadcast.call_args[0][0]
         assert call_args["type"] == "user_question"
+        assert call_args["session_id"] == "session-1"
         assert call_args["request_id"] == "req-123"
         assert call_args["tool_use_id"] == "tool-456"
         assert call_args["questions"] == sample_questions
@@ -163,6 +164,10 @@ class TestRequestAnswers(TestUserQuestionHandler):
 
         assert "error" in result
         assert "timed out" in result["error"]
+        assert mock_broadcast.await_count == 2
+        timeout_call = mock_broadcast.await_args_list[1].args[0]
+        assert timeout_call["type"] == "user_question_timeout"
+        assert timeout_call["session_id"] == "session-1"
 
     @pytest.mark.asyncio
     async def test_request_answers_timeout_cleans_up_pending(self, handler, sample_questions, mock_broadcast):

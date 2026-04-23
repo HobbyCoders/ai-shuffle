@@ -636,6 +636,7 @@ class TestPermissionHandler:
             # Verify broadcast content
             call_args = mock_broadcast.call_args[0][0]
             assert call_args["type"] == "permission_request"
+            assert call_args["session_id"] == "session-1"
             assert call_args["request_id"] == "req-1"
             assert call_args["tool_name"] == "Bash"
 
@@ -661,6 +662,10 @@ class TestPermissionHandler:
 
         assert result.behavior == "deny"
         assert "timed out" in result.message
+        assert mock_broadcast.await_count == 2
+        timeout_call = mock_broadcast.await_args_list[1].args[0]
+        assert timeout_call["type"] == "permission_timeout"
+        assert timeout_call["session_id"] == "session-1"
 
         # Request should be removed from queue
         assert handler.get_queue_count("session-1") == 0
@@ -1042,6 +1047,7 @@ class TestPermissionHandler:
         mock_broadcast.assert_called_once()
         call_args = mock_broadcast.call_args[0][0]
         assert call_args["type"] == "permission_queue_update"
+        assert call_args["session_id"] == "session-1"
         assert "req-1" in call_args["resolved_ids"]
 
     @pytest.mark.asyncio

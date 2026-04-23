@@ -295,6 +295,7 @@ export interface FileUploadResponse {
 // Permission types
 export interface PermissionRequest {
 	request_id: string;
+	session_id?: string;
 	tool_name: string;
 	tool_input: Record<string, unknown>;
 	queue_position?: number;
@@ -338,6 +339,7 @@ export interface UserQuestion {
 
 export interface UserQuestionRequest {
 	request_id: string;
+	session_id?: string;
 	tool_use_id: string;
 	questions: UserQuestion[];
 	created_at?: string;

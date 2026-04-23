@@ -24,11 +24,13 @@ export function createPermissionHandler(deps: PermissionHandlerDeps) {
 			requestId: string,
 			decision: 'allow' | 'deny',
 			remember?: 'none' | 'session' | 'profile',
-			pattern?: string
+			pattern?: string,
+			sessionId?: string
 		) {
 			wsSend({
 				type: 'permission_response',
 				request_id: requestId,
+				session_id: sessionId,
 				decision,
 				remember: remember || 'none',
 				pattern,
@@ -38,11 +40,13 @@ export function createPermissionHandler(deps: PermissionHandlerDeps) {
 		sendUserQuestionResponse(
 			requestId: string,
 			toolUseId: string,
-			answers: Record<string, string | string[]>
+			answers: Record<string, string | string[]>,
+			sessionId?: string
 		) {
 			wsSend({
 				type: 'user_question_response',
 				request_id: requestId,
+				session_id: sessionId,
 				tool_use_id: toolUseId,
 				answers,
 			});

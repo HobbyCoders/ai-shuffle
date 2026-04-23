@@ -14,11 +14,10 @@
  * Key behaviors:
  * - Sends ?since_update_id=N → gets 304 if nothing changed (cheap)
  * - On update: replaces session state entirely (no merging)
- * - Extracts TodoWrite inputs for todo list display
  * - Stops automatically when streaming ends
  */
 
-import type { ChatMessage, TodoItem, SubagentChildMessage, MessageType } from '../types';
+import type { ChatMessage, SubagentChildMessage, MessageType } from '../types';
 import { sessionState, type SessionUsage } from './session-state';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -50,7 +49,6 @@ export interface PollAppliedData {
 	messages: ChatMessage[];
 	isStreaming: boolean;
 	usage: SessionUsage;
-	todos: TodoItem[];
 	sessionMeta?: SessionMeta;
 }
 
@@ -328,7 +326,6 @@ class SessionPoller {
 					messages: session.messages,
 					isStreaming: session.isStreaming,
 					usage: session.usage,
-					todos: session.todos,
 					sessionMeta,
 				};
 			}
@@ -449,8 +446,6 @@ class SessionPoller {
 			return;
 		}
 
-		const todos = extractTodos(messages);
-
 		const usageRaw = (data.usage as Record<string, number>) || {};
 		const usage: SessionUsage = {
 			inputTokens: usageRaw.input_tokens || 0,
@@ -482,7 +477,6 @@ class SessionPoller {
 			isStreaming,
 			newUpdateId,
 			usage,
-			todos,
 			existingMessages
 		);
 
@@ -497,7 +491,6 @@ class SessionPoller {
 					messages: session.messages,
 					isStreaming: session.isStreaming,
 					usage: session.usage,
-					todos: session.todos,
 					sessionMeta,
 				});
 			} else {
@@ -572,23 +565,6 @@ function convertServerMessage(m: Record<string, unknown>, index: number): ChatMe
 	if (m.metadata) msg.metadata = m.metadata as Record<string, unknown>;
 
 	return msg;
-}
-
-function extractTodos(messages: ChatMessage[]): TodoItem[] {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const msg = messages[i];
-		if (msg.type === 'tool_use' && msg.toolName === 'TodoWrite' && msg.toolInput?.todos) {
-			const todos = msg.toolInput.todos as TodoItem[];
-			if (Array.isArray(todos)) {
-				return todos.map(todo => ({
-					content: todo.content || '',
-					status: todo.status || 'pending',
-					activeForm: todo.activeForm || todo.content || '',
-				}));
-			}
-		}
-	}
-	return [];
 }
 
 // ─── Export singleton ────────────────────────────────────────────────────────

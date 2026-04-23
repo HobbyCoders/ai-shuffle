@@ -127,6 +127,45 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		clearStopTimeout,
 	} = deps;
 
+	function mapPermissionRequests(
+		requests: PermissionRequestType[],
+		sessionId?: string
+	): PermissionRequestType[] {
+		return requests.map(req => ({
+			...req,
+			session_id: req.session_id ?? sessionId,
+		}));
+	}
+
+	function mapUserQuestions(
+		questions: UserQuestionRequest[],
+		sessionId?: string
+	): UserQuestionRequest[] {
+		return questions.map(question => ({
+			...question,
+			session_id: question.session_id ?? sessionId,
+		}));
+	}
+
+	function setNeedsAttention(sessionId: string | undefined, count: number): void {
+		if (!sessionId) return;
+		backgroundPermissions.update(map => {
+			const next = new Map(map);
+			if (count > 0) next.set(sessionId, count);
+			else next.delete(sessionId);
+			return next;
+		});
+	}
+
+	function bumpNeedsAttention(sessionId: string | undefined): void {
+		if (!sessionId) return;
+		backgroundPermissions.update(map => {
+			const next = new Map(map);
+			next.set(sessionId, (next.get(sessionId) ?? 0) + 1);
+			return next;
+		});
+	}
+
 	// ── Handler: done ────────────────────────────────────────────────
 
 	function handleDone(data: Record<string, unknown>): void {
@@ -444,15 +483,27 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// History is now loaded via HTTP (sessionPoller.loadSession).
 				// If we receive a WS history message, just trigger a poll to sync.
 				if (data.session_id && state.sessionId === data.session_id) {
-					sessionPoller.pollNow(data.session_id as string);
+					const historySessionId = data.session_id as string;
+					sessionPoller.pollNow(historySessionId);
+					const historyPendingPermissions = mapPermissionRequests(
+						(data.pendingPermissions as PermissionRequestType[] | undefined) ?? [],
+						historySessionId
+					);
+					const historyPendingQuestions = mapUserQuestions(
+						(data.pendingQuestions as UserQuestionRequest[] | undefined) ?? [],
+						historySessionId
+					);
 					// Populate server-side queue state from history response
 					const historyQueued = data.queuedMessages as Array<{ id: string; content: string; created_at: string }> | undefined;
-					if (historyQueued) {
-						update(s => ({ ...s, queuedMessages: historyQueued.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime() })) }));
-					} else {
-						// No queued messages in response — clear local state
-						update(s => s.queuedMessages.length > 0 ? { ...s, queuedMessages: [] } : s);
-					}
+					setNeedsAttention(historySessionId, 0);
+					update(s => ({
+						...s,
+						pendingPermissions: historyPendingPermissions,
+						pendingQuestions: historyPendingQuestions,
+						queuedMessages: historyQueued
+							? historyQueued.map(m => ({ id: m.id, content: m.content, queuedAt: new Date(m.created_at).getTime() }))
+							: [],
+					}));
 				}
 				break;
 
@@ -691,7 +742,14 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'permission_request': {
+				const requestSessionId = data.session_id as string | undefined;
+				const currentSessionId = getState().sessionId;
+				if (requestSessionId && requestSessionId !== currentSessionId) {
+					bumpNeedsAttention(requestSessionId);
+					break;
+				}
 				const request = {
+					session_id: requestSessionId ?? currentSessionId ?? undefined,
 					request_id: data.request_id as string,
 					tool_name: data.tool_name as string,
 					tool_input: data.tool_input as Record<string, unknown>,
@@ -699,12 +757,19 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					queue_total: data.queue_total as number | undefined,
 				} as PermissionRequestType;
 
+				setNeedsAttention(request.session_id, 0);
 				onNotifyWaitingForResponse('permission', { toolName: request.tool_name });
 				update(s => ({ ...s, pendingPermissions: [...s.pendingPermissions, request] }));
 				break;
 			}
 
 			case 'permission_queue_update': {
+				const queueSessionId = data.session_id as string | undefined;
+				if (queueSessionId && queueSessionId !== getState().sessionId) {
+					const remainingCount = data.remaining_count as number | undefined;
+					if (remainingCount !== undefined) setNeedsAttention(queueSessionId, remainingCount);
+					break;
+				}
 				const resolvedIds = data.resolved_ids as string[];
 				update(s => ({
 					...s,
@@ -715,6 +780,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 			case 'permission_response_ack':
 			case 'permission_timeout': {
+				const responseSessionId = data.session_id as string | undefined;
+				if (responseSessionId && responseSessionId !== getState().sessionId) break;
 				const requestId = data.request_id as string;
 				update(s => ({
 					...s,
@@ -724,12 +791,27 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'pending_permissions': {
-				const requests = data.requests as PermissionRequestType[];
+				const pendingSessionId = data.session_id as string | undefined;
+				const requests = mapPermissionRequests(
+					(data.requests as PermissionRequestType[] | undefined) ?? [],
+					pendingSessionId
+				);
+				if (pendingSessionId && pendingSessionId !== getState().sessionId) {
+					setNeedsAttention(pendingSessionId, requests.length);
+					break;
+				}
+				setNeedsAttention(pendingSessionId, 0);
 				update(s => ({ ...s, pendingPermissions: requests }));
 				break;
 			}
 
 			case 'user_question': {
+				const questionSessionId = data.session_id as string | undefined;
+				const currentSessionId = getState().sessionId;
+				if (questionSessionId && questionSessionId !== currentSessionId) {
+					bumpNeedsAttention(questionSessionId);
+					break;
+				}
 				const rawQuestions = data.questions as Array<Record<string, unknown>>;
 				const normalizedQuestions = rawQuestions.map((q, idx) => ({
 					question: q.question as string || '',
@@ -742,11 +824,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}));
 
 				const request = {
+					session_id: questionSessionId ?? currentSessionId ?? undefined,
 					request_id: data.request_id as string,
 					tool_use_id: data.tool_use_id as string,
 					questions: normalizedQuestions,
 				} as UserQuestionRequest;
 
+				setNeedsAttention(request.session_id, 0);
 				onNotifyWaitingForResponse('question', { questionCount: request.questions.length });
 				update(s => ({ ...s, pendingQuestions: [...s.pendingQuestions, request] }));
 				break;
@@ -754,6 +838,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 			case 'user_question_response_ack':
 			case 'user_question_timeout': {
+				const responseSessionId = data.session_id as string | undefined;
+				if (responseSessionId && responseSessionId !== getState().sessionId) break;
 				const requestId = data.request_id as string;
 				update(s => ({
 					...s,
@@ -763,7 +849,16 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'pending_questions': {
-				const questions = data.questions as UserQuestionRequest[];
+				const pendingSessionId = data.session_id as string | undefined;
+				const questions = mapUserQuestions(
+					(data.questions as UserQuestionRequest[] | undefined) ?? [],
+					pendingSessionId
+				);
+				if (pendingSessionId && pendingSessionId !== getState().sessionId) {
+					setNeedsAttention(pendingSessionId, questions.length);
+					break;
+				}
+				setNeedsAttention(pendingSessionId, 0);
 				update(s => {
 					const existingIds = new Set(s.pendingQuestions.map(q => q.request_id));
 					const newIds = new Set(questions.map(q => q.request_id));

@@ -11,7 +11,7 @@
  * 3. Fine-grained reactivity via $state - only affected components re-render
  */
 
-import type { ChatMessage, TodoItem } from '../types';
+import type { ChatMessage } from '../types';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -30,7 +30,6 @@ export interface SessionData {
 	isStreaming: boolean;
 	lastUpdateId: number;
 	usage: SessionUsage;
-	todos: TodoItem[];
 }
 
 // ─── Default values ──────────────────────────────────────────────────────────
@@ -50,8 +49,22 @@ function createEmptySession(sessionId: string): SessionData {
 		isStreaming: false,
 		lastUpdateId: 0,
 		usage: { ...EMPTY_USAGE },
-		todos: [],
 	};
+}
+
+function sameAgentUsage(
+	existing: ChatMessage['agentUsage'],
+	incoming: ChatMessage['agentUsage']
+): boolean {
+	if (existing === incoming) return true;
+	if (!existing || !incoming) return !existing && !incoming;
+	return (
+		existing.total_tokens === incoming.total_tokens &&
+		existing.tool_uses === incoming.tool_uses &&
+		existing.duration_ms === incoming.duration_ms &&
+		existing.input_tokens === incoming.input_tokens &&
+		existing.output_tokens === incoming.output_tokens
+	);
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -77,6 +90,7 @@ function compareMessage(incoming: ChatMessage, existing: ChatMessage | undefined
 			existing.content === incoming.content &&
 			existing.streaming === incoming.streaming &&
 			existing.agentStatus === incoming.agentStatus &&
+			sameAgentUsage(existing.agentUsage, incoming.agentUsage) &&
 			existing.agentChildren?.length === incoming.agentChildren?.length
 		) {
 			const existLast = existing.agentChildren?.[existing.agentChildren.length - 1];
@@ -213,7 +227,6 @@ class SessionStateManager {
 		isStreaming: boolean,
 		lastUpdateId: number,
 		usage: SessionUsage,
-		todos: TodoItem[],
 		existingMessages?: ChatMessage[]
 	): void {
 		const existing = this.sessions.get(sessionId);
@@ -245,9 +258,6 @@ class SessionStateManager {
 			isStreaming,
 			lastUpdateId,
 			usage,
-			// Always use server-provided todos. If the server returns an empty
-			// list, that means todos were cleared — don't preserve stale ones.
-			todos,
 		});
 	}
 
@@ -270,7 +280,7 @@ class SessionStateManager {
 	/**
 	 * Reset a session's lastUpdateId to 0, forcing the next poll to fetch
 	 * fresh data from the server. Unlike removeSession() + initSession(),
-	 * this preserves existing session data (messages, usage, todos) so
+	 * this preserves existing session data (messages, usage) so
 	 * there's no visible flash of stale/zero values in the UI.
 	 *
 	 * Used by startStreaming() when restarting polling for an existing

@@ -73,6 +73,7 @@ class UserQuestionHandler:
         # Broadcast question request to frontend
         await broadcast_func({
             "type": "user_question",
+            "session_id": session_id,
             "request_id": request_id,
             "tool_use_id": tool_use_id,
             "questions": questions
@@ -91,6 +92,7 @@ class UserQuestionHandler:
             try:
                 await broadcast_func({
                     "type": "user_question_timeout",
+                    "session_id": session_id,
                     "request_id": request_id
                 })
             except Exception:
@@ -152,6 +154,7 @@ class UserQuestionHandler:
 
         return [
             {
+                "session_id": req.session_id,
                 "request_id": req.request_id,
                 "tool_use_id": req.tool_use_id,
                 "questions": req.questions,

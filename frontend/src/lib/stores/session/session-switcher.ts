@@ -453,7 +453,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			effortLevelOverride: null,
 			pendingPermissions: [],
 			pendingQuestions: [],
-			todos: [],
 			queuedMessages: [],
 			draft: newChatEphemeral?.draft || '',
 			scrollTop: 0,

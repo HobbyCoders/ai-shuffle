@@ -45,7 +45,7 @@ import { untrack } from 'svelte';
 import { createStore, createSubscribers } from './store-utils';
 // Shared types
 import type {
-	ChatMessage, MessageType, TodoItem,
+	ChatMessage, MessageType,
 	QueuedMessage, ExecutionMode
 } from './types';
 
@@ -106,7 +106,6 @@ export interface ActiveSessionState {
 	effortLevelOverride: string | null;
 	pendingPermissions: PermissionRequestType[];
 	pendingQuestions: UserQuestionRequest[];
-	todos: TodoItem[];
 	queuedMessages: QueuedMessage[];
 	draft: string;
 	scrollTop: number;
@@ -188,7 +187,6 @@ function defaultState(): ActiveSessionState {
 		effortLevelOverride: null,
 		pendingPermissions: [],
 		pendingQuestions: [],
-		todos: [],
 		queuedMessages: [],
 		draft: '',
 		scrollTop: 0,
@@ -634,5 +632,4 @@ export const activeIsStreaming = createDerived(() => _state.isStreaming);
 export const activeWsConnected = createDerived(() => _state.wsConnected);
 export const activePendingPermissions = createDerived(() => _state.pendingPermissions);
 export const activePendingQuestions = createDerived(() => _state.pendingQuestions);
-export const activeTodos = createDerived(() => _state.todos);
 export const activeError = createDerived(() => _state.error);

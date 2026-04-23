@@ -74,6 +74,7 @@ export interface WsClientCloseSession {
 export interface WsClientPermissionResponse {
 	type: 'permission_response';
 	request_id: string;
+	session_id?: string;
 	decision: 'allow' | 'deny';
 	remember: 'none' | 'session' | 'profile';
 	pattern?: string;
@@ -88,6 +89,7 @@ export interface WsClientGetPendingPermissions {
 export interface WsClientUserQuestionResponse {
 	type: 'user_question_response';
 	request_id: string;
+	session_id?: string;
 	tool_use_id: string;
 	answers: Record<string, string | string[]>;
 }

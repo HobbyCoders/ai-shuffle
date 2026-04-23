@@ -1237,14 +1237,15 @@ async def chat_websocket(
                     elif msg_type == "permission_response":
                         # Handle permission response from frontend
                         request_id = data.get("request_id")
+                        response_session_id = data.get("session_id") or current_session_id
                         decision = data.get("decision")  # "allow" or "deny"
                         remember = data.get("remember")  # "none", "session", or "profile"
                         pattern = data.get("pattern")  # Optional pattern for the rule
 
-                        if request_id and decision and current_session_id:
+                        if request_id and decision and response_session_id:
                             result = await permission_handler.respond(
                                 request_id=request_id,
-                                session_id=current_session_id,
+                                session_id=response_session_id,
                                 decision=decision,
                                 remember=remember,
                                 pattern=pattern,
@@ -1255,6 +1256,7 @@ async def chat_websocket(
                             # Send confirmation back
                             await send_json({
                                 "type": "permission_response_ack",
+                                "session_id": response_session_id,
                                 "request_id": request_id,
                                 "result": result
                             })
@@ -1277,18 +1279,20 @@ async def chat_websocket(
                     elif msg_type == "user_question_response":
                         # Handle user question response from frontend
                         request_id = data.get("request_id")
+                        response_session_id = data.get("session_id") or current_session_id
                         answers = data.get("answers", {})
 
-                        if current_session_id and request_id and answers:
+                        if response_session_id and request_id and answers:
                             result = await user_question_handler.respond(
                                 request_id=request_id,
-                                session_id=current_session_id,
+                                session_id=response_session_id,
                                 answers=answers
                             )
                             logger.debug(f"User question response processed: {request_id} -> {result}")
 
                             await send_json({
                                 "type": "user_question_response_ack",
+                                "session_id": response_session_id,
                                 "request_id": request_id,
                                 "success": result
                             })

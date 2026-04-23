@@ -189,6 +189,7 @@ class PermissionHandler:
         # Broadcast permission request to frontend
         permission_event = {
             "type": "permission_request",
+            "session_id": session_id,
             "request_id": request_id,
             "tool_name": tool_name,
             "tool_input": tool_input,
@@ -216,6 +217,7 @@ class PermissionHandler:
             try:
                 await broadcast_func({
                     "type": "permission_timeout",
+                    "session_id": session_id,
                     "request_id": request_id
                 })
             except Exception:
@@ -348,6 +350,7 @@ class PermissionHandler:
         if resolved_ids and broadcast_func:
             await broadcast_func({
                 "type": "permission_queue_update",
+                "session_id": session_id,
                 "resolved_ids": resolved_ids,
                 "remaining_count": len(self._pending_requests.get(session_id, {}))
             })
@@ -391,6 +394,7 @@ class PermissionHandler:
 
         return [
             {
+                "session_id": req.session_id,
                 "request_id": req.request_id,
                 "tool_name": req.tool_name,
                 "tool_input": req.tool_input,

@@ -125,6 +125,21 @@ export function usageStoreUpdate(usage: SessionUsage): Partial<ActiveSessionStat
 	};
 }
 
+function sameAgentUsage(
+	existing: ChatMessage['agentUsage'],
+	incoming: ChatMessage['agentUsage']
+): boolean {
+	if (existing === incoming) return true;
+	if (!existing || !incoming) return !existing && !incoming;
+	return (
+		existing.total_tokens === incoming.total_tokens &&
+		existing.tool_uses === incoming.tool_uses &&
+		existing.duration_ms === incoming.duration_ms &&
+		existing.input_tokens === incoming.input_tokens &&
+		existing.output_tokens === incoming.output_tokens
+	);
+}
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createSessionInit(deps: SessionInitDeps) {
@@ -178,8 +193,6 @@ export function createSessionInit(deps: SessionInitDeps) {
 				usageDelta.contextUsed = _state.contextUsed;
 			}
 			const usageHasUpdate = usageDelta.contextUsed !== _state.contextUsed;
-
-			const todosHaveUpdate = data.todos.length > 0;
 			const streamingChanged = _state.isStreaming !== data.isStreaming;
 
 			// Build worktree metadata delta from server (corrects stale client state)
@@ -206,7 +219,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 
 			// Skip if nothing actually changed
 			const msgsMatch = _state.messages === data.messages;
-			if (msgsMatch && !todosHaveUpdate && !usageHasUpdate && !streamingChanged && !metaHasUpdate) {
+			if (msgsMatch && !usageHasUpdate && !streamingChanged && !metaHasUpdate) {
 				console.debug(`[PollCB] skipped: no changes for ${sessionId}`);
 				return;
 			}
@@ -428,6 +441,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 								existing.agentStatus === msg.agentStatus &&
 								existing.streaming === msg.streaming &&
 								existing.content === msg.content &&
+								sameAgentUsage(existing.agentUsage, msg.agentUsage) &&
 								sameLen &&
 								sameTail
 							) {
@@ -469,7 +483,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 					msgsUnchanged &&
 					finalWsContent === s.wsStreamContent &&
 					data.isStreaming === s.isStreaming &&
-					!todosHaveUpdate && !usageHasUpdate && !streamingChanged && !metaHasUpdate
+					!usageHasUpdate && !streamingChanged && !metaHasUpdate
 				) {
 					return s;
 				}
@@ -478,7 +492,6 @@ export function createSessionInit(deps: SessionInitDeps) {
 					...s,
 					messages: msgsUnchanged ? s.messages : finalMessages,
 					isStreaming: data.isStreaming,
-					todos: todosHaveUpdate ? data.todos : s.todos,
 					streamStartTime: data.isStreaming ? s.streamStartTime : null,
 					wsStreamContent: finalWsContent,
 					...usageDelta,

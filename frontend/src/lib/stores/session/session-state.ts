@@ -9,7 +9,7 @@
  */
 
 import { writable } from 'svelte/store';
-import type { ChatMessage, TodoItem } from '../types';
+import type { ChatMessage } from '../types';
 import { sessionStateManager } from './session-state.svelte';
 import type { SessionUsage, SessionData } from './session-state.svelte';
 
@@ -54,13 +54,12 @@ export const sessionState = {
 		isStreaming: boolean,
 		lastUpdateId: number,
 		usage: SessionUsage,
-		todos: TodoItem[],
 		existingMessages?: ChatMessage[]
 	): void {
 		const beforeId = sessionStateManager.getLastUpdateId(sessionId);
 		const beforeSession = sessionStateManager.getSession(sessionId);
 		sessionStateManager.applyServerState(
-			sessionId, serverMessages, isStreaming, lastUpdateId, usage, todos, existingMessages
+			sessionId, serverMessages, isStreaming, lastUpdateId, usage, existingMessages
 		);
 		// Notify writable store subscribers when data changed.
 		// Check both lastUpdateId AND session reference — for non-streaming

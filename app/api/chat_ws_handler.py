@@ -829,14 +829,15 @@ class ChatWebSocketHandler:
     async def handle_permission_response(self, data: dict) -> None:
         """Handle 'permission_response' message type."""
         request_id = data.get("request_id")
+        response_session_id = data.get("session_id") or self.current_session_id
         decision = data.get("decision")  # "allow" or "deny"
         remember = data.get("remember")  # "none", "session", or "profile"
         pattern = data.get("pattern")  # Optional pattern for the rule
 
-        if request_id and decision and self.current_session_id:
+        if request_id and decision and response_session_id:
             result = await permission_handler.respond(
                 request_id=request_id,
-                session_id=self.current_session_id,
+                session_id=response_session_id,
                 decision=decision,
                 remember=remember,
                 pattern=pattern,
@@ -847,6 +848,7 @@ class ChatWebSocketHandler:
             # Send confirmation back
             await self.send_json({
                 "type": "permission_response_ack",
+                "session_id": response_session_id,
                 "request_id": request_id,
                 "result": result
             })
@@ -877,18 +879,20 @@ class ChatWebSocketHandler:
     async def handle_user_question_response(self, data: dict) -> None:
         """Handle 'user_question_response' message type."""
         request_id = data.get("request_id")
+        response_session_id = data.get("session_id") or self.current_session_id
         answers = data.get("answers", {})
 
-        if self.current_session_id and request_id and answers:
+        if response_session_id and request_id and answers:
             result = await user_question_handler.respond(
                 request_id=request_id,
-                session_id=self.current_session_id,
+                session_id=response_session_id,
                 answers=answers
             )
             logger.debug(f"User question response processed: {request_id} -> {result}")
 
             await self.send_json({
                 "type": "user_question_response_ack",
+                "session_id": response_session_id,
                 "request_id": request_id,
                 "success": result
             })
