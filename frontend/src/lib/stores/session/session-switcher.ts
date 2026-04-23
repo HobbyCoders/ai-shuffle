@@ -325,9 +325,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// Merge ephemeral state in the same update
 			draft: ephemeral?.draft || '',
 			scrollTop: ephemeral?.scrollTop || 0,
-			modelOverride: ephemeral?.modelOverride ?? s.modelOverride,
-			permissionModeOverride: ephemeral?.permissionModeOverride ?? s.permissionModeOverride,
-			effortLevelOverride: ephemeral?.effortLevelOverride ?? s.effortLevelOverride,
+			// Overrides are per-session ephemeral state — default to null on cache
+			// miss, NEVER fall back to s.X (the leaving session's state). Using
+			// s.X caused the leaving session's effort / permission / model
+			// overrides to cascade into the target session on switch.
+			modelOverride: ephemeral?.modelOverride ?? null,
+			permissionModeOverride: ephemeral?.permissionModeOverride ?? null,
+			effortLevelOverride: ephemeral?.effortLevelOverride ?? null,
 			fastMode: ephemeral?.fastMode ?? false,
 			// Worktree fields: ephemeral > worktreeInfo from session list > safe defaults
 			executionMode: ephemeral?.executionMode ?? worktreeInfo?.executionMode ?? 'local',
