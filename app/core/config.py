@@ -138,6 +138,17 @@ class Settings(BaseSettings):
     # Each idle subprocess uses ~100MB RAM, so 3 sessions ≈ 300MB worst case.
     sdk_session_pool_size: int = 3
 
+    # SDK 0.1.65 SessionStore adapter (Postgres) — controls whether we mirror
+    # transcripts into Postgres and, eventually, treat Postgres as the single
+    # source of truth instead of reading JSONL files from ~/.claude/projects.
+    # Values:
+    #   "disabled"       — adapter never attached. Pre-migration behavior.
+    #   "mirror"         — attach adapter AND keep JSONL reads as primary.
+    #                      Used to backfill + diff-verify during rollout.
+    #   "postgres_only"  — Postgres is the single source of truth; JSONL
+    #                      reads are deleted. Final cutover.
+    session_store_mode: str = "disabled"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

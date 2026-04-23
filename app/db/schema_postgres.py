@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 43
 
 
 def create_postgres_schema(cursor) -> None:
@@ -1045,6 +1045,66 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_category ON fal_model_catalog(category)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_tool_type ON fal_model_catalog(tool_type)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fal_catalog_output_type ON fal_model_catalog(output_type)")
+
+    # ------------------------------------------------------------------
+    # 49. SDK SessionStore — Postgres-backed transcript mirror (v43)
+    # ------------------------------------------------------------------
+    # Implements the SDK 0.1.65+ SessionStore Protocol so session transcripts
+    # (normally written as JSONL by the Claude Code subprocess) can be
+    # persisted to Postgres as the single source of truth. The subprocess
+    # still writes to an ephemeral CLAUDE_CONFIG_DIR; this table holds the
+    # durable copy consumed by resume/list/summary APIs.
+    #
+    # ``subpath`` is NULL for main transcripts, populated for subagent
+    # transcripts (e.g. "subagents/agent-{id}"). Per-entry ordering is by
+    # auto-incrementing ``id`` which preserves append-call order. See
+    # app/core/pg_session_store.py for the adapter.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_store_entries (
+            id BIGSERIAL PRIMARY KEY,
+            project_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            subpath TEXT,
+            entry JSONB NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    # Lookups by (project_key, session_id, subpath) ordered by id for load().
+    # Partial indexes distinguish main (NULL subpath) from subagent rows.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_main "
+        "ON session_store_entries(project_key, session_id, id) "
+        "WHERE subpath IS NULL"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_sub "
+        "ON session_store_entries(project_key, session_id, subpath, id) "
+        "WHERE subpath IS NOT NULL"
+    )
+    # For list_sessions() scoped by project_key.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_project "
+        "ON session_store_entries(project_key) "
+        "WHERE subpath IS NULL"
+    )
+
+    # Summary sidecar written inside append() via fold_session_summary().
+    # Scoped to main transcripts only (subagent appends must not mutate).
+    # ``mtime_ms`` is storage write time (epoch ms) stamped by the adapter;
+    # must share a clock with list_sessions().mtime for the same session.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_store_summaries (
+            project_key TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            data JSONB NOT NULL,
+            mtime_ms BIGINT NOT NULL,
+            PRIMARY KEY (project_key, session_id)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sss_project "
+        "ON session_store_summaries(project_key)"
+    )
 
     # ==================================================================
     # SEED DATA

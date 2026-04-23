@@ -76,7 +76,8 @@ def _safe_json(value):
 # v38: Add message_template to project_hooks, make project_id nullable
 # v39: Add queued_messages table for server-side message queueing
 # v40: Add instance_id column to sessions for per-instance isolation
-SCHEMA_VERSION = 42
+# v43: Add session_store_entries + session_store_summaries (SDK 0.1.65 SessionStore)
+SCHEMA_VERSION = 43
 
 
 def _run_column_migrations(cursor):
@@ -282,6 +283,53 @@ def _run_column_migrations(cursor):
 
     # Ensure performance-critical indexes exist (idempotent, no version gate).
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
+
+    # SDK 0.1.65 SessionStore tables (v43). Idempotent so upgrades from any
+    # older version land the tables without requiring a SCHEMA_VERSION bump
+    # to fire the schema bootstrap path (same defensive pattern as the
+    # other column-migrations above).
+    if not table_exists(cursor, "session_store_entries"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS session_store_entries (
+                id BIGSERIAL PRIMARY KEY,
+                project_key TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                subpath TEXT,
+                entry JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("session_store_entries")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_main "
+        "ON session_store_entries(project_key, session_id, id) "
+        "WHERE subpath IS NULL"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_sub "
+        "ON session_store_entries(project_key, session_id, subpath, id) "
+        "WHERE subpath IS NOT NULL"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_project "
+        "ON session_store_entries(project_key) "
+        "WHERE subpath IS NULL"
+    )
+    if not table_exists(cursor, "session_store_summaries"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS session_store_summaries (
+                project_key TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                data JSONB NOT NULL,
+                mtime_ms BIGINT NOT NULL,
+                PRIMARY KEY (project_key, session_id)
+            )
+        """)
+        migrations_applied.append("session_store_summaries")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sss_project "
+        "ON session_store_summaries(project_key)"
+    )
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")
