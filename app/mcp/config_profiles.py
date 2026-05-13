@@ -6,7 +6,7 @@ permission mode, system prompt, etc.).
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, cast
 
 from app.core.model_registry import DEFAULT_MODEL, model_values
 from app.mcp.config_helpers import _tool_result, _error
@@ -67,7 +67,7 @@ def _create_profile_tools(is_admin: bool) -> list:
         profile = database.get_profile(args["profile_id"])
         if not profile:
             return _error(f"Profile not found: {args['profile_id']}")
-        return _tool_result(profile)
+        return _tool_result(cast(dict, profile))
 
     tools.append(get_profile)
 
@@ -187,6 +187,8 @@ def _create_profile_tools(is_admin: bool) -> list:
             description=args.get("description"),
             config=config,
         )
+        if not profile:
+            return _error(f"Failed to create profile: {profile_id}")
 
         return _tool_result({
             "success": True,
@@ -218,6 +220,11 @@ def _create_profile_tools(is_admin: bool) -> list:
                 "tools_preset": {"type": "string", "enum": ["claude_code"]},
                 "max_turns": {"type": "integer"},
                 "app_config_tools": {"type": "boolean"},
+                "system_prompt_content": {"type": "string", "description": "Custom system prompt content. Pass non-empty string to switch profile to custom system prompt; omit to leave unchanged."},
+                "system_prompt_append": {"type": "string", "description": "Text to append to the preset system prompt. Pass non-empty string to switch profile to preset+append; omit to leave unchanged."},
+                "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Explicit tool whitelist. Pass [] to clear; omit to leave unchanged."},
+                "disallowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Tool blacklist. Pass [] to clear; omit to leave unchanged."},
+                "effort": {"type": "string", "enum": ["low", "medium", "high", "max", "xhigh"], "description": "Effort-based reasoning level for Opus 4.6+ models. Ignored on other models."},
             },
             "required": ["profile_id"],
         },
@@ -235,10 +242,33 @@ def _create_profile_tools(is_admin: bool) -> list:
         updated_fields = []
 
         for field in ("model", "permission_mode", "thinking_mode",
-                      "tools_preset", "max_turns", "app_config_tools"):
+                      "tools_preset", "max_turns", "app_config_tools", "effort"):
             if field in args and args[field] is not None:
                 config[field] = args[field]
                 updated_fields.append(field)
+
+        for field in ("allowed_tools", "disallowed_tools"):
+            if field in args:
+                config[field] = args[field]
+                updated_fields.append(field)
+
+        # System prompt merge — mirrors createProfile semantics
+        if args.get("system_prompt_content"):
+            config["system_prompt"] = {
+                "type": "custom",
+                "content": args["system_prompt_content"],
+                "inject_env_details": True,
+            }
+            updated_fields.append("system_prompt")
+        elif args.get("system_prompt_append"):
+            existing_sp = config.get("system_prompt") or {}
+            config["system_prompt"] = {
+                "type": "preset",
+                "preset": existing_sp.get("preset", "claude_code"),
+                "append": args["system_prompt_append"],
+            }
+            updated_fields.append("system_prompt")
+        # If neither key provided (or both empty string), leave system_prompt untouched.
 
         # Update profile-level fields
         name = args.get("name")
@@ -251,16 +281,18 @@ def _create_profile_tools(is_admin: bool) -> list:
         if not updated_fields:
             return _error("No fields provided to update.")
 
+        # Built-in profiles remain editable via MCP (mirrors REST behavior).
+        # Use the restore endpoint / UI to revert built-in profiles to defaults.
         updated = database.update_profile(
             args["profile_id"],
             name=name,
             description=description,
             config=config,
-            allow_builtin=False,
+            allow_builtin=True,
         )
 
         if not updated:
-            return _error("Failed to update profile (may be a built-in profile).")
+            return _error("Failed to update profile.")
 
         return _tool_result({
             "success": True,
@@ -270,5 +302,45 @@ def _create_profile_tools(is_admin: bool) -> list:
         })
 
     tools.append(update_profile)
+
+    # -- deleteProfile ----------------------------------------------------
+
+    @tool(
+        "deleteProfile",
+        "Delete a profile permanently. Sessions using it are preserved but unlinked. Built-in profiles cannot be deleted.",
+        {
+            "type": "object",
+            "properties": {
+                "profile_id": {"type": "string"},
+                "confirm": {"type": "boolean", "description": "Must be true to confirm deletion."},
+            },
+            "required": ["profile_id", "confirm"],
+        },
+    )
+    async def delete_profile(args: dict) -> dict:
+        if not _is_admin:
+            return _error("App configuration tools require admin access.")
+
+        if not args.get("confirm"):
+            return _error("Deletion requires confirm=true.")
+
+        profile = database.get_profile(args["profile_id"])
+        if not profile:
+            return _error(f"Profile not found: {args['profile_id']}")
+
+        if profile.get("is_builtin"):
+            return _error(f"Cannot delete built-in profile: {args['profile_id']}")
+
+        deleted = database.delete_profile(args["profile_id"])
+        if not deleted:
+            return _error("Failed to delete profile.")
+
+        return _tool_result({
+            "success": True,
+            "profile_id": args["profile_id"],
+            "message": f"Profile '{profile.get('name')}' deleted.",
+        })
+
+    tools.append(delete_profile)
 
     return tools

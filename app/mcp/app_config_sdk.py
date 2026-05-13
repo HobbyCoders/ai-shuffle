@@ -49,6 +49,7 @@ from app.mcp.config_automations import _create_automation_tools
 from app.mcp.config_mcp_servers import _create_mcp_tools
 from app.mcp.config_profiles import _create_profile_tools
 from app.mcp.config_connectors import _create_connector_tools
+from app.mcp.config_subagents import _create_subagent_tools
 
 logger = logging.getLogger(__name__)
 
@@ -220,10 +221,17 @@ def get_app_config_tool_names(is_admin: bool = True) -> List[str]:
         "mcp__app-config__getProfile",
         "mcp__app-config__createProfile",
         "mcp__app-config__updateProfile",
+        "mcp__app-config__deleteProfile",
         # Connectors
         "mcp__app-config__listConnectors",
         "mcp__app-config__getConnectorStatus",
         "mcp__app-config__toggleConnector",
+        # Subagents
+        "mcp__app-config__listSubagents",
+        "mcp__app-config__getSubagent",
+        "mcp__app-config__createSubagent",
+        "mcp__app-config__updateSubagent",
+        "mcp__app-config__deleteSubagent",
     ]
 
 
@@ -255,6 +263,7 @@ def create_app_config_server(
     all_tools.extend(_create_mcp_tools(is_admin, project_id))
     all_tools.extend(_create_profile_tools(is_admin))
     all_tools.extend(_create_connector_tools(is_admin))
+    all_tools.extend(_create_subagent_tools(is_admin))
 
     if not all_tools:
         return None
