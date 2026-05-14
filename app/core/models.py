@@ -141,6 +141,11 @@ class ProfileConfig(BaseModel):
     # sessions (never exposed to API users regardless of this setting).
     app_config_tools: bool = False
 
+    # Lock MCP server set deterministically per session (SDK 0.1.74+).
+    # When True, the SDK validates that no MCP server is added or removed
+    # mid-session; prevents tool-set drift across turns.
+    strict_mcp_config: bool = False
+
 
 
 class ProfileBase(BaseModel):

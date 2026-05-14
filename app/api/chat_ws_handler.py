@@ -114,6 +114,7 @@ class ChatWebSocketHandler:
             "close_session": self.handle_close_session,
             "permission_response": self.handle_permission_response,
             "get_pending_permissions": self.handle_get_pending_permissions,
+            "requeue_deferred_permissions": self.handle_requeue_deferred_permissions,
             "user_question_response": self.handle_user_question_response,
             "get_pending_questions": self.handle_get_pending_questions,
             "tabs_update": self.handle_tabs_update,
@@ -830,7 +831,8 @@ class ChatWebSocketHandler:
         """Handle 'permission_response' message type."""
         request_id = data.get("request_id")
         response_session_id = data.get("session_id") or self.current_session_id
-        decision = data.get("decision")  # "allow" or "deny"
+        decision = data.get("decision")  # "allow", "deny", or "defer"
+        # remember and pattern are ignored when decision == "defer"
         remember = data.get("remember")  # "none", "session", or "profile"
         pattern = data.get("pattern")  # Optional pattern for the rule
 
@@ -839,8 +841,8 @@ class ChatWebSocketHandler:
                 request_id=request_id,
                 session_id=response_session_id,
                 decision=decision,
-                remember=remember,
-                pattern=pattern,
+                remember=remember if decision != "defer" else None,
+                pattern=pattern if decision != "defer" else None,
                 broadcast_func=self.send_json
             )
             logger.debug(f"Permission response processed: {result}")
@@ -866,11 +868,38 @@ class ChatWebSocketHandler:
         """Handle 'get_pending_permissions' message type."""
         if self.current_session_id:
             pending = permission_handler.get_pending_requests(self.current_session_id)
+            deferred = permission_handler.get_deferred_requests(self.current_session_id)
             await self.send_json({
                 "type": "pending_permissions",
                 "session_id": self.current_session_id,
-                "requests": pending
+                "pending": pending,
+                "deferred": deferred,
             })
+
+    # ------------------------------------------------------------------
+    # handle_requeue_deferred_permissions
+    # ------------------------------------------------------------------
+
+    async def handle_requeue_deferred_permissions(self, data: dict) -> None:
+        """Handle 'requeue_deferred_permissions' — move deferred requests back to pending."""
+        session_id = data.get("session_id") or self.current_session_id
+        if not session_id:
+            await self.send_json({"type": "error", "message": "No session_id for requeue"})
+            return
+
+        requeued_ids = await permission_handler.requeue_deferred(
+            session_id=session_id,
+            broadcast_func=self.send_json,
+        )
+
+        logger.debug(f"Requeued {len(requeued_ids)} deferred permission(s) for {session_id}")
+
+        await self.send_json({
+            "type": "permission_queue_update",
+            "session_id": session_id,
+            "requeued_ids": requeued_ids,
+            "remaining_count": permission_handler.get_queue_count(session_id),
+        })
 
     # ------------------------------------------------------------------
     # handle_user_question_response

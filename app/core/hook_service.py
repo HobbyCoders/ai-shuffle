@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Awaitable
 
 from claude_agent_sdk.types import (
-    HookInput, HookContext, HookMatcher, SyncHookJSONOutput
+    HookInput, HookContext, HookMatcher, SyncHookJSONOutput,
+    PreToolUseHookSpecificOutput, PostToolUseHookSpecificOutput,
 )
 
 from app.db import database
@@ -424,6 +425,12 @@ def create_plugin_hook_handler(
 
     Returns:
         Async hook handler function compatible with SDK
+
+    Output type routing (SDK 0.1.81+):
+        - PreToolUse  → PreToolUseHookSpecificOutput  (permissionDecision, permissionDecisionReason)
+        - PostToolUse → PostToolUseHookSpecificOutput  (updatedToolOutput)
+          Plugin scripts may include "updated_output" in their JSON stdout to rewrite tool output.
+        - All other events → SyncHookJSONOutput (decision, reason, systemMessage, continue_)
     """
 
     async def handler(
@@ -475,20 +482,53 @@ def create_plugin_hook_handler(
             if result:
                 logger.debug(f"{event_name} hook returned: {result}")
 
-                # Check for any meaningful response (decision, systemMessage, reason)
-                decision = result.get("decision")
-                system_message = result.get("systemMessage", "")
-                reason = result.get("reason", "")
-                continue_ = result.get("continue", False)
+                if event_name == "PreToolUse":
+                    # Use PreToolUseHookSpecificOutput for permission-aware responses.
+                    # Valid permissionDecision values: "allow", "deny", "ask", "defer".
+                    decision = result.get("decision")
+                    reason = result.get("reason", "")
+                    if decision or reason:
+                        output: PreToolUseHookSpecificOutput = {
+                            "hookEventName": "PreToolUse",
+                        }
+                        if decision:
+                            output["permissionDecision"] = decision
+                        if reason:
+                            output["permissionDecisionReason"] = reason
+                        return output  # type: ignore[return-value]
 
-                # Return response if hook returned anything meaningful
-                if decision or system_message or reason:
-                    return SyncHookJSONOutput(
-                        decision=decision,
-                        reason=reason,
-                        systemMessage=system_message,
-                        continue_=continue_
-                    )
+                elif event_name == "PostToolUse":
+                    # Use PostToolUseHookSpecificOutput.
+                    # Plugin scripts may set "updated_output" to rewrite the tool result
+                    # seen by the model; omitting the key leaves tool output unchanged.
+                    updated_output = result.get("updated_output")
+                    additional_context = result.get("additionalContext", "")
+                    if updated_output is not None or additional_context:
+                        output_post: PostToolUseHookSpecificOutput = {
+                            "hookEventName": "PostToolUse",
+                        }
+                        if updated_output is not None:
+                            output_post["updatedToolOutput"] = updated_output
+                        if additional_context:
+                            output_post["additionalContext"] = additional_context
+                        return output_post  # type: ignore[return-value]
+
+                else:
+                    # All other events: Stop, SessionStart/End, UserPromptSubmit,
+                    # PreCompact, SubagentStop, Notification — use SyncHookJSONOutput.
+                    decision = result.get("decision")
+                    system_message = result.get("systemMessage", "")
+                    reason = result.get("reason", "")
+                    continue_ = result.get("continue", False)
+
+                    # Return response if hook returned anything meaningful
+                    if decision or system_message or reason:
+                        return SyncHookJSONOutput(
+                            decision=decision,
+                            reason=reason,
+                            systemMessage=system_message,
+                            continue_=continue_
+                        )
 
         return SyncHookJSONOutput()
 

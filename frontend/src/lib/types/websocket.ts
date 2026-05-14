@@ -70,14 +70,32 @@ export interface WsClientCloseSession {
 	type: 'close_session';
 }
 
-/** Respond to a permission request from the SDK. */
+/**
+ * Respond to a permission request from the SDK.
+ *
+ * `decision === 'defer'` (Slice B, SDK 0.1.81+) tells the server to park the
+ * request in the per-session deferred queue. `remember` and `pattern` are
+ * ignored by the server for defer decisions — the frontend already omits
+ * them in `permission-handler.ts`.
+ */
 export interface WsClientPermissionResponse {
 	type: 'permission_response';
 	request_id: string;
 	session_id?: string;
-	decision: 'allow' | 'deny';
-	remember: 'none' | 'session' | 'profile';
+	decision: 'allow' | 'deny' | 'defer';
+	remember?: 'none' | 'session' | 'profile';
 	pattern?: string;
+}
+
+/**
+ * Slice B: ask the server to re-broadcast every previously-deferred
+ * permission request as fresh `permission_request` events for the given
+ * session. Triggered when the user expands the "N deferred" pill and taps
+ * Review.
+ */
+export interface WsClientRequeueDeferredPermissions {
+	type: 'requeue_deferred_permissions';
+	session_id: string;
 }
 
 /** Request the list of pending permission requests for the current session. */
@@ -121,6 +139,7 @@ export type ClientMessage =
 	| WsClientLoadSession
 	| WsClientCloseSession
 	| WsClientPermissionResponse
+	| WsClientRequeueDeferredPermissions
 	| WsClientGetPendingPermissions
 	| WsClientUserQuestionResponse
 	| WsClientGetPendingQuestions
@@ -239,6 +258,25 @@ export interface WsServerSystem {
 	data?: Record<string, unknown>;
 	content?: string;
 	session_id?: string;
+}
+
+/**
+ * Hook event broadcast from the SDK 0.1.81 hook pipeline. Surfaced verbatim
+ * by the backend whenever a `PreToolUse`, `PostToolUse`, `Stop`,
+ * `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreCompact`,
+ * `SubagentStop`, or `Notification` hook fires. Rendered as a collapsed
+ * chrome row in `SystemMessage.svelte` so noisy hooks don't spam the chat.
+ */
+export interface WsServerHookEvent {
+	type: 'hook_event';
+	hook_event_name: string | null;
+	matcher: string | null;
+	decision: string | null;
+	reason: string | null;
+	system_message: string | null;
+	tool_name: string | null;
+	session_id: string;
+	timestamp: string;
 }
 
 /** Subagent task started. */
@@ -389,15 +427,29 @@ export interface WsServerHeartbeat {
 	pending_questions?: number;
 }
 
-/** Permission request from the SDK (tool needs approval). */
+/**
+ * Permission request from the SDK (tool needs approval).
+ *
+ * SDK 0.1.81 adds optional enrichment fields (Slice D): `title`, `display_name`,
+ * `description`, `decision_reason`, and `blocked_path`. The backend forwards
+ * them verbatim when the SDK populates them and omits them otherwise.
+ */
 export interface WsServerPermissionRequest {
 	type: 'permission_request';
 	request_id: string;
 	tool_name: string;
 	tool_input: Record<string, unknown>;
+	tool_use_id?: string;
+	agent_id?: string;
 	queue_position?: number;
 	queue_total?: number;
 	session_id?: string;
+	// Slice D enrichment (SDK 0.1.81+) — optional.
+	title?: string;
+	display_name?: string;
+	description?: string;
+	decision_reason?: string;
+	blocked_path?: string;
 }
 
 /** Batch update: some permission requests were resolved. */
@@ -422,11 +474,48 @@ export interface WsServerPermissionTimeout {
 	session_id?: string;
 }
 
-/** Full list of pending permissions for the current session. */
+/**
+ * Full list of pending permissions for the current session.
+ *
+ * Slice B: the payload now also carries `deferred[]`, populated with every
+ * permission request the user previously sent a `decision: 'defer'` response
+ * for in this session. The frontend mirrors both arrays into the active
+ * session store.
+ */
 export interface WsServerPendingPermissions {
 	type: 'pending_permissions';
 	session_id: string;
 	requests: unknown[];
+	/** Items the user previously deferred (Slice B). May be omitted by older backends. */
+	deferred?: unknown[];
+	/** Alternate name the spec uses; treated equivalently. */
+	pending?: unknown[];
+}
+
+/**
+ * Slice C: structured API-level error broadcast (e.g. Anthropic API returned
+ * a non-2xx status from inside a streaming query). Rendered as a transient
+ * toast in the UI.
+ */
+export interface WsServerApiError {
+	type: 'api_error';
+	status: number;
+	session_id?: string;
+	message?: string;
+}
+
+/**
+ * Slice C: rate-limit telemetry broadcast (token bucket exhausted, request
+ * deferred, etc.). Drives the {@link RateLimitBanner} component above
+ * `<ChatInput>`.
+ */
+export interface WsServerRateLimit {
+	type: 'rate_limit';
+	status: string;
+	rate_limit_type: string;
+	resets_at?: string;
+	utilization?: number;
+	session_id?: string;
 }
 
 /** User question from the SDK (interactive questions for the user). */
@@ -684,6 +773,7 @@ export type ServerMessage =
 	| WsServerToolUse
 	| WsServerToolResult
 	| WsServerSystem
+	| WsServerHookEvent
 	// Subagent events
 	| WsServerSubagentStart
 	| WsServerSubagentChunk
@@ -692,6 +782,8 @@ export type ServerMessage =
 	| WsServerSubagentDone
 	// Errors
 	| WsServerError
+	| WsServerApiError
+	| WsServerRateLimit
 	// Keep-alive
 	| WsServerPing
 	| WsServerHeartbeat

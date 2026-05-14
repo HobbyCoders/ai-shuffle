@@ -153,7 +153,8 @@
 		max_buffer_size: null as number | null,
 		env_vars: [] as { key: string; value: string }[],
 		enable_file_checkpointing: false,
-		app_config_tools: false
+		app_config_tools: false,
+		strict_mcp_config: false
 	});
 
 	// Common environment variable presets with valid ranges
@@ -302,7 +303,8 @@
 			max_buffer_size: null,
 			env_vars: [],
 			enable_file_checkpointing: false,
-			app_config_tools: false
+			app_config_tools: false,
+			strict_mcp_config: false
 		};
 		toolSelectionMode = 'all';
 		aiToolSelectionMode = 'custom';
@@ -374,7 +376,8 @@
 			max_buffer_size: (config as any).max_buffer_size || null,
 			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string })),
 			enable_file_checkpointing: (config as any).enable_file_checkpointing || false,
-			app_config_tools: (config as any).app_config_tools || false
+			app_config_tools: (config as any).app_config_tools || false,
+			strict_mcp_config: (config as any).strict_mcp_config || false
 		};
 
 		viewMode = 'form';
@@ -555,7 +558,8 @@
 			permission_mode: profileForm.permission_mode,
 			include_partial_messages: profileForm.include_partial_messages,
 			enable_file_checkpointing: profileForm.enable_file_checkpointing,
-			app_config_tools: profileForm.app_config_tools
+			app_config_tools: profileForm.app_config_tools,
+			strict_mcp_config: profileForm.strict_mcp_config
 		};
 
 		config.thinking_mode = profileForm.thinking_mode;
@@ -769,7 +773,8 @@
 			max_buffer_size: agent.max_buffer_size || null,
 			env_vars: agent.env ? Object.entries(agent.env).map(([key, value]) => ({ key, value: value as string })) : [],
 			enable_file_checkpointing: false,
-			app_config_tools: false
+			app_config_tools: false,
+			strict_mcp_config: false
 		};
 
 		viewMode = 'form';

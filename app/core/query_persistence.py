@@ -9,6 +9,7 @@ from typing import Optional, Callable
 
 from app.db import database
 from app.db.async_database import run_sync
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -217,37 +218,41 @@ async def _persist_turn_results(
     # ResultMessage aggregate only when the per-call capture is missing
     # (pre-fix metadata, non-streaming paths without AssistantMessages, etc.)
     # so the update is still safe.
-    try:
-        if sdk_session_id:
-            last_input_tokens = metadata.get(
-                "last_call_tokens_in",
-                metadata.get("tokens_in", 0),
-            )
-            last_cache_creation = metadata.get(
-                "last_call_cache_creation_tokens",
-                metadata.get("cache_creation_tokens", 0),
-            )
-            last_cache_read = metadata.get(
-                "last_call_cache_read_tokens",
-                metadata.get("cache_read_tokens", 0),
-            )
-            await run_sync(
-                database.update_session,
-                session_id=session_id,
-                sdk_session_id=sdk_session_id,
-                cost_increment=metadata.get("total_cost_usd", 0),
-                tokens_in_increment=metadata.get("tokens_in", 0),
-                tokens_out_increment=metadata.get("tokens_out", 0),
-                turn_increment=metadata.get("num_turns", 0),
-                # Persist per-turn context-window values so /live can render
-                # the context bar on session reload without scanning JSONL.
-                last_input_tokens=last_input_tokens,
-                cache_creation_tokens=last_cache_creation,
-                cache_read_tokens=last_cache_read,
-            )
-            logger.debug(f"{log_prefix}Updated session {session_id}, sdk_session_id={sdk_session_id}")
-    except Exception as e:
-        logger.error(f"{log_prefix}Failed to update session {session_id} in database: {e}")
+    #
+    # TODO: remove this block (and step 2 below) once postgres_only mode is
+    # proven stable and mirror-verify diff logging shows zero drift (Slice A.2).
+    if settings.session_store_mode != "postgres_only":
+        try:
+            if sdk_session_id:
+                last_input_tokens = metadata.get(
+                    "last_call_tokens_in",
+                    metadata.get("tokens_in", 0),
+                )
+                last_cache_creation = metadata.get(
+                    "last_call_cache_creation_tokens",
+                    metadata.get("cache_creation_tokens", 0),
+                )
+                last_cache_read = metadata.get(
+                    "last_call_cache_read_tokens",
+                    metadata.get("cache_read_tokens", 0),
+                )
+                await run_sync(
+                    database.update_session,
+                    session_id=session_id,
+                    sdk_session_id=sdk_session_id,
+                    cost_increment=metadata.get("total_cost_usd", 0),
+                    tokens_in_increment=metadata.get("tokens_in", 0),
+                    tokens_out_increment=metadata.get("tokens_out", 0),
+                    turn_increment=metadata.get("num_turns", 0),
+                    # Persist per-turn context-window values so /live can render
+                    # the context bar on session reload without scanning JSONL.
+                    last_input_tokens=last_input_tokens,
+                    cache_creation_tokens=last_cache_creation,
+                    cache_read_tokens=last_cache_read,
+                )
+                logger.debug(f"{log_prefix}Updated session {session_id}, sdk_session_id={sdk_session_id}")
+        except Exception as e:
+            logger.error(f"{log_prefix}Failed to update session {session_id} in database: {e}")
 
     # 2. Build batch of messages to insert in one transaction
     full_response = "\n".join(response_text) if response_text else ""
@@ -314,7 +319,8 @@ async def _persist_turn_results(
         })
 
     # 3. Insert all messages in one transaction
-    if batch:
+    # TODO: remove this gate once postgres_only mode proves stable (Slice A.2).
+    if batch and settings.session_store_mode != "postgres_only":
         try:
             inserted = await run_sync(add_session_messages_batch, batch)
             # The assistant message is always last in the batch

@@ -8,6 +8,13 @@
 		tool_input: Record<string, unknown>;
 		queue_position?: number;
 		queue_total?: number;
+		// SDK 0.1.81 enrichment fields (Slice D) — optional, server only sends
+		// when the underlying SDK populates them.
+		title?: string;
+		display_name?: string;
+		description?: string;
+		decision_reason?: string;
+		blocked_path?: string;
 	}
 
 	interface Props {
@@ -17,7 +24,7 @@
 		compact?: boolean;
 		onRespond?: (detail: {
 			request_id: string;
-			decision: 'allow' | 'deny';
+			decision: 'allow' | 'deny' | 'defer';
 			remember?: 'none' | 'session' | 'profile';
 			pattern?: string;
 		}) => void;
@@ -29,6 +36,10 @@
 	let rememberChoice = $state<'none' | 'session' | 'profile'>('none');
 	let customPattern = $state('');
 	let isEditingPattern = $state(false);
+	// Slice D: collapse/expand state for long descriptions + reason/blocked details
+	let descriptionExpanded = $state(false);
+	let enrichmentDetailsExpanded = $state(false);
+	const DESCRIPTION_TRUNCATE_LEN = 120;
 
 	// Tool display configuration - uses theme CSS variables for colors
 	// Maps tools to semantic theme colors: success, warning, info, primary, destructive
@@ -222,14 +233,31 @@
 		});
 	}
 
+	// Slice B: Defer — backend ignores remember/pattern for defer decisions.
+	function handleDefer() {
+		onRespond?.({
+			request_id: request.request_id,
+			decision: 'defer',
+		});
+	}
+
 	// Keyboard shortcuts
 	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Enter' && !e.shiftKey && !isEditingPattern) {
+		if (isEditingPattern) return;
+		if (e.key === 'Enter' && !e.shiftKey) {
 			e.preventDefault();
 			handleAllow();
 		} else if (e.key === 'Escape') {
 			e.preventDefault();
 			handleDeny();
+		} else if ((e.key === 'd' || e.key === 'D') && !isExitPlanMode && !e.metaKey && !e.ctrlKey && !e.altKey) {
+			// Skip if user is typing in another input; <svelte:window> handler still
+			// fires when textarea has focus, so guard against contentEditable / inputs.
+			const target = e.target as HTMLElement | null;
+			const tag = target?.tagName;
+			if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+			e.preventDefault();
+			handleDefer();
 		}
 	}
 
@@ -237,6 +265,26 @@
 	const summary = $derived(getToolSummary());
 	const formattedInput = $derived(formatToolInput(request.tool_input));
 	const suggestedPattern = $derived(getSuggestedPattern());
+
+	// Slice D: SDK 0.1.81 enrichment — prefer title, then display_name, then the
+	// existing tool config label. Existing label remains the final fallback.
+	const enrichedTitle = $derived(
+		(request.title && request.title.trim()) ||
+		(request.display_name && request.display_name.trim()) ||
+		config.label
+	);
+	const hasEnrichmentDetails = $derived(
+		Boolean(request.decision_reason || request.blocked_path)
+	);
+	const descriptionTruncatedView = $derived.by(() => {
+		const desc = request.description?.trim();
+		if (!desc) return null;
+		const needsTruncate = desc.length > DESCRIPTION_TRUNCATE_LEN;
+		const visible = !needsTruncate || descriptionExpanded
+			? desc
+			: desc.slice(0, DESCRIPTION_TRUNCATE_LEN).trimEnd() + '…';
+		return { visible, needsTruncate };
+	});
 
 	// ExitPlanMode detection
 	const isExitPlanMode = $derived(request.tool_name === 'ExitPlanMode');
@@ -464,9 +512,9 @@
 		<!-- Title -->
 		<div class="flex-1 min-w-0">
 			<h3 id="permission-title" class="text-sm font-semibold text-foreground flex items-center gap-2">
-				{config.label}
+				<span class="truncate">{enrichedTitle}</span>
 				<span
-					class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md border"
+					class="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded-md border flex-shrink-0"
 					style="
 						background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
 						color: var(--muted-foreground);
@@ -499,6 +547,22 @@
 
 	<!-- Command/Action Summary -->
 	<div class="px-4 py-3">
+		<!-- Slice D: SDK-provided description, rendered as supporting subhead. -->
+		{#if descriptionTruncatedView}
+			<p class="enrichment-description text-xs text-muted-foreground leading-relaxed mb-2">
+				{descriptionTruncatedView.visible}
+				{#if descriptionTruncatedView.needsTruncate}
+					<button
+						type="button"
+						class="enrichment-expand-btn"
+						onclick={() => (descriptionExpanded = !descriptionExpanded)}
+					>
+						{descriptionExpanded ? 'Show less' : 'Show more'}
+					</button>
+				{/if}
+			</p>
+		{/if}
+
 		<div class="relative group">
 			<div class="text-sm text-foreground font-mono bg-card/60 rounded-xl px-3 py-2.5 border border-border/40 break-all leading-relaxed">
 				{#if request.tool_name === 'Bash'}
@@ -507,6 +571,42 @@
 				{summary || 'No details available'}
 			</div>
 		</div>
+
+		<!-- Slice D: enrichment details (decision_reason / blocked_path) -->
+		{#if hasEnrichmentDetails}
+			<button
+				type="button"
+				onclick={() => (enrichmentDetailsExpanded = !enrichmentDetailsExpanded)}
+				class="mt-2 text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors"
+				aria-expanded={enrichmentDetailsExpanded}
+			>
+				<svg
+					class="w-3.5 h-3.5 transition-transform duration-200 {enrichmentDetailsExpanded ? 'rotate-90' : ''}"
+					fill="none"
+					stroke="currentColor"
+					viewBox="0 0 24 24"
+				>
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+				</svg>
+				Details
+			</button>
+			{#if enrichmentDetailsExpanded}
+				<div class="mt-2 space-y-2 animate-expand enrichment-details">
+					{#if request.decision_reason}
+						<div class="enrichment-row">
+							<span class="enrichment-label">Reason</span>
+							<p class="enrichment-value">{request.decision_reason}</p>
+						</div>
+					{/if}
+					{#if request.blocked_path}
+						<div class="enrichment-row">
+							<span class="enrichment-label">Blocked path</span>
+							<code class="enrichment-mono">{request.blocked_path}</code>
+						</div>
+					{/if}
+				</div>
+			{/if}
+		{/if}
 
 		<!-- Expand Details Toggle -->
 		<button
@@ -667,7 +767,7 @@
 
 	<!-- Action Buttons -->
 	<div class="px-4 py-3 border-t border-border/40 bg-card/20">
-		<div class="flex gap-2">
+		<div class="flex gap-2 flex-wrap sm:flex-nowrap">
 			<!-- Deny Button -->
 			<button
 				type="button"
@@ -675,6 +775,17 @@
 				class="deny-btn"
 			>
 				Deny
+			</button>
+
+			<!-- Slice B: Defer Button — amber neutral, skip-for-later. -->
+			<button
+				type="button"
+				onclick={handleDefer}
+				class="defer-btn"
+				title="Skip this tool call; review later."
+				aria-label="Defer this permission request"
+			>
+				Defer
 			</button>
 
 			<!-- Allow Button -->
@@ -688,10 +799,14 @@
 		</div>
 
 		<!-- Keyboard Hints -->
-		<div class="mt-2 flex items-center justify-center gap-3 text-[10px] text-muted-foreground">
+		<div class="mt-2 flex flex-wrap items-center justify-center gap-3 text-[10px] text-muted-foreground">
 			<span class="flex items-center gap-1">
 				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Enter</kbd>
 				<span>Allow</span>
+			</span>
+			<span class="flex items-center gap-1">
+				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">D</kbd>
+				<span>Defer</span>
 			</span>
 			<span class="flex items-center gap-1">
 				<kbd class="px-1.5 py-0.5 bg-muted/50 rounded text-[9px] font-mono">Esc</kbd>
@@ -899,8 +1014,106 @@
 		outline-offset: 2px;
 	}
 
+	/* Slice B: Defer button — amber/yellow neutral tone, between deny and allow. */
+	.defer-btn {
+		flex: 1 1 0%;
+		min-height: 44px;
+		padding: 0.625rem 1rem;
+		font-size: 0.875rem;
+		font-weight: 500;
+		border-radius: var(--radius, 0.75rem);
+		background: color-mix(in oklch, var(--warning, #d97706) 12%, var(--card));
+		color: var(--warning, #d97706);
+		border: 1px solid color-mix(in oklch, var(--warning, #d97706) 35%, var(--border));
+		transition: all 0.15s ease;
+	}
+
+	.defer-btn:hover {
+		background: color-mix(in oklch, var(--warning, #d97706) 18%, var(--card));
+		border-color: color-mix(in oklch, var(--warning, #d97706) 50%, var(--border));
+		box-shadow: 0 0 12px color-mix(in oklch, var(--warning, #d97706) 20%, transparent);
+	}
+
+	.defer-btn:active {
+		transform: scale(0.98);
+	}
+
+	.defer-btn:focus-visible {
+		outline: 2px solid var(--warning, #d97706);
+		outline-offset: 2px;
+	}
+
+	/* Ensure all three action buttons clear the 44px mobile tap target. */
+	.deny-btn,
+	.allow-btn {
+		min-height: 44px;
+	}
+
+	/* Slice D: SDK enrichment subhead + details disclosure */
+	.enrichment-description {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+		line-height: 1.5;
+	}
+
+	.enrichment-expand-btn {
+		margin-left: 0.25rem;
+		font-size: 0.6875rem;
+		font-weight: 600;
+		color: var(--foreground);
+		text-decoration: underline;
+		text-underline-offset: 2px;
+		background: transparent;
+		border: 0;
+		padding: 0;
+		cursor: pointer;
+	}
+
+	.enrichment-expand-btn:hover {
+		color: var(--primary);
+	}
+
+	.enrichment-row {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		padding: 0.5rem 0.625rem;
+		border-radius: var(--radius, 0.75rem);
+		background: var(--card);
+		border: 1px solid var(--border);
+	}
+
+	.enrichment-label {
+		font-size: 0.625rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--muted-foreground);
+		font-weight: 600;
+	}
+
+	.enrichment-value {
+		font-size: 0.75rem;
+		color: var(--foreground);
+		line-height: 1.5;
+		margin: 0;
+		word-break: break-word;
+	}
+
+	.enrichment-mono {
+		font-family: var(--font-mono);
+		font-size: 0.7rem;
+		color: var(--foreground);
+		padding: 0.2rem 0.4rem;
+		background: var(--muted);
+		border-radius: 0.375rem;
+		word-break: break-all;
+	}
+
 	@media (min-width: 640px) {
 		.deny-btn {
+			flex: 0 0 auto;
+		}
+		.defer-btn {
 			flex: 0 0 auto;
 		}
 	}

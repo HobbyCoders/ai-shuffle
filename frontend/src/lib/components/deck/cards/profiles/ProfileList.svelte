@@ -132,6 +132,10 @@
 							{#if groups?.profiles?.assignments?.[profile.id]}
 								<span class="fp-item-badge fp-item-badge--accent">{groups.profiles.assignments[profile.id]}</span>
 							{/if}
+							<!-- Slice F: highlight profiles that opt into SDK 0.1.81 strict MCP. -->
+							{#if profile.config?.strict_mcp_config}
+								<span class="fp-item-badge fp-item-badge--strict" title="MCP servers must validate cleanly or the session fails to start.">Strict MCP</span>
+							{/if}
 						</div>
 						<div class="fp-item-meta">
 							<span class="fp-meta-model">{getModelDisplay(profile.config?.model)}</span>
@@ -195,5 +199,12 @@
 	.fp-btn--sm {
 		padding: 4px 10px;
 		font-size: 0.75rem;
+	}
+
+	/* Slice F: strict-MCP badge — uses warning hue to signal "fail-fast on misconfig". */
+	:global(.fp-item-badge--strict) {
+		background: color-mix(in oklch, var(--warning, #d97706) 14%, transparent);
+		color: var(--warning, #d97706);
+		border-color: color-mix(in oklch, var(--warning, #d97706) 38%, transparent);
 	}
 </style>

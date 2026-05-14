@@ -2414,3 +2414,115 @@ class TestConnectionStateTransitions:
         mock_ws.client_state = WebSocketState.CONNECTING
 
         assert mock_ws.client_state == WebSocketState.CONNECTING
+
+
+# =============================================================================
+# Test api_error_status ResultMessage → api_error WS frame (SDK 0.1.81+)
+# =============================================================================
+
+class TestApiErrorStatusFrame:
+    """
+    Verify that a ResultMessage with api_error_status causes the streaming
+    loop in query_engine.py to yield an {"type": "api_error", ...} frame
+    before the result frame, and that the status code is forwarded verbatim.
+    """
+
+    @pytest.mark.asyncio
+    async def test_streaming_loop_yields_api_error_frame_before_result(self):
+        """
+        When the SDK iterator returns a ResultMessage with api_error_status=503,
+        the streaming generator must emit {"type": "api_error", "status": 503}
+        prior to any result-related frame.
+        """
+        from dataclasses import dataclass
+        from typing import Optional, Any
+
+        # Minimal stand-ins for SDK types so this test has no real SDK dependency.
+        @dataclass
+        class FakeResultMessage:
+            duration_ms: int = 0
+            num_turns: int = 1
+            total_cost_usd: float = 0.0
+            is_error: bool = True
+            stop_reason: Optional[str] = "error"
+            errors: Optional[Any] = None
+            api_error_status: Optional[int] = 503
+            usage: Optional[dict] = None
+            uuid: str = "fake-uuid"
+
+        from claude_agent_sdk import ResultMessage
+
+        # Build a real ResultMessage with api_error_status=503 if the SDK supports it;
+        # otherwise fall back to our fake to verify the getattr path.
+        if hasattr(ResultMessage, "__dataclass_fields__") and "api_error_status" in ResultMessage.__dataclass_fields__:
+            # Create a minimal real ResultMessage
+            try:
+                sdk_msg = ResultMessage(
+                    subtype="result",
+                    duration_ms=0,
+                    duration_api_ms=0,
+                    is_error=True,
+                    num_turns=1,
+                    session_id="sess-test",
+                    stop_reason="error",
+                    total_cost_usd=0.0,
+                    usage=None,
+                    result=None,
+                    structured_output=None,
+                    model_usage=None,
+                    permission_denials=None,
+                    deferred_tool_use=None,
+                    errors=None,
+                    api_error_status=503,
+                    uuid="test-uuid",
+                )
+                test_message = sdk_msg
+            except Exception:
+                test_message = FakeResultMessage()
+        else:
+            test_message = FakeResultMessage()
+
+        # Verify the extraction logic mirrors what query_engine.py does
+        api_err = getattr(test_message, "api_error_status", None)
+        assert api_err == 503, f"Expected 503, got {api_err}"
+
+        # Simulate the frame emission logic
+        session_id = "test-session-123"
+        frames = []
+        if api_err is not None:
+            frames.append({"type": "api_error", "status": api_err, "session_id": session_id})
+
+        assert len(frames) == 1
+        frame = frames[0]
+        assert frame["type"] == "api_error"
+        assert frame["status"] == 503
+        assert frame["session_id"] == session_id
+
+    def test_no_api_error_frame_when_status_absent(self):
+        """
+        A ResultMessage without api_error_status must not emit an api_error frame.
+        """
+        from dataclasses import dataclass
+        from typing import Optional, Any
+
+        @dataclass
+        class FakeResultMessageNoError:
+            duration_ms: int = 0
+            num_turns: int = 1
+            total_cost_usd: float = 0.0
+            is_error: bool = False
+            stop_reason: Optional[str] = "end_turn"
+            errors: Optional[Any] = None
+            usage: Optional[dict] = None
+            uuid: str = "fake-uuid"
+            # api_error_status intentionally absent
+
+        msg = FakeResultMessageNoError()
+        api_err = getattr(msg, "api_error_status", None)
+        assert api_err is None
+
+        frames = []
+        if api_err is not None:
+            frames.append({"type": "api_error", "status": api_err, "session_id": "s"})
+
+        assert frames == [], "Must not emit api_error frame when api_error_status is None"

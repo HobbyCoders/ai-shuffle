@@ -17,6 +17,7 @@
 	import QueuedMessages from '$lib/components/chat/QueuedMessages.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
+	import RateLimitBanner from '$lib/components/RateLimitBanner.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
 	import ExecutionModeBar from './ExecutionModeBar.svelte';
@@ -50,19 +51,28 @@
 		}
 	});
 
-	// Handle permission response
+	// Handle permission response — Slice B widens decision to include 'defer'.
 	function handlePermissionResponse(detail: {
 		request_id: string;
-		decision: 'allow' | 'deny';
+		decision: 'allow' | 'deny' | 'defer';
 		remember?: 'none' | 'session' | 'profile';
 		pattern?: string;
 	}) {
 		const { request_id, decision, remember, pattern } = detail;
 		const sessionId =
 			$activeSession.pendingPermissions.find(req => req.request_id === request_id)?.session_id ??
+			$activeSession.deferredPermissions.find(req => req.request_id === request_id)?.session_id ??
 			$activeSession.sessionId ??
 			undefined;
 		activeSession.sendPermissionResponse(request_id, decision, remember, pattern, sessionId);
+	}
+
+	// Slice B: ask the server to re-broadcast every previously-deferred
+	// permission request as fresh `permission_request` events.
+	function handleRequeueDeferred() {
+		const sessionId = $activeSession.sessionId;
+		if (!sessionId) return;
+		activeSession.requeueDeferredPermissions(sessionId);
 	}
 
 	// Handle question response
@@ -102,6 +112,7 @@
 					onSelectProject={handleProjectSelect}
 				/>
 				<div class="empty-input-wrapper">
+					<RateLimitBanner />
 					<ChatInput />
 				</div>
 				{#if $githubAuthenticated}
@@ -130,6 +141,20 @@
 			{/if}
 
 			<div class="input-wrapper">
+				<!-- Slice B: deferred-only strip when there are no active requests to
+				     review (when there are, the strip is rendered inside the modal
+				     PermissionQueue above). -->
+				{#if (!$activeSession.pendingPermissions || $activeSession.pendingPermissions.length === 0) && $activeSession.deferredPermissions && $activeSession.deferredPermissions.length > 0}
+					<div class="inline-deferred-strip">
+						<PermissionQueue
+							requests={[]}
+							deferred={$activeSession.deferredPermissions}
+							onRespond={handlePermissionResponse}
+							onRequeueDeferred={handleRequeueDeferred}
+						/>
+					</div>
+				{/if}
+				<RateLimitBanner />
 				<ChatInput compact />
 			</div>
 
@@ -142,7 +167,9 @@
 							<div class="modal-card-wrapper">
 								<PermissionQueue
 									requests={$activeSession.pendingPermissions}
+									deferred={$activeSession.deferredPermissions ?? []}
 									onRespond={handlePermissionResponse}
+									onRequeueDeferred={handleRequeueDeferred}
 								/>
 							</div>
 						{/if}
@@ -224,6 +251,10 @@
 
 	.input-wrapper {
 		flex-shrink: 0;
+	}
+
+	.inline-deferred-strip {
+		padding: 4px 12px 0;
 	}
 
 	.transitioning-from-empty .message-area-wrapper {

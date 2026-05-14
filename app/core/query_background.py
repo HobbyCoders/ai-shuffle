@@ -19,6 +19,11 @@ try:
 except ImportError:
     class RateLimitEvent:
         pass
+try:
+    from claude_agent_sdk import HookEventMessage  # type: ignore[attr-defined]
+except ImportError:
+    class HookEventMessage:  # safe stub for older SDKs
+        pass
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -374,6 +379,24 @@ async def _run_background_query(
             elif isinstance(message, RateLimitEvent):
                 logger.debug(f"[Background] Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
 
+            elif isinstance(message, HookEventMessage):
+                logger.debug(f"[Background] Hook event: {getattr(message, 'hook_event_name', None)}")
+                await live_session_store.add_system_message(
+                    session_id,
+                    content="",
+                    subtype="hook_event",
+                    data={
+                        "hook_event_name": getattr(message, "hook_event_name", None),
+                        "matcher": getattr(message, "matcher", None),
+                        "decision": getattr(message, "decision", None),
+                        "reason": getattr(message, "reason", None),
+                        "system_message": getattr(message, "system_message", None),
+                        "tool_name": getattr(message, "tool_name", None),
+                        "session_id": session_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+
             elif isinstance(message, ResultMessage):
                 metadata["duration_ms"] = message.duration_ms
                 metadata["num_turns"] = message.num_turns
@@ -385,6 +408,10 @@ async def _run_background_query(
                 if result_errors:
                     metadata["errors"] = result_errors
                     logger.warning(f"[Background] ResultMessage contains errors: {result_errors}")
+                # Surface HTTP error status code (SDK 0.1.81+); no WS yield — background loop has no direct consumer
+                api_err = getattr(message, "api_error_status", None)
+                if api_err is not None:
+                    metadata["api_error_status"] = api_err
                 # Extract token counts from usage dict.
                 # ResultMessage.usage is CUMULATIVE across every API call in
                 # the agent loop — safe for increment totals, unsafe as a

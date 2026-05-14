@@ -723,6 +723,10 @@ class LiveSessionStore:
                     f"Compaction boundary: flagged needs_full_refresh "
                     f"for session {session_id}"
                 )
+            # hook_event is intentionally NOT deduplicated: each fires as a
+            # discrete event (PreToolUse / PostToolUse per tool call) and must
+            # appear individually. LiveMessage IDs are uuid-suffixed so no two
+            # rows share the same ID even when hook_event_name is identical.
 
             msg = LiveMessage(
                 id=f"system-{uuid.uuid4().hex[:12]}",

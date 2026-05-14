@@ -1936,3 +1936,51 @@ class TestEdgeCases:
             assert result is None
             # The subagent should be found by matching the name
             mock_db.delete_subagent.assert_called_once_with("subagent-123")
+
+
+# =============================================================================
+# Test ProfileConfig.strict_mcp_config field (Slice F)
+# =============================================================================
+
+class TestProfileConfigStrictMcpConfig:
+    """Verify strict_mcp_config field on ProfileConfig survives JSON roundtrip."""
+
+    def test_strict_mcp_config_defaults_false(self):
+        """ProfileConfig.strict_mcp_config must default to False."""
+        from app.core.models import ProfileConfig
+
+        cfg = ProfileConfig()
+        assert cfg.strict_mcp_config is False
+
+    def test_strict_mcp_config_roundtrip_true(self):
+        """strict_mcp_config=True must survive model_dump() → parse roundtrip."""
+        from app.core.models import ProfileConfig
+
+        cfg = ProfileConfig(strict_mcp_config=True)
+        dumped = cfg.model_dump()
+        assert dumped["strict_mcp_config"] is True
+
+        reloaded = ProfileConfig(**dumped)
+        assert reloaded.strict_mcp_config is True
+
+    def test_strict_mcp_config_roundtrip_json(self):
+        """strict_mcp_config must survive JSON serialise/deserialise."""
+        import json
+        from app.core.models import ProfileConfig
+
+        cfg = ProfileConfig(strict_mcp_config=True)
+        json_str = cfg.model_dump_json()
+        data = json.loads(json_str)
+        assert data["strict_mcp_config"] is True
+
+        reloaded = ProfileConfig.model_validate(data)
+        assert reloaded.strict_mcp_config is True
+
+    def test_strict_mcp_config_absent_in_json_defaults_false(self):
+        """When strict_mcp_config key is absent in persisted JSON, field defaults False."""
+        from app.core.models import ProfileConfig
+
+        # Simulate a profile config JSON blob without the new key (pre-upgrade data)
+        legacy_data = {"model": "claude-sonnet-4-5", "permission_mode": "default"}
+        cfg = ProfileConfig.model_validate(legacy_data)
+        assert cfg.strict_mcp_config is False

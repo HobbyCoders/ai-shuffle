@@ -2,6 +2,7 @@
 	import type { ChatMessage } from '$lib/stores/types';
 	import { Marked } from 'marked';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
+	import { Webhook, ChevronDown } from 'lucide-svelte';
 
 	// Create a local marked instance to avoid mutating global config
 	const localMarked = new Marked({ breaks: true, gfm: true });
@@ -11,6 +12,92 @@
 	}
 
 	let { message }: Props = $props();
+
+	// ─── Hook event (SDK 0.1.81 hook pipeline) ────────────────────────────
+	// Detect the hook_event subtype before falling through to the generic
+	// system-message renderer. Hook events render as a collapsed chrome row
+	// (mirrors compact_boundary) so noisy PreToolUse hooks don't dominate
+	// the chat.
+	const isHookEvent = $derived(message.systemSubtype === 'hook_event');
+
+	type HookEventData = {
+		hook_event_name: string | null;
+		matcher: string | null;
+		decision: string | null;
+		reason: string | null;
+		system_message: string | null;
+		tool_name: string | null;
+		timestamp: string;
+	};
+
+	const hookEventData = $derived<HookEventData | null>(
+		isHookEvent && message.systemData
+			? {
+					hook_event_name:
+						((message.systemData as Record<string, unknown>).hook_event_name as string | null) ??
+						((message.systemData as Record<string, unknown>).hookEventName as string | null) ??
+						null,
+					matcher: ((message.systemData as Record<string, unknown>).matcher as string | null) ?? null,
+					decision: ((message.systemData as Record<string, unknown>).decision as string | null) ?? null,
+					reason: ((message.systemData as Record<string, unknown>).reason as string | null) ?? null,
+					system_message:
+						((message.systemData as Record<string, unknown>).system_message as string | null) ?? null,
+					tool_name:
+						((message.systemData as Record<string, unknown>).tool_name as string | null) ?? null,
+					timestamp:
+						((message.systemData as Record<string, unknown>).timestamp as string) ??
+						new Date().toISOString(),
+				}
+			: null
+	);
+
+	let hookExpanded = $state(false);
+
+	function formatHookTime(iso: string): string {
+		try {
+			const d = new Date(iso);
+			if (Number.isNaN(d.getTime())) return '';
+			return d.toLocaleTimeString('en-US', {
+				hour: 'numeric',
+				minute: '2-digit',
+				hour12: true,
+			});
+		} catch {
+			return '';
+		}
+	}
+
+	function getDecisionBadgeClasses(decision: string | null): string {
+		switch (decision) {
+			case 'allow':
+				return 'bg-success/15 text-success border-success/30';
+			case 'deny':
+				return 'bg-destructive/15 text-destructive border-destructive/30';
+			case 'defer':
+				return 'bg-warning/15 text-warning border-warning/30';
+			default:
+				return 'bg-muted text-muted-foreground border-border';
+		}
+	}
+
+	function toggleHookExpanded() {
+		hookExpanded = !hookExpanded;
+	}
+
+	function onHookKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter' || e.key === ' ') {
+			e.preventDefault();
+			toggleHookExpanded();
+		}
+	}
+
+	const hasHookDetails = $derived(
+		!!hookEventData &&
+			(!!hookEventData.reason ||
+				!!hookEventData.system_message ||
+				!!hookEventData.tool_name ||
+				(!!hookEventData.matcher && hookEventData.matcher.length > 32))
+	);
 
 	// Check if content should be rendered as markdown
 	function isMarkdownContent(subtype: string | undefined): boolean {
@@ -549,7 +636,100 @@
 	}
 </script>
 
-{#if !formatted.hidden}
+{#if isHookEvent && hookEventData}
+	<!--
+		Hook event row — collapsed chrome by default. Mirrors the visual
+		restraint of compact_boundary; never as loud as a full system card.
+		Whole row is the tap target (>=44px) so mobile users can expand
+		on touch.
+	-->
+	<div class="w-full hook-event-row border border-border/60 rounded-lg overflow-hidden bg-card/40">
+		<div
+			class="hook-event-summary w-full px-3 py-2 flex items-center gap-2 min-w-0 cursor-pointer select-none"
+			role="button"
+			tabindex="0"
+			aria-expanded={hookExpanded}
+			aria-label={`Hook event ${hookEventData.hook_event_name ?? ''}${hookEventData.decision ? ' decision ' + hookEventData.decision : ''}`}
+			onclick={toggleHookExpanded}
+			onkeydown={onHookKeydown}
+		>
+			<!-- Hook icon -->
+			<Webhook class="w-4 h-4 text-primary/80 flex-shrink-0" strokeWidth={2} />
+
+			<!-- Primary label -->
+			<span class="text-sm font-medium text-foreground truncate min-w-0">
+				{hookEventData.hook_event_name ?? 'hook'}
+			</span>
+
+			<!-- Matcher chip -->
+			{#if hookEventData.matcher}
+				<span class="hook-matcher-chip flex-shrink-0 px-1.5 py-0.5 text-[10px] font-mono rounded bg-muted/60 text-muted-foreground border border-border/50 truncate max-w-[140px]"
+					title={hookEventData.matcher}
+				>
+					{hookEventData.matcher}
+				</span>
+			{/if}
+
+			<!-- Decision badge -->
+			{#if hookEventData.decision}
+				<span class="flex-shrink-0 px-1.5 py-0.5 text-[10px] uppercase tracking-wide font-semibold rounded border {getDecisionBadgeClasses(hookEventData.decision)}">
+					{hookEventData.decision}
+				</span>
+			{/if}
+
+			<!-- Spacer pushes time + chevron to the right -->
+			<div class="flex-1 min-w-0"></div>
+
+			<!-- Time chip -->
+			{#if hookEventData.timestamp}
+				<span class="hidden sm:inline text-[10px] text-muted-foreground/70 flex-shrink-0 font-mono tabular-nums">
+					{formatHookTime(hookEventData.timestamp)}
+				</span>
+			{/if}
+
+			<!-- Chevron (only when there's something to expand) -->
+			{#if hasHookDetails}
+				<ChevronDown
+					class="w-3.5 h-3.5 text-muted-foreground/70 flex-shrink-0 transition-transform duration-150 {hookExpanded ? 'rotate-180' : ''}"
+				/>
+			{/if}
+		</div>
+
+		{#if hookExpanded && hasHookDetails}
+			<div class="px-3 pb-3 pt-1 border-t border-border/40 bg-muted/20 space-y-2">
+				{#if hookEventData.tool_name}
+					<div class="hook-detail-row flex items-baseline gap-2">
+						<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 flex-shrink-0">Tool</span>
+						<span class="text-xs font-mono text-foreground break-all">{hookEventData.tool_name}</span>
+					</div>
+				{/if}
+				{#if hookEventData.matcher}
+					<div class="hook-detail-row flex items-baseline gap-2">
+						<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 flex-shrink-0">Matcher</span>
+						<span class="text-xs font-mono text-foreground break-all">{hookEventData.matcher}</span>
+					</div>
+				{/if}
+				{#if hookEventData.reason}
+					<div class="hook-detail-row flex items-baseline gap-2">
+						<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 flex-shrink-0">Reason</span>
+						<span class="text-xs text-foreground whitespace-pre-wrap break-words">{hookEventData.reason}</span>
+					</div>
+				{/if}
+				{#if hookEventData.system_message}
+					<div class="hook-detail-row flex items-baseline gap-2">
+						<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 flex-shrink-0">Message</span>
+						<span class="text-xs text-muted-foreground whitespace-pre-wrap break-words">{hookEventData.system_message}</span>
+					</div>
+				{/if}
+				<!-- Time visible on mobile only when expanded -->
+				<div class="sm:hidden hook-detail-row flex items-baseline gap-2">
+					<span class="text-[10px] uppercase tracking-wider text-muted-foreground/70 w-20 flex-shrink-0">Time</span>
+					<span class="text-xs font-mono text-muted-foreground tabular-nums">{formatHookTime(hookEventData.timestamp)}</span>
+				</div>
+			</div>
+		{/if}
+	</div>
+{:else if !formatted.hidden}
 	{#if formatted.collapsible}
 		<!-- Collapsible rendering for hook responses — styled like tool messages -->
 		<div class="w-full border border-border rounded-lg overflow-hidden">
@@ -663,6 +843,28 @@
 {/if}
 
 <style>
+	/* Hook event row — collapsed chrome, restrained styling, mobile tap target */
+	.hook-event-row {
+		transition: background-color 150ms ease, border-color 150ms ease;
+	}
+	.hook-event-row:hover {
+		border-color: hsl(var(--border));
+	}
+	.hook-event-summary {
+		min-height: 44px; /* CLAUDE.md mandate: touch targets >= 44px */
+		transition: background-color 120ms ease;
+	}
+	.hook-event-summary:hover {
+		background-color: hsl(var(--muted) / 0.35);
+	}
+	.hook-event-summary:focus-visible {
+		outline: 2px solid hsl(var(--ring));
+		outline-offset: -2px;
+	}
+	.hook-matcher-chip {
+		letter-spacing: 0.02em;
+	}
+
 	/* Compact hook messages — match tool-summary hover behavior */
 	.compact-summary {
 		transition: background-color 150ms ease;

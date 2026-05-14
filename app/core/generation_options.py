@@ -275,4 +275,14 @@ def build_generation_options(
     # still loads if present, but `enabledPlugins` is forcibly emptied.
     kwargs["settings"] = _GEN_SETTINGS_OVERRIDE
 
+    # Hook event forwarding (SDK 0.1.81+) — enable so callers can observe
+    # hook decisions even on one-shot generation paths.
+    kwargs["include_hook_events"] = True
+
+    # Strict MCP config (SDK 0.1.81+) — generation calls have no profile-level
+    # toggle; default to False.  session_store is intentionally NOT set here:
+    # generation sessions are one-shot fire-and-forget and must not be
+    # persisted to the session store (would pollute the transcript history).
+    kwargs["strict_mcp_config"] = False
+
     return ClaudeAgentOptions(**kwargs)

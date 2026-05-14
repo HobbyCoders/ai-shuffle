@@ -14,6 +14,8 @@
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import type { ActiveSessionState, StreamingSessionInfo } from '../active-session';
 import { messageCache } from '../message-cache';
+import { toast } from '../toast';
+import { rateLimit } from '../rate-limit';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -578,6 +580,57 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				break;
 			}
+			case 'hook_event': {
+				// SDK 0.1.81 hook pipeline event. Append as a collapsed system
+				// message so users can see what hooks fire (with optional
+				// allow/deny/defer decisions) without spamming the chat. The
+				// poller never replays these — they're WS-only — so we write
+				// directly to `messages` (mirrors `draft-manager.addSystemMessage`).
+				const hookSessionId = data.session_id as string | undefined;
+				const hookState = getState();
+				if (!hookSessionId || hookSessionId !== hookState.sessionId) break;
+
+				type HookEventPayload = {
+					hook_event_name: string | null;
+					matcher: string | null;
+					decision: string | null;
+					reason: string | null;
+					system_message: string | null;
+					tool_name: string | null;
+					timestamp: string;
+				};
+				const hookData: HookEventPayload = {
+					hook_event_name: (data.hook_event_name as string | null) ?? null,
+					matcher: (data.matcher as string | null) ?? null,
+					decision: (data.decision as string | null) ?? null,
+					reason: (data.reason as string | null) ?? null,
+					system_message: (data.system_message as string | null) ?? null,
+					tool_name: (data.tool_name as string | null) ?? null,
+					timestamp: (data.timestamp as string) ?? new Date().toISOString(),
+				};
+
+				const hookLabel =
+					hookData.hook_event_name ||
+					hookData.tool_name ||
+					'hook_event';
+
+				update(s => ({
+					...s,
+					messages: [
+						...s.messages,
+						{
+							id: `hook-${hookData.timestamp}-${s.messages.length}`,
+							role: 'system' as const,
+							content: hookLabel,
+							type: 'system' as const,
+							systemSubtype: 'hook_event',
+							systemData: hookData as unknown as Record<string, unknown>,
+						},
+					],
+				}));
+				break;
+			}
+
 			case 'subagent_start':
 			case 'subagent_chunk':
 			case 'subagent_done':
@@ -723,6 +776,38 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				break;
 			}
 
+			case 'api_error': {
+				// Slice C: surface API-level errors (e.g. Anthropic 429/5xx) as a
+				// transient toast. Backend-agnostic — we only key off `status`.
+				const status = Number(data.status ?? 0);
+				const customMessage = typeof data.message === 'string' ? data.message : '';
+				let message: string;
+				if (status === 429) {
+					message = customMessage || 'Rate limited — slow down or wait for the next window.';
+				} else if (status >= 500 && status < 600) {
+					message = customMessage || `Service error: HTTP ${status}`;
+				} else if (status > 0) {
+					message = customMessage || `API error: HTTP ${status}`;
+				} else {
+					message = customMessage || 'An API error occurred.';
+				}
+				toast.push(message, { tone: status === 429 ? 'warning' : 'error', duration_ms: 5000 });
+				break;
+			}
+
+			case 'rate_limit': {
+				// Slice C: pipe to the rate-limit store. RateLimitBanner reads
+				// reactively and renders a countdown + utilization bar.
+				rateLimit.set({
+					status: (data.status as string) ?? 'unknown',
+					rate_limit_type: (data.rate_limit_type as string) ?? 'unknown',
+					resets_at: data.resets_at as string | undefined,
+					utilization: data.utilization as number | undefined,
+					session_id: data.session_id as string | undefined,
+				});
+				break;
+			}
+
 			case 'heartbeat': {
 				const pendingPermCount = data.pending_permissions as number | undefined;
 				const pendingQCount = data.pending_questions as number | undefined;
@@ -755,11 +840,26 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					tool_input: data.tool_input as Record<string, unknown>,
 					queue_position: data.queue_position as number | undefined,
 					queue_total: data.queue_total as number | undefined,
+					// Slice D enrichment (SDK 0.1.81+) — forwarded only when present.
+					title: data.title as string | undefined,
+					display_name: data.display_name as string | undefined,
+					description: data.description as string | undefined,
+					decision_reason: data.decision_reason as string | undefined,
+					blocked_path: data.blocked_path as string | undefined,
 				} as PermissionRequestType;
 
 				setNeedsAttention(request.session_id, 0);
 				onNotifyWaitingForResponse('permission', { toolName: request.tool_name });
-				update(s => ({ ...s, pendingPermissions: [...s.pendingPermissions, request] }));
+				update(s => ({
+					...s,
+					pendingPermissions: [...s.pendingPermissions, request],
+					// Slice B: if this request was previously deferred and is now
+					// being re-broadcast (after `requeue_deferred_permissions`),
+					// drop it from the deferred queue to avoid duplicates.
+					deferredPermissions: s.deferredPermissions.filter(
+						p => p.request_id !== request.request_id
+					),
+				}));
 				break;
 			}
 
@@ -792,16 +892,27 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 			case 'pending_permissions': {
 				const pendingSessionId = data.session_id as string | undefined;
-				const requests = mapPermissionRequests(
-					(data.requests as PermissionRequestType[] | undefined) ?? [],
-					pendingSessionId
-				);
+				// Some backends spell the active-queue field `requests`, others
+				// (per SDK 0.1.81 contract) ship it under `pending`. Accept both.
+				const activeRaw =
+					(data.requests as PermissionRequestType[] | undefined) ??
+					(data.pending as PermissionRequestType[] | undefined) ??
+					[];
+				const requests = mapPermissionRequests(activeRaw, pendingSessionId);
+				// Slice B: a fresh-server (SDK 0.1.81+) also reports deferred items.
+				const deferredRaw = (data.deferred as PermissionRequestType[] | undefined) ?? [];
+				const deferred = mapPermissionRequests(deferredRaw, pendingSessionId);
+
 				if (pendingSessionId && pendingSessionId !== getState().sessionId) {
 					setNeedsAttention(pendingSessionId, requests.length);
 					break;
 				}
 				setNeedsAttention(pendingSessionId, 0);
-				update(s => ({ ...s, pendingPermissions: requests }));
+				update(s => ({
+					...s,
+					pendingPermissions: requests,
+					deferredPermissions: deferred,
+				}));
 				break;
 			}
 

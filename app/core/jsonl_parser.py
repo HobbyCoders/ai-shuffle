@@ -829,6 +829,33 @@ def _parse_session_history_uncached(
             })
             continue
 
+        # Explicit hook_event mapping — keeps field names aligned with the
+        # live stream contract so replay is visually identical to live events.
+        if entry_type == "hook_event":
+            msg_counter += 1
+            messages.append({
+                "id": uuid,
+                "uuid": uuid,
+                "role": "system",
+                "content": "",
+                "type": "system",
+                "subtype": "hook_event",
+                "systemSubtype": "hook_event",
+                "systemData": {
+                    "hook_event_name": entry.get("hook_event_name"),
+                    "matcher": entry.get("matcher"),
+                    "decision": entry.get("decision"),
+                    "reason": entry.get("reason"),
+                    "system_message": entry.get("system_message"),
+                    "tool_name": entry.get("tool_name"),
+                    "session_id": entry.get("session_id"),
+                    "timestamp": entry.get("timestamp") or timestamp,
+                },
+                "metadata": {"timestamp": timestamp},
+                "streaming": False,
+            })
+            continue
+
         if entry_type == "user" and role == "user":
             # User message - can be plain text, tool results, or array with text blocks
             if isinstance(content, str):

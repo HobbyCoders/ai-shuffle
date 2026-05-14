@@ -20,9 +20,33 @@ export interface ApiError {
 async function extractErrorDetail(response: Response): Promise<string> {
 	try {
 		const json = await response.json();
-		if (json.detail) return json.detail;
-		if (json.message) return json.message;
-		if (json.error) return typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
+		// Slice C: SDK 0.1.81+ structured api_error body — prefer its concrete
+		// fields over generic 429 / 5xx canned strings when present.
+		if (json && typeof json === 'object') {
+			if (json.type === 'api_error') {
+				const status = typeof json.status === 'number' ? json.status : response.status;
+				const retry = typeof json.retry_after_seconds === 'number' ? json.retry_after_seconds : null;
+				const explicit = typeof json.detail === 'string' ? json.detail
+					: typeof json.message === 'string' ? json.message
+					: null;
+				if (explicit) return explicit;
+				if (status === 429 && retry !== null) {
+					return `Rate limited — retry in ${retry}s`;
+				}
+				if (status === 429) {
+					return 'Rate limited — too many requests, try again shortly';
+				}
+				return `API error: HTTP ${status}`;
+			}
+			if (json.detail) return json.detail;
+			if (json.message) return json.message;
+			if (json.error) return typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
+			// Even when `type` is missing, an explicit `retry_after_seconds` on a
+			// 429 response gives us a better message than the canned fallback.
+			if (response.status === 429 && typeof json.retry_after_seconds === 'number') {
+				return `Rate limited — retry in ${json.retry_after_seconds}s`;
+			}
+		}
 	} catch {
 		// JSON parsing failed — try plain text
 		try {
@@ -220,6 +244,8 @@ export interface ProfileConfig {
 	user?: string;  // User identifier override
 	max_buffer_size?: number;  // Maximum buffer size for output
 	env?: Record<string, string>;  // Environment variables to set
+	app_config_tools?: boolean;  // Allow AI to configure hooks/automations/MCP/profiles via chat
+	strict_mcp_config?: boolean;  // SDK 0.1.81+ — fail-fast on misconfigured MCP servers
 	system_prompt?: {
 		type: string;
 		preset?: string;

@@ -105,6 +105,9 @@ export interface ActiveSessionState {
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
 	pendingPermissions: PermissionRequestType[];
+	/** Slice B (SDK 0.1.81): permission requests the user deferred — visible as a
+	 *  "N deferred" pill below the chat. Re-broadcast on `requeue_deferred_permissions`. */
+	deferredPermissions: PermissionRequestType[];
 	pendingQuestions: UserQuestionRequest[];
 	queuedMessages: QueuedMessage[];
 	draft: string;
@@ -186,6 +189,7 @@ function defaultState(): ActiveSessionState {
 		permissionModeOverride: null,
 		effortLevelOverride: null,
 		pendingPermissions: [],
+		deferredPermissions: [],
 		pendingQuestions: [],
 		queuedMessages: [],
 		draft: '',
@@ -485,6 +489,7 @@ export const activeSession = {
 	// ── Permission & Question Responses (delegated to permission-handler) ──
 
 	sendPermissionResponse: permissionHandler.sendPermissionResponse,
+	requeueDeferredPermissions: permissionHandler.requeueDeferredPermissions,
 	sendUserQuestionResponse: permissionHandler.sendUserQuestionResponse,
 	syncPendingPermissions: permissionHandler.syncPendingPermissions,
 	syncPendingQuestions: permissionHandler.syncPendingQuestions,
@@ -631,5 +636,6 @@ export const activeMessages = createDerived(() => _state.messages);
 export const activeIsStreaming = createDerived(() => _state.isStreaming);
 export const activeWsConnected = createDerived(() => _state.wsConnected);
 export const activePendingPermissions = createDerived(() => _state.pendingPermissions);
+export const activeDeferredPermissions = createDerived(() => _state.deferredPermissions);
 export const activePendingQuestions = createDerived(() => _state.pendingQuestions);
 export const activeError = createDerived(() => _state.error);

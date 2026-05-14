@@ -92,6 +92,18 @@ class SessionOptions:
     # Token budget management (SDK 0.1.51+)
     task_budget: Optional[int] = None
 
+    # Session store (SDK 0.1.65+) — PgSessionStore instance or None
+    session_store: Optional[object] = None
+
+    # Session store flush mode (SDK 0.1.65+) — "eager" | None
+    session_store_flush: Optional[str] = None
+
+    # Hook event forwarding (SDK 0.1.81+) — emit HookEventMessage to stream
+    include_hook_events: bool = True
+
+    # Strict MCP config validation (SDK 0.1.81+) — raise on unknown MCP fields
+    strict_mcp_config: bool = False
+
     # Arbitrary extra options (for forward-compatibility with new SDK fields)
     extra: Dict[str, Any] = field(default_factory=dict)
 

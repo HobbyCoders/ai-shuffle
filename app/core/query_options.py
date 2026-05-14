@@ -53,6 +53,36 @@ from app.core.environment import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+# ─── Session store singleton (Phase 1.5) ────────────────────────────────────
+# Constructed once per process when session_store_mode != "disabled".
+# Wrapped in try/except so Postgres unavailability is non-fatal — callers
+# get None and behave identically to the disabled case.
+_session_store_singleton = None
+_session_store_init_attempted = False
+
+
+def _get_session_store():
+    """Return the module-level PgSessionStore singleton, or None if disabled / unavailable."""
+    global _session_store_singleton, _session_store_init_attempted
+    if _session_store_init_attempted:
+        return _session_store_singleton
+    _session_store_init_attempted = True
+    if settings.session_store_mode == "disabled":
+        return None
+    try:
+        from app.core.pg_session_store import PgSessionStore
+        _session_store_singleton = PgSessionStore()
+        logger.info(f"PgSessionStore singleton created (mode={settings.session_store_mode})")
+    except Exception:
+        logger.warning(
+            "PgSessionStore construction failed — proceeding without session_store. "
+            "Check DATABASE_URL and Postgres connectivity.",
+            exc_info=True,
+        )
+        _session_store_singleton = None
+    return _session_store_singleton
+
+
 # Path to Claude's user settings file
 _CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 # Lock to prevent concurrent writes to settings.json
@@ -695,5 +725,19 @@ def build_options_from_profile(
     # Resume existing session
     if resume_session_id:
         options.resume = resume_session_id
+
+    # Hook event forwarding (SDK 0.1.81+) — always enable so the frontend
+    # receives HookEventMessage payloads without requiring profile changes.
+    options.include_hook_events = True
+
+    # Strict MCP config validation (SDK 0.1.81+) — off by default; a future
+    # profile field (Slice F) will allow per-profile override.
+    options.strict_mcp_config = bool(getattr(config, "strict_mcp_config", False) or config.get("strict_mcp_config", False))
+
+    # Session store wiring (Phase 1.5) — attach PgSessionStore when enabled.
+    _store = _get_session_store()
+    if _store is not None:
+        options.session_store = _store
+        options.session_store_flush = "eager"
 
     return options, agents_dict

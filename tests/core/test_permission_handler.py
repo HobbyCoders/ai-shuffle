@@ -28,6 +28,7 @@ from app.core.permission_handler import (
     PermissionRule,
     PermissionHandler,
     permission_handler,
+    _DeferSentinel,
 )
 
 
@@ -1422,3 +1423,156 @@ class TestEdgeCasesAndSecurity:
 
         # All requests should be removed
         assert handler.get_queue_count("session-1") == 0
+
+
+# =============================================================================
+# Slice D — ToolPermissionContext enrichment field tests (D.5)
+# =============================================================================
+
+class TestEnrichmentFields:
+    """
+    D.5 — Verify that the 5 SDK 0.1.81 ToolPermissionContext enrichment fields
+    (title, display_name, description, decision_reason, blocked_path) are
+    stored on PermissionRequest, included in broadcast payloads when non-None,
+    and omitted from payloads when None.
+    """
+
+    @pytest.fixture
+    def handler(self):
+        return PermissionHandler()
+
+    @pytest.fixture
+    def mock_broadcast(self):
+        return AsyncMock()
+
+    def test_permission_request_stores_enrichment_fields(self):
+        """PermissionRequest should store all 5 enrichment fields."""
+        req = PermissionRequest(
+            request_id="req-1",
+            session_id="session-1",
+            profile_id="profile-1",
+            tool_name="Bash",
+            tool_input={"command": "ls"},
+            title="Run bash command",
+            display_name="Bash Executor",
+            description="Runs a bash command in the shell",
+            decision_reason="Requires elevated access",
+            blocked_path="/etc/passwd",
+        )
+
+        assert req.title == "Run bash command"
+        assert req.display_name == "Bash Executor"
+        assert req.description == "Runs a bash command in the shell"
+        assert req.decision_reason == "Requires elevated access"
+        assert req.blocked_path == "/etc/passwd"
+
+    def test_permission_request_enrichment_fields_default_none(self):
+        """Enrichment fields should default to None when not provided."""
+        req = PermissionRequest(
+            request_id="req-1",
+            session_id="session-1",
+            profile_id="profile-1",
+            tool_name="Bash",
+            tool_input={"command": "ls"},
+        )
+
+        assert req.title is None
+        assert req.display_name is None
+        assert req.description is None
+        assert req.decision_reason is None
+        assert req.blocked_path is None
+
+    @pytest.mark.asyncio
+    async def test_broadcast_payload_includes_enrichment_fields_when_set(self, handler, mock_broadcast):
+        """Broadcast payload must include all 5 enrichment fields when non-None."""
+        with patch("app.db.database.get_permission_rules", return_value=[]):
+            task = asyncio.create_task(
+                handler.request_permission(
+                    request_id="req-enriched",
+                    session_id="session-1",
+                    profile_id="profile-1",
+                    tool_name="Bash",
+                    tool_input={"command": "rm -rf /"},
+                    broadcast_func=mock_broadcast,
+                    title="Dangerous command",
+                    display_name="Bash",
+                    description="Deletes everything",
+                    decision_reason="Destructive operation detected",
+                    blocked_path="/",
+                )
+            )
+
+            await asyncio.sleep(0.01)
+
+            # Inspect the broadcast that was fired
+            assert mock_broadcast.called
+            payload = mock_broadcast.call_args[0][0]
+            assert payload["type"] == "permission_request"
+            assert payload["title"] == "Dangerous command"
+            assert payload["display_name"] == "Bash"
+            assert payload["description"] == "Deletes everything"
+            assert payload["decision_reason"] == "Destructive operation detected"
+            assert payload["blocked_path"] == "/"
+
+            # Clean up
+            await handler.cancel_request("req-enriched", "session-1")
+            await task
+
+    @pytest.mark.asyncio
+    async def test_broadcast_payload_omits_none_enrichment_fields(self, handler, mock_broadcast):
+        """Broadcast payload must NOT include enrichment fields when they are None."""
+        with patch("app.db.database.get_permission_rules", return_value=[]):
+            task = asyncio.create_task(
+                handler.request_permission(
+                    request_id="req-plain",
+                    session_id="session-1",
+                    profile_id="profile-1",
+                    tool_name="Bash",
+                    tool_input={"command": "ls"},
+                    broadcast_func=mock_broadcast,
+                    # enrichment fields intentionally omitted → default None
+                )
+            )
+
+            await asyncio.sleep(0.01)
+
+            payload = mock_broadcast.call_args[0][0]
+            assert payload["type"] == "permission_request"
+            assert "title" not in payload
+            assert "display_name" not in payload
+            assert "description" not in payload
+            assert "decision_reason" not in payload
+            assert "blocked_path" not in payload
+
+            await handler.cancel_request("req-plain", "session-1")
+            await task
+
+    @pytest.mark.asyncio
+    async def test_broadcast_payload_includes_partial_enrichment_fields(self, handler, mock_broadcast):
+        """Only non-None enrichment fields should appear in the payload."""
+        with patch("app.db.database.get_permission_rules", return_value=[]):
+            task = asyncio.create_task(
+                handler.request_permission(
+                    request_id="req-partial",
+                    session_id="session-1",
+                    profile_id="profile-1",
+                    tool_name="Bash",
+                    tool_input={"command": "ls"},
+                    broadcast_func=mock_broadcast,
+                    title="Only title set",
+                    blocked_path="/tmp",
+                    # display_name, description, decision_reason remain None
+                )
+            )
+
+            await asyncio.sleep(0.01)
+
+            payload = mock_broadcast.call_args[0][0]
+            assert payload["title"] == "Only title set"
+            assert payload["blocked_path"] == "/tmp"
+            assert "display_name" not in payload
+            assert "description" not in payload
+            assert "decision_reason" not in payload
+
+            await handler.cancel_request("req-partial", "session-1")
+            await task

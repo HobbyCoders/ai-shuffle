@@ -20,6 +20,7 @@
 	import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
 	import OfflineBanner from '$lib/components/OfflineBanner.svelte';
 	import ClaudeStatusBanner from '$lib/components/ClaudeStatusBanner.svelte';
+	import ToastViewport from '$lib/components/ToastViewport.svelte';
 	import { claudeStatus } from '$lib/stores/claude-status';
 
 	let { children }: { children: Snippet } = $props();
@@ -163,6 +164,7 @@
 		<UpdatePrompt />
 	{/if}
 	<InstallPrompt />
+	<ToastViewport />
 
 	{@render children?.()}
 {/if}

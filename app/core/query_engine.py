@@ -57,6 +57,11 @@ try:
 except ImportError:
     class RateLimitEvent:
         pass
+try:
+    from claude_agent_sdk import HookEventMessage  # type: ignore[attr-defined]
+except ImportError:
+    class HookEventMessage:  # safe stub for older SDKs
+        pass
 from claude_agent_sdk.types import StreamEvent, PermissionResultAllow, PermissionResultDeny
 
 from app.db import database
@@ -69,7 +74,7 @@ from app.core.session_pool import (
 )
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
-from app.core.permission_handler import permission_handler
+from app.core.permission_handler import permission_handler, _DeferSentinel
 from app.core.user_question_handler import user_question_handler
 
 from app.core.live_session_store import live_session_store
@@ -301,6 +306,10 @@ async def execute_query(
                 if result_errors:
                     metadata["errors"] = result_errors
                     logger.warning(f"ResultMessage contains errors: {result_errors}")
+                # Surface HTTP error status code (SDK 0.1.81+)
+                api_err = getattr(message, "api_error_status", None)
+                if api_err is not None:
+                    metadata["api_error_status"] = api_err
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -745,12 +754,32 @@ async def stream_query(
 
             elif isinstance(message, RateLimitEvent):
                 logger.debug(f"Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
+                _rli = message.rate_limit_info
                 yield {
                     "type": "rate_limit",
-                    "status": message.rate_limit_info.status,
-                    "rate_limit_type": message.rate_limit_info.rate_limit_type,
-                    "resets_at": message.rate_limit_info.resets_at,
-                    "utilization": message.rate_limit_info.utilization,
+                    "status": _rli.status,
+                    "rate_limit_type": _rli.rate_limit_type,
+                    "resets_at": _rli.resets_at,
+                    "utilization": _rli.utilization,
+                    # SDK 0.1.81+ overage fields (None when absent)
+                    "overage_status": getattr(_rli, "overage_status", None),
+                    "overage_resets_at": getattr(_rli, "overage_resets_at", None),
+                    "overage_disabled_reason": getattr(_rli, "overage_disabled_reason", None),
+                    "session_id": session_id,
+                }
+
+            elif isinstance(message, HookEventMessage):
+                logger.debug(f"Hook event: {getattr(message, 'hook_event_name', None)}")
+                yield {
+                    "type": "hook_event",
+                    "hook_event_name": getattr(message, "hook_event_name", None),
+                    "matcher": getattr(message, "matcher", None),
+                    "decision": getattr(message, "decision", None),
+                    "reason": getattr(message, "reason", None),
+                    "system_message": getattr(message, "system_message", None),
+                    "tool_name": getattr(message, "tool_name", None),
+                    "session_id": session_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
 
             elif isinstance(message, ResultMessage):
@@ -764,6 +793,11 @@ async def stream_query(
                 if result_errors:
                     metadata["errors"] = result_errors
                     logger.warning(f"ResultMessage contains errors: {result_errors}")
+                # Surface HTTP error status code (SDK 0.1.81+); emit before result frame
+                api_err = getattr(message, "api_error_status", None)
+                if api_err is not None:
+                    metadata["api_error_status"] = api_err
+                    yield {"type": "api_error", "status": api_err, "session_id": session_id}
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)
@@ -1010,6 +1044,13 @@ async def stream_to_websocket(
                 _ctx_tool_use_id = getattr(context, 'tool_use_id', None)
                 _ctx_agent_id = getattr(context, 'agent_id', None)
 
+                # Extract SDK 0.1.81 ToolPermissionContext enrichment fields (Slice D)
+                _ctx_decision_reason = getattr(context, 'decision_reason', None)
+                _ctx_blocked_path    = getattr(context, 'blocked_path', None)
+                _ctx_title           = getattr(context, 'title', None)
+                _ctx_display_name    = getattr(context, 'display_name', None)
+                _ctx_description     = getattr(context, 'description', None)
+
                 # Check profile-level tool restrictions FIRST
                 if _disallowed and tool_name in _disallowed:
                     logger.debug(f"[WS] Tool {tool_name} blocked by profile disallowed_tools")
@@ -1055,7 +1096,16 @@ async def stream_to_websocket(
                             broadcast_func=_broadcast,
                             tool_use_id=_ctx_tool_use_id,
                             agent_id=_ctx_agent_id,
+                            title=_ctx_title,
+                            display_name=_ctx_display_name,
+                            description=_ctx_description,
+                            decision_reason=_ctx_decision_reason,
+                            blocked_path=_ctx_blocked_path,
                         )
+                        if isinstance(result, _DeferSentinel):
+                            # Deferred ExitPlanMode — treat as deny so execution
+                            # stays paused; user can requeue and re-approve later
+                            return PermissionResultDeny(message="ExitPlanMode deferred by user")
                         if result.behavior == "deny":
                             return result
 
@@ -1075,7 +1125,24 @@ async def stream_to_websocket(
                         broadcast_func=_broadcast,
                         tool_use_id=_ctx_tool_use_id,
                         agent_id=_ctx_agent_id,
+                        title=_ctx_title,
+                        display_name=_ctx_display_name,
+                        description=_ctx_description,
+                        decision_reason=_ctx_decision_reason,
+                        blocked_path=_ctx_blocked_path,
                     )
+                    if isinstance(result, _DeferSentinel):
+                        # SDK 0.1.81 — return PreToolUseHookSpecificOutput with defer
+                        try:
+                            from claude_agent_sdk.types import PreToolUseHookSpecificOutput
+                            return PreToolUseHookSpecificOutput(
+                                hookEventName="PreToolUse",
+                                permissionDecision="defer",
+                                permissionDecisionReason="Deferred by user",
+                            )
+                        except (ImportError, TypeError):
+                            # Fallback: if SDK signature differs, treat as deny so we never crash
+                            return PermissionResultDeny(message="Tool deferred by user")
                     return result
                 else:
                     return PermissionResultAllow()
@@ -1897,12 +1964,32 @@ async def stream_to_websocket(
 
             elif isinstance(message, RateLimitEvent):
                 logger.debug(f"[WS] Rate limit event: status={message.rate_limit_info.status}, type={message.rate_limit_info.rate_limit_type}")
+                _rli = message.rate_limit_info
                 yield {
                     "type": "rate_limit",
-                    "status": message.rate_limit_info.status,
-                    "rate_limit_type": message.rate_limit_info.rate_limit_type,
-                    "resets_at": message.rate_limit_info.resets_at,
-                    "utilization": message.rate_limit_info.utilization,
+                    "status": _rli.status,
+                    "rate_limit_type": _rli.rate_limit_type,
+                    "resets_at": _rli.resets_at,
+                    "utilization": _rli.utilization,
+                    # SDK 0.1.81+ overage fields (None when absent)
+                    "overage_status": getattr(_rli, "overage_status", None),
+                    "overage_resets_at": getattr(_rli, "overage_resets_at", None),
+                    "overage_disabled_reason": getattr(_rli, "overage_disabled_reason", None),
+                    "session_id": session_id,
+                }
+
+            elif isinstance(message, HookEventMessage):
+                logger.debug(f"[WS] Hook event: {getattr(message, 'hook_event_name', None)}")
+                yield {
+                    "type": "hook_event",
+                    "hook_event_name": getattr(message, "hook_event_name", None),
+                    "matcher": getattr(message, "matcher", None),
+                    "decision": getattr(message, "decision", None),
+                    "reason": getattr(message, "reason", None),
+                    "system_message": getattr(message, "system_message", None),
+                    "tool_name": getattr(message, "tool_name", None),
+                    "session_id": session_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
 
             elif isinstance(message, ResultMessage):
@@ -1916,6 +2003,11 @@ async def stream_to_websocket(
                 if result_errors:
                     metadata["errors"] = result_errors
                     logger.warning(f"[WS] ResultMessage contains errors: {result_errors}")
+                # Surface HTTP error status code (SDK 0.1.81+); emit before result frame
+                api_err = getattr(message, "api_error_status", None)
+                if api_err is not None:
+                    metadata["api_error_status"] = api_err
+                    yield {"type": "api_error", "status": api_err, "session_id": session_id}
                 # Extract token counts from usage dict
                 if message.usage:
                     metadata["tokens_in"] = message.usage.get("input_tokens", 0)

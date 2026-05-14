@@ -11,6 +11,7 @@ Manages tool permission requests with a queue system that supports:
 import asyncio
 import logging
 import fnmatch
+from collections import defaultdict
 from typing import Optional, Dict, Any, List, Literal, Union
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,6 +27,11 @@ logger = logging.getLogger(__name__)
 class PermissionDecision(str, Enum):
     ALLOW = "allow"
     DENY = "deny"
+    DEFER = "defer"
+
+
+class _DeferSentinel:
+    """Returned by request_permission when user defers; query_engine translates to SDK deferred output."""
 
 
 class RememberScope(str, Enum):
@@ -47,6 +53,16 @@ class PermissionRequest:
     # SDK context fields (SDK 0.1.52+) — enables disambiguating parallel requests
     tool_use_id: Optional[str] = None
     agent_id: Optional[str] = None
+
+    # SDK 0.1.81 ToolPermissionContext enrichment fields (Slice D)
+    title: Optional[str] = None
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    decision_reason: Optional[str] = None
+    blocked_path: Optional[str] = None
+
+    # Request lifecycle state: "pending" | "deferred"
+    state: str = "pending"
 
     # Async event for waiting on response
     response_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -120,6 +136,9 @@ class PermissionHandler:
         # Pending requests by session_id
         self._pending_requests: Dict[str, Dict[str, PermissionRequest]] = {}
 
+        # Deferred requests by session_id (Slice B)
+        self._deferred: Dict[str, Dict[str, PermissionRequest]] = defaultdict(dict)
+
         # In-memory session rules (cleared when session ends)
         self._session_rules: Dict[str, List[PermissionRule]] = {}
 
@@ -136,7 +155,12 @@ class PermissionHandler:
         broadcast_func: callable,
         tool_use_id: Optional[str] = None,
         agent_id: Optional[str] = None,
-    ) -> Union[PermissionResultAllow, PermissionResultDeny]:
+        title: Optional[str] = None,
+        display_name: Optional[str] = None,
+        description: Optional[str] = None,
+        decision_reason: Optional[str] = None,
+        blocked_path: Optional[str] = None,
+    ) -> Union[PermissionResultAllow, PermissionResultDeny, "_DeferSentinel"]:
         """
         Request permission for a tool use.
 
@@ -154,9 +178,14 @@ class PermissionHandler:
             broadcast_func: Async function to broadcast to WebSocket
             tool_use_id: SDK tool_use_id from ToolPermissionContext (SDK 0.1.52+)
             agent_id: SDK agent_id from ToolPermissionContext (SDK 0.1.52+)
+            title: SDK 0.1.81 ToolPermissionContext.title
+            display_name: SDK 0.1.81 ToolPermissionContext.display_name
+            description: SDK 0.1.81 ToolPermissionContext.description
+            decision_reason: SDK 0.1.81 ToolPermissionContext.decision_reason
+            blocked_path: SDK 0.1.81 ToolPermissionContext.blocked_path
 
         Returns:
-            PermissionResultAllow or PermissionResultDeny
+            PermissionResultAllow, PermissionResultDeny, or _DeferSentinel
         """
         # Check saved rules first
         rule = self._check_rules(session_id, profile_id, tool_name, tool_input)
@@ -176,6 +205,11 @@ class PermissionHandler:
             tool_input=tool_input,
             tool_use_id=tool_use_id,
             agent_id=agent_id,
+            title=title,
+            display_name=display_name,
+            description=description,
+            decision_reason=decision_reason,
+            blocked_path=blocked_path,
         )
 
         async with self._lock:
@@ -187,21 +221,7 @@ class PermissionHandler:
         queue_position = len(self._pending_requests.get(session_id, {}))
 
         # Broadcast permission request to frontend
-        permission_event = {
-            "type": "permission_request",
-            "session_id": session_id,
-            "request_id": request_id,
-            "tool_name": tool_name,
-            "tool_input": tool_input,
-            "queue_position": queue_position,
-            "queue_total": queue_position,
-        }
-        # Include SDK context fields when available (SDK 0.1.52+)
-        if tool_use_id:
-            permission_event["tool_use_id"] = tool_use_id
-        if agent_id:
-            permission_event["agent_id"] = agent_id
-        await broadcast_func(permission_event)
+        await self._broadcast_permission_request(request, queue_position, broadcast_func)
 
         logger.debug(f"Permission request queued: {request_id} for {tool_name}")
 
@@ -224,6 +244,10 @@ class PermissionHandler:
                 pass  # Best-effort notification
             return PermissionResultDeny(message="Permission request timed out")
 
+        # Check if user deferred (Slice B)
+        if isinstance(request.response, _DeferSentinel):
+            return request.response
+
         # Return the response - convert from stored dict to proper type
         if request.response:
             if request.response.get("behavior") == "allow":
@@ -233,11 +257,45 @@ class PermissionHandler:
         else:
             return PermissionResultDeny(message="No response received")
 
+    async def _broadcast_permission_request(
+        self,
+        request: "PermissionRequest",
+        queue_position: int,
+        broadcast_func: callable,
+    ) -> None:
+        """Build and broadcast a permission_request event for the given request."""
+        permission_event = {
+            "type": "permission_request",
+            "session_id": request.session_id,
+            "request_id": request.request_id,
+            "tool_name": request.tool_name,
+            "tool_input": request.tool_input,
+            "queue_position": queue_position,
+            "queue_total": queue_position,
+        }
+        # Include SDK context fields when available (SDK 0.1.52+)
+        if request.tool_use_id:
+            permission_event["tool_use_id"] = request.tool_use_id
+        if request.agent_id:
+            permission_event["agent_id"] = request.agent_id
+        # Include SDK 0.1.81 enrichment fields when available (Slice D)
+        if request.title is not None:
+            permission_event["title"] = request.title
+        if request.display_name is not None:
+            permission_event["display_name"] = request.display_name
+        if request.description is not None:
+            permission_event["description"] = request.description
+        if request.decision_reason is not None:
+            permission_event["decision_reason"] = request.decision_reason
+        if request.blocked_path is not None:
+            permission_event["blocked_path"] = request.blocked_path
+        await broadcast_func(permission_event)
+
     async def respond(
         self,
         request_id: str,
         session_id: str,
-        decision: Literal["allow", "deny"],
+        decision: Literal["allow", "deny", "defer"],
         remember: Optional[Literal["none", "session", "profile"]] = None,
         pattern: Optional[str] = None,
         broadcast_func: Optional[callable] = None
@@ -245,14 +303,15 @@ class PermissionHandler:
         """
         Respond to a permission request.
 
-        If remember is set, creates a rule and auto-resolves matching queued requests.
+        If remember is set (and decision != defer), creates a rule and
+        auto-resolves matching queued requests.
 
         Args:
             request_id: The request to respond to
             session_id: The session ID
-            decision: "allow" or "deny"
-            remember: Scope to remember the decision
-            pattern: Optional pattern for the rule (e.g., "npm *" for Bash)
+            decision: "allow", "deny", or "defer"
+            remember: Scope to remember the decision (ignored when decision == "defer")
+            pattern: Optional pattern for the rule (ignored when decision == "defer")
             broadcast_func: Function to broadcast queue updates
 
         Returns:
@@ -265,6 +324,31 @@ class PermissionHandler:
             request = self._pending_requests[session_id].get(request_id)
             if not request:
                 return {"error": "Request not found"}
+
+            # Handle defer decision (Slice B)
+            if decision == "defer":
+                request.state = "deferred"
+                request.response = _DeferSentinel()
+                request.response_event.set()
+                del self._pending_requests[session_id][request_id]
+                self._deferred[session_id][request_id] = request
+
+                # Broadcast that this request moved to deferred state
+                if broadcast_func:
+                    await broadcast_func({
+                        "type": "permission_queue_update",
+                        "session_id": session_id,
+                        "resolved_ids": [request_id],
+                        "deferred_ids": [request_id],
+                        "remaining_count": len(self._pending_requests.get(session_id, {})),
+                    })
+
+                return {
+                    "resolved": True,
+                    "deferred": True,
+                    "auto_resolved_count": 0,
+                    "auto_resolved_ids": [],
+                }
 
             # Set the response
             if decision == "allow":
@@ -393,17 +477,87 @@ class PermissionHandler:
             return []
 
         return [
-            {
-                "session_id": req.session_id,
-                "request_id": req.request_id,
-                "tool_name": req.tool_name,
-                "tool_input": req.tool_input,
-                "created_at": req.created_at.isoformat(),
-                **({"tool_use_id": req.tool_use_id} if req.tool_use_id else {}),
-                **({"agent_id": req.agent_id} if req.agent_id else {}),
-            }
+            self._request_to_dict(req)
             for req in self._pending_requests[session_id].values()
         ]
+
+    def get_deferred_requests(self, session_id: str) -> List[Dict[str, Any]]:
+        """Get all deferred permission requests for a session (Slice B)"""
+        return [
+            self._request_to_dict(req)
+            for req in self._deferred.get(session_id, {}).values()
+        ]
+
+    def _request_to_dict(self, req: "PermissionRequest") -> Dict[str, Any]:
+        """Serialize a PermissionRequest to a dict for WS broadcast."""
+        d: Dict[str, Any] = {
+            "session_id": req.session_id,
+            "request_id": req.request_id,
+            "tool_name": req.tool_name,
+            "tool_input": req.tool_input,
+            "created_at": req.created_at.isoformat(),
+            "state": req.state,
+        }
+        if req.tool_use_id:
+            d["tool_use_id"] = req.tool_use_id
+        if req.agent_id:
+            d["agent_id"] = req.agent_id
+        if req.title is not None:
+            d["title"] = req.title
+        if req.display_name is not None:
+            d["display_name"] = req.display_name
+        if req.description is not None:
+            d["description"] = req.description
+        if req.decision_reason is not None:
+            d["decision_reason"] = req.decision_reason
+        if req.blocked_path is not None:
+            d["blocked_path"] = req.blocked_path
+        return d
+
+    async def requeue_deferred(
+        self,
+        session_id: str,
+        broadcast_func: Optional[callable] = None,
+    ) -> List[str]:
+        """
+        Move all deferred requests for a session back to pending and re-broadcast.
+
+        Returns the list of requeued request_ids.
+        """
+        requeued_ids: List[str] = []
+
+        async with self._lock:
+            deferred_snapshot = dict(self._deferred.get(session_id, {}))
+            self._deferred[session_id].clear()
+
+            if session_id not in self._pending_requests:
+                self._pending_requests[session_id] = {}
+
+            for req_id, req in deferred_snapshot.items():
+                req.state = "pending"
+                # Reset the event so request_permission can wait again
+                req.response_event = asyncio.Event()
+                req.response = None
+                self._pending_requests[session_id][req_id] = req
+                requeued_ids.append(req_id)
+
+        # Re-broadcast each request (outside lock)
+        if broadcast_func:
+            for req_id in requeued_ids:
+                req = self._pending_requests[session_id].get(req_id)
+                if req:
+                    queue_position = len(self._pending_requests.get(session_id, {}))
+                    await self._broadcast_permission_request(req, queue_position, broadcast_func)
+
+            if requeued_ids:
+                await broadcast_func({
+                    "type": "permission_queue_update",
+                    "session_id": session_id,
+                    "requeued_ids": requeued_ids,
+                    "remaining_count": len(self._pending_requests.get(session_id, {})),
+                })
+
+        return requeued_ids
 
     def get_queue_count(self, session_id: str) -> int:
         """Get count of pending requests for a session"""

@@ -85,6 +85,7 @@ function mockState(): ActiveSessionState {
 		permissionModeOverride: null,
 		effortLevelOverride: null,
 		pendingPermissions: [],
+		deferredPermissions: [],
 		pendingQuestions: [],
 		queuedMessages: [],
 		draft: '',

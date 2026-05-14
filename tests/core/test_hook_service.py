@@ -9,6 +9,7 @@ from app.core.hook_service import (
     load_plugin_hooks,
     build_hooks_config,
     create_stop_hook_handler,
+    create_plugin_hook_handler,
     execute_plugin_hook,
     _fix_python_command_for_windows,
 )
@@ -261,3 +262,116 @@ class TestExecutePluginHook:
 
         assert len(callback_called) == 1
         assert "warning message" in callback_called[0][1]
+
+
+# =============================================================================
+# Test create_plugin_hook_handler — event-type routing (SDK 0.1.81+)
+# =============================================================================
+
+class TestCreatePluginHookHandler:
+    """Tests for create_plugin_hook_handler output-type routing."""
+
+    @pytest.mark.asyncio
+    async def test_posttooluse_updated_output_forwarded(self, tmp_path):
+        """
+        When a PostToolUse plugin script returns {"updated_output": "REWRITTEN"},
+        the handler must return a PostToolUseHookSpecificOutput with
+        updatedToolOutput == "REWRITTEN".
+        """
+        from claude_agent_sdk.types import PostToolUseHookSpecificOutput
+
+        async def mock_execute(*args, **kwargs):
+            return {"updated_output": "REWRITTEN"}
+
+        with patch("app.core.hook_service.execute_plugin_hook", mock_execute):
+            handler = create_plugin_hook_handler(
+                event_name="PostToolUse",
+                hook_defs=[{"command": "echo test", "plugin_path": str(tmp_path), "timeout": 5}],
+                working_dir=str(tmp_path),
+            )
+            result = await handler(
+                {"hook_event_name": "PostToolUse", "tool_name": "Read"},
+                None,
+                {"session_id": "test-session"},
+            )
+
+        assert result is not None
+        assert result.get("hookEventName") == "PostToolUse"
+        assert result.get("updatedToolOutput") == "REWRITTEN"
+
+    @pytest.mark.asyncio
+    async def test_posttooluse_no_updated_output_returns_default(self, tmp_path):
+        """
+        When a PostToolUse plugin script returns nothing meaningful, the handler
+        must return the default SyncHookJSONOutput (no updatedToolOutput).
+        """
+        async def mock_execute(*args, **kwargs):
+            return {}
+
+        with patch("app.core.hook_service.execute_plugin_hook", mock_execute):
+            handler = create_plugin_hook_handler(
+                event_name="PostToolUse",
+                hook_defs=[{"command": "echo test", "plugin_path": str(tmp_path), "timeout": 5}],
+                working_dir=str(tmp_path),
+            )
+            result = await handler(
+                {"hook_event_name": "PostToolUse", "tool_name": "Write"},
+                None,
+                {"session_id": "test-session"},
+            )
+
+        # Should fall through to the SyncHookJSONOutput default
+        assert result is not None
+        assert result.get("updatedToolOutput") is None
+
+    @pytest.mark.asyncio
+    async def test_pretooluse_permission_decision_forwarded(self, tmp_path):
+        """
+        When a PreToolUse plugin script returns {"decision": "deny"},
+        the handler must return a PreToolUseHookSpecificOutput with
+        permissionDecision == "deny".
+        """
+        async def mock_execute(*args, **kwargs):
+            return {"decision": "deny", "reason": "blocked by policy"}
+
+        with patch("app.core.hook_service.execute_plugin_hook", mock_execute):
+            handler = create_plugin_hook_handler(
+                event_name="PreToolUse",
+                hook_defs=[{"command": "echo test", "plugin_path": str(tmp_path), "timeout": 5}],
+                working_dir=str(tmp_path),
+            )
+            result = await handler(
+                {"hook_event_name": "PreToolUse", "tool_name": "Bash"},
+                None,
+                {"session_id": "test-session"},
+            )
+
+        assert result is not None
+        assert result.get("hookEventName") == "PreToolUse"
+        assert result.get("permissionDecision") == "deny"
+        assert result.get("permissionDecisionReason") == "blocked by policy"
+
+    @pytest.mark.asyncio
+    async def test_other_event_uses_sync_hook_json_output(self, tmp_path):
+        """
+        Non-PreToolUse/PostToolUse events must still return SyncHookJSONOutput.
+        """
+        async def mock_execute(*args, **kwargs):
+            return {"decision": "block", "reason": "stop loop", "systemMessage": "try harder"}
+
+        with patch("app.core.hook_service.execute_plugin_hook", mock_execute):
+            handler = create_plugin_hook_handler(
+                event_name="Stop",
+                hook_defs=[{"command": "echo test", "plugin_path": str(tmp_path), "timeout": 5}],
+                working_dir=str(tmp_path),
+            )
+            result = await handler(
+                {"hook_event_name": "Stop"},
+                None,
+                {"session_id": "test-session"},
+            )
+
+        # SyncHookJSONOutput uses snake_case / dataclass attributes
+        assert result is not None
+        assert result.get("decision") == "block"
+        assert result.get("reason") == "stop loop"

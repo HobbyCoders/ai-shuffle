@@ -321,6 +321,14 @@ class ClaudeAgentAdapter(ProviderAdapter):
             kwargs["session_id"] = options.session_id
         if options.task_budget is not None:
             kwargs["task_budget"] = options.task_budget
+        if options.session_store is not None:
+            kwargs["session_store"] = options.session_store
+        if options.session_store_flush is not None:
+            kwargs["session_store_flush"] = options.session_store_flush
+        if options.include_hook_events:
+            kwargs["include_hook_events"] = True
+        if options.strict_mcp_config:
+            kwargs["strict_mcp_config"] = True
 
         # Forward any extra options for forward-compatibility
         kwargs.update(options.extra)

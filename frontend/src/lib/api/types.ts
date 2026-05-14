@@ -38,6 +38,7 @@ export interface ProfileConfig {
 	max_buffer_size?: number;  // Maximum buffer size for output
 	env?: Record<string, string>;  // Environment variables to set
 	app_config_tools?: boolean;  // Allow AI to configure hooks, automations, MCP, profiles via chat
+	strict_mcp_config?: boolean;  // SDK 0.1.81+ — fail-fast on misconfigured MCP servers
 	system_prompt?: {
 		type: string;
 		preset?: string;
@@ -110,11 +111,18 @@ export interface PermissionRequest {
 	queue_position?: number;
 	queue_total?: number;
 	created_at?: string;
+	// SDK 0.1.81 enrichment fields (Slice D) — optional; backend only forwards
+	// when the SDK populates them on PermissionRequest payloads.
+	title?: string;
+	display_name?: string;
+	description?: string;
+	decision_reason?: string;
+	blocked_path?: string;
 }
 
 export interface PermissionResponse {
 	request_id: string;
-	decision: 'allow' | 'deny';
+	decision: 'allow' | 'deny' | 'defer';
 	remember?: 'none' | 'session' | 'profile';
 	pattern?: string;
 }

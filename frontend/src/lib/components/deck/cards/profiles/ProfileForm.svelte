@@ -75,6 +75,7 @@
 		env_vars: { key: string; value: string }[];
 		enable_file_checkpointing: boolean;
 		app_config_tools: boolean;
+		strict_mcp_config: boolean;
 	}
 
 	interface EnvVarPreset {
@@ -368,6 +369,24 @@
 					aria-checked={profileForm.app_config_tools}
 					aria-label="Toggle app configuration tools"
 					onclick={() => onFormChange('app_config_tools', !profileForm.app_config_tools)}
+				>
+					<span class="pf-toggle-knob"></span>
+				</button>
+			</div>
+			<!-- Slice F (SDK 0.1.81): strict MCP config — fail-fast on broken servers. -->
+			<div class="pf-toggle-row">
+				<div class="pf-toggle-info">
+					<span class="pf-toggle-title">Strict MCP config</span>
+					<span class="pf-toggle-desc">Fail-fast if any MCP server is misconfigured. Recommended for production profiles.</span>
+				</div>
+				<button
+					type="button"
+					class="pf-toggle"
+					class:active={profileForm.strict_mcp_config}
+					role="switch"
+					aria-checked={profileForm.strict_mcp_config}
+					aria-label="Toggle strict MCP config"
+					onclick={() => onFormChange('strict_mcp_config', !profileForm.strict_mcp_config)}
 				>
 					<span class="pf-toggle-knob"></span>
 				</button>
