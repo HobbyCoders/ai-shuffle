@@ -17,7 +17,6 @@
 	import QueuedMessages from '$lib/components/chat/QueuedMessages.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
-	import RateLimitBanner from '$lib/components/RateLimitBanner.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
 	import ExecutionModeBar from './ExecutionModeBar.svelte';
@@ -112,7 +111,6 @@
 					onSelectProject={handleProjectSelect}
 				/>
 				<div class="empty-input-wrapper">
-					<RateLimitBanner />
 					<ChatInput />
 				</div>
 				{#if $githubAuthenticated}
@@ -154,7 +152,6 @@
 						/>
 					</div>
 				{/if}
-				<RateLimitBanner />
 				<ChatInput compact />
 			</div>
 

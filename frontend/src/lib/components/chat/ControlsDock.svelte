@@ -9,6 +9,7 @@
 	import { profiles } from '$lib/stores/app-data';
 	import { getDefaultModel, getModelFamily } from '$lib/constants/models';
 	import ContextUsageBar from './ContextUsageBar.svelte';
+	import UsageLimitIndicator from './UsageLimitIndicator.svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';
 
@@ -53,6 +54,7 @@
 	<!-- Left: Usage Indicator + Fast Mode Badge -->
 	<div class="controls-left">
 		<ContextUsageBar />
+		<UsageLimitIndicator />
 		{#if $activeSession.fastMode}
 			<button
 				type="button"
