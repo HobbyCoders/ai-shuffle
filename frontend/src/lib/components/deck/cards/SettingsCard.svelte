@@ -13,7 +13,7 @@
 	import { api } from '$lib/api/client';
 	import type { Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/types';
-	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword } from '$lib/api/auth';
+	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword, startClaudeLogin, completeClaudeLogin } from '$lib/api/auth';
 	import ConnectorManager from '$lib/components/ConnectorManager.svelte';
 	import { slide, fade } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
@@ -308,10 +308,18 @@
 	async function startClaudeOAuth() {
 		claudeLoginLoading = true;
 		try {
-			const result = await api.get<{authorization_url: string, state: string}>('/auth/claude/authorize');
-			claudeOAuthUrl = result.authorization_url;
-			claudeOAuthState = result.state;
-			window.open(result.authorization_url, '_blank', 'width=600,height=700');
+			const result = await startClaudeLogin();
+			if (result.already_authenticated) {
+				await auth.checkAuth();
+				return;
+			}
+			if (result.success && result.oauth_url && result.state) {
+				claudeOAuthUrl = result.oauth_url;
+				claudeOAuthState = result.state;
+				window.open(result.oauth_url, '_blank', 'width=600,height=700');
+			} else {
+				error = result.error || result.message || 'Failed to start OAuth';
+			}
 		} catch (e: any) {
 			error = e.detail || 'Failed to start OAuth';
 		} finally {
@@ -323,10 +331,11 @@
 		if (!claudeAuthCode.trim() || !claudeOAuthState) return;
 		claudeCompletingLogin = true;
 		try {
-			await api.post('/auth/claude/callback', {
-				code: claudeAuthCode,
-				state: claudeOAuthState
-			});
+			const result = await completeClaudeLogin(claudeAuthCode.trim(), claudeOAuthState);
+			if (!result.success) {
+				error = result.error || result.message || 'Failed to complete OAuth';
+				return;
+			}
 			claudeOAuthUrl = null;
 			claudeOAuthState = null;
 			claudeAuthCode = '';
