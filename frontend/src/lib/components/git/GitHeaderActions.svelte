@@ -3,13 +3,17 @@
 	 * GitHeaderActions - Git controls for the PageHeader
 	 *
 	 * Branch selector dropdown (checkout branches), split action buttons, and diff stats.
-	 * Split buttons: main area performs quick action with saved settings,
-	 * chevron opens the modal for customization.
+	 * Mutating actions (Commit / Push / Pull / Create PR / Finish / Ship It) send a
+	 * pre-written prompt to the chat so the AI agent performs the git task — the main
+	 * area of a split button sends immediately; the chevron opens an editable prompt
+	 * popover (GitPromptPopover) for tweaking before sending.
+	 * Branch selector, diff review, and Init Repo remain direct git actions.
 	 * Branch selector is locked during streaming.
 	 */
 	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket } from 'lucide-svelte';
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode, changedFiles } from '$lib/stores/git';
 	import { githubRepoInfo } from '$lib/stores/github';
+	import GitPromptPopover from './GitPromptPopover.svelte';
 
 	interface Props {
 		projectId: string;
@@ -22,7 +26,7 @@
 		worktreeBranch?: string | null;
 		/** When set, shows the "Finish" button instead of Commit/Create PR */
 		openPR?: { number: number; title: string; url: string } | null;
-		/** Quick actions (use saved settings, no modal) */
+		/** Quick actions: main button click sends the canned prompt to chat immediately */
 		onClickCommit: () => void;
 		onClickCreatePR: () => void;
 		onClickFinish: () => void;
@@ -30,18 +34,40 @@
 		onClickPull: () => void;
 		onClickNewBranch: () => void;
 		onClickInitRepo?: () => void;
-		/** Ship It: one-click commit → push → PR → merge → cleanup pipeline */
+		/** Ship It: one-shot commit → push → PR → merge → cleanup prompt */
 		onClickShipIt?: () => void;
-		/** Open modal for customization */
-		onOpenCommitModal: () => void;
-		onOpenCreatePRModal: () => void;
-		onOpenFinishModal: () => void;
-		onOpenPullModal: () => void;
+		/** Send an (edited) prompt to the chat from the chevron popover */
+		onSendPrompt: (text: string) => void;
+		/** Prefilled, editable prompt text for each split-button chevron popover */
+		commitPrompt: string;
+		createPRPrompt: string;
+		finishPrompt: string;
+		pullPrompt: string;
 		/** Open diff review panel (side-by-side) */
 		onOpenDiffReview?: () => void;
 	}
 
-	let { projectId, isStreaming = false, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenCommitModal, onOpenCreatePRModal, onOpenFinishModal, onOpenPullModal, onOpenDiffReview }: Props = $props();
+	let { projectId, isStreaming = false, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onSendPrompt, commitPrompt, createPRPrompt, finishPrompt, pullPrompt, onOpenDiffReview }: Props = $props();
+
+	// --- Editable-prompt popover state (opened by split-button chevrons) ---
+	// Only one popover is open at a time, keyed by action.
+	type PromptAction = 'commit' | 'pr' | 'finish' | 'pull';
+	let openPromptPopover = $state<PromptAction | null>(null);
+
+	const popoverConfig = $derived<Record<PromptAction, { title: string; prompt: string }>>({
+		commit: { title: 'Commit', prompt: commitPrompt },
+		pr: { title: 'Create pull request', prompt: createPRPrompt },
+		finish: { title: 'Finish / merge', prompt: finishPrompt },
+		pull: { title: 'Pull', prompt: pullPrompt },
+	});
+
+	function togglePromptPopover(action: PromptAction) {
+		openPromptPopover = openPromptPopover === action ? null : action;
+	}
+
+	function closePromptPopover() {
+		openPromptPopover = null;
+	}
 
 	// Worktree mode: determined by prop (immediate) OR store (after load)
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
@@ -151,24 +177,34 @@
 		onClickNewBranch();
 	}
 
-	// Close dropdown on outside click
+	// Root container ref — used to detect clicks outside the whole git toolbar
+	// so we can close the prompt popover (its own close button + Esc handle the rest).
+	let gitActionsRef = $state<HTMLDivElement | null>(null);
+
+	// Close dropdown and prompt popover on outside click
 	function handleClickOutside(e: MouseEvent) {
-		if (!showDropdown) return;
-		if (dropdownRef && !dropdownRef.contains(e.target as Node)) {
+		if (showDropdown && dropdownRef && !dropdownRef.contains(e.target as Node)) {
 			showDropdown = false;
+		}
+		// Close the editable-prompt popover when clicking outside the toolbar.
+		// Clicks inside the toolbar (e.g. another chevron) are handled by the
+		// chevron's own toggle, so they shouldn't close it here.
+		if (openPromptPopover && gitActionsRef && !gitActionsRef.contains(e.target as Node)) {
+			openPromptPopover = null;
 		}
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape' && showDropdown) {
-			showDropdown = false;
+		if (e.key === 'Escape') {
+			if (showDropdown) showDropdown = false;
+			if (openPromptPopover) openPromptPopover = null;
 		}
 	}
 </script>
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />
 
-<div class="git-actions">
+<div class="git-actions" bind:this={gitActionsRef}>
 	{#if isGitRepo}
 	<!-- Branch selector -->
 	<div class="branch-selector" bind:this={dropdownRef}>
@@ -284,12 +320,20 @@
 			<button
 				class="git-btn split-chevron pull-btn"
 				class:diverged={isDiverged}
-				onclick={onOpenPullModal}
+				class:active={openPromptPopover === 'pull'}
+				onclick={() => togglePromptPopover('pull')}
 				disabled={isStreaming}
-				title="Pull options..."
+				title="Edit pull prompt..."
 			>
 				<ChevronDown size={11} strokeWidth={1.5} />
 			</button>
+			<GitPromptPopover
+				open={openPromptPopover === 'pull'}
+				title={popoverConfig.pull.title}
+				prompt={popoverConfig.pull.prompt}
+				onSend={onSendPrompt}
+				onClose={closePromptPopover}
+			/>
 		</div>
 	{/if}
 
@@ -316,19 +360,27 @@
 				class="git-btn split-main"
 				onclick={onClickCommit}
 				disabled={isStreaming}
-				title={isStreaming ? 'Cannot commit during streaming' : 'Quick commit with saved settings'}
+				title={isStreaming ? 'Cannot commit during streaming' : 'Send a commit request to the chat'}
 			>
 				<GitCommitHorizontal size={14} strokeWidth={1.5} />
 				<span class="btn-label">Commit</span>
 			</button>
 			<button
 				class="git-btn split-chevron"
-				onclick={onOpenCommitModal}
+				class:active={openPromptPopover === 'commit'}
+				onclick={() => togglePromptPopover('commit')}
 				disabled={isStreaming}
-				title="Commit options..."
+				title="Edit commit prompt..."
 			>
 				<ChevronDown size={11} strokeWidth={1.5} />
 			</button>
+			<GitPromptPopover
+				open={openPromptPopover === 'commit'}
+				title={popoverConfig.commit.title}
+				prompt={popoverConfig.commit.prompt}
+				onSend={onSendPrompt}
+				onClose={closePromptPopover}
+			/>
 		</div>
 	{:else if openPR}
 		<div class="split-btn-group">
@@ -336,19 +388,27 @@
 				class="git-btn split-main"
 				onclick={onClickFinish}
 				disabled={isStreaming}
-				title={isStreaming ? 'Cannot finish during streaming' : `Quick merge PR #${openPR.number} with saved settings`}
+				title={isStreaming ? 'Cannot finish during streaming' : `Send a request to merge PR #${openPR.number}`}
 			>
 				<CheckCircle2 size={14} strokeWidth={1.5} />
 				<span class="btn-label">Finish</span>
 			</button>
 			<button
 				class="git-btn split-chevron"
-				onclick={onOpenFinishModal}
+				class:active={openPromptPopover === 'finish'}
+				onclick={() => togglePromptPopover('finish')}
 				disabled={isStreaming}
-				title="Merge options..."
+				title="Edit merge prompt..."
 			>
 				<ChevronDown size={11} strokeWidth={1.5} />
 			</button>
+			<GitPromptPopover
+				open={openPromptPopover === 'finish'}
+				title={popoverConfig.finish.title}
+				prompt={popoverConfig.finish.prompt}
+				onSend={onSendPrompt}
+				onClose={closePromptPopover}
+			/>
 		</div>
 	{:else if canCreatePR}
 		<div class="split-btn-group">
@@ -356,19 +416,27 @@
 				class="git-btn split-main"
 				onclick={onClickCreatePR}
 				disabled={isStreaming}
-				title={isStreaming ? 'Cannot create PR during streaming' : `Quick create PR (${commitsAhead} commit${commitsAhead === 1 ? '' : 's'} ahead)`}
+				title={isStreaming ? 'Cannot create PR during streaming' : `Send a request to open a PR (${commitsAhead} commit${commitsAhead === 1 ? '' : 's'} ahead)`}
 			>
 				<GitPullRequest size={14} strokeWidth={1.5} />
 				<span class="btn-label">Create PR</span>
 			</button>
 			<button
 				class="git-btn split-chevron"
-				onclick={onOpenCreatePRModal}
+				class:active={openPromptPopover === 'pr'}
+				onclick={() => togglePromptPopover('pr')}
 				disabled={isStreaming}
-				title="PR options..."
+				title="Edit PR prompt..."
 			>
 				<ChevronDown size={11} strokeWidth={1.5} />
 			</button>
+			<GitPromptPopover
+				open={openPromptPopover === 'pr'}
+				title={popoverConfig.pr.title}
+				prompt={popoverConfig.pr.prompt}
+				onSend={onSendPrompt}
+				onClose={closePromptPopover}
+			/>
 		</div>
 	{:else}
 		<button
@@ -481,6 +549,8 @@
 	.split-btn-group {
 		display: flex;
 		align-items: center;
+		/* Anchor the editable-prompt popover to the group */
+		position: relative;
 	}
 
 	.split-btn-group .split-main {
@@ -497,7 +567,8 @@
 		border-left: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
 	}
 
-	.split-btn-group .split-chevron:hover:not(:disabled) {
+	.split-btn-group .split-chevron:hover:not(:disabled),
+	.split-btn-group .split-chevron.active {
 		background: color-mix(in oklch, var(--hover-overlay) 80%, transparent);
 	}
 
