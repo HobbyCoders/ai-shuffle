@@ -10,21 +10,16 @@
 	import type { ViewType } from '$lib/stores/layout';
 	import { projects } from '$lib/stores/app-data';
 	import { activeSession } from '$lib/stores/active-session';
-	import { git, gitStatus, branches as branchStore, diffStats } from '$lib/stores/git';
+	import { git, gitStatus, branches as branchStore } from '$lib/stores/git';
 	import { githubAuthenticated } from '$lib/stores/auth';
 	import { githubRepoInfo } from '$lib/stores/github';
 	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming';
-	import { createPullRequest, getPullRequests, mergePullRequest } from '$lib/api/github';
-	import { generateCommitMessage, generatePRDescription, deleteWorktree } from '$lib/api/git';
+	import { getPullRequests } from '$lib/api/github';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import ChatView from './ChatView.svelte';
 	import PageHeader from './PageHeader.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
-	import CommitModal from '$lib/components/git/CommitModal.svelte';
-	import CommitProgressModal from '$lib/components/git/CommitProgressModal.svelte';
-	import FinishModal from '$lib/components/git/FinishModal.svelte';
-	import PullModal from '$lib/components/git/PullModal.svelte';
 	import InitRepoModal from '$lib/components/git/InitRepoModal.svelte';
 	import ChangedFilesPanel from '$lib/components/git/ChangedFilesPanel.svelte';
 	import DiffViewer from '$lib/components/git/DiffViewer.svelte';
@@ -124,26 +119,10 @@
 	);
 
 	// =========================================================================
-	// Git modal state
+	// Git modal state (retained: branch creation, init repo, diff review)
 	// =========================================================================
 
 	let showCreateBranchModal = $state(false);
-	let showCommitModal = $state(false);
-	let showCommitModalMode = $state<'commit' | 'pr-only'>('commit');
-	let showProgressModal = $state(false);
-	let progressAction = $state<'commit' | 'push' | 'pr' | 'finish' | 'pull' | 'pipeline'>('commit');
-	let progressMode = $state<'commit' | 'pr-only' | 'finish' | 'pull' | 'push' | 'pipeline'>('commit');
-	let progressStep = $state(1);
-	let progressCompleted = $state(false);
-	let progressError = $state<string | null>(null);
-	let progressIsGenerating = $state(false);
-	let progressHasCleanup = $state(false);
-
-	// Finish modal state
-	let showFinishModal = $state(false);
-
-	// Pull modal state
-	let showPullModal = $state(false);
 
 	// Init repo modal state
 	let showInitRepoModal = $state(false);
@@ -153,14 +132,8 @@
 	let reviewMode = $state(false);
 	let selectedDiffFile = $state<import('$lib/api/git').FileChangeInfo | null>(null);
 
-	// PR detection for current branch
+	// PR detection for current branch (drives Finish button visibility — read-only)
 	let branchPR = $state<{ number: number; title: string; url: string; head_branch: string } | null>(null);
-	let _pendingPRModal = $state(false);
-	let _finishedWorktreeCleanup = false;
-
-	const isWorktreeMode = $derived(
-		activeTab?.executionMode === 'worktree' && !!activeTab?.worktreeId
-	);
 
 	// Load git repository when active tab's project changes (only when GitHub CLI is authenticated).
 	// Extract the project and worktree strings OUTSIDE the effect to avoid tracking the entire
@@ -296,34 +269,6 @@
 	}
 
 	/**
-	 * Suspend the git poll timer entirely for the duration of a git operation
-	 * (commit/push/PR/pull). Unlike the `operationInProgress` guard (which
-	 * lets the timer fire and skip), this cancels the timer so no HTTP
-	 * connections are attempted at all, leaving the full browser connection
-	 * pool available for the operation itself.
-	 */
-	let _gitPollPausedProject: string | null = null;
-
-	function pauseGitPoll() {
-		if (_gitPollTimer) {
-			clearTimeout(_gitPollTimer);
-			_gitPollTimer = null;
-		}
-		// Remember the project so we can resume after the operation
-		_gitPollPausedProject = _gitPollProject;
-	}
-
-	function resumeGitPoll() {
-		const project = _gitPollPausedProject;
-		_gitPollPausedProject = null;
-		if (project && _gitPollProject) {
-			// Restart the timer — the operation's own refreshes already
-			// fetched fresh data, so schedule the next poll at idle interval.
-			scheduleGitPoll();
-		}
-	}
-
-	/**
 	 * Check for open PRs matching the current branch.
 	 * Only called when the branch changes (event-driven), not on a timer.
 	 */
@@ -442,562 +387,123 @@
 		}
 	});
 
-	/**
-	 * Handle the commit workflow (commit → push → PR)
-	 */
-	async function handleStartCommit(
-		action: 'commit' | 'push' | 'pr',
-		message: string,
-		includeUnstaged: boolean
-	) {
-		const needsGeneration = !message.trim();
-		progressAction = action;
-		progressMode = 'commit';
-		progressStep = 1;
-		progressCompleted = false;
-		progressError = null;
-		progressIsGenerating = needsGeneration;
-		showProgressModal = true;
+	// =========================================================================
+	// Git action prompts (send to chat instead of running git directly)
+	// =========================================================================
+	// The mutating git buttons (Commit / Push / Pull / Create PR / Finish /
+	// Ship It) no longer call the git API. Instead, clicking the main part of a
+	// button sends a pre-written prompt to the active chat so the AI agent
+	// performs the operation with its own git/gh tools. The split-button chevron
+	// opens an editable popover (GitPromptPopover) so the user can tweak the
+	// wording before sending. Read-only git state machinery below is unchanged.
 
-		const projectId = activeTab?.project;
-		if (!projectId) {
-			progressError = 'No project selected';
-			return;
-		}
-
-		const worktreeId = activeTab?.worktreeId ?? undefined;
-
-		// Pause git polling while the operation runs to prevent
-		// HTTP request accumulation that saturates the connection pool.
-		// Both cancels the poll timer AND aborts in-flight poll fetches.
-		pauseGitPoll();
-		git.setOperationInProgress(true);
-		try {
-			let finalMessage = message;
-
-			// Generate commit message with AI if empty
-			if (needsGeneration) {
-				try {
-					const generated = await generateCommitMessage(projectId, {
-						include_unstaged: includeUnstaged
-					}, worktreeId);
-					finalMessage = generated.message;
-				} catch (e: any) {
-					progressIsGenerating = false;
-					progressError = e?.detail || e?.message || 'Failed to generate commit message';
-					return;
-				}
-				progressIsGenerating = false;
-				progressStep = 2;
-			}
-
-			// Commit step
-			const commitStep = needsGeneration ? 2 : 1;
-			progressStep = commitStep;
-			await git.commitChanges(finalMessage, includeUnstaged);
-
-			if (action === 'push' || action === 'pr') {
-				// Push step
-				progressStep = commitStep + 1;
-				const branch = $gitStatus?.current_branch ?? undefined;
-				await git.pushCommits(branch, true);
-
-				if (action === 'pr') {
-					_pendingPRModal = true;
-				}
-			}
-
-			progressCompleted = true;
-		} catch (e: any) {
-			_pendingPRModal = false;
-			progressError = e?.detail || e?.message || 'An error occurred';
-		} finally {
-			git.setOperationInProgress(false);
-			resumeGitPoll();
-		}
-	}
-
-	/**
-	 * Handle the PR-only workflow (generate → push → create PR)
-	 */
-	async function handleCreatePR(title: string, body: string) {
-		const needsGeneration = !title.trim();
-		progressAction = 'pr';
-		progressMode = 'pr-only';
-		progressStep = 1;
-		progressCompleted = false;
-		progressError = null;
-		progressIsGenerating = needsGeneration;
-		showProgressModal = true;
-
-		const projectId = activeTab?.project;
-		if (!projectId) {
-			progressError = 'No project selected';
-			return;
-		}
-
-		const worktreeId = activeTab?.worktreeId ?? undefined;
-
-		pauseGitPoll();
-		git.setOperationInProgress(true);
-		try {
-			let prTitle = title;
-			let prBody = body;
-
-			// Generate PR description with AI if title is empty
-			if (needsGeneration) {
-				try {
-					const generated = await generatePRDescription(projectId, {
-						base_branch: 'main'
-					}, worktreeId);
-					prTitle = generated.title;
-					prBody = generated.body;
-				} catch {
-					prTitle = $gitStatus?.current_branch || 'Update';
-					prBody = '';
-				}
-				progressIsGenerating = false;
-			}
-
-			// Push step
-			const pushStep = needsGeneration ? 2 : 1;
-			progressStep = pushStep;
-			const branch = $gitStatus?.current_branch ?? undefined;
-			await git.pushCommits(branch, true);
-
-			// Create PR step
-			progressStep = pushStep + 1;
-			if (branch) {
-				await createPullRequest(projectId, {
-					title: prTitle,
-					body: prBody,
-					head: branch,
-					base: 'main'
-				});
-				// Detect the new PR so UI transitions to Finish state
-				await checkPullRequests(projectId, branch);
-			}
-
-			progressCompleted = true;
-		} catch (e: any) {
-			progressError = e?.detail || e?.message || 'An error occurred';
-		} finally {
-			git.setOperationInProgress(false);
-			resumeGitPoll();
-		}
-	}
-
-	/**
-	 * Handle the Finish workflow (merge PR → optional cleanup)
-	 */
-	async function handleFinish(mergeMethod: 'squash' | 'merge' | 'rebase', cleanup: boolean) {
-		if (!branchPR) return;
-
-		const projectId = activeTab?.project;
-		if (!projectId) {
-			progressError = 'No project selected';
-			return;
-		}
-
-		// Safety check: verify the PR's branch matches the current branch
-		const currentBranch = $gitStatus?.current_branch;
-		if (currentBranch && branchPR.head_branch !== currentBranch) {
-			progressError = `PR #${branchPR.number} is for branch "${branchPR.head_branch}" but current branch is "${currentBranch}"`;
-			showFinishModal = false;
-			untrack(() => git.refreshDiffStats());
-			return;
-		}
-
-		progressAction = 'finish';
-		progressMode = 'finish';
-		progressStep = 1;
-		progressCompleted = false;
-		progressError = null;
-		progressIsGenerating = false;
-		progressHasCleanup = cleanup;
-		showProgressModal = true;
-
-		const prNumber = branchPR.number;
-		const worktreeId = activeTab?.worktreeId ?? null;
-
-		// Track for post-cleanup worktree state update
-		_finishedWorktreeCleanup = !!(cleanup && isWorktreeMode && worktreeId);
-
-		pauseGitPoll();
-		git.setOperationInProgress(true);
-		try {
-			// Step 1: Merge pull request
-			await mergePullRequest(projectId, prNumber, mergeMethod);
-
-			if (cleanup) {
-				// Step 2: Cleanup
-				progressStep = 2;
-
-				if (isWorktreeMode && worktreeId) {
-					// Delete worktree and branch
-					await deleteWorktree(projectId, worktreeId, false);
-				} else {
-					// Non-worktree: checkout default branch, then delete feature branch
-					const currentBranch = $gitStatus?.current_branch;
-					const defaultBranch = 'main';
-
-					if (currentBranch && currentBranch !== defaultBranch) {
-						await git.checkout(defaultBranch);
-						await git.deleteBranch(currentBranch);
-					}
-				}
-			}
-
-			progressCompleted = true;
-			branchPR = null;
-
-			// Only refresh git state if worktree wasn't deleted — polling a
-			// deleted worktree produces 404 spam that saturates connections.
-			if (!(cleanup && isWorktreeMode && worktreeId)) {
-				await git.refreshStatus();
-				await git.refreshDiffStats();
-			}
-		} catch (e: any) {
-			progressError = e?.detail || e?.message || 'An error occurred';
-		} finally {
-			git.setOperationInProgress(false);
-			// Don't resume polling if the worktree was deleted — it will
-			// just fire 404s until the user closes the modal and
-			// markWorktreeDeleted() clears the worktree context.
-			if (!(cleanup && isWorktreeMode && worktreeId)) {
-				resumeGitPoll();
-			}
-		}
-	}
-
-	// Pull modal derived state
-	const commitsBehindForPull = $derived.by(() => {
-		const current = $branchStore.find(b => b.current);
-		return current?.behind ?? 0;
-	});
-	const commitsAheadForPull = $derived.by(() => {
-		const current = $branchStore.find(b => b.current);
-		return current?.ahead ?? 0;
-	});
-	const isDivergedForPull = $derived(commitsBehindForPull > 0 && commitsAheadForPull > 0);
-	// Show pull when behind upstream, including diverged state (pull is the safe default)
-	const needsPull = $derived(commitsBehindForPull > 0);
-	const pullHasChanges = $derived(
-		($diffStats?.additions ?? 0) > 0 ||
-		($diffStats?.deletions ?? 0) > 0 ||
-		($diffStats?.files_changed ?? 0) > 0
-	);
-
-	async function handlePush(force: boolean = false) {
-		progressAction = 'push';
-		progressMode = 'push';
-		progressStep = 1;
-		progressCompleted = false;
-		progressError = null;
-		progressIsGenerating = false;
-		progressHasCleanup = false;
-		showProgressModal = true;
-
-		pauseGitPoll();
-		git.setOperationInProgress(true);
-		try {
-			const branch = $gitStatus?.current_branch ?? undefined;
-			await git.pushCommits(branch, true, force);
-			progressCompleted = true;
-		} catch (e: any) {
-			progressError = e?.detail || e?.message || 'Failed to push';
-		} finally {
-			git.setOperationInProgress(false);
-			resumeGitPoll();
-		}
-	}
-
-	// Derived state for quick-action guards
+	// Upstream tracking state (drives prompt wording + quick-action guards).
+	const currentBranchForPrompt = $derived($branchStore.find(b => b.current));
+	const needsPull = $derived((currentBranchForPrompt?.behind ?? 0) > 0);
 	const isOnDefaultBranch = $derived(
 		($gitStatus?.current_branch ?? null) === ($githubRepoInfo?.default_branch ?? 'main')
 	);
 
-	// =========================================================================
-	// Quick-action handlers (use saved preferences, bypass modals)
-	// =========================================================================
+	/** Append "on branch `<name>`" if a branch is known. */
+	function branchSuffix(): string {
+		const branch = $gitStatus?.current_branch;
+		return branch ? ` (current branch: \`${branch}\`)` : '';
+	}
 
-	/** Quick commit: uses saved preferences, empty message triggers AI generation */
-	function handleQuickCommit() {
+	/** Build the commit prompt, honoring saved next-step + include-unstaged prefs. */
+	function buildCommitPrompt(): string {
 		const prefs = gitActionPreferences.current;
-		let action = prefs.nextStep;
-		// Guard: can't push/pr when behind upstream
-		if (needsPull) action = 'commit';
-		// Guard: can't create PR from default branch
-		else if (action === 'pr' && isOnDefaultBranch) action = 'push';
-		handleStartCommit(action, '', prefs.includeUnstaged);
+		const staged = prefs.includeUnstaged
+			? 'Stage and commit all current changes (including untracked files)'
+			: 'Commit the currently staged changes';
+		let prompt = `${staged} with a clear, conventional-commit-style message that summarizes what changed${branchSuffix()}.`;
+
+		// Honor the saved "next step" preference, but guard against invalid states.
+		let nextStep = prefs.nextStep;
+		if (needsPull) nextStep = 'commit';
+		else if (nextStep === 'pr' && isOnDefaultBranch) nextStep = 'push';
+
+		if (nextStep === 'push') {
+			prompt += ' Then push the branch to its remote.';
+		} else if (nextStep === 'pr') {
+			prompt += ' Then push the branch and open a pull request into the default branch with a descriptive title and summary.';
+		}
+		return prompt;
 	}
 
-	/** Quick create PR: empty title/body triggers AI generation */
-	function handleQuickCreatePR() {
-		handleCreatePR('', '');
+	/** Build the push prompt. */
+	function buildPushPrompt(): string {
+		return `Push the current branch to its remote${branchSuffix()}.`;
 	}
 
-	/** Quick pull: uses saved strategy and autoStash */
-	function handleQuickPull() {
+	/** Build the pull prompt, honoring saved pull strategy + auto-stash. */
+	function buildPullPrompt(): string {
 		const prefs = gitActionPreferences.current;
-		handlePull(prefs.pullStrategy, prefs.autoStash && pullHasChanges);
+		const strategy = prefs.pullStrategy === 'rebase' ? 'rebasing onto' : 'merging';
+		const stash = prefs.autoStash
+			? ' If there are uncommitted local changes, stash them first and restore them afterward.'
+			: '';
+		return `Pull the latest changes from the remote for the current branch${branchSuffix()}, ${strategy} the upstream changes into your local work.${stash} If there are conflicts, stop and tell me which files conflict.`;
 	}
 
-	/** Quick finish: uses saved mergeMethod and cleanup */
-	function handleQuickFinish() {
+	/** Build the create-PR prompt. */
+	function buildCreatePRPrompt(): string {
+		return `Push the current branch${branchSuffix()} and open a pull request into the default branch with a descriptive title and a summary of what changed.`;
+	}
+
+	/** Build the finish/merge prompt, honoring saved merge method + cleanup. */
+	function buildFinishPrompt(): string {
 		const prefs = gitActionPreferences.current;
-		handleFinish(prefs.mergeMethod, prefs.cleanupAfterMerge);
+		const pr = branchPR ? `pull request #${branchPR.number}` : 'the open pull request for this branch';
+		const method = prefs.mergeMethod === 'squash'
+			? 'squash-merge'
+			: prefs.mergeMethod === 'rebase'
+				? 'rebase-merge'
+				: 'merge';
+		const cleanup = prefs.cleanupAfterMerge
+			? ' After it merges, delete the branch (and clean up the worktree if this is a worktree session).'
+			: '';
+		return `${method.charAt(0).toUpperCase() + method.slice(1)} ${pr} into the default branch.${cleanup}`;
 	}
 
-	// =========================================================================
-	// Ship It pipeline (commit → push → PR → merge → cleanup)
-	// =========================================================================
-
-	/** Pipeline step descriptors, built dynamically based on current state */
-	let pipelineSteps = $state<{ id: string; label: string; sublabel?: string }[]>([]);
+	/** Build the Ship It pipeline prompt. */
+	function buildShipItPrompt(): string {
+		const prefs = gitActionPreferences.current;
+		const method = prefs.mergeMethod === 'squash'
+			? 'squash-merge'
+			: prefs.mergeMethod === 'rebase'
+				? 'rebase-merge'
+				: 'merge';
+		const cleanup = prefs.cleanupAfterMerge
+			? ', then delete the branch and clean up the worktree if applicable'
+			: '';
+		const prStep = branchPR
+			? `then ${method} the existing pull request #${branchPR.number} into the default branch`
+			: `open a pull request into the default branch with a descriptive title and summary, then ${method} it`;
+		return `Ship this branch end to end${branchSuffix()}: commit all current changes with a clear conventional-commit message, push the branch, ${prStep}${cleanup}. If anything fails along the way, stop and tell me what went wrong.`;
+	}
 
 	/**
-	 * Ship It — one-click pipeline using all saved preferences.
-	 *
-	 * Dynamically determines which steps are needed:
-	 * - Skip commit if no uncommitted changes
-	 * - Skip push if already up-to-date with remote
-	 * - Skip PR creation if PR already exists
-	 * - Always merge + cleanup (per user prefs)
+	 * Send a canned git-action prompt to the active chat session.
+	 * The buttons are disabled while streaming, so sending here won't interrupt.
 	 */
-	async function handleShipIt() {
-		const projectId = activeTab?.project;
-		if (!projectId) return;
-
-		const prefs = gitActionPreferences.current;
-		const worktreeId = activeTab?.worktreeId ?? undefined;
-		const branch = $gitStatus?.current_branch ?? undefined;
-		const defaultBranch = $githubRepoInfo?.default_branch ?? 'main';
-
-		// Build the pipeline steps based on current state
-		const steps: { id: string; label: string; sublabel?: string }[] = [];
-
-		const hasUncommittedChanges = ($diffStats?.files_changed ?? 0) > 0 ||
-			($diffStats?.additions ?? 0) > 0 ||
-			($diffStats?.deletions ?? 0) > 0;
-
-		if (hasUncommittedChanges) {
-			steps.push({ id: 'generate-commit', label: 'Generating commit message' });
-			steps.push({ id: 'commit', label: 'Committing changes' });
-		}
-
-		steps.push({ id: 'push', label: branch ? `Pushing to ${branch}` : 'Pushing to remote' });
-
-		// Check if PR already exists for this branch
-		const existingPR = branchPR;
-		if (!existingPR) {
-			steps.push({ id: 'generate-pr', label: 'Generating PR description' });
-			steps.push({ id: 'create-pr', label: 'Creating pull request' });
-		}
-
-		steps.push({ id: 'merge', label: `Merging pull request (${prefs.mergeMethod})` });
-
-		if (prefs.cleanupAfterMerge) {
-			steps.push({
-				id: 'cleanup',
-				label: isWorktreeMode ? 'Cleaning up worktree and branch' : 'Cleaning up branch'
-			});
-		}
-
-		pipelineSteps = steps;
-
-		// Initialize progress modal in pipeline mode
-		progressAction = 'pipeline';
-		progressMode = 'pipeline';
-		progressStep = 1;
-		progressCompleted = false;
-		progressError = null;
-		progressIsGenerating = false;
-		progressHasCleanup = prefs.cleanupAfterMerge;
-		showProgressModal = true;
-
-		// Track for post-cleanup worktree state update
-		_finishedWorktreeCleanup = !!(prefs.cleanupAfterMerge && isWorktreeMode && worktreeId);
-
-		let currentStepIndex = 0;
-
-		function advanceStep() {
-			currentStepIndex++;
-			progressStep = currentStepIndex;
-		}
-
-		pauseGitPoll();
-		git.setOperationInProgress(true);
-
-		// Timing instrumentation for ship-it pipeline
-		const tPipelineStart = performance.now();
-		const stepTimings: Record<string, number> = {};
-		async function timeStep(label: string, fn: () => Promise<any>): Promise<any> {
-			const t0 = performance.now();
-			try {
-				return await fn();
-			} finally {
-				const ms = performance.now() - t0;
-				stepTimings[label] = ms;
-				console.info(`[ship-it-timing] ${label} ${ms.toFixed(0)}ms`);
-			}
-		}
-
+	async function sendGitPrompt(prompt: string) {
+		const text = prompt.trim();
+		if (!text) return;
 		try {
-			// --- Step: Commit (if needed) ---
-			if (hasUncommittedChanges) {
-				// Generate commit message
-				advanceStep(); // generate-commit
-				let commitMessage: string;
-				try {
-					const generated = await timeStep('generate-commit-message', () =>
-						generateCommitMessage(projectId, {
-							include_unstaged: prefs.includeUnstaged
-						}, worktreeId)
-					);
-					commitMessage = generated.message;
-				} catch (e: any) {
-					progressError = e?.detail || e?.message || 'Failed to generate commit message';
-					return;
-				}
-
-				// Commit
-				advanceStep(); // commit
-				await timeStep('commit', () => git.commitChanges(commitMessage, prefs.includeUnstaged));
-			}
-
-			// --- Step: Push ---
-			advanceStep(); // push
-			await timeStep('push', () => git.pushCommits(branch, true));
-
-			// --- Step: Create PR (if none exists) ---
-			let prNumber: number;
-
-			if (!existingPR) {
-				// Generate PR description
-				advanceStep(); // generate-pr
-				let prTitle: string;
-				let prBody: string;
-				try {
-					const generated = await timeStep('generate-pr-description', () =>
-						generatePRDescription(projectId, {
-							base_branch: defaultBranch
-						}, worktreeId)
-					);
-					prTitle = generated.title;
-					prBody = generated.body;
-				} catch {
-					prTitle = branch || 'Update';
-					prBody = '';
-				}
-
-				// Create PR
-				advanceStep(); // create-pr
-				if (branch) {
-					const pr = await timeStep('create-pr', () =>
-						createPullRequest(projectId, {
-							title: prTitle,
-							body: prBody,
-							head: branch,
-							base: defaultBranch
-						})
-					);
-					prNumber = pr.number;
-					// Update branchPR state so Finish logic works
-					await timeStep('check-pr-after-create', () => checkPullRequests(projectId, branch));
-				} else {
-					progressError = 'No branch detected';
-					return;
-				}
-			} else {
-				prNumber = existingPR.number;
-			}
-
-			// --- Step: Merge ---
-			advanceStep(); // merge
-			await timeStep('merge-pr', () => mergePullRequest(projectId, prNumber, prefs.mergeMethod));
-
-			// --- Step: Cleanup (if enabled) ---
-			if (prefs.cleanupAfterMerge) {
-				advanceStep(); // cleanup
-				if (isWorktreeMode && worktreeId) {
-					await timeStep('cleanup-worktree', () => deleteWorktree(projectId, worktreeId, false));
-				} else if (branch && branch !== defaultBranch) {
-					await timeStep('cleanup-checkout', () => git.checkout(defaultBranch));
-					await timeStep('cleanup-delete-branch', () => git.deleteBranch(branch));
-				}
-			}
-
-			const tPipelineMs = performance.now() - tPipelineStart;
-			console.info(
-				`[ship-it-timing] PIPELINE TOTAL ${tPipelineMs.toFixed(0)}ms`,
-				stepTimings
-			);
-
-			progressCompleted = true;
-			branchPR = null;
-
-			// Only refresh git state if worktree wasn't deleted — polling a
-			// deleted worktree produces 404 spam that saturates connections.
-			const worktreeWasDeleted = prefs.cleanupAfterMerge && isWorktreeMode && !!worktreeId;
-			if (!worktreeWasDeleted) {
-				await git.refreshStatus();
-				await git.refreshDiffStats();
-			}
-		} catch (e: any) {
-			progressError = e?.detail || e?.message || 'An error occurred during the pipeline';
-		} finally {
-			git.setOperationInProgress(false);
-			// Don't resume polling if the worktree was deleted — it will
-			// just fire 404s until the user closes the modal and
-			// markWorktreeDeleted() clears the worktree context.
-			const worktreeWasDeleted = prefs.cleanupAfterMerge && isWorktreeMode && !!worktreeId;
-			if (!worktreeWasDeleted) {
-				resumeGitPoll();
-			}
+			await activeSession.sendMessage(text);
+		} catch (err) {
+			console.error('[MainPanel] Failed to send git action prompt', err);
 		}
 	}
 
-	async function handlePull(strategy: 'merge' | 'rebase', autoStash: boolean = false) {
-		progressAction = 'pull';
-		progressMode = 'pull';
-		progressStep = 1;
-		progressCompleted = false;
-		progressError = null;
-		progressIsGenerating = false;
-		progressHasCleanup = false;
-		showProgressModal = true;
-
-		const projectId = activeTab?.project;
-		if (!projectId) {
-			progressError = 'No project selected';
-			return;
-		}
-
-		pauseGitPoll();
-		git.setOperationInProgress(true);
-		try {
-			const result = await git.pull(strategy, autoStash);
-
-			if (result.has_conflicts) {
-				const fileList = result.conflicts.join(', ');
-				progressError = `Merge conflicts in ${result.conflicts.length} file(s): ${fileList}. Resolve conflicts manually using your editor or CLI.`;
-				return;
-			}
-
-			if (!result.success) {
-				progressError = result.message || 'Failed to pull';
-				return;
-			}
-
-			progressCompleted = true;
-		} catch (e: any) {
-			progressError = e?.detail || e?.message || 'Failed to pull';
-		} finally {
-			git.setOperationInProgress(false);
-			resumeGitPoll();
-		}
-	}
+	// --- Quick-action handlers: main button click sends the prompt immediately ---
+	function handleQuickCommit() { sendGitPrompt(buildCommitPrompt()); }
+	function handlePush() { sendGitPrompt(buildPushPrompt()); }
+	function handleQuickPull() { sendGitPrompt(buildPullPrompt()); }
+	function handleQuickCreatePR() { sendGitPrompt(buildCreatePRPrompt()); }
+	function handleQuickFinish() { sendGitPrompt(buildFinishPrompt()); }
+	function handleShipIt() { sendGitPrompt(buildShipItPrompt()); }
 </script>
 
 <div class="main-panel">
@@ -1026,14 +532,15 @@
 							onClickCreatePR={handleQuickCreatePR}
 							onClickFinish={handleQuickFinish}
 							onClickNewBranch={() => showCreateBranchModal = true}
-							onClickPush={() => handlePush(false)}
+							onClickPush={handlePush}
 							onClickPull={handleQuickPull}
 							onClickInitRepo={() => showInitRepoModal = true}
 							onClickShipIt={handleShipIt}
-							onOpenCommitModal={() => { showCommitModalMode = 'commit'; showCommitModal = true; }}
-							onOpenCreatePRModal={() => { showCommitModalMode = 'pr-only'; showCommitModal = true; }}
-							onOpenFinishModal={() => showFinishModal = true}
-							onOpenPullModal={() => showPullModal = true}
+							onSendPrompt={sendGitPrompt}
+							commitPrompt={buildCommitPrompt()}
+							createPRPrompt={buildCreatePRPrompt()}
+							finishPrompt={buildFinishPrompt()}
+							pullPrompt={buildPullPrompt()}
 							onOpenDiffReview={() => { showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
 						/>
 					{/if}
@@ -1111,65 +618,6 @@
 		defaultName={activeTab.title || ''}
 		onClose={() => showCreateBranchModal = false}
 		onCreated={() => git.refreshStatus()}
-	/>
-
-	<CommitModal
-		open={showCommitModal}
-		projectId={activeTab.project}
-		mode={showCommitModalMode}
-		defaultBranch={$githubRepoInfo?.default_branch ?? 'main'}
-		{needsPull}
-		onClose={() => showCommitModal = false}
-		onStartCommit={handleStartCommit}
-		onCreatePR={handleCreatePR}
-	/>
-
-	<FinishModal
-		open={showFinishModal}
-		pr={branchPR}
-		branchName={$gitStatus?.current_branch ?? ''}
-		{isWorktreeMode}
-		onClose={() => showFinishModal = false}
-		onFinish={handleFinish}
-	/>
-
-	<PullModal
-		open={showPullModal}
-		branchName={$gitStatus?.current_branch ?? ''}
-		commitsBehind={commitsBehindForPull}
-		commitsAhead={commitsAheadForPull}
-		hasChanges={pullHasChanges}
-		isDiverged={isDivergedForPull}
-		onClose={() => showPullModal = false}
-		onPull={(strategy, autoStash) => { showPullModal = false; handlePull(strategy, autoStash); }}
-		onForcePush={() => { showPullModal = false; handlePush(true); }}
-	/>
-
-	<CommitProgressModal
-		open={showProgressModal}
-		action={progressAction}
-		mode={progressMode}
-		currentStep={progressStep}
-		completed={progressCompleted}
-		error={progressError}
-		branchName={$gitStatus?.current_branch ?? ''}
-		isGenerating={progressIsGenerating}
-		hasCleanup={progressHasCleanup}
-		{pipelineSteps}
-		onClose={() => {
-			showProgressModal = false;
-			progressHasCleanup = false;
-			pipelineSteps = [];
-			if (progressCompleted && (progressMode === 'finish' || progressMode === 'pipeline') && _finishedWorktreeCleanup) {
-				activeSession.markWorktreeDeleted();
-				_finishedWorktreeCleanup = false;
-			}
-			if (progressCompleted && _pendingPRModal) {
-				_pendingPRModal = false;
-				showCommitModalMode = 'pr-only';
-				showCommitModal = true;
-			}
-		}}
 	/>
 
 	<InitRepoModal
