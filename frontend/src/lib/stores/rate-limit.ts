@@ -1,14 +1,15 @@
 /**
  * Rate-limit store — holds the most recent `rate_limit` WebSocket event so
- * `RateLimitBanner.svelte` can render reactively.
+ * `UsageLimitIndicator.svelte` can render reactively.
  *
  * Slice C (SDK 0.1.65→0.1.81 upgrade). Plain `.ts` (no $state runes) — see
  * KNOWN_ISSUES.md Root Cause 10.
  *
  * Lifecycle:
  *   1. WS handler `case 'rate_limit'` calls {@link rateLimit.set}.
- *   2. The banner subscribes via `$rateLimit` and renders when `event` is set.
- *   3. The banner ticks a countdown each second; once `resets_at` is in the
+ *   2. UsageLimitIndicator subscribes via `$rateLimit` and renders the 5-hour
+ *      usage pill when an applicable `event` is set.
+ *   3. The indicator ticks a countdown each second; once `resets_at` is in the
  *      past, the store auto-clears (via {@link rateLimit.gcExpired}).
  *   4. Dismiss is per-event — re-arms automatically on the next event.
  */

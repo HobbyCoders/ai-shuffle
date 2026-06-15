@@ -796,8 +796,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 
 			case 'rate_limit': {
-				// Slice C: pipe to the rate-limit store. RateLimitBanner reads
-				// reactively and renders a countdown + utilization bar.
+				// Slice C: pipe to the rate-limit store. UsageLimitIndicator reads
+				// reactively and renders a compact 5-hour usage pill + countdown.
 				rateLimit.set({
 					status: (data.status as string) ?? 'unknown',
 					rate_limit_type: (data.rate_limit_type as string) ?? 'unknown',

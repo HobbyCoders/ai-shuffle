@@ -506,8 +506,7 @@ export interface WsServerApiError {
 
 /**
  * Slice C: rate-limit telemetry broadcast (token bucket exhausted, request
- * deferred, etc.). Drives the {@link RateLimitBanner} component above
- * `<ChatInput>`.
+ * deferred, etc.). Drives the `UsageLimitIndicator` pill in the controls dock.
  */
 export interface WsServerRateLimit {
 	type: 'rate_limit';
