@@ -70,9 +70,9 @@ jobs:
           no-cache: ${{ inputs.no_cache }}
           build-args: |
             ${{ inputs.no_cache && format('CACHEBUST={0}', github.run_id) || '' }}
-          # Blacksmith persistent layer cache — survives across workflow runs
-          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
-          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }},mode=max
+          # Layer caching is automatic via Blacksmith's sticky disk:
+          # useblacksmith/setup-docker-builder persists /var/lib/buildkit across
+          # runs, so no cache-from/cache-to registry round-trip is needed.
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
