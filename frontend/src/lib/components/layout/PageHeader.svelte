@@ -10,6 +10,7 @@
 	import { layout, sidebarCollapsed } from '$lib/stores/layout';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
 	import { globalSttState, triggerToggle } from '$lib/services/globalStt';
+	import ClaudeStatusIndicator from '$lib/components/ClaudeStatusIndicator.svelte';
 
 	import type { Snippet } from 'svelte';
 
@@ -42,7 +43,9 @@
 	let showToggle = $derived(showSidebarToggle && $sidebarCollapsed);
 	let showStt = $derived(isMobile && $hotkeyPreferences.globalSttEnabled && !hideGlobalStt);
 	let hasContext = $derived(!!projectName || !!worktreeBranch);
-	let hasRightContent = $derived(showStt || !!actions || hasContext);
+	// The Claude status indicator always renders in .header-right, so the right
+	// region is always present (regardless of STT / git actions / context).
+	let hasRightContent = $derived(true);
 </script>
 
 <header class="page-header">
@@ -63,6 +66,7 @@
 
 	{#if hasRightContent}
 		<div class="header-right">
+			<ClaudeStatusIndicator />
 			{#if showStt}
 				<button
 					class="header-btn mic"
