@@ -391,6 +391,19 @@ async def handle_system(
                 # so the next frontend poll will pick up the change.
                 return
 
+    # Route thinking-token estimates to the active thinking block (a live
+    # counter, desktop-app style) instead of rendering them as standalone
+    # system-message cards. The newer CLI emits these frequently while the
+    # model reasons; surfacing each as a card floods the chat. Always return
+    # here — if there's no thinking block to attach to, the estimate is dropped
+    # (never falls through to add_system_message).
+    if subtype == "thinking_tokens":
+        await live_session_store.update_thinking_tokens(
+            session_id=ectx.session_id,
+            estimated_tokens=data.get("estimated_tokens"),
+        )
+        return
+
     # Extract content from data if available (e.g., api_error, local_command
     # events store their display text in data["content"])
     system_content = ""

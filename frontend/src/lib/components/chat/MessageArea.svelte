@@ -808,6 +808,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 						<ThinkingBlock
 							content={message.content}
 							streaming={message.streaming}
+							thinkingTokens={message.thinkingTokens}
 							profileName={getProfileName(message)}
 						/>
 					{:else if message.type === 'text' || !message.type}

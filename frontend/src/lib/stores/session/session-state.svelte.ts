@@ -112,7 +112,8 @@ function compareMessage(incoming: ChatMessage, existing: ChatMessage | undefined
 		existing.content === incoming.content &&
 		existing.streaming === incoming.streaming &&
 		existing.toolResult === incoming.toolResult &&
-		existing.toolStatus === incoming.toolStatus
+		existing.toolStatus === incoming.toolStatus &&
+		existing.thinkingTokens === incoming.thinkingTokens
 	) {
 		return existing;
 	}

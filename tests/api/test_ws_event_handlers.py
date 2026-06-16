@@ -504,6 +504,75 @@ class TestHandleSystem:
 
 
 # ---------------------------------------------------------------------------
+# Thinking: content channel vs. token-estimate routing
+# ---------------------------------------------------------------------------
+
+class TestThinkingHandling:
+    """Distinguishes the two thinking signals the newer CLI emits:
+
+    1. Thinking *content* — `stream_delta` deltas with delta_type="thinking",
+       captured into a thinking block (this is the real "is there thinking?"
+       evidence: when the model reasons, this channel carries the text).
+    2. Thinking *token estimate* — `system`/subtype="thinking_tokens" progress
+       messages. These must update the active thinking block (like task_progress
+       updates its subagent), NOT render as standalone system-message cards.
+    """
+
+    @pytest.mark.asyncio
+    async def test_thinking_delta_appends_content_and_broadcasts(self):
+        """Proof that thinking content flows: a thinking delta is appended to
+        the thinking block and forwarded as a 'thinking' chunk (never a card)."""
+        ectx = make_ctx()
+        state = make_state(stream_started=True)
+        event = {
+            "type": "stream_delta",
+            "delta_type": "thinking",
+            "content": "Let me reason about this...",
+            "index": 0,
+            "session_id": "sess-1",
+        }
+
+        with patch("app.api.ws_event_handlers.live_session_store") as mock_store, \
+             patch("app.api.ws_event_handlers.sync_engine") as mock_sync:
+            mock_store.append_thinking = AsyncMock()
+            mock_sync.broadcast_stream_chunk = AsyncMock()
+
+            await handle_stream_delta(event, ectx, state)
+
+            mock_store.append_thinking.assert_awaited_once_with(
+                "sess-1", "Let me reason about this..."
+            )
+            _, kwargs = mock_sync.broadcast_stream_chunk.await_args
+            assert kwargs["chunk_type"] == "thinking"
+
+    @pytest.mark.asyncio
+    async def test_thinking_tokens_routes_to_block_not_system_message(self):
+        """Spec for Option B: a thinking_tokens system message must update the
+        active thinking block's token estimate and must NOT create a system
+        card. Mirrors the task_progress -> subagent routing in handle_system."""
+        ectx = make_ctx()
+        state = make_state(stream_started=True)
+        event = {
+            "type": "system",
+            "subtype": "thinking_tokens",
+            "data": {"estimated_tokens": 174, "estimated_tokens_delta": 24},
+        }
+
+        with patch("app.api.ws_event_handlers.live_session_store") as mock_store, \
+             patch("app.api.ws_event_handlers.sync_engine") as mock_sync:
+            mock_store.update_thinking_tokens = AsyncMock(return_value=True)
+            mock_store.add_system_message = AsyncMock()
+            mock_sync.broadcast_stream_chunk = AsyncMock()
+
+            await handle_system(event, ectx, state)
+
+            mock_store.update_thinking_tokens.assert_awaited_once_with(
+                session_id="sess-1", estimated_tokens=174
+            )
+            mock_store.add_system_message.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # Subagent handlers
 # ---------------------------------------------------------------------------
 

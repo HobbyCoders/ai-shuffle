@@ -25,13 +25,17 @@
 		initialExpanded?: boolean;
 		/** Profile name to display in header (defaults to "Assistant") */
 		profileName?: string;
+		/** Live estimated thinking-token count, shown as a counter in the header
+		 *  (fed by the CLI's streaming `thinking_tokens` events). */
+		thinkingTokens?: number | null;
 	}
 
 	let {
 		content,
 		streaming = false,
 		initialExpanded,
-		profileName = 'Assistant'
+		profileName = 'Assistant',
+		thinkingTokens = null
 	}: Props = $props();
 
 	// Chat preferences (reactive via .current getter)
@@ -167,6 +171,12 @@
 			<StreamingIndicator />
 		{/if}
 
+		{#if thinkingTokens}
+			<span class="thinking-tokens" title="Estimated thinking tokens">
+				{thinkingTokens.toLocaleString()} tokens
+			</span>
+		{/if}
+
 		<!-- Chevron -->
 		<svg
 			class="thinking-chevron {isExpanded ? 'expanded' : ''}"
@@ -239,6 +249,16 @@
 		height: 1rem;
 		flex-shrink: 0;
 		color: color-mix(in oklch, var(--primary) 70%, var(--muted-foreground));
+	}
+
+	.thinking-tokens {
+		font-style: normal;
+		font-size: 0.6875rem;
+		font-weight: 500;
+		color: var(--muted-foreground);
+		font-variant-numeric: tabular-nums;
+		opacity: 0.85;
+		white-space: nowrap;
 	}
 
 	.thinking-chevron {

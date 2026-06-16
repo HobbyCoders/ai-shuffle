@@ -106,6 +106,11 @@ class LiveMessage:
     system_subtype: Optional[str] = None
     system_data: Optional[Dict[str, Any]] = None
 
+    # For thinking messages — live estimated token count, fed by the CLI's
+    # streaming `thinking_tokens` system messages (desktop-app-style counter
+    # shown on the thinking block instead of as standalone system cards).
+    thinking_tokens: Optional[int] = None
+
     # Metadata (added at completion)
     metadata: Optional[Dict[str, Any]] = None
 
@@ -164,6 +169,10 @@ class LiveMessage:
             result["systemSubtype"] = self.system_subtype
         if self.system_data is not None:
             result["systemData"] = self.system_data
+
+        # Thinking token estimate (live counter on thinking blocks)
+        if self.thinking_tokens is not None:
+            result["thinkingTokens"] = self.thinking_tokens
 
         # Metadata
         if self.metadata:
@@ -534,6 +543,30 @@ class LiveSessionStore:
                     msg.streaming = False
                     self._increment_update_id(session)
                     return
+
+    async def update_thinking_tokens(
+        self, session_id: str, estimated_tokens: Optional[int]
+    ) -> bool:
+        """Attach the CLI's live thinking-token estimate to the current thinking
+        block — the streaming counterpart to how `update_subagent_progress`
+        routes `task_progress` usage to its subagent. Keeps these high-frequency
+        estimates off the chat as standalone system cards.
+
+        Returns True if a thinking block was found and updated.
+        """
+        if estimated_tokens is None:
+            return False
+        async with self._get_session_lock(session_id):
+            session = self._sessions.get(session_id)
+            if not session:
+                return False
+            # Most recent thinking block (streaming or just-finalized).
+            for msg in reversed(session.messages):
+                if msg.type == "thinking" and msg.role == "assistant":
+                    msg.thinking_tokens = estimated_tokens
+                    self._increment_update_id(session)
+                    return True
+            return False
 
     async def add_tool_use(
         self,
