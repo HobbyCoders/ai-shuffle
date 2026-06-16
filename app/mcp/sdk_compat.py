@@ -33,7 +33,7 @@ def patch_sdk_server(server_cfg: dict, tools: list) -> dict:
         The same dict, patched in-place.
     """
     try:
-        from mcp.types import TextContent
+        from mcp.types import TextContent, ImageContent
 
         instance = server_cfg.get("instance")
         if instance is None:
@@ -54,6 +54,15 @@ def patch_sdk_server(server_cfg: dict, tools: list) -> dict:
                     item_type = item.get("type")
                     if item_type == "text":
                         content.append(TextContent(type="text", text=item["text"]))
+                    elif item_type == "image":
+                        # Pass inline images through as proper ImageContent so the
+                        # model can actually see them (e.g. computer-use screenshots).
+                        # Without this branch they'd be JSON-stringified into text.
+                        content.append(ImageContent(
+                            type="image",
+                            data=item["data"],
+                            mimeType=item.get("mimeType", "image/png"),
+                        ))
                     else:
                         content.append(TextContent(
                             type="text",

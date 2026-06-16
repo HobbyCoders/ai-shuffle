@@ -237,6 +237,7 @@ export interface ProfileConfig {
 	thinking_mode?: 'default' | 'disabled' | 'adaptive' | 'think' | 'think_harder' | 'ultra_think';  // Thinking config: default=SDK decides, disabled=off, adaptive=auto, think/think_harder/ultra_think=token budgets
 	effort?: 'low' | 'medium' | 'high' | 'max';  // Effort level for reasoning depth (independent of thinking config)
 	ai_tools?: Record<string, boolean>;  // AI tool toggles (image_generation, video_generation, etc.)
+	computer_use?: { enabled?: boolean; target_display?: number | null; require_confirmation?: boolean };  // Host desktop control (native mode only)
 	enabled_agents?: string[];  // Subagents enabled for this profile
 	setting_sources?: string[];  // Where to load settings from (e.g., 'claude_code')
 	cwd?: string;  // Working directory override

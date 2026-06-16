@@ -154,7 +154,8 @@
 		env_vars: [] as { key: string; value: string }[],
 		enable_file_checkpointing: false,
 		app_config_tools: false,
-		strict_mcp_config: false
+		strict_mcp_config: false,
+		computer_use_enabled: false
 	});
 
 	// Common environment variable presets with valid ranges
@@ -304,7 +305,8 @@
 			env_vars: [],
 			enable_file_checkpointing: false,
 			app_config_tools: false,
-			strict_mcp_config: false
+			strict_mcp_config: false,
+			computer_use_enabled: false
 		};
 		toolSelectionMode = 'all';
 		aiToolSelectionMode = 'custom';
@@ -377,7 +379,8 @@
 			env_vars: Object.entries((config as any).env || {}).map(([key, value]) => ({ key, value: value as string })),
 			enable_file_checkpointing: (config as any).enable_file_checkpointing || false,
 			app_config_tools: (config as any).app_config_tools || false,
-			strict_mcp_config: (config as any).strict_mcp_config || false
+			strict_mcp_config: (config as any).strict_mcp_config || false,
+			computer_use_enabled: !!(config as any).computer_use?.enabled
 		};
 
 		viewMode = 'form';
@@ -609,6 +612,8 @@
 			? Object.fromEntries(effectiveAITools.map((id) => [id, true]))
 			: {};
 
+		config.computer_use = { enabled: profileForm.computer_use_enabled };
+
 		if (profileForm.system_prompt_type === 'preset') {
 			config.system_prompt = {
 				type: 'preset',
@@ -774,7 +779,8 @@
 			env_vars: agent.env ? Object.entries(agent.env).map(([key, value]) => ({ key, value: value as string })) : [],
 			enable_file_checkpointing: false,
 			app_config_tools: false,
-			strict_mcp_config: false
+			strict_mcp_config: false,
+			computer_use_enabled: false
 		};
 
 		viewMode = 'form';

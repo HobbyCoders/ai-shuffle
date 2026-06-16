@@ -75,6 +75,19 @@ class SystemPromptConfig(BaseModel):
     inject_env_details: bool = False  # Inject environment info (working dir, platform, date, etc.)
 
 
+class ComputerUseConfig(BaseModel):
+    """Host desktop control (screenshots, mouse, keyboard). Native mode only.
+
+    Off by default; the server is also gated on host availability at runtime
+    (auto-disabled in Docker/headless). See app/mcp/computer_use_sdk.py.
+    """
+    enabled: bool = False
+    target_display: Optional[int] = None  # initial monitor (mss index); None = primary
+    virtual_width: Optional[int] = None   # screenshot downscale target width
+    virtual_height: Optional[int] = None  # screenshot downscale target height
+    require_confirmation: bool = False    # route each action through the approval UI
+
+
 class ProfileConfig(BaseModel):
     """Claude Agent configuration stored in profile - maps to ClaudeAgentOptions"""
     # Core settings
@@ -97,6 +110,9 @@ class ProfileConfig(BaseModel):
 
     # AI tools configuration - individual toggles for each AI tool
     ai_tools: Optional[AIToolsConfig] = None
+
+    # Computer-use (host desktop control). Off by default; native mode only.
+    computer_use: Optional[ComputerUseConfig] = None
 
     # System prompt
     system_prompt: Optional[SystemPromptConfig] = None

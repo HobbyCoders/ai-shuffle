@@ -11,6 +11,9 @@
 	import UsageLimitIndicator from './UsageLimitIndicator.svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';
+	import { onMount } from 'svelte';
+	import { Monitor } from 'lucide-svelte';
+	import { computerUse } from '$lib/stores/computerUse.svelte';
 
 	interface Props {
 		isUploading: boolean;
@@ -18,6 +21,22 @@
 	}
 
 	let { isUploading, onAttachClick }: Props = $props();
+
+	// Computer-use toolbar toggle. A single monitor icon: lit when the agent is
+	// allowed to control the screen, dimmed when paused (the process-global
+	// emergency stop halts all synthetic input immediately). Polling starts only
+	// while the active profile enables the capability.
+	let cuBusy = $state(false);
+
+	async function toggleComputerUse() {
+		if (cuBusy) return;
+		cuBusy = true;
+		try {
+			await computerUse.toggleStopped();
+		} finally {
+			cuBusy = false;
+		}
+	}
 
 	// Only one override dropdown may be open at a time — opening one closes the other.
 	let openDropdown = $state<'effort' | 'permission' | null>(null);
@@ -31,6 +50,15 @@
 	const profilePermissionMode = $derived(activeProfile?.config?.permission_mode ?? null);
 	const effortValue = $derived($activeSession.effortLevelOverride ?? profileEffort);
 	const permissionValue = $derived($activeSession.permissionModeOverride ?? profilePermissionMode);
+	const computerUseEnabled = $derived(!!activeProfile?.config?.computer_use?.enabled);
+
+	// Poll computer-use status (shared store) only while the active profile
+	// enables the capability; stop when it doesn't, to avoid idle polling.
+	$effect(() => {
+		if (!computerUseEnabled) return;
+		computerUse.start();
+		return () => computerUse.stop();
+	});
 
 	const permissionModes = [
 		{ value: 'default', label: 'Ask', description: 'Confirm before tools' },
@@ -96,6 +124,30 @@
 				</svg>
 			{/snippet}
 		</OverrideDropdown>
+
+		<!-- Computer Use toggle (only when the profile enables it). A single
+		     monitor icon: lit = the agent may control the screen; dimmed =
+		     paused. Clicking toggles control on/off. -->
+		{#if computerUseEnabled}
+			<button
+				type="button"
+				onclick={toggleComputerUse}
+				disabled={cuBusy}
+				class="dock-action-btn dock-action-btn--cu"
+				class:cu-on={!computerUse.stopped}
+				class:cu-active={computerUse.active && !computerUse.stopped}
+				role="switch"
+				aria-checked={!computerUse.stopped}
+				title={computerUse.stopped
+					? 'Computer control paused — click to allow the agent to control the screen'
+					: computerUse.active
+						? `Agent is controlling ${computerUse.displayLabel ?? 'your screen'} — click to pause`
+						: 'Computer control enabled — click to pause'}
+				aria-label={computerUse.stopped ? 'Enable computer control' : 'Pause computer control'}
+			>
+				<Monitor size={18} strokeWidth={1.75} />
+			</button>
+		{/if}
 
 		<!-- Attach File Button -->
 		<button
@@ -186,6 +238,31 @@
 	.dock-action-btn:disabled {
 		opacity: 0.3;
 		cursor: not-allowed;
+	}
+
+	/* Computer-use toggle: dimmed when paused, lit (primary) when control is
+	   allowed, and gently pulsing while the agent is actively driving a screen. */
+	.dock-action-btn--cu {
+		color: var(--muted-foreground);
+	}
+
+	.dock-action-btn--cu.cu-on {
+		color: var(--primary);
+	}
+
+	.dock-action-btn--cu:hover:not(:disabled) {
+		background: var(--hover-overlay);
+		color: var(--primary);
+	}
+
+	.dock-action-btn--cu.cu-active {
+		color: var(--primary);
+		animation: cu-pulse 1.4s ease-in-out infinite;
+	}
+
+	@keyframes cu-pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.45; }
 	}
 
 	/* Responsive: mobile tighter center gap */
