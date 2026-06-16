@@ -1,5 +1,8 @@
 import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { fileURLToPath } from 'node:url';
+
+const lib = fileURLToPath(new URL('./src/lib', import.meta.url));
 
 export default defineConfig({
 	plugins: [svelte({ hot: !process.env.VITEST })],
@@ -20,8 +23,12 @@ export default defineConfig({
 				'build/'
 			]
 		},
-		// Svelte 5 compatibility
-		alias: [{ find: /^svelte$/, replacement: 'svelte/internal' }]
+		// Svelte 5 compatibility + SvelteKit `$lib` alias for unit tests
+		alias: [
+			{ find: /^svelte$/, replacement: 'svelte/internal' },
+			{ find: /^\$lib\/(.*)$/, replacement: `${lib}/$1` },
+			{ find: /^\$lib$/, replacement: lib }
+		]
 	},
 	resolve: {
 		conditions: ['browser']

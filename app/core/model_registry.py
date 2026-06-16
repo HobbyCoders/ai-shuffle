@@ -33,7 +33,22 @@ class ModelOption:
     """Model family — drives badge colour."""
 
     context_window: int
-    """Maximum input context in tokens (200k standard, 1M for [1m] variants)."""
+    """Maximum input context in tokens (always the standard 200k window;
+    the 1M window is opt-in via the ``[1m]`` suffix, see ``CONTEXT_1M_SUFFIX``)."""
+
+    supports_1m: bool = False
+    """Whether this model can run with the 1M context window (``[1m]`` suffix)."""
+
+
+# ---------------------------------------------------------------------------
+# 1M context modifier
+# ---------------------------------------------------------------------------
+
+# The 1M context window is not a separate model — it is a capability toggled
+# on a base model by appending this suffix to the stored model ID. The UI
+# exposes it as a checkbox rather than as duplicate dropdown entries.
+CONTEXT_1M_SUFFIX = "[1m]"
+CONTEXT_1M_WINDOW = 1_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -41,17 +56,14 @@ class ModelOption:
 # ---------------------------------------------------------------------------
 
 # Order here is the order shown in every dropdown in the UI and the order
-# reported by ``GET /api/models``.
+# reported by ``GET /api/models``. Only base models live here; the 1M variants
+# are derived on demand via ``CONTEXT_1M_SUFFIX``.
 MODELS: Tuple[ModelOption, ...] = (
-    ModelOption("claude-haiku-4-5",      "Haiku 4.5",       "haiku",  200_000),
-    ModelOption("claude-sonnet-4-6",     "Sonnet 4.6",      "sonnet", 200_000),
-    ModelOption("claude-sonnet-4-6[1m]", "Sonnet 4.6 1M",   "sonnet", 1_000_000),
-    ModelOption("claude-opus-4-6",       "Opus 4.6",        "opus",   200_000),
-    ModelOption("claude-opus-4-6[1m]",   "Opus 4.6 1M",     "opus",   1_000_000),
-    ModelOption("claude-opus-4-7",       "Opus 4.7",        "opus",   200_000),
-    ModelOption("claude-opus-4-7[1m]",   "Opus 4.7 1M",     "opus",   1_000_000),
-    ModelOption("claude-opus-4-8",       "Opus 4.8",        "opus",   200_000),
-    ModelOption("claude-opus-4-8[1m]",   "Opus 4.8 1M",     "opus",   1_000_000),
+    ModelOption("claude-haiku-4-5",  "Haiku 4.5",  "haiku",  200_000, supports_1m=False),
+    ModelOption("claude-sonnet-4-6", "Sonnet 4.6", "sonnet", 200_000, supports_1m=True),
+    ModelOption("claude-opus-4-6",   "Opus 4.6",   "opus",   200_000, supports_1m=True),
+    ModelOption("claude-opus-4-7",   "Opus 4.7",   "opus",   200_000, supports_1m=True),
+    ModelOption("claude-opus-4-8",   "Opus 4.8",   "opus",   200_000, supports_1m=True),
 )
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -92,22 +104,50 @@ def normalize_model(value: Optional[str]) -> str:
     return LEGACY_MODEL_MAP.get(value, value)
 
 
+def has_1m_context(value: Optional[str]) -> bool:
+    """True when the (normalized) model opts into the 1M context window."""
+    normalized = normalize_model(value)
+    return bool(normalized) and normalized.endswith(CONTEXT_1M_SUFFIX)
+
+
+def strip_context_suffix(value: Optional[str]) -> str:
+    """The base model ID with any ``[1m]`` suffix removed (normalized first)."""
+    normalized = normalize_model(value)
+    if normalized.endswith(CONTEXT_1M_SUFFIX):
+        return normalized[: -len(CONTEXT_1M_SUFFIX)]
+    return normalized
+
+
+def with_context_suffix(value: Optional[str], enabled: bool) -> str:
+    """Apply or remove the ``[1m]`` suffix on a model ID.
+
+    Inherit / empty values are returned untouched (nothing to toggle).
+    """
+    base = strip_context_suffix(value)
+    if not base:
+        return base
+    return base + CONTEXT_1M_SUFFIX if enabled else base
+
+
 def is_preset_model(value: Optional[str]) -> bool:
-    """True when ``value`` (after normalization) is one of the selectable presets."""
-    return normalize_model(value) in _BY_VALUE
+    """True when ``value`` maps to one of the selectable presets (1M variants included)."""
+    return strip_context_suffix(value) in _BY_VALUE
 
 
 def get_model(value: Optional[str]) -> Optional[ModelOption]:
-    """Look up a ``ModelOption`` by stored value, honouring legacy slugs."""
-    normalized = normalize_model(value)
-    return _BY_VALUE.get(normalized)
+    """Look up the base ``ModelOption`` for a stored value, honouring legacy
+    slugs and the ``[1m]`` suffix."""
+    return _BY_VALUE.get(strip_context_suffix(value))
 
 
 def get_model_label(value: Optional[str]) -> str:
-    """Human-readable label; falls back to the raw value, then 'Default'."""
+    """Human-readable label; falls back to the raw value, then 'Default'.
+
+    1M variants get a ``" 1M"`` suffix on the base label.
+    """
     match = get_model(value)
     if match is not None:
-        return match.label
+        return f"{match.label} 1M" if has_1m_context(value) else match.label
     return value if value else "Default"
 
 
@@ -118,14 +158,22 @@ def get_model_family(value: Optional[str]) -> Optional[ModelFamily]:
 
 
 def get_context_window(value: Optional[str]) -> int:
-    """Context window for the given model; defaults to 200k for unknowns."""
+    """Context window for the given model; 1M for ``[1m]`` variants, else 200k."""
+    if has_1m_context(value):
+        return CONTEXT_1M_WINDOW
     match = get_model(value)
     return match.context_window if match is not None else 200_000
 
 
 def model_values() -> List[str]:
-    """All canonical model IDs, for use in Pydantic ``Literal`` / JSON-schema enums."""
-    return [m.value for m in MODELS]
+    """All selectable model IDs (base + 1M variants), for use in Pydantic
+    ``Literal`` / JSON-schema enums."""
+    values: List[str] = []
+    for m in MODELS:
+        values.append(m.value)
+        if m.supports_1m:
+            values.append(m.value + CONTEXT_1M_SUFFIX)
+    return values
 
 
 def registry_payload() -> Dict[str, object]:
@@ -137,10 +185,12 @@ def registry_payload() -> Dict[str, object]:
                 "label": m.label,
                 "family": m.family,
                 "context_window": m.context_window,
+                "supports_1m": m.supports_1m,
             }
             for m in MODELS
         ],
         "default": DEFAULT_MODEL,
         "inherit_value": INHERIT_VALUE,
+        "context_1m_suffix": CONTEXT_1M_SUFFIX,
         "legacy_map": dict(LEGACY_MODEL_MAP),
     }

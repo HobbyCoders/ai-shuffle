@@ -27,23 +27,29 @@ export interface ModelOption {
 	label: string;
 	/** Badge family — maps to `.card-badge--{family}` CSS classes. */
 	family: ModelFamily;
+	/** Whether this model can run with the 1M context window (`[1m]` suffix). */
+	supports1m?: boolean;
 }
+
+/**
+ * The 1M context window is not a separate model — it is a capability toggled
+ * on a base model by appending this suffix to the stored model ID. The UI
+ * exposes it as a checkbox rather than as duplicate dropdown entries.
+ */
+export const CONTEXT_1M_SUFFIX = '[1m]';
 
 // ---------------------------------------------------------------------------
 // Static fallback — mirrors `app/core/model_registry.py` at build time.
 // Keep in sync; drift is logged via `warnOnDrift` when hydration completes.
+// Only base models live here; the 1M variants are derived via CONTEXT_1M_SUFFIX.
 // ---------------------------------------------------------------------------
 
 const STATIC_MODELS: readonly ModelOption[] = [
-	{ value: 'claude-haiku-4-5', label: 'Haiku 4.5', family: 'haiku' },
-	{ value: 'claude-sonnet-4-6', label: 'Sonnet 4.6', family: 'sonnet' },
-	{ value: 'claude-sonnet-4-6[1m]', label: 'Sonnet 4.6 1M', family: 'sonnet' },
-	{ value: 'claude-opus-4-6', label: 'Opus 4.6', family: 'opus' },
-	{ value: 'claude-opus-4-6[1m]', label: 'Opus 4.6 1M', family: 'opus' },
-	{ value: 'claude-opus-4-7', label: 'Opus 4.7', family: 'opus' },
-	{ value: 'claude-opus-4-7[1m]', label: 'Opus 4.7 1M', family: 'opus' },
-	{ value: 'claude-opus-4-8', label: 'Opus 4.8', family: 'opus' },
-	{ value: 'claude-opus-4-8[1m]', label: 'Opus 4.8 1M', family: 'opus' }
+	{ value: 'claude-haiku-4-5', label: 'Haiku 4.5', family: 'haiku', supports1m: false },
+	{ value: 'claude-sonnet-4-6', label: 'Sonnet 4.6', family: 'sonnet', supports1m: true },
+	{ value: 'claude-opus-4-6', label: 'Opus 4.6', family: 'opus', supports1m: true },
+	{ value: 'claude-opus-4-7', label: 'Opus 4.7', family: 'opus', supports1m: true },
+	{ value: 'claude-opus-4-8', label: 'Opus 4.8', family: 'opus', supports1m: true }
 ] as const;
 
 const STATIC_DEFAULT = 'claude-sonnet-4-6';
@@ -115,27 +121,58 @@ export function normalizeModel(value: string | null | undefined): string {
 	return _registry.legacyMap[value] ?? value;
 }
 
-/** True when `value` (after normalization) is one of the selectable presets. */
-export function isPresetModel(value: string | null | undefined): boolean {
+/** True when the (normalized) model opts into the 1M context window. */
+export function has1MContext(value: string | null | undefined): boolean {
 	const normalized = normalizeModel(value);
-	return _registry.models.some((m) => m.value === normalized);
+	return !!normalized && normalized.endsWith(CONTEXT_1M_SUFFIX);
+}
+
+/** The base model ID with any `[1m]` suffix removed (normalized first). */
+export function getBaseModel(value: string | null | undefined): string {
+	const normalized = normalizeModel(value);
+	return normalized.endsWith(CONTEXT_1M_SUFFIX)
+		? normalized.slice(0, -CONTEXT_1M_SUFFIX.length)
+		: normalized;
+}
+
+/**
+ * Apply or remove the `[1m]` suffix on a model ID.
+ * Inherit / empty values are returned untouched (nothing to toggle).
+ */
+export function withContextSuffix(value: string | null | undefined, enabled: boolean): string {
+	const base = getBaseModel(value);
+	if (!base) return base;
+	return enabled ? base + CONTEXT_1M_SUFFIX : base;
+}
+
+/** True when the base model supports the 1M context window. */
+export function modelSupports1M(value: string | null | undefined): boolean {
+	const base = getBaseModel(value);
+	return _registry.models.find((m) => m.value === base)?.supports1m ?? false;
+}
+
+/** True when `value` maps to one of the selectable presets (1M variants included). */
+export function isPresetModel(value: string | null | undefined): boolean {
+	const base = getBaseModel(value);
+	return _registry.models.some((m) => m.value === base);
 }
 
 /**
  * Human-readable label for a stored model value.
  * Falls back to the raw value, or `'Default'` when nothing is set.
+ * 1M variants get a `" 1M"` suffix on the base label.
  */
 export function getModelLabel(value: string | null | undefined): string {
-	const normalized = normalizeModel(value);
-	const match = _registry.models.find((m) => m.value === normalized);
-	if (match) return match.label;
+	const base = getBaseModel(value);
+	const match = _registry.models.find((m) => m.value === base);
+	if (match) return has1MContext(value) ? `${match.label} 1M` : match.label;
 	return value && value.length > 0 ? value : 'Default';
 }
 
 /** Resolved family for a stored model value, or `null` for non-preset values. */
 export function getModelFamily(value: string | null | undefined): ModelFamily | null {
-	const normalized = normalizeModel(value);
-	return _registry.models.find((m) => m.value === normalized)?.family ?? null;
+	const base = getBaseModel(value);
+	return _registry.models.find((m) => m.value === base)?.family ?? null;
 }
 
 /**
@@ -153,11 +190,24 @@ export function getModelBadgeClass(value: string | null | undefined): string {
 // Hydration
 // ---------------------------------------------------------------------------
 
+interface RegistryModelPayload {
+	value: string;
+	label: string;
+	family: ModelFamily;
+	context_window?: number;
+	supports_1m?: boolean;
+}
+
 interface RegistryPayload {
-	models: ModelOption[];
+	models: RegistryModelPayload[];
 	default: string;
 	inherit_value?: string;
+	context_1m_suffix?: string;
 	legacy_map: Record<string, string>;
+}
+
+function mapPayloadModel(m: RegistryModelPayload): ModelOption {
+	return { value: m.value, label: m.label, family: m.family, supports1m: m.supports_1m ?? false };
 }
 
 function warnOnDrift(hydrated: ModelOption[], baseline: readonly ModelOption[]): void {
@@ -184,8 +234,9 @@ export async function hydrateModelRegistry(): Promise<void> {
 			console.warn('[model-registry] hydrate returned empty payload, keeping static fallback');
 			return;
 		}
-		warnOnDrift(payload.models, STATIC_MODELS);
-		_registry.models = payload.models;
+		const models = payload.models.map(mapPayloadModel);
+		warnOnDrift(models, STATIC_MODELS);
+		_registry.models = models;
 		_registry.default = payload.default || STATIC_DEFAULT;
 		_registry.legacyMap = payload.legacy_map ?? { ...STATIC_LEGACY_MAP };
 		_registry.hydrated = true;

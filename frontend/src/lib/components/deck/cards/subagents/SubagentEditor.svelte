@@ -4,7 +4,15 @@
 	import type { SubagentExport } from '$lib/api/client';
 	import AIGenerateDialog from '../AIGenerateDialog.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
-	import { getModels, CUSTOM_VALUE, INHERIT_VALUE } from '$lib/constants/models';
+	import {
+		getModels,
+		CUSTOM_VALUE,
+		INHERIT_VALUE,
+		getBaseModel,
+		has1MContext,
+		withContextSuffix,
+		modelSupports1M
+	} from '$lib/constants/models';
 	import '../card-design-system.css';
 
 	interface Subagent {
@@ -264,13 +272,13 @@
 				<select
 					id="agent-model"
 					class="card-form-input"
-					value={customModelMode ? CUSTOM_VALUE : formModel}
+					value={customModelMode ? CUSTOM_VALUE : getBaseModel(formModel)}
 					onchange={(e) => {
 						const v = (e.target as HTMLSelectElement).value;
 						if (v === CUSTOM_VALUE) {
 							onCustomModelModeChange(true, '');
 						} else {
-							onCustomModelModeChange(false, v);
+							onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(formModel)));
 						}
 					}}
 				>
@@ -289,6 +297,15 @@
 						placeholder="e.g. claude-opus-4-6"
 						style="margin-top: 6px;"
 					/>
+				{:else if modelSupports1M(formModel)}
+					<label class="agent-1m-toggle">
+						<input
+							type="checkbox"
+							checked={has1MContext(formModel)}
+							onchange={(e) => onFormModelChange(withContextSuffix(formModel, (e.target as HTMLInputElement).checked))}
+						/>
+						<span>1M context</span>
+					</label>
 				{/if}
 			</div>
 
@@ -638,6 +655,23 @@
 	/* Required indicator */
 	.required {
 		color: var(--destructive);
+	}
+
+	/* 1M context toggle (under model select) */
+	.agent-1m-toggle {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-top: 8px;
+		cursor: pointer;
+		font-size: var(--text-sm, 0.75rem);
+		color: var(--text-secondary);
+	}
+
+	.agent-1m-toggle input {
+		width: 14px;
+		height: 14px;
+		accent-color: var(--primary);
 	}
 
 	/* ─── Profile-style content & sections ─── */

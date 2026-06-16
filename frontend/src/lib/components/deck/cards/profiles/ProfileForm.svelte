@@ -9,7 +9,14 @@
 	import { Users, Settings, Wrench, Bot, FileText, SlidersHorizontal, Check, Plus, Trash2 } from 'lucide-svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
-	import { getModels, CUSTOM_VALUE } from '$lib/constants/models';
+	import {
+		getModels,
+		CUSTOM_VALUE,
+		getBaseModel,
+		has1MContext,
+		withContextSuffix,
+		modelSupports1M
+	} from '$lib/constants/models';
 
 	interface ToolCategory {
 		id: string;
@@ -266,7 +273,7 @@
 			<div class="pf-field-grid">
 				<div class="pf-field">
 					<label class="pf-label" for="profile-model">Model</label>
-					<select id="profile-model" class="pf-select" value={customModelMode ? CUSTOM_VALUE : profileForm.model} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v === CUSTOM_VALUE) { onCustomModelModeChange(true, ''); } else { onCustomModelModeChange(false, v); } }}>
+					<select id="profile-model" class="pf-select" value={customModelMode ? CUSTOM_VALUE : getBaseModel(profileForm.model)} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v === CUSTOM_VALUE) { onCustomModelModeChange(true, ''); } else { onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(profileForm.model))); } }}>
 						{#each getModels() as model (model.value)}
 							<option value={model.value}>{model.label}</option>
 						{/each}
@@ -274,6 +281,16 @@
 					</select>
 					{#if customModelMode}
 						<input type="text" value={profileForm.model} oninput={(e) => onFormChange('model', (e.target as HTMLInputElement).value)} class="pf-input pf-input--mono" placeholder="e.g. claude-opus-4-7" style="margin-top: 6px;" />
+					{:else if modelSupports1M(profileForm.model)}
+						<label class="pf-1m-toggle">
+							<input
+								type="checkbox"
+								class="checkbox-input"
+								checked={has1MContext(profileForm.model)}
+								onchange={(e) => onFormChange('model', withContextSuffix(profileForm.model, (e.target as HTMLInputElement).checked))}
+							/>
+							<span class="pf-1m-label">1M context</span>
+						</label>
 					{/if}
 				</div>
 				<div class="pf-field">
@@ -974,6 +991,20 @@
 
 	.required {
 		color: var(--destructive);
+	}
+
+	/* 1M context toggle (under model select) */
+	.pf-1m-toggle {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-top: 8px;
+		cursor: pointer;
+	}
+
+	.pf-1m-label {
+		font-size: var(--text-sm, 0.75rem);
+		color: var(--text-secondary);
 	}
 
 	/* Inline checkboxes */
