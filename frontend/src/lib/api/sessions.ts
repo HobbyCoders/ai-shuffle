@@ -159,9 +159,10 @@ export async function toggleSessionFavorite(sessionId: string): Promise<Session>
  */
 export async function exportSession(
 	sessionId: string,
-	format: 'markdown' | 'json' = 'markdown'
+	format: 'markdown' | 'json' | 'jsonl' = 'markdown'
 ): Promise<void> {
-	const fallback = `session-export.${format === 'json' ? 'json' : 'md'}`;
+	const ext = format === 'json' ? 'json' : format === 'jsonl' ? 'jsonl' : 'md';
+	const fallback = `session-export.${ext}`;
 	await fetchAndDownload(`/sessions/${sessionId}/export?format=${format}`, fallback);
 }
 

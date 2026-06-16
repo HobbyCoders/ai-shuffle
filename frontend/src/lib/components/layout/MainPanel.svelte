@@ -15,6 +15,9 @@
 	import { githubRepoInfo } from '$lib/stores/github';
 	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming';
 	import { getPullRequests } from '$lib/api/github';
+	import { exportSession } from '$lib/api/sessions';
+	import { toast } from '$lib/stores/toast';
+	import { Download } from 'lucide-svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import ChatView from './ChatView.svelte';
 	import PageHeader from './PageHeader.svelte';
@@ -504,6 +507,22 @@
 	function handleQuickCreatePR() { sendGitPrompt(buildCreatePRPrompt()); }
 	function handleQuickFinish() { sendGitPrompt(buildFinishPrompt()); }
 	function handleShipIt() { sendGitPrompt(buildShipItPrompt()); }
+
+	// Download the raw Claude session history (.jsonl) for the active chat.
+	let downloadingJsonl = $state(false);
+	async function handleDownloadJsonl() {
+		const sessionId = activeTab?.sessionId;
+		if (!sessionId || downloadingJsonl) return;
+		downloadingJsonl = true;
+		try {
+			await exportSession(sessionId, 'jsonl');
+		} catch (err) {
+			const detail = (err as { detail?: string })?.detail;
+			toast.push(detail || 'Failed to download chat history', { tone: 'error' });
+		} finally {
+			downloadingJsonl = false;
+		}
+	}
 </script>
 
 <div class="main-panel">
@@ -520,6 +539,17 @@
 				hideGlobalStt={$activeView?.type === 'chat'}
 			>
 				{#snippet actions()}
+					{#if $activeView?.type === 'chat' && activeTab?.sessionId && activeTab.messages.length > 0}
+						<button
+							class="download-jsonl-btn"
+							onclick={handleDownloadJsonl}
+							disabled={downloadingJsonl}
+							title="Download chat history (.jsonl)"
+							aria-label="Download chat history as JSONL"
+						>
+							<Download size={16} strokeWidth={1.5} />
+						</button>
+					{/if}
 					{#if $activeView?.type === 'chat' && activeTab?.project && $githubAuthenticated && !activeTab?.worktreeDeleted}
 						<GitHeaderActions
 							projectId={activeTab.project}
@@ -659,6 +689,51 @@
 		min-width: 0;
 		overflow: hidden;
 		background: var(--background);
+	}
+
+	/* Download chat history button — matches PageHeader's .header-btn styling */
+	.download-jsonl-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		flex-shrink: 0;
+		background: transparent;
+		border: none;
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: background-color 150ms ease, color 150ms ease;
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	.download-jsonl-btn:hover {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+	}
+
+	.download-jsonl-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
+	}
+
+	.download-jsonl-btn:disabled {
+		opacity: 0.5;
+		cursor: default;
+	}
+
+	@media (max-width: 639px) {
+		.download-jsonl-btn {
+			width: 36px;
+			height: 36px;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.download-jsonl-btn {
+			transition: none;
+		}
 	}
 
 	.feature-panel {

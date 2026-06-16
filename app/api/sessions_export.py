@@ -31,7 +31,7 @@ export_router = APIRouter(tags=["Sessions"])
 async def export_session(
     request: Request,
     session_id: str,
-    format: str = Query("markdown", description="Export format: markdown or json"),
+    format: str = Query("markdown", description="Export format: markdown, json or jsonl"),
     token: str = Depends(require_auth)
 ):
     """
@@ -39,41 +39,81 @@ async def export_session(
 
     Args:
         session_id: The session ID to export
-        format: Export format - 'markdown' or 'json'
+        format: Export format - 'markdown', 'json' or 'jsonl'
 
     Returns:
         - For markdown: Plain text Markdown representation
         - For JSON: Full session data including metadata and messages
+        - For JSONL: The raw Claude session history (.jsonl) file
     """
     from datetime import datetime, timezone
     from fastapi.responses import Response
     import json
 
     # Validate format
-    if format not in ("markdown", "json"):
+    if format not in ("markdown", "json", "jsonl"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid format. Must be 'markdown' or 'json'"
+            detail="Invalid format. Must be 'markdown', 'json' or 'jsonl'"
         )
 
     session = await require_session(request, session_id)
 
-    # Load messages from JSONL (same logic as get_session)
     sdk_session_id = session.get("sdk_session_id")
-    messages = []
+
+    # Resolve working dir from project if available (used by JSONL lookups below)
     working_dir = "/workspace"
+    project_id = session.get("project_id")
+    if project_id:
+        project = await run_sync(database.get_project, project_id)
+        if project:
+            working_dir = get_project_working_dir(project)
+
+    # Generate base filename
+    title = session.get("title") or "untitled-session"
+    # Sanitize title for filename
+    safe_title = "".join(c if c.isalnum() or c in "-_ " else "" for c in title)
+    safe_title = safe_title.strip().replace(" ", "-")[:50]
+    date_str = datetime.now().strftime("%Y%m%d")
+
+    # Raw JSONL export — stream the original Claude session history file verbatim.
+    if format == "jsonl":
+        from app.core.jsonl_parser import get_session_jsonl_path
+
+        jsonl_path = None
+        if sdk_session_id:
+            jsonl_path = await run_sync(get_session_jsonl_path, sdk_session_id, working_dir)
+
+        if not jsonl_path:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No JSONL history file found for this session"
+            )
+
+        try:
+            content = jsonl_path.read_text(encoding="utf-8")
+        except Exception as e:
+            logger.error(f"Failed to read JSONL file for session {session_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to read JSONL history file"
+            )
+
+        filename = f"{safe_title}-{date_str}.jsonl"
+        return Response(
+            content=content,
+            media_type="application/x-ndjson",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            }
+        )
+
+    # Load messages from JSONL (same logic as get_session)
+    messages = []
 
     if sdk_session_id:
         try:
             from app.core.jsonl_parser import parse_session_history
-            from app.core.config import settings
-
-            # Get working dir from project if available
-            project_id = session.get("project_id")
-            if project_id:
-                project = await run_sync(database.get_project, project_id)
-                if project:
-                    working_dir = get_project_working_dir(project)
 
             jsonl_messages, _usage = await run_sync(parse_session_history, sdk_session_id, working_dir)
             if jsonl_messages:
@@ -94,13 +134,6 @@ async def export_session(
             elif msg.get("role") == "assistant":
                 msg["type"] = "text"
             messages.append(msg)
-
-    # Generate filename
-    title = session.get("title") or "untitled-session"
-    # Sanitize title for filename
-    safe_title = "".join(c if c.isalnum() or c in "-_ " else "" for c in title)
-    safe_title = safe_title.strip().replace(" ", "-")[:50]
-    date_str = datetime.now().strftime("%Y%m%d")
 
     if format == "json":
         # JSON export - include full session data

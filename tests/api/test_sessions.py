@@ -51,8 +51,16 @@ def mock_settings(temp_dir):
 
 @pytest.fixture
 def mock_database():
-    """Mock database module."""
-    with patch("app.api.sessions.database") as mock_db:
+    """Mock database module.
+
+    The sessions router is split across several modules (`sessions`,
+    `sessions_helpers`, `sessions_export`), each with its own `database`
+    import. Patch all of them to the same mock so helpers like
+    `require_session` resolve through the mock instead of a real pool.
+    """
+    with patch("app.api.sessions.database") as mock_db, \
+            patch("app.api.sessions_helpers.database", mock_db), \
+            patch("app.api.sessions_export.database", mock_db):
         # Set up default returns
         mock_db.get_session_tags.return_value = []
         mock_db.session_has_forks.return_value = False
@@ -985,6 +993,38 @@ class TestExportSession:
         assert response.status_code == 200
         content = response.text
         assert "Tool: Read" in content or "### Tool" in content
+
+    def test_export_session_jsonl(self, client, mock_database, sample_session, tmp_path):
+        """Should export the raw Claude session history (.jsonl) file verbatim."""
+        mock_database.get_session.return_value = sample_session
+
+        raw = (
+            '{"type":"user","message":{"role":"user","content":"Hello"},"uuid":"u1"}\n'
+            '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hi"}]},"uuid":"a1"}\n'
+        )
+        jsonl_file = tmp_path / "sdk-123.jsonl"
+        jsonl_file.write_text(raw, encoding="utf-8")
+
+        with patch("app.core.jsonl_parser.get_session_jsonl_path", return_value=jsonl_file):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=jsonl")
+
+        assert response.status_code == 200
+        assert "application/x-ndjson" in response.headers["content-type"]
+        cd = response.headers["content-disposition"]
+        assert "attachment" in cd
+        assert cd.endswith('.jsonl"')
+        # Content must be the file bytes verbatim, not re-serialized.
+        assert response.text == raw
+
+    def test_export_session_jsonl_no_file(self, client, mock_database, sample_session):
+        """Should return 404 when no JSONL history file exists for the session."""
+        mock_database.get_session.return_value = sample_session
+
+        with patch("app.core.jsonl_parser.get_session_jsonl_path", return_value=None):
+            response = client.get("/api/v1/sessions/test-session-id/export?format=jsonl")
+
+        assert response.status_code == 404
+        assert "JSONL" in response.json()["detail"]
 
 
 # =============================================================================
