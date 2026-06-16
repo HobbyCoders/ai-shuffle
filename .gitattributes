@@ -1,0 +1,5 @@
+# Shell scripts are COPYed into the Linux container image and run there, so they
+# must use LF line endings — CRLF would break the `#!/bin/bash` shebang. Force
+# LF on checkout regardless of the user's core.autocrlf setting (Windows).
+*.sh text eol=lf
+entrypoint.sh text eol=lf

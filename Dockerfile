@@ -68,30 +68,32 @@ RUN mkdir -p /etc/apt/keyrings \
 
 RUN node --version && npm --version && gh --version
 
-# ── Headless browser for the Playwright MCP server ──
-# Installs Chromium + its OS dependencies so the @playwright/mcp server can
-# drive a real headless browser server-side (no visible window). The browser
-# lives in a shared cache dir (PLAYWRIGHT_BROWSERS_PATH) that is world-readable
-# so the non-root appuser can launch it at runtime.
+# ── Browser for the "Claude in Chrome" integration ──
+# Installs REAL Google Chrome (glibc) so the bundled Claude Code CLI's --chrome
+# integration can drive it. We use Google Chrome (not Chromium) because Anthropic
+# officially supports it and it avoids the Chromium native-messaging-host
+# workaround (anthropics/claude-code#14391). google-chrome-stable pulls its own
+# runtime deps via apt. socat relays Chrome's localhost-only DevTools port when
+# CHROME_DEBUG=1 (one-time extension sign-in/pairing).
 #
-# Version pinning (why it matters): the runtime launches a PINNED
-# @playwright/mcp@0.0.76, which bundles playwright-core@1.61.0-alpha-1781023400000.
-# Each Playwright release expects a SPECIFIC Chromium build revision. If we baked
-# the browser with a different (e.g. @latest) Playwright, the MCP server would
-# look for "chromium-<rev>" that doesn't exist under /ms-playwright and fail at
-# runtime ("Executable doesn't exist ..."), especially offline/air-gapped.
-#
-# To keep the baked Chromium revision in sync with what the MCP server launches,
-# we install the SAME pinned @playwright/mcp globally and drive the browser
-# install THROUGH its bundled playwright-core, so the revision is guaranteed to
-# match. The global install is also reused at runtime (no network fetch needed).
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-ENV PLAYWRIGHT_MCP_VERSION=0.0.76
-RUN npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
-    && PW_CORE_DIR="$(node -e "process.stdout.write(require('path').dirname(require.resolve('playwright-core/package.json',{paths:[require.resolve('@playwright/mcp',{paths:[require('child_process').execSync('npm root -g').toString().trim()]})]})))")" \
-    && echo "Using playwright-core at: ${PW_CORE_DIR} ($(node -e "process.stdout.write(require(\"${PW_CORE_DIR}/package.json\").version)"))" \
-    && node "${PW_CORE_DIR}/cli.js" install --with-deps chromium \
-    && chmod -R a+rX /ms-playwright
+# NOTE: google-chrome-stable is published for amd64 only. On arm64 hosts this
+# layer will fail — swap in `chromium` + the #14391 manifest symlink there.
+RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+       | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
+       | tee /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+       google-chrome-stable socat \
+    && rm -rf /var/lib/apt/lists/*
+
+# Auto-install the "Claude in Chrome" extension via enterprise policy so it
+# doesn't need to be clicked through the Web Store inside the container.
+# DeveloperToolsAvailability=1 lifts the default ban on DevTools for
+# force-installed extensions — the pairing/sign-in pages can only be reached
+# through DevTools in this headless setup (CHROME_DEBUG=1).
+RUN mkdir -p /etc/opt/chrome/policies/managed && \
+    echo '{"ExtensionInstallForcelist":["fcoeoabgfenejglbffodgkkbkcdhcgfn;https://clients2.google.com/service/update2/crx"],"DeveloperToolsAvailability":1}' \
+      > /etc/opt/chrome/policies/managed/claude-extension.json
 
 # ── Create non-root user ──
 RUN groupadd -g 1000 appuser && \
@@ -116,12 +118,22 @@ COPY --from=tools-builder --chown=appuser:appuser /tools/ /opt/ai-tools/
 
 COPY --chown=appuser:appuser .env.example .
 
-# Copy entrypoint script
+# Copy entrypoint + Claude in Chrome helper scripts
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY docker/start-chrome.sh /usr/local/bin/start-chrome
+COPY docker/chrome-doctor.sh /usr/local/bin/chrome-doctor
+RUN chmod +x /entrypoint.sh /usr/local/bin/start-chrome /usr/local/bin/chrome-doctor
 
 # Ensure /app is owned by appuser
 RUN chown appuser:appuser /app
+
+# ── Claude in Chrome integration defaults ──
+# START_CHROME=1 launches headless Google Chrome at container start so the
+# bundled CLI's --chrome integration has a browser to drive (set 0 to disable).
+# CHROME_DEBUG=1 exposes DevTools on :9222 for the one-time extension sign-in.
+ENV START_CHROME=1 \
+    CHROME_DEBUG=0 \
+    CHROME_EXECUTABLE=/usr/bin/google-chrome-stable
 
 EXPOSE 8000
 

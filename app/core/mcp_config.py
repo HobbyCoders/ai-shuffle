@@ -50,6 +50,11 @@ def _build_mcp_servers_dict(
                 continue
             if server.name in mcp_servers:
                 continue
+            # CLI-flag built-ins (e.g. Claude in Chrome) are not spawnable MCP
+            # servers — they carry no command/url and are enabled via a CLI flag
+            # in build_options_from_profile. Never add them to mcp_servers.
+            if getattr(server, "cli_flag", None):
+                continue
             if server.type == McpServerType.STDIO or server.type == "stdio":
                 config: dict = {"command": server.command}
                 if server.args:

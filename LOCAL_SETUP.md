@@ -117,31 +117,41 @@ DATA_DIR=/path/to/custom/data
 WORKSPACE_DIR=/path/to/custom/workspace
 ```
 
-### Headless Browser MCP (Playwright)
+### Browser automation — Claude in Chrome
 
-AI Shuffle ships a built-in headless browser MCP server (`playwright`) that lets
-the agent navigate and interact with web pages server-side. The Docker image
-bakes a matching Chromium build automatically, but **in local mode you must
-install the browser yourself**, otherwise the first browser tool call fails with
-something like *"Executable doesn't exist ... run 'playwright install'"*.
+AI Shuffle's built-in browser integration is Anthropic's **Claude in Chrome**
+(built-in server `claude-in-chrome`). When enabled, agent sessions launch the
+bundled Claude Code CLI with `--chrome`, which exposes `mcp__claude-in-chrome__*`
+tools and drives a **real, signed-in Chrome/Chromium** through the Claude in
+Chrome browser extension — not a throwaway headless browser.
 
-Install Chromium once (it is cached for future runs):
+On **Windows local mode** this uses your existing desktop Chrome:
 
-```bash
-npx playwright install chromium
-```
+1. Install the **Claude in Chrome** extension in Chrome and sign in to your
+   Claude account (the same setup you use for Claude Code's `/chrome`).
+2. Keep that Chrome running while AI Shuffle sessions are active. The CLI
+   auto-installs its native-messaging host (registered under
+   `HKCU\Software\Google\Chrome\NativeMessagingHosts`) the first time a session
+   runs with `--chrome`; pair the browser once when prompted.
+3. The integration is on by default. Toggle it off via the `claude-in-chrome`
+   entry in the MCP admin UI.
 
-If the browser MCP server is enabled but no browser is found, the backend logs a
-non-fatal warning at startup pointing you to this step. The server itself stays
-enabled — only the actual browser tool calls fail until Chromium is installed.
+> **Concurrency:** Claude in Chrome pairs to a single account/browser. AI Shuffle
+> runs multiple pooled sessions that all share that one browser, so browser
+> actions across concurrent sessions may serialize or interfere. Use it from one
+> active session at a time for predictable results.
 
-> **Security note (SSRF / local-network reach).** The headless browser runs
-> inside the AI Shuffle process with **no egress filtering**. The agent can drive
-> it to reach `localhost`/loopback services, other RFC1918 private hosts on your
-> network, and cloud metadata endpoints such as `169.254.169.254` (which on some
-> clouds exposes credentials). If you run untrusted prompts, isolate the host at
-> the network layer or disable the `playwright` built-in server in the MCP admin
-> UI. AI Shuffle does not filter the browser's outbound traffic for you.
+> **Docker:** the container image bundles Google Chrome + the Claude in Chrome
+> extension and launches a headless browser automatically (`START_CHROME=1`). It
+> needs a one-time sign-in/pairing via `CHROME_DEBUG=1` — see
+> "Claude in Chrome (Docker)" in the README.
+
+> **Security note (SSRF / local-network reach).** The agent drives a real browser
+> with **no egress filtering** and your real cookies/sessions. It can reach
+> `localhost`/loopback services, other RFC1918 private hosts on your network, and
+> cloud metadata endpoints such as `169.254.169.254` (which on some clouds exposes
+> credentials). If you run untrusted prompts, isolate the host at the network
+> layer or disable the `claude-in-chrome` built-in server in the MCP admin UI.
 
 ## Differences from Docker Mode
 

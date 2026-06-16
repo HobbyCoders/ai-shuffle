@@ -71,14 +71,23 @@ services:
       - claude-auth:/home/appuser/.claude
       # Persist GitHub CLI authentication
       - gh-auth:/home/appuser/.config/gh
+      # Persist the Chrome profile (extension + Claude in Chrome sign-in/pairing)
+      - browser-profile:/home/appuser/.config/google-chrome
       # Persist database and session data
       - ai-shuffle-data:/data
       # Mount workspace directory for projects
       - ${WORKSPACE_DIR:-./workspace}:/workspace
 
+    # Chrome (Claude in Chrome) needs more than Docker's default 64MB /dev/shm.
+    shm_size: '1gb'
+
     # Port mapping
     ports:
       - "${PORT:-8000}:8000"
+      # Uncomment for the ONE-TIME Claude in Chrome extension sign-in/pairing
+      # (set CHROME_DEBUG=1). Exposes the headless browser's DevTools — anyone
+      # who can reach this port can control the browser, so turn it off after.
+      # - "${CHROME_DEBUG_PORT:-9222}:9222"
 
     # Health check
     healthcheck:
@@ -121,6 +130,9 @@ volumes:
     driver: local
   # Named volume for GitHub CLI authentication persistence
   gh-auth:
+    driver: local
+  # Named volume for the Chrome profile (Claude in Chrome extension + sign-in)
+  browser-profile:
     driver: local
   # Named volume for AI Shuffle data (database, sessions)
   ai-shuffle-data:

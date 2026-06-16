@@ -61,6 +61,12 @@ class McpServerConfig:
     enabled: bool = True
     description: Optional[str] = None
     builtin: bool = False
+    # When set, this built-in is NOT a spawnable MCP server but a Claude Code
+    # CLI integration enabled by passing ``--<cli_flag>`` to the CLI (e.g.
+    # ``chrome`` for the "Claude in Chrome" browser integration). Such servers
+    # carry no command/url and are skipped by the mcp_servers builder; the flag
+    # is applied in build_options_from_profile instead.
+    cli_flag: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
@@ -76,6 +82,7 @@ class McpServerConfig:
             "enabled": self.enabled,
             "description": self.description,
             "builtin": self.builtin,
+            "cli_flag": self.cli_flag,
         }
 
     def to_mcp_json_format(self) -> Dict[str, Any]:

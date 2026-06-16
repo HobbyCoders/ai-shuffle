@@ -119,6 +119,39 @@ docker compose up -d
 | `AUTO_UPDATE` | `true` | Auto-update Claude CLI on startup |
 | `LOCAL_MODE` | `false` | Use local filesystem paths |
 | `COMMAND_TIMEOUT` | `300` | Subprocess timeout (seconds) |
+| `START_CHROME` | `1` | Launch headless Chrome for Claude in Chrome (`0` to disable) |
+| `CHROME_DEBUG` | `0` | Expose Chrome DevTools on `:9222` for the one-time extension sign-in |
+
+### Claude in Chrome (Docker)
+
+The image bundles **Google Chrome** and force-installs the Claude in Chrome
+extension so agent sessions can drive a real browser (`mcp__claude-in-chrome__*`).
+Chrome starts automatically (headless, as the app user) when the container boots.
+The extension needs a **one-time sign-in + pairing** because the browser is
+headless:
+
+1. Set `CHROME_DEBUG=1` and map port `9222` (uncomment the line in
+   `docker-compose.yml`), then restart: `docker compose up -d`.
+2. Get a DevTools link: open `http://<host>:9222/json`, copy the `id` of a
+   `"type": "page"` entry, then open
+   `http://<host>:9222/devtools/inspector.html?ws=<host>:9222/devtools/page/<id>`.
+   The left pane is a live, clickable view of the headless browser.
+3. In that view, go to `https://claude.ai` and **sign in** to your Claude account.
+4. Open `chrome-extension://fcoeoabgfenejglbffodgkkbkcdhcgfn/sidepanel.html`,
+   click **Log in**, then **Authorize** on the consent page. This is what
+   connects the extension to your account.
+5. Run an agent session that uses the browser; if a pairing prompt appears, name
+   the browser and **Connect**.
+6. Set `CHROME_DEBUG=0`, remove the `9222` mapping, and restart. The profile
+   (extension, sign-in, pairing) persists in the `browser-profile` volume, so
+   this is one-time.
+
+> ⚠️ While `CHROME_DEBUG=1`, anyone who can reach port `9222` can control the
+> browser. Don't leave it on. Diagnose the chain with
+> `docker exec -u appuser -e HOME=/home/appuser ai-shuffle chrome-doctor`.
+>
+> Like local mode, the agent drives a real browser with **no egress filtering**
+> (SSRF / local-network reach) — isolate the container if you run untrusted prompts.
 
 ---
 
@@ -138,7 +171,7 @@ docker compose up -d
 | **Backend** | FastAPI · WebSockets · SQLite |
 | **AI Engine** | Claude Agent SDK (Python) |
 | **Media** | fal.ai (image, video, 3D, audio) |
-| **Browser** | Playwright (bundled in Docker) |
+| **Browser** | Claude in Chrome (`--chrome`, via the Claude in Chrome extension) |
 | **CI/CD** | GitHub Actions |
 
 ---

@@ -325,43 +325,6 @@ def check_claude_auth():
         return False
 
 
-def install_playwright_browsers():
-    """Install Playwright Chromium browser if not already present"""
-    print_status("Checking Playwright Chromium browser...", "info")
-
-    venv_python = str(get_venv_python())
-
-    # Ask Playwright which version it expects and where
-    try:
-        result = subprocess.run(
-            [venv_python, "-m", "playwright", "install", "--dry-run"],
-            capture_output=True, text=True
-        )
-        # Look for the chromium install location in dry-run output
-        for line in result.stdout.splitlines():
-            if "Install location:" in line and "chromium-" in line:
-                expected_path = line.split("Install location:")[1].strip()
-                if Path(expected_path).exists():
-                    print_status("Playwright Chromium already installed", "success")
-                    return True
-                break
-    except Exception:
-        pass  # Fall through to install
-
-    print_status("Installing Playwright Chromium browser (one-time download)...", "info")
-    try:
-        subprocess.run(
-            [venv_python, "-m", "playwright", "install", "chromium"],
-            check=True
-        )
-        print_status("Playwright Chromium installed", "success")
-        return True
-    except subprocess.CalledProcessError as e:
-        print_status(f"Failed to install Playwright Chromium: {e}", "error")
-        print_status("You can install manually: playwright install chromium", "info")
-        return False
-
-
 def run_setup():
     """Run the full setup process"""
     print(f"\n{Colors.BOLD}Running first-time setup...{Colors.END}\n")
@@ -372,7 +335,11 @@ def run_setup():
     if not install_dependencies():
         return False
 
-    install_playwright_browsers()
+    # Browser automation now uses Claude in Chrome (the bundled CLI's --chrome
+    # flag + your real Chrome), so there's no Playwright Chromium to install.
+    # Install the "Claude in Chrome" extension in Chrome and sign in once;
+    # see LOCAL_SETUP.md → "Browser automation — Claude in Chrome".
+    print_status("Browser automation: Claude in Chrome (no Playwright install needed)", "info")
 
     if not build_frontend():
         print_status("Frontend build skipped - you can build it later", "warning")

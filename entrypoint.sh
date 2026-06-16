@@ -216,6 +216,35 @@ chown -R appuser:appuser /data /workspace
 chown -R appuser:appuser /home/appuser/.config /home/appuser/.claude 2>/dev/null || true
 
 # =============================================================================
+# Claude in Chrome browser
+# =============================================================================
+# Launch headless Google Chrome as appuser (the same user the app + bundled CLI
+# run as) so the native-messaging host the CLI writes to
+# /home/appuser/.config/google-chrome/NativeMessagingHosts/ is the one this
+# browser reads. Supervised so a crash auto-restarts. Disable with START_CHROME=0.
+# One-time extension sign-in/pairing uses CHROME_DEBUG=1 (DevTools on :9222).
+if [ "${START_CHROME:-1}" = "1" ]; then
+    mkdir -p /home/appuser/.config/google-chrome
+    chown -R appuser:appuser /home/appuser/.config/google-chrome 2>/dev/null || true
+    echo "Starting Google Chrome for Claude in Chrome (CHROME_DEBUG=${CHROME_DEBUG:-0})..."
+    (
+        while true; do
+            setpriv --reuid=appuser --regid=appuser --init-groups \
+                env HOME=/home/appuser \
+                    CHROME_DEBUG="${CHROME_DEBUG:-0}" \
+                    CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-9222}" \
+                    CHROME_EXECUTABLE="${CHROME_EXECUTABLE:-/usr/bin/google-chrome-stable}" \
+                    start-chrome || true
+            echo "Chrome exited (rc=$?). Restarting in 5s..."
+            sleep 5
+        done
+    ) > /home/appuser/.config/chrome.log 2>&1 &
+    echo "Chrome supervisor started (logs: /home/appuser/.config/chrome.log). Diagnose with: chrome-doctor"
+else
+    echo "START_CHROME=0 — skipping Chrome launch (Claude in Chrome will be unavailable)"
+fi
+
+# =============================================================================
 # Start Application
 # =============================================================================
 echo ""
