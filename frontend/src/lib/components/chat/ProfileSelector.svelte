@@ -60,12 +60,12 @@
 	>
 		<div class="selector-icon">
 			<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
 			</svg>
 		</div>
 		<span class="selector-text">{selectedProfileName}</span>
-		<svg class="w-3 h-3 opacity-50 chevron" class:open={showProfileDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+		<svg class="w-3 h-3 chevron" class:open={showProfileDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 9l-7 7-7-7" />
 		</svg>
 	</button>
 
@@ -93,48 +93,51 @@
 	.context-selector-btn {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		padding: 4px 10px 4px 8px;
+		gap: 5px;
+		height: 26px;
+		padding: 0 8px;
 		background: transparent;
-		border: 1px solid transparent;
+		border: 1px solid var(--border);
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		color: var(--muted-foreground);
+		font-size: 0.6875rem;
+		font-weight: 500;
 		cursor: pointer;
-		transition: all 0.15s ease;
+		transition: all 150ms ease;
+		white-space: nowrap;
 	}
 
 	.context-selector-btn:hover {
 		background: var(--hover-overlay);
-		border-color: var(--border-subtle);
+		color: var(--foreground);
 	}
 
 	.context-selector-btn.unset {
+		border-color: var(--warning);
 		color: var(--warning);
 	}
 
 	.context-selector-btn.unset:hover {
-		background: var(--status-warning-bg);
-		border-color: var(--status-warning-border);
+		background: color-mix(in oklch, var(--warning) 10%, transparent);
+		color: var(--warning);
 	}
 
 	.selector-icon {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 20px;
-		height: 20px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.42);
-		background: var(--muted);
-		border: 1px solid var(--border-subtle);
+		flex-shrink: 0;
 	}
 
 	.selector-icon svg {
-		color: var(--muted-foreground);
+		color: currentColor;
 	}
 
 	.selector-text {
-		font-size: 12px;
+		font-size: 0.6875rem;
 		font-weight: 500;
-		color: var(--muted-foreground);
+		color: inherit;
+		line-height: 1;
 		letter-spacing: 0.01em;
 		max-width: 80px;
 		overflow: hidden;
@@ -151,7 +154,8 @@
 
 	/* Chevron */
 	.chevron {
-		color: var(--muted-foreground);
+		color: inherit;
+		opacity: 0.6;
 		transition: transform 0.2s ease;
 	}
 
@@ -210,9 +214,9 @@
 
 	/* Responsive: mobile layout adjustments */
 	@media (max-width: 639px) {
-		/* Slightly smaller text on mobile */
+		/* Match git buttons' mobile text size */
 		.selector-text {
-			font-size: 11px;
+			font-size: 0.75rem;
 		}
 
 		/* Header is a horizontal scroll rail on mobile; pin the dropdown as a fixed
@@ -235,16 +239,11 @@
 			to { opacity: 1; transform: translateY(0); }
 		}
 
-		/* Make selectors more compact */
+		/* Match git buttons' mobile touch target */
 		.context-selector-btn {
-			padding: 4px 6px 4px 4px;
-			gap: 4px;
-		}
-
-		/* Smaller selector icon */
-		.selector-icon {
-			width: 18px;
-			height: 18px;
+			height: 36px;
+			padding: 0 12px;
+			font-size: 0.75rem;
 		}
 
 		/* Hide chevron on mobile to save space */
