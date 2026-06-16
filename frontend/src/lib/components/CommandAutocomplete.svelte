@@ -119,17 +119,7 @@
 
       if (response.ok) {
         const data = await response.json();
-        // Inject client-side commands that are handled locally (not sent to SDK)
-        const clientCommands: Command[] = [
-          {
-            name: 'fast',
-            display: '/fast',
-            description: 'Toggle fast mode (Opus 4.6 — faster output)',
-            argument_hint: '[on|off]',
-            type: 'sdk_builtin',
-          },
-        ];
-        commands = [...data.commands, ...clientCommands];
+        commands = data.commands;
       }
     } catch (error) {
       console.error('Failed to fetch commands:', error);

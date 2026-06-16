@@ -19,32 +19,41 @@
 		onSelect: (value: string | null) => void;
 		icon: Snippet;
 		title: string;
+		/** Whether the active/overridden indicator should light up. Defaults to
+		 *  `currentValue !== null`. Pass explicitly when `currentValue` reflects an
+		 *  effective (possibly profile-inherited) value rather than a real override. */
+		isOverridden?: boolean;
+		/** Open state is owned by the parent so sibling dropdowns are mutually
+		 *  exclusive — opening one closes the others. */
+		isOpen: boolean;
+		onOpenChange: (open: boolean) => void;
 	}
 
-	let { modes, currentValue, onSelect, icon, title }: Props = $props();
+	let { modes, currentValue, onSelect, icon, title, isOverridden, isOpen, onOpenChange }: Props = $props();
 
-	let showDropdown = $state(false);
+	const isActive = $derived(isOverridden ?? currentValue !== null);
+
 	let dropdownRef = $state<HTMLDivElement | null>(null);
 
 	function handleClick(e: MouseEvent) {
 		e.stopPropagation();
-		showDropdown = !showDropdown;
+		onOpenChange(!isOpen);
 	}
 
 	function handleSelect(value: string | null) {
 		onSelect(value);
-		showDropdown = false;
+		onOpenChange(false);
 	}
 
 	function handleClickOutside(e: MouseEvent) {
-		if (dropdownRef && !dropdownRef.contains(e.target as Node)) {
-			showDropdown = false;
+		if (isOpen && dropdownRef && !dropdownRef.contains(e.target as Node)) {
+			onOpenChange(false);
 		}
 	}
 
 	function handleEscape(e: KeyboardEvent) {
-		if (e.key === 'Escape') {
-			showDropdown = false;
+		if (e.key === 'Escape' && isOpen) {
+			onOpenChange(false);
 		}
 	}
 
@@ -62,19 +71,19 @@
 	<button
 		type="button"
 		class="override-btn"
-		class:active={currentValue !== null}
+		class:active={isActive}
 		onclick={handleClick}
 		title="{title} (session only)"
 		aria-haspopup="menu"
-		aria-expanded={showDropdown}
+		aria-expanded={isOpen}
 	>
 		{@render icon()}
-		{#if currentValue !== null}
+		{#if isActive}
 			<span class="override-indicator"></span>
 		{/if}
 	</button>
 
-	{#if showDropdown}
+	{#if isOpen}
 		<div class="override-dropdown" role="menu" aria-label={title}>
 			<div class="override-dropdown-header">{title}</div>
 			{#each modes as mode (mode.value)}

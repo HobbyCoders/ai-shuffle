@@ -136,7 +136,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride: state.modelOverride,
 			permissionModeOverride: state.permissionModeOverride,
 			effortLevelOverride: state.effortLevelOverride,
-			fastMode: state.fastMode,
 			executionMode: state.executionMode,
 			worktreeId: state.worktreeId,
 			worktreeBranch: state.worktreeBranch,
@@ -333,7 +332,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride: ephemeral?.modelOverride ?? null,
 			permissionModeOverride: ephemeral?.permissionModeOverride ?? null,
 			effortLevelOverride: ephemeral?.effortLevelOverride ?? null,
-			fastMode: ephemeral?.fastMode ?? false,
 			// Worktree fields: ephemeral > worktreeInfo from session list > safe defaults
 			executionMode: ephemeral?.executionMode ?? worktreeInfo?.executionMode ?? 'local',
 			worktreeId: ephemeral?.worktreeId ?? worktreeInfo?.worktreeId ?? null,
@@ -474,7 +472,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			isReopeningWorktree: false,
 			worktreeError: null,
 			worktreeDeleted: false,
-			fastMode: false,
 			sessionLocked: false,
 			sessionLockedBy: undefined,
 		}));

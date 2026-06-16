@@ -2,7 +2,7 @@
 Claude model registry — single source of truth for the backend.
 
 Add/remove a model here and every Pydantic default, MCP tool enum, and
-fast-mode eligibility check across the backend picks it up automatically.
+model-family check across the backend picks it up automatically.
 Callers should never hardcode a model ID inline — import from this module.
 
 Mirrors ``frontend/src/lib/constants/models.ts``. The two registries must
@@ -30,13 +30,10 @@ class ModelOption:
     """Human-facing label for dropdowns and badges."""
 
     family: ModelFamily
-    """Model family — drives badge colour and fast-mode eligibility."""
+    """Model family — drives badge colour."""
 
     context_window: int
     """Maximum input context in tokens (200k standard, 1M for [1m] variants)."""
-
-    fast_mode_eligible: bool
-    """Whether this model supports the 'fast mode' per-session toggle."""
 
 
 # ---------------------------------------------------------------------------
@@ -46,13 +43,15 @@ class ModelOption:
 # Order here is the order shown in every dropdown in the UI and the order
 # reported by ``GET /api/models``.
 MODELS: Tuple[ModelOption, ...] = (
-    ModelOption("claude-haiku-4-5",      "Haiku 4.5",       "haiku",  200_000,   False),
-    ModelOption("claude-sonnet-4-6",     "Sonnet 4.6",      "sonnet", 200_000,   False),
-    ModelOption("claude-sonnet-4-6[1m]", "Sonnet 4.6 1M",   "sonnet", 1_000_000, False),
-    ModelOption("claude-opus-4-6",       "Opus 4.6",        "opus",   200_000,   True),
-    ModelOption("claude-opus-4-6[1m]",   "Opus 4.6 1M",     "opus",   1_000_000, True),
-    ModelOption("claude-opus-4-7",       "Opus 4.7",        "opus",   200_000,   True),
-    ModelOption("claude-opus-4-7[1m]",   "Opus 4.7 1M",     "opus",   1_000_000, True),
+    ModelOption("claude-haiku-4-5",      "Haiku 4.5",       "haiku",  200_000),
+    ModelOption("claude-sonnet-4-6",     "Sonnet 4.6",      "sonnet", 200_000),
+    ModelOption("claude-sonnet-4-6[1m]", "Sonnet 4.6 1M",   "sonnet", 1_000_000),
+    ModelOption("claude-opus-4-6",       "Opus 4.6",        "opus",   200_000),
+    ModelOption("claude-opus-4-6[1m]",   "Opus 4.6 1M",     "opus",   1_000_000),
+    ModelOption("claude-opus-4-7",       "Opus 4.7",        "opus",   200_000),
+    ModelOption("claude-opus-4-7[1m]",   "Opus 4.7 1M",     "opus",   1_000_000),
+    ModelOption("claude-opus-4-8",       "Opus 4.8",        "opus",   200_000),
+    ModelOption("claude-opus-4-8[1m]",   "Opus 4.8 1M",     "opus",   1_000_000),
 )
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -69,8 +68,8 @@ LEGACY_MODEL_MAP: Dict[str, str] = {
     "haiku": "claude-haiku-4-5",
     "sonnet": "claude-sonnet-4-6",
     "sonnet[1m]": "claude-sonnet-4-6[1m]",
-    "opus": "claude-opus-4-7",
-    "opus[1m]": "claude-opus-4-7[1m]",
+    "opus": "claude-opus-4-8",
+    "opus[1m]": "claude-opus-4-8[1m]",
 }
 
 
@@ -124,17 +123,6 @@ def get_context_window(value: Optional[str]) -> int:
     return match.context_window if match is not None else 200_000
 
 
-def is_fast_mode_eligible(value: Optional[str]) -> bool:
-    """Whether this model supports the per-session 'fast mode' toggle.
-
-    Use this instead of string-matching ``"opus" in model`` — the heuristic
-    misfires on any future model whose name happens to contain "opus" but
-    does not actually support fast mode, and vice versa.
-    """
-    match = get_model(value)
-    return match.fast_mode_eligible if match is not None else False
-
-
 def model_values() -> List[str]:
     """All canonical model IDs, for use in Pydantic ``Literal`` / JSON-schema enums."""
     return [m.value for m in MODELS]
@@ -149,7 +137,6 @@ def registry_payload() -> Dict[str, object]:
                 "label": m.label,
                 "family": m.family,
                 "context_window": m.context_window,
-                "fast_mode_eligible": m.fast_mode_eligible,
             }
             for m in MODELS
         ],

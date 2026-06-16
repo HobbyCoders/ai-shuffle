@@ -104,7 +104,6 @@ function mockState(): ActiveSessionState {
 		worktreeDeleted: false,
 		sessionLocked: false,
 		sessionLockedBy: undefined,
-		fastMode: false,
 		wsStreamContent: '',
 		pendingInterruptPrompt: null,
 	};

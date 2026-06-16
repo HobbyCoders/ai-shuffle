@@ -304,8 +304,8 @@
 						<option value="low">Low</option>
 						<option value="medium">Medium</option>
 						<option value="high">High</option>
+						<option value="xhigh">XHigh</option>
 						<option value="max">Max</option>
-						<option value="xhigh">XHigh (Opus 4.7+)</option>
 					</select>
 				</div>
 				<div class="pf-field">

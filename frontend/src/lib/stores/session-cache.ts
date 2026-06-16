@@ -18,7 +18,6 @@ export interface SessionEphemeral {
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
-	fastMode: boolean;
 	executionMode: ExecutionMode;
 	worktreeId: string | null;
 	worktreeBranch: string;

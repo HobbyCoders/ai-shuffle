@@ -202,22 +202,6 @@
 
 		if (!finalPrompt.trim() || isUploading || $activeSession.isReopeningWorktree) return;
 
-		// Client-side slash command: /fast [on|off] — per-session toggle
-		const fastMatch = finalPrompt.trim().match(/^\/fast(?:\s+(on|off|enable|disable|true|false))?$/i);
-		if (fastMatch) {
-			const arg = fastMatch[1]?.toLowerCase();
-			const currentlyOn = $activeSession.fastMode;
-			const enable = arg === 'on' || arg === 'enable' || arg === 'true'
-				? true
-				: arg === 'off' || arg === 'disable' || arg === 'false'
-				? false
-				: !currentlyOn;
-			activeSession.setFastMode(enable);
-			inputValue = '';
-			editorRef?.clear();
-			return;
-		}
-
 		// Require profile and project to be selected
 		if (!$activeSession.profile) {
 			return;

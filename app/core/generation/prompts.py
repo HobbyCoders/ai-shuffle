@@ -157,7 +157,8 @@ Subagents are specialized AI assistants that the main Claude agent can delegate 
   - "claude-sonnet-4-6": Balanced - use for most analysis, coding, moderate complexity
   - "claude-sonnet-4-6[1m]": Sonnet 4.6 with 1M context window
   - "claude-opus-4-6" / "claude-opus-4-6[1m]": Powerful - complex reasoning, architecture
-  - "claude-opus-4-7" / "claude-opus-4-7[1m]": Most capable - security analysis, deep reasoning
+  - "claude-opus-4-7" / "claude-opus-4-7[1m]": Highly capable - security analysis, deep reasoning
+  - "claude-opus-4-8" / "claude-opus-4-8[1m]": Most capable - hardest reasoning, security, long-running tasks
   - null: Inherit from parent (default)
 
 ## Domain Templates
@@ -291,7 +292,8 @@ Profiles are pre-configured settings for Claude sessions. They control:
   - "claude-sonnet-4-6": Balanced - general coding, analysis (default)
   - "claude-sonnet-4-6[1m]": Sonnet 4.6 with 1M context - large codebases
   - "claude-opus-4-6" / "claude-opus-4-6[1m]": Powerful - complex reasoning, architecture
-  - "claude-opus-4-7" / "claude-opus-4-7[1m]": Most capable - deep reasoning, long-running tasks
+  - "claude-opus-4-7" / "claude-opus-4-7[1m]": Highly capable - deep reasoning, long-running tasks
+  - "claude-opus-4-8" / "claude-opus-4-8[1m]": Most capable - hardest reasoning, long-running tasks
 
 - **thinking_mode**: Depth of reasoning
   - "default": Standard thinking

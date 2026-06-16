@@ -7,7 +7,6 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { claudeAuthenticated } from '$lib/stores/auth';
 	import { profiles } from '$lib/stores/app-data';
-	import { getDefaultModel, getModelFamily } from '$lib/constants/models';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import UsageLimitIndicator from './UsageLimitIndicator.svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
@@ -20,19 +19,20 @@
 
 	let { isUploading, onAttachClick }: Props = $props();
 
-	// Resolve the effective model to determine if fast mode is applicable
-	const effectiveModel = $derived.by(() => {
-		if ($activeSession.modelOverride) return $activeSession.modelOverride;
-		const profile = $profiles.find(p => p.id === $activeSession.profile);
-		return profile?.config?.model || getDefaultModel();
-	});
+	// Only one override dropdown may be open at a time — opening one closes the other.
+	let openDropdown = $state<'effort' | 'permission' | null>(null);
 
-	// Fast mode is only meaningful with Opus models (per-session state)
-	const isOpusModel = $derived(getModelFamily(effectiveModel) === 'opus');
-	const fastModeActive = $derived(!!($activeSession.fastMode && isOpusModel));
+	// The effort/permission dropdowns reflect the *effective* value: the per-session
+	// override if one is set, otherwise the active profile's setting. They list only
+	// real SDK values (no synthetic "Default") — selecting the profile's own value
+	// clears the override so the session keeps inheriting from the profile.
+	const activeProfile = $derived($profiles.find((p) => p.id === $activeSession.profile));
+	const profileEffort = $derived(activeProfile?.config?.effort ?? null);
+	const profilePermissionMode = $derived(activeProfile?.config?.permission_mode ?? null);
+	const effortValue = $derived($activeSession.effortLevelOverride ?? profileEffort);
+	const permissionValue = $derived($activeSession.permissionModeOverride ?? profilePermissionMode);
 
 	const permissionModes = [
-		{ value: null, label: 'Default', description: 'Use profile setting' },
 		{ value: 'default', label: 'Ask', description: 'Confirm before tools' },
 		{ value: 'auto', label: 'Auto', description: 'Model classifier decides per tool call' },
 		{ value: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve edits' },
@@ -41,33 +41,19 @@
 	];
 
 	const effortLevels = [
-		{ value: null, label: 'Default', description: 'Use profile setting' },
 		{ value: 'low', label: 'Low', description: 'Quick, minimal reasoning' },
 		{ value: 'medium', label: 'Medium', description: 'Balanced reasoning' },
 		{ value: 'high', label: 'High', description: 'Thorough reasoning' },
-		{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' },
-		{ value: 'xhigh', label: 'XHigh', description: 'Opus 4.7+ extreme reasoning' }
+		{ value: 'xhigh', label: 'XHigh', description: 'Extreme reasoning' },
+		{ value: 'max', label: 'Max', description: 'Maximum reasoning depth' }
 	];
 </script>
 
 <div class="controls-dock">
-	<!-- Left: Usage Indicator + Fast Mode Badge -->
+	<!-- Left: Usage Indicator -->
 	<div class="controls-left">
 		<ContextUsageBar />
 		<UsageLimitIndicator />
-		{#if $activeSession.fastMode}
-			<button
-				type="button"
-				class="fast-mode-badge"
-				class:active={fastModeActive}
-				class:inactive={!isOpusModel}
-				title={isOpusModel ? 'Fast mode active' : 'Fast mode enabled but requires Opus model'}
-				onclick={() => activeSession.setFastMode(false)}
-			>
-				<span class="fast-icon">↯</span>
-				<span class="fast-label">FAST</span>
-			</button>
-		{/if}
 	</div>
 
 	<!-- Center: Profile selector -->
@@ -80,8 +66,11 @@
 		<!-- Effort Level Override -->
 		<OverrideDropdown
 			modes={effortLevels}
-			currentValue={$activeSession.effortLevelOverride}
-			onSelect={(v) => activeSession.setEffortLevelOverride(v)}
+			currentValue={effortValue}
+			isOverridden={$activeSession.effortLevelOverride !== null}
+			isOpen={openDropdown === 'effort'}
+			onOpenChange={(open) => (openDropdown = open ? 'effort' : null)}
+			onSelect={(v) => activeSession.setEffortLevelOverride(v === profileEffort ? null : v)}
 			title="Effort Level"
 		>
 			{#snippet icon()}
@@ -94,8 +83,11 @@
 		<!-- Permission Mode Override -->
 		<OverrideDropdown
 			modes={permissionModes}
-			currentValue={$activeSession.permissionModeOverride}
-			onSelect={(v) => activeSession.setPermissionModeOverride(v)}
+			currentValue={permissionValue}
+			isOverridden={$activeSession.permissionModeOverride !== null}
+			isOpen={openDropdown === 'permission'}
+			onOpenChange={(open) => (openDropdown = open ? 'permission' : null)}
+			onSelect={(v) => activeSession.setPermissionModeOverride(v === profilePermissionMode ? null : v)}
 			title="Permission Mode"
 		>
 			{#snippet icon()}
@@ -196,62 +188,10 @@
 		cursor: not-allowed;
 	}
 
-	/* ===== FAST MODE BADGE ===== */
-	.fast-mode-badge {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		padding: 3px 8px;
-		border: 1px solid var(--border-subtle);
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		cursor: pointer;
-		font-family: var(--font-mono);
-		font-size: 10px;
-		font-weight: 600;
-		letter-spacing: 0.05em;
-		transition: all 0.15s ease;
-		background: transparent;
-		line-height: 1;
-	}
-
-	.fast-mode-badge.active {
-		background: color-mix(in oklch, var(--warning) 15%, transparent);
-		border-color: color-mix(in oklch, var(--warning) 40%, transparent);
-		color: var(--warning);
-	}
-
-	.fast-mode-badge.inactive {
-		background: color-mix(in oklch, var(--muted) 30%, transparent);
-		border-color: var(--border-subtle);
-		color: var(--muted-foreground);
-		opacity: 0.6;
-	}
-
-	.fast-mode-badge:hover {
-		opacity: 0.8;
-	}
-
-	.fast-icon {
-		font-size: 12px;
-		line-height: 1;
-	}
-
-	.fast-label {
-		line-height: 1;
-	}
-
 	/* Responsive: mobile tighter center gap */
 	@media (max-width: 639px) {
 		.controls-center {
 			gap: 4px;
-		}
-
-		.fast-label {
-			display: none;
-		}
-
-		.fast-mode-badge {
-			padding: 3px 5px;
 		}
 	}
 </style>

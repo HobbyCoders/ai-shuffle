@@ -10,10 +10,7 @@ live here. MCP config, agent config, and environment setup are split into
 sibling modules and re-exported for backward compatibility.
 """
 
-import json
 import logging
-import tempfile
-import threading
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -21,7 +18,6 @@ from claude_agent_sdk import ClaudeAgentOptions, AgentDefinition
 
 from app.db import database
 from app.core.config import settings
-from app.core.model_registry import is_fast_mode_eligible
 from app.core.platform import detect_deployment_mode, DeploymentMode
 
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
@@ -81,87 +77,6 @@ def _get_session_store():
         )
         _session_store_singleton = None
     return _session_store_singleton
-
-
-# Path to Claude's user settings file
-_CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
-# Lock to prevent concurrent writes to settings.json
-_settings_file_lock = threading.Lock()
-# Directory for per-session fast mode settings files (avoids race conditions)
-_FAST_MODE_SETTINGS_DIR = Path(tempfile.gettempdir()) / "claude-fast-mode"
-
-
-def _create_fast_mode_settings_file(session_id: str) -> str:
-    """Create a per-session settings file with fastMode enabled.
-
-    Returns the file path as a string for use with ``--settings``.
-
-    Previous approach wrote fastMode to the shared ``~/.claude/settings.json``,
-    but this caused a race condition: concurrent queries (background tasks,
-    commit generation, etc.) without fast mode would overwrite ``fastMode``
-    to ``false`` before the CLI subprocess could read the file.
-
-    New approach: each fast-mode session gets its own temp settings file.
-    This eliminates the race entirely — no shared mutable state.
-    """
-    _FAST_MODE_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-    settings_file = _FAST_MODE_SETTINGS_DIR / f"fast-{session_id}.json"
-    settings_file.write_text(json.dumps({
-        "fastMode": True,
-        "penguinModeOrgEnabled": True,
-    }), encoding="utf-8")
-    logger.debug(f"Created per-session fast mode settings: {settings_file}")
-    return str(settings_file)
-
-
-def cleanup_fast_mode_settings(session_id: str) -> None:
-    """Remove the per-session fast mode settings file after use."""
-    settings_file = _FAST_MODE_SETTINGS_DIR / f"fast-{session_id}.json"
-    try:
-        settings_file.unlink(missing_ok=True)
-    except Exception:
-        pass  # Best-effort cleanup
-
-
-def _set_fast_mode_in_user_settings(enabled: bool) -> None:
-    """Write fastMode and penguinModeOrgEnabled to ~/.claude/settings.json.
-
-    This is a backup mechanism alongside the per-session settings file.
-    The Claude CLI reads fastMode from the user settings file (loaded via
-    ``--setting-sources user``).
-
-    penguinModeOrgEnabled tells the CLI that the org supports fast mode,
-    bypassing the network-based org eligibility check that fails in
-    SDK/Docker mode (no OAuth token available for the check).
-
-    Thread-safe: acquires a lock before read-modify-write.
-    """
-    with _settings_file_lock:
-        try:
-            if _CLAUDE_SETTINGS_FILE.exists():
-                data = json.loads(_CLAUDE_SETTINGS_FILE.read_text(encoding="utf-8"))
-            else:
-                data = {}
-
-            current_fast = data.get("fastMode", False)
-            current_penguin = data.get("penguinModeOrgEnabled", False)
-            if current_fast == enabled and current_penguin == enabled:
-                return  # No-op: already in desired state
-
-            if enabled:
-                data["fastMode"] = True
-                data["penguinModeOrgEnabled"] = True
-            else:
-                data.pop("fastMode", None)
-                data.pop("penguinModeOrgEnabled", None)
-
-            _CLAUDE_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            _CLAUDE_SETTINGS_FILE.write_text(
-                json.dumps(data, indent=2), encoding="utf-8"
-            )
-            logger.debug(f"Set fastMode={enabled}, penguinModeOrgEnabled={enabled} in {_CLAUDE_SETTINGS_FILE}")
-        except Exception:
-            logger.exception("Failed to update fastMode in user settings")
 
 
 # Token budgets for thinking modes (token-based thinking)
@@ -463,51 +378,11 @@ def build_options_from_profile(
 
     # Process model selection.
     # All supported model IDs (claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-6,
-    # claude-opus-4-7) and their [1m] variants are native CLI aliases — pass through as-is.
+    # claude-opus-4-7, claude-opus-4-8) and their [1m] variants are native CLI aliases —
+    # pass through as-is.
     raw_model = overrides.get("model") or config.get("model")
     model_to_use = raw_model
     betas_to_use = []
-
-    # Fast mode: three-pronged approach to enable fastMode reliably.
-    #
-    # 1. Per-session settings FILE passed via --settings (file path, not inline JSON).
-    #    This sets flagSettings.fastMode in the CLI, which is required for SDK mode.
-    #
-    # 2. Write fastMode + penguinModeOrgEnabled to ~/.claude/settings.json as backup.
-    #    The CLI reads these from user settings loaded via --setting-sources user.
-    #    penguinModeOrgEnabled bypasses the org eligibility check that otherwise
-    #    disables fast mode when running with API keys (non-OAuth).
-    #
-    # 3. Set CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1 env var.
-    #    The CLI checks this env var to skip the org-level fast mode eligibility
-    #    check entirely. Without this, the CLI tries to verify org eligibility
-    #    via network call, which fails in SDK/Docker mode and falls back to
-    #    cached penguinModeOrgEnabled (default false) → fast mode disabled.
-    #
-    # Previous bug: the else branch wrote fastMode=false to the shared settings
-    # file, causing a race condition — concurrent queries (background tasks,
-    # commit generation) without fast mode would overwrite fastMode before the
-    # fast-mode CLI subprocess could read it. Now each session gets its own
-    # temp file, and we only write TRUE to the shared file (never false).
-    fast_mode_requested = overrides.get("fast_mode") == "true"
-    fast_mode_settings: Optional[str] = None
-    # Fast-mode eligibility is a per-model capability declared in the
-    # registry (app/core/model_registry.py) rather than inferred from the
-    # model ID — a future non-Opus model could ship fast mode, and the old
-    # substring check would have silently misfired.
-    if fast_mode_requested and is_fast_mode_eligible(model_to_use):
-        # Per-session temp file — no race with concurrent queries
-        fast_mode_settings = _create_fast_mode_settings_file(session_id or "default")
-        # Also write to shared settings as backup (no false-write race now)
-        _set_fast_mode_in_user_settings(True)
-        logger.debug(f"Fast mode enabled for model={model_to_use}, settings file={fast_mode_settings}")
-        # Inject fast mode awareness into system prompt
-        fast_mode_note = "\n\nFast mode is enabled. You are running with faster output using the same model. When asked about your speed or mode, you can confirm fast mode is active."
-        if isinstance(final_system_prompt, dict):
-            current_append = final_system_prompt.get("append", "")
-            final_system_prompt["append"] = current_append + fast_mode_note
-        else:
-            final_system_prompt += fast_mode_note
 
     # Build tool configuration (SDK 0.1.12+ supports new 'tools' parameter)
     # Priority: tools > tools_preset > allowed_tools (legacy)
@@ -562,16 +437,6 @@ def build_options_from_profile(
     # 1. MCP server creation (so Node.js tool subprocesses get the keys)
     # 2. ClaudeAgentOptions env (so the Claude CLI subprocess also gets them)
     full_env = _build_env_with_ai_tools(config.get("env"), ai_tools_config, api_user_id)
-
-    # Inject fast mode org check bypass into CLI environment.
-    # The CLI's org eligibility check fails in SDK/Docker mode because there's
-    # no OAuth session to query. This env var tells the CLI to skip the check
-    # and assume the org supports fast mode.
-    if fast_mode_settings:
-        if not full_env:
-            full_env = {}
-        full_env["CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"] = "1"
-        logger.debug("Injected CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1 for fast mode")
 
     ai_tool_env = full_env if full_env else None
 
@@ -642,7 +507,6 @@ def build_options_from_profile(
 
         # Settings loading
         setting_sources=config.get("setting_sources"),
-        settings=fast_mode_settings,
 
         # MCP servers - pass all registered MCP servers directly to the SDK
         # This ensures tools from MCP servers are available regardless of
@@ -702,7 +566,7 @@ def build_options_from_profile(
     )
 
     deployment_mode = detect_deployment_mode()
-    logger.debug(f"Built options with model={model_to_use}, betas={betas_to_use}, settings={fast_mode_settings}, permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
+    logger.debug(f"Built options with model={model_to_use}, betas={betas_to_use}, permission_mode={permission_mode}, can_use_tool={options.can_use_tool is not None}, hooks={hooks is not None}, deployment_mode={deployment_mode}")
     logger.debug(f"Agents passed via SDK: {list(agents_dict.keys()) if agents_dict else 'None'}")
     if deployment_mode == DeploymentMode.LOCAL:
         logger.debug("Windows local mode: agents also written to filesystem for discovery")

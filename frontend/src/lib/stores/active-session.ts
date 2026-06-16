@@ -124,7 +124,6 @@ export interface ActiveSessionState {
 	worktreeError: string | null;
 	worktreeDeleted: boolean;
 	isReopeningWorktree: boolean;
-	fastMode: boolean;
 	sessionLocked: boolean;
 	sessionLockedBy: string | undefined;
 	/** Accumulated text from WebSocket stream_delta events for instant rendering.
@@ -206,7 +205,6 @@ function defaultState(): ActiveSessionState {
 		worktreeError: null,
 		worktreeDeleted: false,
 		isReopeningWorktree: false,
-		fastMode: false,
 		sessionLocked: false,
 		sessionLockedBy: undefined,
 		wsStreamContent: '',
@@ -564,7 +562,6 @@ export const activeSession = {
 	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model })); persistSession(); },
 	setPermissionModeOverride(mode: string | null) { _update(s => ({ ...s, permissionModeOverride: mode })); persistSession(); },
 	setEffortLevelOverride(level: string | null) { _update(s => ({ ...s, effortLevelOverride: level })); persistSession(); },
-	setFastMode(enabled: boolean) { _update(s => ({ ...s, fastMode: enabled })); },
 
 	// ── Ephemeral UI State (delegated to draft-manager) ─────────────
 

@@ -163,12 +163,12 @@ DOMAIN_KEYWORDS: Dict[str, List[str]] = {
 
 MODEL_BY_DOMAIN: Dict[str, str] = {
     "code-review": "claude-sonnet-4-6",
-    "security": "claude-opus-4-7",  # Security needs careful analysis
+    "security": "claude-opus-4-8",  # Security needs careful analysis
     "testing": "claude-sonnet-4-6",
     "documentation": "claude-sonnet-4-6",
     "refactoring": "claude-opus-4-6",  # Complex restructuring
     "exploration": "claude-haiku-4-5",  # Fast searches
-    "planning": "claude-opus-4-7",  # Complex reasoning
+    "planning": "claude-opus-4-8",  # Complex reasoning
     "research": "claude-sonnet-4-6",
     "debugging": "claude-sonnet-4-6",
     "pr-review": "claude-sonnet-4-6",

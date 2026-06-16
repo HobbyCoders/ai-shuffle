@@ -150,7 +150,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
 		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
 		if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
-		if (_state.fastMode) overrides.fast_mode = 'true';
 		return Object.keys(overrides).length > 0 ? overrides : undefined;
 	}
 
@@ -489,7 +488,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const modelOverrideSnap = _state.modelOverride;
 			const permissionModeOverrideSnap = _state.permissionModeOverride;
 			const effortLevelOverrideSnap = _state.effortLevelOverride;
-			const fastModeSnap = _state.fastMode;
 			const userMsgId = `user-${Date.now()}`;
 
 			const creationGen = internal.worktreeCreationGeneration;
@@ -503,7 +501,6 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			if (modelOverrideSnap) overridesPayload.model = modelOverrideSnap;
 			if (permissionModeOverrideSnap) overridesPayload.permission_mode = permissionModeOverrideSnap;
 			if (effortLevelOverrideSnap) overridesPayload.effort = effortLevelOverrideSnap;
-			if (fastModeSnap) overridesPayload.fast_mode = 'true';
 
 			update(s => {
 				// eslint-disable-next-line no-console

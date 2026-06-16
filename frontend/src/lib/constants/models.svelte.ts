@@ -41,7 +41,9 @@ const STATIC_MODELS: readonly ModelOption[] = [
 	{ value: 'claude-opus-4-6', label: 'Opus 4.6', family: 'opus' },
 	{ value: 'claude-opus-4-6[1m]', label: 'Opus 4.6 1M', family: 'opus' },
 	{ value: 'claude-opus-4-7', label: 'Opus 4.7', family: 'opus' },
-	{ value: 'claude-opus-4-7[1m]', label: 'Opus 4.7 1M', family: 'opus' }
+	{ value: 'claude-opus-4-7[1m]', label: 'Opus 4.7 1M', family: 'opus' },
+	{ value: 'claude-opus-4-8', label: 'Opus 4.8', family: 'opus' },
+	{ value: 'claude-opus-4-8[1m]', label: 'Opus 4.8 1M', family: 'opus' }
 ] as const;
 
 const STATIC_DEFAULT = 'claude-sonnet-4-6';
@@ -50,8 +52,8 @@ const STATIC_LEGACY_MAP: Readonly<Record<string, string>> = {
 	haiku: 'claude-haiku-4-5',
 	sonnet: 'claude-sonnet-4-6',
 	'sonnet[1m]': 'claude-sonnet-4-6[1m]',
-	opus: 'claude-opus-4-7',
-	'opus[1m]': 'claude-opus-4-7[1m]'
+	opus: 'claude-opus-4-8',
+	'opus[1m]': 'claude-opus-4-8[1m]'
 };
 
 /** Sentinel value meaning "inherit from parent" (used by subagents). */

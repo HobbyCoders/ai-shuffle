@@ -52,7 +52,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
                     "Cryptographic implementation",
                     "Secret/credential exposure",
                 ],
-                "model": "claude-opus-4-7",  # Security needs extra scrutiny
+                "model": "claude-opus-4-8",  # Security needs extra scrutiny
                 "thinking_mode": "think_harder",
             },
             "performance": {
@@ -112,7 +112,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "description_pattern": "Use this agent for comprehensive security audits. Invoke for penetration testing preparation, vulnerability assessment, or security compliance reviews.",
         "domain": "security",
         "tools": ["Read", "Grep", "Glob", "WebSearch"],
-        "model": "claude-opus-4-7",
+        "model": "claude-opus-4-8",
         "thinking_mode": "think_harder",
         "ai_tools": [],
         "prompt_sections": [
@@ -240,7 +240,7 @@ DOMAIN_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "description_pattern": "Use this agent to plan implementations and design solutions. Invoke before starting complex features, refactors, or architectural changes.",
         "domain": "planning",
         "tools": ["Read", "Grep", "Glob"],
-        "model": "claude-opus-4-7",
+        "model": "claude-opus-4-8",
         "thinking_mode": "ultra_think",
         "ai_tools": [],
         "prompt_sections": [
