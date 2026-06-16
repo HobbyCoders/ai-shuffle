@@ -87,6 +87,7 @@
 	/* ===== SELECTORS (Profile) ===== */
 	.selector-wrapper {
 		position: relative;
+		flex-shrink: 0;
 	}
 
 	.context-selector-btn {
@@ -159,13 +160,16 @@
 	}
 
 	/* ===== DROPDOWN MENU ===== */
+	/* Lives in the chat header rail now, so it opens downward. */
 	.selector-dropdown {
 		position: absolute;
-		bottom: calc(100% + 4px);
+		top: calc(100% + 4px);
 		left: 50%;
 		transform: translateX(-50%);
 		min-width: 200px;
 		max-width: 280px;
+		max-height: 60vh;
+		overflow-y: auto;
 		background: var(--popover);
 		border: 1px solid var(--border);
 		border-radius: var(--radius, 0.75rem);
@@ -178,7 +182,7 @@
 	@keyframes dropdown-fade-in {
 		from {
 			opacity: 0;
-			transform: translateX(-50%) translateY(4px);
+			transform: translateX(-50%) translateY(-4px);
 		}
 		to {
 			opacity: 1;
@@ -209,6 +213,26 @@
 		/* Slightly smaller text on mobile */
 		.selector-text {
 			font-size: 11px;
+		}
+
+		/* Header is a horizontal scroll rail on mobile; pin the dropdown as a fixed
+		   panel below the header so it isn't clipped by the rail's overflow. */
+		.selector-dropdown {
+			position: fixed;
+			top: 56px;
+			left: 8px;
+			right: 8px;
+			bottom: auto;
+			transform: none;
+			min-width: 0;
+			max-width: none;
+			max-height: 60vh;
+			z-index: 200;
+		}
+
+		@keyframes dropdown-fade-in {
+			from { opacity: 0; transform: translateY(-4px); }
+			to { opacity: 1; transform: translateY(0); }
 		}
 
 		/* Make selectors more compact */

@@ -316,64 +316,81 @@
 		}
 	}
 
-	/* Mobile touch targets & wrapping layout */
+	/* Mobile: single horizontal touch-scroll rail.
+	   Title, context badge, profile selector and git actions all live on one line
+	   the user can swipe through left-to-right, rather than wrapping into stacked rows. */
 	@media (max-width: 639px) {
 		.page-header {
 			position: relative;
-			height: auto;
+			height: 48px;
 			min-height: 48px;
-			flex-wrap: wrap;
-			padding: var(--space-2, 8px) var(--space-3, 12px);
+			flex-wrap: nowrap;
+			overflow-x: auto;
+			overflow-y: hidden;
+			-webkit-overflow-scrolling: touch;
+			scrollbar-width: none; /* Firefox */
+			padding: 0 var(--space-2, 8px);
 			gap: var(--space-2, 8px);
+			row-gap: 0;
+		}
+
+		/* Hide the scrollbar so the rail reads as a clean strip (still swipe/drag scrollable). */
+		.page-header::-webkit-scrollbar {
+			display: none;
 		}
 
 		.header-left {
-			flex: 1 1 100%;
+			flex: 0 0 auto;
 			min-width: 0;
 			min-height: 36px;
-			overflow: hidden;
-			justify-content: center;
-			padding-left: 36px;
-			padding-right: 36px;
+			overflow: visible;
+			justify-content: flex-start;
+			padding: 0;
+			gap: var(--space-2, 8px);
 		}
 
+		/* Toggle scrolls with the rail as its first item (no longer absolutely pinned). */
 		.sidebar-toggle {
-			position: absolute;
-			left: var(--space-3, 12px);
-			top: var(--space-2, 8px);
+			position: static;
+			left: auto;
+			top: auto;
 			width: 36px;
 			height: 36px;
+			flex-shrink: 0;
 		}
 
 		.header-btn {
 			width: 36px;
 			height: 36px;
+			flex-shrink: 0;
 		}
 
 		.header-right {
-			flex: 1 0 100%;
-			flex-wrap: wrap;
-			justify-content: center;
+			flex: 0 0 auto;
+			flex-wrap: nowrap;
+			justify-content: flex-start;
 			min-height: 36px;
 			gap: var(--space-2, 8px);
 		}
 
-		/* When only the STT button or context badge is present (no git actions), keep it inline */
-		.header-right:not(:has(.git-actions)) {
-			flex: 0 0 auto;
+		/* Keep every rail item at its natural size so the row overflows and scrolls
+		   instead of squashing items together. */
+		.header-right > :global(*) {
+			flex-shrink: 0;
 		}
 
 		.header-title {
-			flex: 1;
+			flex: 0 0 auto;
 			min-width: 0;
-			text-align: center;
+			max-width: 45vw;
+			text-align: left;
 		}
 
 		.context-badge {
-			flex-shrink: 1;
+			flex-shrink: 0;
 			max-width: none;
-			height: 36px;
-			padding: 0 12px;
+			height: 32px;
+			padding: 0 10px;
 			font-size: 0.75rem;
 		}
 	}

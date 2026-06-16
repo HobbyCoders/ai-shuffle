@@ -9,7 +9,6 @@
 	import { profiles } from '$lib/stores/app-data';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import UsageLimitIndicator from './UsageLimitIndicator.svelte';
-	import ProfileSelector from './ProfileSelector.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';
 
 	interface Props {
@@ -54,11 +53,6 @@
 	<div class="controls-left">
 		<ContextUsageBar />
 		<UsageLimitIndicator />
-	</div>
-
-	<!-- Center: Profile selector -->
-	<div class="controls-center">
-		<ProfileSelector />
 	</div>
 
 	<!-- Right: Override buttons, Attach & Mic buttons -->
@@ -142,14 +136,6 @@
 		flex: 1;
 	}
 
-	.controls-center {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		justify-content: center;
-		flex: 2;
-	}
-
 	.controls-right {
 		display: flex;
 		align-items: center;
@@ -188,10 +174,4 @@
 		cursor: not-allowed;
 	}
 
-	/* Responsive: mobile tighter center gap */
-	@media (max-width: 639px) {
-		.controls-center {
-			gap: 4px;
-		}
-	}
 </style>
