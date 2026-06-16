@@ -2,9 +2,18 @@
 	/**
 	 * PageHeader - Codex-style thin header bar for the main content panel
 	 *
-	 * Sits at the top of MainPanel. Shows the current page/chat title,
-	 * optional project or worktree context, and a sidebar toggle when
-	 * the sidebar is collapsed.
+	 * Sits at the top of MainPanel.
+	 *
+	 * Layout:
+	 * - Desktop: a single row. Left cluster (sidebar toggle, profile selector,
+	 *   Claude status, download) sits at the start; git actions are pushed to the
+	 *   right edge; the chat title is absolutely centered so it stays in the true
+	 *   center of the header regardless of the side clusters' widths.
+	 * - Mobile: two rows. The top row is static (toggle, title, status, download);
+	 *   the bottom row is a horizontal scroll rail (profile selector + git actions
+	 *   + diff stats). The two <div class="hdr-row*"> wrappers use `display:contents`
+	 *   on desktop so all items share one flex row, and become real flex rows on
+	 *   mobile.
 	 */
 	import { PanelLeftOpen, GitBranch, FolderClosed, Mic } from 'lucide-svelte';
 	import { layout, sidebarCollapsed } from '$lib/stores/layout';
@@ -26,6 +35,11 @@
 		showSidebarToggle?: boolean;
 		isMobile?: boolean;
 		hideGlobalStt?: boolean;
+		/** Profile selector — left cluster (desktop) / bottom rail start (mobile). */
+		profile?: Snippet;
+		/** Left-cluster meta actions (e.g. download chat history). */
+		leftActions?: Snippet;
+		/** Right cluster / bottom rail: git actions, diff stats, etc. */
 		actions?: Snippet;
 	}
 
@@ -37,19 +51,18 @@
 		showSidebarToggle = false,
 		isMobile = false,
 		hideGlobalStt = false,
+		profile,
+		leftActions,
 		actions
 	}: Props = $props();
 
 	let showToggle = $derived(showSidebarToggle && $sidebarCollapsed);
 	let showStt = $derived(isMobile && $hotkeyPreferences.globalSttEnabled && !hideGlobalStt);
-	let hasContext = $derived(!!projectName || !!worktreeBranch);
-	// The Claude status indicator always renders in .header-right, so the right
-	// region is always present (regardless of STT / git actions / context).
-	let hasRightContent = $derived(true);
 </script>
 
 <header class="page-header">
-	<div class="header-left" class:has-toggle={showToggle}>
+	<!-- Row 1: toggle + title + meta (static row on mobile; flattened on desktop) -->
+	<div class="hdr-row1">
 		{#if showToggle || isMobile}
 			<button
 				class="sidebar-toggle"
@@ -62,10 +75,8 @@
 		{/if}
 
 		<h1 class="header-title">{title}</h1>
-	</div>
 
-	{#if hasRightContent}
-		<div class="header-right">
+		<div class="hdr-meta">
 			<ClaudeStatusIndicator />
 			{#if showStt}
 				<button
@@ -79,6 +90,21 @@
 					<Mic size={18} />
 				</button>
 			{/if}
+			{#if leftActions}
+				{@render leftActions()}
+			{/if}
+		</div>
+	</div>
+
+	<!-- Row 2: profile + git actions (scroll rail on mobile; flattened on desktop) -->
+	<div class="hdr-row2">
+		{#if profile}
+			<div class="hdr-profile">
+				{@render profile()}
+			</div>
+		{/if}
+
+		<div class="hdr-right">
 			{#if worktreeBranch}
 				<span
 					class="context-badge"
@@ -103,39 +129,76 @@
 				{@render actions()}
 			{/if}
 		</div>
-	{/if}
+	</div>
 </header>
 
 <style>
 	.page-header {
+		position: relative;
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		flex-wrap: wrap;
 		min-height: 40px;
 		flex-shrink: 0;
 		padding: 4px 12px;
-		row-gap: 2px;
+		gap: 8px;
 		background: var(--background);
 		border-bottom: 1px solid var(--border);
 	}
 
-	.header-left {
+	/* Desktop default: flatten both row wrappers so all items live on one flex row. */
+	.hdr-row1,
+	.hdr-row2 {
+		display: contents;
+	}
+
+	.hdr-meta {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-shrink: 0;
+	}
+
+	.hdr-profile {
+		display: flex;
+		align-items: center;
+		flex-shrink: 0;
+	}
+
+	.hdr-right {
 		display: flex;
 		align-items: center;
 		gap: 8px;
 		min-width: 0;
-		flex: 1 1 auto;
-		min-height: 32px;
 	}
 
-	.header-right {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 8px;
-		flex: 1 0 auto;
-		min-height: 32px;
+	/* Desktop ordering across the flattened single row:
+	   [toggle] [profile] [meta] ......(auto gap)...... [git/right]
+	   Title is absolutely centered so the side clusters never shift it. */
+	.sidebar-toggle { order: 1; }
+	.hdr-profile { order: 2; }
+	.hdr-meta { order: 3; }
+	.hdr-right {
+		order: 4;
+		margin-left: auto;
+		justify-content: flex-end;
+		flex-wrap: wrap;
+	}
+
+	.header-title {
+		position: absolute;
+		left: 50%;
+		transform: translateX(-50%);
+		max-width: 40%;
+		font-size: 0.8125rem;
+		font-weight: 500;
+		color: var(--foreground);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		text-align: center;
+		margin: 0;
+		line-height: 1;
+		pointer-events: none;
 	}
 
 	/* Sidebar toggle button */
@@ -162,19 +225,6 @@
 	.sidebar-toggle:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
-	}
-
-	/* Page title */
-	.header-title {
-		font-size: 0.8125rem;
-		font-weight: 500;
-		color: var(--foreground);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		min-width: 0;
-		margin: 0;
-		line-height: 1;
 	}
 
 	/* Project / worktree context badge — styled to match .git-btn */
@@ -214,12 +264,6 @@
 		max-width: 140px;
 	}
 
-	@media (max-width: 639px) {
-		.context-label.branch {
-			max-width: 100px;
-		}
-	}
-
 	.context-separator {
 		font-size: 0.75rem;
 		line-height: 1;
@@ -228,14 +272,14 @@
 		flex-shrink: 0;
 	}
 
-
-	/* Header action buttons */
+	/* Header action buttons (mic) */
 	.header-btn {
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		width: 28px;
 		height: 28px;
+		flex-shrink: 0;
 		background: transparent;
 		border: none;
 		border-radius: calc(var(--radius, 0.75rem) * 0.5);
@@ -288,102 +332,88 @@
 		50% { opacity: 0.6; }
 	}
 
-	/* Desktop layout — title fills available space and truncates,
-	   right elements (git actions, context badges) pushed to the right edge. */
-	@media (min-width: 1024px) {
-		.header-left {
-			flex: 1 1 0%;
-			min-width: 0;
-			justify-content: center;
-			position: relative;
-		}
-
-		.header-left .sidebar-toggle {
-			position: absolute;
-			left: 0;
-		}
-
-		.header-title {
-			text-align: center;
-			max-width: 100%;
-		}
-
-		.header-right {
-			flex: 0 0 auto;
-			margin-left: auto;
-			flex-wrap: wrap;
-			justify-content: flex-end;
-		}
-	}
-
-	/* Mobile: single horizontal touch-scroll rail.
-	   Title, context badge, profile selector and git actions all live on one line
-	   the user can swipe through left-to-right, rather than wrapping into stacked rows. */
+	/* ===================================================================
+	   Mobile: two stacked rows.
+	   Row 1 (static): toggle, title, status, download.
+	   Row 2 (scroll rail): profile selector + git actions + diff stats.
+	   =================================================================== */
 	@media (max-width: 639px) {
 		.page-header {
-			position: relative;
-			height: 48px;
-			min-height: 48px;
-			flex-wrap: nowrap;
+			flex-direction: column;
+			align-items: stretch;
+			min-height: 0;
+			padding: 0;
+			gap: 0;
+			/* Header overflow stays visible so status/branch popovers aren't clipped;
+			   only the bottom rail scrolls (see .hdr-row2). */
+			overflow: visible;
+		}
+
+		/* Both wrappers become real flex rows again. */
+		.hdr-row1,
+		.hdr-row2 {
+			display: flex;
+			align-items: center;
+			height: 44px;
+			padding: 0 8px;
+			gap: 8px;
+		}
+
+		/* Top row: static, never scrolls. */
+		.hdr-row1 {
+			flex-shrink: 0;
+			border-bottom: 1px solid var(--border);
+		}
+
+		/* Bottom row: horizontal touch-scroll rail. */
+		.hdr-row2 {
 			overflow-x: auto;
 			overflow-y: hidden;
 			-webkit-overflow-scrolling: touch;
 			scrollbar-width: none; /* Firefox */
-			padding: 0 var(--space-2, 8px);
-			gap: var(--space-2, 8px);
-			row-gap: 0;
 		}
 
-		/* Hide the scrollbar so the rail reads as a clean strip (still swipe/drag scrollable). */
-		.page-header::-webkit-scrollbar {
+		.hdr-row2::-webkit-scrollbar {
 			display: none;
 		}
 
-		.header-left {
-			flex: 0 0 auto;
-			min-width: 0;
-			min-height: 36px;
-			overflow: visible;
-			justify-content: flex-start;
-			padding: 0;
-			gap: var(--space-2, 8px);
-		}
-
-		/* Toggle scrolls with the rail as its first item (no longer absolutely pinned). */
-		.sidebar-toggle {
-			position: static;
-			left: auto;
-			top: auto;
-			width: 36px;
-			height: 36px;
-			flex-shrink: 0;
-		}
-
-		.header-btn {
-			width: 36px;
-			height: 36px;
-			flex-shrink: 0;
-		}
-
-		.header-right {
-			flex: 0 0 auto;
-			flex-wrap: nowrap;
-			justify-content: flex-start;
-			min-height: 36px;
-			gap: var(--space-2, 8px);
-		}
-
-		/* Keep every rail item at its natural size so the row overflows and scrolls
-		   instead of squashing items together. */
-		.header-right > :global(*) {
-			flex-shrink: 0;
+		/* Reset desktop ordering / absolute centering. */
+		.sidebar-toggle,
+		.hdr-meta,
+		.hdr-profile,
+		.hdr-right {
+			order: 0;
+			margin: 0;
 		}
 
 		.header-title {
-			flex: 0 0 auto;
+			position: static;
+			transform: none;
+			flex: 1 1 auto;
 			min-width: 0;
-			max-width: 45vw;
+			max-width: none;
 			text-align: left;
+			pointer-events: auto;
+		}
+
+		.hdr-meta {
+			margin-left: auto; /* push status/download to the right edge of row 1 */
+		}
+
+		/* Rail items keep their natural size and scroll instead of squashing. */
+		.hdr-right {
+			flex-wrap: nowrap;
+			flex-shrink: 0;
+		}
+
+		.hdr-row2 > :global(*) {
+			flex-shrink: 0;
+		}
+
+		.sidebar-toggle,
+		.header-btn {
+			width: 36px;
+			height: 36px;
 		}
 
 		.context-badge {
@@ -392,6 +422,10 @@
 			height: 32px;
 			padding: 0 10px;
 			font-size: 0.75rem;
+		}
+
+		.context-label.branch {
+			max-width: 100px;
 		}
 	}
 

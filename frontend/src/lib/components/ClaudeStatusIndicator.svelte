@@ -193,11 +193,13 @@
 		color: var(--destructive);
 	}
 
-	/* Popover anchored to the right edge of the button. */
+	/* Desktop: the indicator sits in the header's left cluster, so the popover
+	   left-aligns under the button and expands rightward (right-anchoring would
+	   push it off the panel's left edge). Mobile flips this (see media query). */
 	.status-popover {
 		position: absolute;
 		top: calc(100% + 6px);
-		right: 0;
+		left: 0;
 		z-index: 100;
 		width: max-content;
 		max-width: min(320px, calc(100vw - 24px));
@@ -305,7 +307,11 @@
 			height: 36px;
 		}
 
+		/* On mobile the indicator is at the right edge of the static top row,
+		   so right-anchor the popover and let it expand leftward. */
 		.status-popover {
+			left: auto;
+			right: 0;
 			max-width: calc(100vw - 24px);
 		}
 	}

@@ -64,7 +64,7 @@
 			</svg>
 		</div>
 		<span class="selector-text">{selectedProfileName}</span>
-		<svg class="w-3 h-3 chevron" class:open={showProfileDropdown} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+		<svg class="chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 9l-7 7-7-7" />
 		</svg>
 	</button>
@@ -152,24 +152,22 @@
 		}
 	}
 
-	/* Chevron */
+	/* Chevron — sized to match the git buttons' ChevronDown (11px), not animated */
 	.chevron {
+		width: 11px;
+		height: 11px;
+		flex-shrink: 0;
 		color: inherit;
 		opacity: 0.6;
-		transition: transform 0.2s ease;
-	}
-
-	.chevron.open {
-		transform: rotate(180deg);
 	}
 
 	/* ===== DROPDOWN MENU ===== */
-	/* Lives in the chat header rail now, so it opens downward. */
+	/* Lives on the left of the header rail, so it left-aligns under the button
+	   and expands rightward (centering would push it off the panel's left edge). */
 	.selector-dropdown {
 		position: absolute;
 		top: calc(100% + 4px);
-		left: 50%;
-		transform: translateX(-50%);
+		left: 0;
 		min-width: 200px;
 		max-width: 280px;
 		max-height: 60vh;
@@ -186,11 +184,11 @@
 	@keyframes dropdown-fade-in {
 		from {
 			opacity: 0;
-			transform: translateX(-50%) translateY(-4px);
+			transform: translateY(-4px);
 		}
 		to {
 			opacity: 1;
-			transform: translateX(-50%) translateY(0);
+			transform: translateY(0);
 		}
 	}
 
@@ -223,7 +221,7 @@
 		   panel below the header so it isn't clipped by the rail's overflow. */
 		.selector-dropdown {
 			position: fixed;
-			top: 56px;
+			top: 92px;
 			left: 8px;
 			right: 8px;
 			bottom: auto;
@@ -244,11 +242,6 @@
 			height: 36px;
 			padding: 0 12px;
 			font-size: 0.75rem;
-		}
-
-		/* Hide chevron on mobile to save space */
-		.context-selector-btn .chevron {
-			display: none;
 		}
 	}
 </style>

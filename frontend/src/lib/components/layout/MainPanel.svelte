@@ -539,7 +539,12 @@
 				{isMobile}
 				hideGlobalStt={$activeView?.type === 'chat'}
 			>
-				{#snippet actions()}
+				{#snippet profile()}
+					{#if $activeView?.type === 'chat' && activeTab}
+						<ProfileSelector />
+					{/if}
+				{/snippet}
+				{#snippet leftActions()}
 					{#if $activeView?.type === 'chat' && activeTab?.sessionId && activeTab.messages.length > 0}
 						<button
 							class="download-jsonl-btn"
@@ -551,6 +556,8 @@
 							<Download size={16} strokeWidth={1.5} />
 						</button>
 					{/if}
+				{/snippet}
+				{#snippet actions()}
 					{#if $activeView?.type === 'chat' && activeTab?.project && $githubAuthenticated && !activeTab?.worktreeDeleted}
 						<GitHeaderActions
 							projectId={activeTab.project}
@@ -574,10 +581,6 @@
 							pullPrompt={buildPullPrompt()}
 							onOpenDiffReview={() => { showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
 						/>
-					{:else if $activeView?.type === 'chat' && activeTab}
-						<!-- No git header (no project / not GitHub-authed / worktree cleaned up):
-						     keep the profile selector available in the header rail. -->
-						<ProfileSelector />
 					{/if}
 				{/snippet}
 			</PageHeader>

@@ -14,7 +14,6 @@
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode, changedFiles } from '$lib/stores/git';
 	import { githubRepoInfo } from '$lib/stores/github';
 	import GitPromptPopover from './GitPromptPopover.svelte';
-	import ProfileSelector from '$lib/components/chat/ProfileSelector.svelte';
 
 	interface Props {
 		projectId: string;
@@ -300,9 +299,6 @@
 		{/if}
 	</div>
 
-	<!-- Profile selector — sits between the branch selector and the git action buttons -->
-	<ProfileSelector />
-
 	<!-- Pull button (when behind upstream, including diverged state) -->
 	{#if needsPull}
 		<div class="split-btn-group">
@@ -485,8 +481,7 @@
 	{/if}
 
 	{:else}
-		<!-- No git repo: profile selector + project name + Init button -->
-		<ProfileSelector />
+		<!-- No git repo: project name + Init button (profile selector lives in the header) -->
 		{#if projectName}
 			<span class="git-btn project-only-badge" title="Project: {projectName}">
 				<FolderClosed size={13} strokeWidth={1.5} />
@@ -888,7 +883,7 @@
 		   (so outside-click detection keeps working). */
 		.branch-dropdown {
 			position: fixed;
-			top: 56px;
+			top: 92px;
 			left: 8px;
 			right: 8px;
 			bottom: auto;
