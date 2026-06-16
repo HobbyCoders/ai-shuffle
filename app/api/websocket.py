@@ -39,6 +39,7 @@ from app.api.ws_auth import authenticate_websocket  # noqa: F401
 from app.api.ws_cleanup import (  # noqa: F401
     _active_chat_sessions,
     _active_sessions_lock,
+    _draining_sessions,
     _interrupt_pending_sessions,
     _pending_cleanup_tasks,
     _stopped_sessions,
@@ -617,11 +618,36 @@ async def chat_websocket(
 
         Returns True if a query was started, False otherwise.
         """
+        # Atomically decide-and-reserve. The interrupt/stop/idle checks and the
+        # drain reservation must happen under the same lock acquisition,
+        # otherwise the gap between "looks idle" and "successor registered"
+        # lets a second drain — or an incoming interrupt_for_query whose query
+        # arrives in the window — start a competing query for the same session.
         async with _active_sessions_lock:
+            if sid in _interrupt_pending_sessions or sid in _stopped_sessions:
+                return False
             successor = _active_chat_sessions.get(sid)
-        if successor is not None and isinstance(successor, asyncio.Task) and not successor.done():
-            return False
+            if successor is not None and isinstance(successor, asyncio.Task) and not successor.done():
+                return False
+            if sid in _draining_sessions:
+                return False
+            _draining_sessions.add(sid)
 
+        try:
+            return await _drain_reserved(sid, log_prefix)
+        finally:
+            _draining_sessions.discard(sid)
+
+    async def _drain_reserved(sid: str, log_prefix: str) -> bool:
+        """Drain body, run only while holding the ``_draining_sessions`` slot.
+
+        Pops the next queued message, sets it up, then registers the successor
+        query — but re-verifies under the lock that nothing preempted the drain
+        (an incoming explicit query, an interrupt, or a stop) before launching.
+        If preempted, the popped message is re-queued at the front so it is
+        never silently lost (the symptom: message shows in chat but the session
+        goes idle without running it).
+        """
         msg = await run_sync(database.pop_next_queued_message, sid)
         if not msg:
             return False
@@ -630,6 +656,26 @@ async def chat_websocket(
         q_profile = msg.get("profile_id") or "claude-code"
         q_project = msg.get("project_id")
         logger.info(f"[Queue:{log_prefix}] auto-processing queued message for {sid}: {q_content[:80]}...")
+
+        async def _requeue_front() -> None:
+            try:
+                await run_sync(
+                    database.requeue_message_at_front,
+                    session_id=sid,
+                    content=q_content,
+                    profile_id=q_profile if q_profile != "claude-code" else None,
+                    project_id=q_project,
+                )
+                restored = await run_sync(database.get_queued_messages, sid)
+                await sync_engine.broadcast_queue_updated(sid, restored)
+                await send_json({
+                    "type": "sync",
+                    "event_type": "queue_updated",
+                    "session_id": sid,
+                    "data": {"queued_messages": restored},
+                })
+            except Exception:
+                logger.exception(f"[Queue:{log_prefix}] failed to re-queue preempted message")
 
         try:
             # Broadcast updated queue (post-pop) to all devices + direct send
@@ -673,11 +719,32 @@ async def chat_websocket(
             q_session = await run_sync(database.get_session, sid)
             q_worktree = q_session.get("worktree_id") if q_session else None
 
-            q_task = asyncio.create_task(
-                run_query(q_content, sid, q_profile, q_project, None, q_worktree)
-            )
+            # Final preempt check + atomic registration. Between the reservation
+            # and here we ran several awaits; an explicit query (Send Now), a
+            # stop, or an interrupt may have arrived and taken ownership of the
+            # session. If so, re-queue the popped message rather than launching
+            # a competing query that would either be cancelled (message lost) or
+            # stream alongside the other one (garbled output). Creating the task
+            # and registering it happen under the lock so the decision can't go
+            # stale; the (slow) re-queue I/O is done after releasing the lock.
+            preempted = False
             async with _active_sessions_lock:
-                _active_chat_sessions[sid] = q_task
+                existing = _active_chat_sessions.get(sid)
+                if (
+                    sid in _interrupt_pending_sessions
+                    or sid in _stopped_sessions
+                    or (existing is not None and isinstance(existing, asyncio.Task) and not existing.done())
+                ):
+                    preempted = True
+                else:
+                    q_task = asyncio.create_task(
+                        run_query(q_content, sid, q_profile, q_project, None, q_worktree)
+                    )
+                    _active_chat_sessions[sid] = q_task
+            if preempted:
+                logger.debug(f"[Queue:{log_prefix}] drain preempted before launch — re-queuing {sid}")
+                await _requeue_front()
+                return False
             return True
         except Exception:
             # Re-insert at the front of the queue so the message is not lost

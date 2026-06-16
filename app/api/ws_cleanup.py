@@ -31,6 +31,16 @@ _interrupt_pending_sessions: set[str] = set()
 # the user). Entry is cleared by the finally-block consumer.
 _stopped_sessions: set[str] = set()
 
+# Module-level set tracking sessions that are mid-drain — i.e. a queued
+# message has been claimed and a successor query is being set up, but the
+# task is not yet registered in ``_active_chat_sessions``. Guarded by
+# ``_active_sessions_lock``. Without this reservation there is a TOCTOU
+# window between "the session looks idle" and "the successor task is
+# registered" during which a second drain (or an incoming query) can start
+# a duplicate/competing query for the same session. Consulted by
+# ``drain_next_queued_if_idle`` so only one drain proceeds at a time.
+_draining_sessions: set[str] = set()
+
 
 async def cleanup_session_handlers(session_id: str) -> None:
     """Clean up session-keyed data from global handler singletons.
