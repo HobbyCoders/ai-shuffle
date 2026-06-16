@@ -1,64 +1,47 @@
 <script lang="ts">
 	/**
-	 * UsageLimitIndicator — compact glass pill showing the current 5-hour usage
-	 * window utilization, sitting next to <ContextUsageBar /> in the controls dock.
+	 * UsageLimitIndicator — compact, ALWAYS-VISIBLE glass pill showing the current
+	 * 5-hour usage window, sitting next to <ContextUsageBar /> in the controls dock.
 	 *
-	 * Data source: the `rateLimit` store, fed by the WS `case 'rate_limit'` handler.
-	 * The CLI emits `rate_limit` events only when rate-limit *state changes* (e.g.
-	 * transitioning toward `allowed_warning`), NOT proactively at all times — so
-	 * this indicator renders NOTHING until a five-hour event has arrived. It never
-	 * shows a fake 0%.
+	 * Data source: the `rateLimit` store's persisted `lastFiveHour` reading, fed by
+	 * the WS `case 'rate_limit'` handler. The CLI only reports 5-hour usage when the
+	 * rate-limit *status changes* (there's no proactive/queryable live feed), so this
+	 * pill shows the MOST RECENT reported value at all times — not a second-by-second
+	 * figure. It refreshes whenever a new reading arrives, drops to 0% once the window
+	 * rolls over (`resets_at` passes → a fresh 5-hour window), and shows a neutral "—"
+	 * until the first reading ever arrives.
 	 *
-	 * Window selection: we key on `rate_limit_type === 'five_hour'` (canonical SDK
-	 * value — see RateLimitType in claude_agent_sdk types). Other windows
-	 * (seven_day, overage, …) are ignored here.
+	 * Window selection: keyed on `rate_limit_type === 'five_hour'` (the store only
+	 * stores five-hour readings into `lastFiveHour`).
 	 *
-	 * Utilization: the SDK reports a fraction 0.0–1.0. We defensively normalize in
-	 * case a 0–100 value ever arrives (mirrors RateLimitBanner's old logic).
-	 *
-	 * Lifecycle: drives a 1s tick that refreshes the reset countdown and calls
-	 * `rateLimit.gcExpired()` so stale events auto-clear once `resets_at` passes.
-	 * This replaces the per-second ticker that used to live in RateLimitBanner.
+	 * Utilization: the SDK reports a fraction 0.0–1.0; we defensively accept 0–100 too.
 	 */
 	import { rateLimit } from '$lib/stores/rate-limit';
 	import { Clock } from 'lucide-svelte';
 
-	// Canonical SDK value for the 5-hour ("session") rate-limit window.
-	const FIVE_HOUR_TYPE = 'five_hour';
+	// Last-known five-hour reading (persisted across reloads).
+	const reading = $derived($rateLimit.lastFiveHour);
 
-	const rlState = $derived($rateLimit);
-	// Only surface the event when it describes the five-hour window.
-	const event = $derived(
-		rlState.event && rlState.event.rate_limit_type === FIVE_HOUR_TYPE ? rlState.event : null
-	);
-
-	// Per-second tick — keeps the reset countdown fresh and GCs expired events so
-	// the pill disappears once the window has reset.
+	// Per-second tick — keeps the reset countdown fresh and lets the pill flip to
+	// 0% the moment the window rolls over. Only runs while we have a reading.
 	let now: number = $state(Date.now());
-
 	$effect(() => {
-		if (!event) return;
+		if (!reading) return;
 		now = Date.now();
 		const interval = setInterval(() => {
 			now = Date.now();
-			rateLimit.gcExpired(now);
 		}, 1000);
 		return () => clearInterval(interval);
 	});
 
-	/**
-	 * Parse `resets_at` into epoch ms. The field is typed as a string but the CLI
-	 * may emit an ISO string, epoch seconds, or epoch milliseconds — handle all.
-	 */
+	/** Parse `resets_at` (ISO string, epoch seconds, or epoch ms) into epoch ms. */
 	function parseResetMs(resetsAt: string | number | undefined): number | null {
 		if (resetsAt == null) return null;
 		if (typeof resetsAt === 'number') {
-			// Heuristic: < 1e12 means seconds, otherwise milliseconds.
 			return resetsAt < 1e12 ? resetsAt * 1000 : resetsAt;
 		}
 		const trimmed = resetsAt.trim();
 		if (trimmed === '') return null;
-		// Pure-numeric string → epoch.
 		if (/^\d+$/.test(trimmed)) {
 			const n = Number(trimmed);
 			return n < 1e12 ? n * 1000 : n;
@@ -81,46 +64,50 @@
 		return `${s}s`;
 	}
 
-	// Normalize utilization to an integer 0–100. SDK sends a 0–1 fraction; we also
-	// accept a 0–100 percentage defensively.
-	const utilizationPct = $derived.by(() => {
-		const u = event?.utilization;
+	const resetMs = $derived(reading ? parseResetMs(reading.resets_at) : null);
+	// Window has rolled over → a fresh 5-hour window has begun (≈0% used).
+	const windowReset = $derived(resetMs != null && resetMs <= now);
+
+	// Last-known utilization normalized to an integer 0–100 (SDK sends 0–1).
+	const rawPct = $derived.by(() => {
+		const u = reading?.utilization;
 		if (u == null) return null;
 		const pct = u <= 1 ? u * 100 : u;
 		return Math.min(100, Math.max(0, Math.round(pct)));
 	});
 
-	const countdown = $derived(formatCountdown(event?.resets_at, now));
+	// Display %: 0 right after a window reset, otherwise the last-known value.
+	// null when we've never received a reading (renders "—").
+	const displayPct = $derived(reading ? (windowReset ? 0 : rawPct) : null);
+	const hasValue = $derived(displayPct != null);
+
+	const countdown = $derived(reading && !windowReset ? formatCountdown(reading.resets_at, now) : '');
 
 	// Severity by proximity to the cap: neutral <70%, amber 70–90%, red >90%.
 	const severity = $derived.by<'neutral' | 'warning' | 'danger'>(() => {
-		const pct = utilizationPct;
-		if (pct == null) return 'neutral';
-		if (pct > 90) return 'danger';
-		if (pct >= 70) return 'warning';
+		if (displayPct == null) return 'neutral';
+		if (displayPct > 90) return 'danger';
+		if (displayPct >= 70) return 'warning';
 		return 'neutral';
 	});
 
 	const tooltip = $derived.by(() => {
-		if (!event) return '';
-		const pct = utilizationPct;
-		const head = pct != null ? `5-hour usage: ${pct}%` : '5-hour usage';
+		if (displayPct == null) return '5-hour usage — updates as you use Claude';
+		if (windowReset) return '5-hour usage: 0% · new window';
 		const reset = countdown ? ` · resets in ${countdown}` : '';
-		return `${head}${reset}`;
+		return `5-hour usage: ${displayPct}%${reset}`;
 	});
 </script>
 
-{#if event && utilizationPct !== null}
-	<div class="usage-indicator usage-limit {severity}" title={tooltip}>
-		<span class="limit-icon" aria-hidden="true">
-			<Clock size={12} />
-		</span>
-		<div class="usage-bar">
-			<div class="usage-fill" style="width: {utilizationPct}%"></div>
-		</div>
-		<span class="usage-text">{utilizationPct}%</span>
+<div class="usage-indicator usage-limit {severity}" title={tooltip}>
+	<span class="limit-icon" aria-hidden="true">
+		<Clock size={12} />
+	</span>
+	<div class="usage-bar">
+		<div class="usage-fill" style="width: {displayPct ?? 0}%"></div>
 	</div>
-{/if}
+	<span class="usage-text">{hasValue ? `${displayPct}%` : '—'}</span>
+</div>
 
 <style>
 	/* Glass pill — mirrors ContextUsageBar's .usage-indicator for visual parity. */
