@@ -1111,6 +1111,42 @@ async def stream_to_websocket(
 
                     return PermissionResultAllow()
 
+                # Computer use: request_access is the single approval gate (keyed to
+                # permission mode); individual actions are auto-allowed here — they
+                # enforce the granted state themselves, so we never prompt per click.
+                if tool_name.startswith("mcp__computer-use__"):
+                    if tool_name == "mcp__computer-use__request_access":
+                        if _perm_mode == "bypassPermissions":
+                            return PermissionResultAllow()
+                        if _perm_mode == "plan":
+                            return PermissionResultDeny(message="Computer control is disabled in plan mode.")
+                        apps = tool_input.get("apps") or []
+                        reason = tool_input.get("reason") or ""
+                        request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
+                        desc = "Claude wants to control: " + (", ".join(apps) if apps else "your screen")
+                        if reason:
+                            desc += f"\nReason: {reason}"
+                        result = await permission_handler.request_permission(
+                            request_id=request_id,
+                            session_id=_sid,
+                            profile_id=_profile_id,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            broadcast_func=_broadcast,
+                            tool_use_id=_ctx_tool_use_id,
+                            agent_id=_ctx_agent_id,
+                            title="Computer control access",
+                            display_name="Control your computer",
+                            description=desc,
+                        )
+                        if isinstance(result, _DeferSentinel):
+                            return PermissionResultDeny(message="Computer-use access deferred by user")
+                        if getattr(result, "behavior", None) == "deny":
+                            return result
+                        return PermissionResultAllow()
+                    # All other computer-use actions: access is gated by request_access.
+                    return PermissionResultAllow()
+
                 # For other tools in default mode, route through permission handler
                 if _perm_mode == "default":
                     request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"

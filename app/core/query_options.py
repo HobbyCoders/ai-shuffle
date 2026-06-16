@@ -49,6 +49,29 @@ from app.core.environment import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+# Operating guidance appended to the system prompt when computer-use is active.
+COMPUTER_USE_GUIDANCE = (
+    "## Computer use\n"
+    "You can control this **Windows** computer with the `mcp__computer-use__*` tools "
+    "(screenshot, left_click, type, key, scroll, open_application, zoom, request_access, "
+    "computer_batch, …) — the standard computer-use interface, with the usual conventions "
+    "(coordinates are [x, y] pixels in the most recent screenshot).\n"
+    "- Call `request_access` FIRST with the apps you'll need (Start-menu names, e.g. "
+    "'Notepad', 'File Explorer') and a one-line reason; wait for approval, then take a "
+    "`screenshot` to begin.\n"
+    "- To launch or focus an app, use `open_application` (e.g. open_application app='Notepad') "
+    "rather than hunting for its window — this app (AI Shuffle) runs in a browser that is "
+    "usually in front and won't move itself.\n"
+    "- Take a fresh `screenshot` after actions; use `zoom` to read small text. Use "
+    "`computer_batch` for predictable sequences (click → type → Return).\n"
+    "- For multiple monitors, read the display note on screenshots and use `switch_display`.\n"
+    "- You share one physical cursor with the user; work in short, verifiable steps. The "
+    "user can engage an emergency Stop at any time, after which actions refuse until "
+    "resumed.\n"
+    "- Synthetic input cannot operate the Windows UAC / secure desktop or the lock screen. "
+    "If you hit an elevation prompt or a black screenshot, stop and ask the user to handle it."
+)
+
 # ─── Session store singleton (Phase 1.5) ────────────────────────────────────
 # Constructed once per process when session_store_mode != "disabled".
 # Wrapped in try/except so Postgres unavailability is non-fatal — callers
@@ -446,6 +469,26 @@ def build_options_from_profile(
     except Exception:
         logger.exception("Failed to add built-in MCP server tools to allowed_tools")
 
+    # Computer-use (host desktop control). Only allow-list its tools when the
+    # profile explicitly enables it AND the host can actually run it (native /
+    # non-Docker with a usable display). Off by default; tools never reach the
+    # model otherwise.
+    computer_use_cfg = config.get("computer_use") or {}
+    computer_use_enabled = bool(computer_use_cfg.get("enabled"))
+    if computer_use_enabled:
+        try:
+            from app.mcp.computer_use.scaling import computer_use_available
+            _cu_ok, _cu_reason = computer_use_available()
+            if _cu_ok:
+                from app.mcp.computer_use_sdk import get_computer_use_tool_names
+                mcp_allowed_tools.extend(get_computer_use_tool_names())
+            else:
+                computer_use_enabled = False
+                logger.info("computer-use requested but unavailable (%s)", _cu_reason)
+        except Exception:
+            computer_use_enabled = False
+            logger.exception("Failed to evaluate computer-use availability")
+
     # Build final allowed_tools list:
     # - When sdk_tools is set (preset), built-in tools are handled by the preset.
     #   Only MCP tool names need to go in allowed_tools.
@@ -499,6 +542,46 @@ def build_options_from_profile(
             logger.debug("Builtin bridge MCP server registered")
     except Exception:
         logger.exception("Failed to create builtin bridge MCP server")
+
+    # Register the computer-use server (host desktop control) when enabled and
+    # the host supports it. computer_use_enabled was already validated against
+    # computer_use_available() above, so this just builds the server.
+    if computer_use_enabled:
+        try:
+            from app.mcp.computer_use_sdk import create_computer_use_server
+            cu_srv = create_computer_use_server(
+                enabled=True,
+                target_display=computer_use_cfg.get("target_display"),
+                virtual_size=(
+                    int(computer_use_cfg.get("virtual_width", 1280)),
+                    int(computer_use_cfg.get("virtual_height", 800)),
+                ),
+                permission_mode=permission_mode,
+                session_id=session_id,
+                profile_id=profile.get("id"),
+            )
+            if cu_srv:
+                mcp_servers_dict["computer-use"] = cu_srv
+                logger.info("computer-use MCP server registered for session %s", session_id)
+            else:
+                computer_use_enabled = False
+        except Exception:
+            computer_use_enabled = False
+            logger.exception("Failed to create computer-use MCP server")
+
+    # When computer-use is active, append operating guidance to the system prompt
+    # so the model uses the tools correctly (coordinate space, screenshot-first,
+    # shared cursor, UAC limits, emergency stop). Handle both string and preset
+    # (dict with "append") prompt shapes.
+    if computer_use_enabled and "computer-use" in mcp_servers_dict:
+        if isinstance(final_system_prompt, dict):
+            _existing = final_system_prompt.get("append", "")
+            final_system_prompt["append"] = (
+                f"{_existing}\n\n{COMPUTER_USE_GUIDANCE}" if _existing else COMPUTER_USE_GUIDANCE
+            )
+        else:
+            _base = str(final_system_prompt) if final_system_prompt else ""
+            final_system_prompt = f"{_base}\n\n{COMPUTER_USE_GUIDANCE}" if _base else COMPUTER_USE_GUIDANCE
 
     # Build options with all ClaudeAgentOptions fields
     # Note: We don't set cli_path - let the SDK use its bundled CLI or find system CLI automatically

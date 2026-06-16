@@ -10,6 +10,29 @@
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
 	import { getModels, CUSTOM_VALUE } from '$lib/constants/models';
+	import { onMount } from 'svelte';
+	import { getComputerUseStatus } from '$lib/api/computerUse';
+
+	// Host capability for the Computer Use toggle. Native-only: unavailable in
+	// Docker/headless, which we surface so the toggle can be greyed out.
+	let computerUse = $state<{ available: boolean; reason: string }>({ available: true, reason: 'ok' });
+	onMount(async () => {
+		try {
+			const s = await getComputerUseStatus();
+			computerUse = { available: s.available, reason: s.reason };
+		} catch {
+			// Leave optimistic default; backend still no-ops if unavailable.
+		}
+	});
+
+	const COMPUTER_USE_REASONS: Record<string, string> = {
+		docker: 'Unavailable: AI Shuffle is running in Docker, which cannot control the host desktop. Run it natively to use this.',
+		'no-display': 'Unavailable: no desktop display detected on this host.',
+		'no-monitors': 'Unavailable: no monitors detected on this host.',
+		'missing-deps': 'Unavailable: the mss/pynput packages are not installed on the server.',
+		'env-disabled': 'Unavailable: disabled by the COMPUTER_USE_DISABLED environment variable.',
+		'screenshot-probe-failed': 'Unavailable: the screen-capture probe failed on this host.'
+	};
 
 	interface ToolCategory {
 		id: string;
@@ -76,6 +99,7 @@
 		enable_file_checkpointing: boolean;
 		app_config_tools: boolean;
 		strict_mcp_config: boolean;
+		computer_use_enabled: boolean;
 	}
 
 	interface EnvVarPreset {
@@ -387,6 +411,31 @@
 					aria-checked={profileForm.strict_mcp_config}
 					aria-label="Toggle strict MCP config"
 					onclick={() => onFormChange('strict_mcp_config', !profileForm.strict_mcp_config)}
+				>
+					<span class="pf-toggle-knob"></span>
+				</button>
+			</div>
+			<!-- Computer Use: control the host desktop (screenshots, mouse, keyboard). -->
+			<div class="pf-toggle-row" class:pf-toggle-row--disabled={!computerUse.available}>
+				<div class="pf-toggle-info">
+					<span class="pf-toggle-title">Computer Use</span>
+					<span class="pf-toggle-desc">
+						Let the agent control this machine's screen — screenshots, mouse, and keyboard,
+						like Claude Desktop. Shares one cursor with you. Native (non-Docker) hosts only.
+						{#if !computerUse.available}
+							<br /><strong>{COMPUTER_USE_REASONS[computerUse.reason] ?? `Unavailable (${computerUse.reason}).`}</strong>
+						{/if}
+					</span>
+				</div>
+				<button
+					type="button"
+					class="pf-toggle"
+					class:active={profileForm.computer_use_enabled}
+					role="switch"
+					aria-checked={profileForm.computer_use_enabled}
+					aria-label="Toggle computer use"
+					disabled={!computerUse.available}
+					onclick={() => onFormChange('computer_use_enabled', !profileForm.computer_use_enabled)}
 				>
 					<span class="pf-toggle-knob"></span>
 				</button>
@@ -754,6 +803,15 @@
 
 	.pf-toggle.active .pf-toggle-knob {
 		transform: translateX(20px);
+	}
+
+	.pf-toggle:disabled {
+		cursor: not-allowed;
+		opacity: 0.4;
+	}
+
+	.pf-toggle-row--disabled .pf-toggle-title {
+		opacity: 0.6;
 	}
 
 	/* Summary Bar */
