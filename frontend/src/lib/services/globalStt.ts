@@ -13,6 +13,7 @@ import { writable, get } from 'svelte/store';
 import { browser } from '$app/environment';
 import { registerShortcut, type ShortcutRegistration } from './keyboard';
 import { hotkeyPreferences, type HotkeyConfig } from '$lib/stores/hotkeyPreferences';
+import { convertToWav } from '$lib/utils/audioConvert';
 
 // ============================================================================
 // Types
@@ -342,9 +343,20 @@ async function transcribeAndOutput(audioBlob: Blob): Promise<void> {
 	}));
 
 	try {
+		// MediaRecorder produces WebM/Opus (or MP4), which some fal STT models
+		// (e.g. ElevenLabs Scribe) reject. Re-encode to WAV, which every model
+		// accepts. Fall back to the original blob if conversion isn't possible.
+		let uploadBlob = audioBlob;
+		let filename = `recording.${getFileExtension(audioBlob.type || currentMimeType)}`;
+		try {
+			uploadBlob = await convertToWav(audioBlob);
+			filename = 'recording.wav';
+		} catch (conversionError) {
+			console.warn('[GlobalSTT] WAV conversion failed, uploading original recording:', conversionError);
+		}
+
 		const formData = new FormData();
-		const extension = getFileExtension(audioBlob.type || currentMimeType);
-		formData.append('file', audioBlob, `recording.${extension}`);
+		formData.append('file', uploadBlob, filename);
 
 		const response = await fetch('/api/v1/settings/transcribe', {
 			method: 'POST',

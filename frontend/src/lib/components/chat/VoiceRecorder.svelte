@@ -4,6 +4,7 @@
 	 * visualization, and transcription. Extracted from ChatInput.
 	 */
 	import { tick, onDestroy } from 'svelte';
+	import { convertToWav } from '$lib/utils/audioConvert';
 
 	interface Props {
 		onTranscription: (text: string) => void;
@@ -240,8 +241,20 @@
 		recordingError = '';
 
 		try {
+			// MediaRecorder produces WebM/Opus (or MP4), which some fal STT models
+			// (e.g. ElevenLabs Scribe) reject. Re-encode to WAV, which every model
+			// accepts. Fall back to the original blob if conversion isn't possible.
+			let uploadBlob = audioBlob;
+			let filename = 'recording.webm';
+			try {
+				uploadBlob = await convertToWav(audioBlob);
+				filename = 'recording.wav';
+			} catch (conversionError) {
+				console.warn('WAV conversion failed, uploading original recording:', conversionError);
+			}
+
 			const formData = new FormData();
-			formData.append('file', audioBlob, 'recording.webm');
+			formData.append('file', uploadBlob, filename);
 
 			const response = await fetch('/api/v1/settings/transcribe', {
 				method: 'POST',
