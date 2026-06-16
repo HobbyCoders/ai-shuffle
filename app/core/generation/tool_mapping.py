@@ -9,24 +9,39 @@ import re
 from typing import Dict, List, Optional, Set
 
 # ============================================================================
+# Browser Tools (Claude in Chrome)
+# ============================================================================
+
+# The headless browser MCP is "Claude in Chrome" (replaced the legacy Playwright
+# `browser_*` tools). Tool names are namespaced under the MCP server.
+CHROME_BROWSER_TOOLS: List[str] = [
+    "mcp__Claude_in_Chrome__navigate",
+    "mcp__Claude_in_Chrome__computer",
+    "mcp__Claude_in_Chrome__find",
+    "mcp__Claude_in_Chrome__form_input",
+    "mcp__Claude_in_Chrome__get_page_text",
+    "mcp__Claude_in_Chrome__read_page",
+    "mcp__Claude_in_Chrome__read_console_messages",
+    "mcp__Claude_in_Chrome__read_network_requests",
+    "mcp__Claude_in_Chrome__javascript_tool",
+    "mcp__Claude_in_Chrome__resize_window",
+    "mcp__Claude_in_Chrome__tabs_create_mcp",
+    "mcp__Claude_in_Chrome__tabs_close_mcp",
+    "mcp__Claude_in_Chrome__tabs_context_mcp",
+]
+
+# ============================================================================
 # Tool Categories
 # ============================================================================
 
-TOOL_CATEGORIES: Dict[str, List[str]] = {
+TOOL_CATEGORIES: Dict[str, Optional[List[str]]] = {
     "read_only": ["Read", "Grep", "Glob"],
     "file_ops": ["Read", "Write", "Edit", "Glob", "Grep"],
-    "execution": ["Bash", "KillShell"],
+    "execution": ["Bash"],
     "web": ["WebFetch", "WebSearch"],
-    "management": ["TodoWrite", "Task", "Agent"],
+    "management": ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "Agent"],
     "notebook": ["NotebookEdit"],
-    "browser": [
-        "browser_navigate", "browser_screenshot", "browser_click",
-        "browser_type", "browser_scroll", "browser_get_content",
-        "browser_get_elements", "browser_back", "browser_forward",
-        "browser_evaluate", "browser_fill", "browser_select",
-        "browser_wait", "browser_tab_new", "browser_tab_list",
-        "browser_tab_switch", "browser_close",
-    ],
+    "browser": CHROME_BROWSER_TOOLS,
     "all": None,  # Special: inherit all tools
 }
 
@@ -68,12 +83,7 @@ DOMAIN_TOOLS: Dict[str, Optional[List[str]]] = {
     # Web browsing
     "web-browsing": [
         "Read", "Grep", "Glob", "WebFetch", "WebSearch",
-        "browser_navigate", "browser_screenshot", "browser_click",
-        "browser_type", "browser_scroll", "browser_get_content",
-        "browser_get_elements", "browser_back", "browser_forward",
-        "browser_evaluate", "browser_fill", "browser_select",
-        "browser_wait", "browser_tab_new", "browser_tab_list",
-        "browser_tab_switch", "browser_close",
+        *CHROME_BROWSER_TOOLS,
     ],
 
     # General - inherits all

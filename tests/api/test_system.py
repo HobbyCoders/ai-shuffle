@@ -791,7 +791,10 @@ class TestToolCategories:
 
         execution_tools = [t["name"] for t in BUILTIN_TOOLS if t["category"] == "execution"]
 
-        expected = ["Bash", "Task", "Agent"]
+        # The targeted Claude CLI launches subagents via "Task"; "Agent" is the
+        # newer alias used by other SDK versions and is categorized in
+        # TOOL_CATEGORY_RULES but not necessarily present in the live builtin set.
+        expected = ["Bash", "PowerShell", "Task"]
         for tool in expected:
             assert tool in execution_tools
 
@@ -902,6 +905,10 @@ class TestSystemIntegration:
         all_tools_result = await list_available_tools(token="test-token")
         builtin_result = await list_builtin_tools(token="test-token")
 
-        # all_tools should match builtin list
-        assert len(all_tools_result.all_tools) == len(builtin_result)
-        assert len(all_tools_result.all_tools) == len(BUILTIN_TOOLS)
+        # Compare only the built-in (non-MCP) tools — discovery may also surface
+        # MCP server tools depending on the environment, which list_builtin_tools
+        # never includes. The static BUILTIN_TOOLS fallback should mirror the
+        # live CLI's built-in tool set.
+        discovered_builtin = [t for t in all_tools_result.all_tools if not t.name.startswith("mcp__")]
+        assert len(discovered_builtin) == len(builtin_result)
+        assert len(discovered_builtin) == len(BUILTIN_TOOLS)

@@ -40,6 +40,10 @@ TOOL_CATEGORIES = {
         "name": "Execution tools",
         "description": "Tools that execute commands or code"
     },
+    "task_management": {
+        "name": "Task management tools",
+        "description": "Tools that track and update the agent's task list"
+    },
     "scheduling": {
         "name": "Scheduling tools",
         "description": "Tools that schedule, trigger, or delay work"
@@ -80,11 +84,17 @@ BUILTIN_TOOLS = [
 
     # Execution tools
     {"name": "Bash", "category": "execution", "description": "Execute shell commands"},
+    {"name": "PowerShell", "category": "execution", "description": "Execute PowerShell commands"},
     {"name": "Task", "category": "execution", "description": "Launch subagent tasks"},
-    {"name": "Agent", "category": "execution", "description": "Launch subagent tasks"},
-    {"name": "KillShell", "category": "execution", "description": "Kill background shell"},
+    {"name": "Workflow", "category": "execution", "description": "Orchestrate multiple subagents deterministically"},
     {"name": "Monitor", "category": "execution", "description": "Stream output from a long-running command"},
     {"name": "TaskStop", "category": "execution", "description": "Stop a background task"},
+
+    # Task management tools
+    {"name": "TaskCreate", "category": "task_management", "description": "Add tasks to the task list"},
+    {"name": "TaskGet", "category": "task_management", "description": "Get a task from the task list"},
+    {"name": "TaskList", "category": "task_management", "description": "List tracked tasks"},
+    {"name": "TaskUpdate", "category": "task_management", "description": "Update a task's status"},
 
     # Scheduling tools
     {"name": "ScheduleWakeup", "category": "scheduling", "description": "Pause and resume the session after a delay"},
@@ -101,9 +111,8 @@ BUILTIN_TOOLS = [
     {"name": "PushNotification", "category": "notification", "description": "Send a push notification"},
 
     # Other tools
-    {"name": "TodoWrite", "category": "other", "description": "Manage task lists"},
     {"name": "Skill", "category": "other", "description": "Execute skills"},
-    {"name": "SlashCommand", "category": "other", "description": "Run slash commands"},
+    {"name": "DesignSync", "category": "other", "description": "Sync design assets"},
     {"name": "EnterPlanMode", "category": "other", "description": "Enter planning mode"},
     {"name": "ExitPlanMode", "category": "other", "description": "Exit planning mode"},
     {"name": "AskUserQuestion", "category": "other", "description": "Ask user clarifying questions"},
@@ -123,11 +132,17 @@ TOOL_DESCRIPTIONS = {
     "Write": "Write new files",
     "NotebookEdit": "Edit Jupyter notebooks",
     "Bash": "Execute shell commands",
-    "Task": "Launch subagent tasks",
+    "PowerShell": "Execute PowerShell commands",
     "Agent": "Launch subagent tasks",
-    "KillShell": "Kill background shell",
+    "Workflow": "Orchestrate multiple subagents deterministically",
+    "Task": "Launch subagent tasks (legacy; renamed to Agent)",
+    "KillShell": "Kill background shell (legacy)",
     "Monitor": "Stream output from a long-running command",
     "TaskStop": "Stop a background task",
+    "TaskCreate": "Add tasks to the task list",
+    "TaskGet": "Get a task from the task list",
+    "TaskList": "List tracked tasks",
+    "TaskUpdate": "Update a task's status",
     "ScheduleWakeup": "Pause and resume the session after a delay",
     "CronCreate": "Create a recurring scheduled task",
     "CronList": "List scheduled tasks",
@@ -136,9 +151,11 @@ TOOL_DESCRIPTIONS = {
     "EnterWorktree": "Enter an isolated git worktree",
     "ExitWorktree": "Exit the current worktree",
     "PushNotification": "Send a push notification",
-    "TodoWrite": "Manage task lists",
+    "SendUserFile": "Send a file to the user",
+    "DesignSync": "Sync design assets",
     "Skill": "Execute skills",
-    "SlashCommand": "Run slash commands",
+    "TodoWrite": "Manage task lists (legacy; replaced by TaskCreate/TaskUpdate)",
+    "SlashCommand": "Run slash commands (legacy; now handled by Skill)",
     "EnterPlanMode": "Enter planning mode",
     "ExitPlanMode": "Exit planning mode",
     "AskUserQuestion": "Ask user clarifying questions",
@@ -149,10 +166,11 @@ TOOL_DESCRIPTIONS = {
 TOOL_CATEGORY_RULES = {
     "read_only": ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TaskOutput", "ToolSearch"],
     "edit": ["Edit", "Write", "NotebookEdit"],
-    "execution": ["Bash", "Task", "Agent", "KillShell", "Monitor", "TaskStop"],
+    "execution": ["Bash", "PowerShell", "Agent", "Workflow", "Monitor", "TaskStop", "Task", "KillShell"],
+    "task_management": ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TodoWrite"],
     "scheduling": ["ScheduleWakeup", "CronCreate", "CronList", "CronDelete", "RemoteTrigger"],
     "worktree": ["EnterWorktree", "ExitWorktree"],
-    "notification": ["PushNotification"],
+    "notification": ["PushNotification", "SendUserFile"],
 }
 
 # Cache for dynamically discovered tools

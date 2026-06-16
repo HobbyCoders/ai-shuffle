@@ -51,6 +51,7 @@ class TestToolMapping:
         from app.core.generation.tool_mapping import get_tools_for_domain
 
         tools = get_tools_for_domain("code-review")
+        assert tools is not None
         assert tools == ["Read", "Grep", "Glob"]
         assert "Write" not in tools
         assert "Edit" not in tools
@@ -60,6 +61,7 @@ class TestToolMapping:
         from app.core.generation.tool_mapping import get_tools_for_domain
 
         tools = get_tools_for_domain("testing")
+        assert tools is not None
         assert "Read" in tools
         assert "Write" in tools
         assert "Edit" in tools
@@ -77,7 +79,7 @@ class TestToolMapping:
         from app.core.generation.tool_mapping import get_model_for_domain
 
         assert get_model_for_domain("exploration") == "claude-haiku-4-5"  # Fast
-        assert get_model_for_domain("security") == "claude-opus-4-7"  # Complex analysis
+        assert get_model_for_domain("security") == "claude-opus-4-8"  # Complex analysis
         assert get_model_for_domain("code-review") == "claude-sonnet-4-6"  # Balanced
 
     def test_get_thinking_mode_for_domain(self):
