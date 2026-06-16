@@ -12,8 +12,9 @@ Key design principles:
 - Worktree validity is determined by checking if the folder exists on disk
 
 Path pattern:
-  Workspace projects: {workspace_dir}/{branch_sanitized}-{short_hash}
-  Absolute-path projects: {project_parent}/{branch_sanitized}-{short_hash} (sibling placement)
+  All projects: {project_dir}/.claude/worktrees/{branch_sanitized}-{short_hash}
+  (Worktrees live inside the project's own .claude folder, git-ignored via
+  .git/info/exclude. The absolute path is stored in the DB.)
 """
 
 import hashlib
@@ -27,7 +28,7 @@ from app.core.config import settings
 from app.core.git_service import git_service
 from app.core.project_utils import (
     get_project_working_dir, get_worktree_working_dir,
-    get_worktree_working_dir_as_path, get_project_parent_dir
+    get_worktree_working_dir_as_path
 )
 from app.db import database
 from app.db.base import WorktreeStatus
@@ -53,8 +54,8 @@ class WorktreeManager:
     - get_available_worktrees(): Gets worktrees available for new sessions
     - is_worktree_valid(): Checks if worktree folder exists on disk
 
-    Path pattern: {workspace_dir}/{branch_sanitized}-{short_hash}
-    (Worktrees are adjacent to the main repo, not nested inside it)
+    Path pattern: {project_dir}/.claude/worktrees/{branch_sanitized}-{short_hash}
+    (Worktrees are nested inside the project's .claude folder, git-ignored)
     """
 
     def __init__(self):
@@ -67,13 +68,18 @@ class WorktreeManager:
 
     def _get_worktree_path(self, project_path: str, branch: str) -> Path:
         """
-        Get full path for a worktree - adjacent to the main repo.
-        Uses a short hash of the project path to ensure uniqueness across repos.
+        Get full path for a worktree - nested inside the project's own
+        ``.claude/worktrees/`` directory, mirroring where Claude Code keeps
+        its agent worktrees.
 
-        For relative-path projects (workspace-based):
-            {workspace_dir}/feature-auth-a7b3
-        For absolute-path projects (local mode):
-            {project_parent}/feature-auth-a7b3  (sibling directory)
+        Uses a short hash of the project path to ensure uniqueness, plus a
+        kebab-case sanitized branch name (the same naming convention used
+        before). The ``.claude/worktrees/`` directory is created if needed and
+        the nested location is added to the repo's ``.git/info/exclude`` so it
+        never pollutes the user's git status.
+
+        Example:
+            {project_dir}/.claude/worktrees/feature-auth-a7b3
         """
         sanitized = self._sanitize_branch_name(branch)
 
@@ -81,11 +87,16 @@ class WorktreeManager:
         path_hash = hashlib.md5(project_path.encode()).hexdigest()[:4]
         base_name = f"{sanitized}-{path_hash}"
 
-        # Place worktrees in the parent directory of the project
-        # For workspace projects: this is workspace_dir
-        # For absolute-path projects: this is the project's parent dir (sibling placement)
-        parent_dir = get_project_parent_dir(project_path)
-        base_path = parent_dir / base_name
+        # Place worktrees inside the project's own .claude/worktrees/ folder.
+        main_dir = get_project_working_dir(project_path)
+        worktrees_dir = Path(main_dir) / ".claude" / "worktrees"
+        worktrees_dir.mkdir(parents=True, exist_ok=True)
+
+        # Ensure the nested worktree dir is ignored by the main repo so the
+        # git worktrees we create here don't show up as untracked files.
+        self._ensure_worktrees_ignored(main_dir)
+
+        base_path = worktrees_dir / base_name
 
         # If base path doesn't exist, use it
         if not base_path.exists():
@@ -94,24 +105,82 @@ class WorktreeManager:
         # Otherwise, find a unique suffix
         counter = 2
         while True:
-            candidate = parent_dir / f"{base_name}-{counter}"
+            candidate = worktrees_dir / f"{base_name}-{counter}"
             if not candidate.exists():
                 return candidate
             counter += 1
             if counter > 100:
                 raise WorktreeError(f"Too many worktrees for branch '{branch}'")
 
+    def _ensure_worktrees_ignored(self, main_dir: str) -> None:
+        """
+        Make sure ``.claude/worktrees/`` is git-ignored within the project's
+        repository via ``.git/info/exclude``.
+
+        We deliberately use ``.git/info/exclude`` (a local, untracked ignore
+        file) rather than the tracked ``.gitignore`` so we never modify files
+        the user has committed. Idempotent: the entry is only appended once.
+        """
+        ignore_entry = ".claude/worktrees/"
+        try:
+            git_dir = Path(main_dir) / ".git"
+            if git_dir.is_dir():
+                # Normal repo: .git is a directory → write info/exclude there.
+                info_dir = git_dir / "info"
+            elif git_dir.is_file():
+                # The project path is itself a git worktree (its .git is a file
+                # pointing at the real git dir). The shared exclude file lives in
+                # the *common* git dir, which we resolve via rev-parse. Writing to
+                # the worktree's own git dir would not cover this checkout's
+                # untracked-file rules the same way.
+                result = self.git_service._run_git(
+                    main_dir, ["rev-parse", "--git-common-dir"], timeout=5
+                )
+                if result.returncode != 0 or not result.stdout.strip():
+                    logger.warning(
+                        f"Could not resolve --git-common-dir for {main_dir}: "
+                        f"{result.stderr.strip()}"
+                    )
+                    return
+                common_dir = result.stdout.strip()
+                common_path = Path(common_dir)
+                if not common_path.is_absolute():
+                    # rev-parse may return a path relative to main_dir.
+                    common_path = (Path(main_dir) / common_path).resolve()
+                info_dir = common_path / "info"
+            else:
+                # No .git at all — nothing we can do.
+                return
+
+            info_dir.mkdir(parents=True, exist_ok=True)
+            exclude_file = info_dir / "exclude"
+
+            existing = ""
+            if exclude_file.exists():
+                existing = exclude_file.read_text(encoding="utf-8", errors="ignore")
+            # Already present (match the bare entry on its own line)
+            if any(line.strip() == ignore_entry for line in existing.splitlines()):
+                return
+
+            prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+            with exclude_file.open("a", encoding="utf-8") as f:
+                f.write(f"{prefix}{ignore_entry}\n")
+            logger.debug(f"Added '{ignore_entry}' to {exclude_file}")
+        except Exception as e:
+            # Non-fatal: worst case the worktree dir shows up as untracked.
+            logger.warning(f"Failed to update git info/exclude for {main_dir}: {e}")
+
     def _get_relative_worktree_path_from_full(self, full_path: Path, project_path: str = "") -> str:
         """
         Get the worktree path to store in the database.
 
-        For workspace-based projects: just the folder name (relative to workspace_dir).
-        For absolute-path projects: the full absolute path.
+        New worktrees live under the project's ``.claude/worktrees/`` folder,
+        which is not relative to ``workspace_dir``, so we store the full
+        absolute path. ``get_worktree_working_dir()`` resolves absolute paths
+        directly while remaining backward compatible with older rows that
+        stored just a folder name relative to ``workspace_dir``.
         """
-        from app.core.project_utils import is_absolute_project_path
-        if project_path and is_absolute_project_path(project_path):
-            return str(full_path)
-        return full_path.name
+        return str(full_path)
 
     def _ensure_repository_record(self, project_id: str, project_path: str) -> Optional[Dict]:
         """
@@ -266,19 +335,22 @@ class WorktreeManager:
                 normalized_git_path = os.path.normpath(git_path)
                 if normalized_git_path not in db_paths:
                     try:
-                        worktree_folder = Path(git_path).name
+                        # Store the absolute path so it resolves consistently
+                        # regardless of where the worktree lives on disk (e.g.
+                        # nested under .claude/worktrees/, not workspace_dir).
+                        stored_path = os.path.abspath(git_path)
                         branch_name = git_wt.get("branch", "unknown")
                         worktree_id = f"wt-{uuid.uuid4().hex[:12]}"
                         database.create_worktree(
                             worktree_id=worktree_id,
                             repository_id=repo["id"],
                             branch_name=branch_name,
-                            worktree_path=worktree_folder,
+                            worktree_path=stored_path,
                             session_id=None,
                             base_branch=None,
                             status=WorktreeStatus.ACTIVE
                         )
-                        logger.debug(f"Imported external worktree: {worktree_folder} (branch: {branch_name})")
+                        logger.debug(f"Imported external worktree: {stored_path} (branch: {branch_name})")
                         imported += 1
                     except Exception as e:
                         logger.warning(f"Failed to import external worktree {git_path}: {e}")
@@ -1088,9 +1160,14 @@ class WorktreeManager:
         # Normalize paths for comparison (git uses forward slashes,
         # Python Path uses backslashes on Windows)
         git_worktree_paths = set()
+        # Also index real git worktrees by their basename (folder name) so we can
+        # tolerate older DB rows. See the FIX 3 note in the orphan check below.
+        git_worktree_basenames = set()
         for wt in git_worktrees:
             if not wt.get("is_main"):
-                git_worktree_paths.add(os.path.normpath(wt.get("path", "")))
+                normalized = os.path.normpath(wt.get("path", ""))
+                git_worktree_paths.add(normalized)
+                git_worktree_basenames.add(os.path.basename(normalized))
 
         # Get database worktrees
         db_worktrees = database.get_worktrees_for_repository(repo["id"])
@@ -1100,6 +1177,21 @@ class WorktreeManager:
 
             if worktree_abs_path in git_worktree_paths:
                 # Worktree exists in both git and database
+                result["synced"] += 1
+            elif (
+                db_wt["status"] == WorktreeStatus.ACTIVE
+                and os.path.basename(os.path.normpath(db_wt.get("worktree_path") or ""))
+                in git_worktree_basenames
+            ):
+                # Edge case (pre-existing latent inconsistency): older worktree
+                # rows for absolute-path projects were stored as a *bare folder
+                # name* but physically created in the project's PARENT dir. Such a
+                # row now resolves to ``workspace_dir/<name>`` (nonexistent), so a
+                # naive check would mark a VALID active worktree as ORPHANED and
+                # re-import it on every sync. If a real git worktree with the same
+                # folder name still exists, treat the row as synced rather than
+                # aggressively orphaning it. This is self-healing and avoids churn;
+                # we intentionally do NOT attempt a risky path migration here.
                 result["synced"] += 1
             elif db_wt["status"] == WorktreeStatus.ACTIVE:
                 # Worktree is in database but not on filesystem - mark as orphaned
@@ -1119,6 +1211,14 @@ class WorktreeManager:
             os.path.normpath(get_worktree_working_dir(wt))
             for wt in db_worktrees
         }
+        # Also dedup by bare folder name so older rows (stored as a bare name and
+        # resolving to a nonexistent ``workspace_dir/<name>``) don't get
+        # re-imported as duplicates every sync. See the FIX 3 note above.
+        db_basenames = {
+            os.path.basename(os.path.normpath(wt.get("worktree_path") or ""))
+            for wt in db_worktrees
+            if wt.get("worktree_path")
+        }
         for git_wt in git_worktrees:
             if git_wt.get("is_main"):
                 continue  # Skip main worktree
@@ -1130,11 +1230,20 @@ class WorktreeManager:
             if not Path(git_path).exists():
                 continue
             normalized_git_path = os.path.normpath(git_path)
-            if normalized_git_path not in db_paths:
+            if (
+                normalized_git_path not in db_paths
+                and os.path.basename(normalized_git_path) not in db_basenames
+            ):
                 # External worktree found - import it
                 try:
-                    # Extract relative path (folder name) from absolute path
-                    worktree_folder = Path(git_path).name
+                    # Store the absolute path so it resolves consistently
+                    # regardless of where the worktree lives on disk (e.g.
+                    # nested under .claude/worktrees/, not workspace_dir). A
+                    # bare folder name would resolve against workspace_dir and
+                    # never match the real git path, causing duplicate
+                    # re-imports and false ORPHANED markings. Mirrors the import
+                    # logic in sync_worktrees_for_project().
+                    stored_path = os.path.abspath(git_path)
                     branch_name = git_wt.get("branch", "unknown")
 
                     # Create database record for this external worktree
@@ -1143,12 +1252,12 @@ class WorktreeManager:
                         worktree_id=worktree_id,
                         repository_id=repo["id"],
                         branch_name=branch_name,
-                        worktree_path=worktree_folder,
+                        worktree_path=stored_path,
                         session_id=None,
                         base_branch=None,
                         status=WorktreeStatus.ACTIVE
                     )
-                    logger.debug(f"Imported external worktree: {worktree_folder} (branch: {branch_name})")
+                    logger.debug(f"Imported external worktree: {stored_path} (branch: {branch_name})")
                     result["imported"] = result.get("imported", 0) + 1
                 except Exception as e:
                     logger.warning(f"Failed to import external worktree {git_path}: {e}")

@@ -226,6 +226,64 @@ def check_prerequisites() -> None:
     else:
         logger.info(f"Admin user: {auth_service.get_admin_username()}")
 
+    _check_browser_mcp_prereqs()
+
+
+def _check_browser_mcp_prereqs() -> None:
+    """Warn (non-fatally) if the headless browser MCP is enabled but no
+    Chromium is installed.
+
+    In Docker the browser is baked into the image (PLAYWRIGHT_BROWSERS_PATH=
+    /ms-playwright). In local/dev mode the user must run
+    ``npx playwright install chromium`` once — otherwise the first browser tool
+    call fails with "Executable doesn't exist". This is a guidance warning only;
+    it never blocks startup.
+    """
+    try:
+        from pathlib import Path
+        from app.core.builtin_mcp_servers import (
+            get_builtin_servers,
+            BROWSER_SERVER_NAME,
+            PLAYWRIGHT_BROWSERS_PATH,
+        )
+        from app.core.mcp_service import get_mcp_service
+
+        disabled = set(get_mcp_service().get_disabled_servers())
+        enabled = any(
+            s.name == BROWSER_SERVER_NAME and s.name not in disabled
+            for s in get_builtin_servers()
+        )
+        if not enabled:
+            return
+
+        # Browser is considered present if the build-time cache exists OR
+        # Playwright's default per-user cache has a chromium build.
+        candidates = [Path(PLAYWRIGHT_BROWSERS_PATH)]
+        default_cache = Path.home() / ".cache" / "ms-playwright"
+        candidates.append(default_cache)
+        found = False
+        for base in candidates:
+            try:
+                if base.exists() and any(base.glob("chromium*")):
+                    found = True
+                    break
+            except Exception:
+                continue
+
+        if found:
+            logger.info("Browser MCP (playwright): Chromium browser found")
+        else:
+            logger.warning(
+                "Browser MCP (playwright) is ENABLED but no Chromium browser was "
+                "found (checked %s). In local mode, run `npx playwright install "
+                "chromium` once, or disable the 'playwright' server in the MCP "
+                "admin UI. Browser tool calls will fail until this is resolved.",
+                ", ".join(str(c) for c in candidates),
+            )
+    except Exception:
+        # Never let a best-effort prereq check break startup.
+        logger.debug("Browser MCP prereq check skipped", exc_info=True)
+
 
 async def start_services() -> None:
     """Phase 5: Start async services (connectors, automations, catalog)."""

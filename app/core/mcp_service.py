@@ -532,6 +532,29 @@ class McpService:
 
         return servers
 
+    def get_builtin_servers(self) -> List[McpServerConfig]:
+        """
+        Get built-in/managed MCP servers (e.g. the headless browser server).
+
+        These are shipped and managed by AI Shuffle rather than read from
+        config files. Their enabled state is resolved from the global
+        disable list in settings.json (``disabledMcpServers``) so admins can
+        toggle them the same way as other servers.
+
+        Returns:
+            List of built-in MCP server configurations
+        """
+        # Imported lazily to avoid a circular import (builtin_mcp_servers
+        # imports McpServerConfig from this module).
+        from app.core.builtin_mcp_servers import get_builtin_servers as _builtins
+
+        disabled = self.get_disabled_servers()
+        servers = _builtins()
+        for server in servers:
+            if server.name in disabled:
+                server.enabled = False
+        return servers
+
     def get_all_servers(self) -> Dict[str, List[McpServerConfig]]:
         """
         Get all MCP servers from all available scopes.
@@ -540,6 +563,9 @@ class McpService:
             Dictionary mapping scope name to list of servers
         """
         result = {}
+
+        # Built-in/managed servers (browser, etc.) — always available
+        result["builtin"] = self.get_builtin_servers()
 
         # Always include USER scope
         result["user"] = list(self.get_servers_for_scope(McpScope.USER))
@@ -697,12 +723,15 @@ class McpService:
 
     def get_all_servers_with_builtins(self) -> List[McpServerConfig]:
         """
-        Get all USER scope servers.
+        Get all USER scope servers plus built-in/managed servers.
+
+        Built-ins (e.g. the headless browser server) are listed first so the
+        admin MCP UI surfaces them alongside user-configured servers.
 
         Returns:
             List of all globally available MCP servers.
         """
-        return list(self.get_servers_for_scope(McpScope.USER))
+        return self.get_builtin_servers() + list(self.get_servers_for_scope(McpScope.USER))
 
     def get_server_count(self) -> int:
         """Get total count of MCP servers across all scopes"""

@@ -79,6 +79,7 @@ class ProjectMcpServerCreateRequest(McpServerCreateRequest):
 
 class McpServersResponse(BaseModel):
     """Response containing all MCP servers grouped by scope"""
+    builtin: List[McpServerResponse] = []
     user: List[McpServerResponse] = []
     installed: List[McpServerResponse] = []
     local: List[McpServerResponse] = []
@@ -327,12 +328,16 @@ async def list_project_mcp_servers(
         all_servers = service.get_all_servers()
 
         response = McpServersResponse(
+            builtin=[_server_to_response(s) for s in all_servers.get("builtin", [])],
             user=[_server_to_response(s) for s in all_servers.get("user", [])],
             installed=[_server_to_response(s) for s in all_servers.get("installed", [])],
             local=[_server_to_response(s) for s in all_servers.get("local", [])],
             project=[_server_to_response(s) for s in all_servers.get("project", [])],
         )
-        response.total_count = len(response.user) + len(response.installed) + len(response.local) + len(response.project)
+        response.total_count = (
+            len(response.builtin) + len(response.user) + len(response.installed)
+            + len(response.local) + len(response.project)
+        )
         return response
 
 
@@ -530,10 +535,29 @@ async def toggle_project_mcp_server(
         project_path = get_project_path_from_dict(project)
 
         service = get_mcp_service(project_path)
-        service.set_project_server_enabled(server_name, request.enabled)
 
-        # Return updated server info — check all scopes
-        server = service.get_server(server_name, McpScope.USER)
+        # Built-in/managed servers (e.g. the headless `playwright` browser) have
+        # no per-project disable mechanism — get_builtin_servers() only honours
+        # the GLOBAL disable list (settings.json -> disabledMcpServers). Route a
+        # project-level toggle of a built-in through the global path so it
+        # actually takes effect on agent sessions instead of silently no-opping.
+        from app.core.builtin_mcp_servers import get_builtin_servers as _builtins
+        builtin_names = {s.name for s in _builtins()}
+
+        if server_name in builtin_names:
+            success = service.set_server_enabled(server_name, request.enabled)
+            if not success:
+                raise RuntimeError("Failed to update settings.json")
+        else:
+            service.set_project_server_enabled(server_name, request.enabled)
+
+        # Return updated server info — check built-ins + all scopes
+        server = next(
+            (s for s in service.get_builtin_servers() if s.name == server_name),
+            None,
+        )
+        if not server:
+            server = service.get_server(server_name, McpScope.USER)
         if not server:
             # Check installed servers
             installed = service.get_project_installed_servers()

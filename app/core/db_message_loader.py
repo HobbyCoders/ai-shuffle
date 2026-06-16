@@ -11,6 +11,7 @@ Fallback chain: live_session_store → DB → JSONL → SDK.
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.core.system_message_filter import is_hidden_system_subtype
 from app.db import database
 
 logger = logging.getLogger(__name__)
@@ -209,6 +210,11 @@ def _transform_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     if role == "system":
         subtype = meta.get("subtype", "")
+        # Drop internal/transient system subtypes that live streaming routes
+        # into other UI elements (thinking counter, subagent progress) and
+        # never renders as a card. Filtering on reload matches live behavior.
+        if is_hidden_system_subtype(subtype):
+            return None
         return {
             **base,
             "role": "system",

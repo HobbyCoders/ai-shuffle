@@ -171,7 +171,7 @@
 			<StreamingIndicator />
 		{/if}
 
-		{#if thinkingTokens}
+		{#if thinkingTokens != null}
 			<span class="thinking-tokens" title="Estimated thinking tokens">
 				{thinkingTokens.toLocaleString()} tokens
 			</span>

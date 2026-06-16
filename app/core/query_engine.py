@@ -79,6 +79,7 @@ from app.core.user_question_handler import user_question_handler
 
 from app.core.live_session_store import live_session_store
 from app.core.message_resolver import message_resolver, resolve_working_dir
+from app.core.system_message_filter import HIDDEN_SYSTEM_SUBTYPES
 
 # --- Re-export symbols from extracted modules for backward compatibility ---
 # These were originally defined here; other files import them from query_engine.
@@ -1356,10 +1357,18 @@ async def stream_to_websocket(
                     # Forward all system messages to frontend except noisy internal ones.
                     # Previous whitelist approach silently dropped SDK errors/warnings
                     # with new subtypes (e.g., skill errors, command output).
+                    # Also suppress the transient subtypes that the live WS
+                    # handler routes into other UI elements (thinking counter,
+                    # subagent progress) and never renders as a card. Without
+                    # this, every new session persists useless rows to the DB
+                    # (e.g. thinking_tokens). The read-side filter
+                    # (system_message_filter) is still required for rows already
+                    # written by older sessions; sourcing the set from
+                    # HIDDEN_SYSTEM_SUBTYPES keeps the two lists from drifting.
                     SUPPRESSED_SUBTYPES = {
                         'init',  # Already handled above
                         'rate_limit_event',  # Internal API rate limit info, not useful in chat
-                    }
+                    } | HIDDEN_SYSTEM_SUBTYPES
 
                     # Suppress system messages from subagent execution.
                     # SystemMessage doesn't have parent_tool_use_id as a direct attribute,

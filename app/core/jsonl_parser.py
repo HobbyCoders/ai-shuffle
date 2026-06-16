@@ -28,6 +28,7 @@ from typing import List, Dict, Any, Optional, Generator
 from datetime import datetime, timezone
 
 from app.core.config import settings
+from app.core.system_message_filter import is_hidden_system_subtype
 
 logger = logging.getLogger(__name__)
 
@@ -786,6 +787,11 @@ def _parse_session_history_uncached(
         # Handle system messages (e.g., compact_boundary, worktree_context, plugin_warning)
         if entry_type == "system":
             subtype = entry.get("subtype")
+            # Drop internal/transient system subtypes that live streaming routes
+            # into other UI elements (thinking counter, subagent progress) and
+            # never renders as a card. Filtering on reload matches live behavior.
+            if is_hidden_system_subtype(subtype):
+                continue
             system_content = entry.get("content", "")
             # SDK system messages store fields at the top level of the entry,
             # not under a nested "data" key. Pass the entire entry as systemData

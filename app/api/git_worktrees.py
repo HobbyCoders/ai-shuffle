@@ -9,6 +9,7 @@ Provides endpoints for worktree management including:
 
 import asyncio
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -640,6 +641,16 @@ async def list_worktree_files(
         # Skip hidden files unless requested
         if item.name.startswith('.') and not show_hidden:
             continue
+
+        # Never surface nested git worktree checkouts (.claude/worktrees/...),
+        # which are app internals rather than real project content, even when
+        # show_hidden is requested.
+        try:
+            rel_to_base = item.relative_to(worktree_base)
+            if os.path.normpath(str(rel_to_base)) == os.path.join(".claude", "worktrees"):
+                continue
+        except ValueError:
+            pass
 
         try:
             stat_info = item.stat()

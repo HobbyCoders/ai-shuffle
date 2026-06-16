@@ -552,7 +552,10 @@ class LiveSessionStore:
         routes `task_progress` usage to its subagent. Keeps these high-frequency
         estimates off the chat as standalone system cards.
 
-        Returns True if a thinking block was found and updated.
+        Returns True if a streaming thinking block was found and updated. If no
+        thinking block is currently streaming, the estimate is dropped (the
+        handler's documented behavior) so a stale, just-finalized block from a
+        previous turn or tool-use loop isn't mutated with the wrong live count.
         """
         if estimated_tokens is None:
             return False
@@ -560,9 +563,13 @@ class LiveSessionStore:
             session = self._sessions.get(session_id)
             if not session:
                 return False
-            # Most recent thinking block (streaming or just-finalized).
+            # Only the currently STREAMING thinking block — mirrors
+            # append_thinking/finalize_thinking. A finalized block stays in
+            # session.messages (finalize only flips streaming=False), so without
+            # the streaming filter an early estimate for the next turn's block
+            # would overwrite the previous block's counter.
             for msg in reversed(session.messages):
-                if msg.type == "thinking" and msg.role == "assistant":
+                if msg.type == "thinking" and msg.role == "assistant" and msg.streaming:
                     msg.thinking_tokens = estimated_tokens
                     self._increment_update_id(session)
                     return True

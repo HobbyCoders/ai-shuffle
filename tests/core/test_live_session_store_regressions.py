@@ -824,3 +824,62 @@ class TestDuplicateCompactionMessages:
             "Duplicate boundary must not flip needs_full_refresh — flag would "
             "latch onto the next unrelated update."
         )
+
+
+# =============================================================================
+# Bug: thinking-token counter attaches to the wrong thinking block
+#
+# update_thinking_tokens omitted the `streaming` filter that append_thinking /
+# finalize_thinking both use. Finalized thinking blocks stay in session.messages
+# (finalize only sets streaming=False), so in multi-turn chats or a tool-use
+# loop (think -> tool -> think again) a thinking_tokens estimate arriving before
+# the new block's first delta would overwrite the PREVIOUS finalized block's
+# counter. Fix: only target the currently STREAMING thinking block; otherwise
+# no-op (the handler drops the estimate when there's no active block).
+# =============================================================================
+
+class TestThinkingTokenRouting:
+
+    async def test_update_targets_streaming_block_not_finalized(self, store):
+        await store.start_streaming("s1")
+
+        # Turn 1: a thinking block that gets finalized with its own count.
+        await store.append_thinking("s1", "turn 1 reasoning")
+        await store.finalize_thinking("s1")
+        turn1 = store.get_session("s1").messages[-1]
+        turn1.thinking_tokens = 100  # simulate the count it earned while live
+
+        # Turn 2: a NEW streaming thinking block.
+        await store.append_thinking("s1", "turn 2 reasoning")
+
+        result = await store.update_thinking_tokens("s1", 250)
+        assert result is True
+
+        messages = store.get_session("s1").messages
+        thinking = [m for m in messages if m.type == "thinking"]
+        assert len(thinking) == 2
+
+        turn1_block, turn2_block = thinking[0], thinking[1]
+        assert turn2_block.streaming is True
+        assert turn2_block.thinking_tokens == 250, "estimate must land on streaming block"
+        assert turn1_block.streaming is False
+        assert turn1_block.thinking_tokens == 100, "finalized block must be UNCHANGED"
+
+    async def test_update_is_noop_without_streaming_block(self, store):
+        await store.start_streaming("s1")
+
+        # A finalized thinking block exists, but nothing is streaming.
+        await store.append_thinking("s1", "done thinking")
+        await store.finalize_thinking("s1")
+        block = store.get_session("s1").messages[-1]
+        block.thinking_tokens = 42
+        update_id_before = store.get_session("s1").last_update_id
+
+        result = await store.update_thinking_tokens("s1", 999)
+        assert result is False, "must drop the estimate when no block is streaming"
+
+        block_after = store.get_session("s1").messages[-1]
+        assert block_after.thinking_tokens == 42, "finalized block must be UNCHANGED"
+        assert store.get_session("s1").last_update_id == update_id_before, (
+            "no-op must not bump update_id"
+        )

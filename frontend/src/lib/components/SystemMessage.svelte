@@ -457,6 +457,20 @@
 				};
 			}
 
+			case 'thinking_tokens': {
+				// Live thinking-token estimates - routed to the thinking-block
+				// counter during streaming (never a card). Defensive guard so
+				// any persisted rows that slip through reload stay hidden.
+				return {
+					title: 'Thinking Tokens',
+					content: `${(data.estimated_tokens as number) ?? ''}`,
+					badge: 'thinking_tokens',
+					badgeColor: 'gray',
+					hidden: true,
+					compact: true
+				};
+			}
+
 			case 'task_updated':
 			case 'task_notification': {
 				// SDK task state patches (status changes, timing, usage).

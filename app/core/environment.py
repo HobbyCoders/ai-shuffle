@@ -323,6 +323,20 @@ def _build_env_with_ai_tools(
     env.pop("CLAUDECODE", None)
     env["CLAUDECODE"] = ""
 
+    # Browser-automation MCP server (Playwright MCP) is launched via npx as a
+    # child of the Claude CLI subprocess. Expose the build-time Chromium cache
+    # location so it finds the bundled browser without re-downloading at runtime.
+    # The per-server env in builtin_mcp_servers also sets this; threading it
+    # here covers env inheritance for the npx process tree. Only set when the
+    # cache actually exists (Docker build installs it; local mode may not).
+    try:
+        from app.core.builtin_mcp_servers import PLAYWRIGHT_BROWSERS_PATH
+        from pathlib import Path as _Path
+        if "PLAYWRIGHT_BROWSERS_PATH" not in env and _Path(PLAYWRIGHT_BROWSERS_PATH).exists():
+            env["PLAYWRIGHT_BROWSERS_PATH"] = PLAYWRIGHT_BROWSERS_PATH
+    except Exception:
+        logger.debug("Could not set PLAYWRIGHT_BROWSERS_PATH", exc_info=True)
+
     if not ai_tools_config:
         return env
 

@@ -424,6 +424,28 @@ def build_options_from_profile(
     from app.mcp.builtin_tools import get_builtin_tool_names
     mcp_allowed_tools.extend(get_builtin_tool_names())
 
+    # Built-in/managed MCP servers (e.g. the headless browser server) are
+    # passed via mcp_servers (loaded through McpService inside
+    # _build_mcp_servers_dict). Their tool names must be explicitly allowed —
+    # like other MCP tools — or they would be blocked when a tools preset is
+    # active (final_allowed_tools = mcp_allowed_tools in that case). We add a
+    # server-level wildcard (mcp__<server>) so every tool from each enabled
+    # built-in server is permitted, and skip disabled ones so the
+    # disabledMcpServers toggle is honoured here too.
+    try:
+        from app.core.builtin_mcp_servers import get_builtin_servers
+        from app.core.mcp_service import get_mcp_service
+        # get_disabled_servers() reads the GLOBAL disable list (settings.json ->
+        # disabledMcpServers), which is independent of project_dir, so the
+        # unscoped service instance is equivalent here. Built-in servers are
+        # toggled globally (the project-level toggle routes to this same path).
+        _disabled = get_mcp_service().get_disabled_servers()
+        for _srv in get_builtin_servers():
+            if _srv.name not in _disabled:
+                mcp_allowed_tools.append(f"mcp__{_srv.name}")
+    except Exception:
+        logger.exception("Failed to add built-in MCP server tools to allowed_tools")
+
     # Build final allowed_tools list:
     # - When sdk_tools is set (preset), built-in tools are handled by the preset.
     #   Only MCP tool names need to go in allowed_tools.

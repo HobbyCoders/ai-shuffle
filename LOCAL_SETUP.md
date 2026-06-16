@@ -117,6 +117,32 @@ DATA_DIR=/path/to/custom/data
 WORKSPACE_DIR=/path/to/custom/workspace
 ```
 
+### Headless Browser MCP (Playwright)
+
+AI Shuffle ships a built-in headless browser MCP server (`playwright`) that lets
+the agent navigate and interact with web pages server-side. The Docker image
+bakes a matching Chromium build automatically, but **in local mode you must
+install the browser yourself**, otherwise the first browser tool call fails with
+something like *"Executable doesn't exist ... run 'playwright install'"*.
+
+Install Chromium once (it is cached for future runs):
+
+```bash
+npx playwright install chromium
+```
+
+If the browser MCP server is enabled but no browser is found, the backend logs a
+non-fatal warning at startup pointing you to this step. The server itself stays
+enabled — only the actual browser tool calls fail until Chromium is installed.
+
+> **Security note (SSRF / local-network reach).** The headless browser runs
+> inside the AI Shuffle process with **no egress filtering**. The agent can drive
+> it to reach `localhost`/loopback services, other RFC1918 private hosts on your
+> network, and cloud metadata endpoints such as `169.254.169.254` (which on some
+> clouds exposes credentials). If you run untrusted prompts, isolate the host at
+> the network layer or disable the `playwright` built-in server in the MCP admin
+> UI. AI Shuffle does not filter the browser's outbound traffic for you.
+
 ## Differences from Docker Mode
 
 | Feature | Docker | Local |

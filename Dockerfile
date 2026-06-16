@@ -68,6 +68,31 @@ RUN mkdir -p /etc/apt/keyrings \
 
 RUN node --version && npm --version && gh --version
 
+# ── Headless browser for the Playwright MCP server ──
+# Installs Chromium + its OS dependencies so the @playwright/mcp server can
+# drive a real headless browser server-side (no visible window). The browser
+# lives in a shared cache dir (PLAYWRIGHT_BROWSERS_PATH) that is world-readable
+# so the non-root appuser can launch it at runtime.
+#
+# Version pinning (why it matters): the runtime launches a PINNED
+# @playwright/mcp@0.0.76, which bundles playwright-core@1.61.0-alpha-1781023400000.
+# Each Playwright release expects a SPECIFIC Chromium build revision. If we baked
+# the browser with a different (e.g. @latest) Playwright, the MCP server would
+# look for "chromium-<rev>" that doesn't exist under /ms-playwright and fail at
+# runtime ("Executable doesn't exist ..."), especially offline/air-gapped.
+#
+# To keep the baked Chromium revision in sync with what the MCP server launches,
+# we install the SAME pinned @playwright/mcp globally and drive the browser
+# install THROUGH its bundled playwright-core, so the revision is guaranteed to
+# match. The global install is also reused at runtime (no network fetch needed).
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_MCP_VERSION=0.0.76
+RUN npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
+    && PW_CORE_DIR="$(node -e "process.stdout.write(require('path').dirname(require.resolve('playwright-core/package.json',{paths:[require.resolve('@playwright/mcp',{paths:[require('child_process').execSync('npm root -g').toString().trim()]})]})))")" \
+    && echo "Using playwright-core at: ${PW_CORE_DIR} ($(node -e "process.stdout.write(require(\"${PW_CORE_DIR}/package.json\").version)"))" \
+    && node "${PW_CORE_DIR}/cli.js" install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
+
 # ── Create non-root user ──
 RUN groupadd -g 1000 appuser && \
     useradd -m -u 1000 -g 1000 appuser && \
