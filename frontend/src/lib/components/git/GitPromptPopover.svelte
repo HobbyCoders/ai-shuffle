@@ -189,9 +189,17 @@
 	}
 
 	@media (max-width: 639px) {
+		/* Header is a horizontal scroll rail on mobile; pin the popover as a fixed
+		   panel below the header so it isn't clipped by the rail's overflow. */
 		.git-prompt-popover {
-			right: auto;
-			left: 0;
+			position: fixed;
+			top: 56px;
+			left: 8px;
+			right: 8px;
+			bottom: auto;
+			width: auto;
+			max-width: none;
+			z-index: 200;
 		}
 
 		.popover-send-btn {

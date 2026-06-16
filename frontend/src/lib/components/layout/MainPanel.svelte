@@ -22,6 +22,7 @@
 	import ChatView from './ChatView.svelte';
 	import PageHeader from './PageHeader.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
+	import ProfileSelector from '$lib/components/chat/ProfileSelector.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import InitRepoModal from '$lib/components/git/InitRepoModal.svelte';
 	import ChangedFilesPanel from '$lib/components/git/ChangedFilesPanel.svelte';
@@ -573,6 +574,10 @@
 							pullPrompt={buildPullPrompt()}
 							onOpenDiffReview={() => { showChangedFilesPanel = true; reviewMode = true; git.refreshChangedFiles(); }}
 						/>
+					{:else if $activeView?.type === 'chat' && activeTab}
+						<!-- No git header (no project / not GitHub-authed / worktree cleaned up):
+						     keep the profile selector available in the header rail. -->
+						<ProfileSelector />
 					{/if}
 				{/snippet}
 			</PageHeader>

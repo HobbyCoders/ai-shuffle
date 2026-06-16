@@ -14,6 +14,7 @@
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode, changedFiles } from '$lib/stores/git';
 	import { githubRepoInfo } from '$lib/stores/github';
 	import GitPromptPopover from './GitPromptPopover.svelte';
+	import ProfileSelector from '$lib/components/chat/ProfileSelector.svelte';
 
 	interface Props {
 		projectId: string;
@@ -299,6 +300,9 @@
 		{/if}
 	</div>
 
+	<!-- Profile selector — sits between the branch selector and the git action buttons -->
+	<ProfileSelector />
+
 	<!-- Pull button (when behind upstream, including diverged state) -->
 	{#if needsPull}
 		<div class="split-btn-group">
@@ -481,7 +485,8 @@
 	{/if}
 
 	{:else}
-		<!-- No git repo: show project name + Init button -->
+		<!-- No git repo: profile selector + project name + Init button -->
+		<ProfileSelector />
 		{#if projectName}
 			<span class="git-btn project-only-badge" title="Project: {projectName}">
 				<FolderClosed size={13} strokeWidth={1.5} />
@@ -841,10 +846,20 @@
 		to { transform: rotate(360deg); }
 	}
 
-	/* Mobile touch targets */
+	/* Mobile touch targets — single horizontal rail (no wrapping) */
 	@media (max-width: 639px) {
 		.git-actions {
-			flex-wrap: wrap;
+			/* Stay on one line so the header reads as a single touch-scrollable rail.
+			   Items keep their intrinsic size and overflow-scroll with the header. */
+			flex-wrap: nowrap;
+			flex-shrink: 0;
+		}
+
+		/* Don't let rail items shrink — they should keep their size and scroll. */
+		.git-btn,
+		.split-btn-group,
+		.diff-stats {
+			flex-shrink: 0;
 		}
 
 		.git-btn {
@@ -867,9 +882,20 @@
 			max-width: 80px;
 		}
 
+		/* The header is a horizontal scroll container on mobile, which would clip an
+		   absolutely-positioned dropdown. Pin it as a fixed panel just below the
+		   header so it escapes the rail's overflow while staying in the DOM tree
+		   (so outside-click detection keeps working). */
 		.branch-dropdown {
-			right: auto;
-			left: 0;
+			position: fixed;
+			top: 56px;
+			left: 8px;
+			right: 8px;
+			bottom: auto;
+			min-width: 0;
+			max-width: none;
+			max-height: 60vh;
+			z-index: 200;
 		}
 	}
 

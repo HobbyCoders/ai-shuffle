@@ -9,7 +9,6 @@
 	import { profiles } from '$lib/stores/app-data';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import UsageLimitIndicator from './UsageLimitIndicator.svelte';
-	import ProfileSelector from './ProfileSelector.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';
 	import { onMount } from 'svelte';
 	import { Monitor } from 'lucide-svelte';
@@ -82,11 +81,6 @@
 	<div class="controls-left">
 		<ContextUsageBar />
 		<UsageLimitIndicator />
-	</div>
-
-	<!-- Center: Profile selector -->
-	<div class="controls-center">
-		<ProfileSelector />
 	</div>
 
 	<!-- Right: Override buttons, Attach & Mic buttons -->
@@ -194,14 +188,6 @@
 		flex: 1;
 	}
 
-	.controls-center {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		justify-content: center;
-		flex: 2;
-	}
-
 	.controls-right {
 		display: flex;
 		align-items: center;
@@ -263,12 +249,5 @@
 	@keyframes cu-pulse {
 		0%, 100% { opacity: 1; }
 		50% { opacity: 0.45; }
-	}
-
-	/* Responsive: mobile tighter center gap */
-	@media (max-width: 639px) {
-		.controls-center {
-			gap: 4px;
-		}
 	}
 </style>
