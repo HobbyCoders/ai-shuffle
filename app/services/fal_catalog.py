@@ -32,12 +32,25 @@ CATEGORY_TO_TOOL_TYPE = {
     "image-to-3d": "image_to_3d",
     "3d-to-3d": "text_to_3d",
     "text-to-speech": "tts",
+    "text-to-audio": "audio",  # music / sound generation (Lyria, Stable Audio, ACE-Step, ...)
+    "text-to-music": "audio",
     "audio-to-audio": "audio",
     "audio-to-video": "video_generation",
-    "training": None,  # Skip training-only models
-    "text-to-json": None,
-    "unknown": None,
 }
+
+# Categories that are deliberately excluded from the catalog (non-inference or
+# unusable by the generic executor). Everything NOT listed here is kept — even
+# if its category is unmapped — so new fal.ai categories never silently vanish.
+SKIP_CATEGORIES = {
+    "training",     # training-only models, not runnable for inference
+    "text-to-json", # structured-output helpers, not media generation
+    "unknown",      # no category metadata from fal.ai
+    "",
+}
+
+# Fallback tool type for inference models whose category we don't explicitly map.
+# Keeps them discoverable via searchModels / runnable via runFalModel.
+GENERIC_TOOL_TYPE = "generic"
 
 # Categories that produce specific output types (for generic executor)
 CATEGORY_TO_OUTPUT_TYPE = {
@@ -51,8 +64,44 @@ CATEGORY_TO_OUTPUT_TYPE = {
     "image-to-3d": "3d",
     "3d-to-3d": "3d",
     "text-to-speech": "audio",
+    "text-to-audio": "audio",
+    "text-to-music": "audio",
     "audio-to-audio": "audio",
 }
+
+# Map the "...-to-X" suffix of a category to an output type, so we can infer the
+# output of unmapped categories (used as a fallback for generic models).
+_OUTPUT_SUFFIX_TO_TYPE = {
+    "image": "image",
+    "video": "video",
+    "audio": "audio",
+    "speech": "audio",
+    "music": "audio",
+    "sound": "audio",
+    "3d": "3d",
+    "mesh": "3d",
+}
+
+
+def resolve_tool_type(category: str) -> Optional[str]:
+    """Resolve a fal.ai category to an internal tool type.
+
+    Returns None only for categories we deliberately skip; any other (unmapped)
+    inference category falls back to a generic tool type so it stays usable.
+    """
+    if category in SKIP_CATEGORIES:
+        return None
+    return CATEGORY_TO_TOOL_TYPE.get(category, GENERIC_TOOL_TYPE)
+
+
+def resolve_output_type(category: str) -> Optional[str]:
+    """Resolve a fal.ai category to an output type, inferring from the category
+    name (e.g. "text-to-audio" -> "audio") when not explicitly mapped."""
+    explicit = CATEGORY_TO_OUTPUT_TYPE.get(category)
+    if explicit:
+        return explicit
+    suffix = category.rsplit("-to-", 1)[-1] if category else ""
+    return _OUTPUT_SUFFIX_TO_TYPE.get(suffix)
 
 FAL_CATALOG_API = "https://api.fal.ai/v1/models"
 DEFAULT_CACHE_TTL = 3600  # 1 hour
@@ -95,8 +144,8 @@ class CatalogModel:
             group_key=group.get("key") if group else None,
             group_label=group.get("label") if group else None,
             updated_at=metadata.get("updated_at"),
-            tool_type=CATEGORY_TO_TOOL_TYPE.get(category),
-            output_type=CATEGORY_TO_OUTPUT_TYPE.get(category),
+            tool_type=resolve_tool_type(category),
+            output_type=resolve_output_type(category),
         )
 
     @classmethod
@@ -231,7 +280,10 @@ class FalCatalogService:
                 for model_data in data.get("models", []):
                     model = CatalogModel.from_api_response(model_data)
 
-                    # Skip training-only and unknown/unclassified models
+                    # Skip only deliberately-excluded categories (training,
+                    # text-to-json, unknown); unmapped inference categories are
+                    # kept with a generic tool type so new fal.ai categories
+                    # (e.g. a new music model) don't silently disappear.
                     if model.tool_type is None:
                         continue
 
@@ -341,7 +393,7 @@ class FalCatalogService:
             category_counts[model.category] = category_counts.get(model.category, 0) + 1
 
         return [
-            {"category": cat, "count": count, "tool_type": CATEGORY_TO_TOOL_TYPE.get(cat)}
+            {"category": cat, "count": count, "tool_type": resolve_tool_type(cat)}
             for cat, count in sorted(category_counts.items(), key=lambda x: -x[1])
         ]
 
