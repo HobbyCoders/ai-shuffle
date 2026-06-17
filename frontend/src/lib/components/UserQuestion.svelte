@@ -185,14 +185,19 @@
 
 	function handleSubmit() {
 		const questions = data.questions ?? [];
-		const finalAnswers: Record<string, string | string[]> = {};
+		// The SDK's AskUserQuestion tool matches answers by the full question
+		// TEXT (not the short header) and expects each answer as a plain string;
+		// multi-select selections must be comma-separated. Sending header-keyed
+		// answers or raw arrays makes the tool report "did not answer".
+		const finalAnswers: Record<string, string> = {};
 
 		questions.forEach((q, idx) => {
-			const key = q.header || `question_${idx}`;
+			const key = q.question || q.header || `question_${idx}`;
 			if (showOther[idx]) {
 				finalAnswers[key] = (otherText[idx] || '').trim();
 			} else {
-				finalAnswers[key] = answers[idx] ?? '';
+				const answer = answers[idx];
+				finalAnswers[key] = Array.isArray(answer) ? answer.join(', ') : (answer ?? '');
 			}
 		});
 
