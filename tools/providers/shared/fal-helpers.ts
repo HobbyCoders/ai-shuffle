@@ -83,26 +83,80 @@ export async function downloadToFile(
 // ============================================================================
 
 /**
- * Extract a user-friendly error message from fal.ai errors.
+ * Pull the human-readable detail out of a fal.ai error body.
+ *
+ * fal validation errors (HTTP 422) return `{ detail: [{ loc, msg, type }, ...] }`,
+ * which says exactly which field was rejected and why. Other errors may return a
+ * string body or `{ message }` / `{ error }`. Without surfacing this, every failure
+ * collapses to a useless "Unprocessable Entity".
+ */
+function extractFalDetail(body: unknown): string {
+  if (!body) return '';
+  if (typeof body === 'string') return body.slice(0, 600);
+
+  const b = body as any;
+  const detail = b.detail ?? b.message ?? b.error;
+
+  if (detail === undefined || detail === null) {
+    try { return JSON.stringify(b).slice(0, 600); } catch { return ''; }
+  }
+  if (typeof detail === 'string') return detail.slice(0, 600);
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d: any) => {
+        if (typeof d === 'string') return d;
+        const loc = Array.isArray(d.loc) ? d.loc.join('.') : (d.loc ?? '');
+        const msg = d.msg ?? d.message ?? d.type ?? JSON.stringify(d);
+        return loc ? `${loc}: ${msg}` : msg;
+      })
+      .join('; ')
+      .slice(0, 700);
+  }
+  try { return JSON.stringify(detail).slice(0, 600); } catch { return ''; }
+}
+
+/**
+ * Extract a user-friendly but ACTIONABLE error message from fal.ai errors.
+ *
+ * The fal client throws errors carrying `.status` and `.body` — we mine both so
+ * the caller learns *why* a request failed (bad field, unknown endpoint, safety
+ * block) instead of a bare HTTP phrase, which previously forced blind retries.
  */
 export function handleFalError(error: unknown): string {
-  if (error instanceof Error) {
-    const msg = error.message.toLowerCase();
+  if (error && typeof error === 'object') {
+    const err = error as any;
+    const status: number | undefined = err.status ?? err.statusCode ?? err.response?.status;
+    const body = err.body ?? err.response?.body ?? err.response?.data;
+    const detail = extractFalDetail(body);
+    const rawMsg: string = typeof err.message === 'string' ? err.message : '';
+    const lower = rawMsg.toLowerCase();
+    const suffix = detail ? ` Detail: ${detail}` : '';
 
-    if (msg.includes('unauthorized') || msg.includes('401')) {
-      return 'fal.ai API key is invalid or expired.';
+    if (status === 404 || lower.includes('not found')) {
+      return `fal.ai endpoint not found (404). The endpoint_id is likely wrong — use the searchModels tool to look up the exact ID instead of guessing.${suffix}`;
     }
-    if (msg.includes('rate limit') || msg.includes('429')) {
-      return 'fal.ai rate limit exceeded. Please wait a moment and try again.';
+    if (status === 401 || status === 403 || lower.includes('unauthorized') || lower.includes('401')) {
+      return 'fal.ai API key is invalid, expired, or lacks access to this model (401/403).';
     }
-    if (msg.includes('safety') || msg.includes('blocked') || msg.includes('nsfw')) {
-      return 'Generation was blocked by safety filters. Please try a different prompt.';
+    if (status === 429 || lower.includes('rate limit') || lower.includes('429')) {
+      return 'fal.ai rate limit exceeded (429). Please wait a moment and try again.';
     }
-    if (msg.includes('timeout')) {
+    if (/safety|blocked|nsfw|content[ _-]?polic/i.test(`${lower} ${detail}`)) {
+      return `Generation was blocked by content safety filters. Try a different prompt.${suffix}`;
+    }
+    if (status === 422) {
+      return `fal.ai rejected the input (422 Unprocessable Entity).${detail ? ` ${detail}` : ' No detail was provided — likely an invalid or missing input field, or a content-safety block.'}`;
+    }
+    if (lower.includes('timeout')) {
       return 'Generation timed out. Please try again.';
     }
 
-    return `fal.ai error: ${error.message}`;
+    if (rawMsg) {
+      return `fal.ai error${status ? ` (${status})` : ''}: ${rawMsg}${suffix}`;
+    }
+    if (detail) {
+      return `fal.ai error${status ? ` (${status})` : ''}: ${detail}`;
+    }
   }
 
   return 'Unknown fal.ai error occurred';

@@ -101,7 +101,11 @@ function inferOutputType(endpointId: string): 'image' | 'video' | '3d' | 'audio'
     return '3d';
   }
   if (id.includes('speech') || id.includes('tts') || id.includes('audio')
-      || id.includes('whisper') || id.includes('kokoro') || id.includes('chatterbox')) {
+      || id.includes('whisper') || id.includes('kokoro') || id.includes('chatterbox')
+      || id.includes('lyria') || id.includes('music') || id.includes('song')
+      || id.includes('ace-step') || id.includes('diffrhythm') || id.includes('stable-audio')
+      || id.includes('cassetteai') || id.includes('mmaudio') || id.includes('elevenlabs')
+      || id.includes('minimax-music') || id.includes('sound')) {
     return 'audio';
   }
   return 'image';

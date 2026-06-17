@@ -194,11 +194,86 @@ def _create_3d_tools(worker: NodeWorker) -> list:
     return tools
 
 
+def _get_fal_api_key() -> Optional[str]:
+    """Resolve the fal.ai API key from the encrypted settings store or env."""
+    try:
+        from app.api.settings import get_decrypted_api_key
+        key = get_decrypted_api_key("fal_api_key")
+        if key:
+            return key
+    except Exception:  # noqa: BLE001 - settings store optional in some contexts
+        pass
+    import os
+    return os.environ.get("FAL_KEY") or os.environ.get("FAL_API_KEY")
+
+
+async def _search_catalog(query: str, output_type: Optional[str] = None, limit: int = 15) -> dict:
+    """Search the in-process fal.ai catalog, refreshing it if empty or stale."""
+    from app.services.fal_catalog import catalog_service
+
+    if catalog_service.model_count == 0 or catalog_service.is_stale:
+        try:
+            await catalog_service.refresh(_get_fal_api_key())
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"searchModels: catalog refresh failed: {e}")
+
+    matches = catalog_service.search(q=query, output_type=output_type)
+    total = len(matches)
+    matches = matches[: max(1, min(limit, 50))]
+
+    return {
+        "success": True,
+        "query": query,
+        "total_matches": total,
+        "returned": len(matches),
+        "catalog_size": catalog_service.model_count,
+        "models": [
+            {
+                "endpoint_id": m.endpoint_id,
+                "display_name": m.display_name,
+                "output_type": m.output_type,
+                "category": m.category,
+                "description": (m.description or "")[:240],
+            }
+            for m in matches
+        ],
+        "hint": (
+            "Pick the endpoint_id you want and call runFalModel with it, passing the "
+            "matching output_type. If total_matches is 0, try a broader/shorter query."
+        ),
+    }
+
+
+def _create_catalog_tools() -> list:
+    """Create the model discovery tool. Runs in-process — no Node worker needed."""
+    tools = []
+
+    @tool("searchModels", "Look up the exact fal.ai endpoint_id for a model before calling runFalModel. Searches the live 600+ model catalog by name/keyword. ALWAYS use this first when the user names a specific model (e.g. 'lyria 3 pro', 'seedance', 'flux 2') or when you are unsure of the exact endpoint string — do not guess endpoint IDs. Returns endpoint_id, output_type, category, and description for each match.", {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Model name, family, or keyword to search (e.g. 'lyria', 'music', 'seedance', 'upscale'). Matches display name, description, endpoint id, and tags. Shorter is broader."},
+            "output_type": {"type": "string", "enum": ["image", "video", "3d", "audio"], "description": "Optional filter to only models that produce this output type."},
+            "limit": {"type": "integer", "description": "Max results to return (default 15, max 50)."}
+        },
+        "required": ["query"]
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
+    async def search_models(args: dict) -> dict:
+        result = await _search_catalog(
+            query=args.get("query", ""),
+            output_type=args.get("output_type"),
+            limit=args.get("limit") or 15,
+        )
+        return _tool_result(result)
+
+    tools.append(search_models)
+    return tools
+
+
 def _create_generic_tools(worker: NodeWorker) -> list:
     """Create the generic fal.ai model executor tool."""
     tools = []
 
-    @tool("runFalModel", "Run ANY fal.ai model by endpoint ID. Supports 600+ models including Imagen 4, Seedance, Wan 2.2, Stable Diffusion, and more. Use this when the specific tools (generateImage, generateVideo, etc.) don't support the model you need. Browse available models at fal.ai/explore/models", {
+    @tool("runFalModel", "Run ANY fal.ai model by endpoint ID. Supports 600+ models including Imagen 4, Seedance, Wan 2.2, Lyria (music), Stable Diffusion, and more. Use this when the specific tools (generateImage, generateVideo, etc.) don't support the model you need — including all music/audio generation. If you don't already know the EXACT endpoint_id, call searchModels first to resolve it; do not guess (a single wrong character returns 'Not Found').", {
         "type": "object",
         "properties": {
             "endpoint_id": {
@@ -249,6 +324,12 @@ TOOL_CONFIG_MAP = {
     "imageTo3D": {"config_key": "image_to_3d"},
     # Generic tool — enabled when ANY other tool is enabled
     "runFalModel": {"config_keys": [
+        "image_generation", "image_editing", "image_reference",
+        "video_generation", "video_with_audio", "image_to_video", "video_extend",
+        "text_to_3d", "image_to_3d",
+    ]},
+    # Model discovery — enabled whenever the generic executor is (same condition)
+    "searchModels": {"config_keys": [
         "image_generation", "image_editing", "image_reference",
         "video_generation", "video_with_audio", "image_to_video", "video_extend",
         "text_to_3d", "image_to_3d",
@@ -354,6 +435,7 @@ def create_ai_tools_server(
     all_video_tools = _create_video_tools(worker)
     all_3d_tools = _create_3d_tools(worker)
     all_generic_tools = _create_generic_tools(worker)
+    all_catalog_tools = _create_catalog_tools()
 
     # Filter to only enabled tools
     enabled_tools = []
@@ -371,6 +453,10 @@ def create_ai_tools_server(
             enabled_tools.append(t)
 
     for t in all_generic_tools:
+        if _is_tool_enabled(t.name, ai_tools_config):
+            enabled_tools.append(t)
+
+    for t in all_catalog_tools:
         if _is_tool_enabled(t.name, ai_tools_config):
             enabled_tools.append(t)
 
