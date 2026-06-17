@@ -16,6 +16,8 @@
 	import { git, changedFiles, changedFilesLoading } from '$lib/stores/git.svelte';
 	import type { FileChangeInfo } from '$lib/api/git';
 	import DiffViewer from './DiffViewer.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
+	import { toast } from '$lib/stores/toast';
 
 	interface Props {
 		projectId: string;
@@ -66,26 +68,70 @@
 		inFlightFiles = next;
 	}
 
-	// ── Discard / delete confirmation state ─────────────────────────────
-	let confirmingDiscard = $state(new Set<string>());
-	// Track "discard all" / "delete all" group-level confirmations
-	let confirmingGroupAction = $state<string | null>(null);
+	// ── Discard / delete confirmation (shared modal) ────────────────────
+	// All destructive file ops (per-file discard/delete, group discard-all/
+	// delete-all, review-mode decline) route through one ConfirmDialog driven
+	// by this object. Lightweight inline confirms were replaced per the
+	// "modals for file ops" decision.
+	let pendingConfirm = $state<{
+		title: string;
+		message: string;
+		confirmLabel: string;
+		action: () => void;
+	} | null>(null);
 
-	function requestConfirm(file: string) {
-		const next = new Set(confirmingDiscard);
-		next.add(file);
-		confirmingDiscard = next;
+	function confirmDiscardFile(file: FileChangeInfo, group: string) {
+		const name = basename(file.file);
+		pendingConfirm = group === 'untracked'
+			? {
+				title: 'Delete file',
+				message: `Permanently delete ${name}? This cannot be undone.`,
+				confirmLabel: 'Delete',
+				action: () => discardFile(file),
+			}
+			: {
+				title: 'Discard changes',
+				message: `Discard all changes to ${name}? This cannot be undone.`,
+				confirmLabel: 'Discard',
+				action: () => discardFile(file),
+			};
 	}
 
-	function cancelConfirm(file: string) {
-		const next = new Set(confirmingDiscard);
-		next.delete(file);
-		confirmingDiscard = next;
+	function confirmDiscardGroup(files: FileChangeInfo[], type: 'modified' | 'untracked') {
+		pendingConfirm = type === 'untracked'
+			? {
+				title: 'Delete all untracked files',
+				message: `Permanently delete all ${files.length} untracked files? This cannot be undone.`,
+				confirmLabel: 'Delete All',
+				action: () => discardAll(files),
+			}
+			: {
+				title: 'Discard all changes',
+				message: `Discard all changes to ${files.length} files? This cannot be undone.`,
+				confirmLabel: 'Discard All',
+				action: () => discardAll(files),
+			};
+	}
+
+	function confirmReviewDecline() {
+		if (!reviewSelectedFile) return;
+		const name = basename(reviewSelectedFile.file);
+		pendingConfirm = {
+			title: 'Discard changes',
+			message: `Discard all changes to ${name}? This cannot be undone.`,
+			confirmLabel: 'Discard',
+			action: () => reviewDecline(),
+		};
+	}
+
+	function runPendingConfirm() {
+		const action = pendingConfirm?.action;
+		pendingConfirm = null;
+		action?.();
 	}
 
 	// ── Review mode: selected file + footer confirmation ────────────────
 	let reviewSelectedFile = $state<FileChangeInfo | null>(null);
-	let reviewConfirmingDecline = $state(false);
 	let reviewActionInFlight = $state(false);
 
 	// Flat ordered list for keyboard nav in review mode
@@ -100,7 +146,6 @@
 
 	function selectReviewFile(file: FileChangeInfo) {
 		reviewSelectedFile = file;
-		reviewConfirmingDecline = false;
 	}
 
 	async function reviewAccept() {
@@ -114,6 +159,8 @@
 			}
 			await git.refreshChangedFiles();
 			advanceReviewFile();
+		} catch {
+			toast.push('Failed to update file', { tone: 'error' });
 		} finally {
 			reviewActionInFlight = false;
 		}
@@ -122,7 +169,6 @@
 	async function reviewDecline() {
 		if (!reviewSelectedFile || reviewActionInFlight) return;
 		reviewActionInFlight = true;
-		reviewConfirmingDecline = false;
 		try {
 			await git.discardChanges(
 				[reviewSelectedFile.file],
@@ -130,6 +176,8 @@
 			);
 			await git.refreshChangedFiles();
 			advanceReviewFile();
+		} catch {
+			toast.push('Failed to discard changes', { tone: 'error' });
 		} finally {
 			reviewActionInFlight = false;
 		}
@@ -154,6 +202,8 @@
 		markInFlight(file.file);
 		try {
 			await git.stageFiles([file.file]);
+		} catch {
+			toast.push('Failed to stage file', { tone: 'error' });
 		} finally {
 			clearInFlight(file.file);
 		}
@@ -163,6 +213,8 @@
 		markInFlight(file.file);
 		try {
 			await git.unstageFiles([file.file]);
+		} catch {
+			toast.push('Failed to unstage file', { tone: 'error' });
 		} finally {
 			clearInFlight(file.file);
 		}
@@ -170,9 +222,10 @@
 
 	async function discardFile(file: FileChangeInfo) {
 		markInFlight(file.file);
-		cancelConfirm(file.file);
 		try {
 			await git.discardChanges([file.file], { [file.file]: file.category });
+		} catch {
+			toast.push('Failed to discard changes', { tone: 'error' });
 		} finally {
 			clearInFlight(file.file);
 		}
@@ -183,6 +236,8 @@
 		for (const p of paths) markInFlight(p);
 		try {
 			await git.stageFiles(paths);
+		} catch {
+			toast.push('Failed to stage files', { tone: 'error' });
 		} finally {
 			for (const p of paths) clearInFlight(p);
 		}
@@ -193,13 +248,14 @@
 		for (const p of paths) markInFlight(p);
 		try {
 			await git.unstageFiles(paths);
+		} catch {
+			toast.push('Failed to unstage files', { tone: 'error' });
 		} finally {
 			for (const p of paths) clearInFlight(p);
 		}
 	}
 
 	async function discardAll(files: FileChangeInfo[]) {
-		confirmingGroupAction = null;
 		const paths = files.map(f => f.file);
 		for (const p of paths) markInFlight(p);
 		try {
@@ -207,6 +263,8 @@
 				paths,
 				Object.fromEntries(files.map(f => [f.file, f.category]))
 			);
+		} catch {
+			toast.push('Failed to discard changes', { tone: 'error' });
 		} finally {
 			for (const p of paths) clearInFlight(p);
 		}
@@ -255,7 +313,7 @@
 			if (e.key === 'ArrowDown') nextIdx = Math.min(curIdx + 1, flatFiles.length - 1);
 			else nextIdx = Math.max(curIdx - 1, 0);
 			reviewSelectedFile = flatFiles[nextIdx];
-			reviewConfirmingDecline = false;
+			pendingConfirm = null;
 		}
 	}
 
@@ -302,10 +360,8 @@
 	// Reset state when panel closes
 	$effect(() => {
 		if (!open) {
-			confirmingDiscard = new Set();
-			confirmingGroupAction = null;
+			pendingConfirm = null;
 			reviewSelectedFile = null;
-			reviewConfirmingDecline = false;
 			reviewActionInFlight = false;
 		}
 	});
@@ -332,123 +388,101 @@
 {/snippet}
 
 {#snippet fileRow(file: FileChangeInfo, group: 'staged' | 'modified' | 'untracked' | 'conflict')}
-	{@const isConfirming = confirmingDiscard.has(file.file)}
 	{@const isInFlight = inFlightFiles.has(file.file)}
 
 	<div class="file-row group/row" class:opacity-50={isInFlight} class:pointer-events-none={isInFlight}>
-		{#if isConfirming}
-			<!-- Inline discard/delete confirmation -->
-			<div class="confirm-bar">
-				<span class="confirm-text">
-					{group === 'untracked' ? 'Delete file?' : 'Discard changes?'}
-				</span>
-				<button
-					class="confirm-yes"
-					onclick={() => discardFile(file)}
-				>
-					Yes
-				</button>
-				<button
-					class="confirm-no"
-					onclick={() => cancelConfirm(file.file)}
-				>
-					No
-				</button>
-			</div>
-		{:else}
-			<!-- Status icon -->
-			{@render statusIcon(file.status)}
+		<!-- Status icon -->
+		{@render statusIcon(file.status)}
 
-			<!-- File name -->
-			<div class="file-name">
-				<span class="file-basename">{basename(file.file)}</span>
-				{#if dirname(file.file)}
-					<span class="file-dirname">{dirname(file.file)}</span>
-				{/if}
-			</div>
-
-			<!-- Diff stats -->
-			{#if group !== 'untracked' && !file.is_binary}
-				<span class="diff-stats">
-					{#if file.additions > 0}
-						<span class="text-success">+{file.additions}</span>
-					{/if}
-					{#if file.deletions > 0}
-						<span class="text-destructive">-{file.deletions}</span>
-					{/if}
-				</span>
+		<!-- File name -->
+		<div class="file-name">
+			<span class="file-basename">{basename(file.file)}</span>
+			{#if dirname(file.file)}
+				<span class="file-dirname">{dirname(file.file)}</span>
 			{/if}
+		</div>
 
-			<!-- Action buttons -->
-			<div class="file-actions">
-				{#if group === 'staged'}
-					<button
-						class="action-btn"
-						title="Unstage"
-						onclick={() => unstageFile(file)}
-						disabled={isInFlight}
-					>
-						<Minus size={14} strokeWidth={1.5} />
-					</button>
-					<button
-						class="action-btn"
-						title="View diff"
-						onclick={() => reviewMode ? selectReviewFile(file) : onViewDiff(file)}
-					>
-						<Eye size={14} strokeWidth={1.5} />
-					</button>
-				{:else if group === 'modified'}
-					<button
-						class="action-btn"
-						title="Stage"
-						onclick={() => stageFile(file)}
-						disabled={isInFlight}
-					>
-						<Plus size={14} strokeWidth={1.5} />
-					</button>
-					<button
-						class="action-btn action-btn-danger"
-						title="Discard changes"
-						onclick={() => requestConfirm(file.file)}
-						disabled={isInFlight}
-					>
-						<Undo2 size={14} strokeWidth={1.5} />
-					</button>
-					<button
-						class="action-btn"
-						title="View diff"
-						onclick={() => reviewMode ? selectReviewFile(file) : onViewDiff(file)}
-					>
-						<Eye size={14} strokeWidth={1.5} />
-					</button>
-				{:else if group === 'untracked'}
-					<button
-						class="action-btn"
-						title="Stage"
-						onclick={() => stageFile(file)}
-						disabled={isInFlight}
-					>
-						<Plus size={14} strokeWidth={1.5} />
-					</button>
-					<button
-						class="action-btn action-btn-danger"
-						title="Delete file"
-						onclick={() => requestConfirm(file.file)}
-						disabled={isInFlight}
-					>
-						<Trash2 size={14} strokeWidth={1.5} />
-					</button>
-				{:else if group === 'conflict'}
-					<button
-						class="action-btn"
-						title="View diff"
-						onclick={() => reviewMode ? selectReviewFile(file) : onViewDiff(file)}
-					>
-						<Eye size={14} strokeWidth={1.5} />
-					</button>
+		<!-- Diff stats -->
+		{#if group !== 'untracked' && !file.is_binary}
+			<span class="diff-stats">
+				{#if file.additions > 0}
+					<span class="text-success">+{file.additions}</span>
 				{/if}
-			</div>
+				{#if file.deletions > 0}
+					<span class="text-destructive">-{file.deletions}</span>
+				{/if}
+			</span>
 		{/if}
+
+		<!-- Action buttons -->
+		<div class="file-actions">
+			{#if group === 'staged'}
+				<button
+					class="action-btn"
+					title="Unstage"
+					onclick={() => unstageFile(file)}
+					disabled={isInFlight}
+				>
+					<Minus size={14} strokeWidth={1.5} />
+				</button>
+				<button
+					class="action-btn"
+					title="View diff"
+					onclick={() => reviewMode ? selectReviewFile(file) : onViewDiff(file)}
+				>
+					<Eye size={14} strokeWidth={1.5} />
+				</button>
+			{:else if group === 'modified'}
+				<button
+					class="action-btn"
+					title="Stage"
+					onclick={() => stageFile(file)}
+					disabled={isInFlight}
+				>
+					<Plus size={14} strokeWidth={1.5} />
+				</button>
+				<button
+					class="action-btn action-btn-danger"
+					title="Discard changes"
+					onclick={() => confirmDiscardFile(file, group)}
+					disabled={isInFlight}
+				>
+					<Undo2 size={14} strokeWidth={1.5} />
+				</button>
+				<button
+					class="action-btn"
+					title="View diff"
+					onclick={() => reviewMode ? selectReviewFile(file) : onViewDiff(file)}
+				>
+					<Eye size={14} strokeWidth={1.5} />
+				</button>
+			{:else if group === 'untracked'}
+				<button
+					class="action-btn"
+					title="Stage"
+					onclick={() => stageFile(file)}
+					disabled={isInFlight}
+				>
+					<Plus size={14} strokeWidth={1.5} />
+				</button>
+				<button
+					class="action-btn action-btn-danger"
+					title="Delete file"
+					onclick={() => confirmDiscardFile(file, group)}
+					disabled={isInFlight}
+				>
+					<Trash2 size={14} strokeWidth={1.5} />
+				</button>
+			{:else if group === 'conflict'}
+				<button
+					class="action-btn"
+					title="View diff"
+					onclick={() => reviewMode ? selectReviewFile(file) : onViewDiff(file)}
+				>
+					<Eye size={14} strokeWidth={1.5} />
+				</button>
+			{/if}
+		</div>
 	</div>
 {/snippet}
 
@@ -500,27 +534,12 @@
 					>
 						Stage All
 					</button>
-					{#if confirmingGroupAction === 'discard-modified'}
-						<button
-							class="group-action-btn group-action-danger"
-							onclick={() => discardAll(groupActions.files)}
-						>
-							Confirm
-						</button>
-						<button
-							class="group-action-btn"
-							onclick={() => { confirmingGroupAction = null; }}
-						>
-							Cancel
-						</button>
-					{:else}
-						<button
-							class="group-action-btn group-action-danger"
-							onclick={() => { confirmingGroupAction = 'discard-modified'; }}
-						>
-							Discard All
-						</button>
-					{/if}
+					<button
+						class="group-action-btn group-action-danger"
+						onclick={() => confirmDiscardGroup(groupActions.files, 'modified')}
+					>
+						Discard All
+					</button>
 				{:else if groupActions.type === 'untracked'}
 					<button
 						class="group-action-btn"
@@ -528,27 +547,12 @@
 					>
 						Stage All
 					</button>
-					{#if confirmingGroupAction === 'delete-untracked'}
-						<button
-							class="group-action-btn group-action-danger"
-							onclick={() => discardAll(groupActions.files)}
-						>
-							Confirm
-						</button>
-						<button
-							class="group-action-btn"
-							onclick={() => { confirmingGroupAction = null; }}
-						>
-							Cancel
-						</button>
-					{:else}
-						<button
-							class="group-action-btn group-action-danger"
-							onclick={() => { confirmingGroupAction = 'delete-untracked'; }}
-						>
-							Delete All
-						</button>
-					{/if}
+					<button
+						class="group-action-btn group-action-danger"
+						onclick={() => confirmDiscardGroup(groupActions.files, 'untracked')}
+					>
+						Delete All
+					</button>
 				{/if}
 			</div>
 		{/if}
@@ -743,31 +747,21 @@
 						</span>
 					</div>
 					<div class="review-footer-actions">
-						{#if reviewConfirmingDecline}
-							<span class="review-confirm-text">Discard changes?</span>
-							<button class="review-btn review-btn-danger" onclick={reviewDecline} disabled={reviewActionInFlight}>
-								Yes
-							</button>
-							<button class="review-btn review-btn-neutral" onclick={() => { reviewConfirmingDecline = false; }} disabled={reviewActionInFlight}>
-								No
+						{#if reviewSelectedFile.category === 'staged'}
+							<button class="review-btn review-btn-unstage" onclick={reviewAccept} disabled={reviewActionInFlight}>
+								{#if reviewActionInFlight}<Loader2 size={14} strokeWidth={2} class="animate-spin" />{:else}<Undo2 size={14} strokeWidth={2} />{/if}
+								Unstage
 							</button>
 						{:else}
-							{#if reviewSelectedFile.category === 'staged'}
-								<button class="review-btn review-btn-unstage" onclick={reviewAccept} disabled={reviewActionInFlight}>
-									{#if reviewActionInFlight}<Loader2 size={14} strokeWidth={2} class="animate-spin" />{:else}<Undo2 size={14} strokeWidth={2} />{/if}
-									Unstage
-								</button>
-							{:else}
-								<button class="review-btn review-btn-accept" onclick={reviewAccept} disabled={reviewActionInFlight}>
-									{#if reviewActionInFlight}<Loader2 size={14} strokeWidth={2} class="animate-spin" />{:else}<Check size={14} strokeWidth={2} />{/if}
-									Accept
-								</button>
-							{/if}
-							<button class="review-btn review-btn-decline" onclick={() => { reviewConfirmingDecline = true; }} disabled={reviewActionInFlight}>
-								<X size={14} strokeWidth={2} />
-								Decline
+							<button class="review-btn review-btn-accept" onclick={reviewAccept} disabled={reviewActionInFlight}>
+								{#if reviewActionInFlight}<Loader2 size={14} strokeWidth={2} class="animate-spin" />{:else}<Check size={14} strokeWidth={2} />{/if}
+								Accept
 							</button>
 						{/if}
+						<button class="review-btn review-btn-decline" onclick={confirmReviewDecline} disabled={reviewActionInFlight}>
+							<X size={14} strokeWidth={2} />
+							Decline
+						</button>
 					</div>
 				</div>
 			{/if}
@@ -778,6 +772,18 @@
 			</div>
 		{/if}
 	</div>
+
+	{#if pendingConfirm}
+		<ConfirmDialog
+			open={true}
+			title={pendingConfirm.title}
+			message={pendingConfirm.message}
+			confirmLabel={pendingConfirm.confirmLabel}
+			danger={true}
+			onConfirm={runPendingConfirm}
+			onCancel={() => { pendingConfirm = null; }}
+		/>
+	{/if}
 {/if}
 
 <script module lang="ts">
@@ -1123,13 +1129,6 @@
 		flex-shrink: 0;
 	}
 
-	.review-confirm-text {
-		font-size: 0.75rem;
-		color: var(--warning);
-		font-weight: 500;
-		white-space: nowrap;
-	}
-
 	.review-btn {
 		display: inline-flex;
 		align-items: center;
@@ -1183,25 +1182,6 @@
 	.review-btn-decline:hover:not(:disabled) {
 		background: color-mix(in oklch, var(--destructive) 22%, transparent);
 		border-color: color-mix(in oklch, var(--destructive) 50%, transparent);
-	}
-
-	.review-btn-danger {
-		background: color-mix(in oklch, var(--destructive) 50%, transparent);
-		border-color: color-mix(in oklch, var(--destructive) 60%, transparent);
-		color: var(--destructive-foreground);
-	}
-	.review-btn-danger:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--destructive) 70%, transparent);
-	}
-
-	.review-btn-neutral {
-		background: color-mix(in oklch, var(--border) 40%, transparent);
-		border-color: color-mix(in oklch, var(--border) 50%, transparent);
-		color: var(--muted-foreground);
-	}
-	.review-btn-neutral:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--border) 70%, transparent);
-		color: var(--foreground);
 	}
 
 	@media (max-width: 639px) {
@@ -1460,52 +1440,6 @@
 	.action-btn-danger:hover {
 		background: color-mix(in oklch, var(--destructive) 15%, transparent);
 		color: var(--destructive);
-	}
-
-	/* ── Inline confirm bar ──────────────────────────────────────────── */
-	.confirm-bar {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		width: 100%;
-	}
-
-	.confirm-text {
-		font-size: 0.75rem;
-		color: var(--warning);
-		font-weight: 500;
-		flex: 1;
-	}
-
-	.confirm-yes {
-		padding: 3px 12px;
-		font-size: 0.6875rem;
-		font-weight: 600;
-		color: var(--destructive-foreground);
-		background: color-mix(in oklch, var(--destructive) 50%, transparent);
-		border: 1px solid color-mix(in oklch, var(--destructive) 60%, transparent);
-		border-radius: calc(var(--radius) - 4px);
-		cursor: pointer;
-		transition: all 120ms ease;
-	}
-
-	.confirm-yes:hover { background: color-mix(in oklch, var(--destructive) 70%, transparent); }
-
-	.confirm-no {
-		padding: 3px 12px;
-		font-size: 0.6875rem;
-		font-weight: 600;
-		color: var(--muted-foreground);
-		background: color-mix(in oklch, var(--border) 40%, transparent);
-		border: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
-		border-radius: calc(var(--radius) - 4px);
-		cursor: pointer;
-		transition: all 120ms ease;
-	}
-
-	.confirm-no:hover {
-		background: color-mix(in oklch, var(--border) 70%, transparent);
-		color: var(--foreground);
 	}
 
 	/* ── Empty state ─────────────────────────────────────────────────── */
