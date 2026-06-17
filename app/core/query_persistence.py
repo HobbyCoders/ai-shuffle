@@ -130,6 +130,25 @@ def _row_for_thinking(session_id: str, tb: dict, profile_id: Optional[str], mode
     }
 
 
+def _row_for_text(session_id: str, payload: dict, profile_id: Optional[str],
+                  metadata: Optional[dict] = None) -> dict:
+    """Build an assistant text row from an ordered turn event.
+
+    The closing turn metadata (cost/duration/usage) is attached only to the
+    last text row of the turn (passed as `metadata`); intermediate text rows
+    carry just the model so the frontend renders cost/duration on the final
+    assistant bubble exactly as the legacy single-row path did.
+    """
+    return {
+        "session_id": session_id,
+        "role": "assistant",
+        "content": payload.get("content", ""),
+        "metadata": metadata if metadata is not None else {},
+        "profile_id": profile_id,
+        "jsonl_uuid": payload.get("uuid"),
+    }
+
+
 def _row_for_system(session_id: str, sm: dict, profile_id: Optional[str]) -> dict:
     return {
         "session_id": session_id,
@@ -258,6 +277,11 @@ async def _persist_turn_results(
     full_response = "\n".join(response_text) if response_text else ""
     batch: list[dict] = []
 
+    # Index of the last assistant-text row appended via the ordered path.
+    # The turn-closing metadata (cost/duration/usage) is attached to this row
+    # after the loop so the frontend renders cost on the final assistant bubble.
+    last_text_batch_idx = -1
+
     if turn_events:
         # Ordered path — preserves stream order, skips subagent children
         # (they're embedded in their parent subagent's metadata).
@@ -267,6 +291,15 @@ async def _persist_turn_results(
             payload = ev.get("payload") or {}
             if kind == "thinking":
                 batch.append(_row_for_thinking(session_id, payload, profile_id, model))
+            elif kind == "text":
+                # Ordered assistant text block. Intermediate blocks carry only
+                # the model; the closing metadata is attached to the LAST text
+                # row after the loop (see below).
+                batch.append(_row_for_text(
+                    session_id, payload, profile_id,
+                    metadata={"model": model} if model else {},
+                ))
+                last_text_batch_idx = len(batch) - 1
             elif kind == "tool_use":
                 # Skip subagent children — they go inside the parent's metadata
                 if payload.get("parent_tool_id"):
@@ -303,12 +336,28 @@ async def _persist_turn_results(
         for pm in plugin_messages:
             batch.append(_row_for_plugin(session_id, pm, profile_id))
 
-    # Assistant text response (always last — closes the turn visually)
+    # Assistant text response — closes the turn.
     assistant_msg = None
-    if full_response or interrupted or tool_messages:
+    assistant_uuid = metadata.get("jsonl_uuid") or metadata.get("last_assistant_uuid")
+
+    if last_text_batch_idx >= 0:
+        # Ordered path already emitted the assistant text as one or more rows in
+        # their true stream position (around tool cards). Don't append a second,
+        # merged trailing row — that's exactly what reordered the turn on reload.
+        # Instead, attach the turn-closing metadata to the LAST text row so cost/
+        # duration render on the final bubble, and fold the interrupted marker in.
+        final_row = batch[last_text_batch_idx]
+        final_row["metadata"] = metadata
+        if not final_row.get("jsonl_uuid"):
+            final_row["jsonl_uuid"] = assistant_uuid
+        if interrupted:
+            final_row["content"] = (final_row.get("content", "") or "") + "\n[Interrupted]"
+    elif full_response or interrupted or tool_messages:
+        # No ordered text rows (legacy bucketed path, tool-only turn, or an
+        # interrupt before any text). Emit a single closing assistant row, as
+        # before, so the turn still has a final assistant bubble.
         # Capture the assistant message's JSONL uuid so rewind can map a
         # DB row back to its transcript entry for truncation.
-        assistant_uuid = metadata.get("jsonl_uuid") or metadata.get("last_assistant_uuid")
         batch.append({
             "session_id": session_id,
             "role": "assistant",
@@ -323,9 +372,14 @@ async def _persist_turn_results(
     if batch and settings.session_store_mode != "postgres_only":
         try:
             inserted = await run_sync(add_session_messages_batch, batch)
-            # The assistant message is always last in the batch
-            if inserted and batch[-1]["role"] == "assistant":
-                assistant_msg = inserted[-1]
+            # Find the last assistant row. With ordered text persistence the
+            # assistant text may not be the final batch entry (a turn can end
+            # on a tool_use), so scan from the end for the last assistant role.
+            if inserted:
+                for k in range(len(batch) - 1, -1, -1):
+                    if batch[k]["role"] == "assistant":
+                        assistant_msg = inserted[k]
+                        break
         except Exception as e:
             logger.error(f"{log_prefix}Failed to store messages for session {session_id}: {e}")
 

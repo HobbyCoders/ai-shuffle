@@ -1625,6 +1625,21 @@ async def stream_to_websocket(
                             # Only send chunk when partial messages is disabled
                             response_text.append(block.text)
                             has_visible_content = True
+                            # Record this text block in ordered turn events so it
+                            # persists in the exact stream position relative to
+                            # tool_use blocks. Without this, all text was bucketed
+                            # into a single merged assistant row appended AFTER the
+                            # tools, which made reloads (DB fast-path) render the
+                            # tool card above the text and merge separate text
+                            # blocks of a text→tool→text turn into one bubble.
+                            if block.text and block.text.strip():
+                                turn_events.append({
+                                    "kind": "text",
+                                    "payload": {
+                                        "content": block.text,
+                                        "uuid": asst_uuid,
+                                    },
+                                })
                             if not include_partial:
                                 logger.debug(f"[WS] Text chunk len={len(block.text)} for session={session_id}")
                                 yield {"type": "chunk", "content": block.text}

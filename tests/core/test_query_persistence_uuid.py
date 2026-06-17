@@ -222,3 +222,119 @@ class TestPersistTurnResultsAssistantUUID:
         tr_row = next(r for r in tool_batch if r.get("role") == "tool_result")
         assert _row_uuid(tu_row) == "uuid-tu-1"
         assert _row_uuid(tr_row) == "uuid-tr-1"
+
+
+# =============================================================================
+# _persist_turn_results — ordered text/tool sequence (reorder-on-reload fix)
+# =============================================================================
+
+@pytest.mark.asyncio
+class TestPersistTurnResultsOrderedText:
+    """A text -> tool_use -> text turn must persist as three rows in stream
+    order (text, tool, text) — NOT as [tool, merged-text]. The old code
+    appended all assistant text as a single merged row AFTER the tools, which
+    on reload (DB fast-path) hoisted the tool card above the text and merged
+    the two distinct text blocks into one bubble.
+    """
+
+    async def _run_and_capture(self, monkeypatch, *, turn_events, response_text,
+                               interrupted=False):
+        captured_batches: list[list[dict]] = []
+
+        async def fake_run_sync(fn, *args, **kwargs):
+            if args:
+                captured_batches.append(args[0])
+            return [{**row, "id": i + 1} for i, row in enumerate(args[0] if args else [])]
+
+        monkeypatch.setattr(qp, "run_sync", fake_run_sync)
+
+        await qp._persist_turn_results(
+            session_id="s1",
+            sdk_session_id="sdk-1",
+            tool_messages=[],
+            response_text=response_text,
+            metadata={
+                "model": "claude-sonnet-4",
+                "num_turns": 1,
+                "total_cost_usd": 0.012,
+                "duration_ms": 1234,
+                "jsonl_uuid": "uuid-asst-final",
+            },
+            profile_id="p1",
+            interrupted=interrupted,
+            turn_events=turn_events,
+        )
+
+        # The message batch is the one containing assistant/tool rows.
+        for batch in captured_batches:
+            if isinstance(batch, list) and any(
+                isinstance(r, dict) and r.get("role") in ("assistant", "tool_use")
+                for r in batch
+            ):
+                return batch
+        raise AssertionError("message batch was never captured")
+
+    async def test_text_tool_text_persists_in_order(self, monkeypatch):
+        turn_events = [
+            {"kind": "text", "payload": {"content": "I'll run a quick check.", "uuid": "u2"}},
+            {"kind": "tool_use", "payload": {"name": "Bash", "tool_id": "toolu_01BASQ", "input": {"command": "ls"}, "uuid": "u3"}},
+            {"kind": "tool_result", "payload": {"name": "Bash", "tool_id": "toolu_01BASQ", "output": "ok", "uuid": "u4"}},
+            {"kind": "text", "payload": {"content": "Output confirmed: ok", "uuid": "u5"}},
+        ]
+        batch = await self._run_and_capture(
+            monkeypatch, turn_events=turn_events,
+            response_text=["I'll run a quick check.", "Output confirmed: ok"],
+        )
+
+        # Exactly two assistant text rows, in order, NOT merged.
+        roles = [r["role"] for r in batch]
+        assert roles == ["assistant", "tool_use", "tool_result", "assistant"], roles
+        assert batch[0]["content"] == "I'll run a quick check."
+        assert batch[3]["content"] == "Output confirmed: ok"
+        # No single merged row containing both blocks.
+        assert all("\n".join(["I'll run a quick check.", "Output confirmed: ok"]) != r["content"]
+                   for r in batch)
+        # Closing metadata (cost/duration) lands on the LAST text row.
+        assert batch[3]["metadata"].get("total_cost_usd") == 0.012
+        assert batch[3]["metadata"].get("duration_ms") == 1234
+        # Intermediate text row does NOT carry cost (so cost renders once, on final bubble).
+        assert "total_cost_usd" not in (batch[0]["metadata"] or {})
+
+    async def test_turn_ending_on_text_has_no_extra_merged_row(self, monkeypatch):
+        turn_events = [
+            {"kind": "text", "payload": {"content": "first", "uuid": "u2"}},
+            {"kind": "tool_use", "payload": {"name": "Bash", "tool_id": "t1", "input": {}, "uuid": "u3"}},
+            {"kind": "text", "payload": {"content": "second", "uuid": "u5"}},
+        ]
+        batch = await self._run_and_capture(
+            monkeypatch, turn_events=turn_events, response_text=["first", "second"],
+        )
+        assistant_rows = [r for r in batch if r["role"] == "assistant"]
+        # Two text rows only — no third merged trailing row.
+        assert len(assistant_rows) == 2
+        assert [r["content"] for r in assistant_rows] == ["first", "second"]
+
+    async def test_interrupt_marker_folds_into_last_text_row(self, monkeypatch):
+        turn_events = [
+            {"kind": "text", "payload": {"content": "partial answer", "uuid": "u2"}},
+        ]
+        batch = await self._run_and_capture(
+            monkeypatch, turn_events=turn_events, response_text=["partial answer"],
+            interrupted=True,
+        )
+        assistant_rows = [r for r in batch if r["role"] == "assistant"]
+        assert len(assistant_rows) == 1
+        assert assistant_rows[0]["content"] == "partial answer\n[Interrupted]"
+
+    async def test_tool_only_turn_still_emits_closing_assistant_row(self, monkeypatch):
+        # No text events → legacy trailing assistant row must still appear so
+        # the turn has a final bubble (preserves prior behavior).
+        turn_events = [
+            {"kind": "tool_use", "payload": {"name": "Bash", "tool_id": "t1", "input": {}, "uuid": "u3"}},
+        ]
+        batch = await self._run_and_capture(
+            monkeypatch, turn_events=turn_events, response_text=["done"],
+        )
+        assistant_rows = [r for r in batch if r["role"] == "assistant"]
+        assert len(assistant_rows) == 1
+        assert assistant_rows[0]["content"] == "done"
