@@ -371,14 +371,27 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 	}
 
 	function handleScroll() {
-		if (!containerRef || programmaticScrollDepth > 0) return;
+		if (!containerRef) return;
+		if (programmaticScrollDepth > 0) {
+			// Scroll event triggered by (or racing with) a programmatic scroll or a
+			// resize-induced scrollTop clamp. Make no auto-scroll decision, but keep
+			// the baseline current — otherwise a later genuine user scroll is measured
+			// against a stale pre-scroll position and falsely flagged as a scroll-up,
+			// disabling auto-scroll mid-stream (the "chat scrolls up after send" bug).
+			lastKnownScrollTop = containerRef.scrollTop;
+			return;
+		}
 
 		// Throttle to one handler per animation frame to prevent main thread blocking
 		if (scrollRafPending) return;
 		scrollRafPending = true;
 		requestAnimationFrame(() => {
 			scrollRafPending = false;
-			if (!containerRef || programmaticScrollDepth > 0) return;
+			if (!containerRef) return;
+			if (programmaticScrollDepth > 0) {
+				lastKnownScrollTop = containerRef.scrollTop;
+				return;
+			}
 
 			const cacheKey = $activeSession.sessionId ?? 'new';
 			const currentScrollTop = containerRef.scrollTop;
@@ -695,11 +708,12 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 		// which handleScroll misinterprets as a user scroll-up and disables autoscroll.
 		// Force autoscroll back on when the new message is from the user — they always
 		// want to see the response to what they just sent.
-		if (hasNewMessage && currentLength > 0) {
-			const newestMsg = $activeSession.messages[currentLength - 1];
-			if (newestMsg?.role === 'user') {
-				shouldAutoScroll = true;
-			}
+		const newUserMessage =
+			hasNewMessage &&
+			currentLength > 0 &&
+			$activeSession.messages[currentLength - 1]?.role === 'user';
+		if (newUserMessage) {
+			shouldAutoScroll = true;
 		}
 
 		if (hasNewMessage || hasContentChange) {
@@ -721,6 +735,19 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 				// Session switch: use aggressive scroll that retries until DOM is stable.
 				// Large content (tables, code blocks) may take multiple frames to render.
 				tick().then(() => scrollToBottomUntilStable());
+			} else if (newUserMessage) {
+				// Just-sent user message: its content (attachment previews, markdown)
+				// and the input-shrink reflow can land over several frames, so a single
+				// scroll can leave the message above the fold. Scroll across a few frames
+				// to stay pinned to the bottom without the long-running stable loop.
+				tick().then(() => {
+					let frames = 0;
+					const pin = () => {
+						scrollToBottom();
+						if (++frames < 4) requestAnimationFrame(pin);
+					};
+					pin();
+				});
 			} else {
 				// Normal streaming: single scroll is enough.
 				tick().then(() => requestAnimationFrame(scrollToBottom));
