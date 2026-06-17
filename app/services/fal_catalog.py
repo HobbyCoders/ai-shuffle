@@ -199,7 +199,14 @@ class FalCatalogService:
         return len(self._cache)
 
     def load_from_db(self) -> int:
-        """Load catalog from database on startup. Returns count of models loaded."""
+        """Load catalog from database on startup. Returns count of models loaded.
+
+        Seeds ``_last_refresh`` from the persisted data's actual age
+        (``fetched_at``) rather than the load time, so a snapshot that is
+        already older than the TTL is treated as stale and refreshed on the
+        first request after startup — instead of being trusted for another
+        full hour every time the process restarts.
+        """
         try:
             with get_db() as conn:
                 cursor = conn.cursor()
@@ -208,9 +215,25 @@ class FalCatalogService:
                 )
                 rows = cursor.fetchall()
                 self._cache = [CatalogModel.from_db_row(dict(row)) for row in rows]
+
+                # Use the freshest persisted row's timestamp as the effective
+                # last-refresh time. If it's missing (legacy rows), leave
+                # _last_refresh at 0 so the catalog is considered stale and
+                # refreshes promptly.
+                cursor.execute(
+                    "SELECT EXTRACT(EPOCH FROM MAX(fetched_at)) AS ts "
+                    "FROM fal_model_catalog WHERE status = 'active'"
+                )
+                row = cursor.fetchone()
+                fetched_epoch = dict(row).get("ts") if row else None
+
             if self._cache:
-                self._last_refresh = time.time()
-                logger.info(f"Loaded {len(self._cache)} models from catalog cache")
+                self._last_refresh = float(fetched_epoch) if fetched_epoch is not None else 0.0
+                age = time.time() - self._last_refresh
+                logger.info(
+                    f"Loaded {len(self._cache)} models from catalog cache "
+                    f"(data age {age / 60:.0f} min, stale={self.is_stale})"
+                )
             return len(self._cache)
         except Exception as e:
             logger.debug(f"No catalog cache in DB (expected on first run): {e}")
