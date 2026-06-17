@@ -425,7 +425,17 @@ class SessionPoller {
 		// Delta merge
 		let messages: ChatMessage[];
 		if (initialMessageCount > 0 && existingMessages && existingMessages.length >= initialMessageCount) {
-			const historyMessages = existingMessages.slice(0, initialMessageCount);
+			// The server splits at a positional boundary (initialMessageCount).
+			// If that boundary shifts by one (e.g. end_streaming filtered a
+			// history message, or a compaction mutated the list), a real
+			// streaming message can fall inside the "history" slice and then be
+			// re-added from streamingMessages → a duplicate card. Dedup the
+			// history slice against the streaming ids so the now-stable message
+			// ids (see jsonl_parser tool id alignment) self-correct the split.
+			const streamingIds = new Set(streamingMessages.map(m => m.id));
+			const historyMessages = existingMessages
+				.slice(0, initialMessageCount)
+				.filter(m => !streamingIds.has(m.id));
 			messages = [...historyMessages, ...streamingMessages];
 		} else if (initialMessageCount > 0 && existingMessages && existingMessages.length > 0) {
 			// existingMessages may already contain streaming messages from a

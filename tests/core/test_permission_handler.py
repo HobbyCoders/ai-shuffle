@@ -18,7 +18,7 @@ This is security-critical code - comprehensive coverage is essential.
 
 import asyncio
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 from app.core.permission_handler import (
@@ -99,7 +99,7 @@ class TestPermissionRequest:
 
     def test_default_created_at(self):
         """Should set created_at to current time by default."""
-        before = datetime.now()
+        before = datetime.now(timezone.utc)
         request = PermissionRequest(
             request_id="req-123",
             session_id="session-456",
@@ -107,7 +107,7 @@ class TestPermissionRequest:
             tool_name="Bash",
             tool_input={}
         )
-        after = datetime.now()
+        after = datetime.now(timezone.utc)
 
         assert before <= request.created_at <= after
 

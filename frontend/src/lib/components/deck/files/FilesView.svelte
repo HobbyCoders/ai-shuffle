@@ -33,6 +33,8 @@
 	} from 'lucide-svelte';
 	import { files, sortedFiles, breadcrumbs, hasSelection, selectionCount } from '$lib/stores/files';
 	import type { FileItem } from '$lib/stores/files';
+	import ContextMenu from '$lib/components/ui/ContextMenu.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 
 	// State
 	let showNewFolderInput = $state(false);
@@ -40,7 +42,11 @@
 	let renameTarget: FileItem | null = $state(null);
 	let renameValue = $state('');
 	let contextMenu: { x: number; y: number; item: FileItem } | null = $state(null);
-	let contextMenuEl: HTMLDivElement | undefined = $state();
+	// A pending delete awaiting confirmation (replaces native confirm()).
+	let pendingDelete:
+		| { kind: 'single'; item: FileItem }
+		| { kind: 'selected'; count: number }
+		| null = $state(null);
 	let uploadInput: HTMLInputElement;
 	let isMobile = $state(false);
 	let pathTrackEl = $state<HTMLDivElement | null>(null);
@@ -99,36 +105,9 @@
 		// Load workspace root files
 		files.loadFiles();
 
-		// Close context menu on click outside
-		function handleClickOutside(e: MouseEvent) {
-			if (contextMenu) {
-				contextMenu = null;
-			}
-		}
-		document.addEventListener('click', handleClickOutside);
-
 		return () => {
 			window.removeEventListener('resize', checkMobile);
-			document.removeEventListener('click', handleClickOutside);
 		};
-	});
-
-	// Clamp context menu within viewport bounds
-	$effect(() => {
-		if (contextMenu && contextMenuEl) {
-			const rect = contextMenuEl.getBoundingClientRect();
-			const pad = 8;
-			let { x, y } = contextMenu;
-			if (x + rect.width > window.innerWidth - pad) {
-				x = window.innerWidth - rect.width - pad;
-			}
-			if (y + rect.height > window.innerHeight - pad) {
-				y = window.innerHeight - rect.height - pad;
-			}
-			if (x !== contextMenu.x || y !== contextMenu.y) {
-				contextMenu = { ...contextMenu, x, y };
-			}
-		}
 	});
 
 	// Handlers
@@ -191,16 +170,22 @@
 		renameValue = '';
 	}
 
-	async function handleDelete(item: FileItem) {
-		if (confirm(`Delete "${item.name}"?`)) {
-			await files.delete(item.path);
-		}
+	function handleDelete(item: FileItem) {
+		pendingDelete = { kind: 'single', item };
 		contextMenu = null;
 	}
 
-	async function handleDeleteSelected() {
-		const count = $selectionCount;
-		if (confirm(`Delete ${count} selected item${count > 1 ? 's' : ''}?`)) {
+	function handleDeleteSelected() {
+		pendingDelete = { kind: 'selected', count: $selectionCount };
+	}
+
+	async function confirmDelete() {
+		const target = pendingDelete;
+		pendingDelete = null;
+		if (!target) return;
+		if (target.kind === 'single') {
+			await files.delete(target.item.path);
+		} else {
 			await files.deleteSelected();
 		}
 	}
@@ -651,16 +636,13 @@
 	/>
 
 	<!-- Context menu -->
-	{#if contextMenu}
-		<div
-			bind:this={contextMenuEl}
-			class="context-menu"
-			style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
-			onclick={(e) => e.stopPropagation()}
-			onkeydown={(e) => e.stopPropagation()}
-			role="menu"
-			tabindex="-1"
-		>
+	<ContextMenu
+		open={!!contextMenu}
+		x={contextMenu?.x ?? 0}
+		y={contextMenu?.y ?? 0}
+		onClose={() => (contextMenu = null)}
+	>
+		{#if contextMenu}
 			{#if contextMenu.item.type === 'file'}
 				<button class="ctx-btn" onclick={() => handleDownload(contextMenu!.item)}>
 					<Download />
@@ -677,8 +659,23 @@
 				<Trash2 />
 				<span>Delete</span>
 			</button>
-		</div>
-	{/if}
+		{/if}
+	</ContextMenu>
+
+	<!-- Delete confirmation -->
+	<ConfirmDialog
+		open={!!pendingDelete}
+		title="Delete"
+		message={pendingDelete?.kind === 'single'
+			? `Delete "${pendingDelete.item.name}"?`
+			: pendingDelete
+				? `Delete ${pendingDelete.count} selected item${pendingDelete.count > 1 ? 's' : ''}?`
+				: ''}
+		confirmLabel="Delete"
+		danger
+		onConfirm={confirmDelete}
+		onCancel={() => (pendingDelete = null)}
+	/>
 </div>
 
 <style>
@@ -1534,32 +1531,6 @@
 	/* ============================================
 	   Context Menu
 	   ============================================ */
-	.context-menu {
-		position: fixed;
-		min-width: 180px;
-		background: oklch(0.13 0.01 260);
-		border: 1px solid oklch(0.25 0.015 260);
-		border-radius: 0.75rem;
-		box-shadow:
-			0 8px 32px rgba(0, 0, 0, 0.5),
-			0 0 0 1px oklch(0.2 0.01 260);
-		z-index: 100;
-		overflow: hidden;
-		padding: 0.375rem;
-		animation: contextIn 0.12s ease;
-	}
-
-	@keyframes contextIn {
-		from {
-			opacity: 0;
-			transform: scale(0.95);
-		}
-		to {
-			opacity: 1;
-			transform: scale(1);
-		}
-	}
-
 	.ctx-btn {
 		display: flex;
 		align-items: center;

@@ -688,6 +688,12 @@ class TestParseSessionHistory:
                 assert result[0]["toolName"] == "Bash"
                 assert result[0]["toolResult"] == "hello"
                 assert result[0]["toolStatus"] == "complete"
+                # #1 stable id: on the MAIN session path the tool message id is
+                # `tool-{tool_id}` (matching the live store), NOT
+                # `tool-{uuid}-{tool_id}` — so the card keeps a stable id across
+                # the streaming → persisted handoff and the frontend dedup works.
+                assert result[0]["id"] == "tool-tool-abc"
+                assert "tool-use-1" not in result[0]["id"], "id must not depend on the JSONL uuid"
 
     def test_skip_queue_operations(self):
         """Should skip queue-operation entries."""

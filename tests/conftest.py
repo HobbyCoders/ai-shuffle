@@ -1045,6 +1045,37 @@ def prevent_real_cli_tool_discovery():
         yield
 
 
+@pytest.fixture(autouse=True)
+def reset_global_stores():
+    """
+    Reset process-wide singleton stores after every test.
+
+    ``live_session_store``, ``permission_handler`` and the ``session_pool`` are
+    module-level singletons. Any test that drives a real app endpoint populates
+    them with per-session state, and nothing empties them between tests. Across
+    the full suite this grows monotonically — each ``LiveSession`` drags its
+    accumulated streamed-message buffers along — ballooning RSS until the
+    machine freezes. Clear them in teardown so each test starts clean.
+    """
+    yield
+    try:
+        from app.core.live_session_store import live_session_store
+        live_session_store.reset_all()
+    except Exception:
+        pass
+    try:
+        from app.core.permission_handler import permission_handler
+        permission_handler.reset_all()
+    except Exception:
+        pass
+    try:
+        import app.core.session_pool as session_pool_mod
+        # Drop the pooled SDK clients; a fresh pool is lazily created on next use.
+        session_pool_mod._session_pool = None
+    except Exception:
+        pass
+
+
 @pytest.fixture
 def mock_encryption():
     """

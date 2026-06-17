@@ -883,3 +883,71 @@ class TestThinkingTokenRouting:
         assert store.get_session("s1").last_update_id == update_id_before, (
             "no-op must not bump update_id"
         )
+
+
+# =============================================================================
+# Bug: Messages mixing up — content bleeding between assistant messages.
+#
+# Two root causes (see investigation):
+#  #2  Two streaming text messages could coexist; append_text routes deltas to
+#      "the last streaming text message", so a later delta bleeds into the wrong
+#      one. start_assistant_message must finalize the prior streaming text.
+#  #4  start_streaming replaced the per-session lock on a same-session re-query,
+#      breaking mutual exclusion with an in-flight writer holding the old lock.
+# =============================================================================
+
+
+class TestSingleStreamingTextInvariant:
+    """At most one streaming assistant text message may exist at a time."""
+
+    async def test_start_assistant_message_finalizes_prior_streaming_text(self, store):
+        await store.start_streaming("s1", initial_messages=[])
+        await store.append_text("s1", "first block")
+
+        # A new assistant message starts while the first text is still streaming.
+        await store.start_assistant_message("s1", "asst-2")
+
+        session = store.get_session("s1")
+        streaming_text = [
+            m for m in session.messages
+            if m.type == "text" and m.role == "assistant" and m.streaming
+        ]
+        assert len(streaming_text) == 1, (
+            "at most one streaming text message may exist; "
+            f"found {len(streaming_text)}"
+        )
+        assert streaming_text[0].id == "asst-2", "the new message is the live one"
+
+    async def test_deltas_do_not_bleed_into_a_prior_text_message(self, store):
+        await store.start_streaming("s1", initial_messages=[])
+        await store.append_text("s1", "ANSWER-A")
+
+        # New assistant text begins, then its deltas arrive.
+        await store.start_assistant_message("s1", "asst-2")
+        await store.append_text("s1", "ANSWER-B")
+
+        texts = [
+            m for m in store.get_session("s1").messages
+            if m.type == "text" and m.role == "assistant"
+        ]
+        first = next(m for m in texts if m.id != "asst-2")
+        second = next(m for m in texts if m.id == "asst-2")
+        assert first.content == "ANSWER-A", "prior message must not absorb new deltas"
+        assert second.content == "ANSWER-B", "new deltas land only on the new message"
+
+
+class TestPerSessionLockStability:
+    """The per-session lock must be stable for the session's whole lifetime."""
+
+    async def test_lock_is_reused_across_same_session_requery(self, store):
+        await store.start_streaming("s1", initial_messages=[])
+        lock_before = store._get_session_lock("s1")
+
+        # Rapid re-query on the same session id (new turn).
+        await store.start_streaming("s1", initial_messages=[])
+        lock_after = store._get_session_lock("s1")
+
+        assert lock_before is lock_after, (
+            "replacing the lock on re-query breaks mutual exclusion with an "
+            "in-flight writer still holding the old lock"
+        )

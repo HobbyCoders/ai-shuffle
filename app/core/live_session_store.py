@@ -262,6 +262,27 @@ class LiveSessionStore:
         session.last_update_id += 1
 
     @staticmethod
+    def _finalize_streaming(session: LiveSession, block_type: str) -> None:
+        """Mark any currently-streaming assistant message of ``block_type`` as
+        complete.
+
+        Enforces the "at most one streaming message of a given block type"
+        invariant. Without it, two streaming text messages can coexist (e.g.
+        text → tool_use → text in one turn, or a rapid same-session re-query),
+        and ``append_text``'s reverse-scan would route deltas to the wrong one —
+        the "content bleeding between messages" symptom. Type-specific on
+        purpose: finalizing text must not disturb a legitimately-streaming
+        thinking block (the SDK's text-before-thinking reordering relies on it).
+        """
+        for msg in session.messages:
+            if (
+                msg.role == "assistant"
+                and msg.streaming
+                and msg.type == block_type
+            ):
+                msg.streaming = False
+
+    @staticmethod
     def _boundary_token(subtype: str, data: Optional[Dict[str, Any]]) -> Optional[int]:
         """Extract the identifying token count for a compaction boundary.
 
@@ -418,8 +439,14 @@ class LiveSessionStore:
                 session.cache_read_tokens = prev_session.cache_read_tokens
 
             self._sessions[session_id] = session
-            # Create a per-session lock for this session
-            self._session_locks[session_id] = asyncio.Lock()
+            # Reuse the existing per-session lock if one is already present.
+            # Replacing it on a rapid same-session re-query would break mutual
+            # exclusion: an in-flight writer from the previous query may still
+            # hold the OLD lock object, so a new writer acquiring the NEW lock
+            # runs concurrently — interleaving appends and corrupting message
+            # state. Keep one stable lock per session_id for its whole lifetime.
+            if session_id not in self._session_locks:
+                self._session_locks[session_id] = asyncio.Lock()
             logger.debug(f"Started live streaming for session {session_id} with {len(messages)} initial messages")
             return session
 
@@ -449,6 +476,12 @@ class LiveSessionStore:
             if not session:
                 logger.warning(f"Cannot start assistant message: session {session_id} not found")
                 return
+
+            # Invariant: at most one streaming text message at a time.
+            # Finalize any prior streaming text first, otherwise a later text
+            # delta (routed to "the last streaming text message") could bleed
+            # into the wrong message when the SDK emits text → tool → text.
+            self._finalize_streaming(session, "text")
 
             msg = LiveMessage(
                 id=message_id,
@@ -1495,6 +1528,17 @@ class LiveSessionStore:
             self._session_locks.pop(session_id, None)
             msg_count = len(removed_session.messages) if removed_session else 0
             logger.info(f"Force-cleaned session {session_id} ({msg_count} messages). Remaining: sessions={len(self._sessions)} locks={len(self._session_locks)}")
+
+    def reset_all(self) -> None:
+        """Drop all in-memory session state.
+
+        Used on server shutdown and between tests to prevent unbounded growth
+        of ``_sessions`` (each ``LiveSession`` holds full streamed message
+        buffers). Synchronous on purpose so it can run outside an event loop
+        (e.g. pytest teardown).
+        """
+        self._sessions.clear()
+        self._session_locks.clear()
 
 
 # Global instance

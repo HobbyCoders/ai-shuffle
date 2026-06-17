@@ -1182,7 +1182,15 @@ def _parse_session_history_uncached(
                                     messages_by_tool_id[tool_id] = len(messages) - 1
                             else:
                                 messages.append({
-                                    "id": f"tool-{uuid}-{tool_id or msg_counter}",
+                                    # Use the raw tool_id (matching the live
+                                    # store's `tool-{tool_id}`) so a tool card
+                                    # keeps a STABLE id across the streaming →
+                                    # persisted handoff and the frontend dedup
+                                    # doesn't drop/duplicate it. Fall back to the
+                                    # per-message counter only when the SDK
+                                    # omitted a tool id. The rewind `uuid` field
+                                    # below is separate and unchanged.
+                                    "id": f"tool-{tool_id}" if tool_id else f"tool-{uuid}-{msg_counter}",
                                     "uuid": uuid,  # Raw JSONL UUID for rewind
                                     "role": "assistant",
                                     "content": "",

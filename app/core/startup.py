@@ -357,3 +357,14 @@ async def shutdown_services() -> None:
     except Exception:
         pass
 
+    # Free in-memory session/permission state. These are never otherwise
+    # emptied, so a long-lived server accumulates LiveSession message buffers
+    # for every session that ever streamed.
+    try:
+        from app.core.live_session_store import live_session_store
+        from app.core.permission_handler import permission_handler
+        live_session_store.reset_all()
+        permission_handler.reset_all()
+    except Exception:
+        pass
+

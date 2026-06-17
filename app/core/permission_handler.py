@@ -613,6 +613,16 @@ class PermissionHandler:
             for rule in self._session_rules[session_id]
         ]
 
+    def reset_all(self) -> None:
+        """Drop all pending/deferred requests and session rules.
+
+        Used on server shutdown and between tests to prevent unbounded growth
+        across sessions. Synchronous so it can run outside an event loop.
+        """
+        self._pending_requests.clear()
+        self._deferred.clear()
+        self._session_rules.clear()
+
 
 # Global singleton instance
 permission_handler = PermissionHandler()
