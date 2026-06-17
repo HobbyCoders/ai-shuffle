@@ -21,6 +21,8 @@ psycopg2-binary==2.9.9
 aiogram>=3.4.0  # Telegram bot framework (async)
 discord.py>=2.3.0  # Discord bot library
 # Gmail connector dependencies
-google-api-python-client>=2.100.0  # Gmail API client
-google-auth-oauthlib>=1.1.0  # Google OAuth2 authentication
-google-auth-httplib2>=0.2.0  # Google auth HTTP transport
+# google-api-python-client provides googleapiclient + pulls in google-auth
+# transitively (gmail.py imports google.oauth2.credentials). The OAuth token
+# exchange is handled by our own httpx PKCE flow in app/core/oauth.py, so the
+# google-auth-oauthlib / google-auth-httplib2 helper libs are not needed.
+google-api-python-client>=2.100.0  # Gmail API client (+ google-auth)

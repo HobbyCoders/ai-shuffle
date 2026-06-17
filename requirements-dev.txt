@@ -8,7 +8,7 @@ pytest-cov>=4.1.0
 pytest-mock>=3.12.0
 httpx>=0.27.0  # Already in requirements.txt, but needed for TestClient
 
-# Time mocking for auth tests
+# Time mocking for analytics date-window tests
 freezegun>=1.2.0
 
 # Linting (already using ruff via CLI)
