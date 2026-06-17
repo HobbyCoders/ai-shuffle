@@ -9,6 +9,7 @@ import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { ExecutionMode } from '../types';
 import { api } from '$lib/api/client';
+import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal, migrateUploadsToWorktree, reopenWorktree } from '$lib/api/git';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -311,7 +312,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							.filter(m => !(m.type === 'text' && m.role === 'assistant' && !m.content))
 						: s.messages;
 					// eslint-disable-next-line no-console
-					console.log(`[AS] optimistic append A id=${userMsgId} prevLen=${baseMessages.length} "${prompt.slice(0, 30)}"`);
+					if (STREAM_DEBUG) console.log(`[AS] optimistic append A id=${userMsgId} prevLen=${baseMessages.length} "${prompt.slice(0, 30)}"`);
 					return {
 						...s,
 						messages: [...baseMessages, {
@@ -504,7 +505,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 			update(s => {
 				// eslint-disable-next-line no-console
-				console.log(`[AS] optimistic append B-worktree id=${userMsgId} prevLen=${s.messages.length} "${prompt.slice(0, 30)}"`);
+				if (STREAM_DEBUG) console.log(`[AS] optimistic append B-worktree id=${userMsgId} prevLen=${s.messages.length} "${prompt.slice(0, 30)}"`);
 				return {
 					...s,
 					isCreatingWorktree: true,

@@ -130,9 +130,14 @@
 
 	// Use a plain object to avoid Svelte 5 compiling these as reactive signals.
 	// Mutating reactive `let` vars inside `$derived` corrupts the effect linked list.
+	// `html` and `stablePrefixHtml` hold SANITIZED markup. Sanitization is folded
+	// into the render functions so that during streaming DOMPurify only runs over
+	// the growing tail paragraph (and the stable prefix once, when it advances)
+	// instead of re-sanitizing the entire message on every delta — which was
+	// O(full content) per frame and got heavier as a response grew.
 	const _cache = { content: '', html: '', wasStreaming: false, stablePrefixContent: '', stablePrefixHtml: '' };
 
-	const renderedHtml = $derived(sanitizeHtml(renderMarkdownMemoized(displayContent, streaming)));
+	const renderedHtml = $derived(renderMarkdownMemoized(displayContent, streaming));
 
 	function renderMarkdownMemoized(text: string, isStreaming: boolean): string {
 		// Fast path: content and streaming flag unchanged
@@ -178,26 +183,28 @@
 		if (lastBoundary <= 0) {
 			// No paragraph boundary yet — full parse (content is short)
 			let html = marked(replaceMediaWithPlaceholders(text), { breaks: true }) as string;
-			return injectStreamingCursor(html);
+			return sanitizeHtml(injectStreamingCursor(html));
 		}
 
 		const stableContent = text.substring(0, lastBoundary);
 		const tailContent = text.substring(lastBoundary);
 
-		// If the stable prefix hasn't changed, reuse its cached HTML
+		// If the stable prefix hasn't changed, reuse its cached (sanitized) HTML
 		let prefixHtml: string;
 		if (stableContent === _cache.stablePrefixContent) {
 			prefixHtml = _cache.stablePrefixHtml;
 		} else {
-			// Stable prefix grew — re-parse it and cache
-			prefixHtml = marked(replaceMediaWithPlaceholders(stableContent), { breaks: true }) as string;
+			// Stable prefix grew — re-parse, sanitize, and cache it once.
+			prefixHtml = sanitizeHtml(marked(replaceMediaWithPlaceholders(stableContent), { breaks: true }) as string);
 			_cache.stablePrefixContent = stableContent;
 			_cache.stablePrefixHtml = prefixHtml;
 		}
 
-		// Always re-parse the tail (last incomplete paragraph + new content)
+		// Always re-parse the tail (last incomplete paragraph + new content).
+		// This is the only DOMPurify pass that runs every delta — bounded to the
+		// last paragraph rather than the whole message.
 		let tailHtml = marked(replaceMediaWithPlaceholders(tailContent), { breaks: true }) as string;
-		tailHtml = injectStreamingCursor(tailHtml);
+		tailHtml = sanitizeHtml(injectStreamingCursor(tailHtml));
 
 		return prefixHtml + tailHtml;
 	}
@@ -243,7 +250,7 @@
 	function renderMarkdownFull(text: string, isStreaming: boolean): string {
 		if (isStreaming) {
 			let html = marked(replaceMediaWithPlaceholders(text), { breaks: true }) as string;
-			return injectStreamingCursor(html);
+			return sanitizeHtml(injectStreamingCursor(html));
 		}
 
 		// Process base64 images with download capability and overlay buttons
@@ -299,7 +306,7 @@
 			</div>`;
 		});
 
-		return marked(processedContent, { breaks: true }) as string;
+		return sanitizeHtml(marked(processedContent, { breaks: true }) as string);
 	}
 
 	/**

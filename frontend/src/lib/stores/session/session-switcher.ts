@@ -13,6 +13,7 @@ import type { SessionEphemeral } from '../session-cache';
 import type { ChatMessage } from '../types';
 import type { PollAppliedData } from './session-poller';
 import { api } from '$lib/api/client';
+import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { getOrCreateDeviceId } from '../device-id';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -248,7 +249,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const generation = ++_switchGeneration;
 		const state = getState();
 		// eslint-disable-next-line no-console
-		console.log(`[AS] switchSession CALLED gen=${generation} from=${state.sessionId} to=${sessionId} visibility=${typeof document !== 'undefined' ? document.visibilityState : 'n/a'}`);
+		if (STREAM_DEBUG) console.log(`[AS] switchSession CALLED gen=${generation} from=${state.sessionId} to=${sessionId} visibility=${typeof document !== 'undefined' ? document.visibilityState : 'n/a'}`);
 
 		// Stop polling and clean up session state for the session we're leaving.
 		// Without removeSession, the old session lingers in sessionState with

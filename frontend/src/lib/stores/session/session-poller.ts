@@ -19,6 +19,7 @@
 
 import type { ChatMessage, SubagentChildMessage, MessageType } from '../types';
 import { sessionState, type SessionUsage } from './session-state';
+import { STREAM_DEBUG } from '$lib/utils/debug-log';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -459,7 +460,7 @@ class SessionPoller {
 		};
 
 		// ── Diagnostic: log streaming→ended transition data ──────
-		if (streamingJustEnded) {
+		if (STREAM_DEBUG && streamingJustEnded) {
 			const assistantTexts = messages.filter(m => m.role === 'assistant' && m.type === 'text');
 			console.warn(
 				`[Poller:StreamEnd] streamingJustEnded`,
