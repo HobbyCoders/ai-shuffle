@@ -26,6 +26,8 @@ cd ai-shuffle
 
 ```bash
 pip install -r requirements.txt
+# Optional: computer-use (host desktop control), native runs only
+pip install -r requirements-native.txt
 ```
 
 ### 3. Install Frontend Dependencies

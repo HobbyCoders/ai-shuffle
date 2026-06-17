@@ -145,6 +145,16 @@ install_dependencies() {
     source venv/bin/activate
     pip install -r requirements.txt
     print_status "Dependencies installed" "success"
+
+    # Native-only deps (computer-use). Best-effort: a build failure here (e.g. evdev
+    # on a Linux host without kernel headers) just disables computer-use; don't abort.
+    if [[ -f "requirements-native.txt" ]]; then
+        if pip install -r requirements-native.txt; then
+            print_status "Native (computer-use) dependencies installed" "success"
+        else
+            print_status "Native (computer-use) dependencies skipped - computer-use will be unavailable" "warning"
+        fi
+    fi
 }
 
 build_frontend() {

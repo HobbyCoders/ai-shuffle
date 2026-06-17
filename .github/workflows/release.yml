@@ -74,6 +74,7 @@ jobs:
 
           # Copy core files
           cp requirements.txt "${STAGING}/"
+          cp requirements-native.txt "${STAGING}/"
           cp run_local.py "${STAGING}/"
           cp .env.example "${STAGING}/"
           cp LICENSE "${STAGING}/"

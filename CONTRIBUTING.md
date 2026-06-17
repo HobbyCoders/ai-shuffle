@@ -57,6 +57,8 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 pip install -r requirements-dev.txt
+# Optional: computer-use (host desktop control), native runs only
+pip install -r requirements-native.txt
 
 # Install pre-commit hooks
 pip install pre-commit

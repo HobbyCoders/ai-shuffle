@@ -55,6 +55,8 @@ source venv/bin/activate
 ### 3. Install Dependencies
 ```bash
 pip install -r requirements.txt
+# Optional: computer-use (host desktop control), native runs only
+pip install -r requirements-native.txt
 ```
 
 ### 4. Build Frontend

@@ -261,10 +261,28 @@ def install_dependencies():
             str(get_venv_pip()), "install", "-r", str(requirements)
         ], check=True)
         print_status("Dependencies installed", "success")
-        return True
     except subprocess.CalledProcessError as e:
         print_status(f"Failed to install dependencies: {e}", "error")
         return False
+
+    # Native-only deps (computer-use). Best-effort: a failure here (e.g. evdev build
+    # on a Linux host without kernel headers) just disables computer-use, it should
+    # not block startup.
+    native_requirements = project_root / "requirements-native.txt"
+    if native_requirements.exists():
+        try:
+            subprocess.run([
+                str(get_venv_pip()), "install", "-r", str(native_requirements)
+            ], check=True)
+            print_status("Native (computer-use) dependencies installed", "success")
+        except subprocess.CalledProcessError as e:
+            print_status(
+                f"Native (computer-use) dependencies skipped: {e}. "
+                "Computer-use will be unavailable.",
+                "warning",
+            )
+
+    return True
 
 
 def build_frontend():

@@ -1,0 +1,13 @@
+# Native/local-only Python dependencies.
+#
+# These power the computer-use feature (host desktop control) and are intentionally
+# kept out of requirements.txt so they are NOT installed into the Docker image:
+#   - computer-use is auto-disabled in containers anyway, and
+#   - pynput pulls in `evdev` on Linux, whose sdist build needs the kernel input
+#     headers + a C toolchain that the runtime image doesn't ship, breaking the build.
+#
+# Native install paths (run_local.py / run_local.sh) install this on top of
+# requirements.txt, best-effort: a failure here disables computer-use but does not
+# block startup.
+mss>=9.0.1  # fast cross-platform screenshots + multi-monitor enumeration
+pynput>=1.7.6  # mouse/keyboard control (Pillow already pulled in transitively)
