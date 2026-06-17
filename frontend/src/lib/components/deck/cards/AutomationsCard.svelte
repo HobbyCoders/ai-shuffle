@@ -10,6 +10,7 @@
 	 */
 	import { onMount } from 'svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import type {
 		Automation,
 		AutomationCreate,
@@ -79,6 +80,9 @@
 	let connectorTypes: ConnectorTypeInfo[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
+
+	// A pending delete awaiting confirmation (replaces native confirm()).
+	let pendingDeleteId = $state<string | null>(null);
 
 	// ── UI state ────────────────────────────────────────────────────────
 	type View = 'list' | 'create' | 'edit' | 'detail' | 'approvals';
@@ -361,8 +365,14 @@
 		}
 	}
 
-	async function handleDelete(id: string) {
-		if (!confirm('Are you sure you want to delete this automation?')) return;
+	function handleDelete(id: string) {
+		pendingDeleteId = id;
+	}
+
+	async function confirmDelete() {
+		const id = pendingDeleteId;
+		pendingDeleteId = null;
+		if (!id) return;
 		try {
 			await deleteAutomation(id);
 			if (currentView === 'detail') currentView = 'list';
@@ -806,6 +816,17 @@
 		</div>
 	</div>
 {/if}
+
+<!-- Delete automation confirmation -->
+<ConfirmDialog
+	open={!!pendingDeleteId}
+	title="Delete automation"
+	message="Are you sure you want to delete this automation?"
+	confirmLabel="Delete"
+	danger
+	onConfirm={confirmDelete}
+	onCancel={() => (pendingDeleteId = null)}
+/>
 
 <style>
 	/* ═══════════════════ Layout ═══════════════════ */

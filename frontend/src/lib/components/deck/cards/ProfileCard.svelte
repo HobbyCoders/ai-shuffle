@@ -7,7 +7,9 @@
 	 * - Form view: Edit or create profiles with tabbed interface
 	 */
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import { toast } from '$lib/stores/toast';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
 	import { Users, Upload, Sparkles, Plus, Wrench, Bot, Settings, FileText, SlidersHorizontal, Check } from 'lucide-svelte';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data';
@@ -198,6 +200,9 @@
 	let profileImportInput: HTMLInputElement | undefined = $state();
 	let profileImporting = $state(false);
 	let showGenerateDialog = $state(false);
+
+	// A pending "restore defaults" awaiting confirmation (replaces native confirm()).
+	let pendingRevert = $state<string | null>(null);
 
 	// Tab definitions
 	const tabs = [
@@ -649,7 +654,7 @@
 				await tabsStore.createProfile(data);
 			}
 		} catch (e: any) {
-			alert('Failed to save profile: ' + (e.detail || e.message || 'Unknown error'));
+			toast.push('Failed to save profile: ' + (e.detail || e.message || 'Unknown error'), { tone: 'error' });
 			return;
 		}
 
@@ -657,15 +662,21 @@
 		resetForm();
 	}
 
-	async function handleRevertProfile(profileId: string) {
+	function handleRevertProfile(profileId: string) {
 		const profile = profiles.find(p => p.id === profileId);
 		if (!profile?.is_builtin) return;
-		if (!confirm('Restore this profile to its original default settings? Your customizations will be lost.')) return;
+		pendingRevert = profileId;
+	}
+
+	async function confirmRevert() {
+		const profileId = pendingRevert;
+		pendingRevert = null;
+		if (!profileId) return;
 
 		try {
 			await tabsStore.restoreProfile(profileId);
 		} catch (e: any) {
-			alert('Failed to restore defaults: ' + (e.detail || e.message || 'Unknown error'));
+			toast.push('Failed to restore defaults: ' + (e.detail || e.message || 'Unknown error'), { tone: 'error' });
 		}
 	}
 
@@ -674,7 +685,7 @@
 		try {
 			await exportAgent(profileId);
 		} catch (e: any) {
-			alert('Export failed: ' + (e.detail || 'Unknown error'));
+			toast.push('Export failed: ' + (e.detail || 'Unknown error'), { tone: 'error' });
 		}
 	}
 
@@ -693,9 +704,9 @@
 			const parsed = parseAgentExportFile(content);
 			const profile = await importAgent(parsed);
 			await tabsStore.loadProfiles();
-			alert(`Successfully imported agent: ${profile.name}`);
+			toast.push(`Successfully imported agent: ${profile.name}`, { tone: 'success' });
 		} catch (err: any) {
-			alert('Import failed: ' + (err.detail || err.message || 'Invalid file format'));
+			toast.push('Import failed: ' + (err.detail || err.message || 'Invalid file format'), { tone: 'error' });
 		} finally {
 			input.value = '';
 			profileImporting = false;
@@ -931,6 +942,17 @@
 	isOpen={showGenerateDialog}
 	onClose={() => showGenerateDialog = false}
 	onGenerated={handleGeneratedProfile}
+/>
+
+<!-- Restore-defaults confirmation -->
+<ConfirmDialog
+	open={!!pendingRevert}
+	title="Restore defaults"
+	message="Restore this profile to its original default settings? Your customizations will be lost."
+	confirmLabel="Restore"
+	danger
+	onConfirm={confirmRevert}
+	onCancel={() => (pendingRevert = null)}
 />
 
 

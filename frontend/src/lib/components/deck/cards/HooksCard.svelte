@@ -29,6 +29,7 @@
 	import HookListItem from '$lib/components/hooks/HookListItem.svelte';
 	import HookForm from '$lib/components/hooks/HookForm.svelte';
 	import PluginHookItem from '$lib/components/hooks/PluginHookItem.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { Search, X, Loader2, Zap, Plus, AlertCircle, CheckCircle, XCircle } from 'lucide-svelte';
 	import './card-design-system.css';
 
@@ -57,6 +58,9 @@
 
 	// Test result display
 	let testResult = $state<{ hookId: string; result: HookTestResult } | null>(null);
+
+	// A pending delete awaiting confirmation (replaces native confirm()).
+	let pendingDeleteHookId = $state<string | null>(null);
 
 	// ── Data loading ───────────────────────────────────────────────────
 	$effect(() => {
@@ -179,8 +183,14 @@
 		}
 	}
 
-	async function handleDeleteHook(hookId: string) {
-		if (!confirm('Are you sure you want to delete this hook?')) return;
+	function handleDeleteHook(hookId: string) {
+		pendingDeleteHookId = hookId;
+	}
+
+	async function confirmDeleteHook() {
+		const hookId = pendingDeleteHookId;
+		pendingDeleteHookId = null;
+		if (!hookId) return;
 		try {
 			await hooks.deleteHook(hookId);
 		} catch (e) {
@@ -397,6 +407,17 @@
 		{/snippet}
 	</FeaturePageLayout>
 {/if}
+
+<!-- Delete hook confirmation -->
+<ConfirmDialog
+	open={!!pendingDeleteHookId}
+	title="Delete hook"
+	message="Are you sure you want to delete this hook?"
+	confirmLabel="Delete"
+	danger
+	onConfirm={confirmDeleteHook}
+	onCancel={() => (pendingDeleteHookId = null)}
+/>
 
 <style>
 	.hooks-card {

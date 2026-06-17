@@ -20,6 +20,7 @@
 	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
 	import { timezonePreference } from '$lib/stores/timezonePreference';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { Settings } from 'lucide-svelte';
 	import AIToolsSettings from '$lib/components/settings/AIToolsSettings.svelte';
 
@@ -110,6 +111,8 @@
 	let savingSecurityInstructions = $state(false);
 	let securityInstructionsSuccess = $state('');
 	let securityInstructionsError = $state('');
+	// Pending "revert security instructions" awaiting confirmation (replaces native confirm()).
+	let pendingRevertSecurity = $state(false);
 
 	// Load data on mount — use onMount for one-time setup to avoid
 	// subscription accumulation from $effect re-runs.
@@ -223,10 +226,12 @@
 		}
 	}
 
-	async function revertSecurityInstructions() {
-		if (!confirm('Are you sure you want to revert to the default security instructions? This will discard any customizations.')) {
-			return;
-		}
+	function revertSecurityInstructions() {
+		pendingRevertSecurity = true;
+	}
+
+	async function confirmRevertSecurityInstructions() {
+		pendingRevertSecurity = false;
 		savingSecurityInstructions = true;
 		securityInstructionsError = '';
 		securityInstructionsSuccess = '';
@@ -546,6 +551,17 @@
 		{@render settingsContent()}
 	</div>
 </FeaturePageLayout>
+
+<!-- Revert security instructions confirmation -->
+<ConfirmDialog
+	open={pendingRevertSecurity}
+	title="Revert to defaults"
+	message="Are you sure you want to revert to the default security instructions? This will discard any customizations."
+	confirmLabel="Revert"
+	danger
+	onConfirm={confirmRevertSecurityInstructions}
+	onCancel={() => (pendingRevertSecurity = false)}
+/>
 
 <style>
 	/* ========================================

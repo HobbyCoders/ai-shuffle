@@ -6,6 +6,7 @@
 	 */
 
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import './card-design-system.css';
 	import { StickyNote, Search as SearchIcon, Plus, Pin, Trash2, ChevronRight } from 'lucide-svelte';
 	import {
@@ -51,6 +52,21 @@
 	// Debounce for auto-save
 	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 	let hasUnsavedChanges = $state(false);
+
+	// A pending confirmation awaiting the user (replaces native confirm()).
+	let pendingConfirm = $state<{
+		title: string;
+		message: string;
+		confirmLabel: string;
+		danger: boolean;
+		action: () => void;
+	} | null>(null);
+
+	function runPendingConfirm() {
+		const action = pendingConfirm?.action;
+		pendingConfirm = null;
+		action?.();
+	}
 
 	// Load notes and tags
 	async function loadData() {
@@ -121,9 +137,20 @@
 
 	// Close editor and go back to list
 	function closeEditor() {
-		if (hasUnsavedChanges && !confirm('You have unsaved changes. Discard them?')) {
+		if (hasUnsavedChanges) {
+			pendingConfirm = {
+				title: 'Discard changes',
+				message: 'You have unsaved changes. Discard them?',
+				confirmLabel: 'Discard',
+				danger: true,
+				action: doCloseEditor
+			};
 			return;
 		}
+		doCloseEditor();
+	}
+
+	function doCloseEditor() {
 		editingNote = null;
 		isCreatingNew = false;
 		loadData();
@@ -167,10 +194,19 @@
 	}
 
 	// Delete the current note
-	async function handleDelete() {
+	function handleDelete() {
 		if (!editingNote) return;
-		if (!confirm('Delete this note? This cannot be undone.')) return;
+		pendingConfirm = {
+			title: 'Delete note',
+			message: 'Delete this note? This cannot be undone.',
+			confirmLabel: 'Delete',
+			danger: true,
+			action: doDelete
+		};
+	}
 
+	async function doDelete() {
+		if (!editingNote) return;
 		try {
 			await deleteNote(editingNote.id);
 			editingNote = null;
@@ -194,10 +230,18 @@
 	}
 
 	// Delete a note from list view
-	async function handleDeleteFromList(note: Note, e: Event) {
+	function handleDeleteFromList(note: Note, e: Event) {
 		e.stopPropagation();
-		if (!confirm('Delete this note? This cannot be undone.')) return;
+		pendingConfirm = {
+			title: 'Delete note',
+			message: 'Delete this note? This cannot be undone.',
+			confirmLabel: 'Delete',
+			danger: true,
+			action: () => doDeleteFromList(note)
+		};
+	}
 
+	async function doDeleteFromList(note: Note) {
 		try {
 			await deleteNote(note.id);
 			loadData();
@@ -478,6 +522,17 @@
 		</div>
 	{/snippet}
 </FeaturePageLayout>
+
+<!-- Confirmation dialog (delete / discard) -->
+<ConfirmDialog
+	open={!!pendingConfirm}
+	title={pendingConfirm?.title ?? 'Confirm'}
+	message={pendingConfirm?.message ?? ''}
+	confirmLabel={pendingConfirm?.confirmLabel ?? 'Confirm'}
+	danger={pendingConfirm?.danger ?? false}
+	onConfirm={runPendingConfirm}
+	onCancel={() => (pendingConfirm = null)}
+/>
 
 <style>
 	/* ============================================
