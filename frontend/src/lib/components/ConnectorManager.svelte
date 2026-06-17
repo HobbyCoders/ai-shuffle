@@ -33,6 +33,7 @@
 	import type { ApiUser } from '$lib/api/apiUsers';
 	import { getApiUsers } from '$lib/api/apiUsers';
 	import { formatDateTime } from '$lib/utils/dateFormatting';
+	import { toast } from '$lib/stores/toast';
 
 	// State
 	let connectors: Connector[] = $state([]);
@@ -58,7 +59,6 @@
 	let formEvents: string[] = $state([]);
 	let formSaving = $state(false);
 	let formError = $state('');
-	let testResult: { success: boolean; message: string } | null = $state(null);
 	let testingId: string | null = $state(null);
 	let deletingId: string | null = $state(null);
 
@@ -201,7 +201,7 @@
 			deletingId = null;
 			await loadData();
 		} catch (e: any) {
-			error = e.detail || 'Failed to delete connector';
+			toast.push(e.detail || 'Failed to delete connector', { tone: 'error' });
 			deletingId = null;
 		}
 	}
@@ -212,21 +212,19 @@
 
 	async function handleTest(id: string) {
 		testingId = id;
-		testResult = null;
 
 		try {
 			const result = await testConnector(id);
-			testResult = {
-				success: result.success,
-				message: result.success
-					? `Connection successful${result.response_time_ms ? ` (${result.response_time_ms}ms)` : ''}`
-					: result.error || result.message || 'Test failed'
-			};
+			if (result.success) {
+				toast.push(
+					`Connection successful${result.response_time_ms ? ` (${result.response_time_ms}ms)` : ''}`,
+					{ tone: 'success' }
+				);
+			} else {
+				toast.push(result.error || result.message || 'Test failed', { tone: 'error' });
+			}
 		} catch (e: any) {
-			testResult = {
-				success: false,
-				message: e.detail || 'Failed to test connector'
-			};
+			toast.push(e.detail || 'Failed to test connector', { tone: 'error' });
 		} finally {
 			testingId = null;
 		}
@@ -241,7 +239,7 @@
 			}
 			await loadData();
 		} catch (e: any) {
-			error = e.detail || 'Failed to toggle connector';
+			toast.push(e.detail || 'Failed to update connector', { tone: 'error' });
 		}
 	}
 
@@ -275,7 +273,6 @@
 
 	function startAdd() {
 		view = 'add';
-		testResult = null;
 	}
 
 	function selectType(type: ConnectorTypeInfo) {
@@ -410,24 +407,6 @@
 					Add Connector
 				</button>
 			</div>
-
-			<!-- Test Result Banner -->
-			{#if testResult}
-				<div
-					class={`rounded-lg p-3 text-sm ${testResult.success ? 'bg-status-success border border-status-success text-success' : 'bg-status-error border border-status-error text-destructive'}`}
-					transition:slide={{ duration: 200, easing: quintOut }}
-				>
-					{testResult.message}
-					<button
-						onclick={() => {
-							testResult = null;
-						}}
-						class="ml-2 text-xs underline opacity-70 hover:opacity-100"
-					>
-						Dismiss
-					</button>
-				</div>
-			{/if}
 
 			<!-- Connector List -->
 			{#if connectors.length === 0}
