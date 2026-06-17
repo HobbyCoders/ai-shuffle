@@ -269,25 +269,38 @@
 
 			<div class="card-form-section">
 				<label for="agent-model" class="card-form-label">Model</label>
-				<select
-					id="agent-model"
-					class="card-form-input"
-					value={customModelMode ? CUSTOM_VALUE : getBaseModel(formModel)}
-					onchange={(e) => {
-						const v = (e.target as HTMLSelectElement).value;
-						if (v === CUSTOM_VALUE) {
-							onCustomModelModeChange(true, '');
-						} else {
-							onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(formModel)));
-						}
-					}}
-				>
-					<option value={INHERIT_VALUE}>Inherit</option>
-					{#each getModels() as model (model.value)}
-						<option value={model.value}>{model.label}</option>
-					{/each}
-					<option value={CUSTOM_VALUE}>Custom...</option>
-				</select>
+				<div class="agent-model-row">
+					<select
+						id="agent-model"
+						class="card-form-input"
+						value={customModelMode ? CUSTOM_VALUE : getBaseModel(formModel)}
+						onchange={(e) => {
+							const v = (e.target as HTMLSelectElement).value;
+							if (v === CUSTOM_VALUE) {
+								onCustomModelModeChange(true, '');
+							} else {
+								onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(formModel)));
+							}
+						}}
+					>
+						<option value={INHERIT_VALUE}>Inherit</option>
+						{#each getModels() as model (model.value)}
+							<option value={model.value}>{model.label}</option>
+						{/each}
+						<option value={CUSTOM_VALUE}>Custom...</option>
+					</select>
+					{#if !customModelMode && modelSupports1M(formModel)}
+						<label class="agent-1m-toggle">
+							<input
+								type="checkbox"
+								class="checkbox-input"
+								checked={has1MContext(formModel)}
+								onchange={(e) => onFormModelChange(withContextSuffix(formModel, (e.target as HTMLInputElement).checked))}
+							/>
+							<span class="checkbox-label">1M context</span>
+						</label>
+					{/if}
+				</div>
 				{#if customModelMode}
 					<input
 						type="text"
@@ -297,15 +310,6 @@
 						placeholder="e.g. claude-opus-4-6"
 						style="margin-top: 6px;"
 					/>
-				{:else if modelSupports1M(formModel)}
-					<label class="agent-1m-toggle">
-						<input
-							type="checkbox"
-							checked={has1MContext(formModel)}
-							onchange={(e) => onFormModelChange(withContextSuffix(formModel, (e.target as HTMLInputElement).checked))}
-						/>
-						<span>1M context</span>
-					</label>
 				{/if}
 			</div>
 
@@ -657,21 +661,38 @@
 		color: var(--destructive);
 	}
 
-	/* 1M context toggle (under model select) */
+	/* Model select + 1M context toggle, side by side */
+	.agent-model-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+	}
+
+	.agent-model-row .card-form-input {
+		flex: 1;
+		min-width: 0;
+	}
+
+	/* 1M context toggle (inline, right of model select) */
 	.agent-1m-toggle {
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		margin-top: 8px;
+		flex-shrink: 0;
+		white-space: nowrap;
 		cursor: pointer;
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
 	}
 
-	.agent-1m-toggle input {
-		width: 14px;
-		height: 14px;
+	.checkbox-input {
+		width: 16px;
+		height: 16px;
 		accent-color: var(--primary);
+		color-scheme: dark;
+	}
+
+	.checkbox-label {
+		font-size: var(--text-md, 0.875rem);
+		color: var(--text-primary);
 	}
 
 	/* ─── Profile-style content & sections ─── */
