@@ -19,8 +19,10 @@
 	import type { ChatMessage, TodoItem } from '$lib/stores/types';
 	import { chatPreferences } from '$lib/stores/chatPreferences';
 	import { messageCache } from '$lib/stores/message-cache';
+	import { STREAM_DEBUG } from '$lib/utils/debug-log';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
+	import StreamingIndicator from './StreamingIndicator.svelte';
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import ToolUseGroup from './ToolUseGroup.svelte';
 	import SystemMessageGroup from './SystemMessageGroup.svelte';
@@ -103,7 +105,7 @@
 		let stableCount = 0;
 		let tick = 0;
 		// eslint-disable-next-line no-console
-		console.log(`[AS] stable START initSH=${containerRef?.scrollHeight} initST=${containerRef?.scrollTop} msgLen=${$activeSession.messages.length}`);
+		if (STREAM_DEBUG) console.log(`[AS] stable START initSH=${containerRef?.scrollHeight} initST=${containerRef?.scrollTop} msgLen=${$activeSession.messages.length}`);
 		pendingScrollTimer = setInterval(() => {
 			if (!containerRef) {
 				if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
@@ -114,7 +116,7 @@
 			scrollToBottom();
 			const shAfter = containerRef.scrollHeight;
 			// eslint-disable-next-line no-console
-			console.log(`[AS] stable tick=${tick} shBefore=${shBefore} shAfter=${shAfter} ST=${containerRef.scrollTop} CH=${containerRef.clientHeight} stable=${stableCount} msgLen=${$activeSession.messages.length}`);
+			if (STREAM_DEBUG) console.log(`[AS] stable tick=${tick} shBefore=${shBefore} shAfter=${shAfter} ST=${containerRef.scrollTop} CH=${containerRef.clientHeight} stable=${stableCount} msgLen=${$activeSession.messages.length}`);
 			if (containerRef.scrollHeight === lastScrollHeight) {
 				stableCount++;
 				// Require 5 stable ticks (~250ms) before declaring done. Large content
@@ -122,7 +124,7 @@
 				// stability does not mean the layout has settled.
 				if (stableCount >= 5) {
 					// eslint-disable-next-line no-console
-					console.log(`[AS] stable DONE finalSH=${containerRef.scrollHeight} finalST=${containerRef.scrollTop} tick=${tick}`);
+					if (STREAM_DEBUG) console.log(`[AS] stable DONE finalSH=${containerRef.scrollHeight} finalST=${containerRef.scrollTop} tick=${tick}`);
 					if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
 				}
 			} else {
@@ -136,7 +138,7 @@
 		setTimeout(() => {
 			if (pendingScrollTimer) {
 				// eslint-disable-next-line no-console
-				console.log('[AS] stable TIMEOUT (3s)', { finalSH: containerRef?.scrollHeight, finalST: containerRef?.scrollTop });
+				if (STREAM_DEBUG) console.log('[AS] stable TIMEOUT (3s)', { finalSH: containerRef?.scrollHeight, finalST: containerRef?.scrollTop });
 				clearInterval(pendingScrollTimer); pendingScrollTimer = null;
 			}
 		}, 3000);
@@ -180,6 +182,29 @@
 		return -1;
 	});
 
+	// Show the existing streaming indicator at the bottom of the conversation
+	// whenever the turn is still active (isStreaming) but nothing else is
+	// currently signaling activity. This fills the dead air in the gap between a
+	// completed text block and the next tool call (the model generating the
+	// tool_use, or hidden thinking), where no message is streaming and no tool
+	// card exists yet — which otherwise looks frozen for many seconds. We suppress
+	// it when something already shows progress: a streaming message (cursor), a
+	// running tool (spinner), or a running subagent — to avoid a double indicator.
+	const showGapIndicator = $derived.by(() => {
+		if (!$activeSession.isStreaming) return false;
+		const msgs = $activeSession.messages;
+		if (msgs.length === 0) return false;
+		const last = msgs[msgs.length - 1];
+		if (last.streaming) {
+			// A streaming thinking block hidden by user preference renders nothing,
+			// so the indicator is still needed; otherwise the cursor covers it.
+			return last.type === 'thinking' && chatPrefs?.showThinkingBlocks === false;
+		}
+		if (last.type === 'tool_use' && last.toolStatus === 'running') return false;
+		if (last.type === 'subagent' && (last.agentStatus === 'running' || last.agentStatus === 'pending')) return false;
+		return true;
+	});
+
 	// --- Tool call grouping ---
 	// Groups 2+ consecutive "regular" tool_use messages into a single display item.
 	// TodoWrite, Task, and Agent tools are excluded from grouping.
@@ -216,12 +241,29 @@
 			&& GROUPABLE_SYSTEM_SUBTYPES.has(msg.systemSubtype || '');
 	}
 
-const displayItems: DisplayItem[] = $derived.by(() => {
+	// Memoize the grouped display list by (messages, isStreaming) identity.
+	// The active-session store emits a fresh state object on every WS stream
+	// delta (it updates `wsStreamContent`, which the streaming bubble reads via
+	// its own prop). Those deltas arrive faster than the 150ms poll and do NOT
+	// change the `messages` array reference — yet without this guard the derived
+	// rebuilt the entire O(N) grouped list and returned a new array each time,
+	// forcing the {#each} to re-diff every message. That made streaming get
+	// progressively choppier as a session grew. A plain object (not $state)
+	// avoids Svelte 5 compiling these into reactive signals inside the derived.
+	const _displayCache: { messages: ChatMessage[] | null; isStreaming: boolean; items: DisplayItem[] } =
+		{ messages: null, isStreaming: false, items: [] };
+
+	const displayItems: DisplayItem[] = $derived.by(() => {
 		const messages = $activeSession.messages;
 		const isStreamingNow = $activeSession.isStreaming;
+		if (messages === _displayCache.messages && isStreamingNow === _displayCache.isStreaming) {
+			// Same message identities (e.g. a WS-delta-only update) — reuse the
+			// cached array reference so downstream {#each} skips re-diffing.
+			return _displayCache.items;
+		}
 		const items: DisplayItem[] = [];
 		// Diagnostic: log when displayItems re-evaluates after streaming ends
-		if (!isStreamingNow && messages.length > 0) {
+		if (STREAM_DEBUG && !isStreamingNow && messages.length > 0) {
 			const aTexts = messages.filter((m: ChatMessage) => m.role === 'assistant' && m.type === 'text');
 			const hasStrmMsg = messages.some((m: ChatMessage) => m.streaming);
 			console.debug(`[displayItems] re-eval: ${messages.length} msgs, streaming=${isStreamingNow}, hasStreamingMsg=${hasStrmMsg}, aTexts=${aTexts.length} [${aTexts.map((m: ChatMessage) => `len=${(m.content||'').length}`).join(',')}]`);
@@ -284,6 +326,9 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 			}
 		}
 
+		_displayCache.messages = messages;
+		_displayCache.isStreaming = isStreamingNow;
+		_displayCache.items = items;
 		return items;
 	});
 
@@ -359,7 +404,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 			containerRef.scrollTop = containerRef.scrollHeight;
 			lastKnownScrollTop = containerRef.scrollTop;
 			// eslint-disable-next-line no-console
-			console.log(`[AS] scrollToBottom preSH=${preSH} preST=${preST} preCH=${preCH} postST=${containerRef.scrollTop} postSH=${containerRef.scrollHeight} depth=${programmaticScrollDepth}`);
+			if (STREAM_DEBUG) console.log(`[AS] scrollToBottom preSH=${preSH} preST=${preST} preCH=${preCH} postST=${containerRef.scrollTop} postSH=${containerRef.scrollHeight} depth=${programmaticScrollDepth}`);
 			// Use double RAF to ensure scroll events from this programmatic scroll are ignored
 			// Single RAF isn't enough - browser may fire scroll events across multiple frames
 			requestAnimationFrame(() => {
@@ -420,7 +465,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 				// user scroll-up and silently disable auto-scroll mid-render.
 				if (scrollUpDelta > 50) {
 					// eslint-disable-next-line no-console
-					console.log(`[AS] handleScroll DISABLE currST=${currentScrollTop} lastST=${lastKnownScrollTop} delta=${scrollUpDelta} SH=${containerRef.scrollHeight} CH=${containerRef.clientHeight}`);
+					if (STREAM_DEBUG) console.log(`[AS] handleScroll DISABLE currST=${currentScrollTop} lastST=${lastKnownScrollTop} delta=${scrollUpDelta} SH=${containerRef.scrollHeight} CH=${containerRef.clientHeight}`);
 					shouldAutoScroll = false;
 				}
 			}
@@ -435,14 +480,14 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 	onMount(() => {
 		isMounted = true;
 		// eslint-disable-next-line no-console
-		console.log(`[AS] onMount sid=${$activeSession.sessionId} msgLen=${$activeSession.messages.length}`);
+		if (STREAM_DEBUG) console.log(`[AS] onMount sid=${$activeSession.sessionId} msgLen=${$activeSession.messages.length}`);
 		// Wait for DOM to be ready
 		requestAnimationFrame(() => {
 			if (!containerRef) return;
 
 			const cacheKey = $activeSession.sessionId ?? 'new';
 			// eslint-disable-next-line no-console
-			console.log(`[AS] onMount-raf cacheKey=${cacheKey} cachedPos=${scrollPositionCache.get(cacheKey)} cachedAutoS=${autoScrollCache.get(cacheKey)} sessionScrollTop=${$activeSession.scrollTop} SH=${containerRef.scrollHeight} ST=${containerRef.scrollTop} CH=${containerRef.clientHeight}`);
+			if (STREAM_DEBUG) console.log(`[AS] onMount-raf cacheKey=${cacheKey} cachedPos=${scrollPositionCache.get(cacheKey)} cachedAutoS=${autoScrollCache.get(cacheKey)} sessionScrollTop=${$activeSession.scrollTop} SH=${containerRef.scrollHeight} ST=${containerRef.scrollTop} CH=${containerRef.clientHeight}`);
 
 			// Check if user had explicitly scrolled up before this component
 			// was destroyed. autoScrollCache tracks shouldAutoScroll state:
@@ -493,7 +538,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 	// causing the chat to appear scrolled to the middle instead of the bottom.
 	function handleVisibilityChange() {
 		// eslint-disable-next-line no-console
-		console.log(`[AS] visibility=${document.visibilityState} autoS=${shouldAutoScroll} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
+		if (STREAM_DEBUG) console.log(`[AS] visibility=${document.visibilityState} autoS=${shouldAutoScroll} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
 		if (document.visibilityState === 'visible' && shouldAutoScroll && containerRef) {
 			// Use double RAF to ensure browser has finished any scroll restoration
 			requestAnimationFrame(() => {
@@ -529,7 +574,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 
 		if (containerRef) {
 			// eslint-disable-next-line no-console
-			console.log(`[AS] onDestroy saving cacheKey=${cacheKey} ST=${containerRef.scrollTop} autoS=${shouldAutoScroll} SH=${containerRef.scrollHeight} CH=${containerRef.clientHeight}`);
+			if (STREAM_DEBUG) console.log(`[AS] onDestroy saving cacheKey=${cacheKey} ST=${containerRef.scrollTop} autoS=${shouldAutoScroll} SH=${containerRef.scrollHeight} CH=${containerRef.clientHeight}`);
 			scrollPositionCache.set(cacheKey, containerRef.scrollTop);
 			activeSession.setScrollTop(containerRef.scrollTop);
 			// Persist auto-scroll state so remounting this component
@@ -558,7 +603,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 		if (currentId === prevId) return;
 
 		// eslint-disable-next-line no-console
-		console.log(`[AS] session-switch effect from=${prevId} to=${currentId} msgLen=${$activeSession.messages.length} lastId=${$activeSession.messages[$activeSession.messages.length - 1]?.id} lastRole=${$activeSession.messages[$activeSession.messages.length - 1]?.role} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
+		if (STREAM_DEBUG) console.log(`[AS] session-switch effect from=${prevId} to=${currentId} msgLen=${$activeSession.messages.length} lastId=${$activeSession.messages[$activeSession.messages.length - 1]?.id} lastRole=${$activeSession.messages[$activeSession.messages.length - 1]?.role} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
 
 		// Save scroll state for the old session (if any)
 		if (prevId && containerRef) {
@@ -577,7 +622,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 		// (bottom) from onMount, and restoring would fight the initial render.
 		if (!prevId) {
 			// eslint-disable-next-line no-console
-			console.log(`[AS] session-switch SKIP (no prevId) to=${currentId}`);
+			if (STREAM_DEBUG) console.log(`[AS] session-switch SKIP (no prevId) to=${currentId}`);
 			return;
 		}
 
@@ -619,7 +664,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 			// ensure we stay at bottom after resize
 			if (shouldAutoScroll && containerRef) {
 				// eslint-disable-next-line no-console
-				console.log(`[AS] resizeObserver → scrollToBottom SH=${containerRef.scrollHeight} ST=${containerRef.scrollTop} CH=${containerRef.clientHeight}`);
+				if (STREAM_DEBUG) console.log(`[AS] resizeObserver → scrollToBottom SH=${containerRef.scrollHeight} ST=${containerRef.scrollTop} CH=${containerRef.clientHeight}`);
 				// Use requestAnimationFrame to ensure layout is complete
 				requestAnimationFrame(() => {
 					scrollToBottom();
@@ -719,7 +764,7 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 		if (hasNewMessage || hasContentChange) {
 			const newest = $activeSession.messages[currentLength - 1];
 			// eslint-disable-next-line no-console
-			console.log(`[AS] effect len=${currentLength} prevLen=${prevMessagesLength} newMsg=${hasNewMessage} contentChg=${hasContentChange} autoS=${shouldAutoScroll} pend=${pendingScrollToBottom} newestId=${newest?.id} newestRole=${newest?.role} newestType=${newest?.type} newestStreaming=${newest?.streaming} cLen=${(newest?.content || '').length} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
+			if (STREAM_DEBUG) console.log(`[AS] effect len=${currentLength} prevLen=${prevMessagesLength} newMsg=${hasNewMessage} contentChg=${hasContentChange} autoS=${shouldAutoScroll} pend=${pendingScrollToBottom} newestId=${newest?.id} newestRole=${newest?.role} newestType=${newest?.type} newestStreaming=${newest?.streaming} cLen=${(newest?.content || '').length} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
 		}
 
 		// Scroll to bottom on content changes if auto-scroll is active,
@@ -912,6 +957,15 @@ const displayItems: DisplayItem[] = $derived.by(() => {
 				{/if}
 			</div>
 			{/each}
+
+			<!-- Reuse the existing streaming indicator to fill the gap between steps
+			     (e.g. after a text block, while the model generates the next tool
+			     call) so the agent never appears frozen while it's still working. -->
+			{#if showGapIndicator}
+				<div class="pl-2 py-1">
+					<StreamingIndicator />
+				</div>
+			{/if}
 
 			<!-- Error -->
 			{#if $activeSession.error}

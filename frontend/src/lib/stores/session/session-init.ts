@@ -15,6 +15,7 @@ import type { InternalMutableState } from './ws-message-handlers';
 import type { ChatMessage } from '../types';
 import type { SessionUsage } from './session-state';
 import type { PollAppliedData } from './session-poller';
+import { STREAM_DEBUG } from '$lib/utils/debug-log';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -164,7 +165,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 			}
 
 			// eslint-disable-next-line no-console
-			console.log(`[AS] poll-apply start sid=${sessionId.slice(0,8)} stateLen=${_state.messages.length} stateLastId=${_state.messages[_state.messages.length - 1]?.id} stateLastRole=${_state.messages[_state.messages.length - 1]?.role} dataLen=${data.messages.length} dataLastId=${data.messages[data.messages.length - 1]?.id} dataLastRole=${data.messages[data.messages.length - 1]?.role} streaming=${data.isStreaming}`);
+			if (STREAM_DEBUG) console.log(`[AS] poll-apply start sid=${sessionId.slice(0,8)} stateLen=${_state.messages.length} stateLastId=${_state.messages[_state.messages.length - 1]?.id} stateLastRole=${_state.messages[_state.messages.length - 1]?.role} dataLen=${data.messages.length} dataLastId=${data.messages[data.messages.length - 1]?.id} dataLastRole=${data.messages[data.messages.length - 1]?.role} streaming=${data.isStreaming}`);
 
 			// During interrupt_for_query, STALE polls from the old query can
 			// return with `isStreaming=false` and would clobber the optimistic
@@ -230,7 +231,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 			console.debug(`[PollCB] applying: ${data.messages.length} msgs, streaming=${data.isStreaming}, msgsChanged=${!msgsMatch}, streamingChanged=${streamingChanged}`);
 
 			// ── Diagnostic: trace streaming→ended transition ────────────
-			if (streamingChanged && !data.isStreaming) {
+			if (STREAM_DEBUG && streamingChanged && !data.isStreaming) {
 				const assistantTexts = data.messages.filter(
 					(m: ChatMessage) => m.role === 'assistant' && m.type === 'text'
 				);
@@ -315,7 +316,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 					if (matchIdx >= 0) {
 						// Server persisted this msg under its own id → drop optimistic.
 						// eslint-disable-next-line no-console
-						console.log(`[AS] phase1 drop-optimistic optId=${m.id} serverId=${finalMessages[matchIdx]?.id} serverIdx=${matchIdx} "${(m.content || '').slice(0, 30)}"`);
+						if (STREAM_DEBUG) console.log(`[AS] phase1 drop-optimistic optId=${m.id} serverId=${finalMessages[matchIdx]?.id} serverIdx=${matchIdx} "${(m.content || '').slice(0, 30)}"`);
 						claimedServerIdx.add(matchIdx);
 						continue;
 					}
@@ -466,7 +467,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 						}
 						if (existing.id !== msg.id) {
 							// eslint-disable-next-line no-console
-							console.log(`[AS] phase3 id-swap from=${msg.id} to=${existing.id} role=${msg.role} type=${msg.type} "${(msg.content || '').slice(0, 30)}"`);
+							if (STREAM_DEBUG) console.log(`[AS] phase3 id-swap from=${msg.id} to=${existing.id} role=${msg.role} type=${msg.type} "${(msg.content || '').slice(0, 30)}"`);
 							needsStabilization = true;
 							return { ...msg, id: existing.id };
 						}
@@ -500,7 +501,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 			});
 
 			// ── Diagnostic: verify post-update state ────────────────
-			if (streamingChanged && !data.isStreaming) {
+			if (STREAM_DEBUG && streamingChanged && !data.isStreaming) {
 				const postState = getState();
 				const postAssistantTexts = postState.messages.filter(
 					(m: ChatMessage) => m.role === 'assistant' && m.type === 'text'
