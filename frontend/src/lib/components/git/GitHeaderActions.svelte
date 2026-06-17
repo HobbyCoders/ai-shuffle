@@ -10,9 +10,11 @@
 	 * Branch selector, diff review, and Init Repo remain direct git actions.
 	 * Branch selector is locked during streaming.
 	 */
+	import { onDestroy } from 'svelte';
 	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket } from 'lucide-svelte';
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode, changedFiles } from '$lib/stores/git';
 	import { githubRepoInfo } from '$lib/stores/github';
+	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import GitPromptPopover from './GitPromptPopover.svelte';
 
 	interface Props {
@@ -73,7 +75,8 @@
 	const isWorktreeMode = $derived(!!worktreeBranch || $gitMode === 'worktree');
 
 	// --- Dropdown state ---
-	let showDropdown = $state(false);
+	// Driven by the shared store so opening this closes the profile/status dropdowns.
+	const showDropdown = $derived($openHeaderDropdown === 'branch');
 	let dropdownRef = $state<HTMLDivElement | null>(null);
 	let checkingOut = $state(false);
 
@@ -144,8 +147,10 @@
 
 	function toggleDropdown() {
 		if (branchLocked) return;
-		showDropdown = !showDropdown;
 		if (showDropdown) {
+			closeDropdown('branch');
+		} else {
+			openDropdown('branch');
 			branchSearch = '';
 			// Refresh branches when opening
 			git.loadBranches();
@@ -156,11 +161,11 @@
 
 	async function checkoutBranch(branchName: string) {
 		if (branchName === currentBranch) {
-			showDropdown = false;
+			closeDropdown('branch');
 			return;
 		}
 		checkingOut = true;
-		showDropdown = false;
+		closeDropdown('branch');
 		try {
 			await git.checkout(branchName);
 			// Refresh diff stats after checkout
@@ -173,7 +178,7 @@
 	}
 
 	function handleNewBranch() {
-		showDropdown = false;
+		closeDropdown('branch');
 		onClickNewBranch();
 	}
 
@@ -184,7 +189,7 @@
 	// Close dropdown and prompt popover on outside click
 	function handleClickOutside(e: MouseEvent) {
 		if (showDropdown && dropdownRef && !dropdownRef.contains(e.target as Node)) {
-			showDropdown = false;
+			closeDropdown('branch');
 		}
 		// Close the editable-prompt popover when clicking outside the toolbar.
 		// Clicks inside the toolbar (e.g. another chevron) are handled by the
@@ -196,10 +201,13 @@
 
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
-			if (showDropdown) showDropdown = false;
+			if (showDropdown) closeDropdown('branch');
 			if (openPromptPopover) openPromptPopover = null;
 		}
 	}
+
+	// Clear our shared-store flag on unmount so the dropdown doesn't re-open on remount.
+	onDestroy(() => closeDropdown('branch'));
 </script>
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} />

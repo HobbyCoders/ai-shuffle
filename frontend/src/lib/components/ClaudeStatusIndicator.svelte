@@ -10,8 +10,10 @@
 	 * Replaces the old full-width ClaudeStatusBanner. The polling lifecycle
 	 * still lives in the claudeStatus store (started/stopped from +layout).
 	 */
+	import { onDestroy } from 'svelte';
 	import { CircleCheck, TriangleAlert, OctagonX, ExternalLink } from 'lucide-svelte';
 	import { claudeStatus } from '$lib/stores/claude-status';
+	import { openHeaderDropdown, toggleDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 
 	type Severity = 'operational' | 'minor' | 'major';
 
@@ -36,25 +38,29 @@
 
 	const title = $derived(isOk ? 'All systems operational' : 'Claude is experiencing issues');
 
-	let showPopover = $state(false);
+	// Driven by the shared store so opening this closes the profile/branch dropdowns.
+	const showPopover = $derived($openHeaderDropdown === 'claude-status');
 	let rootRef = $state<HTMLDivElement | null>(null);
 
 	function togglePopover() {
-		showPopover = !showPopover;
+		toggleDropdown('claude-status');
 	}
 
 	function handleClickOutside(e: MouseEvent) {
 		if (!showPopover) return;
 		if (rootRef && !rootRef.contains(e.target as Node)) {
-			showPopover = false;
+			closeDropdown('claude-status');
 		}
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape' && showPopover) {
-			showPopover = false;
+			closeDropdown('claude-status');
 		}
 	}
+
+	// Clear our shared-store flag on unmount so the popover doesn't re-open on remount.
+	onDestroy(() => closeDropdown('claude-status'));
 
 	function truncate(text: string, maxLen: number): string {
 		if (text.length <= maxLen) return text;
@@ -307,12 +313,19 @@
 			height: 36px;
 		}
 
-		/* On mobile the indicator is at the right edge of the static top row,
-		   so right-anchor the popover and let it expand leftward. */
+		/* The header becomes a stacked/scrolling layout on mobile, which would clip
+		   (or push off-screen) an absolutely-positioned popover anchored to this
+		   right-edge button. Pin it as a fixed full-width panel just below the header
+		   so it centers and expands like the profile/branch dropdowns. */
 		.status-popover {
-			left: auto;
-			right: 0;
-			max-width: calc(100vw - 24px);
+			position: fixed;
+			top: 92px;
+			left: 8px;
+			right: 8px;
+			bottom: auto;
+			width: auto;
+			max-width: none;
+			z-index: 200;
 		}
 	}
 

@@ -7,35 +7,40 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { profiles } from '$lib/stores/app-data';
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
+	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 
-	let showProfileDropdown = $state(false);
 	let profileDropdownRef = $state<HTMLDivElement | null>(null);
 	let groupedSelector = $state<ReturnType<typeof GroupedSelector> | null>(null);
+
+	// Driven by the shared store so opening this closes the branch/status dropdowns.
+	const showProfileDropdown = $derived($openHeaderDropdown === 'profile');
 
 	const selectedProfileName = $derived($profiles.find(p => p.id === $activeSession.profile)?.name || 'Profile');
 
 	function handleProfileClick(e: MouseEvent) {
 		e.stopPropagation();
-		showProfileDropdown = !showProfileDropdown;
 		if (showProfileDropdown) {
+			closeDropdown('profile');
+		} else {
+			openDropdown('profile');
 			groupedSelector?.reset();
 		}
 	}
 
 	function selectProfile(profileId: string) {
 		activeSession.setProfile(profileId);
-		showProfileDropdown = false;
+		closeDropdown('profile');
 	}
 
 	function handleClickOutside(e: MouseEvent) {
-		if (profileDropdownRef && !profileDropdownRef.contains(e.target as Node)) {
-			showProfileDropdown = false;
+		if (showProfileDropdown && profileDropdownRef && !profileDropdownRef.contains(e.target as Node)) {
+			closeDropdown('profile');
 		}
 	}
 
 	function handleEscape(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
-			showProfileDropdown = false;
+			closeDropdown('profile');
 		}
 	}
 
@@ -45,6 +50,7 @@
 		return () => {
 			document.removeEventListener('click', handleClickOutside);
 			document.removeEventListener('keydown', handleEscape);
+			closeDropdown('profile');
 		};
 	});
 </script>
