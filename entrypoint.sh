@@ -226,7 +226,18 @@ chown -R appuser:appuser /home/appuser/.config /home/appuser/.claude 2>/dev/null
 if [ "${START_CHROME:-1}" = "1" ]; then
     mkdir -p /home/appuser/.config/google-chrome
     chown -R appuser:appuser /home/appuser/.config/google-chrome 2>/dev/null || true
-    echo "Starting Google Chrome for Claude in Chrome (CHROME_DEBUG=${CHROME_DEBUG:-0})..."
+    # arm64 runs Chromium (symlinked as google-chrome-stable). Chromium reads user
+    # native-messaging host manifests from ~/.config/chromium/NativeMessagingHosts/,
+    # but the bundled CLI writes them to ~/.config/google-chrome/NativeMessagingHosts/.
+    # Bridge the two so the Claude-in-Chrome extension can reach its host (#14391).
+    if readlink -f "${CHROME_EXECUTABLE:-/usr/bin/google-chrome-stable}" 2>/dev/null | grep -qi chromium; then
+        mkdir -p /home/appuser/.config/google-chrome/NativeMessagingHosts \
+                 /home/appuser/.config/chromium
+        ln -sfn /home/appuser/.config/google-chrome/NativeMessagingHosts \
+                /home/appuser/.config/chromium/NativeMessagingHosts
+        chown -R appuser:appuser /home/appuser/.config/chromium 2>/dev/null || true
+    fi
+    echo "Starting Chrome for Claude in Chrome (CHROME_DEBUG=${CHROME_DEBUG:-0})..."
     (
         while true; do
             setpriv --reuid=appuser --regid=appuser --init-groups \

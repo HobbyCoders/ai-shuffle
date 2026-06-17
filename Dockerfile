@@ -69,31 +69,47 @@ RUN mkdir -p /etc/apt/keyrings \
 RUN node --version && npm --version && gh --version
 
 # ── Browser for the "Claude in Chrome" integration ──
-# Installs REAL Google Chrome (glibc) so the bundled Claude Code CLI's --chrome
-# integration can drive it. We use Google Chrome (not Chromium) because Anthropic
-# officially supports it and it avoids the Chromium native-messaging-host
-# workaround (anthropics/claude-code#14391). google-chrome-stable pulls its own
-# runtime deps via apt. socat relays Chrome's localhost-only DevTools port when
-# CHROME_DEBUG=1 (one-time extension sign-in/pairing).
+# Gives the bundled Claude Code CLI's --chrome integration a real browser to drive.
+# socat relays Chrome's localhost-only DevTools port when CHROME_DEBUG=1 (one-time
+# extension sign-in/pairing).
 #
-# NOTE: google-chrome-stable is published for amd64 only. On arm64 hosts this
-# layer will fail — swap in `chromium` + the #14391 manifest symlink there.
-RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
-       | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg \
-    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
-       | tee /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-       google-chrome-stable socat \
-    && rm -rf /var/lib/apt/lists/*
+# amd64: install REAL Google Chrome (glibc). Anthropic officially supports it and
+#   it avoids the Chromium native-messaging-host manifest-dir workaround
+#   (anthropics/claude-code#14391). google-chrome-stable pulls its own runtime deps.
+# arm64: Google Chrome publishes no arm64 Linux build, so install Chromium and
+#   symlink it to /usr/bin/google-chrome-stable (so CHROME_EXECUTABLE and
+#   start-chrome.sh resolve unchanged). Chromium reads user native-messaging host
+#   manifests from ~/.config/chromium/... but the CLI writes them under
+#   ~/.config/google-chrome/...; entrypoint.sh bridges that at runtime (#14391).
+ARG TARGETARCH
+RUN set -eux; \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            chromium socat; \
+        ln -sf /usr/bin/chromium /usr/bin/google-chrome-stable; \
+    else \
+        curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+            | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg; \
+        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
+            | tee /etc/apt/sources.list.d/google-chrome.list; \
+        apt-get update && apt-get install -y --no-install-recommends \
+            google-chrome-stable socat; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 
 # Auto-install the "Claude in Chrome" extension via enterprise policy so it
 # doesn't need to be clicked through the Web Store inside the container.
 # DeveloperToolsAvailability=1 lifts the default ban on DevTools for
 # force-installed extensions — the pairing/sign-in pages can only be reached
 # through DevTools in this headless setup (CHROME_DEBUG=1).
-RUN mkdir -p /etc/opt/chrome/policies/managed && \
-    echo '{"ExtensionInstallForcelist":["fcoeoabgfenejglbffodgkkbkcdhcgfn;https://clients2.google.com/service/update2/crx"],"DeveloperToolsAvailability":1}' \
-      > /etc/opt/chrome/policies/managed/claude-extension.json
+# Written to both the Google Chrome (amd64) and Chromium (arm64) managed-policy
+# dirs so the force-install applies whichever browser this arch ships.
+RUN echo '{"ExtensionInstallForcelist":["fcoeoabgfenejglbffodgkkbkcdhcgfn;https://clients2.google.com/service/update2/crx"],"DeveloperToolsAvailability":1}' \
+      > /tmp/claude-extension.json && \
+    mkdir -p /etc/opt/chrome/policies/managed /etc/chromium/policies/managed && \
+    cp /tmp/claude-extension.json /etc/opt/chrome/policies/managed/claude-extension.json && \
+    cp /tmp/claude-extension.json /etc/chromium/policies/managed/claude-extension.json && \
+    rm /tmp/claude-extension.json
 
 # ── Create non-root user ──
 RUN groupadd -g 1000 appuser && \
