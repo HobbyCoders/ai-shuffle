@@ -36,6 +36,8 @@ class SessionRow(TypedDict):
     updated_at: str
     parent_session_id: Optional[str]
     fork_point_message_index: Optional[int]
+    cloud_remote_url: Optional[str]
+    cloud_remote_session_id: Optional[str]
 
 
 class SessionSearchResult(TypedDict):
@@ -365,6 +367,8 @@ def create_session(
     worktree_id: Optional[str] = None,
     worktree_branch: Optional[str] = None,
     worktree_path: Optional[str] = None,
+    cloud_remote_url: Optional[str] = None,
+    cloud_remote_session_id: Optional[str] = None,
     _conn=None
 ) -> SessionRow:
     """Create a new session
@@ -380,16 +384,18 @@ def create_session(
         worktree_id: Optional worktree to link this session to
         worktree_branch: Optional branch name (persisted for display after worktree deletion)
         worktree_path: Optional worktree path (persisted for display after worktree deletion)
+        cloud_remote_url: Base URL of the second install executing a cloud session
+        cloud_remote_session_id: The session id on the remote install (cloud mode)
         _conn: Optional existing DB connection for transaction grouping
     """
     from app.core.config import settings
     now = datetime.now(timezone.utc).isoformat()
     instance_id = settings.effective_instance_id
     _ph = ph()
-    _phs13 = ", ".join([_ph] * 13)
-    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, instance_id, created_at, updated_at)
-               VALUES ({_phs13})"""
-    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, instance_id, now, now)
+    _phs15 = ", ".join([_ph] * 15)
+    sql = f"""INSERT INTO sessions (id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, instance_id, cloud_remote_url, cloud_remote_session_id, created_at, updated_at)
+               VALUES ({_phs15})"""
+    params = (session_id, profile_id, project_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, instance_id, cloud_remote_url, cloud_remote_session_id, now, now)
     if _conn is not None:
         cursor = get_cursor(_conn)
         cursor.execute(sql, params)

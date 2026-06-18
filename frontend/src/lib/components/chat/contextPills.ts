@@ -38,6 +38,8 @@ export interface ContextBadge {
 	deleted: boolean;
 	/** Tooltip text. */
 	title: string;
+	/** True for cloud sessions (renders a cloud indicator instead of a branch). */
+	cloud?: boolean;
 }
 
 /**
@@ -60,6 +62,18 @@ export function computeContextBadge(input: ContextBadgeInput): ContextBadge | nu
 	// The empty/new-session state is owned by the execution-mode toggle, not a
 	// context badge — so a badge only ever applies once a chat is active.
 	if (messageCount === 0) return null;
+
+	// Cloud sessions always show a read-only "cloud" badge so it's clear the
+	// work is running on the configured second install (there's no local branch).
+	if (executionMode === 'cloud') {
+		const prefix = projectName ? `${projectName} · ` : '';
+		return {
+			branch: null,
+			deleted: false,
+			cloud: true,
+			title: `${prefix}Running on the cloud install`
+		};
+	}
 
 	// The session's worktree branch (only meaningful in worktree mode).
 	const branch =
@@ -119,7 +133,9 @@ export function shouldShowEmptyStateBranchPill(input: EmptyStateBranchInput): bo
 	// badge (computeContextBadge) owns this slot.
 	if (messageCount !== 0) return false;
 	if (!project || !githubAuthenticated) return false;
-	// Worktree mode's branch picker lives in the ExecutionModeBar; don't double up.
-	if (executionMode === 'worktree') return false;
+	// Only local mode has a working branch to pick here. Worktree mode's branch
+	// picker lives in the ExecutionModeBar, and cloud mode lets the worker pick
+	// the branch — so neither shows the local branch pill.
+	if (executionMode !== 'local') return false;
 	return true;
 }

@@ -10,7 +10,7 @@
 import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
-import type { ChatMessage } from '../types';
+import type { ChatMessage, ExecutionMode } from '../types';
 import type { PollAppliedData } from './session-poller';
 import { api } from '$lib/api/client';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
@@ -101,14 +101,15 @@ export function getPersistedProject(): string {
  * is restored per-session from the persisted/backend session record. Only new
  * chats consult this preference.
  */
-export function getPersistedExecutionMode(): 'local' | 'worktree' {
+export function getPersistedExecutionMode(): ExecutionMode {
 	if (typeof window !== 'undefined') {
-		return localStorage.getItem('aihub_executionMode') === 'worktree' ? 'worktree' : 'local';
+		const stored = localStorage.getItem('aihub_executionMode');
+		if (stored === 'worktree' || stored === 'cloud') return stored;
 	}
 	return 'local';
 }
 
-export function setPersistedExecutionMode(mode: 'local' | 'worktree'): void {
+export function setPersistedExecutionMode(mode: ExecutionMode): void {
 	if (typeof window !== 'undefined') {
 		localStorage.setItem('aihub_executionMode', mode);
 	}

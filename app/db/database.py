@@ -78,7 +78,8 @@ def _safe_json(value):
 # v40: Add instance_id column to sessions for per-instance isolation
 # v43: Add session_store_entries + session_store_summaries (SDK 0.1.65 SessionStore)
 # v44: Add error_log (app-wide error capture readable by the GetAppErrors MCP tool)
-SCHEMA_VERSION = 44
+# v45: Add cloud_remote_url + cloud_remote_session_id to sessions (cloud offload mode)
+SCHEMA_VERSION = 45
 
 
 def _run_column_migrations(cursor):
@@ -170,6 +171,15 @@ def _run_column_migrations(cursor):
         if not column_exists(cursor, "sessions", "worktree_path"):
             cursor.execute("ALTER TABLE sessions ADD COLUMN worktree_path TEXT")
             migrations_applied.append("sessions.worktree_path")
+        # Cloud offload linkage (v45): a "cloud" session is a local proxy whose
+        # real work runs on a second AI Shuffle install. These columns record
+        # which install (base URL) and which remote session id it maps to.
+        if not column_exists(cursor, "sessions", "cloud_remote_url"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN cloud_remote_url TEXT")
+            migrations_applied.append("sessions.cloud_remote_url")
+        if not column_exists(cursor, "sessions", "cloud_remote_session_id"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN cloud_remote_session_id TEXT")
+            migrations_applied.append("sessions.cloud_remote_session_id")
         # Backfill for existing sessions with active worktrees
         if "sessions.worktree_branch" in migrations_applied:
             try:

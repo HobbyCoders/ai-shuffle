@@ -106,6 +106,11 @@ from app.api.sessions_worktree import (  # noqa: F401 — re-exports
     create_session_with_worktree,
 )
 
+from app.api.sessions_cloud import (  # noqa: F401 — re-exports
+    cloud_router,
+    create_cloud_session,
+)
+
 # ---------------------------------------------------------------------------
 # Router setup — include sub-routers so all endpoints are served
 # ---------------------------------------------------------------------------
@@ -113,6 +118,7 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 router.include_router(export_router)
 router.include_router(fork_router)
 router.include_router(worktree_router)
+router.include_router(cloud_router)
 
 
 # ============================================================================
@@ -566,6 +572,24 @@ async def get_live_session(
 
     # Check session exists and user has access
     session = await require_session(request, session_id)
+
+    # Cloud sessions run on a second install — proxy the worker's live state so
+    # the user sees the remote stream (and history) exactly like a local one.
+    if session.get("cloud_remote_url"):
+        from app.core import cloud_relay
+        try:
+            code, data = await cloud_relay.get_live(session, since_update_id)
+        except cloud_relay.CloudRelayError as e:
+            logger.warning("Cloud live proxy failed for %s: %s", session_id, e)
+            return Response(status_code=503)
+        if code == 304 or data is None:
+            return Response(status_code=304)
+        meta = data.get("session_meta") or {}
+        meta["execution_mode"] = "cloud"
+        if session.get("title"):
+            meta.setdefault("title", session.get("title"))
+        data["session_meta"] = meta
+        return data
 
     # Compute session metadata from DB session — included in all response
     # paths so the frontend can correct any stale state on switch.

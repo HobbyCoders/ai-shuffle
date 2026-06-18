@@ -188,6 +188,8 @@ def create_postgres_schema(cursor) -> None:
             parent_session_id TEXT,
             fork_point_message_index INTEGER,
             instance_id TEXT,
+            cloud_remote_url TEXT,
+            cloud_remote_session_id TEXT,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
             FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,

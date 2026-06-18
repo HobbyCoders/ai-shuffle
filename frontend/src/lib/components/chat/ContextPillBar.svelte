@@ -31,7 +31,7 @@
 	import { projects } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { git } from '$lib/stores/git.svelte';
-	import { FolderClosed, GitBranch, Lock } from 'lucide-svelte';
+	import { FolderClosed, GitBranch, Lock, Cloud } from 'lucide-svelte';
 
 	const projectName = $derived(
 		$projects.find((p) => p.id === $activeSession.project)?.name ?? null
@@ -105,13 +105,18 @@
 		<span
 			class="context-badge"
 			class:deleted={badge.deleted}
+			class:cloud={badge.cloud}
 			aria-disabled={badge.deleted ? 'true' : undefined}
 			title={badge.title}
 		>
 			{#if projectName}
 				<FolderClosed size={13} strokeWidth={1.5} />
 				<span class="pill-label project-name">{projectName}</span>
-				{#if badge.branch}<span class="separator">/</span>{/if}
+				{#if badge.branch || badge.cloud}<span class="separator">/</span>{/if}
+			{/if}
+			{#if badge.cloud}
+				<Cloud size={13} strokeWidth={1.5} />
+				<span class="pill-label">Cloud</span>
 			{/if}
 			{#if badge.branch}
 				<GitBranch size={13} strokeWidth={1.5} />
@@ -167,6 +172,13 @@
 	.context-badge.deleted {
 		opacity: 0.7;
 		border-style: dashed;
+	}
+
+	/* Cloud session: subtle accent so it's distinguishable from local/worktree. */
+	.context-badge.cloud {
+		color: var(--primary);
+		border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
+		background: color-mix(in oklch, var(--primary) 8%, var(--background));
 	}
 
 	.context-badge :global(svg) {

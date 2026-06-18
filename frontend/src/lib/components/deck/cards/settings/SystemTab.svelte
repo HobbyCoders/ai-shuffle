@@ -3,6 +3,7 @@
 	import { quintOut } from 'svelte/easing';
 	import RateLimitManager from '$lib/components/RateLimitManager.svelte';
 	import ApiUserManager from '$lib/components/ApiUserManager.svelte';
+	import CloudSection from './CloudSection.svelte';
 	import './settings-shared.css';
 
 	interface Props {
@@ -54,6 +55,12 @@
 			</div>
 		{/if}
 	</section>
+
+	<!-- Cloud Offload Section -->
+	<CloudSection
+		expanded={expandedSections.has('cloud-offload')}
+		onToggle={() => onToggleSection('cloud-offload')}
+	/>
 
 	<!-- API Users Section -->
 	<section class="section">

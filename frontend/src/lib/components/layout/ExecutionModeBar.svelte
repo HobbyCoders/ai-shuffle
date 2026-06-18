@@ -13,8 +13,9 @@
 	import type { ExecutionMode } from '$lib/stores/types';
 	import { syncWorktrees, createWorktree as createWorktreeApi, type Worktree, type Branch } from '$lib/api/git';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch } from '$lib/stores/git.svelte';
-	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2 } from 'lucide-svelte';
+	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2, Cloud } from 'lucide-svelte';
 	import { untrack } from 'svelte';
+	import { api } from '$lib/api/client';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 
 	// --- UI state ---
@@ -27,6 +28,26 @@
 	let showCreateModal = $state(false);
 	let creatingWorktree = $state(false);
 	let localWorktreeError = $state<string | null>(null);
+
+	// --- Cloud offload config status ---
+	let cloudConfigured = $state<boolean | null>(null);
+
+	async function loadCloudConfig() {
+		if (cloudConfigured !== null) return;
+		try {
+			const cfg = await api.get<{ configured: boolean }>('/settings/cloud');
+			cloudConfigured = !!cfg.configured;
+		} catch {
+			cloudConfigured = false;
+		}
+	}
+
+	// Lazily check cloud config the first time cloud mode is selected.
+	$effect(() => {
+		if ($activeSession.executionMode === 'cloud') {
+			loadCloudConfig();
+		}
+	});
 
 	// --- Derived data ---
 	// Filter out worktrees that no longer exist on disk
@@ -260,7 +281,28 @@
 				<GitFork size={13} strokeWidth={1.5} />
 				<span>Worktree</span>
 			</button>
+			<button
+				class="mode-option"
+				class:active={$activeSession.executionMode === 'cloud'}
+				onclick={() => setMode('cloud')}
+				title="Offload this session to a second AI Shuffle install (GitHub repos only)"
+			>
+				<Cloud size={13} strokeWidth={1.5} />
+				<span>Cloud</span>
+			</button>
 		</div>
+
+		<!-- Cloud status (shown when cloud mode active) -->
+		{#if $activeSession.executionMode === 'cloud'}
+			<div class="cloud-status" class:warn={cloudConfigured === false}>
+				<Cloud size={12} strokeWidth={1.5} />
+				{#if cloudConfigured === false}
+					<span>Not configured — set the second install in Settings → System → Cloud Offload</span>
+				{:else}
+					<span>Runs on your second install (GitHub repos only)</span>
+				{/if}
+			</div>
+		{/if}
 
 		<!-- Branch selector (shown when worktree mode active) -->
 		{#if $activeSession.executionMode === 'worktree'}
@@ -447,6 +489,31 @@
 
 	.mode-option :global(svg) {
 		flex-shrink: 0;
+	}
+
+	/* Cloud status hint */
+	.cloud-status {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		padding: 2px 4px;
+		font-size: 0.6875rem;
+		line-height: 1.3;
+		color: var(--muted-foreground);
+		max-width: 100%;
+	}
+
+	.cloud-status :global(svg) {
+		flex-shrink: 0;
+		color: var(--primary);
+	}
+
+	.cloud-status.warn {
+		color: var(--destructive);
+	}
+
+	.cloud-status.warn :global(svg) {
+		color: var(--destructive);
 	}
 
 	/* Branch selector */

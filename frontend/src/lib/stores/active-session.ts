@@ -622,6 +622,9 @@ export const activeSession = {
 	autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) =>
 		messageSender.autoCreateWorktree(prompt, pendingUploadPaths),
 
+	startCloudSession: (prompt: string, pendingUploadPaths?: string[]) =>
+		messageSender.startCloudSession(prompt, pendingUploadPaths),
+
 	// ── Queued Messages (delegated to message-sender) ──────────────
 
 	queueMessage: (content: string) => messageSender.queueMessage(content),

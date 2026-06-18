@@ -63,6 +63,7 @@ function makeDeps(initial: ActiveSessionState) {
 
 	const autoCreateWorktree = vi.fn(async () => {});
 	const createWorktree = vi.fn(async () => {});
+	const startCloudSession = vi.fn(async () => {});
 	const innerSendMessage = vi.fn(async () => true);
 
 	const deps: MessageSenderDeps = {
@@ -80,10 +81,11 @@ function makeDeps(initial: ActiveSessionState) {
 			sendMessage: innerSendMessage,
 			createWorktree,
 			autoCreateWorktree,
+			startCloudSession,
 		}),
 	};
 
-	return { deps, wsConn, getState, autoCreateWorktree, createWorktree };
+	return { deps, wsConn, getState, autoCreateWorktree, createWorktree, startCloudSession };
 }
 
 describe('message-sender worktree send backstop', () => {

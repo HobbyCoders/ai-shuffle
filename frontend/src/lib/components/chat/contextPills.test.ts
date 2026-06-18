@@ -111,6 +111,27 @@ describe('computeContextBadge', () => {
 			)
 		).toBeNull();
 	});
+
+	it('shows a cloud badge for an active cloud session (even when authenticated)', () => {
+		// Cloud sessions run on the second install; the badge marks that clearly
+		// regardless of GitHub auth, and carries no local branch.
+		const badge = computeContextBadge(
+			base({ executionMode: 'cloud', worktreeBranch: null, selectedWorktreeBranch: null })
+		);
+		expect(badge).not.toBeNull();
+		expect(badge!.cloud).toBe(true);
+		expect(badge!.branch).toBeNull();
+		expect(badge!.deleted).toBe(false);
+		expect(badge!.title).toBe('my-app · Running on the cloud install');
+	});
+
+	it('cloud badge drops the project prefix when the name is unknown', () => {
+		const badge = computeContextBadge(
+			base({ executionMode: 'cloud', projectName: null })
+		);
+		expect(badge!.cloud).toBe(true);
+		expect(badge!.title).toBe('Running on the cloud install');
+	});
 });
 
 /** A fresh new-session, authenticated, local-mode state with a project. */
@@ -131,6 +152,10 @@ describe('shouldShowEmptyStateBranchPill', () => {
 
 	it('hides in worktree mode — the ExecutionModeBar owns the branch picker there', () => {
 		expect(shouldShowEmptyStateBranchPill(branchBase({ executionMode: 'worktree' }))).toBe(false);
+	});
+
+	it('hides in cloud mode — the worker picks the branch', () => {
+		expect(shouldShowEmptyStateBranchPill(branchBase({ executionMode: 'cloud' }))).toBe(false);
 	});
 
 	it('hides once a chat is active (branch pill / context badge owns that slot)', () => {

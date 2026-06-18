@@ -114,6 +114,7 @@ export interface MessageSenderDeps {
 		sendMessage: (prompt: string, options?: SendMessageOptions) => Promise<boolean>;
 		createWorktree: (prompt?: string, pendingUploadPaths?: string[]) => Promise<void>;
 		autoCreateWorktree: (prompt: string, pendingUploadPaths?: string[]) => Promise<void>;
+		startCloudSession: (prompt: string, pendingUploadPaths?: string[]) => Promise<void>;
 	};
 }
 
@@ -192,6 +193,14 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			if (_state.worktreeDeleted && !_state.worktreeId) {
 				update(s => ({ ...s, error: 'This worktree session cannot be resumed — the worktree was permanently deleted. Start a new session instead.' }));
 				return false;
+			}
+
+			// Cloud setup on first message — offload to the configured second
+			// install. Subsequent messages flow through the normal WS query path
+			// (the backend forwards them to the worker).
+			if (!options?.skipWorktreeSetup && _state.executionMode === 'cloud' && !_state.sessionId && _state.messages.length === 0) {
+				await getActiveSession().startCloudSession(prompt, options?.pendingUploadPaths);
+				return true;
 			}
 
 			// Worktree setup on first message
@@ -691,6 +700,95 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					...s,
 					isCreatingWorktree: false,
 					worktreeError: formatted,
+					messages: s.messages.filter(m => m.id !== userMsgId),
+				}));
+			}
+		},
+
+		// ── Cloud offload (run on a second install) ─────────────────────
+
+		async startCloudSession(prompt: string, pendingUploadPaths?: string[]) {
+			prompt = prompt.trim();
+			const _state = getState();
+			if (!_state.profile) { update(s => ({ ...s, error: 'Please select a profile' })); return; }
+			if (!_state.project) { update(s => ({ ...s, error: 'Please select a project' })); return; }
+
+			const queryProfileId = _state.profile;
+			const projectId = _state.project;
+			const userMsgId = `user-${Date.now()}`;
+			const creationGen = internal.worktreeCreationGeneration;
+
+			const overridesPayload: Record<string, string> = {};
+			if (_state.modelOverride) overridesPayload.model = _state.modelOverride;
+			if (_state.permissionModeOverride) overridesPayload.permission_mode = _state.permissionModeOverride;
+			if (_state.effortLevelOverride) overridesPayload.effort = _state.effortLevelOverride;
+
+			// Optimistically show the prompt + a creating/streaming state.
+			update(s => ({
+				...s,
+				isCreatingWorktree: true,
+				error: null,
+				title: s.title === 'New Chat'
+					? prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '')
+					: s.title,
+				messages: [...s.messages, {
+					id: userMsgId,
+					role: 'user' as const,
+					content: prompt,
+					profileId: queryProfileId,
+				}],
+			}));
+
+			try {
+				const response = await api.post<{
+					session_id: string; remote_session_id: string; remote_url: string;
+					project_id: string; status: string; query_started?: boolean;
+				}>('/sessions/cloud', {
+					project_id: projectId,
+					prompt,
+					profile_id: queryProfileId,
+					pending_upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
+					overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
+				}, { keepalive: true });
+
+				appData.loadSessions();
+				appData.loadApiUserSessions();
+
+				// User navigated away mid-request: the worker is already running
+				// the query, so leave the (switched) view untouched.
+				if (creationGen !== internal.worktreeCreationGeneration) {
+					console.debug('[Cloud] User navigated away — worker query running in background');
+					return;
+				}
+
+				update(s => ({
+					...s,
+					sessionId: response.session_id,
+					isCreatingWorktree: false,
+					isStreaming: true,
+					wsStreamContent: '',
+					error: null,
+				}));
+
+				persistSession();
+
+				// The worker runs the query headlessly; the proxied /live endpoint
+				// is our data source, so start the poller immediately.
+				sessionPoller.startStreaming(response.session_id);
+
+				// Connect WS for follow-up messages / interrupt forwarding.
+				if (!wsConn.isConnected()) {
+					wsConn.connect();
+					await waitForConnectionVoid();
+				}
+			} catch (error) {
+				if (creationGen !== internal.worktreeCreationGeneration) return;
+				const err = error as { detail?: string; message?: string; status?: number };
+				const rawError = err.detail || err.message || 'Failed to start cloud session.';
+				update(s => ({
+					...s,
+					isCreatingWorktree: false,
+					error: rawError,
 					messages: s.messages.filter(m => m.id !== userMsgId),
 				}));
 			}
