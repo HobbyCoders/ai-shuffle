@@ -48,6 +48,15 @@ export interface NoteAutocomplete {
 	absolute_path: string | null;
 }
 
+export interface NoteAttachment {
+	id: string;
+	note_id: string;
+	filename: string;
+	content_type: string | null;
+	size_bytes: number;
+	created_at: string;
+}
+
 // ============================================================================
 // Note API Functions
 // ============================================================================
@@ -115,4 +124,62 @@ export async function getNotesAutocomplete(
 	params.set('limit', limit.toString());
 
 	return api.get<NoteAutocomplete[]>(`/notes/autocomplete?${params.toString()}`);
+}
+
+// ============================================================================
+// Note Attachments
+// ============================================================================
+
+const API_BASE = '/api/v1';
+
+/**
+ * List all files attached to a note.
+ */
+export async function getNoteAttachments(noteId: string): Promise<NoteAttachment[]> {
+	return api.get<NoteAttachment[]>(`/notes/${noteId}/attachments`);
+}
+
+/**
+ * Upload a file and attach it to a note.
+ * Uses multipart/form-data (mirrors the workspace/project upload pattern).
+ */
+export async function uploadNoteAttachment(
+	noteId: string,
+	file: File
+): Promise<NoteAttachment> {
+	const formData = new FormData();
+	formData.append('file', file);
+
+	const response = await fetch(`${API_BASE}/notes/${noteId}/attachments`, {
+		method: 'POST',
+		credentials: 'include',
+		body: formData
+	});
+
+	if (!response.ok) {
+		let detail = `Upload failed (HTTP ${response.status})`;
+		try {
+			const json = await response.json();
+			if (json?.detail) detail = json.detail;
+		} catch {
+			// keep fallback
+		}
+		throw new Error(detail);
+	}
+
+	return response.json();
+}
+
+/**
+ * Delete an attachment from a note.
+ */
+export async function deleteNoteAttachment(noteId: string, attachmentId: string): Promise<void> {
+	await api.delete(`/notes/${noteId}/attachments/${attachmentId}`);
+}
+
+/**
+ * Build the download URL for an attachment (clickable link in rendered notes).
+ */
+export function noteAttachmentDownloadUrl(noteId: string, attachmentId: string): string {
+	return `${API_BASE}/notes/${noteId}/attachments/${attachmentId}/download`;
 }

@@ -105,6 +105,75 @@ def get_absolute_file_path(relative_path: str) -> Path:
     return settings.effective_data_dir / Path(relative_path)
 
 
+# ---------------------------------------------------------------------------
+# Attachments — arbitrary files uploaded to a note and referenced via @ in the
+# note body. Stored under 'notes/attachments/{note_id}/' inside the data dir,
+# alongside the materialized markdown files.
+# ---------------------------------------------------------------------------
+
+def get_note_attachments_dir(note_id: str) -> Path:
+    """Return the attachments directory for a note, creating it if needed."""
+    attachments_dir = get_notes_dir() / "attachments" / note_id
+    attachments_dir.mkdir(parents=True, exist_ok=True)
+    return attachments_dir
+
+
+def sanitize_attachment_filename(filename: str) -> str:
+    """Reduce an uploaded filename to a safe basename.
+
+    Strips any directory components (defends against path traversal) and rejects
+    empty or dot-only names. Preserves the original name otherwise so references
+    stay human-readable.
+    """
+    base = Path(filename or "").name.strip()
+    if not base or base in (".", ".."):
+        return ""
+    return base
+
+
+def get_unique_attachment_path(note_id: str, filename: str) -> Path:
+    """Return a non-colliding absolute path for a new attachment.
+
+    Appends '_1', '_2', ... to the stem when a file of the same name already
+    exists for this note.
+    """
+    attachments_dir = get_note_attachments_dir(note_id)
+    file_path = attachments_dir / filename
+    if file_path.exists():
+        stem = file_path.stem
+        suffix = file_path.suffix
+        counter = 1
+        while file_path.exists():
+            file_path = attachments_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+    return file_path
+
+
+def get_attachment_storage_path(note_id: str, filename: str) -> str:
+    """Return the POSIX-style relative path stored in the database.
+
+    Stored as 'notes/attachments/{note_id}/{filename}' for portability.
+    """
+    return f"notes/attachments/{note_id}/{filename}"
+
+
+def delete_note_attachment_file(relative_path: str) -> bool:
+    """Delete an attachment file given its stored relative path."""
+    file_path = get_absolute_file_path(relative_path)
+    if file_path.exists() and file_path.is_file():
+        file_path.unlink()
+        return True
+    return False
+
+
+def delete_all_note_attachments(note_id: str) -> None:
+    """Remove the entire attachments directory for a note (used on note delete)."""
+    import shutil
+    attachments_dir = get_notes_dir() / "attachments" / note_id
+    if attachments_dir.exists():
+        shutil.rmtree(attachments_dir, ignore_errors=True)
+
+
 def materialize_all_notes(notes: List[Dict]) -> Dict[str, str]:
     """Write all provided notes to disk as markdown files.
 
