@@ -66,6 +66,14 @@ def _transform_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     meta = row.get("metadata") or {}
     row_id = row.get("id", 0)
     created_at = row.get("created_at", "")
+    # PostgreSQL returns timestamp columns as datetime objects (SQLite returned
+    # ISO strings). A raw datetime here is not JSON-serializable, which breaks
+    # every stdlib json.dumps() consumer of these messages — the JSONL parse
+    # cache (pre_seed/store) and the SyncEngine WS broadcast — even though the
+    # FastAPI HTTP response encodes it fine. Normalize to an ISO string so the
+    # timestamp matches the HTTP path and stays serializable everywhere.
+    if hasattr(created_at, "isoformat"):
+        created_at = created_at.isoformat()
 
     base: Dict[str, Any] = {
         "id": f"msg-{row_id}",

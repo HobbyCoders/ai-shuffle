@@ -1186,7 +1186,7 @@ class ChatWebSocketHandler:
         worktree_id: Optional[str] = None,
     ) -> None:
         """Execute query and stream results directly to WebSocket."""
-        from app.api.websocket import _active_chat_sessions, schedule_delayed_cleanup, cancel_pending_cleanup
+        from app.api.websocket import _active_chat_sessions, _active_sessions_lock, schedule_delayed_cleanup, cancel_pending_cleanup
         from app.api.ws_event_handlers import EventContext, MutableStreamState, dispatch_event
         from app.core.query_engine import stream_to_websocket
         from app.core.jsonl_parser import parse_session_history

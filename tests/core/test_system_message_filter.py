@@ -69,3 +69,44 @@ class TestDbLoaderFiltersHiddenSystemSubtypes:
         assert msg is not None
         assert msg["type"] == "system"
         assert msg["subtype"] == "compact_boundary"
+
+
+class TestDbLoaderTimestampSerializable:
+    """Regression: PostgreSQL returns timestamp columns as datetime objects
+    (SQLite returned ISO strings). A raw datetime in metadata.timestamp is not
+    JSON-serializable and breaks every stdlib json.dumps() consumer of these
+    messages — the JSONL parse cache pre-seed/store and the SyncEngine WS
+    broadcast — so history loads pay a slow re-parse and modals/sync events
+    silently drop. The loader must normalize it to an ISO string."""
+
+    import json
+    from datetime import datetime, timezone
+
+    def test_datetime_created_at_normalized_to_string(self):
+        from app.core.db_message_loader import _transform_row
+
+        row = {
+            "id": 7,
+            "role": "user",
+            "content": "hi",
+            "metadata": {},
+            "created_at": self.datetime(2026, 6, 18, 9, 22, 40, tzinfo=self.timezone.utc),
+        }
+        msg = _transform_row(row)
+        ts = msg["metadata"]["timestamp"]
+        assert isinstance(ts, str), f"timestamp must be a string, got {type(ts).__name__}"
+        # And the whole message must be json.dumps-able (the property that broke).
+        self.json.dumps(msg)
+
+    def test_string_created_at_passed_through(self):
+        from app.core.db_message_loader import _transform_row
+
+        row = {
+            "id": 8,
+            "role": "user",
+            "content": "hi",
+            "metadata": {},
+            "created_at": "2026-06-18T09:22:40Z",
+        }
+        msg = _transform_row(row)
+        assert msg["metadata"]["timestamp"] == "2026-06-18T09:22:40Z"

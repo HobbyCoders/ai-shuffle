@@ -336,9 +336,12 @@ class SyncEngine:
             connections = list(self._connections[session_id].values())
         logger.debug(f"Broadcasting {event.event_type} to {len(connections)} devices for session {session_id[:8]}...")
 
-        # Pre-serialize once so a serialization error doesn't disconnect all devices
+        # Pre-serialize once so a serialization error doesn't disconnect all devices.
+        # default=str: event payloads can include PostgreSQL datetime values (e.g. a
+        # queued message's created_at). Without it those raise here and the event is
+        # dropped for every device — e.g. queue_updated never reaching the client.
         try:
-            event_text = json.dumps(event.to_dict())
+            event_text = json.dumps(event.to_dict(), default=str)
         except (TypeError, ValueError) as e:
             logger.error(f"Failed to serialize event {event.event_type} for session {session_id[:8]}: {e}")
             return

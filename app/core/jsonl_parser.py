@@ -645,9 +645,12 @@ def parse_session_history(
     logger.debug(f"Parse cache miss for session {sdk_session_id}, parsing JSONL")
     messages, usage_data = _parse_session_history_uncached(sdk_session_id, working_dir, jsonl_path)
 
-    # Store in cache as serialized JSON strings (fast to copy on read, no deepcopy needed)
+    # Store in cache as serialized JSON strings (fast to copy on read, no deepcopy needed).
+    # default=str keeps the cache resilient to non-JSON-native values that can slip in
+    # from PostgreSQL rows (e.g. datetime timestamps) — a single such value must not
+    # raise and silently drop the cache, forcing a 6-20s JSONL re-parse on every load.
     with _parse_cache_lock:
-        _parse_cache[sdk_session_id] = (file_mtime, file_size, json.dumps(messages), json.dumps(usage_data))
+        _parse_cache[sdk_session_id] = (file_mtime, file_size, json.dumps(messages, default=str), json.dumps(usage_data, default=str))
         while len(_parse_cache) > _PARSE_CACHE_MAX_SIZE:
             _parse_cache.popitem(last=False)
 
@@ -718,8 +721,12 @@ def pre_seed_parse_cache(
             _parse_cache[sdk_session_id] = (
                 file_mtime,
                 file_size,
-                json.dumps(messages),
-                json.dumps(usage_data)
+                # default=str: live-store messages can carry non-JSON-native values
+                # (e.g. PostgreSQL datetime timestamps). Without it a single such value
+                # raises here, the pre-seed is abandoned, and the next load pays a full
+                # JSONL re-parse instead of a cache hit.
+                json.dumps(messages, default=str),
+                json.dumps(usage_data, default=str)
             )
             _parse_cache.move_to_end(sdk_session_id)
             while len(_parse_cache) > _PARSE_CACHE_MAX_SIZE:
