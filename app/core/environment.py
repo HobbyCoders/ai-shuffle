@@ -5,6 +5,7 @@ Contains functions for building environment variables, resolving credentials,
 generating environment details blocks, and configuring security instructions.
 """
 
+import json
 import logging
 import platform
 import subprocess
@@ -19,6 +20,21 @@ from app.core import encryption
 from app.core.model_registry import has_1m_context
 
 logger = logging.getLogger(__name__)
+
+
+def _inject_model_params(env: Dict[str, str], env_var: str, setting_key: str) -> None:
+    """Inject stored schema-driven params for a model as a JSON env var.
+
+    The Node tool worker reads these (e.g. IMAGE_MODEL_PARAMS) and merges them
+    into the fal payload, so uncurated models honor their configured params.
+    """
+    try:
+        from app.api.settings_media import get_model_params
+        params = get_model_params(setting_key)
+        if params:
+            env[env_var] = json.dumps(params)
+    except Exception as e:  # noqa: BLE001 - param injection is best-effort
+        logger.debug(f"Could not inject {env_var}: {e}")
 
 
 # Default instructions for displaying media and files in chat
@@ -336,7 +352,8 @@ def _build_env_with_ai_tools(
     any_image_tools = ai_tools_config.get("image_generation", False) or ai_tools_config.get("image_editing", False) or ai_tools_config.get("image_reference", False)
     any_video_tools = ai_tools_config.get("video_generation", False) or ai_tools_config.get("image_to_video", False) or ai_tools_config.get("video_extend", False)
     any_3d_tools = ai_tools_config.get("text_to_3d", False) or ai_tools_config.get("image_to_3d", False)
-    any_audio_tools = ai_tools_config.get("tts", False) or ai_tools_config.get("stt", False)
+    any_audio_gen_tools = ai_tools_config.get("audio_generation", False) or ai_tools_config.get("audio_to_audio", False)
+    any_audio_tools = ai_tools_config.get("tts", False) or ai_tools_config.get("stt", False) or any_audio_gen_tools
 
     if not any_image_tools and not any_video_tools and not any_3d_tools and not any_audio_tools:
         return env
@@ -369,6 +386,8 @@ def _build_env_with_ai_tools(
             env["IMAGE_ASPECT_RATIO"] = image_aspect_ratio
         if image_resolution:
             env["IMAGE_RESOLUTION"] = image_resolution
+        _inject_model_params(env, "IMAGE_MODEL_PARAMS", "image_model")
+        _inject_model_params(env, "IMAGE_EDIT_MODEL_PARAMS", "image_edit_model")
 
     if any_video_tools:
         video_model = database.get_system_setting("video_model")
@@ -389,6 +408,8 @@ def _build_env_with_ai_tools(
             env["VIDEO_DURATION"] = video_duration
         if video_resolution:
             env["VIDEO_RESOLUTION"] = video_resolution
+        _inject_model_params(env, "VIDEO_MODEL_PARAMS", "video_model")
+        _inject_model_params(env, "I2V_MODEL_PARAMS", "i2v_model")
 
     if any_3d_tools:
         model3d_model = database.get_system_setting("model3d_model")
@@ -400,6 +421,8 @@ def _build_env_with_ai_tools(
         if image_to_3d_model:
             env["IMAGE_TO_3D_MODEL"] = image_to_3d_model
             logger.debug(f"Set default IMAGE_TO_3D_MODEL={image_to_3d_model}")
+        _inject_model_params(env, "MODEL3D_MODEL_PARAMS", "model3d_model")
+        _inject_model_params(env, "IMAGE_TO_3D_MODEL_PARAMS", "image_to_3d_model")
 
     if any_audio_tools:
         tts_model = database.get_system_setting("tts_model")
@@ -411,6 +434,19 @@ def _build_env_with_ai_tools(
         stt_language = database.get_system_setting("stt_language")
         if stt_language:
             env["STT_LANGUAGE"] = stt_language
+
+    if any_audio_gen_tools:
+        audio_model = database.get_system_setting("audio_model")
+        audio_to_audio_model = database.get_system_setting("audio_to_audio_model")
+        env["AUDIO_PROVIDER"] = "fal-ai"
+        if audio_model:
+            env["AUDIO_MODEL"] = audio_model
+            logger.debug(f"Set default AUDIO_MODEL={audio_model}")
+        if audio_to_audio_model:
+            env["AUDIO_TO_AUDIO_MODEL"] = audio_to_audio_model
+            logger.debug(f"Set default AUDIO_TO_AUDIO_MODEL={audio_to_audio_model}")
+        _inject_model_params(env, "AUDIO_MODEL_PARAMS", "audio_model")
+        _inject_model_params(env, "AUDIO_TO_AUDIO_MODEL_PARAMS", "audio_to_audio_model")
 
     return env
 

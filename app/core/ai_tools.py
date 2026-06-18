@@ -88,6 +88,18 @@ AI_TOOLS: Dict[str, Dict[str, Any]] = {
         "category": "audio",
         "providers": ["fal-ai"]
     },
+    "audio_generation": {
+        "name": "Audio Generation",
+        "description": "Generate music and sound from text prompts (Lyria, Stable Audio, ACE-Step)",
+        "category": "audio",
+        "providers": ["fal-ai"]
+    },
+    "audio_to_audio": {
+        "name": "Audio to Audio",
+        "description": "Transform audio into audio — style transfer, restoration, stems, remix",
+        "category": "audio",
+        "providers": ["fal-ai"]
+    },
 }
 
 # ============================================================================

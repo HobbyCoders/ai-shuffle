@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.auth import require_auth
 from app.services.fal_catalog import catalog_service, CatalogModel
+from app.services.fal_schema import schema_service
 from app.api.settings import get_decrypted_api_key
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,25 @@ async def list_models(
         "total": len(models),
         "catalog_size": catalog_service.model_count,
     }
+
+
+@router.get("/schema")
+async def get_model_schema(
+    endpoint_id: str = Query(..., description="fal.ai endpoint ID to fetch the input schema for"),
+    refresh: bool = Query(False, description="Bypass the schema cache and re-fetch"),
+    _: str = Depends(require_auth),
+):
+    """Return the normalized OpenAPI input schema for a model.
+
+    Drives the dynamic, model-specific parameter form in the UI. Returns
+    ``found: False`` (not an error) when the model has no discoverable schema,
+    so callers can fall back to a plain prompt input.
+    """
+    api_key = get_decrypted_api_key("fal_api_key")
+    schema = await schema_service.get_schema(endpoint_id, api_key, force=refresh)
+    if not schema:
+        return {"found": False, "endpoint_id": endpoint_id}
+    return {"found": True, "schema": schema.to_dict()}
 
 
 @router.get("/models/{endpoint_id:path}")

@@ -119,6 +119,8 @@ class IntegrationSettingsResponse(BaseModel):
     tts_speed: Optional[float] = None
     tts_output_format: Optional[str] = None
     stt_model: Optional[str] = None
+    audio_model: Optional[str] = None
+    audio_to_audio_model: Optional[str] = None
     # Per-model generation settings
     image_aspect_ratio: Optional[str] = None
     image_resolution: Optional[str] = None
@@ -171,6 +173,8 @@ async def get_integration_settings(token: str = Depends(require_auth)):
     tts_speed = float(tts_speed_str) if tts_speed_str else 1.0
     tts_output_format = database.get_system_setting("tts_output_format") or "wav"
     stt_model = database.get_system_setting("stt_model") or "fal-ai/whisper"
+    audio_model = database.get_system_setting("audio_model")
+    audio_to_audio_model = database.get_system_setting("audio_to_audio_model")
     # Per-model generation settings
     image_aspect_ratio = database.get_system_setting("image_aspect_ratio")
     image_resolution = database.get_system_setting("image_resolution")
@@ -196,6 +200,8 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         tts_speed=tts_speed,
         tts_output_format=tts_output_format,
         stt_model=stt_model,
+        audio_model=audio_model,
+        audio_to_audio_model=audio_to_audio_model,
         image_aspect_ratio=image_aspect_ratio,
         image_resolution=image_resolution,
         video_aspect_ratio=video_aspect_ratio,

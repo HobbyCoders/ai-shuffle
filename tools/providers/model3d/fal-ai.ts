@@ -18,6 +18,7 @@ import {
   downloadToFile,
   handleFalError,
   getGeneratedModelsDir,
+  applyExtraParams,
 } from '../shared/fal-helpers.js';
 
 // ============================================================================
@@ -113,7 +114,7 @@ export const fal3DProvider: Model3DProvider = {
       }
 
       const result = await fal.subscribe(model, {
-        input: falInput,
+        input: applyExtraParams(falInput, input.extra_params),
       }) as any;
 
       const data = result.data || result;
@@ -183,7 +184,7 @@ export const fal3DProvider: Model3DProvider = {
       if (input.prompt) falInput.prompt = input.prompt.trim();
 
       const result = await fal.subscribe(i3dModel, {
-        input: falInput,
+        input: applyExtraParams(falInput, input.extra_params),
       }) as any;
 
       const data = result.data || result;

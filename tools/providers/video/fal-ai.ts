@@ -19,6 +19,7 @@ import {
   downloadToFile,
   handleFalError,
   getGeneratedVideosDir,
+  applyExtraParams,
 } from '../shared/fal-helpers.js';
 
 // ============================================================================
@@ -198,7 +199,7 @@ export const falVideoProvider: VideoProvider = {
       }
 
       const result = await fal.subscribe(model, {
-        input: falInput,
+        input: applyExtraParams(falInput, input.extra_params),
       }) as any;
 
       // Different models return video in different shapes
@@ -273,7 +274,7 @@ export const falVideoProvider: VideoProvider = {
       }
 
       const result = await fal.subscribe(i2vModel, {
-        input: falInput,
+        input: applyExtraParams(falInput, input.extra_params),
       }) as any;
 
       const videoData = result.data?.video || result.video;
@@ -329,7 +330,7 @@ export const falVideoProvider: VideoProvider = {
       }
 
       const result = await fal.subscribe(model, {
-        input: falInput,
+        input: applyExtraParams(falInput, input.extra_params),
       }) as any;
 
       const videoData = result.data?.video || result.video;

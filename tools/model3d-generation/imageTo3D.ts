@@ -26,6 +26,7 @@
 
 import { Model3DResponse } from './shared.js';
 import { registry } from '../providers/registry.js';
+import { parseModelParamsEnv } from '../providers/shared/fal-helpers.js';
 
 export interface ImageTo3DInput {
   /**
@@ -181,7 +182,8 @@ export async function imageTo3D(input: ImageTo3DInput): Promise<ImageTo3DRespons
         prompt: input.prompt || '',
         image_path: input.image_path,
         topology: input.topology,
-        target_polycount: input.target_polycount
+        target_polycount: input.target_polycount,
+        extra_params: parseModelParamsEnv('IMAGE_TO_3D_MODEL_PARAMS')
       },
       { apiKey: falKey },
       falModel

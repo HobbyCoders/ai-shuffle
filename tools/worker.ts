@@ -28,6 +28,8 @@ import { imageToVideo } from './video-generation/imageToVideo.js';
 import { extendVideo } from './video-generation/extendVideo.js';
 import { textTo3D } from './model3d-generation/textTo3D.js';
 import { imageTo3D } from './model3d-generation/imageTo3D.js';
+import { generateAudio } from './audio-generation/generateAudio.js';
+import { audioToAudio } from './audio-generation/audioToAudio.js';
 import { executeFalModel } from './providers/fal-generic.js';
 
 // Tool dispatch table
@@ -40,6 +42,8 @@ const tools: Record<string, (args: any) => Promise<any>> = {
   extendVideo,
   textTo3D,
   imageTo3D,
+  generateAudio,
+  audioToAudio,
   runFalModel: executeFalModel,
 };
 

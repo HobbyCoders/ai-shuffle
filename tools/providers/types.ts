@@ -155,6 +155,8 @@ export interface UnifiedImageInput {
   seed?: number;
   /** Control generation of people */
   person_generation?: 'dont_allow' | 'allow_adult' | 'allow_all';
+  /** Schema-driven params for the selected model (merged into the fal input) */
+  extra_params?: Record<string, unknown>;
   /** Provider-specific options */
   [key: string]: any;
 }
@@ -283,6 +285,8 @@ export interface UnifiedVideoInput {
   seed?: number;
   /** Control generation of people */
   person_generation?: 'allow_all' | 'allow_adult';
+  /** Schema-driven params for the selected model (merged into the fal input) */
+  extra_params?: Record<string, unknown>;
   /** Provider-specific options */
   [key: string]: any;
 }
@@ -656,6 +660,8 @@ export interface Unified3DInput {
   mode?: 'preview' | 'refine';
   /** Task ID to refine (required for refine mode) */
   preview_task_id?: string;
+  /** Schema-driven params for the selected model (merged into the fal input) */
+  extra_params?: Record<string, unknown>;
   /** Provider-specific options */
   [key: string]: any;
 }

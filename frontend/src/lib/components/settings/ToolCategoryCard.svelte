@@ -19,6 +19,7 @@
 	} from '$lib/types/ai-tool-registry';
 	import { ALL_TTS_MODELS, type TTSVoice, type CatalogModel } from '$lib/types/ai-models';
 	import ModelPickerGrid from './ModelPickerGrid.svelte';
+	import DynamicModelParams from './DynamicModelParams.svelte';
 
 	interface Props {
 		category: ToolCategory;
@@ -114,6 +115,18 @@
 		savingTool = tool.id;
 		try {
 			await api.patch<{ success: boolean }>(tool.modelEndpoint, { model: modelId });
+
+			// Clear stored schema-driven params so the new model starts from its
+			// own defaults rather than inheriting the previous model's values.
+			try {
+				await api.patch('/settings/integrations/model-params', {
+					key: tool.modelSettingKey,
+					params: {},
+				});
+			} catch {
+				// Non-critical
+			}
+
 			onchange(tool.modelSettingKey, modelId);
 
 			// Reset per-model settings when model changes (keep sliders at current value)
@@ -291,6 +304,14 @@
 									<span class="cap-badge cap-{cap.color}">{cap.label}</span>
 								{/each}
 							</div>
+						{/if}
+
+						<!-- Schema-driven params for uncurated (catalog) models -->
+						{#if !selectedModel}
+							<DynamicModelParams
+								endpointId={getSelectedModelId(tool)}
+								persistKey={tool.modelSettingKey}
+							/>
 						{/if}
 
 						<!-- Per-model settings -->

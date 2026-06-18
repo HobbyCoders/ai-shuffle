@@ -12,6 +12,7 @@
 
 import { registry } from '../providers/registry.js';
 import { ImageResult, ProviderCredentials, GeneratedImage as ProviderGeneratedImage } from '../providers/types.js';
+import { parseModelParamsEnv } from '../providers/shared/fal-helpers.js';
 
 export interface GenerateImageInput {
   /**
@@ -263,7 +264,8 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
       aspect_ratio,
       image_size,
       number_of_images: input.number_of_images,
-      person_generation: input.person_generation
+      person_generation: input.person_generation,
+      extra_params: parseModelParamsEnv('IMAGE_MODEL_PARAMS')
     },
     credentials,
     modelId

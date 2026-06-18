@@ -194,6 +194,43 @@ def _create_3d_tools(worker: NodeWorker) -> list:
     return tools
 
 
+def _create_audio_gen_tools(worker: NodeWorker) -> list:
+    """Create audio (music/sound) generation and transform tool functions."""
+    tools = []
+
+    @tool("generateAudio", "Generate music or sound effects from a text prompt using AI (fal.ai models: Lyria, Stable Audio, ACE-Step). Uses the configured audio-generation model.", {
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string", "description": "Text description of the music or sound to generate"},
+            "duration": {"type": "number", "description": "Duration in seconds (model-dependent)"},
+            "model": {"type": "string", "description": "Optional fal.ai model ID override (e.g. fal-ai/lyria2, fal-ai/stable-audio). Defaults to the configured audio-generation model."}
+        },
+        "required": ["prompt"]
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
+    async def generate_audio(args: dict) -> dict:
+        result = await worker.call("generateAudio", args)
+        return _tool_result(result)
+
+    tools.append(generate_audio)
+
+    @tool("audioToAudio", "Transform an existing audio file into new audio — style transfer, remix, stem separation, or restoration (fal.ai audio-to-audio models). Uses the configured audio-to-audio model.", {
+        "type": "object",
+        "properties": {
+            "audio_path": {"type": "string", "description": "Path to the source audio file to transform"},
+            "prompt": {"type": "string", "description": "Optional text description guiding the transformation"},
+            "model": {"type": "string", "description": "Optional fal.ai model ID override. Defaults to the configured audio-to-audio model."}
+        },
+        "required": ["audio_path"]
+    }, annotations=_LARGE_RESULT_ANNOTATIONS)
+    async def audio_to_audio(args: dict) -> dict:
+        result = await worker.call("audioToAudio", args)
+        return _tool_result(result)
+
+    tools.append(audio_to_audio)
+
+    return tools
+
+
 def _get_fal_api_key() -> Optional[str]:
     """Resolve the fal.ai API key from the encrypted settings store or env."""
     try:
@@ -322,17 +359,22 @@ TOOL_CONFIG_MAP = {
     # 3D tools
     "textTo3D": {"config_key": "text_to_3d"},
     "imageTo3D": {"config_key": "image_to_3d"},
+    # Audio generation tools
+    "generateAudio": {"config_key": "audio_generation"},
+    "audioToAudio": {"config_key": "audio_to_audio"},
     # Generic tool — enabled when ANY other tool is enabled
     "runFalModel": {"config_keys": [
         "image_generation", "image_editing", "image_reference",
         "video_generation", "video_with_audio", "image_to_video", "video_extend",
         "text_to_3d", "image_to_3d",
+        "audio_generation", "audio_to_audio",
     ]},
     # Model discovery — enabled whenever the generic executor is (same condition)
     "searchModels": {"config_keys": [
         "image_generation", "image_editing", "image_reference",
         "video_generation", "video_with_audio", "image_to_video", "video_extend",
         "text_to_3d", "image_to_3d",
+        "audio_generation", "audio_to_audio",
     ]},
 }
 
@@ -412,9 +454,11 @@ def create_ai_tools_server(
                 ai_tools_config.get("video_with_audio", False)
     any_3d = ai_tools_config.get("text_to_3d", False) or \
              ai_tools_config.get("image_to_3d", False)
+    any_audio_gen = ai_tools_config.get("audio_generation", False) or \
+                    ai_tools_config.get("audio_to_audio", False)
 
     # Generic tool is enabled when any other tool is enabled
-    any_generic = any_image or any_video or any_3d
+    any_generic = any_image or any_video or any_3d or any_audio_gen
 
     if not any_generic:
         return None
@@ -434,6 +478,7 @@ def create_ai_tools_server(
     all_image_tools = _create_image_tools(worker)
     all_video_tools = _create_video_tools(worker)
     all_3d_tools = _create_3d_tools(worker)
+    all_audio_gen_tools = _create_audio_gen_tools(worker)
     all_generic_tools = _create_generic_tools(worker)
     all_catalog_tools = _create_catalog_tools()
 
@@ -449,6 +494,10 @@ def create_ai_tools_server(
             enabled_tools.append(t)
 
     for t in all_3d_tools:
+        if _is_tool_enabled(t.name, ai_tools_config):
+            enabled_tools.append(t)
+
+    for t in all_audio_gen_tools:
         if _is_tool_enabled(t.name, ai_tools_config):
             enabled_tools.append(t)
 

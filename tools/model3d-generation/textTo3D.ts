@@ -25,6 +25,7 @@
 
 import { Model3DResponse } from './shared.js';
 import { registry } from '../providers/registry.js';
+import { parseModelParamsEnv } from '../providers/shared/fal-helpers.js';
 
 export interface TextTo3DInput {
   /**
@@ -177,7 +178,8 @@ export async function textTo3D(input: TextTo3DInput): Promise<TextTo3DResponse> 
         prompt: input.prompt.trim(),
         art_style: input.art_style,
         topology: input.topology,
-        target_polycount: input.target_polycount
+        target_polycount: input.target_polycount,
+        extra_params: parseModelParamsEnv('MODEL3D_MODEL_PARAMS')
       },
       { apiKey: falKey },
       falModel

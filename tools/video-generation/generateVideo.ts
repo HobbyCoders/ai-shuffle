@@ -23,6 +23,7 @@
 
 import { registry } from '../providers/registry.js';
 import { VideoResult, ProviderCredentials } from '../providers/types.js';
+import { parseModelParamsEnv } from '../providers/shared/fal-helpers.js';
 
 // Re-export VideoResponse for backwards compatibility
 export { VideoResponse } from './shared.js';
@@ -207,7 +208,8 @@ export async function generateVideo(input: GenerateVideoInput): Promise<Generate
       resolution,
       negative_prompt: input.negative_prompt,
       seed: input.seed,
-      person_generation: input.person_generation
+      person_generation: input.person_generation,
+      extra_params: parseModelParamsEnv('VIDEO_MODEL_PARAMS')
     },
     credentials,
     modelId

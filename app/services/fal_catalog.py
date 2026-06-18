@@ -32,9 +32,9 @@ CATEGORY_TO_TOOL_TYPE = {
     "image-to-3d": "image_to_3d",
     "3d-to-3d": "text_to_3d",
     "text-to-speech": "tts",
-    "text-to-audio": "audio",  # music / sound generation (Lyria, Stable Audio, ACE-Step, ...)
-    "text-to-music": "audio",
-    "audio-to-audio": "audio",
+    "text-to-audio": "audio_generation",  # music / sound generation (Lyria, Stable Audio, ACE-Step, ...)
+    "text-to-music": "audio_generation",
+    "audio-to-audio": "audio_to_audio",  # remix / style transfer / restoration
     "audio-to-video": "video_generation",
 }
 

@@ -6,7 +6,7 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -16,6 +16,8 @@ from pydantic import BaseModel
 from app.db import database
 from app.api.auth import require_admin, require_auth
 from app.api.settings_crypto import get_decrypted_api_key
+from app.api.settings_media import get_model_params
+from app.services.fal_schema import schema_service, ModelSchema
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +198,9 @@ class TTSGenerateRequest(BaseModel):
     voice: Optional[str] = None
     speed: Optional[float] = None
     output_format: Optional[str] = "mp3"
+    # Arbitrary model-specific params from the schema-driven settings form,
+    # merged onto the resolved payload (overriding inferred voice/speed).
+    params: Optional[dict[str, Any]] = None
 
 
 class TTSGenerateResponse(BaseModel):
@@ -287,6 +292,87 @@ def _build_tts_payload(model_id: str, text: str, voice: str, speed: float, model
     if model_info.get("supports_speed") and speed != 1.0:
         payload["speed"] = speed
     return payload
+
+
+# Field-name candidates used to map our generic voice/speed settings onto an
+# arbitrary model's schema when the model isn't one of the curated ones.
+_VOICE_FIELD_CANDIDATES = ("voice", "voice_id", "voice_name", "speaker", "preset")
+_SPEED_FIELD_CANDIDATES = ("speed", "rate", "speaking_rate")
+
+
+def _build_payload_from_schema(
+    text: str,
+    voice: Optional[str],
+    speed: Optional[float],
+    schema: Optional["ModelSchema"],
+    extra_params: Optional[dict] = None,
+) -> dict:
+    """Build a fal payload for an *uncurated* TTS model from its OpenAPI schema.
+
+    Routes the user's text into the model's primary text field, best-effort maps
+    our voice/speed knobs onto matching schema fields, then layers any explicit
+    per-model params (from the dynamic settings form) on top.
+    """
+    extra_params = extra_params or {}
+
+    if not schema:
+        # No schema available — best effort. "text" is the most common key.
+        payload: dict = {"text": text}
+        if voice:
+            payload["voice"] = voice
+        payload.update(extra_params)
+        return payload
+
+    field_names = {f.name for f in schema.fields}
+    payload = {}
+
+    primary = schema.primary_text_field or ("prompt" if "prompt" in field_names else "text")
+    payload[primary] = text
+
+    if voice:
+        for cand in _VOICE_FIELD_CANDIDATES:
+            if cand in field_names:
+                payload[cand] = voice
+                break
+
+    if speed is not None:
+        for cand in _SPEED_FIELD_CANDIDATES:
+            if cand in field_names:
+                spec = next(f for f in schema.fields if f.name == cand)
+                lo = spec.minimum if spec.minimum is not None else 0.1
+                hi = spec.maximum if spec.maximum is not None else 5.0
+                payload[cand] = max(lo, min(hi, speed))
+                break
+
+    # Explicit params from the dynamic form win over our inferred mapping.
+    payload.update(extra_params)
+    return payload
+
+
+async def _resolve_tts_payload(
+    tts_model: str,
+    text: str,
+    voice: Optional[str],
+    speed: Optional[float],
+    model_info: Optional[dict],
+    fal_key: Optional[str],
+    extra_params: Optional[dict] = None,
+) -> dict:
+    """Build the fal payload for any TTS model — curated or arbitrary.
+
+    Curated models use their hand-tuned payload shape; unknown models are
+    resolved dynamically from the fal OpenAPI schema so any model just works.
+    """
+    if model_info:
+        payload = _build_tts_payload(
+            tts_model, text, voice or "", speed if speed is not None else 1.0, model_info
+        )
+        if extra_params:
+            payload.update(extra_params)
+        return payload
+
+    schema = await schema_service.get_schema(tts_model, fal_key)
+    return _build_payload_from_schema(text, voice, speed, schema, extra_params)
 
 
 def _extract_audio_url(result: dict) -> Optional[str]:
@@ -416,14 +502,15 @@ async def update_tts_model(
     request: AudioModelUpdateRequest,
     token: str = Depends(require_admin)
 ):
-    """Update the default TTS model."""
-    model = request.model.strip()
+    """Update the default TTS model. Accepts any fal.ai TTS model ID.
 
-    if model not in TTS_MODELS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid TTS model. Available: {', '.join(TTS_MODELS.keys())}"
-        )
+    The catalog is the source of truth, so any text-to-speech model fal.ai
+    offers is selectable; uncurated models are driven by their OpenAPI schema
+    at generation time.
+    """
+    model = request.model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Model cannot be empty")
 
     database.set_system_setting("tts_model", model)
     return {"success": True, "model": model}
@@ -441,12 +528,8 @@ async def update_tts_settings(
     """
     if request.model:
         model = request.model.strip()
-        if model not in TTS_MODELS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid TTS model. Available: {', '.join(TTS_MODELS.keys())}"
-            )
-        database.set_system_setting("tts_model", model)
+        if model:
+            database.set_system_setting("tts_model", model)
 
     if request.voice:
         database.set_system_setting("tts_voice", request.voice.strip())
@@ -472,14 +555,10 @@ async def update_stt_model(
     request: AudioModelUpdateRequest,
     token: str = Depends(require_admin)
 ):
-    """Update the default STT model."""
+    """Update the default STT model. Accepts any fal.ai speech-to-text model ID."""
     model = request.model.strip()
-
-    if model not in STT_MODELS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid STT model. Available: {', '.join(STT_MODELS.keys())}"
-        )
+    if not model:
+        raise HTTPException(status_code=400, detail="Model cannot be empty")
 
     database.set_system_setting("stt_model", model)
     return {"success": True, "model": model}
@@ -706,15 +785,10 @@ async def generate_tts(
             detail="fal.ai API key not configured. Go to Settings > Integrations to add your key."
         )
 
-    # Get configured model or use request override
+    # Get configured model or use request override. Any fal.ai TTS model is
+    # accepted — curated models get tuned payloads, others are schema-driven.
     tts_model = request.model or database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
     model_info = TTS_MODELS.get(tts_model)
-
-    if not model_info:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid TTS model: {tts_model}. Available: {', '.join(TTS_MODELS.keys())}"
-        )
 
     # Get voice and other settings
     voice = request.voice or database.get_system_setting("tts_voice") or "af_heart"
@@ -730,14 +804,20 @@ async def generate_tts(
     if len(text) > 4096:
         raise HTTPException(status_code=400, detail="Text too long. Maximum 4096 characters.")
 
-    # Validate speed if model supports it
-    if model_info.get("supports_speed"):
+    # Validate speed for curated models that declare a supported range.
+    if model_info and model_info.get("supports_speed"):
         speed_range = model_info.get("speed_range", [0.5, 2.0])
         if speed < speed_range[0] or speed > speed_range[1]:
             raise HTTPException(status_code=400, detail=f"Speed must be between {speed_range[0]} and {speed_range[1]}")
 
-    # Build model-specific payload
-    payload = _build_tts_payload(tts_model, text, voice, speed, model_info)
+    # Stored schema-driven params (set via the dynamic settings form) are used
+    # when the request doesn't override them.
+    extra_params = request.params if request.params is not None else get_model_params("tts_model")
+
+    # Build the fal payload (curated shape, or schema-driven for any other model)
+    payload = await _resolve_tts_payload(
+        tts_model, text, voice, speed, model_info, fal_key, extra_params
+    )
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -830,8 +910,6 @@ async def stream_tts(
 
     tts_model = request.model or database.get_system_setting("tts_model") or "fal-ai/kokoro/american-english"
     model_info = TTS_MODELS.get(tts_model)
-    if not model_info:
-        raise HTTPException(status_code=400, detail=f"Invalid TTS model: {tts_model}")
 
     voice = request.voice or database.get_system_setting("tts_voice") or "af_heart"
     speed = request.speed
@@ -845,7 +923,10 @@ async def stream_tts(
     if len(text) > 4096:
         raise HTTPException(status_code=400, detail="Text too long. Maximum 4096 characters.")
 
-    payload = _build_tts_payload(tts_model, text, voice, speed, model_info)
+    extra_params = request.params if request.params is not None else get_model_params("tts_model")
+    payload = await _resolve_tts_payload(
+        tts_model, text, voice, speed, model_info, fal_key, extra_params
+    )
 
     output_format = request.output_format or "mp3"
     mime_types = {

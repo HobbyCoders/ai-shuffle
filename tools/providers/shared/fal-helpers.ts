@@ -163,6 +163,47 @@ export function handleFalError(error: unknown): string {
 }
 
 // ============================================================================
+// Schema-driven extra params
+// ============================================================================
+
+/**
+ * Parse a JSON object of schema-driven model params from an env var.
+ *
+ * The backend injects user-configured parameters for the selected model as a
+ * JSON string (e.g. IMAGE_MODEL_PARAMS). Returns {} when unset or invalid so
+ * callers can always spread the result safely.
+ */
+export function parseModelParamsEnv(name: string): Record<string, unknown> {
+  const raw = process.env[name];
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Merge user-configured params underneath the provider's explicitly built input.
+ *
+ * Extra params act as defaults/extra knobs; the fields the provider sets for
+ * this call (prompt, image_size, etc.) always win. Blank extra values are
+ * dropped so we never override a model's own defaults with "".
+ */
+export function applyExtraParams(
+  built: Record<string, any>,
+  extra?: Record<string, unknown>
+): Record<string, any> {
+  if (!extra) return built;
+  const base: Record<string, any> = {};
+  for (const [k, v] of Object.entries(extra)) {
+    if (v !== undefined && v !== null && v !== '') base[k] = v;
+  }
+  return { ...base, ...built };
+}
+
+// ============================================================================
 // Output Directory Helpers
 // ============================================================================
 

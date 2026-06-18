@@ -358,6 +358,41 @@ export const AI_TOOL_CATEGORIES: ToolCategory[] = [
 			},
 		],
 	},
+	{
+		id: 'audio_gen',
+		label: 'Audio Generation',
+		icon: 'audio',
+		description: 'Generate music & sound, and transform audio',
+		accent: 'rose',
+		tools: [
+			{
+				id: 'text_to_audio',
+				label: 'Text to Audio',
+				description: 'Generate music and sound effects from a text prompt',
+				modelSettingKey: 'audio_model',
+				modelEndpoint: '/settings/integrations/audio/generation-model',
+				defaultModel: 'fal-ai/lyria2',
+				// Gallery-only: pick any fal text-to-audio model; params come from
+				// the model's OpenAPI schema (no curated list to maintain).
+				getModels: () => [],
+				catalogToolType: 'audio_generation',
+				formatPrice: () => '',
+				settings: [],
+			},
+			{
+				id: 'audio_to_audio',
+				label: 'Audio to Audio',
+				description: 'Transform audio — remix, style transfer, restoration, stems',
+				modelSettingKey: 'audio_to_audio_model',
+				modelEndpoint: '/settings/integrations/audio/audio-to-audio-model',
+				defaultModel: '',
+				getModels: () => [],
+				catalogToolType: 'audio_to_audio',
+				formatPrice: () => '',
+				settings: [],
+			},
+		],
+	},
 ];
 
 // ============================================================================

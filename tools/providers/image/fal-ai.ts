@@ -20,6 +20,7 @@ import {
   downloadToFile,
   handleFalError,
   getGeneratedImagesDir,
+  applyExtraParams,
 } from '../shared/fal-helpers.js';
 
 // ============================================================================
@@ -180,7 +181,7 @@ export const falImageProvider: ImageProvider = {
       }
 
       const result = await fal.subscribe(model, {
-        input: falInput,
+        input: applyExtraParams(falInput, input.extra_params),
       }) as any;
 
       const images = result.data?.images || result.images || [];
@@ -260,7 +261,7 @@ export const falImageProvider: ImageProvider = {
       }
 
       const result = await fal.subscribe(editModel, {
-        input: falInput,
+        input: applyExtraParams(falInput, input.extra_params),
       }) as any;
 
       const images = result.data?.images || result.images || [];
@@ -345,7 +346,7 @@ export const falImageProvider: ImageProvider = {
       }
 
       const result = await fal.subscribe(referenceModel, {
-        input: falInput as any,
+        input: applyExtraParams(falInput, input.extra_params) as any,
       }) as any;
 
       const images = result.data?.images || result.images || [];

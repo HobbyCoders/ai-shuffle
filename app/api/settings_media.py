@@ -2,10 +2,11 @@
 Settings API routes - media model selection and generation settings endpoints.
 """
 
+import json
 import logging
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.db import database
@@ -116,6 +117,24 @@ async def update_image_to_3d_model(
     return await _update_model_setting("image_to_3d_model", request)
 
 
+@media_router.patch("/integrations/audio/generation-model")
+async def update_audio_generation_model(
+    request: ModelUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """Update the text-to-audio (music/sound) model. Accepts any fal.ai model ID."""
+    return await _update_model_setting("audio_model", request)
+
+
+@media_router.patch("/integrations/audio/audio-to-audio-model")
+async def update_audio_to_audio_model(
+    request: ModelUpdateRequest,
+    token: str = Depends(require_admin)
+):
+    """Update the audio-to-audio (transform) model. Accepts any fal.ai model ID."""
+    return await _update_model_setting("audio_to_audio_model", request)
+
+
 # ============================================================================
 # Per-Model Generation Settings
 # ============================================================================
@@ -158,3 +177,65 @@ async def update_stt_settings(
     if request.language is not None:
         database.set_system_setting("stt_language", request.language)
     return {"success": True}
+
+
+# ============================================================================
+# Generic, schema-driven per-model parameters
+# ============================================================================
+#
+# For uncurated fal.ai models we don't hardcode settings — the UI renders
+# controls from the model's OpenAPI schema and stores the chosen values as a
+# JSON blob keyed by the model-selection setting (e.g. "tts_model_params").
+# Generation code merges these onto the fal payload.
+
+
+class ModelParamsRequest(BaseModel):
+    """Request to persist schema-driven params for a model-selection key."""
+    key: str
+    params: dict[str, Any] = {}
+
+
+def get_model_params(setting_key: str) -> dict:
+    """Load stored schema-driven params for a model-selection setting key.
+
+    ``setting_key`` is the model-selection key (e.g. "tts_model"); params are
+    stored under ``"<setting_key>_params"``. Returns {} when none/invalid.
+    """
+    raw = database.get_system_setting(f"{setting_key}_params")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+@media_router.get("/integrations/model-params")
+async def read_model_params(
+    key: str = Query(..., description="Model-selection setting key, e.g. tts_model"),
+    token: str = Depends(require_admin),
+):
+    """Return the stored schema-driven params for a model-selection key."""
+    return {"key": key, "params": get_model_params(key.strip())}
+
+
+@media_router.patch("/integrations/model-params")
+async def update_model_params(
+    request: ModelParamsRequest,
+    token: str = Depends(require_admin),
+):
+    """Replace the stored schema-driven params for a model-selection key.
+
+    Drops blank values so we never send empty strings to fal (which would
+    override a model's own defaults).
+    """
+    key = request.key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="key cannot be empty")
+    cleaned = {
+        k: v for k, v in (request.params or {}).items()
+        if v is not None and v != ""
+    }
+    database.set_system_setting(f"{key}_params", json.dumps(cleaned))
+    return {"success": True, "params": cleaned}

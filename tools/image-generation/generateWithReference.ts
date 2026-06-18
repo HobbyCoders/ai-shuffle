@@ -21,6 +21,7 @@
 
 import { registry } from '../providers/registry.js';
 import { ImageResult, ProviderCredentials } from '../providers/types.js';
+import { parseModelParamsEnv } from '../providers/shared/fal-helpers.js';
 
 export interface ReferenceImage {
   /**
@@ -231,7 +232,8 @@ export async function generateWithReference(input: GenerateWithReferenceInput): 
         aspect_ratio: input.aspect_ratio,
         image_size: input.image_size,
         number_of_images: input.number_of_images,
-        person_generation: input.person_generation
+        person_generation: input.person_generation,
+        extra_params: parseModelParamsEnv('IMAGE_EDIT_MODEL_PARAMS')
       },
       credentials,
       modelId
