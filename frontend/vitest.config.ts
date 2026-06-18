@@ -23,9 +23,9 @@ export default defineConfig({
 				'build/'
 			]
 		},
-		// Svelte 5 compatibility + SvelteKit `$lib` alias for unit tests
+		// SvelteKit `$lib` alias for unit tests (Svelte 5 resolves `svelte`
+		// itself via vite-plugin-svelte + the `browser` resolve condition)
 		alias: [
-			{ find: /^svelte$/, replacement: 'svelte/internal' },
 			{ find: /^\$lib\/(.*)$/, replacement: `${lib}/$1` },
 			{ find: /^\$lib$/, replacement: lib }
 		]
