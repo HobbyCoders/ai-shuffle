@@ -1,15 +1,19 @@
 <script lang="ts">
 	/**
-	 * UsageLimitIndicator — compact, ALWAYS-VISIBLE glass pill showing the current
-	 * 5-hour usage window, sitting next to <ContextUsageBar /> in the controls dock.
+	 * UsageLimitIndicator — compact glass pill showing the current 5-hour usage
+	 * window, sitting next to <ContextUsageBar /> in the controls dock.
+	 *
+	 * Renders nothing until the first reading ever arrives — the CLI only reports
+	 * 5-hour usage once you're meaningfully into a window, so an empty pill would
+	 * just take up toolbar space ~90% of the time. Once a reading lands it stays
+	 * visible (the value persists across reloads).
 	 *
 	 * Data source: the `rateLimit` store's persisted `lastFiveHour` reading, fed by
 	 * the WS `case 'rate_limit'` handler. The CLI only reports 5-hour usage when the
 	 * rate-limit *status changes* (there's no proactive/queryable live feed), so this
 	 * pill shows the MOST RECENT reported value at all times — not a second-by-second
-	 * figure. It refreshes whenever a new reading arrives, drops to 0% once the window
-	 * rolls over (`resets_at` passes → a fresh 5-hour window), and shows a neutral "—"
-	 * until the first reading ever arrives.
+	 * figure. It refreshes whenever a new reading arrives and drops to 0% once the
+	 * window rolls over (`resets_at` passes → a fresh 5-hour window).
 	 *
 	 * Window selection: keyed on `rate_limit_type === 'five_hour'` (the store only
 	 * stores five-hour readings into `lastFiveHour`).
@@ -99,15 +103,17 @@
 	});
 </script>
 
-<div class="usage-indicator usage-limit {severity}" title={tooltip}>
-	<span class="limit-icon" aria-hidden="true">
-		<Clock size={12} />
-	</span>
-	<div class="usage-bar">
-		<div class="usage-fill" style="width: {displayPct ?? 0}%"></div>
+{#if hasValue}
+	<div class="usage-indicator usage-limit {severity}" title={tooltip}>
+		<span class="limit-icon" aria-hidden="true">
+			<Clock size={12} />
+		</span>
+		<div class="usage-bar">
+			<div class="usage-fill" style="width: {displayPct ?? 0}%"></div>
+		</div>
+		<span class="usage-text">{displayPct}%</span>
 	</div>
-	<span class="usage-text">{hasValue ? `${displayPct}%` : '—'}</span>
-</div>
+{/if}
 
 <style>
 	/* Glass pill — mirrors ContextUsageBar's .usage-indicator for visual parity. */

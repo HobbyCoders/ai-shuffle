@@ -1,7 +1,7 @@
 /**
  * Rate-limit store — holds the most recent `rate_limit` WebSocket event plus a
  * persisted "last-known five-hour reading" so `UsageLimitIndicator.svelte` can
- * render an ALWAYS-VISIBLE 5-hour usage pill.
+ * render a 5-hour usage pill (hidden until the first reading arrives).
  *
  * Slice C (SDK 0.1.65→0.1.81 upgrade). Plain `.ts` (no $state runes) — see
  * KNOWN_ISSUES.md Root Cause 10.
@@ -12,9 +12,9 @@
  * and the 5h window belongs to the CLI's OAuth subscription, not the backend's
  * API key). So we keep the MOST RECENT reported five-hour reading
  * ({@link RateLimitState.lastFiveHour}) and persist it to localStorage. The pill
- * shows that last-known value at all times, resets to 0% once the window rolls
- * over (`resets_at` passes), and shows a neutral placeholder until the first
- * reading ever arrives.
+ * stays hidden until the first reading ever arrives, then shows that last-known
+ * value at all times, resetting to 0% once the window rolls over (`resets_at`
+ * passes).
  *
  * Lifecycle:
  *   1. WS handler `case 'rate_limit'` calls {@link rateLimit.set}.
