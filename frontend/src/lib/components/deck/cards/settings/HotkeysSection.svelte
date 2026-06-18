@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
-	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
+	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import HotkeyCapture from '$lib/components/settings/HotkeyCapture.svelte';
 	import './settings-shared.css';
 

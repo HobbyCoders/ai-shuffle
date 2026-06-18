@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
-	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
+	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import './settings-shared.css';
 
 	interface Props {

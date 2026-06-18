@@ -7,7 +7,7 @@
 	 * Back button slides back. Works well on mobile and desktop.
 	 */
 	import { Check, ChevronRight, ChevronLeft, FolderClosed, FolderPlus } from 'lucide-svelte';
-	import { groups, organizeByGroups, type EntityType } from '$lib/stores/groups';
+	import { groups, organizeByGroups, type EntityType } from '$lib/stores/groups.svelte';
 	import { tick } from 'svelte';
 
 	interface Item {

@@ -31,8 +31,8 @@
 		ArrowUpRight,
 		Package
 	} from 'lucide-svelte';
-	import { files, sortedFiles, breadcrumbs, hasSelection, selectionCount } from '$lib/stores/files';
-	import type { FileItem } from '$lib/stores/files';
+	import { files, sortedFiles, breadcrumbs, hasSelection, selectionCount } from '$lib/stores/files.svelte';
+	import type { FileItem } from '$lib/stores/files.svelte';
 	import ContextMenu from '$lib/components/ui/ContextMenu.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 

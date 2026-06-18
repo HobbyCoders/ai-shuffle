@@ -17,7 +17,7 @@
 	import QueuedMessages from '$lib/components/chat/QueuedMessages.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
-	import { githubAuthenticated } from '$lib/stores/auth';
+	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
 	import ExecutionModeBar from './ExecutionModeBar.svelte';
 

@@ -33,13 +33,14 @@
 		BookOpen
 	} from 'lucide-svelte';
 	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
-	import { layout, activeView, sidebarCollapsed } from '$lib/stores/layout';
-	import type { ViewType } from '$lib/stores/layout';
-	import { appData, sessions, projects, apiUserSessions } from '$lib/stores/app-data';
+	import { layout, activeView, sidebarCollapsed } from '$lib/stores/layout.svelte';
+	import type { ViewType } from '$lib/stores/layout.svelte';
+	import { appData, sessions, projects, apiUserSessions } from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { toggleSessionFavorite } from '$lib/api/client';
 	import type { Session } from '$lib/api/client';
 	import type { Project } from '$lib/stores/types';
+	import { toast } from '$lib/stores/toast';
 
 	interface Props {
 		isAdmin?: boolean;
@@ -183,6 +184,7 @@
 			await appData.loadSessions();
 		} catch (err) {
 			console.error('Failed to toggle favorite:', err);
+			toast.push('Failed to update favorite', { tone: 'error' });
 		}
 	}
 
@@ -279,6 +281,7 @@
 				deletingProjectId = null;
 			} catch (err) {
 				console.error('Failed to delete project:', err);
+				toast.push('Failed to delete project', { tone: 'error' });
 			} finally {
 				deleteLoading = false;
 			}
@@ -312,6 +315,7 @@
 				await appData.deleteSession(sessionId);
 			} catch (err) {
 				console.error('Failed to delete session:', err);
+				toast.push('Failed to delete session', { tone: 'error' });
 			} finally {
 				deleteSessionLoading = false;
 				deletingSessionId = null;

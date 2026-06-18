@@ -3,7 +3,7 @@
 	 * TodoList - Cursor-style minimal task progress display
 	 */
 	import type { TodoItem } from '$lib/stores/types';
-	import { chatPreferences } from '$lib/stores/chatPreferences';
+	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 
 	interface Props {
 		todos: TodoItem[];

@@ -24,10 +24,10 @@ export default defineConfig({
 				'build/'
 			]
 		},
-		// SvelteKit `$lib` alias for unit tests. (Do NOT alias `svelte` →
-		// `svelte/internal`: that was a Svelte 4 hack and `svelte/internal` no
-		// longer exists in Svelte 5, so it breaks any module importing runes
-		// helpers like `untrack` from 'svelte'.)
+		// SvelteKit `$lib` alias for unit tests. (Svelte 5 resolves `svelte`
+		// itself via vite-plugin-svelte + the `browser` resolve condition — do
+		// NOT alias `svelte` → `svelte/internal`: that was a Svelte 4 hack and
+		// `svelte/internal` no longer exists in Svelte 5.)
 		alias: [
 			{ find: /^\$lib\/(.*)$/, replacement: `${lib}/$1` },
 			{ find: /^\$lib$/, replacement: lib },

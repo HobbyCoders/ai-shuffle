@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('$lib/api/client', () => ({
 	api: { post: mocks.post },
 }));
-vi.mock('$lib/stores/auth', () => ({
+vi.mock('$lib/stores/auth.svelte', () => ({
 	auth: {
 		get current() {
 			return { status: { authenticated: mocks.authenticated.value } };

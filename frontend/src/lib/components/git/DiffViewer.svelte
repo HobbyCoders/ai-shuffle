@@ -10,7 +10,7 @@
 	 * When `embedded` is true, the header is hidden (used inside ChangedFilesPanel review mode).
 	 */
 	import { ArrowLeft, FileText, Loader2 } from 'lucide-svelte';
-	import { git } from '$lib/stores/git';
+	import { git } from '$lib/stores/git.svelte';
 	import * as gitApi from '$lib/api/git';
 	import { parseDiff, toSideBySide, countChanges, shouldRefetchDiff, effectiveDiffMode } from '$lib/utils/diff-parser';
 	import type { ParsedDiff, SideBySidePair } from '$lib/utils/diff-parser';

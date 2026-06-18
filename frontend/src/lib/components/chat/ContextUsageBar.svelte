@@ -11,7 +11,7 @@
 	 * instance than the one the poller writes to.
 	 */
 	import { activeSession } from '$lib/stores/active-session';
-	import { profiles } from '$lib/stores/app-data';
+	import { profiles } from '$lib/stores/app-data.svelte';
 	import { getContextMaxForModel, AUTO_COMPACTION_BASE } from '$lib/constants/chat';
 	import { getDefaultModel } from '$lib/constants/models';
 

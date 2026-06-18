@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { auth, authLoading, authError } from '$lib/stores/auth';
+	import { auth, authLoading, authError } from '$lib/stores/auth.svelte';
 	import type { LoginResponse } from '$lib/api/auth';
 
 	// Login fields

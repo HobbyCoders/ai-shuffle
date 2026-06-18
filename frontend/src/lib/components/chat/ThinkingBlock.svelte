@@ -10,7 +10,7 @@
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { Typewriter } from '$lib/utils/typewriter';
 	import StreamingIndicator from './StreamingIndicator.svelte';
-	import { chatPreferences } from '$lib/stores/chatPreferences';
+	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 
 	// Configure marked for markdown rendering
 	marked.setOptions({

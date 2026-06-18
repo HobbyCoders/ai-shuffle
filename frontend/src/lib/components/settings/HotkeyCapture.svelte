@@ -9,7 +9,7 @@
 	 * />
 	 */
 	import { formatHotkeyConfig } from '$lib/services/keyboard';
-	import type { HotkeyConfig } from '$lib/stores/hotkeyPreferences';
+	import type { HotkeyConfig } from '$lib/stores/hotkeyPreferences.svelte';
 
 	interface Props {
 		value: HotkeyConfig;

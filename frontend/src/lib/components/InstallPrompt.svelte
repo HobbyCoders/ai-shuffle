@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { pwa, isInstallable } from '$lib/stores/pwa';
+	import { pwa, isInstallable } from '$lib/stores/pwa.svelte';
 
 	const DISMISS_KEY = 'ai-shuffle-install-dismissed';
 	const PERMANENT_DISMISS_KEY = 'ai-shuffle-install-never';

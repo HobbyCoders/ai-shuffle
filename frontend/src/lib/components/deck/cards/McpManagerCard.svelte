@@ -14,7 +14,7 @@
 		mcpLoading,
 		mcpError,
 		mcpDisplayStats
-	} from '$lib/stores/mcp';
+	} from '$lib/stores/mcp.svelte';
 	import type { McpServerInfo, McpServerType } from '$lib/api/mcp';
 	import { getServerTypeLabel, validateMcpServerConfig } from '$lib/api/mcp';
 	import { Server, AlertCircle, X, Plus, Search, Trash2, Check, Globe, Terminal, Zap, Info, ChevronRight } from 'lucide-svelte';

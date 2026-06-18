@@ -8,7 +8,7 @@
 	 * - Transcribing (with processing animation)
 	 */
 	import { globalSttState, clearError } from '$lib/services/globalStt';
-	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
+	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import { formatHotkeyConfig } from '$lib/services/keyboard';
 
 	// Derived visibility

@@ -9,7 +9,7 @@
 	 */
 	import { onMount } from 'svelte';
 	import './card-design-system.css';
-	import { auth, username, isAdmin, claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth';
+	import { auth, username, isAdmin, claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { api } from '$lib/api/client';
 	import type { Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/types';
@@ -17,8 +17,8 @@
 	import ConnectorManager from '$lib/components/ConnectorManager.svelte';
 	import { slide, fade } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
-	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
-	import { timezonePreference } from '$lib/stores/timezonePreference';
+	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences.svelte';
+	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { Settings } from 'lucide-svelte';

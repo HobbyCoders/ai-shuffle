@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { Bot, Search, Plus, Trash2, Download, Upload, X, RotateCcw, Sparkles, ChevronRight } from 'lucide-svelte';
-	import { groups } from '$lib/stores/groups';
+	import { groups } from '$lib/stores/groups.svelte';
 	import type { SubagentExport } from '$lib/api/client';
 	import AIGenerateDialog from '../AIGenerateDialog.svelte';
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';

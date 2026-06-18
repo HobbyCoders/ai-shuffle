@@ -5,7 +5,7 @@
 	import '../deck/cards/card-design-system.css';
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
-	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
+	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import HotkeyCapture from './HotkeyCapture.svelte';
 
 	let expanded = $state(false);

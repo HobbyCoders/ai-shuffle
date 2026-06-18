@@ -20,7 +20,7 @@
 		hookTesting,
 		hookSaving,
 		hookStats
-	} from '$lib/stores/hooks';
+	} from '$lib/stores/hooks.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { derived } from 'svelte/store';
 

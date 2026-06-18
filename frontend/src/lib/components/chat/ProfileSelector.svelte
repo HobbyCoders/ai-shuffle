@@ -5,7 +5,7 @@
 	 */
 	import { onMount } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { profiles } from '$lib/stores/app-data';
+	import { profiles } from '$lib/stores/app-data.svelte';
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 

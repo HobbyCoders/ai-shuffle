@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
-	import { theme, themePreference, currentPresetId, themePresets } from '$lib/stores/theme';
-	import { timezonePreference } from '$lib/stores/timezonePreference';
+	import { theme, themePreference, currentPresetId, themePresets } from '$lib/stores/theme.svelte';
+	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import type { WorkspaceValidation } from '$lib/api/client';
 	import './settings-shared.css';
 

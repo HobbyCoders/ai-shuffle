@@ -11,8 +11,8 @@
 	import { tick, onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
-	import { profiles } from '$lib/stores/app-data';
-	import { claudeAuthenticated } from '$lib/stores/auth';
+	import { profiles } from '$lib/stores/app-data.svelte';
+	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
 
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';

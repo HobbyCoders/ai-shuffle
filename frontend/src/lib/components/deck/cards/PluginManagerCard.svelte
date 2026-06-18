@@ -22,9 +22,7 @@
 		pluginInstalling,
 		uninstalledAvailablePlugins,
 		uninstalledPluginsByMarketplace,
-		pluginStats
-	} from '$lib/stores/plugins';
-	import {
+		pluginStats,
 		pluginUpdating,
 		updatesAvailable,
 		updatesCount,

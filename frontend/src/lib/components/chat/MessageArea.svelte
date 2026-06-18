@@ -15,9 +15,9 @@
 	 */
 	import { tick, untrack, onMount, onDestroy } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { profiles } from '$lib/stores/app-data';
+	import { profiles } from '$lib/stores/app-data.svelte';
 	import type { ChatMessage, TodoItem } from '$lib/stores/types';
-	import { chatPreferences } from '$lib/stores/chatPreferences';
+	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { messageCache } from '$lib/stores/message-cache';
 	import { STREAM_DEBUG } from '$lib/utils/debug-log';
 	import UserMessage from './UserMessage.svelte';

@@ -5,7 +5,7 @@
 	 * The parent handles FeaturePageLayout, tab bar, and footer.
 	 */
 	import type { Profile } from '$lib/api/client';
-	import { layout } from '$lib/stores/layout';
+	import { layout } from '$lib/stores/layout.svelte';
 	import { Users, Settings, Wrench, Bot, FileText, SlidersHorizontal, Check, Plus, Trash2 } from 'lucide-svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';

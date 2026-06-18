@@ -6,7 +6,7 @@
 	 * Includes DirectoryBrowser for location selection, auto-derived name/ID from path.
 	 */
 	import { X } from 'lucide-svelte';
-	import { appData } from '$lib/stores/app-data';
+	import { appData } from '$lib/stores/app-data.svelte';
 	import { getWorkspaceConfig } from '$lib/api/auth';
 	import { onMount } from 'svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';

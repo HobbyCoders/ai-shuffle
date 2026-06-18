@@ -5,8 +5,8 @@
 	import '../deck/cards/card-design-system.css';
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
-	import { theme, themePreference, currentPresetId, themePresets } from '$lib/stores/theme';
-	import { timezonePreference } from '$lib/stores/timezonePreference';
+	import { theme, themePreference, currentPresetId, themePresets } from '$lib/stores/theme.svelte';
+	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig } from '$lib/api/auth';
 	import { getErrorMessage } from '$lib/api/client';
 	import type { WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';

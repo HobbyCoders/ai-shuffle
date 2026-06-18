@@ -12,8 +12,8 @@
 	import { toast } from '$lib/stores/toast';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
 	import { Users, Upload, Sparkles, Plus, Wrench, Bot, Settings, FileText, SlidersHorizontal, Check } from 'lucide-svelte';
-	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data';
-	import { groups as groupsStore } from '$lib/stores/groups';
+	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data.svelte';
+	import { groups as groupsStore } from '$lib/stores/groups.svelte';
 	import {
 		getDefaultModel,
 		getModelBadgeClass as getModelBadgeClassShared,

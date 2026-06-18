@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { pwa, hasUpdate } from '$lib/stores/pwa';
+	import { pwa, hasUpdate } from '$lib/stores/pwa.svelte';
 
 	let isUpdating = false;
 

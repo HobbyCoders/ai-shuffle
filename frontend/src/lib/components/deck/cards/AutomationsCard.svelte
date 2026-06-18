@@ -42,7 +42,7 @@
 	import type { Project } from '$lib/stores/types';
 	import { getConnectors, getConnectorTypes } from '$lib/api/connectors';
 	import type { Connector, ConnectorTypeInfo } from '$lib/api/connectors';
-	import { timezonePreference } from '$lib/stores/timezonePreference';
+	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import { slide, fade } from 'svelte/transition';
 	import {
 		Search,

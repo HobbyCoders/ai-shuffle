@@ -39,7 +39,7 @@ import { createDraftManager } from './session/draft-manager';
 import { messageCache } from './message-cache';
 import { sessionEphemeralCache } from './session-cache';
 import { getOrCreateDeviceId } from './device-id';
-import { appData } from './app-data';
+import { appData } from './app-data.svelte';
 import { git } from './git.svelte';
 import { untrack } from 'svelte';
 import { createStore, createSubscribers } from './store-utils';

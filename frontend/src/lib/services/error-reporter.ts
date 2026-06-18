@@ -18,7 +18,7 @@
 
 import { api } from '$lib/api/client';
 import { activeSession } from '$lib/stores/active-session';
-import { auth } from '$lib/stores/auth';
+import { auth } from '$lib/stores/auth.svelte';
 
 export type ClientErrorSource = 'frontend' | 'ws' | 'api';
 

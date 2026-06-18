@@ -8,7 +8,7 @@
 	 * - LOCAL scope (.claude/.mcp.json) — with edit capability
 	 * - PROJECT scope (.mcp.json) — with edit capability
 	 */
-	import { mcp, projectMcpServers, mcpLoading } from '$lib/stores/mcp';
+	import { mcp, projectMcpServers, mcpLoading } from '$lib/stores/mcp.svelte';
 	import type { McpServerInfo } from '$lib/api/mcp';
 	import McpServerForm from '$lib/components/mcp/McpServerForm.svelte';
 	import { Search, Server, Globe, Terminal, Zap, FolderGit2, FolderLock, Download, Trash2, ToggleLeft, ToggleRight, ChevronRight } from 'lucide-svelte';

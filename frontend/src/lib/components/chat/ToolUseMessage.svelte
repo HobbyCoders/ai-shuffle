@@ -2,7 +2,7 @@
 	/**
 	 * ToolUseMessage - Collapsible tool execution display
 	 */
-	import { chatPreferences } from '$lib/stores/chatPreferences';
+	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 
 	interface Props {
 		name: string;
