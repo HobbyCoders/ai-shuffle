@@ -812,10 +812,23 @@ def build_options_from_profile(
     except Exception:
         logger.exception("Failed to apply CLI-flag built-in MCP servers")
 
-    # Additional directories
-    add_dirs = config.get("add_dirs")
-    if add_dirs:
-        options.add_dirs = add_dirs
+    # Additional directories.
+    # Notes live in the data dir (e.g. /data/notes in Docker), which is OUTSIDE
+    # every possible working directory (workspace / project / worktree all live
+    # under the workspace root). The SDK's file tools can only touch the cwd plus
+    # add_dirs, so an @-referenced note path like /data/notes/foo.md would be
+    # unreachable. Always register the notes dir so referenced notes (and their
+    # attachments, stored beneath it) resolve from any session.
+    merged_add_dirs: list = list(config.get("add_dirs") or [])
+    try:
+        from app.core.note_files import get_notes_dir
+        notes_dir = str(get_notes_dir())
+        if notes_dir not in (str(d) for d in merged_add_dirs):
+            merged_add_dirs.append(notes_dir)
+    except Exception:
+        logger.exception("Failed to register notes dir as an accessible directory")
+    if merged_add_dirs:
+        options.add_dirs = merged_add_dirs
 
     # Resume existing session
     if resume_session_id:
