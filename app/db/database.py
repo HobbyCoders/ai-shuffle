@@ -162,6 +162,27 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE notes ADD COLUMN file_path TEXT")
         migrations_applied.append("notes.file_path")
 
+    # Note attachments — uploaded files referenceable via @ inside a note.
+    # Created idempotently here so existing databases pick it up without a
+    # schema-version bump.
+    if table_exists(cursor, "notes") and not table_exists(cursor, "note_attachments"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS note_attachments (
+                id TEXT PRIMARY KEY,
+                note_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                content_type TEXT,
+                size_bytes INTEGER DEFAULT 0,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_note_attachments_note ON note_attachments(note_id)"
+        )
+        migrations_applied.append("note_attachments")
+
     # Add worktree_branch and worktree_path columns to sessions for persistent worktree info
     # These store worktree info directly on the session so it survives worktree deletion
     if table_exists(cursor, "sessions"):
@@ -730,6 +751,10 @@ from app.db.notes import (  # noqa: F401
     get_all_note_filenames,
     get_notes_without_file_path,
     bulk_update_note_file_paths,
+    create_note_attachment,
+    get_note_attachment,
+    get_note_attachments,
+    delete_note_attachment,
 )
 
 from app.db.hooks import (  # noqa: F401

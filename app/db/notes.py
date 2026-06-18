@@ -42,6 +42,17 @@ class NoteTagCount(TypedDict):
     count: int
 
 
+class NoteAttachmentRow(TypedDict):
+    """A file attached to a note."""
+    id: str
+    note_id: str
+    filename: str
+    file_path: str
+    content_type: Optional[str]
+    size_bytes: int
+    created_at: str
+
+
 # ============================================================================
 # Notes Operations
 # ============================================================================
@@ -289,3 +300,55 @@ def bulk_update_note_file_paths(updates: Dict[str, str]) -> None:
                 "UPDATE notes SET file_path = %s WHERE id = %s",
                 (file_path, note_id)
             )
+
+
+# ============================================================================
+# Note Attachments Operations
+# ============================================================================
+
+def create_note_attachment(
+    attachment_id: str,
+    note_id: str,
+    filename: str,
+    file_path: str,
+    content_type: Optional[str] = None,
+    size_bytes: int = 0,
+) -> NoteAttachmentRow:
+    """Persist a note attachment record."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO note_attachments
+                   (id, note_id, filename, file_path, content_type, size_bytes, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (attachment_id, note_id, filename, file_path, content_type, size_bytes, now),
+        )
+    return get_note_attachment(attachment_id)
+
+
+def get_note_attachment(attachment_id: str) -> Optional[NoteAttachmentRow]:
+    """Get a single attachment by ID."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM note_attachments WHERE id = %s", (attachment_id,))
+        return row_to_dict(cursor.fetchone())
+
+
+def get_note_attachments(note_id: str) -> List[NoteAttachmentRow]:
+    """List all attachments for a note, oldest first."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM note_attachments WHERE note_id = %s ORDER BY created_at ASC",
+            (note_id,),
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def delete_note_attachment(attachment_id: str) -> bool:
+    """Delete an attachment record. Returns True if a row was removed."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM note_attachments WHERE id = %s", (attachment_id,))
+        return cursor.rowcount > 0

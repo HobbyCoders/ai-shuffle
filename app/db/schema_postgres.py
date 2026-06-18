@@ -543,6 +543,24 @@ def create_postgres_schema(cursor) -> None:
         )
     """)
 
+    # Note attachments — files uploaded to a note and referenceable via @ in the
+    # note body. Deleting the note cascades to its attachments.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS note_attachments (
+            id TEXT PRIMARY KEY,
+            note_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            content_type TEXT,
+            size_bytes INTEGER DEFAULT 0,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_note_attachments_note ON note_attachments(note_id)"
+    )
+
     # ------------------------------------------------------------------
     # 30. Queued messages (server-side message queue for streaming)
     # ------------------------------------------------------------------

@@ -7,16 +7,22 @@
 
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
+	import NoteFileAutocomplete from './NoteFileAutocomplete.svelte';
 	import './card-design-system.css';
-	import { StickyNote, Search as SearchIcon, Plus, Pin, Trash2, ChevronRight } from 'lucide-svelte';
+	import { StickyNote, Search as SearchIcon, Plus, Pin, Trash2, ChevronRight, Paperclip, X } from 'lucide-svelte';
 	import {
 		getNotes,
 		createNote,
 		updateNote,
 		deleteNote,
 		getNoteTags,
+		getNoteAttachments,
+		uploadNoteAttachment,
+		deleteNoteAttachment,
+		noteAttachmentDownloadUrl,
 		type Note,
-		type NoteTag
+		type NoteTag,
+		type NoteAttachment
 	} from '$lib/api/client';
 	import { onMount } from 'svelte';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
@@ -48,6 +54,21 @@
 	let showPreview = $state(false);
 	let newTagInput = $state('');
 	let textareaEl = $state<HTMLTextAreaElement | null>(null);
+
+	// Attachments state
+	let attachments = $state<NoteAttachment[]>([]);
+	let uploading = $state(false);
+	let isDragOver = $state(false);
+	let fileInputEl = $state<HTMLInputElement | null>(null);
+
+	// `@` autocomplete state for referencing attached files
+	let autocompleteRef = $state<ReturnType<typeof NoteFileAutocomplete> | null>(null);
+	let atQuery = $state<string | null>(null); // text typed after `@`, or null when inactive
+	let atStartIndex = $state(-1); // index of the `@` character in editorContent
+	let autocompleteVisible = $derived(atQuery !== null && (editingNote !== null || isCreatingNew));
+
+	// The note id we can attach files to (created notes only)
+	let currentNoteId = $derived(editingNote?.id ?? null);
 
 	// Debounce for auto-save
 	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -122,6 +143,8 @@
 		editorTags = [];
 		editorPinned = false;
 		hasUnsavedChanges = false;
+		attachments = [];
+		closeAutocomplete();
 	}
 
 	// Open a note for editing
@@ -133,6 +156,19 @@
 		editorTags = [...note.tags];
 		editorPinned = note.is_pinned;
 		hasUnsavedChanges = false;
+		attachments = [];
+		closeAutocomplete();
+		loadAttachments(note.id);
+	}
+
+	// Load attachments for a note
+	async function loadAttachments(noteId: string) {
+		try {
+			attachments = await getNoteAttachments(noteId);
+		} catch (e) {
+			// Non-fatal: editor still works without the attachment list
+			attachments = [];
+		}
 	}
 
 	// Close editor and go back to list
@@ -153,6 +189,8 @@
 	function doCloseEditor() {
 		editingNote = null;
 		isCreatingNew = false;
+		attachments = [];
+		closeAutocomplete();
 		loadData();
 	}
 
@@ -301,6 +339,165 @@
 		markDirty();
 	}
 
+	// ========================================================================
+	// Attachments
+	// ========================================================================
+
+	// Ensure the note exists (has an id) so files can be associated with it.
+	// New, unsaved notes are persisted first (a title is required to save).
+	async function ensureNoteSaved(): Promise<string | null> {
+		const existing = editingNote;
+		if (existing) return existing.id;
+		if (isCreatingNew) {
+			if (!editorTitle.trim()) {
+				error = 'Add a title before attaching files';
+				return null;
+			}
+			// Cancel any pending autosave to avoid a duplicate create
+			if (saveTimeout) {
+				clearTimeout(saveTimeout);
+				saveTimeout = null;
+			}
+			await saveNote();
+			// saveNote() assigns editingNote on success; re-read it.
+			const created = editingNote as Note | null;
+			return created?.id ?? null;
+		}
+		return null;
+	}
+
+	function triggerFilePicker() {
+		fileInputEl?.click();
+	}
+
+	async function handleFileInputChange(e: Event) {
+		const input = e.target as HTMLInputElement;
+		if (input.files && input.files.length > 0) {
+			await uploadFiles(Array.from(input.files));
+		}
+		// Reset so selecting the same file again re-fires the change event
+		input.value = '';
+	}
+
+	async function uploadFiles(files: File[]) {
+		const noteId = await ensureNoteSaved();
+		if (!noteId) return;
+
+		uploading = true;
+		error = null;
+		try {
+			for (const file of files) {
+				const attachment = await uploadNoteAttachment(noteId, file);
+				attachments = [...attachments, attachment];
+			}
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Failed to upload file';
+		} finally {
+			uploading = false;
+		}
+	}
+
+	async function removeAttachment(attachment: NoteAttachment) {
+		if (!editingNote) return;
+		try {
+			await deleteNoteAttachment(editingNote.id, attachment.id);
+			attachments = attachments.filter(a => a.id !== attachment.id);
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Failed to remove attachment';
+		}
+	}
+
+	// Drag-and-drop upload onto the editor content area
+	function handleDragOver(e: DragEvent) {
+		e.preventDefault();
+		isDragOver = true;
+	}
+
+	function handleDragLeave(e: DragEvent) {
+		e.preventDefault();
+		isDragOver = false;
+	}
+
+	async function handleDrop(e: DragEvent) {
+		e.preventDefault();
+		isDragOver = false;
+		const dropped = e.dataTransfer?.files;
+		if (dropped && dropped.length > 0) {
+			await uploadFiles(Array.from(dropped));
+		}
+	}
+
+	// ========================================================================
+	// `@` reference autocomplete
+	// ========================================================================
+
+	// Find the active `@` mention immediately before the caret. The `@` must be
+	// at the start of input or preceded by whitespace, and the query (text after
+	// `@`) must not contain whitespace.
+	function detectAtMention() {
+		if (!textareaEl) {
+			closeAutocomplete();
+			return;
+		}
+		const caret = textareaEl.selectionStart ?? editorContent.length;
+		const before = editorContent.slice(0, caret);
+		const atIdx = before.lastIndexOf('@');
+		if (atIdx === -1) {
+			closeAutocomplete();
+			return;
+		}
+		// `@` must be at start or preceded by whitespace
+		if (atIdx > 0 && !/\s/.test(before[atIdx - 1])) {
+			closeAutocomplete();
+			return;
+		}
+		const query = before.slice(atIdx + 1);
+		if (/\s/.test(query)) {
+			closeAutocomplete();
+			return;
+		}
+		atStartIndex = atIdx;
+		atQuery = query;
+	}
+
+	function closeAutocomplete() {
+		atQuery = null;
+		atStartIndex = -1;
+	}
+
+	// Insert a markdown reference to the chosen attachment, replacing the typed
+	// `@query`. The token renders as a clickable link in preview.
+	function insertAttachmentReference(attachment: NoteAttachment) {
+		if (!textareaEl || atStartIndex < 0) {
+			closeAutocomplete();
+			return;
+		}
+		const caret = textareaEl.selectionStart ?? editorContent.length;
+		const token = `@[${attachment.filename}](attachment://${attachment.id}) `;
+		const newContent =
+			editorContent.slice(0, atStartIndex) + token + editorContent.slice(caret);
+		editorContent = newContent;
+		closeAutocomplete();
+		markDirty();
+
+		// Restore caret position just after the inserted token
+		const newCaret = atStartIndex + token.length;
+		requestAnimationFrame(() => {
+			if (textareaEl) {
+				textareaEl.focus();
+				textareaEl.setSelectionRange(newCaret, newCaret);
+				autoResizeTextarea();
+			}
+		});
+	}
+
+	// Forward navigation keys to the autocomplete when it's open
+	function handleTextareaKeydown(e: KeyboardEvent) {
+		if (autocompleteVisible && autocompleteRef) {
+			autocompleteRef.handleKeyDown(e);
+		}
+	}
+
 	// Format relative time
 	function formatRelativeTime(dateStr: string): string {
 		const date = new Date(dateStr);
@@ -315,9 +512,36 @@
 		return date.toLocaleDateString();
 	}
 
+	function escapeHtml(text: string): string {
+		return text
+			.replace(/&/g, '&amp;')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;')
+			.replace(/"/g, '&quot;');
+	}
+
+	// Convert an `@[name](attachment://id)` reference into a clickable chip link.
+	// Resolves to the real download URL when the referenced attachment still
+	// exists; otherwise renders the name as plain text so dangling refs degrade
+	// gracefully.
+	function renderAttachmentReferences(content: string): string {
+		return content.replace(
+			/@\[([^\]]+)\]\(attachment:\/\/([A-Za-z0-9_-]+)\)/g,
+			(_match, rawName: string, attachmentId: string) => {
+				const name = escapeHtml(rawName);
+				const att = attachments.find(a => a.id === attachmentId);
+				if (!att || !currentNoteId) {
+					return `<span class="note-ref note-ref--missing">@${name}</span>`;
+				}
+				const url = noteAttachmentDownloadUrl(currentNoteId, attachmentId);
+				return `<a class="note-ref" href="${url}" target="_blank" rel="noopener noreferrer" title="${name}">@${name}</a>`;
+			}
+		);
+	}
+
 	// Simple markdown to HTML (basic conversion)
 	function renderMarkdown(content: string): string {
-		return content
+		return renderAttachmentReferences(content)
 			// Headers
 			.replace(/^### (.+)$/gm, '<h3>$1</h3>')
 			.replace(/^## (.+)$/gm, '<h2>$1</h2>')
@@ -448,11 +672,60 @@
 				oninput={markDirty}
 			/>
 			<div class="editor-actions">
-				{#if saving}
-					<span class="autosave-status">Saving...</span>
+				{#if saving || uploading}
+					<span class="autosave-status">{uploading ? 'Uploading...' : 'Saving...'}</span>
 				{/if}
+				<button
+					class="card-action-btn"
+					onclick={triggerFilePicker}
+					disabled={uploading}
+					title="Attach file"
+				>
+					<Paperclip size={16} />
+				</button>
+				<input
+					type="file"
+					multiple
+					bind:this={fileInputEl}
+					onchange={handleFileInputChange}
+					style="display: none;"
+				/>
 			</div>
 		</div>
+
+		<!-- Attachments list -->
+		{#if attachments.length > 0}
+			<div class="attachments-bar">
+				{#each attachments as att (att.id)}
+					<div class="attachment-chip">
+						{#if currentNoteId}
+							<a
+								class="attachment-chip-link"
+								href={noteAttachmentDownloadUrl(currentNoteId, att.id)}
+								target="_blank"
+								rel="noopener noreferrer"
+								title={`Download ${att.filename}`}
+							>
+								<Paperclip size={12} />
+								<span class="attachment-chip-name">{att.filename}</span>
+							</a>
+						{:else}
+							<span class="attachment-chip-link">
+								<Paperclip size={12} />
+								<span class="attachment-chip-name">{att.filename}</span>
+							</span>
+						{/if}
+						<button
+							class="attachment-chip-remove"
+							onclick={() => removeAttachment(att)}
+							title="Remove attachment"
+						>
+							<X size={12} />
+						</button>
+					</div>
+				{/each}
+			</div>
+		{/if}
 
 		<!-- Editor/Preview Toggle -->
 		<div class="editor-tabs">
@@ -461,7 +734,14 @@
 		</div>
 
 		<!-- Content Area -->
-		<div class="content-area">
+		<div
+			class="content-area"
+			class:drag-over={isDragOver}
+			role="region"
+			ondragover={handleDragOver}
+			ondragleave={handleDragLeave}
+			ondrop={handleDrop}
+		>
 			{#if showPreview}
 				<div class="preview-content">
 					{#if editorContent}
@@ -471,13 +751,30 @@
 					{/if}
 				</div>
 			{:else}
-				<textarea
-					class="content-textarea"
-					placeholder="Write your note in Markdown..."
-					bind:value={editorContent}
-					bind:this={textareaEl}
-					oninput={() => { markDirty(); autoResizeTextarea(); }}
-				></textarea>
+				<div class="textarea-wrapper">
+					<textarea
+						class="content-textarea"
+						placeholder="Write your note in Markdown... Type @ to reference an attached file."
+						bind:value={editorContent}
+						bind:this={textareaEl}
+						oninput={() => { markDirty(); autoResizeTextarea(); detectAtMention(); }}
+						onkeydown={handleTextareaKeydown}
+						onclick={detectAtMention}
+						onkeyup={detectAtMention}
+						onblur={() => requestAnimationFrame(closeAutocomplete)}
+					></textarea>
+					<NoteFileAutocomplete
+						bind:this={autocompleteRef}
+						visible={autocompleteVisible}
+						query={atQuery ?? ''}
+						{attachments}
+						onSelect={insertAttachmentReference}
+						onClose={closeAutocomplete}
+					/>
+				</div>
+			{/if}
+			{#if isDragOver}
+				<div class="drop-overlay">Drop files to attach</div>
 			{/if}
 		</div>
 
@@ -783,6 +1080,113 @@
 		overflow-y: auto;
 		display: flex;
 		flex-direction: column;
+		position: relative;
+	}
+
+	.content-area.drag-over {
+		outline: 2px dashed var(--primary);
+		outline-offset: -4px;
+	}
+
+	.drop-overlay {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		color: var(--text-accent);
+		font-weight: 600;
+		pointer-events: none;
+		z-index: 5;
+	}
+
+	/* ============================================
+	   ATTACHMENTS
+	   ============================================ */
+	.attachments-bar {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-1);
+		padding: var(--space-2) var(--space-3);
+		border-bottom: 1px solid var(--border-default);
+	}
+
+	.attachment-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-1);
+		padding: 2px var(--space-1) 2px calc(var(--space-1) * 1.5);
+		background: var(--surface-1);
+		border: 1px solid var(--border-subtle, var(--border-default));
+		border-radius: var(--radius-full);
+		font-size: var(--text-xs);
+		max-width: 14rem;
+	}
+
+	.attachment-chip-link {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-1);
+		color: var(--text-secondary);
+		text-decoration: none;
+		overflow: hidden;
+	}
+
+	.attachment-chip-link:hover {
+		color: var(--text-accent);
+	}
+
+	.attachment-chip-name {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.attachment-chip-remove {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 2px;
+		background: none;
+		border: none;
+		border-radius: var(--radius-full);
+		color: var(--text-tertiary);
+		cursor: pointer;
+	}
+
+	.attachment-chip-remove:hover {
+		color: var(--destructive);
+		background: var(--surface-hover);
+	}
+
+	.textarea-wrapper {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		flex: 1;
+		min-height: 0;
+	}
+
+	/* Rendered `@`-reference link in preview */
+	.preview-content :global(.note-ref) {
+		display: inline-flex;
+		align-items: center;
+		padding: 0 calc(var(--space-1) * 1.5);
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		color: var(--text-accent);
+		border-radius: var(--radius-sm);
+		text-decoration: none;
+		font-size: 0.95em;
+	}
+
+	.preview-content :global(.note-ref:hover) {
+		background: color-mix(in oklch, var(--primary) 20%, transparent);
+	}
+
+	.preview-content :global(.note-ref--missing) {
+		background: var(--surface-1);
+		color: var(--text-tertiary);
 	}
 
 	.content-textarea {
