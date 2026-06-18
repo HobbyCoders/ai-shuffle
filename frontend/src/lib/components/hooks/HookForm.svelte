@@ -9,7 +9,7 @@
 	import { untrack } from 'svelte';
 	import type { Hook, HookCreate, HookUpdate, HookEventType, HookType } from '$lib/api/client';
 	import { HOOK_EVENT_TYPES } from '$lib/api/client';
-	import { projects } from '$lib/stores/app-data';
+	import { projects } from '$lib/stores/app-data.svelte';
 	import type { Project } from '$lib/stores/types';
 
 	interface Props {

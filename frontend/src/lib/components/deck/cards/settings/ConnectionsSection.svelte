@@ -2,7 +2,7 @@
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
 	import { onMount } from 'svelte';
-	import { claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth';
+	import { claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth.svelte';
 	import './settings-shared.css';
 
 	interface Props {

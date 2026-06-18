@@ -15,8 +15,8 @@
 	 */
 	import type { Snippet } from 'svelte';
 	import { PanelLeftOpen, Mic } from 'lucide-svelte';
-	import { layout, sidebarCollapsed } from '$lib/stores/layout';
-	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
+	import { layout, sidebarCollapsed } from '$lib/stores/layout.svelte';
+	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import { globalSttState, triggerToggle } from '$lib/services/globalStt';
 	import '$lib/components/deck/cards/card-design-system.css';
 

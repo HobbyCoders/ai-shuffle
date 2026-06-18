@@ -33,9 +33,9 @@
 		BookOpen
 	} from 'lucide-svelte';
 	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
-	import { layout, activeView, sidebarCollapsed } from '$lib/stores/layout';
-	import type { ViewType } from '$lib/stores/layout';
-	import { appData, sessions, projects, apiUserSessions } from '$lib/stores/app-data';
+	import { layout, activeView, sidebarCollapsed } from '$lib/stores/layout.svelte';
+	import type { ViewType } from '$lib/stores/layout.svelte';
+	import { appData, sessions, projects, apiUserSessions } from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { toggleSessionFavorite } from '$lib/api/client';
 	import type { Session } from '$lib/api/client';

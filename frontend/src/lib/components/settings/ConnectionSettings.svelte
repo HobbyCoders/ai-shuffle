@@ -5,7 +5,7 @@
 	import '../deck/cards/card-design-system.css';
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
-	import { auth, claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth';
+	import { auth, claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { startClaudeLogin, completeClaudeLogin } from '$lib/api/auth';
 	import { onMount } from 'svelte';

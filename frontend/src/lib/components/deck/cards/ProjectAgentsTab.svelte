@@ -13,7 +13,7 @@
 		projectAgentsLoading,
 		projectAgentsError,
 		projectAgentCount
-	} from '$lib/stores/projectAgents';
+	} from '$lib/stores/projectAgents.svelte';
 	import { Search, Bot, Trash2, X, ChevronRight } from 'lucide-svelte';
 	import {
 		getModelBadgeClass as getModelBadgeClassShared,

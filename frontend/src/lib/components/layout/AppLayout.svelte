@@ -9,8 +9,8 @@
 	 * - Resizable sidebar with drag handle
 	 */
 	import { onMount, onDestroy } from 'svelte';
-	import { layout, sidebarCollapsed, sidebarOverlay, sidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH } from '$lib/stores/layout';
-	import type { ViewType } from '$lib/stores/layout';
+	import { layout, sidebarCollapsed, sidebarOverlay, sidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH } from '$lib/stores/layout.svelte';
+	import type { ViewType } from '$lib/stores/layout.svelte';
 	import SidePanel from './SidePanel.svelte';
 	import MainPanel from './MainPanel.svelte';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';

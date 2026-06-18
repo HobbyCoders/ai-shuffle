@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { isOnline } from '$lib/stores/pwa';
+	import { isOnline } from '$lib/stores/pwa.svelte';
 </script>
 
 {#if !$isOnline}

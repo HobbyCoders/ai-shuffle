@@ -14,7 +14,7 @@
 		hookTesting,
 		hookSaving,
 		hookStats
-	} from '$lib/stores/hooks';
+	} from '$lib/stores/hooks.svelte';
 	import type { Hook, HookUpdate, HookTestResult } from '$lib/api/client';
 	import HookListItem from '$lib/components/hooks/HookListItem.svelte';
 	import PluginHookItem from '$lib/components/hooks/PluginHookItem.svelte';

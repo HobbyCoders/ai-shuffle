@@ -6,7 +6,7 @@
 	 * and a "Continue" button.
 	 */
 	import { GitBranch, X } from 'lucide-svelte';
-	import { git } from '$lib/stores/git';
+	import { git } from '$lib/stores/git.svelte';
 
 	interface Props {
 		open: boolean;

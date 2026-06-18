@@ -7,7 +7,7 @@
 	 * Uses GroupedSelector for group-aware project selection.
 	 */
 	import { ChevronDown, FolderClosed } from 'lucide-svelte';
-	import { projects } from '$lib/stores/app-data';
+	import { projects } from '$lib/stores/app-data.svelte';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
 

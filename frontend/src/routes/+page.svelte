@@ -10,12 +10,12 @@
 	 */
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { isAuthenticated, isAdmin } from '$lib/stores/auth';
+	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data';
+	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data.svelte';
 
-	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout';
-	import type { ViewType } from '$lib/stores/layout';
+	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
+	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 	import { getTags, type Tag } from '$lib/api/client';
 	import type { Command } from '$lib/api/commands';

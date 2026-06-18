@@ -5,12 +5,12 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { auth, isAuthenticated, setupRequired, claudeAuthenticated, onboardingComplete } from '$lib/stores/auth';
-	import { theme } from '$lib/stores/theme';
-	import { pwa, hasUpdate, isOnline } from '$lib/stores/pwa';
-	import { chatPreferences } from '$lib/stores/chatPreferences';
-	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences';
-	import { files } from '$lib/stores/files';
+	import { auth, isAuthenticated, setupRequired, claudeAuthenticated, onboardingComplete } from '$lib/stores/auth.svelte';
+	import { theme } from '$lib/stores/theme.svelte';
+	import { pwa, hasUpdate, isOnline } from '$lib/stores/pwa.svelte';
+	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
+	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
+	import { files } from '$lib/stores/files.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import { hydrateModelRegistry } from '$lib/constants/models';

@@ -12,7 +12,7 @@
 import { writable, get } from 'svelte/store';
 import { browser } from '$app/environment';
 import { registerShortcut, type ShortcutRegistration } from './keyboard';
-import { hotkeyPreferences, type HotkeyConfig } from '$lib/stores/hotkeyPreferences';
+import { hotkeyPreferences, type HotkeyConfig } from '$lib/stores/hotkeyPreferences.svelte';
 import { convertToWav } from '$lib/utils/audioConvert';
 
 // ============================================================================

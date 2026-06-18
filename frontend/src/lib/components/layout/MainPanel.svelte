@@ -6,14 +6,14 @@
 	 * based on the layout store's activeView state.
 	 */
 	import { untrack } from 'svelte';
-	import { activeView, sidebarCollapsed } from '$lib/stores/layout';
-	import type { ViewType } from '$lib/stores/layout';
-	import { projects } from '$lib/stores/app-data';
+	import { activeView, sidebarCollapsed } from '$lib/stores/layout.svelte';
+	import type { ViewType } from '$lib/stores/layout.svelte';
+	import { projects } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
-	import { git, gitStatus, branches as branchStore } from '$lib/stores/git';
-	import { githubAuthenticated } from '$lib/stores/auth';
-	import { githubRepoInfo } from '$lib/stores/github';
-	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming';
+	import { git, gitStatus, branches as branchStore } from '$lib/stores/git.svelte';
+	import { githubAuthenticated } from '$lib/stores/auth.svelte';
+	import { githubRepoInfo } from '$lib/stores/github.svelte';
+	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming.svelte';
 	import { getPullRequests } from '$lib/api/github';
 	import { exportSession } from '$lib/api/sessions';
 	import { toast } from '$lib/stores/toast';

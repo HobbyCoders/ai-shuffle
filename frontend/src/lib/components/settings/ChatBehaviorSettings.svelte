@@ -5,7 +5,7 @@
 	import '../deck/cards/card-design-system.css';
 	import { slide } from 'svelte/transition';
 	import { quintOut } from 'svelte/easing';
-	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences';
+	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { onMount } from 'svelte';
 
 	let expanded = $state(false);

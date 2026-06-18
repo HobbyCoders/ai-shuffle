@@ -6,7 +6,7 @@
  * chosen timezone (see timezonePreference store).
  */
 
-import { timezonePreference } from '$lib/stores/timezonePreference';
+import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 
 /**
  * Parse a backend UTC timestamp string into a proper Date.

@@ -5,8 +5,8 @@
 	 * and file attach button.
 	 */
 	import { activeSession } from '$lib/stores/active-session';
-	import { claudeAuthenticated } from '$lib/stores/auth';
-	import { profiles } from '$lib/stores/app-data';
+	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
+	import { profiles } from '$lib/stores/app-data.svelte';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import UsageLimitIndicator from './UsageLimitIndicator.svelte';
 	import OverrideDropdown from './OverrideDropdown.svelte';

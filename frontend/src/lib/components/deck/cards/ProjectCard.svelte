@@ -15,8 +15,8 @@
 	 * - Add project via shared modal with directory browser
 	 * - Search/filter for many projects
 	 */
-	import { appData as tabs, projects } from '$lib/stores/app-data';
-	import { groups } from '$lib/stores/groups';
+	import { appData as tabs, projects } from '$lib/stores/app-data.svelte';
+	import { groups } from '$lib/stores/groups.svelte';
 	import { Search, Plus, Trash2, FolderOpen, X, Settings, Server, Bot, Zap, MessageSquare, Brain, ChevronRight } from 'lucide-svelte';
 	import type ProjectMcpTabType from './ProjectMcpTab.svelte';
 	import ProjectGeneralTab from './ProjectGeneralTab.svelte';

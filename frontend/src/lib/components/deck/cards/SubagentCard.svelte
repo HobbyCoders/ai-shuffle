@@ -14,7 +14,7 @@
 	 * - Import/export JSON
 	 */
 	import { api, type SubagentExport } from '$lib/api/client';
-	import { groups } from '$lib/stores/groups';
+	import { groups } from '$lib/stores/groups.svelte';
 	import {
 		getModelBadgeClass as getModelBadgeClassShared,
 		getModelLabel,

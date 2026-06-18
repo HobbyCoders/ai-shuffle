@@ -7,8 +7,8 @@
 	 * - Read-only project ID and path
 	 * - Group assignment with select + plus/delete buttons + new group input
 	 */
-	import { appData, projects } from '$lib/stores/app-data';
-	import { groups as groupsStore } from '$lib/stores/groups';
+	import { appData, projects } from '$lib/stores/app-data.svelte';
+	import { groups as groupsStore } from '$lib/stores/groups.svelte';
 	import { Check, Plus, Trash2, Loader2 } from 'lucide-svelte';
 	import './card-design-system.css';
 

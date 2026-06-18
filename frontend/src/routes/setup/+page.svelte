@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
-	import { auth, authLoading, authError, setupRequired } from '$lib/stores/auth';
+	import { auth, authLoading, authError, setupRequired } from '$lib/stores/auth.svelte';
 	import {
 		getWorkspaceConfig,
 		setWorkspaceConfig,
