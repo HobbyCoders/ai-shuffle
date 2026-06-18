@@ -305,18 +305,6 @@
 			{/if}
 		</div>
 
-		<!-- Cloud status (shown when cloud mode active) -->
-		{#if $activeSession.executionMode === 'cloud'}
-			<div class="cloud-status" class:warn={cloudConfigured === false}>
-				<Cloud size={12} strokeWidth={1.5} />
-				{#if cloudConfigured === false}
-					<span>Not configured — set the second install in Settings → System → Cloud Offload</span>
-				{:else}
-					<span>Runs on your second install (GitHub repos only)</span>
-				{/if}
-			</div>
-		{/if}
-
 		<!-- Branch selector (shown when worktree mode active) -->
 		{#if $activeSession.executionMode === 'worktree'}
 			<div class="branch-selector" bind:this={dropdownRef}>
@@ -506,31 +494,6 @@
 
 	.mode-option :global(svg) {
 		flex-shrink: 0;
-	}
-
-	/* Cloud status hint */
-	.cloud-status {
-		display: flex;
-		align-items: center;
-		gap: 5px;
-		padding: 2px 4px;
-		font-size: 0.6875rem;
-		line-height: 1.3;
-		color: var(--muted-foreground);
-		max-width: 100%;
-	}
-
-	.cloud-status :global(svg) {
-		flex-shrink: 0;
-		color: var(--primary);
-	}
-
-	.cloud-status.warn {
-		color: var(--destructive);
-	}
-
-	.cloud-status.warn :global(svg) {
-		color: var(--destructive);
 	}
 
 	/* Branch selector */
