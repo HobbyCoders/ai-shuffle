@@ -107,6 +107,12 @@ class ProfileConfig(BaseModel):
     tools_preset: Optional[str] = None  # "claude_code" to use preset (SDK 0.1.12+)
     allowed_tools: Optional[List[str]] = None
     disallowed_tools: Optional[List[str]] = None
+    # UI-only: which tool-access mode the profile editor is in ("all", "none",
+    # "allow", "disallow"). Persisted so the dropdown round-trips unambiguously
+    # (e.g. "Allow Only Selected" with no tools yet picked can't be inferred from
+    # allowed_tools alone). The runtime ignores this and reads allowed_tools /
+    # disallowed_tools directly.
+    tool_selection_mode: Optional[str] = None
 
     # AI tools configuration - individual toggles for each AI tool
     ai_tools: Optional[AIToolsConfig] = None

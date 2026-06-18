@@ -345,7 +345,13 @@
 			? Object.entries(aiTools).filter(([_, enabled]) => enabled).map(([key]) => key)
 			: [];
 
-		if (Array.isArray(config.allowed_tools) && config.allowed_tools.length === 0) {
+		// Prefer the explicitly persisted mode when present (round-trips even when
+		// the tool list is empty, e.g. "Allow Only Selected" with nothing picked).
+		// Fall back to inference for profiles saved before tool_selection_mode existed.
+		const savedMode = config.tool_selection_mode;
+		if (savedMode === 'all' || savedMode === 'none' || savedMode === 'allow' || savedMode === 'disallow') {
+			toolSelectionMode = savedMode;
+		} else if (Array.isArray(config.allowed_tools) && config.allowed_tools.length === 0) {
 			toolSelectionMode = 'none';
 		} else if (allowedTools.length > 0) {
 			toolSelectionMode = 'allow';
@@ -576,11 +582,15 @@
 		}
 
 		if (profileForm.max_turns) config.max_turns = profileForm.max_turns;
+		// Persist the dropdown mode explicitly so it round-trips even when the tool
+		// list is empty (e.g. "Allow Only Selected" before any tool is picked).
+		// The runtime still derives behavior from allowed_tools/disallowed_tools.
+		config.tool_selection_mode = toolSelectionMode;
 		if (toolSelectionMode === 'none') {
 			config.allowed_tools = [];
-		} else if (toolSelectionMode === 'allow' && profileForm.allowed_tools.length > 0) {
+		} else if (toolSelectionMode === 'allow') {
 			config.allowed_tools = profileForm.allowed_tools;
-		} else if (toolSelectionMode === 'disallow' && profileForm.disallowed_tools.length > 0) {
+		} else if (toolSelectionMode === 'disallow') {
 			config.disallowed_tools = profileForm.disallowed_tools;
 		}
 		const allEnabledAgents = [...new Set([...builtinAgentIds, ...profileForm.enabled_agents])];

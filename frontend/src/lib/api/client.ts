@@ -228,6 +228,7 @@ export interface ProfileConfig {
 	model?: string;
 	allowed_tools?: string[];
 	disallowed_tools?: string[];
+	tool_selection_mode?: 'all' | 'none' | 'allow' | 'disallow';  // UI-only: persists the editor dropdown so it round-trips even when the tool list is empty
 	tools?: string[];  // SDK 0.1.12+ - explicit tool list
 	tools_preset?: string;  // SDK 0.1.12+ - "claude_code" preset
 	permission_mode?: string;
