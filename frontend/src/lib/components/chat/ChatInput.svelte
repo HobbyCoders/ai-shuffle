@@ -85,6 +85,15 @@
 			}
 			draftSaveTimeout = null;
 		}, 100);
+
+		// Clear the pending save on re-run/unmount so a stale timer can't fire
+		// after the editor is torn down (or after a session switch).
+		return () => {
+			if (draftSaveTimeout) {
+				clearTimeout(draftSaveTimeout);
+				draftSaveTimeout = null;
+			}
+		};
 	});
 
 	// Save draft immediately when component unmounts (critical for mode switches)
@@ -101,10 +110,20 @@
 	let editorRef = $state<TiptapEditor | null>(null);
 	let prevSessionId = $state($activeSession.sessionId);
 
-	// Sync editor content when session changes (ChatInput is NOT keyed by sessionId)
+	// Sync editor content when session changes (ChatInput is NOT keyed by sessionId).
+	// Because this single component is reused across sessions, it is solely
+	// responsible for moving draft text between the editor and the correct
+	// session — getting this wrong is what made text "leak" between sessions.
 	$effect(() => {
 		const newSessionId = $activeSession.sessionId;
 		if (newSessionId !== prevSessionId) {
+			// Persist the LEAVING session's draft from the live editor before we
+			// overwrite it. Reading the editor directly (not the debounced store
+			// draft) guarantees the text follows the session it was typed in,
+			// even when the switch happens within the debounce window.
+			if (!messageSent && editorRef) {
+				activeSession.saveDraftForSession(prevSessionId, getDraftJSON());
+			}
 			prevSessionId = newSessionId;
 			const newDraft = $activeSession.draft || '';
 			inputValue = newDraft;

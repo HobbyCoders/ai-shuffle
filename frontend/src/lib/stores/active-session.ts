@@ -568,6 +568,18 @@ export const activeSession = {
 
 	// ── Ephemeral UI State (delegated to draft-manager) ─────────────
 
+	/**
+	 * Persist a draft straight into a specific session's ephemeral cache entry,
+	 * bypassing the debounced store write. ChatInput calls this with the LEAVING
+	 * session's id and its live editor content at the moment the active session
+	 * changes, so the draft that survives a switch is always exactly what the
+	 * user last saw — never a stale debounced value, and never the wrong
+	 * session's text. `null` maps to the shared new-chat slot.
+	 */
+	saveDraftForSession(sessionId: string | null, draft: string) {
+		sessionEphemeralCache.patchDraft(sessionId ?? '__new_chat__', draft);
+	},
+
 	setDraft: draftManager.setDraft,
 	clearPendingInterruptPrompt: draftManager.clearPendingInterruptPrompt,
 	setScrollTop: draftManager.setScrollTop,

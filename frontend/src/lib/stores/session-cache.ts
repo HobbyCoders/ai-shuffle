@@ -61,6 +61,21 @@ class SessionEphemeralCache {
 	}
 
 	/**
+	 * Update just the draft of an already-cached session, in place.
+	 *
+	 * Used to flush the chat input's *live* editor content for the session being
+	 * left at switch time — the store's draft is debounced and can be stale, so
+	 * relying on it alone risks losing (or, in the worst case, leaking) text
+	 * across a session switch. No-op if the session was never cached; switch
+	 * handlers always save() the leaving session's ephemeral first, so an entry
+	 * exists by the time this runs.
+	 */
+	patchDraft(sessionId: string, draft: string): void {
+		const entry = this.cache.get(sessionId);
+		if (entry) entry.draft = draft;
+	}
+
+	/**
 	 * Check if a session has cached ephemeral state.
 	 */
 	has(sessionId: string): boolean {

@@ -340,6 +340,23 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			worktreeError: null,
 			sessionLocked: false,
 			sessionLockedBy: undefined,
+			// Per-session runtime state — MUST be reset on every switch so the
+			// leaving session's values never bleed into the target. These mirror
+			// the resets in newChat()/defaultState(); omitting them caused e.g. the
+			// previous session's profile (sessionProfileId), next-query profile
+			// (currentQueryProfileId — used by queued/auto-worktree sends), token
+			// totals, and stream timer to carry over until a poll happened to
+			// overwrite them. The poller (onPollApplied) repopulates the usage
+			// fields with the target session's real values.
+			sessionProfileId: null,
+			currentQueryProfileId: null,
+			totalTokensIn: 0,
+			totalTokensOut: 0,
+			totalCacheCreationTokens: 0,
+			totalCacheReadTokens: 0,
+			contextMax: 200_000,
+			streamStartTime: null,
+			worktreeCreateNewBranch: false,
 			// Mark context as pending — null signals "not yet loaded" so the
 			// context bar holds its last value instead of flashing to 0%.
 			// loadSession → onPollApplied will populate with correct values.
