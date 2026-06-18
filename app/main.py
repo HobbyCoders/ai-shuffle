@@ -110,6 +110,10 @@ async def lifespan(app: FastAPI):
 
     # Startup phases
     init_core()
+    # Now that the DB pool is up, funnel backend ERROR+ logs into error_log so
+    # the GetAppErrors MCP tool and admin UI can surface them.
+    from app.core.error_log_handler import install_error_log_handler
+    install_error_log_handler()
     init_encryption_and_sessions()
     init_workspace()
     check_prerequisites()
@@ -138,6 +142,11 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("team_transcript_watcher.stop_all failed")
     await shutdown_services()
+    try:
+        from app.core.error_log_handler import uninstall_error_log_handler
+        uninstall_error_log_handler()
+    except Exception:
+        pass
     logger.info("Shutting down AI Hub...")
 
 

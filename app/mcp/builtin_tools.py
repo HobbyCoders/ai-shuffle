@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -613,6 +613,56 @@ def create_builtin_tools_server(
     all_tools.append(tool_search)
 
     # ------------------------------------------------------------------
+    # GetAppErrors — read the durable app error log
+    # ------------------------------------------------------------------
+    @tool(
+        "GetAppErrors",
+        "Read recent application errors (frontend, backend, API, and WebSocket) "
+        "from AI Shuffle's error log so you can debug what the user just hit. Use "
+        "this when the user says something like 'I got an error, check the logs and "
+        "fix it'. Each entry has source, level, message, detail (stack trace), url, "
+        "status_code, occurrence_count, and timestamps.",
+        {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max errors to return (default 20, max 200)."},
+                "source": {"type": "string", "description": "Filter by source: frontend, backend, ws, or api."},
+                "this_session_only": {"type": "boolean", "description": "Only errors tied to this chat session."},
+                "since_minutes": {"type": "integer", "description": "Only errors seen within the last N minutes."},
+            },
+            "required": [],
+        },
+    )
+    async def get_app_errors(args: dict) -> dict:
+        try:
+            from app.db import error_logs
+
+            limit = max(1, min(int(args.get("limit") or 20), 200))
+            source = (args.get("source") or "").strip() or None
+            since = None
+            since_minutes = args.get("since_minutes")
+            if since_minutes:
+                try:
+                    since = datetime.now(timezone.utc) - timedelta(minutes=float(since_minutes))
+                except (TypeError, ValueError):
+                    since = None
+            sess = session_id if args.get("this_session_only") else None
+
+            errors = await asyncio.to_thread(
+                error_logs.get_recent_errors,
+                limit=limit,
+                source=source,
+                session_id=sess,
+                since=since,
+            )
+            return _ok({"errors": errors, "count": len(errors)})
+        except Exception as e:
+            logger.exception("GetAppErrors failed")
+            return _err(f"failed to read errors: {e}")
+
+    all_tools.append(get_app_errors)
+
+    # ------------------------------------------------------------------
     # Server assembly
     # ------------------------------------------------------------------
     logger.info(
@@ -640,4 +690,5 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__TaskOutput",
         "mcp__builtins__TaskStop",
         "mcp__builtins__ToolSearch",
+        "mcp__builtins__GetAppErrors",
     ]

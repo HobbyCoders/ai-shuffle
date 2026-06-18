@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 43
+SCHEMA_VERSION = 44
 
 
 def create_postgres_schema(cursor) -> None:
@@ -1105,6 +1105,42 @@ def create_postgres_schema(cursor) -> None:
         "CREATE INDEX IF NOT EXISTS idx_sss_project "
         "ON session_store_summaries(project_key)"
     )
+
+    # ------------------------------------------------------------------
+    # 50. Application error log (v44)
+    # ------------------------------------------------------------------
+    # Durable, queryable record of every error in the app — backend
+    # unhandled exceptions / ERROR-level logs (captured via the root-logger
+    # ErrorLogDBHandler) and frontend runtime / API / WebSocket errors
+    # (POSTed to /api/v1/logs/client-error). Read by the admin UI and, more
+    # importantly, by the GetAppErrors MCP tool so an agent can debug what
+    # the user just hit ("check the logs and fix it"). Repeated errors with
+    # the same ``fingerprint`` collapse onto one row (occurrence_count++,
+    # updated_at bumped) so a render loop or crash storm can't flood it.
+    # See app/db/error_logs.py and app/core/error_log_handler.py.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS error_log (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            level TEXT DEFAULT 'ERROR',
+            message TEXT NOT NULL,
+            detail TEXT,
+            logger_name TEXT,
+            url TEXT,
+            status_code INTEGER,
+            session_id TEXT,
+            user_id TEXT,
+            context JSONB,
+            fingerprint TEXT,
+            occurrence_count INTEGER DEFAULT 1,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_created ON error_log(created_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_source ON error_log(source)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_session ON error_log(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_fingerprint ON error_log(fingerprint)")
 
     # ==================================================================
     # SEED DATA

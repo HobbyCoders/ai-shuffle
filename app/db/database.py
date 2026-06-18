@@ -77,7 +77,8 @@ def _safe_json(value):
 # v39: Add queued_messages table for server-side message queueing
 # v40: Add instance_id column to sessions for per-instance isolation
 # v43: Add session_store_entries + session_store_summaries (SDK 0.1.65 SessionStore)
-SCHEMA_VERSION = 43
+# v44: Add error_log (app-wide error capture readable by the GetAppErrors MCP tool)
+SCHEMA_VERSION = 44
 
 
 def _run_column_migrations(cursor):
@@ -330,6 +331,35 @@ def _run_column_migrations(cursor):
         "CREATE INDEX IF NOT EXISTS idx_sss_project "
         "ON session_store_summaries(project_key)"
     )
+
+    # error_log (v44). Idempotent so upgrades from any older version land the
+    # table without needing the SCHEMA_VERSION bump to fire the bootstrap path
+    # (same defensive pattern as the SessionStore tables above).
+    if not table_exists(cursor, "error_log"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS error_log (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                level TEXT DEFAULT 'ERROR',
+                message TEXT NOT NULL,
+                detail TEXT,
+                logger_name TEXT,
+                url TEXT,
+                status_code INTEGER,
+                session_id TEXT,
+                user_id TEXT,
+                context JSONB,
+                fingerprint TEXT,
+                occurrence_count INTEGER DEFAULT 1,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        migrations_applied.append("error_log")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_created ON error_log(created_at DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_source ON error_log(source)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_session ON error_log(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_log_fingerprint ON error_log(fingerprint)")
 
     if migrations_applied:
         logger.info(f"Applied column migrations: {', '.join(migrations_applied)}")

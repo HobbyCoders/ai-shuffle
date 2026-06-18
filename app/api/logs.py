@@ -6,16 +6,18 @@ Provides endpoints to:
 - Export full log file as download
 """
 
+import asyncio
 import logging
 from collections import deque
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
-from app.api.auth import require_admin
+from app.api.auth import require_admin, require_auth, get_api_user_from_request
+from app.db import error_logs
 
 logger = logging.getLogger(__name__)
 
@@ -148,3 +150,82 @@ async def export_logs(
             "Content-Disposition": f'attachment; filename="{filename}"',
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Persistent error log (error_log table)
+# ---------------------------------------------------------------------------
+# Backend ERROR+ logs are captured automatically via ErrorLogDBHandler. The
+# endpoints below let the SPA report client-side errors and let admins (and the
+# GetAppErrors MCP tool, indirectly) read the durable error history.
+# ---------------------------------------------------------------------------
+
+# Sources a client is allowed to report (backend errors are captured server-side).
+_CLIENT_SOURCES = {"frontend", "ws", "api"}
+
+
+class ClientErrorIn(BaseModel):
+    message: str
+    source: str = "frontend"
+    level: str = "ERROR"
+    detail: Optional[str] = None
+    url: Optional[str] = None
+    status_code: Optional[int] = None
+    session_id: Optional[str] = None
+    context: Optional[dict[str, Any]] = None
+
+
+class ErrorLogResponse(BaseModel):
+    errors: list[dict[str, Any]]
+    returned: int
+
+
+@router.post("/api/v1/logs/client-error")
+async def report_client_error(
+    payload: ClientErrorIn,
+    request: Request,
+    token: str = Depends(require_auth),
+) -> dict[str, Any]:
+    """
+    Record a client-side (frontend / WebSocket / API) error into the durable
+    error log. Authenticated via cookie or API key.
+
+    Called by the SPA's global error handlers and WS error handlers so frontend
+    errors land in the same store agents read via GetAppErrors.
+    """
+    api_user = get_api_user_from_request(request)
+    user_id = api_user.get("id") if api_user else "admin"
+    source = payload.source if payload.source in _CLIENT_SOURCES else "frontend"
+
+    error_id = await asyncio.to_thread(
+        error_logs.record_error,
+        source,
+        payload.message,
+        level=(payload.level or "ERROR").upper(),
+        detail=payload.detail,
+        url=payload.url,
+        status_code=payload.status_code,
+        session_id=payload.session_id,
+        user_id=user_id,
+        context=payload.context,
+    )
+    return {"ok": True, "id": error_id}
+
+
+@router.get("/api/v1/logs/errors", response_model=ErrorLogResponse)
+async def get_error_logs(
+    token: str = Depends(require_admin),
+    limit: int = Query(100, ge=1, le=500),
+    source: Optional[str] = Query(None, description="Filter by source (frontend/backend/ws/api)"),
+    level: Optional[str] = Query(None, description="Filter by level (ERROR/WARNING/CRITICAL)"),
+    session_id: Optional[str] = Query(None, description="Filter by chat session id"),
+) -> ErrorLogResponse:
+    """Fetch recent persisted errors, most-recently-seen first (admin only)."""
+    errors = await asyncio.to_thread(
+        error_logs.get_recent_errors,
+        limit=limit,
+        source=source,
+        level=level,
+        session_id=session_id,
+    )
+    return ErrorLogResponse(errors=errors, returned=len(errors))
