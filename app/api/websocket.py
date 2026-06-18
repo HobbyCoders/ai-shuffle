@@ -390,25 +390,16 @@ async def chat_websocket(
                 # Dispatch to handler — updates live_session_store and broadcasts via sync_engine
                 await dispatch_event(event, event_ctx, stream_state)
 
-                # --- Turn-boundary queue check ---
-                # When a turn ends with stop_reason "tool_use", the SDK is about
-                # to execute tools and start another API call.  If there are
-                # queued messages waiting, interrupt now so the queued message is
-                # sent at the turn boundary (matching Claude Code behaviour)
-                # instead of waiting for the entire multi-turn query to finish.
-                if event_type == "stream_message_delta":
-                    _stop_reason = event.get("delta", {}).get("stop_reason")
-                    if _stop_reason and _stop_reason != "end_turn":
-                        _queued = await run_sync(database.get_queued_messages, session_id)
-                        if _queued:
-                            from app.core.query_engine import interrupt_session
-                            ctx.debug(
-                                logger,
-                                f"Interrupting at turn boundary — "
-                                f"{len(_queued)} queued message(s) waiting, "
-                                f"stop_reason={_stop_reason}"
-                            )
-                            await interrupt_session(session_id)
+                # NOTE: Queued ("Send Later") messages are intentionally NOT sent
+                # at intermediate turn boundaries (e.g. stop_reason="tool_use").
+                # Interrupting the SDK mid-query at a tool_use boundary leaves an
+                # orphaned tool_use block with no matching tool_result in the
+                # session history — an invalid conversation state. The queued
+                # message would appear to send, but the new query (and every query
+                # after it) then immediately stopped because the SDK session was
+                # corrupted. We now let the query run to its natural end (the final
+                # assistant message / end_turn) and drain the queue afterwards in
+                # the finally block below — see drain_next_queued_if_idle.
 
             query_wall_elapsed = time.monotonic() - query_wall_start
             ctx.info(logger, f"Query completed in {query_wall_elapsed:.1f}s")

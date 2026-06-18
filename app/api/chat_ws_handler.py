@@ -1329,38 +1329,16 @@ class ChatWebSocketHandler:
                 # Dispatch to handler — updates live_session_store and broadcasts via sync_engine
                 await dispatch_event(event, event_ctx, stream_state)
 
-                # --- Turn-boundary queue check ---
-                # When any turn ends (tool_use, end_turn, etc.) and there are
-                # queued messages waiting, interrupt now so the queued message
-                # is sent at the turn boundary instead of waiting for the
-                # entire multi-turn query to finish.  For end_turn this is a
-                # no-op interrupt (query is already ending), but the flag
-                # ensures the pre-close queue processor picks it up before
-                # session state is torn down.
-                if event_type == "stream_message_delta":
-                    stop_reason = event.get("delta", {}).get("stop_reason")
-                    if stop_reason:
-                        queued = await run_sync(database.get_queued_messages, session_id)
-                        if queued:
-                            if stop_reason != "end_turn":
-                                # Mid-query turn boundary — interrupt so the
-                                # loop drains and pre-close processing fires.
-                                from app.core.query_engine import interrupt_session
-                                ctx.debug(
-                                    logger,
-                                    f"Interrupting at turn boundary — "
-                                    f"{len(queued)} queued message(s) waiting, "
-                                    f"stop_reason={stop_reason}"
-                                )
-                                await interrupt_session(session_id)
-                                # Don't break — let the streaming loop drain
-                                # remaining events.
-                            else:
-                                ctx.debug(
-                                    logger,
-                                    f"end_turn with {len(queued)} queued message(s) — "
-                                    f"pre-close processing will handle them"
-                                )
+                # NOTE: Queued ("Send Later") messages are intentionally NOT sent
+                # at intermediate turn boundaries (e.g. stop_reason="tool_use").
+                # Interrupting the SDK mid-query at a tool_use boundary leaves an
+                # orphaned tool_use block with no matching tool_result in the
+                # session history — an invalid conversation state that corrupts
+                # the session so the queued message (and every query after it)
+                # immediately stops. We let the query run to its natural end (the
+                # final assistant message / end_turn); the pre-close queue
+                # processing below then sends the queued message as a clean new
+                # query.
 
             ctx.debug(logger, "Query completed")
 
