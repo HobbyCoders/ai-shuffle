@@ -16,6 +16,8 @@ import type { ActiveSessionState, StreamingSessionInfo } from '../active-session
 import { messageCache } from '../message-cache';
 import { toast } from '../toast';
 import { rateLimit } from '../rate-limit';
+import { reportClientError } from '$lib/services/error-reporter';
+import { startFixChat } from '$lib/services/fix-with-ai';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -716,7 +718,14 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// Must reset isStreaming so the user can send another message.
 				const errState = getState();
 				if (errState.sessionId) sessionPoller.stop(errState.sessionId);
-				update(s => ({ ...s, error: data.message as string, isStreaming: false, streamStartTime: null, wsStreamContent: '' }));
+				const errMessage = data.message as string;
+				update(s => ({ ...s, error: errMessage, isStreaming: false, streamStartTime: null, wsStreamContent: '' }));
+				reportClientError({
+					source: 'ws',
+					message: errMessage || 'Stream error',
+					detail: typeof data.detail === 'string' ? data.detail : undefined,
+					session_id: errState.sessionId ?? undefined,
+				});
 				const errorSessionId = errState.sessionId;
 				if (errorSessionId) {
 					streamingSessions.update(map => {
@@ -791,7 +800,31 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				} else {
 					message = customMessage || 'An API error occurred.';
 				}
-				toast.push(message, { tone: status === 429 ? 'warning' : 'error', duration_ms: 5000 });
+				const apiErrSessionId = getState().sessionId ?? undefined;
+				// Rate-limit (429) is transient and self-resolves — no "Fix with AI".
+				const showFix = status !== 429;
+				toast.push(message, {
+					tone: status === 429 ? 'warning' : 'error',
+					duration_ms: showFix ? 10000 : 5000,
+					action: showFix
+						? {
+								label: 'Fix with AI',
+								onClick: () =>
+									startFixChat({
+										source: 'ws',
+										message,
+										status_code: status > 0 ? status : undefined,
+										session_id: apiErrSessionId,
+									}),
+							}
+						: undefined,
+				});
+				reportClientError({
+					source: 'ws',
+					message,
+					status_code: status > 0 ? status : undefined,
+					session_id: apiErrSessionId,
+				});
 				break;
 			}
 

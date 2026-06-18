@@ -11,12 +11,19 @@ import { createStore } from './store-utils';
 
 export type ToastTone = 'error' | 'warning' | 'info' | 'success';
 
+/** Optional action button rendered inside a toast (e.g. "Fix with AI"). */
+export interface ToastAction {
+	label: string;
+	onClick: () => void;
+}
+
 export interface Toast {
 	id: number;
 	message: string;
 	tone: ToastTone;
 	duration_ms: number;
 	created_at: number;
+	action?: ToastAction;
 }
 
 export interface ToastState {
@@ -49,7 +56,10 @@ export const toast = {
 
 	subscribe: _store.subscribe,
 
-	push(message: string, opts: { tone?: ToastTone; duration_ms?: number } = {}): number {
+	push(
+		message: string,
+		opts: { tone?: ToastTone; duration_ms?: number; action?: ToastAction } = {}
+	): number {
 		const id = _nextId++;
 		const next: Toast = {
 			id,
@@ -57,6 +67,7 @@ export const toast = {
 			tone: opts.tone ?? 'info',
 			duration_ms: opts.duration_ms ?? 5000,
 			created_at: Date.now(),
+			action: opts.action,
 		};
 		_store.update(s => ({ toasts: [...s.toasts, next] }));
 		_schedule(id, next.duration_ms);

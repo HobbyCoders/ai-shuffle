@@ -32,6 +32,18 @@
 				</div>
 				<div class="toast-body">
 					<span class="toast-message">{t.message}</span>
+					{#if t.action}
+						<button
+							type="button"
+							class="toast-action"
+							onclick={() => {
+								t.action?.onClick();
+								toast.dismiss(t.id);
+							}}
+						>
+							{t.action.label}
+						</button>
+					{/if}
 				</div>
 				<button
 					type="button"
@@ -144,6 +156,32 @@
 		display: block;
 	}
 
+	.toast-action {
+		margin-top: 8px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-height: 28px;
+		padding: 4px 12px;
+		font-size: 0.75rem;
+		font-weight: 600;
+		background: var(--primary, var(--foreground));
+		color: var(--primary-foreground, var(--background));
+		border: 0;
+		border-radius: 6px;
+		cursor: pointer;
+		transition: opacity 0.15s ease;
+	}
+
+	.toast-action:hover {
+		opacity: 0.9;
+	}
+
+	.toast-action:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+
 	.toast-close {
 		flex-shrink: 0;
 		display: inline-flex;
@@ -184,6 +222,10 @@
 
 		.toast-close {
 			min-width: 44px;
+			min-height: 44px;
+		}
+
+		.toast-action {
 			min-height: 44px;
 		}
 	}

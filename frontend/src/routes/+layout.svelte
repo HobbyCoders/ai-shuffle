@@ -21,10 +21,12 @@
 	import OfflineBanner from '$lib/components/OfflineBanner.svelte';
 	import ToastViewport from '$lib/components/ToastViewport.svelte';
 	import { claudeStatus } from '$lib/stores/claude-status';
+	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
 
 	let { children }: { children: Snippet } = $props();
 
 	let initialized = $state(false);
+	let teardownErrorHandlers: (() => void) | null = null;
 
 	// Auth poll: detects gh login/logout happening in a terminal.
 	// Auth changes are rare, so 2-minute polling is plenty.
@@ -66,6 +68,10 @@
 
 		// Initialize PWA features
 		pwa.init();
+
+		// Funnel uncaught frontend errors into the durable error_log so agents
+		// can read them via GetAppErrors. Gated on auth inside the reporter.
+		teardownErrorHandlers = installGlobalErrorHandlers();
 
 		try {
 			await auth.checkAuth();
@@ -120,6 +126,8 @@
 		stopAuthPoll();
 		claudeStatus.stop();
 		document.removeEventListener('visibilitychange', handleAuthVisibility);
+		teardownErrorHandlers?.();
+		teardownErrorHandlers = null;
 	});
 </script>
 

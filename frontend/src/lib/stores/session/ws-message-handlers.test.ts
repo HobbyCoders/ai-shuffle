@@ -10,6 +10,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMessageHandlers, type MessageHandlerDeps, type InternalMutableState } from './ws-message-handlers';
 import type { ActiveSessionState } from '../active-session';
 
+// Mock the side-effect services the error handlers call. Keeps this a true unit
+// test of message dispatch — isolated from the heavy active-session/layout
+// module graph, and no real network POST or chat navigation fires. The services
+// have their own dedicated tests (error-reporter.test.ts, fix-with-ai.test.ts).
+vi.mock('$lib/services/error-reporter', () => ({ reportClientError: vi.fn() }));
+vi.mock('$lib/services/fix-with-ai', () => ({ startFixChat: vi.fn() }));
+
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
 function createMockInternal(): InternalMutableState {
