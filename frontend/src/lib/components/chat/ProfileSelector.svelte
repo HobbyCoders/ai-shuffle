@@ -100,13 +100,13 @@
 		display: flex;
 		align-items: center;
 		gap: 5px;
-		height: 26px;
-		padding: 0 8px;
-		background: transparent;
+		height: 28px;
+		padding: 0 10px;
+		background: color-mix(in oklch, var(--foreground) 6%, var(--background));
 		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		border-radius: var(--radius, 0.75rem);
 		color: var(--muted-foreground);
-		font-size: 0.6875rem;
+		font-size: 0.75rem;
 		font-weight: 500;
 		cursor: pointer;
 		transition: all 150ms ease;
@@ -114,7 +114,7 @@
 	}
 
 	.context-selector-btn:hover {
-		background: var(--hover-overlay);
+		border-color: var(--primary);
 		color: var(--foreground);
 	}
 
@@ -140,7 +140,7 @@
 	}
 
 	.selector-text {
-		font-size: 0.6875rem;
+		font-size: 0.75rem;
 		font-weight: 500;
 		color: inherit;
 		line-height: 1;
@@ -168,14 +168,15 @@
 	}
 
 	/* ===== DROPDOWN MENU ===== */
-	/* Lives on the left of the header rail, so it left-aligns under the button
-	   and expands rightward (centering would push it off the panel's left edge). */
+	/* Lives in the context pill bar just above the chat input, so it opens
+	   UPWARD (anchored to the pill's bottom edge) and left-aligns under the
+	   button. */
 	.selector-dropdown {
 		position: absolute;
-		top: calc(100% + 4px);
+		bottom: calc(100% + 4px);
 		left: 0;
 		min-width: 200px;
-		max-width: 280px;
+		max-width: min(280px, calc(100vw - 24px));
 		max-height: 60vh;
 		overflow-y: auto;
 		background: var(--popover);
@@ -190,7 +191,7 @@
 	@keyframes dropdown-fade-in {
 		from {
 			opacity: 0;
-			transform: translateY(-4px);
+			transform: translateY(4px);
 		}
 		to {
 			opacity: 1;
@@ -223,27 +224,20 @@
 			font-size: 0.75rem;
 		}
 
-		/* Header is a horizontal scroll rail on mobile; pin the dropdown as a fixed
-		   panel below the header so it isn't clipped by the rail's overflow. */
+		/* In the pill bar the dropdown opens upward; keep it within the viewport
+		   by anchoring to the bar's full width. */
+		.selector-wrapper {
+			position: static;
+		}
+
 		.selector-dropdown {
-			position: fixed;
-			top: 92px;
-			left: 8px;
-			right: 8px;
-			bottom: auto;
-			transform: none;
+			left: 12px;
+			right: 12px;
 			min-width: 0;
 			max-width: none;
-			max-height: 60vh;
-			z-index: 200;
 		}
 
-		@keyframes dropdown-fade-in {
-			from { opacity: 0; transform: translateY(-4px); }
-			to { opacity: 1; transform: translateY(0); }
-		}
-
-		/* Match git buttons' mobile touch target */
+		/* Bigger touch target on mobile. */
 		.context-selector-btn {
 			height: 36px;
 			padding: 0 12px;

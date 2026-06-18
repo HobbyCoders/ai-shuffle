@@ -6,7 +6,13 @@
  *
  * Notifications are always active when permission is granted — no toggle needed.
  * Permission is requested automatically when visiting the main page.
+ *
+ * An audible chime is also played for these events (see notificationSound). The
+ * sound plays regardless of whether the window/tab is focused or visible, so the
+ * user is alerted even when they are not looking at the screen.
  */
+
+import { notificationSound } from './notificationSound';
 
 function isSupported(): boolean {
 	if (typeof window === 'undefined') return false;
@@ -119,6 +125,9 @@ function formatCost(cost: number): string {
  * Show a notification for session completion.
  */
 export function notifySessionComplete(info: SessionCompleteInfo): Notification | null {
+	// Audible alert first — plays regardless of focus/visibility.
+	notificationSound.playComplete();
+
 	const { sessionTitle, sessionId, durationSeconds, totalCostUsd } = info;
 
 	const details: string[] = [];
@@ -152,7 +161,11 @@ export function notifySessionComplete(info: SessionCompleteInfo): Notification |
 
 /**
  * Show a notification when AI is waiting for user response (permission or question).
- * Only shows if the window is not focused (user is away).
+ *
+ * The audible chime plays regardless of focus — the user should be alerted even
+ * when they are looking at the screen. The visual OS notification, however, is
+ * only shown when the window is not focused (when focused, the in-app modal is
+ * already visible, so an OS popup would be redundant).
  */
 export function notifyWaitingForResponse(
 	type: 'permission' | 'question',
@@ -162,6 +175,9 @@ export function notifyWaitingForResponse(
 		sessionTitle?: string;
 	}
 ): Notification | null {
+	// Audible alert first — always plays, focused or not.
+	notificationSound.play(type);
+
 	if (typeof document !== 'undefined' && document.hasFocus()) {
 		return null;
 	}

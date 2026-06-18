@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI Shuffle — Notification Sound Preview</title>
+<style>
+	body {
+		font-family: system-ui, sans-serif;
+		background: #0f1115;
+		color: #e7e9ee;
+		display: flex;
+		min-height: 100vh;
+		margin: 0;
+		align-items: center;
+		justify-content: center;
+	}
+	.card {
+		background: #181b22;
+		border: 1px solid #2a2f3a;
+		border-radius: 14px;
+		padding: 32px;
+		width: min(440px, 90vw);
+		box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+	}
+	h1 { font-size: 1.1rem; margin: 0 0 6px; }
+	p { color: #9aa3b2; font-size: 0.85rem; margin: 0 0 20px; line-height: 1.5; }
+	button {
+		display: block;
+		width: 100%;
+		padding: 14px;
+		margin-bottom: 12px;
+		font-size: 0.95rem;
+		font-weight: 600;
+		color: #fff;
+		background: #4c6ef5;
+		border: none;
+		border-radius: 10px;
+		cursor: pointer;
+		transition: filter 120ms ease;
+	}
+	button.secondary { background: #2a2f3a; }
+	button:hover { filter: brightness(1.1); }
+	.hint { font-size: 0.75rem; color: #6b7280; margin-top: 14px; text-align: center; }
+</style>
+</head>
+<body>
+	<div class="card">
+		<h1>🔔 Notification sound preview</h1>
+		<p>These are the exact chimes AI Shuffle plays when a session completes or
+		Claude needs your input. Click anywhere first (browsers require a gesture to
+		enable audio), then try each one. Switch to another tab while it plays — the
+		sound continues regardless of focus.</p>
+		<button onclick="play('complete')">▶ Session complete (rising arpeggio)</button>
+		<button class="secondary" onclick="play('question')">▶ Question / permission (attention)</button>
+		<div class="hint">Tip: lower your volume the first time.</div>
+	</div>
+
+<script>
+	// Mirror of frontend/src/lib/services/notificationSound.ts
+	const COMPLETE_NOTES = [
+		{ freq: 523.25, at: 0.0,  dur: 0.18 },
+		{ freq: 659.25, at: 0.11, dur: 0.18 },
+		{ freq: 783.99, at: 0.22, dur: 0.30 },
+	];
+	const QUESTION_NOTES = [
+		{ freq: 880.0,   at: 0.0,  dur: 0.16 },
+		{ freq: 1108.73, at: 0.17, dur: 0.28 },
+	];
+	const VOLUME = 0.4;
+
+	let ctx = null;
+	function ensureCtx() {
+		if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+		if (ctx.state === 'suspended') ctx.resume();
+		return ctx;
+	}
+
+	function playNote(ctx, freq, at, dur) {
+		const osc = ctx.createOscillator();
+		const gain = ctx.createGain();
+		osc.type = 'triangle';
+		osc.frequency.value = freq;
+		const peak = Math.max(0.0002, VOLUME);
+		gain.gain.setValueAtTime(0.0001, at);
+		gain.gain.exponentialRampToValueAtTime(peak, at + 0.015);
+		gain.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+		osc.connect(gain);
+		gain.connect(ctx.destination);
+		osc.start(at);
+		osc.stop(at + dur + 0.05);
+	}
+
+	function play(kind) {
+		const ctx = ensureCtx();
+		const notes = kind === 'complete' ? COMPLETE_NOTES : QUESTION_NOTES;
+		const start = ctx.currentTime + 0.02;
+		for (const n of notes) playNote(ctx, n.freq, start + n.at, n.dur);
+	}
+</script>
+</body>
+</html>

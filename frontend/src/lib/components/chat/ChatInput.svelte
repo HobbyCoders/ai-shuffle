@@ -20,6 +20,7 @@
 	import TiptapEditor from './TiptapEditor.svelte';
 	import VoiceRecorder from './VoiceRecorder.svelte';
 	import ControlsDock from './ControlsDock.svelte';
+	import ContextPillBar from './ContextPillBar.svelte';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips } from './tiptap/serialization';
 
 	interface Command {
@@ -201,6 +202,12 @@
 		const finalPrompt = editorRef?.getMessage() ?? '';
 
 		if (!finalPrompt.trim() || isUploading || $activeSession.isReopeningWorktree) return;
+
+		// Block sending while a worktree is being auto-created. The send button is
+		// already disabled during creation, but the Enter key path reaches here
+		// directly — without this guard a second send would fall through to the
+		// plain query path (no worktree_id) and run in the main checkout.
+		if ($activeSession.isCreatingWorktree) return;
 
 		// Require profile and project to be selected
 		if (!$activeSession.profile) {
@@ -569,6 +576,9 @@
 		<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
 			<!-- Main Island -->
 			<div class="chat-island" bind:this={islandRef}>
+				<!-- Context pills (profile + branch) sit directly above the input -->
+				<ContextPillBar />
+
 				<!-- Input Wrapper - The Hero (outer container with border) -->
 				<div class="input-wrapper">
 					<!-- Input Inner - Dark background container -->

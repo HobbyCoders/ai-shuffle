@@ -21,6 +21,9 @@
 		projectId: string;
 		isStreaming?: boolean;
 		isGitRepo?: boolean;
+		/** Show the branch checkout selector. Disabled when the branch pill is
+		 *  hosted elsewhere (e.g. the context pill bar above the chat input). */
+		showBranchSelector?: boolean;
 		/** Project name to display alongside the branch (combined badge) */
 		projectName?: string | null;
 		/** When set, forces worktree read-only mode and uses this as the branch display.
@@ -49,7 +52,7 @@
 		onOpenDiffReview?: () => void;
 	}
 
-	let { projectId, isStreaming = false, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onSendPrompt, commitPrompt, createPRPrompt, finishPrompt, pullPrompt, onOpenDiffReview }: Props = $props();
+	let { projectId, isStreaming = false, isGitRepo = true, showBranchSelector = true, projectName = null, worktreeBranch = null, openPR = null, onClickCommit, onClickCreatePR, onClickFinish, onClickNewBranch, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onSendPrompt, commitPrompt, createPRPrompt, finishPrompt, pullPrompt, onOpenDiffReview }: Props = $props();
 
 	// --- Editable-prompt popover state (opened by split-button chevrons) ---
 	// Only one popover is open at a time, keyed by action.
@@ -214,7 +217,8 @@
 
 <div class="git-actions" bind:this={gitActionsRef}>
 	{#if isGitRepo}
-	<!-- Branch selector -->
+	<!-- Branch selector (hidden when hosted in the context pill bar) -->
+	{#if showBranchSelector}
 	<div class="branch-selector" bind:this={dropdownRef}>
 		<button
 			class="git-btn branch-btn"
@@ -306,6 +310,8 @@
 			</div>
 		{/if}
 	</div>
+
+	{/if}
 
 	<!-- Pull button (when behind upstream, including diverged state) -->
 	{#if needsPull}

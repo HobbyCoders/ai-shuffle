@@ -26,6 +26,7 @@
 	// Sub-components
 	import ProfileList from './profiles/ProfileList.svelte';
 	import ProfileForm from './profiles/ProfileForm.svelte';
+	import { computeAiToolCount, computeEffectiveAiTools } from './profiles/toolAccess';
 
 	// Icon map for tabs
 	const tabIcons = { general: Settings, tools: Wrench, agents: Bot, prompt: FileText, advanced: SlidersHorizontal } as const;
@@ -172,9 +173,9 @@
 		{ key: 'CLAUDE_CODE_STREAM_CLOSE_TIMEOUT', placeholder: 'ms for stream close (SDK 0.1.10+)' }
 	];
 
-	// Tool selection mode
+	// Tool selection mode. The single visible dropdown drives both built-in and
+	// AI tool behavior — there is no separate AI-tool mode (see ./profiles/toolAccess).
 	let toolSelectionMode = $state<'all' | 'none' | 'allow' | 'disallow'>('all');
-	let aiToolSelectionMode = $state<'all' | 'custom'>('custom');
 	let customModelMode = $state(false);
 
 	// Collapsible tool source sections
@@ -228,13 +229,9 @@
 		return sdkToolTotal;
 	});
 
-	const aiToolCount = $derived.by(() => {
-		if (toolSelectionMode === 'none') return 0;
-		if (toolSelectionMode === 'allow' || toolSelectionMode === 'disallow') {
-			return profileForm.enabled_ai_tools.length;
-		}
-		return aiToolSelectionMode === 'all' ? getAllAIToolIds().length : profileForm.enabled_ai_tools.length;
-	});
+	const aiToolCount = $derived(
+		computeAiToolCount(toolSelectionMode, getAllAIToolIds(), profileForm.enabled_ai_tools)
+	);
 
 	const effectiveToolCount = $derived(enabledSdkToolCount + aiToolCount);
 
@@ -314,7 +311,6 @@
 			computer_use_enabled: false
 		};
 		toolSelectionMode = 'all';
-		aiToolSelectionMode = 'custom';
 		customModelMode = false;
 		activeTab = 'general';
 	}
@@ -397,21 +393,7 @@
 		viewMode = 'form';
 		activeTab = 'general';
 
-		loadAvailableAITools().then(() => {
-			if (!hasExplicitAIToolConfig) {
-				aiToolSelectionMode = 'all';
-			} else {
-				const allIds = getAllAIToolIds();
-				if (
-					enabledAITools.length === allIds.length &&
-					allIds.every((id) => enabledAITools.includes(id))
-				) {
-					aiToolSelectionMode = 'all';
-				} else {
-					aiToolSelectionMode = 'custom';
-				}
-			}
-		});
+		loadAvailableAITools();
 	}
 
 	function backToList() {
@@ -616,13 +598,11 @@
 			}, {} as Record<string, string>);
 		}
 
-		let effectiveAITools: string[];
-		if (aiToolSelectionMode === 'all') {
-			const allIds = getAllAIToolIds();
-			effectiveAITools = allIds.length > 0 ? allIds : [...profileForm.enabled_ai_tools];
-		} else {
-			effectiveAITools = [...profileForm.enabled_ai_tools];
-		}
+		const effectiveAITools = computeEffectiveAiTools(
+			toolSelectionMode,
+			getAllAIToolIds(),
+			profileForm.enabled_ai_tools
+		);
 		config.ai_tools = effectiveAITools.length > 0
 			? Object.fromEntries(effectiveAITools.map((id) => [id, true]))
 			: {};
@@ -748,12 +728,6 @@
 		const enabledAITools: string[] = Object.entries(aiTools)
 			.filter(([_, enabled]) => enabled)
 			.map(([key]) => key);
-
-		if (enabledAITools.length > 0) {
-			aiToolSelectionMode = 'custom';
-		} else {
-			aiToolSelectionMode = 'custom';
-		}
 
 		let spType = 'preset';
 		let spPreset = 'claude_code';

@@ -14,8 +14,19 @@
 		ALL_STT_MODELS,
 		type TTSVoice
 	} from '$lib/types/ai-models';
+	import { notificationSound } from '$lib/services/notificationSound';
 
 	let expanded = $state(false);
+
+	// Notification sound (alert chime on session complete / question / permission)
+	let notifySoundEnabled = $state(true);
+
+	function toggleNotifySound() {
+		notifySoundEnabled = !notifySoundEnabled;
+		notificationSound.setEnabled(notifySoundEnabled);
+		// Preview when turning on so the user hears what it does.
+		if (notifySoundEnabled) notificationSound.playComplete();
+	}
 
 	// TTS state
 	let currentTtsModel = $state('');
@@ -40,6 +51,7 @@
 
 	onMount(() => {
 		loadAudioSettings();
+		notifySoundEnabled = notificationSound.isEnabled();
 	});
 
 	function showSuccess(msg: string) {
@@ -171,6 +183,38 @@
 	</button>
 	{#if expanded}
 		<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
+			<!-- Notification Sound -->
+			<div class="setting-row">
+				<div class="setting-info">
+					<span class="setting-label">Notification Sound</span>
+					<span class="setting-desc">Play a chime when a session finishes or needs your input — even when this tab isn't focused</span>
+				</div>
+				<div class="notify-controls">
+					<button
+						type="button"
+						class="btn-test"
+						onclick={() => notificationSound.playComplete()}
+						disabled={!notifySoundEnabled}
+						aria-label="Test notification sound"
+					>
+						Test
+					</button>
+					<button
+						type="button"
+						onclick={toggleNotifySound}
+						class="toggle"
+						class:active={notifySoundEnabled}
+						role="switch"
+						aria-checked={notifySoundEnabled}
+						aria-label="Notification Sound"
+					>
+						<span class="toggle-knob"></span>
+					</button>
+				</div>
+			</div>
+
+			<hr class="divider" />
+
 			<!-- TTS Model -->
 			<div class="setting-row">
 				<label class="setting-label" for="audio-tts-model">Text-to-Speech Model</label>
@@ -326,6 +370,79 @@
 		font-weight: 500;
 		color: var(--foreground);
 		white-space: nowrap;
+	}
+
+	.setting-info {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+	}
+
+	.setting-desc {
+		font-size: 0.75rem;
+		font-weight: 400;
+		color: var(--muted-foreground);
+		white-space: normal;
+	}
+
+	.notify-controls {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		flex-shrink: 0;
+	}
+
+	.btn-test {
+		padding: 5px 12px;
+		background: var(--secondary);
+		color: var(--secondary-foreground);
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius) - 2px);
+		font-size: 0.8125rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background 150ms ease;
+	}
+
+	.btn-test:hover:not(:disabled) { background: var(--hover-overlay); }
+	.btn-test:disabled { opacity: 0.5; cursor: not-allowed; }
+	.btn-test:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+	.toggle {
+		position: relative;
+		width: 44px;
+		height: 24px;
+		background: var(--muted);
+		border: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem);
+		cursor: pointer;
+		transition: all 200ms ease;
+		flex-shrink: 0;
+	}
+
+	.toggle:hover { border-color: var(--ring); }
+	.toggle:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+	.toggle.active {
+		background: var(--primary);
+		border-color: var(--primary);
+	}
+
+	.toggle-knob {
+		position: absolute;
+		top: 2px;
+		left: 2px;
+		width: 18px;
+		height: 18px;
+		background: var(--primary-foreground);
+		border-radius: 50%;
+		transition: transform 200ms ease;
+		box-shadow: var(--shadow-s);
+	}
+
+	.toggle.active .toggle-knob {
+		transform: translateX(20px);
 	}
 
 	.input {

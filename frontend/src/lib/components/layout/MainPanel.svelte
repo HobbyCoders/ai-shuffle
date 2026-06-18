@@ -22,7 +22,6 @@
 	import ChatView from './ChatView.svelte';
 	import PageHeader from './PageHeader.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
-	import ProfileSelector from '$lib/components/chat/ProfileSelector.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
 	import InitRepoModal from '$lib/components/git/InitRepoModal.svelte';
 	import ChangedFilesPanel from '$lib/components/git/ChangedFilesPanel.svelte';
@@ -539,11 +538,6 @@
 				{isMobile}
 				hideGlobalStt={$activeView?.type === 'chat'}
 			>
-				{#snippet profile()}
-					{#if $activeView?.type === 'chat' && activeTab}
-						<ProfileSelector />
-					{/if}
-				{/snippet}
 				{#snippet leftActions()}
 					{#if $activeView?.type === 'chat' && activeTab?.sessionId && activeTab.messages.length > 0}
 						<button
@@ -563,6 +557,7 @@
 							projectId={activeTab.project}
 							isStreaming={$gitControlsStreaming}
 							isGitRepo={$gitStatus?.is_git_repo !== false}
+							showBranchSelector={false}
 							projectName={headerProjectName}
 							worktreeBranch={activeWorktreeBranch}
 							openPR={branchPR}

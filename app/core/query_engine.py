@@ -97,6 +97,7 @@ from app.core.query_options import (  # noqa: F401 — re-exports
     get_security_instructions,
     generate_environment_details,
     build_options_from_profile,
+    WorktreeUnavailableError,
     _build_thinking_config,
     _build_mcp_servers_dict,
     _build_mcp_servers_dict_with_ai_tools,
@@ -191,7 +192,10 @@ async def execute_query(
         profile_id=profile_id
     )
 
-    # Build options with user-scoped credential resolution
+    # Build options with user-scoped credential resolution.
+    # A WorktreeUnavailableError propagates here (non-streaming path) just like
+    # the ValueErrors above — the caller turns it into an error response rather
+    # than silently running the worktree session in the main checkout.
     options, agents_dict = build_options_from_profile(
         profile=profile,
         project=project,
@@ -446,15 +450,21 @@ async def stream_query(
         data=user_msg
     )
 
-    # Build options with user-scoped credential resolution
-    options, agents_dict = build_options_from_profile(
-        profile=profile,
-        project=project,
-        overrides=overrides,
-        resume_session_id=resume_id,
-        api_user_id=api_user_id,
-        session_id=session_id
-    )
+    # Build options with user-scoped credential resolution.
+    # WorktreeUnavailableError → refuse to run (never silently in main).
+    try:
+        options, agents_dict = build_options_from_profile(
+            profile=profile,
+            project=project,
+            overrides=overrides,
+            resume_session_id=resume_id,
+            api_user_id=api_user_id,
+            session_id=session_id
+        )
+    except WorktreeUnavailableError as e:
+        logger.error(f"[Query] Worktree unavailable for session {session_id}: {e}")
+        yield {"type": "error", "message": str(e)}
+        return
 
     # Yield init event
     yield {"type": "init", "session_id": session_id}
@@ -951,16 +961,23 @@ async def stream_to_websocket(
 
     # Build options once (without callback — callback is set later if needed)
     _build_opts_start = time.monotonic()
-    options, agents_dict = build_options_from_profile(
-        profile=profile,
-        project=project,
-        overrides=overrides,
-        resume_session_id=resume_id,
-        can_use_tool=None,
-        hooks=None,
-        api_user_id=api_user_id,
-        session_id=session_id
-    )
+    try:
+        options, agents_dict = build_options_from_profile(
+            profile=profile,
+            project=project,
+            overrides=overrides,
+            resume_session_id=resume_id,
+            can_use_tool=None,
+            hooks=None,
+            api_user_id=api_user_id,
+            session_id=session_id
+        )
+    except WorktreeUnavailableError as e:
+        # A worktree session whose worktree can't be recovered: refuse to run
+        # in the main checkout. Surface a clear error to the user instead.
+        logger.error(f"[WS] Worktree unavailable for session {session_id}: {e}")
+        yield {"type": "error", "message": str(e)}
+        return
     _build_opts_elapsed = time.monotonic() - _build_opts_start
     if _build_opts_elapsed > 0.5:
         logger.warning(f"[WS] build_options_from_profile took {_build_opts_elapsed:.2f}s for session {session_id}")

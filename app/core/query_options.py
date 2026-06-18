@@ -12,7 +12,7 @@ sibling modules and re-exported for backward compatibility.
 
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple, cast
 
 from claude_agent_sdk import ClaudeAgentOptions, AgentDefinition
 
@@ -49,6 +49,117 @@ from app.core.environment import (  # noqa: F401
 )
 
 logger = logging.getLogger(__name__)
+
+
+class WorktreeUnavailableError(Exception):
+    """Raised when a worktree-flagged session cannot resolve to a valid, active
+    worktree directory and we refuse to silently fall back to the main checkout.
+
+    Running a worktree session in the project's main directory is never correct —
+    it lands the user's work on the wrong branch. Callers (the query engines)
+    convert this into a user-visible error event instead of executing in main.
+    """
+
+    def __init__(self, session_id: Optional[str], branch_name: Optional[str] = None, reason: str = ""):
+        self.session_id = session_id
+        self.branch_name = branch_name
+        self.reason = reason
+        branch = f" for branch '{branch_name}'" if branch_name else ""
+        detail = f" ({reason})" if reason else ""
+        super().__init__(
+            f"The worktree for this session{branch} is unavailable and could not be "
+            f"recreated{detail}. Reopen the worktree or start a new session — refusing "
+            f"to run in the main checkout."
+        )
+
+
+def _resolve_session_worktree_cwd(
+    session_id: str, project: Optional[Dict[str, Any]]
+) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
+    """Resolve the working directory for a session that may be a worktree session.
+
+    A worktree session must NEVER silently execute in the project's main checkout.
+    When the linked worktree is missing or not active we first attempt to
+    auto-recreate it (mirrors the user-facing "reopen worktree" flow); only if
+    that fails do we raise so the caller surfaces a clear error.
+
+    Returns:
+        (working_dir, execution_mode, worktree_info) when the session resolves to
+        a worktree, OR ``(None, None, None)`` when the session is NOT a worktree
+        session and the caller should use normal project/local resolution.
+
+    Raises:
+        WorktreeUnavailableError: the session IS a worktree session but no valid,
+        active worktree could be resolved (auto-recreate failed or no record).
+    """
+    # Lazy import to avoid a circular import (worktree_manager → query_engine).
+    from app.core.worktree_manager import worktree_manager
+
+    worktree = cast(Optional[Dict[str, Any]], database.get_worktree_by_session(session_id))
+
+    def _build_info(wt: Dict[str, Any]):
+        return {
+            "branch": wt.get("branch_name", "unknown"),
+            "base_branch": wt.get("base_branch", "main"),
+        }
+
+    if (
+        worktree
+        and worktree.get("status") == "active"
+        and worktree_manager.is_worktree_valid(worktree)
+    ):
+        working_dir = get_worktree_working_dir(worktree)
+        logger.debug(f"[Options] Session {session_id} using worktree cwd: {working_dir}")
+        return working_dir, "worktree", _build_info(worktree)
+
+    if worktree:
+        # Worktree row exists but is inactive (completed/deleted) or missing on
+        # disk. NEVER fall back to main — try to auto-recreate, else raise.
+        branch_name = worktree.get("branch_name")
+        logger.warning(
+            f"[Options] Session {session_id} worktree {worktree.get('id')} is "
+            f"status='{worktree.get('status')}' / invalid on disk — attempting "
+            f"auto-recreate instead of falling back to main"
+        )
+        try:
+            recreated = worktree_manager.recreate_worktree(worktree["id"])
+        except Exception as e:  # noqa: BLE001
+            raise WorktreeUnavailableError(session_id, branch_name, str(e)) from e
+        if not (
+            recreated
+            and recreated.get("status") == "active"
+            and worktree_manager.is_worktree_valid(recreated)
+        ):
+            raise WorktreeUnavailableError(
+                session_id, branch_name, "recreated worktree is still not valid"
+            )
+        working_dir = get_worktree_working_dir(recreated)
+        logger.info(
+            f"[Options] Session {session_id} auto-recreated worktree "
+            f"{worktree['id']} at {working_dir}"
+        )
+        return working_dir, "worktree", _build_info(recreated)
+
+    # No worktree row found via the session join. This is either a normal local
+    # session OR a worktree session whose worktree row was hard-deleted (the
+    # session's worktree_id was NULLed but worktree_branch/path remain). Inspect
+    # the session columns to tell them apart — a worktree-flagged session must
+    # still not run in main.
+    session = database.get_session(session_id)
+    if session and (
+        session.get("worktree_id")
+        or session.get("worktree_branch")
+        or session.get("worktree_path")
+    ):
+        raise WorktreeUnavailableError(
+            session_id,
+            session.get("worktree_branch"),
+            "no worktree record is linked to this session",
+        )
+
+    # Genuinely not a worktree session — caller uses project/local resolution.
+    return None, None, None
+
 
 # Operating guidance appended to the system prompt when computer-use is active.
 COMPUTER_USE_GUIDANCE = (
@@ -236,23 +347,14 @@ def build_options_from_profile(
             execution_mode = "worktree"
             worktree_info = overrides.get("worktree_info")
     elif session_id:
-        # Check if this session has an associated worktree
-        worktree = database.get_worktree_by_session(session_id)
-        if worktree and worktree.get("status") == "active":
-            working_dir = get_worktree_working_dir(worktree)
-            execution_mode = "worktree"
-            worktree_info = {
-                "branch": worktree.get("branch_name", "unknown"),
-                "base_branch": worktree.get("base_branch", "main")
-            }
-            logger.debug(f"[Options] Session {session_id} using worktree cwd: {working_dir}")
-        elif worktree:
-            # Worktree exists but is not active — log for debugging
-            logger.warning(
-                f"[Options] Session {session_id} has worktree {worktree.get('id')} "
-                f"but status is '{worktree.get('status')}', falling back to project cwd"
-            )
-            working_dir = get_project_working_dir(project) if project else str(settings.workspace_dir)
+        # Resolve a worktree cwd if this session is a worktree session. This
+        # raises WorktreeUnavailableError (rather than silently using main) when
+        # the session is worktree-flagged but its worktree can't be recovered.
+        wt_dir, wt_mode, wt_info = _resolve_session_worktree_cwd(session_id, project)
+        if wt_dir is not None:
+            working_dir = wt_dir
+            execution_mode = wt_mode or "worktree"
+            worktree_info = wt_info
         elif project:
             working_dir = get_project_working_dir(project)
         else:

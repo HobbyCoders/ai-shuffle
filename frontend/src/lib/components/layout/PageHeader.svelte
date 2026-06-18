@@ -6,9 +6,10 @@
 	 *
 	 * Layout:
 	 * - Desktop: a single row. Left cluster (sidebar toggle, profile selector,
-	 *   Claude status, download) sits at the start; git actions are pushed to the
-	 *   right edge; the chat title is absolutely centered so it stays in the true
-	 *   center of the header regardless of the side clusters' widths.
+	 *   Claude status, download) sits at the start; git actions sit at the right
+	 *   edge; the chat title is an in-flow flex item filling the space between the
+	 *   two clusters — it centers itself and shrinks/ellipsizes so it can never
+	 *   overlap the side clusters on narrow screens.
 	 * - Mobile: two rows. The top row is static (toggle, title, status, download);
 	 *   the bottom row is a horizontal scroll rail (profile selector + git actions
 	 *   + diff stats). The two <div class="hdr-row*"> wrappers use `display:contents`
@@ -172,23 +173,23 @@
 	}
 
 	/* Desktop ordering across the flattened single row:
-	   [toggle] [profile] [meta] ......(auto gap)...... [git/right]
-	   Title is absolutely centered so the side clusters never shift it. */
+	   [toggle] [profile] [meta] ...[title fills/centers]... [git/right]
+	   The title is an in-flow flex item that occupies the space between the
+	   side clusters. It grows to centre itself and shrinks (ellipsising) so it
+	   can never overlap the profile selector or git actions on narrow screens. */
 	.sidebar-toggle { order: 1; }
 	.hdr-profile { order: 2; }
 	.hdr-meta { order: 3; }
+	.header-title { order: 4; }
 	.hdr-right {
-		order: 4;
-		margin-left: auto;
+		order: 5;
 		justify-content: flex-end;
 		flex-wrap: wrap;
 	}
 
 	.header-title {
-		position: absolute;
-		left: 50%;
-		transform: translateX(-50%);
-		max-width: 40%;
+		flex: 1 1 auto;
+		min-width: 0;
 		font-size: 0.8125rem;
 		font-weight: 500;
 		color: var(--foreground);
@@ -387,11 +388,9 @@
 		}
 
 		.header-title {
-			position: static;
-			transform: none;
+			order: 0;
 			flex: 1 1 auto;
 			min-width: 0;
-			max-width: none;
 			text-align: left;
 			pointer-events: auto;
 		}

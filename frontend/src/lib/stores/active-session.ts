@@ -27,6 +27,7 @@ import { createMessageHandlers, type InternalMutableState } from './session/ws-m
 import {
 	createSessionSwitcher,
 	getPersistedProfile, getPersistedProject,
+	getPersistedExecutionMode, setPersistedExecutionMode,
 } from './session/session-switcher';
 
 // Extracted sub-modules
@@ -194,7 +195,7 @@ function defaultState(): ActiveSessionState {
 		draft: '',
 		scrollTop: 0,
 		streamStartTime: null,
-		executionMode: 'local',
+		executionMode: getPersistedExecutionMode(),
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
 		worktreeCreateNewBranch: false,
@@ -543,7 +544,9 @@ export const activeSession = {
 		_update(s => ({
 			...s,
 			project: projectId,
-			executionMode: 'local' as const,
+			// Keep the user's preferred mode; only the project-specific worktree
+			// selection below is reset since it doesn't apply to the new project.
+			executionMode: getPersistedExecutionMode(),
 			worktreeBranch: '',
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,
@@ -579,7 +582,11 @@ export const activeSession = {
 
 	// ── Execution Mode & Worktree ───────────────────────────────────
 
-	setExecutionMode(mode: ExecutionMode) { _update(s => ({ ...s, executionMode: mode })); },
+	setExecutionMode(mode: ExecutionMode) {
+		// Remember the toggle so new sessions reopen in the same mode
+		setPersistedExecutionMode(mode);
+		_update(s => ({ ...s, executionMode: mode }));
+	},
 	setWorktreeBranch(branch: string) { _update(s => ({ ...s, worktreeBranch: branch })); },
 	setWorktreeBaseBranch(branch: string) { _update(s => ({ ...s, worktreeBaseBranch: branch })); },
 	setWorktreeMode(mode: 'new' | 'existing') { _update(s => ({ ...s, worktreeMode: mode })); },

@@ -208,6 +208,21 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				}
 			}
 
+			// Backstop: a worktree-intended NEW session must never fall through to
+			// the plain WS query path below — that path carries no worktree_id, so
+			// the backend would create the session in the project's MAIN checkout.
+			// We only reach here (instead of the worktree-setup block above) when
+			// executionMode is 'worktree' with no sessionId yet but a message is
+			// already present — i.e. autoCreateWorktree/createWorktree is still in
+			// flight (e.g. a second send slipped in during the multi-second
+			// auto-name step). Refuse rather than silently run in main; the
+			// in-flight creation owns the first message.
+			if (!options?.skipWorktreeSetup && _state.executionMode === 'worktree' && !_state.sessionId) {
+				console.warn('[ActiveSession] Suppressed send to main: worktree creation still in flight');
+				update(s => ({ ...s, worktreeError: 'Still setting up the worktree — please wait a moment and try again.' }));
+				return false;
+			}
+
 			if (!wsConn.isConnected()) {
 				wsConn.resetReconnectAttempts();
 				wsConn.connect();

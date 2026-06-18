@@ -93,6 +93,27 @@ export function getPersistedProject(): string {
 	return '';
 }
 
+/**
+ * The last execution mode (Local vs Worktree) the user toggled, persisted so it
+ * survives starting a new session / page reload. Defaults to 'local'.
+ *
+ * This is a UI *preference* — distinct from a session's own executionMode, which
+ * is restored per-session from the persisted/backend session record. Only new
+ * chats consult this preference.
+ */
+export function getPersistedExecutionMode(): 'local' | 'worktree' {
+	if (typeof window !== 'undefined') {
+		return localStorage.getItem('aihub_executionMode') === 'worktree' ? 'worktree' : 'local';
+	}
+	return 'local';
+}
+
+export function setPersistedExecutionMode(mode: 'local' | 'worktree'): void {
+	if (typeof window !== 'undefined') {
+		localStorage.setItem('aihub_executionMode', mode);
+	}
+}
+
 export async function loadSelectionFromBackend(): Promise<{ selectedProfile: string; selectedProject: string } | null> {
 	if (typeof window === 'undefined') return null;
 	try {
@@ -462,7 +483,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			draft: newChatEphemeral?.draft || '',
 			scrollTop: 0,
 			streamStartTime: null,
-			executionMode: 'local' as const,
+			// Restore the user's last-toggled mode (Local/Worktree) for new chats
+			executionMode: getPersistedExecutionMode(),
 			worktreeBranch: '',
 			worktreeBaseBranch: 'main',
 			worktreeCreateNewBranch: false,
