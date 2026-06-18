@@ -266,6 +266,7 @@
 		<!-- Segmented pill toggle -->
 		<div class="mode-toggle">
 			<button
+				type="button"
 				class="mode-option"
 				class:active={$activeSession.executionMode === 'local'}
 				onclick={() => setMode('local')}
@@ -274,6 +275,7 @@
 				<span>Local</span>
 			</button>
 			<button
+				type="button"
 				class="mode-option"
 				class:active={$activeSession.executionMode === 'worktree'}
 				onclick={() => setMode('worktree')}
@@ -282,6 +284,7 @@
 				<span>Worktree</span>
 			</button>
 			<button
+				type="button"
 				class="mode-option"
 				class:active={$activeSession.executionMode === 'cloud'}
 				onclick={() => setMode('cloud')}
@@ -308,6 +311,7 @@
 		{#if $activeSession.executionMode === 'worktree'}
 			<div class="branch-selector" bind:this={dropdownRef}>
 			<button
+				type="button"
 				class="branch-trigger"
 				class:auto-mode={isAutoMode}
 				onclick={toggleDropdown}
@@ -333,6 +337,7 @@
 					{:else}
 						<!-- Auto mode option -->
 						<button
+							type="button"
 							class="branch-item auto-item"
 							class:active={isAutoMode}
 							onclick={() => { activeSession.setWorktreeBranch(''); activeSession.setWorktreeMode('new'); activeSession.clearWorktreeSelection(); showBranchDropdown = false; }}
@@ -348,6 +353,7 @@
 							<div class="branch-section-label">Worktrees</div>
 							{#each filteredWorktrees as wt (wt.id)}
 								<button
+									type="button"
 									class="branch-item"
 									class:active={$activeSession.worktreeId === wt.id}
 									onclick={() => selectWorktree(wt)}
@@ -369,6 +375,7 @@
 							<div class="branch-section-label">Branches</div>
 							{#each filteredBranches as branch}
 								<button
+									type="button"
 									class="branch-item"
 									onclick={() => selectBranch(branch)}
 								>
@@ -387,7 +394,7 @@
 						{/if}
 
 						<div class="branch-divider"></div>
-						<button class="branch-item create-branch-item" onclick={openCreateModal}>
+						<button type="button" class="branch-item create-branch-item" onclick={openCreateModal}>
 							<Plus size={13} strokeWidth={1.5} />
 							<span class="branch-item-name">New branch...</span>
 						</button>
