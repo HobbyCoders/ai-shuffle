@@ -274,6 +274,24 @@ const wsConn: WsConnection = createWsConnection({
 			const sessionId = _state.sessionId;
 			wsConn.send({ type: 'watch_session', session_id: sessionId });
 
+			// Re-sync pending permission / AskUserQuestion modals for the ACTIVE
+			// session on every (re)connect. While the WS was down, the running
+			// session may have emitted a permission_request or user_question that
+			// we never received — pendingPermissions/pendingQuestions are written
+			// ONLY by WS handlers, so the modal would stay hidden until the user
+			// switched sessions and back (switchSession re-requests them). Asking
+			// the server to replay the pending queues here makes the modal pop up
+			// immediately on reconnect, no session switch required.
+			//
+			// These are idempotent: the pending_permissions/pending_questions
+			// handlers REPLACE (not append to) the active queues, keyed by
+			// request_id, so re-requesting never double-shows an already-visible
+			// modal. We request unconditionally (not just when streaming) because
+			// a session paused awaiting a permission/question reports
+			// isStreaming=false.
+			wsConn.send({ type: 'get_pending_permissions' });
+			wsConn.send({ type: 'get_pending_questions' });
+
 			// Always re-sync on (re)connect. We may have missed messages during
 			// the disconnect window (e.g. phone lock / network drop). The poller's
 			// shallow-equality check in onPollApplied prevents redundant renders
