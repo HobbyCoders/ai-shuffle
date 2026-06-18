@@ -298,6 +298,12 @@
 		if (!open) return;
 		if (e.key === 'Escape') {
 			e.preventDefault();
+			// Modal layering: Escape dismisses an open confirm dialog first,
+			// leaving the panel open. A second Escape then closes the panel.
+			if (pendingConfirm) {
+				pendingConfirm = null;
+				return;
+			}
 			onClose();
 			return;
 		}
