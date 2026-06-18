@@ -150,7 +150,16 @@ class CatalogModel:
 
     @classmethod
     def from_db_row(cls, row: dict) -> "CatalogModel":
-        """Parse from a database row."""
+        """Parse from a database row.
+
+        ``tool_type`` / ``output_type`` are *derived* values: they are persisted
+        for convenience but recomputed from the raw ``category`` on load so the
+        mapping code (``resolve_tool_type`` / ``resolve_output_type``) is the
+        single source of truth. Without this, a mapping change (e.g. splitting
+        "text-to-audio" out of the generic "audio" tool type into
+        "audio_generation") would leave the cached catalog stuck on the old
+        tool_type until a network refresh, leaving schema-driven dropdowns empty.
+        """
         tags = []
         if row.get("tags_json"):
             try:
@@ -158,10 +167,11 @@ class CatalogModel:
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        category = row["category"]
         return cls(
             endpoint_id=row["endpoint_id"],
             display_name=row["display_name"],
-            category=row["category"],
+            category=category,
             description=row.get("description", ""),
             status=row.get("status", "active"),
             thumbnail_url=row.get("thumbnail_url"),
@@ -169,8 +179,8 @@ class CatalogModel:
             group_key=row.get("group_key"),
             group_label=row.get("group_label"),
             updated_at=row.get("updated_at"),
-            tool_type=row.get("tool_type"),
-            output_type=row.get("output_type"),
+            tool_type=resolve_tool_type(category),
+            output_type=resolve_output_type(category),
         )
 
 
