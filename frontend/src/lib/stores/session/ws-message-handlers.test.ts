@@ -349,6 +349,83 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('pending_permissions handler (reconnect replay)', () => {
+		// On WS reconnect, active-session re-requests get_pending_permissions so a
+		// permission modal that was emitted while disconnected pops up without a
+		// session switch. The server replies with `pending_permissions`. This must
+		// REPLACE the active queue (idempotent) so re-requesting never double-shows
+		// an already-visible modal.
+		it('replaces the active permission queue with the server set', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingPermissions = [
+				{
+					session_id: 'session-1',
+					request_id: 'perm-1',
+					tool_name: 'Bash',
+					tool_input: { command: 'ls' },
+				} as never,
+			];
+
+			let updated: unknown[] | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => {
+					const result = fn(state);
+					updated = result.pendingPermissions as unknown[];
+				}),
+			});
+			handlers = createMessageHandlers(deps);
+
+			// Re-broadcast of the SAME request_id (as happens on reconnect replay).
+			handlers.handleMessage({
+				type: 'pending_permissions',
+				session_id: 'session-1',
+				requests: [
+					{ request_id: 'perm-1', tool_name: 'Bash', tool_input: { command: 'ls' } },
+				],
+			});
+
+			// Replaced (length 1), not appended (would be 2 → duplicate modal).
+			expect(updated?.length).toBe(1);
+		});
+	});
+
+	describe('pending_questions handler (reconnect replay)', () => {
+		it('replaces the active question queue with the server set', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			state.pendingQuestions = [
+				{
+					session_id: 'session-1',
+					request_id: 'q-1',
+					tool_use_id: 'tool-1',
+					questions: [],
+				} as never,
+			];
+
+			let updated: unknown[] | undefined;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => {
+					const result = fn(state);
+					updated = result.pendingQuestions as unknown[];
+				}),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'pending_questions',
+				session_id: 'session-1',
+				questions: [
+					{ request_id: 'q-1', tool_use_id: 'tool-1', questions: [] },
+				],
+			});
+
+			expect(updated?.length).toBe(1);
+		});
+	});
+
 	describe('question handling', () => {
 		it('should keep user questions for inactive sessions out of the active modal', () => {
 			const state = mockState();

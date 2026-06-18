@@ -284,16 +284,28 @@ class SessionPoller {
 	async loadSession(sessionId: string): Promise<PollAppliedData | null> {
 		// loadSession is a one-shot fetch — no need for per-call logging
 
-		// Ensure session state exists. Use initSession (which is a no-op if
-		// already present) instead of the destructive removeSession+initSession
-		// pattern. The old pattern wiped contextUsed → 0 before the HTTP
-		// response arrived, causing a visible flash (16% → correct value) and
-		// risking data mismatches if the re-fetch returned different values
-		// (e.g., from JSONL compaction or live store timing). Resetting the
-		// lastUpdateId to 0 forces _applyPollResult to always apply the
-		// response (the fast-path only skips for lastUpdateId > 0).
+		// Ensure session state exists AND force lastUpdateId → 0 so the HTTP
+		// response is ALWAYS applied. Use initSession when missing, otherwise
+		// resetForPolling (which preserves existing messages/usage so there's
+		// no visible flash to 0%, but zeroes lastUpdateId).
+		//
+		// Why this matters: loadSession fetches with ?since_update_id=0, so the
+		// server returns the FULL current state. But _applyPollResult →
+		// applyServerState has a fast-path that SKIPS the apply when an existing
+		// sessionState entry's lastUpdateId already equals the server's
+		// last_update_id. A stale entry can linger in sessionStateManager for a
+		// session that streamed/finished while it was NOT the active session
+		// (e.g. a background `done` runs pollFinal, which writes the final
+		// lastUpdateId without ever removing the entry). Switching back to that
+		// session would then hit the fast-path skip, onPollApplied would never
+		// fire, and the store would keep the stale IndexedDB-cached messages —
+		// rendering the last user message / dropping the streamed assistant
+		// tail. Forcing lastUpdateId → 0 here guarantees a full, authoritative
+		// apply on every load, which is exactly loadSession's contract.
 		if (!sessionState.getSession(sessionId)) {
 			sessionState.initSession(sessionId);
+		} else {
+			sessionState.resetForPolling(sessionId);
 		}
 
 		try {
