@@ -16,6 +16,7 @@ from app.db import database
 from app.core.config import settings
 from app.core.platform import DeploymentMode
 from app.core import encryption
+from app.core.model_registry import has_1m_context
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +412,25 @@ def _build_env_with_ai_tools(
         if stt_language:
             env["STT_LANGUAGE"] = stt_language
 
+    return env
+
+
+def apply_1m_context_env(env: Dict[str, str], model: Optional[str]) -> Dict[str, str]:
+    """Pin the 1M context window to the profile's toggle (mutates and returns env).
+
+    1M-capable models (e.g. ``claude-opus-4-8``) default to the 1M context
+    window on the CLI side, so disabling 1M for a profile requires explicitly
+    sending ``CLAUDE_CODE_DISABLE_1M_CONTEXT=1``. The ``[1m]`` suffix on the
+    model ID is the source of truth for the toggle:
+
+        ``[1m]`` present (enabled)  -> ``CLAUDE_CODE_DISABLE_1M_CONTEXT=0``
+        ``[1m]`` absent  (disabled) -> ``CLAUDE_CODE_DISABLE_1M_CONTEXT=1``
+
+    An explicit value already present in ``env`` (e.g. a profile's custom env
+    var) wins as an escape hatch and is left untouched.
+    """
+    if "CLAUDE_CODE_DISABLE_1M_CONTEXT" not in env:
+        env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "0" if has_1m_context(model) else "1"
     return env
 
 
