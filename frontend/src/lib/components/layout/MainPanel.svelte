@@ -97,29 +97,14 @@
 		activeTab ? $projects.find(p => p.id === activeTab.project)?.name : undefined
 	);
 
-	// Worktree branch for header context.
+	// Worktree branch for the GitHeaderActions context (passed through to its
+	// branch display). The read-only project/worktree context badge that used to
+	// live in the PageHeader now renders in the ContextPillBar above the input.
 	const activeWorktreeBranch = $derived.by(() => {
 		if (!activeTab) return undefined;
 		if (activeTab.executionMode !== 'worktree' || activeTab.messages.length === 0) return undefined;
 		return activeTab.selectedWorktreeBranch || activeTab.worktreeBranch || undefined;
 	});
-
-	// A cleaned-up worktree session keeps the badge visible (read-only) so the user
-	// knows which project/branch the session belonged to even after cleanup.
-	const isWorktreeBadgeDeleted = $derived(
-		!!activeTab?.worktreeDeleted && !!activeWorktreeBranch
-	);
-
-	// When GitHub CLI is authenticated, GitHeaderActions normally shows project + branch,
-	// so we hide the separate PageHeader badge to avoid redundancy — UNLESS the worktree
-	// has been cleaned up, in which case GitHeaderActions is hidden and the read-only
-	// badge becomes the only contextual indicator of what the session belonged to.
-	const headerProjectNameForBadge = $derived(
-		$githubAuthenticated && !isWorktreeBadgeDeleted ? undefined : headerProjectName
-	);
-	const headerWorktreeBranch = $derived(
-		$githubAuthenticated && !isWorktreeBadgeDeleted ? undefined : activeWorktreeBranch
-	);
 
 	// =========================================================================
 	// Git modal state (retained: branch creation, init repo, diff review)
@@ -488,9 +473,17 @@
 
 	/**
 	 * Send a canned git-action prompt to the active chat session.
-	 * The buttons are disabled while streaming, so sending here won't interrupt.
+	 *
+	 * Git actions (Commit / Push / Pull / Create PR / Finish / Ship It) are
+	 * disabled in the header while streaming. Guard here too as defense in depth:
+	 * sendMessage() *interrupts* a live stream (its mustInterrupt path), so a click
+	 * that slips through the disabled window — a fast double-tap during the
+	 * send→stream transition, or a stale disabled frame — must not fire a new query
+	 * and abort the active generation. Ship It is the costliest to trigger by
+	 * accident (commit → push → PR → merge → cleanup), so this matters most there.
 	 */
 	async function sendGitPrompt(prompt: string) {
+		if (gitControlsStreaming.current) return;
 		const text = prompt.trim();
 		if (!text) return;
 		try {
@@ -531,9 +524,6 @@
 		{#if $activeView.type === 'chat' || !embeddedViews.has($activeView.type)}
 			<PageHeader
 				title={headerTitle}
-				projectName={headerProjectNameForBadge}
-				worktreeBranch={headerWorktreeBranch}
-				worktreeDeleted={isWorktreeBadgeDeleted}
 				showSidebarToggle={$sidebarCollapsed}
 				{isMobile}
 				hideGlobalStt={$activeView?.type === 'chat'}

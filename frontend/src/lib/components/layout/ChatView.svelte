@@ -6,8 +6,9 @@
 	 * Reads from the activeSession store — no props needed.
 	 *
 	 * Two states:
-	 * - Empty: WorkspaceSelector + ChatInput centered
-	 * - Active: MessageArea + ChatInput at bottom + ExecutionModeBar below
+	 * - Empty: WorkspaceSelector + ChatInput centered (the ChatInput's
+	 *   ContextPillBar hosts the Local/Worktree execution-mode toggle above it)
+	 * - Active: MessageArea + ChatInput at bottom
 	 */
 	import { untrack } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -17,9 +18,7 @@
 	import QueuedMessages from '$lib/components/chat/QueuedMessages.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
-	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
-	import ExecutionModeBar from './ExecutionModeBar.svelte';
 
 	// Check if this is an empty state (no messages yet)
 	const isEmptyState = $derived($activeSession.messages.length === 0);
@@ -113,9 +112,6 @@
 				<div class="empty-input-wrapper">
 					<ChatInput />
 				</div>
-				{#if $githubAuthenticated}
-					<ExecutionModeBar />
-				{/if}
 			</div>
 		</div>
 	{:else}

@@ -11,6 +11,7 @@
 import { untrack } from 'svelte';
 import { activeSession, streamingSessions } from '../active-session';
 import { sessionState } from '../session/session-state';
+import { computeGitControlsStreaming } from './git-controls-streaming';
 
 // ─── Multi-Store Derived Helper ──────────────────────────────────────────────
 
@@ -127,27 +128,16 @@ export const gitControlsStreaming = createMultiDerived(
 	[activeSession, sessionState, streamingSessions],
 	() => {
 		const active = activeSession.current;
-		const state = sessionState.current;
-		const streaming = streamingSessions.current;
-
-		// Active session is streaming (always relevant)
-		if (active.isStreaming) return true;
-		if (active.sessionId) {
-			const session = state.sessions.get(active.sessionId);
-			if (session?.isStreaming) return true;
-		}
-
-		// Worktree-mode has independent working directory
-		if (active.executionMode === 'worktree') return false;
-
-		// Project-mode: check cross-session streaming, skip worktree sessions
-		if (active.project) {
-			for (const [, info] of streaming) {
-				if (info.projectId === active.project && !info.worktreeId) return true;
-			}
-		}
-
-		return false;
+		// Pure decision logic lives in ./git-controls-streaming so it can be
+		// unit-tested without the store plumbing (see git-controls-streaming.test.ts).
+		return computeGitControlsStreaming({
+			activeIsStreaming: active.isStreaming,
+			activeSessionId: active.sessionId,
+			activeExecutionMode: active.executionMode,
+			activeProject: active.project || null,
+			sessionStreaming: sessionState.current.sessions,
+			crossDeviceStreaming: streamingSessions.current
+		});
 	}
 );
 

@@ -383,14 +383,19 @@
 />
 
 <style>
+	/* Hosted inline in the ContextPillBar (above the chat input) on the new-session
+	   screen, so it flows as a pill group next to the profile selector rather than
+	   as a standalone centered bar. align-self keeps the toggle row vertically
+	   centered against the profile pill; the optional error wraps underneath. */
 	.execution-mode-bar {
 		position: relative;
 		z-index: 10;
 		display: flex;
 		flex-direction: column;
-		align-items: center;
+		align-items: flex-start;
+		align-self: center;
 		gap: 6px;
-		padding: 8px 0 4px;
+		min-width: 0;
 		max-width: 100%;
 		overflow: visible;
 	}
@@ -398,8 +403,7 @@
 	.mode-bar-row {
 		display: flex;
 		align-items: center;
-		justify-content: center;
-		gap: 12px;
+		gap: 8px;
 		max-width: 100%;
 	}
 

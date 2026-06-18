@@ -15,8 +15,11 @@
 	 *   + diff stats). The two <div class="hdr-row*"> wrappers use `display:contents`
 	 *   on desktop so all items share one flex row, and become real flex rows on
 	 *   mobile.
+	 *
+	 * The project/worktree context badge that used to render here now lives in the
+	 * ContextPillBar above the chat input, alongside the profile + branch pills.
 	 */
-	import { PanelLeftOpen, GitBranch, FolderClosed, Mic } from 'lucide-svelte';
+	import { PanelLeftOpen, Mic } from 'lucide-svelte';
 	import { layout, sidebarCollapsed } from '$lib/stores/layout.svelte';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import { globalSttState, triggerToggle } from '$lib/services/globalStt';
@@ -26,13 +29,6 @@
 
 	interface Props {
 		title: string;
-		projectName?: string;
-		worktreeBranch?: string;
-		/** When true, the project/branch badge is rendered in a read-only, muted
-		 *  state to indicate the underlying worktree has been cleaned up.
-		 *  The badge still shows so the user knows which project/branch the
-		 *  session originally belonged to. */
-		worktreeDeleted?: boolean;
 		showSidebarToggle?: boolean;
 		isMobile?: boolean;
 		hideGlobalStt?: boolean;
@@ -46,9 +42,6 @@
 
 	let {
 		title,
-		projectName,
-		worktreeBranch,
-		worktreeDeleted = false,
 		showSidebarToggle = false,
 		isMobile = false,
 		hideGlobalStt = false,
@@ -106,26 +99,6 @@
 		{/if}
 
 		<div class="hdr-right">
-			{#if worktreeBranch}
-				<span
-					class="context-badge"
-					aria-disabled={worktreeDeleted ? 'true' : undefined}
-					title="{projectName ? projectName + ' · ' : ''}Worktree branch: {worktreeBranch}"
-				>
-					{#if projectName}
-						<FolderClosed size={12} strokeWidth={1.5} />
-						<span class="context-label">{projectName}</span>
-						<span class="context-separator">/</span>
-					{/if}
-					<GitBranch size={12} strokeWidth={1.5} />
-					<span class="context-label branch">{worktreeBranch}</span>
-				</span>
-			{:else if projectName}
-				<span class="context-badge" title="Project: {projectName}">
-					<FolderClosed size={12} strokeWidth={1.5} />
-					<span class="context-label">{projectName}</span>
-				</span>
-			{/if}
 			{#if actions}
 				{@render actions()}
 			{/if}
@@ -226,51 +199,6 @@
 	.sidebar-toggle:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
-	}
-
-	/* Project / worktree context badge — styled to match .git-btn */
-	.context-badge {
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
-		flex-shrink: 1;
-		min-width: 0;
-		height: 26px;
-		padding: 0 8px;
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		color: var(--muted-foreground);
-		font-size: 0.6875rem;
-		font-weight: 500;
-		max-width: 320px;
-	}
-
-	.context-badge :global(svg) {
-		flex-shrink: 0;
-	}
-
-	.context-label {
-		font-size: 0.75rem;
-		line-height: 1;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		min-width: 0;
-	}
-
-	/* Branch names can be long (feat/add-foo-bar-baz…) — cap them so the badge
-	   doesn't dominate the header. Project name still shows in full before the
-	   separator. */
-	.context-label.branch {
-		max-width: 140px;
-	}
-
-	.context-separator {
-		font-size: 0.75rem;
-		line-height: 1;
-		color: var(--muted-foreground);
-		opacity: 0.5;
-		flex-shrink: 0;
 	}
 
 	/* Header action buttons (mic) */
@@ -413,18 +341,6 @@
 		.header-btn {
 			width: 36px;
 			height: 36px;
-		}
-
-		.context-badge {
-			flex-shrink: 0;
-			max-width: none;
-			height: 32px;
-			padding: 0 10px;
-			font-size: 0.75rem;
-		}
-
-		.context-label.branch {
-			max-width: 100px;
 		}
 	}
 
