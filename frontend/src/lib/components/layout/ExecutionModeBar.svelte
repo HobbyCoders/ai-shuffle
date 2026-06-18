@@ -30,6 +30,9 @@
 	let localWorktreeError = $state<string | null>(null);
 
 	// --- Cloud offload config status ---
+	// null while loading. The Cloud execution-mode option is only offered when a
+	// second install is configured (Settings → System → Cloud Offload), so this is
+	// loaded eagerly on mount and the Cloud pill stays hidden until it resolves true.
 	let cloudConfigured = $state<boolean | null>(null);
 
 	async function loadCloudConfig() {
@@ -42,10 +45,14 @@
 		}
 	}
 
-	// Lazily check cloud config the first time cloud mode is selected.
 	$effect(() => {
-		if ($activeSession.executionMode === 'cloud') {
-			loadCloudConfig();
+		// Check cloud config on mount so we know whether to show the Cloud option.
+		loadCloudConfig();
+		// Once it resolves: if no second install is configured but a stale persisted
+		// preference left this session in cloud mode, fall back to local — the Cloud
+		// pill is hidden, so the toggle would otherwise have no active option.
+		if (cloudConfigured === false && untrack(() => $activeSession.executionMode) === 'cloud') {
+			setMode('local');
 		}
 	});
 
@@ -283,16 +290,19 @@
 				<GitFork size={13} strokeWidth={1.5} />
 				<span>Worktree</span>
 			</button>
-			<button
-				type="button"
-				class="mode-option"
-				class:active={$activeSession.executionMode === 'cloud'}
-				onclick={() => setMode('cloud')}
-				title="Offload this session to a second AI Shuffle install (GitHub repos only)"
-			>
-				<Cloud size={13} strokeWidth={1.5} />
-				<span>Cloud</span>
-			</button>
+			<!-- Cloud is only offered when a second install is configured in Settings -->
+			{#if cloudConfigured === true}
+				<button
+					type="button"
+					class="mode-option"
+					class:active={$activeSession.executionMode === 'cloud'}
+					onclick={() => setMode('cloud')}
+					title="Offload this session to a second AI Shuffle install (GitHub repos only)"
+				>
+					<Cloud size={13} strokeWidth={1.5} />
+					<span>Cloud</span>
+				</button>
+			{/if}
 		</div>
 
 		<!-- Cloud status (shown when cloud mode active) -->
