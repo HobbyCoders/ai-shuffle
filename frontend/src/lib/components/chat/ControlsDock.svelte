@@ -147,7 +147,7 @@
 		<button
 			type="button"
 			onclick={onAttachClick}
-			disabled={$activeSession.isStreaming || !$claudeAuthenticated || isUploading || $activeSession.isReopeningWorktree}
+			disabled={!$claudeAuthenticated || isUploading || $activeSession.isReopeningWorktree}
 			class="dock-action-btn"
 			title={isUploading ? 'Uploading...' : $activeSession.project ? 'Attach file' : 'Select a project to attach files'}
 		>
