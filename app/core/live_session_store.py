@@ -723,6 +723,49 @@ class LiveSessionStore:
                     self._increment_update_id(session)
                     return
 
+    @staticmethod
+    def _is_background_ack(msg: "LiveMessage", result: str) -> bool:
+        """True if ``result`` is merely the acknowledgement for a *backgrounded*
+        command that is still executing — not a real completion.
+
+        Backgrounded Bash (``run_in_background: true``) returns control to the
+        model immediately: the SDK emits a ``tool_result`` right away whose body
+        is just "Command running in the background ... ID: bash_xxx", while the
+        shell keeps working. Treating that early result as COMPLETE flips the UI
+        to a green check while the command is still running (the reported bug).
+        The real output later arrives via a separate BashOutput/TaskOutput tool,
+        not a second result for this id, so we must keep this tool RUNNING.
+
+        Detection uses two signals:
+        1. The recorded tool input (authoritative — captured at add_tool_use)
+           has a truthy ``run_in_background`` flag.
+        2. A content sniff of the acknowledgement text, covering cases where the
+           input flag isn't surfaced (e.g. the CLI auto-backgrounds a command).
+        """
+        # Only Bash-family tools background; never hold back other tools.
+        if msg.tool_name not in ("Bash", "PowerShell"):
+            return False
+
+        tool_input = msg.tool_input or {}
+        backgrounded = bool(
+            tool_input.get("run_in_background")
+            or tool_input.get("runInBackground")
+        )
+
+        if not backgrounded:
+            # Fallback: sniff the standard CLI acknowledgement so we still hold
+            # the running state even when the input flag wasn't recorded.
+            text = (result or "").strip().lower()
+            if not text:
+                return False
+            backgrounded = (
+                "running in the background" in text
+                or "running in background" in text
+                or ("background with id" in text)
+            )
+
+        return backgrounded
+
     async def add_tool_result(
         self,
         session_id: str,
@@ -743,8 +786,22 @@ class LiveSessionStore:
             for msg in session.messages:
                 if msg.type == "tool_use" and msg.tool_id == tool_id:
                     msg.tool_result = result
-                    msg.tool_status = ToolStatus.ERROR.value if is_error else ToolStatus.COMPLETE.value
-                    msg.streaming = False
+                    if is_error:
+                        msg.tool_status = ToolStatus.ERROR.value
+                        msg.streaming = False
+                    elif self._is_background_ack(msg, result):
+                        # Backgrounded command still executing — surface the
+                        # acknowledgement output but keep the running indicator
+                        # so the UI doesn't claim completion prematurely.
+                        msg.tool_status = ToolStatus.RUNNING.value
+                        msg.streaming = False
+                        logger.debug(
+                            f"Tool {tool_id} ({msg.tool_name}) backgrounded in "
+                            f"session {session_id}; keeping status=running"
+                        )
+                    else:
+                        msg.tool_status = ToolStatus.COMPLETE.value
+                        msg.streaming = False
                     self._increment_update_id(session)
                     logger.debug(f"Added tool result to {tool_id} in session {session_id} (result_len={len(result) if result else 0})")
                     # Note: We don't create a continuation text message here.

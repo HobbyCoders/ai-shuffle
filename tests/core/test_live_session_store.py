@@ -370,6 +370,89 @@ class TestToolHandling:
         assert msg.tool_status == "error"
 
     @pytest.mark.asyncio
+    async def test_background_bash_stays_running_via_input_flag(self, streaming_session):
+        """A backgrounded Bash (run_in_background=True) must stay 'running' when
+        its immediate acknowledgement result arrives — not flip to 'complete'."""
+        await streaming_session.add_tool_use(
+            "session-1",
+            tool_id="tool-bg",
+            name="Bash",
+            tool_input={"command": "sleep 100", "run_in_background": True},
+        )
+        await streaming_session.add_tool_result(
+            "session-1",
+            tool_id="tool-bg",
+            result="Command running in the background with ID: bash_1",
+            is_error=False,
+        )
+
+        session = streaming_session.get_session("session-1")
+        msg = session.messages[0]
+        # Result is surfaced, but status stays running (still executing).
+        assert msg.tool_result == "Command running in the background with ID: bash_1"
+        assert msg.tool_status == "running"
+        assert msg.streaming is False
+
+    @pytest.mark.asyncio
+    async def test_background_bash_stays_running_via_ack_text(self, streaming_session):
+        """Even without the input flag, the standard CLI 'running in the
+        background' acknowledgement keeps the tool 'running'."""
+        await streaming_session.add_tool_use(
+            "session-1",
+            tool_id="tool-bg2",
+            name="Bash",
+            tool_input={"command": "npm run dev"},
+        )
+        await streaming_session.add_tool_result(
+            "session-1",
+            tool_id="tool-bg2",
+            result="Command running in the background with ID: bash_7",
+            is_error=False,
+        )
+
+        session = streaming_session.get_session("session-1")
+        assert session.messages[0].tool_status == "running"
+
+    @pytest.mark.asyncio
+    async def test_background_bash_error_still_errors(self, streaming_session):
+        """A backgrounded Bash that fails must still report 'error', not run."""
+        await streaming_session.add_tool_use(
+            "session-1",
+            tool_id="tool-bg3",
+            name="Bash",
+            tool_input={"command": "bad", "run_in_background": True},
+        )
+        await streaming_session.add_tool_result(
+            "session-1",
+            tool_id="tool-bg3",
+            result="boom",
+            is_error=True,
+        )
+
+        session = streaming_session.get_session("session-1")
+        assert session.messages[0].tool_status == "error"
+
+    @pytest.mark.asyncio
+    async def test_foreground_bash_with_background_text_completes(self, streaming_session):
+        """A normal (foreground) Bash whose real output merely mentions the word
+        'background' must still complete — guard against over-eager sniffing."""
+        await streaming_session.add_tool_use(
+            "session-1",
+            tool_id="tool-fg",
+            name="Bash",
+            tool_input={"command": "echo hi"},
+        )
+        await streaming_session.add_tool_result(
+            "session-1",
+            tool_id="tool-fg",
+            result="hi",
+            is_error=False,
+        )
+
+        session = streaming_session.get_session("session-1")
+        assert session.messages[0].tool_status == "complete"
+
+    @pytest.mark.asyncio
     async def test_update_tool_input_streaming(self, streaming_session):
         """Should append to partial tool input during streaming."""
         await streaming_session.add_tool_use(

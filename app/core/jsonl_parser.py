@@ -49,6 +49,41 @@ _agent_paths_cache_lock = threading.Lock()
 MAX_DISPLAY_OUTPUT_SIZE = 2000
 
 
+def _is_background_ack_result(tool_msg: Dict[str, Any], output: str) -> bool:
+    """True if a tool_result is merely the acknowledgement for a *backgrounded*
+    command that is still executing — not a real completion.
+
+    Mirrors ``LiveSessionStore._is_background_ack`` so the persisted/reload path
+    keeps the same RUNNING status the live store showed. Without this, once the
+    live store is cleaned up (~30s after stream end) a reload from JSONL would
+    flip a still-running backgrounded Bash to "complete" — the reported bug.
+
+    Backgrounded Bash (``run_in_background: true``) returns control to the model
+    immediately with a "Command running in the background ... ID: bash_xxx"
+    acknowledgement while the shell keeps working; the real output later arrives
+    via a separate BashOutput/TaskOutput tool, not a second result for this id.
+    """
+    if tool_msg.get("toolName") not in ("Bash", "PowerShell"):
+        return False
+
+    tool_input = tool_msg.get("toolInput") or {}
+    if isinstance(tool_input, dict) and (
+        tool_input.get("run_in_background") or tool_input.get("runInBackground")
+    ):
+        return True
+
+    # Fallback: sniff the standard CLI acknowledgement when the input flag
+    # wasn't recorded (e.g. the CLI auto-backgrounded a long command).
+    text = (output or "").strip().lower()
+    if not text:
+        return False
+    return (
+        "running in the background" in text
+        or "running in background" in text
+        or "background with id" in text
+    )
+
+
 def _truncate_for_display(content: str, max_size: int = MAX_DISPLAY_OUTPUT_SIZE) -> str:
     """
     Truncate content for display purposes.
@@ -1020,7 +1055,15 @@ def _parse_session_history_uncached(
                                 msg = messages[msg_idx]
                                 if msg.get("type") == "tool_use":
                                     msg["toolResult"] = output[:2000] if output else ""
-                                    msg["toolStatus"] = "error" if is_error else "complete"
+                                    if is_error:
+                                        msg["toolStatus"] = "error"
+                                    elif _is_background_ack_result(msg, output):
+                                        # Backgrounded command still executing —
+                                        # keep it RUNNING so reload doesn't claim
+                                        # premature completion (matches live store).
+                                        msg["toolStatus"] = "running"
+                                    else:
+                                        msg["toolStatus"] = "complete"
                                     found_tool_use = True
 
                             # Only create separate tool_result if no matching tool_use found

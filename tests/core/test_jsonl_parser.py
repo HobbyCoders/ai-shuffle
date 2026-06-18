@@ -1037,3 +1037,69 @@ class TestToolResultContentVariants:
                 mock_settings.get_claude_projects_dir = projects_dir
                 result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
                 assert result[0]["toolResult"] == "Result value here"
+
+
+class TestBackgroundBashStatus:
+    """Backgrounded Bash must stay 'running' on reload, not flip to 'complete'."""
+
+    def test_helper_input_flag(self):
+        assert jsonl_parser._is_background_ack_result(
+            {"toolName": "Bash", "toolInput": {"run_in_background": True}},
+            "Command running in the background with ID: bash_1",
+        ) is True
+
+    def test_helper_ack_text_only(self):
+        assert jsonl_parser._is_background_ack_result(
+            {"toolName": "Bash", "toolInput": {}},
+            "Command running in the background with ID: bash_2",
+        ) is True
+
+    def test_helper_foreground_completes(self):
+        assert jsonl_parser._is_background_ack_result(
+            {"toolName": "Bash", "toolInput": {}}, "just normal output"
+        ) is False
+
+    def test_helper_non_bash_ignored(self):
+        # Even a Read with background-ish text must not be held back.
+        assert jsonl_parser._is_background_ack_result(
+            {"toolName": "Read", "toolInput": {"run_in_background": True}},
+            "running in the background",
+        ) is False
+
+    def test_end_to_end_background_bash_stays_running(self):
+        """Full parse: a backgrounded Bash whose result is the ack stays running."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            project_dir = projects_dir / "-workspace"
+            project_dir.mkdir(parents=True)
+            session_id = "test-session"
+            jsonl_file = project_dir / f"{session_id}.jsonl"
+            entries = [
+                {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "bg-tool", "name": "Bash", "input": {"command": "sleep 100", "run_in_background": True}}]}, "uuid": "use-1"},
+                {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "bg-tool", "content": "Command running in the background with ID: bash_5"}]}, "uuid": "result-1"},
+            ]
+            jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
+            with patch('app.core.jsonl_parser.settings') as mock_settings:
+                mock_settings.get_claude_projects_dir = projects_dir
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
+                tool_msg = next(m for m in result if m.get("type") == "tool_use")
+                assert tool_msg["toolStatus"] == "running"
+
+    def test_end_to_end_foreground_bash_completes(self):
+        """Full parse: a normal foreground Bash still completes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            project_dir = projects_dir / "-workspace"
+            project_dir.mkdir(parents=True)
+            session_id = "test-session"
+            jsonl_file = project_dir / f"{session_id}.jsonl"
+            entries = [
+                {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "fg-tool", "name": "Bash", "input": {"command": "echo hi"}}]}, "uuid": "use-1"},
+                {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "fg-tool", "content": "hi"}]}, "uuid": "result-1"},
+            ]
+            jsonl_file.write_text('\n'.join(json.dumps(e) for e in entries) + '\n')
+            with patch('app.core.jsonl_parser.settings') as mock_settings:
+                mock_settings.get_claude_projects_dir = projects_dir
+                result, _usage = jsonl_parser.parse_session_history(session_id, "/workspace")
+                tool_msg = next(m for m in result if m.get("type") == "tool_use")
+                assert tool_msg["toolStatus"] == "complete"
