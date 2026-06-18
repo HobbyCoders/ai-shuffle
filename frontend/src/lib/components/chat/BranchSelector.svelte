@@ -130,6 +130,7 @@
 
 <div class="branch-selector" bind:this={dropdownRef}>
 	<button
+		type="button"
 		class="pill branch-btn"
 		class:locked={branchLocked}
 		onclick={toggleDropdown}
@@ -174,7 +175,12 @@
 						placeholder="Filter branches..."
 						onclick={(e) => e.stopPropagation()}
 						onkeydown={(e) => {
-							if (e.key === 'Escape' && branchSearch) {
+							// Prevent Enter from bubbling to the chat form's submit handler
+							// (this input is rendered inside the ChatInput <form>).
+							if (e.key === 'Enter') {
+								e.preventDefault();
+								e.stopPropagation();
+							} else if (e.key === 'Escape' && branchSearch) {
 								branchSearch = '';
 								e.stopPropagation();
 							}
@@ -187,6 +193,7 @@
 				<div class="dropdown-section-label">Branches</div>
 				{#each filteredLocalBranches as branch (branch.name)}
 					<button
+						type="button"
 						class="dropdown-item"
 						class:active={branch.name === currentBranch}
 						onclick={() => checkoutBranch(branch.name)}
@@ -206,6 +213,7 @@
 				<div class="dropdown-section-label">Remote</div>
 				{#each filteredRemoteBranches as branch (branch.name)}
 					<button
+						type="button"
 						class="dropdown-item remote-item"
 						onclick={() => checkoutBranch(branch.shortName)}
 						title={branch.name}
@@ -222,7 +230,7 @@
 			{/if}
 
 			<div class="dropdown-divider"></div>
-			<button class="dropdown-item new-branch-item" onclick={handleNewBranch}>
+			<button type="button" class="dropdown-item new-branch-item" onclick={handleNewBranch}>
 				<Plus size={13} strokeWidth={1.5} />
 				<span class="dropdown-item-name">New branch...</span>
 			</button>

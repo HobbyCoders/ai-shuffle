@@ -824,6 +824,13 @@
 	/* ===== INPUT WRAPPER - THE HERO (glass outer frame) ===== */
 	.input-wrapper {
 		position: relative;
+		/* The `backdrop-filter` below establishes a stacking context, which traps
+		   the @/slash autocomplete panels (z-index: 50) inside this subtree. Without
+		   an explicit z-index here, the whole wrapper stacks at the auto level (0)
+		   and the ContextPillBar's ExecutionModeBar (z-index: 10) — plus its upward
+		   dropdown — would render ABOVE the autocomplete menus. Lifting the wrapper
+		   above the exec-mode bar keeps the @ and / menus on top where they belong. */
+		z-index: 20;
 		background: var(--glass-bg);
 		backdrop-filter: blur(20px);
 		-webkit-backdrop-filter: blur(20px);

@@ -219,9 +219,15 @@
 
 	/* Responsive: mobile layout adjustments */
 	@media (max-width: 639px) {
-		/* Match git buttons' mobile text size */
+		/* On mobile the pill bar wraps onto multiple lines, so the profile pill is
+		   free to grow — show the full profile name instead of truncating it.
+		   Bound to the viewport (minus the bar's padding) so a pathologically long
+		   name can't overflow horizontally; normal names show in full. */
 		.selector-text {
 			font-size: 0.75rem;
+			max-width: calc(100vw - 4rem);
+			overflow: hidden;
+			text-overflow: ellipsis;
 		}
 
 		/* In the pill bar the dropdown opens upward; keep it within the viewport
