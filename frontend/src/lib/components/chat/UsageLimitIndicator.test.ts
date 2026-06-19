@@ -59,4 +59,20 @@ describe('UsageLimitIndicator', () => {
 		expect(container.querySelector('.usage-indicator')).not.toBeNull();
 		expect(container.querySelector('.usage-text')?.textContent).toBe('0%');
 	});
+
+	it('stays hidden for a data-less reading (utilization=null) even after its window rolls over', () => {
+		// Regression (#372 gap): the CLI emits five-hour events with utilization=null
+		// before any usage is recorded. Such a reading carries no data, so the pill
+		// must stay hidden — including after resets_at passes, which previously forced
+		// the display to a hollow "0%" and resurrected the empty pill.
+		rateLimit.set({
+			status: 'allowed',
+			rate_limit_type: 'five_hour',
+			utilization: null as unknown as number,
+			resets_at: new Date(Date.now() - 1_000).toISOString(), // window already rolled over
+		});
+		const { container } = render(UsageLimitIndicator);
+		expect(container.querySelector('.usage-indicator')).toBeNull();
+		expect(container.textContent?.trim()).toBe('');
+	});
 });

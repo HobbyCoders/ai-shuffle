@@ -3,9 +3,10 @@
 	 * UsageLimitIndicator — compact glass pill showing the current 5-hour usage
 	 * window, sitting next to <ContextUsageBar /> in the controls dock.
 	 *
-	 * Renders nothing until the first reading ever arrives — the CLI only reports
-	 * 5-hour usage once you're meaningfully into a window, so an empty pill would
-	 * just take up toolbar space ~90% of the time. Once a reading lands it stays
+	 * Renders nothing until the first reading WITH REAL DATA arrives — the CLI only
+	 * reports a 5-hour utilization once you're meaningfully into a window (and emits
+	 * data-less utilization=null events before then), so an empty pill would just
+	 * take up toolbar space ~90% of the time. Once a real reading lands it stays
 	 * visible (the value persists across reloads).
 	 *
 	 * Data source: the `rateLimit` store's persisted `lastFiveHour` reading, fed by
@@ -26,11 +27,19 @@
 	// Last-known five-hour reading (persisted across reloads).
 	const reading = $derived($rateLimit.lastFiveHour);
 
+	// A reading only counts as data once it carries a numeric `utilization`. The
+	// CLI also emits five-hour events with utilization=null (the window opened but
+	// nothing's been used yet); those must never surface the pill — not even after
+	// the window later rolls over, which would otherwise force a hollow "0%".
+	// (Regression after #372: the windowReset branch below resurrected such empty
+	// readings once resets_at passed.)
+	const hasReading = $derived(reading != null && typeof reading.utilization === 'number');
+
 	// Per-second tick — keeps the reset countdown fresh and lets the pill flip to
-	// 0% the moment the window rolls over. Only runs while we have a reading.
+	// 0% the moment the window rolls over. Only runs while we have a real reading.
 	let now: number = $state(Date.now());
 	$effect(() => {
-		if (!reading) return;
+		if (!hasReading) return;
 		now = Date.now();
 		const interval = setInterval(() => {
 			now = Date.now();
@@ -81,8 +90,8 @@
 	});
 
 	// Display %: 0 right after a window reset, otherwise the last-known value.
-	// null when we've never received a reading (renders "—").
-	const displayPct = $derived(reading ? (windowReset ? 0 : rawPct) : null);
+	// null when there's no real reading yet (pill stays hidden — see hasReading).
+	const displayPct = $derived(hasReading ? (windowReset ? 0 : rawPct) : null);
 	const hasValue = $derived(displayPct != null);
 
 	const countdown = $derived(reading && !windowReset ? formatCountdown(reading.resets_at, now) : '');
