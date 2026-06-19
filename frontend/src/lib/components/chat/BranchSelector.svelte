@@ -6,13 +6,15 @@
 	 * Shows the project + current branch and opens a dropdown (upward, since the
 	 * pill bar sits just above the input near the bottom of the viewport) for
 	 * switching branches. In worktree mode the branch is fixed, so the pill is a
-	 * read-only display of the worktree's branch.
+	 * read-only display of the worktree's branch. In cloud mode the work runs on
+	 * the second install (which owns its own branch), so the pill becomes a locked
+	 * cloud indicator with no dropdown.
 	 *
 	 * Reads project/branch context from the shared git + active-session stores,
 	 * so it works wherever it is rendered (no projectId prop needed).
 	 */
 	import { onDestroy } from 'svelte';
-	import { GitBranch, ChevronDown, Check, Plus, Loader2, Lock, FolderClosed } from 'lucide-svelte';
+	import { GitBranch, ChevronDown, Check, Plus, Loader2, Lock, FolderClosed, Cloud } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { git, gitStatus, branches as branchStore, gitMode } from '$lib/stores/git.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
@@ -28,6 +30,9 @@
 
 	// Worktree mode locks the branch to the session's worktree branch.
 	const isWorktreeMode = $derived($activeSession.executionMode === 'worktree' || $gitMode === 'worktree');
+	// Cloud mode runs on the second install, which owns its own worktree branch —
+	// the pill is a locked, read-only cloud indicator (no local branch to switch).
+	const isCloudMode = $derived($activeSession.executionMode === 'cloud');
 	const worktreeBranch = $derived(
 		$activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch || null
 	);
@@ -49,7 +54,7 @@
 			: ($gitStatus?.current_branch ?? null)
 	);
 
-	const branchLocked = $derived(isWorktreeMode || isStreaming || checkingOut);
+	const branchLocked = $derived(isCloudMode || isWorktreeMode || isStreaming || checkingOut);
 
 	// Local branches for the dropdown (exclude remotes).
 	const localBranches = $derived($branchStore.filter((b) => !b.remote));
@@ -133,33 +138,42 @@
 		type="button"
 		class="pill branch-btn"
 		class:locked={branchLocked}
+		class:cloud={isCloudMode}
 		onclick={toggleDropdown}
 		disabled={branchLocked}
-		title={isWorktreeMode
-			? `Worktree branch: ${currentBranch ?? 'unknown'}`
-			: isStreaming
-				? 'Branch locked during streaming'
-				: currentBranch
-					? `Branch: ${currentBranch}`
-					: 'Select branch'}
+		title={isCloudMode
+			? 'Running on the cloud install — branch managed by the worker'
+			: isWorktreeMode
+				? `Worktree branch: ${currentBranch ?? 'unknown'}`
+				: isStreaming
+					? 'Branch locked during streaming'
+					: currentBranch
+						? `Branch: ${currentBranch}`
+						: 'Select branch'}
 	>
 		{#if projectName}
 			<FolderClosed size={13} strokeWidth={1.5} />
 			<span class="pill-label project-name">{projectName}</span>
-			{#if currentBranch}<span class="separator">/</span>{/if}
+			{#if currentBranch || isCloudMode}<span class="separator">/</span>{/if}
 		{/if}
-		<GitBranch size={13} strokeWidth={1.5} />
-		{#if currentBranch}
-			<span class="pill-label branch-name">{currentBranch}</span>
-		{/if}
-		{#if checkingOut}
-			<Loader2 size={11} strokeWidth={2} class="spin" />
-		{:else if isWorktreeMode}
-			<Lock size={10} strokeWidth={1.5} />
-		{:else if isStreaming}
+		{#if isCloudMode}
+			<Cloud size={13} strokeWidth={1.5} />
+			<span class="pill-label">Cloud</span>
 			<Lock size={10} strokeWidth={1.5} />
 		{:else}
-			<ChevronDown size={11} strokeWidth={1.5} />
+			<GitBranch size={13} strokeWidth={1.5} />
+			{#if currentBranch}
+				<span class="pill-label branch-name">{currentBranch}</span>
+			{/if}
+			{#if checkingOut}
+				<Loader2 size={11} strokeWidth={2} class="spin" />
+			{:else if isWorktreeMode}
+				<Lock size={10} strokeWidth={1.5} />
+			{:else if isStreaming}
+				<Lock size={10} strokeWidth={1.5} />
+			{:else}
+				<ChevronDown size={11} strokeWidth={1.5} />
+			{/if}
 		{/if}
 	</button>
 
@@ -276,6 +290,15 @@
 
 	.pill.locked {
 		opacity: 0.85;
+	}
+
+	/* Cloud session: locked, with a subtle accent so it reads as a cloud
+	   indicator rather than just a dimmed branch pill. */
+	.pill.cloud {
+		opacity: 1;
+		color: var(--primary);
+		border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
+		background: color-mix(in oklch, var(--primary) 8%, var(--background));
 	}
 
 	.pill :global(svg) {

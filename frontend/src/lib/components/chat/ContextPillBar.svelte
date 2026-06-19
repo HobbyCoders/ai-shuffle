@@ -26,11 +26,7 @@
 	import BranchSelector from './BranchSelector.svelte';
 	import ExecutionModeBar from '$lib/components/layout/ExecutionModeBar.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
-	import {
-		computeContextBadge,
-		shouldShowEmptyStateBranchPill,
-		shouldShowActiveBranchPill
-	} from './contextPills';
+	import { computeContextBadge, shouldShowEmptyStateBranchPill } from './contextPills';
 	import { activeSession } from '$lib/stores/active-session';
 	import { projects } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
@@ -47,17 +43,13 @@
 	const isEmptyState = $derived($activeSession.messages.length === 0);
 
 	// Show the interactive branch pill in an active chat (messages present).
-	// Project + GitHub auth + a live (non-cleaned-up), non-cloud session. Cloud
-	// sessions fall through to the read-only cloud badge instead — see
-	// contextPills.shouldShowActiveBranchPill / computeContextBadge.
+	// Mirrors the header's previous gate: project + GitHub auth + a live
+	// (non-cleaned-up) session.
 	const showBranch = $derived(
-		shouldShowActiveBranchPill({
-			messageCount: $activeSession.messages.length,
-			project: $activeSession.project || null,
-			githubAuthenticated: $githubAuthenticated,
-			executionMode: $activeSession.executionMode,
-			worktreeDeleted: $activeSession.worktreeDeleted
-		})
+		!!$activeSession.project &&
+			$githubAuthenticated &&
+			!$activeSession.worktreeDeleted &&
+			$activeSession.messages.length > 0
 	);
 
 	// New-session screen: show the branch pill in LOCAL mode, where the
