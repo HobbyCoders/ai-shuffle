@@ -11,7 +11,7 @@
 	 *
 	 * Built on the app's theme tokens.
 	 */
-	import { Plus, Search, X, Star, FolderClosed, MessageSquare, ChevronRight } from 'lucide-svelte';
+	import { Plus, Search, X, Star, FolderClosed, MessageSquare, ChevronRight, GitBranch } from 'lucide-svelte';
 	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
@@ -176,6 +176,16 @@
 	function fmtCost(c: number): string {
 		return c < 0.01 ? '<$0.01' : `$${c.toFixed(2)}`;
 	}
+	function fmtDuration(s: Session): string {
+		const diff = new Date(s.updated_at || s.created_at).getTime() - new Date(s.created_at).getTime();
+		if (diff < 60000) return '<1m';
+		const mins = Math.floor(diff / 60000);
+		if (mins < 60) return `${mins}m`;
+		const hrs = Math.floor(mins / 60);
+		const rem = mins % 60;
+		if (hrs < 24) return rem > 0 ? `${hrs}h ${rem}m` : `${hrs}h`;
+		return `${Math.floor(hrs / 24)}d`;
+	}
 </script>
 
 <div class="board card-system">
@@ -296,14 +306,31 @@
 				<span class="dot dot-idle"></span>
 			{/if}
 		</span>
-		<span class="row-title">{session.title || 'Untitled'}</span>
-		{#if showProject}
-			<span class="row-proj">{projectName(session)}</span>
-		{/if}
-		{#if session.total_cost_usd > 0}
-			<span class="row-meta">{fmtCost(session.total_cost_usd)}{#if session.turn_count > 0} · {session.turn_count}t{/if}</span>
-		{/if}
-		<span class="row-time">{relTime(session.updated_at || session.created_at)}</span>
+		<div class="row-main">
+			<div class="row-line1">
+				<span class="row-title">{session.title || 'Untitled'}</span>
+				<span class="row-time">{relTime(session.updated_at || session.created_at)}</span>
+			</div>
+			<div class="row-line2">
+				{#if showProject}
+					<span class="row-proj">{projectName(session)}</span>
+				{/if}
+				{#if session.total_cost_usd > 0}
+					<span class="row-stat">{fmtCost(session.total_cost_usd)}</span>
+					{#if session.turn_count > 0}
+						<span class="sep">·</span>
+						<span class="row-stat">{session.turn_count} {session.turn_count === 1 ? 'turn' : 'turns'}</span>
+					{/if}
+					<span class="sep">·</span>
+					<span class="row-stat">{fmtDuration(session)}</span>
+				{:else}
+					<span class="row-stat muted">No activity yet</span>
+				{/if}
+				{#if session.worktree_branch}
+					<span class="row-branch"><GitBranch size={11} strokeWidth={1.6} />{session.worktree_branch}</span>
+				{/if}
+			</div>
+		</div>
 		<span class="row-actions">
 			<button
 				class="row-action fav"
@@ -487,7 +514,7 @@
 	/* Project grid */
 	.proj-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+		grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
 		gap: 12px;
 	}
 	.proj-card {
@@ -568,8 +595,8 @@
 		display: flex;
 		align-items: center;
 		gap: 12px;
-		padding: 0 12px;
-		height: 44px;
+		padding: 9px 14px;
+		min-height: 56px;
 		cursor: pointer;
 		border-bottom: 1px solid var(--border-subtle, var(--border));
 		transition: background-color 120ms ease;
@@ -581,36 +608,59 @@
 	.row.deleting { background: color-mix(in oklch, var(--destructive) 8%, transparent); box-shadow: inset 3px 0 0 var(--destructive); }
 
 	.row-status { display: flex; align-items: center; flex-shrink: 0; }
-	.dot { width: 7px; height: 7px; border-radius: 50%; display: block; }
+	.dot { width: 8px; height: 8px; border-radius: 50%; display: block; }
 	.dot-streaming { background: var(--primary); animation: pulse 2s ease-in-out infinite; }
 	.dot-attention { background: var(--warning); animation: pulse 1.5s ease-in-out infinite; }
 	.dot-idle { background: color-mix(in oklch, var(--muted-foreground) 45%, transparent); }
 	@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
+	.row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+	.row-line1 { display: flex; align-items: center; gap: 8px; }
 	.row-title {
 		flex: 1;
 		min-width: 0;
-		font-size: 0.8125rem;
+		font-size: 0.85rem;
 		font-weight: 500;
 		color: var(--foreground);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.row-proj {
-		flex-shrink: 0;
+	.row-time { flex-shrink: 0; font-size: 0.6875rem; color: var(--muted-foreground); opacity: 0.75; }
+
+	.row-line2 {
+		display: flex;
+		align-items: center;
+		gap: 6px;
 		font-size: 0.6875rem;
 		color: var(--muted-foreground);
+		min-width: 0;
+	}
+	.row-line2 .sep { opacity: 0.4; }
+	.row-line2 .muted { font-style: italic; opacity: 0.7; }
+	.row-stat { white-space: nowrap; }
+	.row-proj {
+		flex-shrink: 0;
+		max-width: 150px;
+		color: var(--muted-foreground);
 		background: color-mix(in oklch, var(--muted) 45%, transparent);
-		padding: 2px 7px;
+		padding: 1px 7px;
 		border-radius: 999px;
-		max-width: 160px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.row-meta { flex-shrink: 0; font-size: 0.6875rem; color: var(--muted-foreground); }
-	.row-time { flex-shrink: 0; font-size: 0.6875rem; color: var(--muted-foreground); opacity: 0.7; width: 34px; text-align: right; }
+	.row-branch {
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		max-width: 160px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: color-mix(in oklch, var(--primary) 85%, var(--muted-foreground));
+	}
+	.row-branch :global(svg) { flex-shrink: 0; }
 
 	.row-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
 	.row-action {
@@ -661,7 +711,10 @@
 		.board-header-actions { width: 100%; }
 		.board-search { flex: 1; }
 		.board-search input { width: 100%; max-width: none; }
-		.row-meta { display: none; }
+		.row { min-height: 64px; padding: 11px 14px; gap: 11px; }
+		.row-title { font-size: 0.9rem; }
+		.row-line2 { font-size: 0.72rem; gap: 7px; }
+		.row-action { width: 38px; height: 38px; opacity: 0.8; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {
