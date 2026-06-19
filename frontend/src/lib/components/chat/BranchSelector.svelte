@@ -7,8 +7,8 @@
 	 * pill bar sits just above the input near the bottom of the viewport) for
 	 * switching branches. In worktree mode the branch is fixed, so the pill is a
 	 * read-only display of the worktree's branch. In cloud mode the work runs on
-	 * the second install (which owns its own branch), so the pill becomes a locked
-	 * cloud indicator with no dropdown.
+	 * the second install (which owns its own branch), so the pill is locked and
+	 * shows a cloud icon in place of the dropdown chevron.
 	 *
 	 * Reads project/branch context from the shared git + active-session stores,
 	 * so it works wherever it is rendered (no projectId prop needed).
@@ -138,7 +138,6 @@
 		type="button"
 		class="pill branch-btn"
 		class:locked={branchLocked}
-		class:cloud={isCloudMode}
 		onclick={toggleDropdown}
 		disabled={branchLocked}
 		title={isCloudMode
@@ -154,26 +153,22 @@
 		{#if projectName}
 			<FolderClosed size={13} strokeWidth={1.5} />
 			<span class="pill-label project-name">{projectName}</span>
-			{#if currentBranch || isCloudMode}<span class="separator">/</span>{/if}
+			{#if currentBranch}<span class="separator">/</span>{/if}
 		{/if}
-		{#if isCloudMode}
-			<Cloud size={13} strokeWidth={1.5} />
-			<span class="pill-label">Cloud</span>
+		<GitBranch size={13} strokeWidth={1.5} />
+		{#if currentBranch}
+			<span class="pill-label branch-name">{currentBranch}</span>
+		{/if}
+		{#if checkingOut}
+			<Loader2 size={11} strokeWidth={2} class="spin" />
+		{:else if isCloudMode}
+			<Cloud size={12} strokeWidth={1.5} />
+		{:else if isWorktreeMode}
+			<Lock size={10} strokeWidth={1.5} />
+		{:else if isStreaming}
 			<Lock size={10} strokeWidth={1.5} />
 		{:else}
-			<GitBranch size={13} strokeWidth={1.5} />
-			{#if currentBranch}
-				<span class="pill-label branch-name">{currentBranch}</span>
-			{/if}
-			{#if checkingOut}
-				<Loader2 size={11} strokeWidth={2} class="spin" />
-			{:else if isWorktreeMode}
-				<Lock size={10} strokeWidth={1.5} />
-			{:else if isStreaming}
-				<Lock size={10} strokeWidth={1.5} />
-			{:else}
-				<ChevronDown size={11} strokeWidth={1.5} />
-			{/if}
+			<ChevronDown size={11} strokeWidth={1.5} />
 		{/if}
 	</button>
 
@@ -290,15 +285,6 @@
 
 	.pill.locked {
 		opacity: 0.85;
-	}
-
-	/* Cloud session: locked, with a subtle accent so it reads as a cloud
-	   indicator rather than just a dimmed branch pill. */
-	.pill.cloud {
-		opacity: 1;
-		color: var(--primary);
-		border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
-		background: color-mix(in oklch, var(--primary) 8%, var(--background));
 	}
 
 	.pill :global(svg) {
