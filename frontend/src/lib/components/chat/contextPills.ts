@@ -139,3 +139,40 @@ export function shouldShowEmptyStateBranchPill(input: EmptyStateBranchInput): bo
 	if (executionMode !== 'local') return false;
 	return true;
 }
+
+export interface ActiveBranchPillInput {
+	/** Number of messages in the active session (0 ⇒ empty/new-session state). */
+	messageCount: number;
+	/** The session's project id, or null when none is selected. */
+	project: string | null;
+	/** Whether GitHub CLI is authenticated (gates the branch controls). */
+	githubAuthenticated: boolean;
+	/** Session execution mode ('local' | 'worktree' | 'cloud'). */
+	executionMode: string;
+	/** True once the session's worktree has been cleaned up. */
+	worktreeDeleted: boolean;
+}
+
+/**
+ * Whether the interactive BranchSelector pill should appear in an ACTIVE chat
+ * (messages present), next to the profile pill.
+ *
+ * Shown only for a live, GitHub-authenticated git session that is NOT a cloud
+ * session: cloud work runs on the second install, which owns its own worktree
+ * branch, so there's no local branch to pick — those sessions fall through to the
+ * read-only cloud badge instead (see computeContextBadge). A cleaned-up worktree
+ * likewise gives way to the badge. Kept in lockstep with computeContextBadge so
+ * the two never both claim the slot.
+ */
+export function shouldShowActiveBranchPill(input: ActiveBranchPillInput): boolean {
+	const { messageCount, project, githubAuthenticated, executionMode, worktreeDeleted } = input;
+
+	// Active chat only — the empty/new-session state is owned by the mode toggle.
+	if (messageCount === 0) return false;
+	if (!project || !githubAuthenticated) return false;
+	// Cloud sessions show the cloud badge in place of the branch pill.
+	if (executionMode === 'cloud') return false;
+	// A cleaned-up worktree shows the read-only deleted badge instead.
+	if (worktreeDeleted) return false;
+	return true;
+}

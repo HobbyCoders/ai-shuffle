@@ -12,8 +12,10 @@ import { describe, it, expect } from 'vitest';
 import {
 	computeContextBadge,
 	shouldShowEmptyStateBranchPill,
+	shouldShowActiveBranchPill,
 	type ContextBadgeInput,
-	type EmptyStateBranchInput
+	type EmptyStateBranchInput,
+	type ActiveBranchPillInput
 } from './contextPills';
 
 /** A live, authenticated worktree session with one message — branch pill case. */
@@ -168,5 +170,44 @@ describe('shouldShowEmptyStateBranchPill', () => {
 
 	it('hides when GitHub CLI is not authenticated', () => {
 		expect(shouldShowEmptyStateBranchPill(branchBase({ githubAuthenticated: false }))).toBe(false);
+	});
+});
+
+/** A live, authenticated, active worktree session — the branch-pill case. */
+function activeBase(overrides: Partial<ActiveBranchPillInput> = {}): ActiveBranchPillInput {
+	return {
+		messageCount: 1,
+		project: 'proj-1',
+		githubAuthenticated: true,
+		executionMode: 'worktree',
+		worktreeDeleted: false,
+		...overrides
+	};
+}
+
+describe('shouldShowActiveBranchPill', () => {
+	it('shows in an active, authenticated, live git session', () => {
+		expect(shouldShowActiveBranchPill(activeBase())).toBe(true);
+		expect(shouldShowActiveBranchPill(activeBase({ executionMode: 'local' }))).toBe(true);
+	});
+
+	it('hides for cloud sessions — the cloud badge takes its place', () => {
+		expect(shouldShowActiveBranchPill(activeBase({ executionMode: 'cloud' }))).toBe(false);
+	});
+
+	it('hides for a cleaned-up worktree — the deleted badge takes its place', () => {
+		expect(shouldShowActiveBranchPill(activeBase({ worktreeDeleted: true }))).toBe(false);
+	});
+
+	it('hides in the empty/new-session state (the mode toggle owns that row)', () => {
+		expect(shouldShowActiveBranchPill(activeBase({ messageCount: 0 }))).toBe(false);
+	});
+
+	it('hides without a project', () => {
+		expect(shouldShowActiveBranchPill(activeBase({ project: null }))).toBe(false);
+	});
+
+	it('hides when GitHub CLI is not authenticated', () => {
+		expect(shouldShowActiveBranchPill(activeBase({ githubAuthenticated: false }))).toBe(false);
 	});
 });
