@@ -81,10 +81,19 @@
 	// Dropdown state
 	let buildOpen = $state(false);
 	let overflowOpen = $state(false);
+	let buildDropdownEl = $state<HTMLDivElement | null>(null);
+	let overflowDropdownEl = $state<HTMLDivElement | null>(null);
 
 	function closeMenus() {
 		buildOpen = false;
 		overflowOpen = false;
+	}
+
+	// Close on outside click (robust: ignore clicks inside the open menu/trigger).
+	function handleWindowClick(e: MouseEvent) {
+		const t = e.target as Node;
+		if (buildOpen && buildDropdownEl && !buildDropdownEl.contains(t)) buildOpen = false;
+		if (overflowOpen && overflowDropdownEl && !overflowDropdownEl.contains(t)) overflowOpen = false;
 	}
 
 	function pick(type: ViewType) {
@@ -98,28 +107,29 @@
 	});
 </script>
 
-<svelte:window onclick={closeMenus} />
+<svelte:window onclick={handleWindowClick} />
 
 <header class="topbar">
-	{#if isMobile}
-		<button class="tb-icon-btn" onclick={onToggleSidebar} title="Sessions" aria-label="Toggle sessions">
-			<PanelLeft size={18} strokeWidth={1.6} />
-		</button>
-	{/if}
-
-	<!-- Brand -->
-	<div class="brand">
-		<span class="brand-mark" aria-hidden="true">
-			<svg width="22" height="22" viewBox="0 0 40 40" fill="none">
-				<path d="M20 4C11.16 4 4 11.16 4 20s7.16 16 16 16 16-7.16 16-16S28.84 4 20 4zm0 28c-6.63 0-12-5.37-12-12S13.37 8 20 8s12 5.37 12 12-5.37 12-12 12z" fill="currentColor" opacity="0.25"/>
-				<path d="M15 17c0-1.1.9-2 2-2h6c1.1 0 2 .9 2 2v6c0 1.1-.9 2-2 2h-6c-1.1 0-2-.9-2-2v-6z" fill="currentColor" opacity="0.55"/>
-				<circle cx="20" cy="20" r="3" fill="currentColor"/>
-			</svg>
-		</span>
-		<span class="brand-name">ai-shuffle</span>
+	<!-- Left: brand (+ mobile sessions toggle) -->
+	<div class="tb-left">
+		{#if isMobile}
+			<button class="tb-icon-btn" onclick={onToggleSidebar} title="Sessions" aria-label="Toggle sessions">
+				<PanelLeft size={18} strokeWidth={1.6} />
+			</button>
+		{/if}
+		<div class="brand">
+			<span class="brand-mark" aria-hidden="true">
+				<svg width="22" height="22" viewBox="0 0 40 40" fill="none">
+					<path d="M20 4C11.16 4 4 11.16 4 20s7.16 16 16 16 16-7.16 16-16S28.84 4 20 4zm0 28c-6.63 0-12-5.37-12-12S13.37 8 20 8s12 5.37 12 12-5.37 12-12 12z" fill="currentColor" opacity="0.25"/>
+					<path d="M15 17c0-1.1.9-2 2-2h6c1.1 0 2 .9 2 2v6c0 1.1-.9 2-2 2h-6c-1.1 0-2-.9-2-2v-6z" fill="currentColor" opacity="0.55"/>
+					<circle cx="20" cy="20" r="3" fill="currentColor"/>
+				</svg>
+			</span>
+			<span class="brand-name">ai-shuffle</span>
+		</div>
 	</div>
 
-	<!-- Primary page navigation -->
+	<!-- Center: primary page navigation -->
 	<nav class="tb-nav" aria-label="Workspace">
 		<button class="tb-tab" class:active={sessionsActive} onclick={onOpenSessions}>
 			<MessagesSquare size={16} strokeWidth={1.6} /><span>Sessions</span>
@@ -132,13 +142,13 @@
 		</button>
 
 		<!-- Build group dropdown -->
-		<div class="tb-dropdown">
+		<div class="tb-dropdown" bind:this={buildDropdownEl}>
 			<button
 				class="tb-tab"
 				class:active={buildActive}
 				aria-haspopup="true"
 				aria-expanded={buildOpen}
-				onclick={(e) => { e.stopPropagation(); overflowOpen = false; buildOpen = !buildOpen; }}
+				onclick={() => { overflowOpen = false; buildOpen = !buildOpen; }}
 			>
 				<Hammer size={16} strokeWidth={1.6} /><span>{buildActive ? buildLabel : 'Build'}</span>
 				<ChevronDown size={13} strokeWidth={1.75} class="tb-caret {buildOpen ? 'flipped' : ''}" />
@@ -162,40 +172,40 @@
 		{/if}
 	</nav>
 
-	<div class="tb-spacer"></div>
-
-	<!-- Right actions -->
-	{#if onOpenSpotlight}
-		<button class="tb-search" onclick={onOpenSpotlight} title="Search (Cmd/Ctrl+K)">
-			<Search size={15} strokeWidth={1.6} />
-			<span class="tb-search-label">Search</span>
-			<kbd class="tb-kbd">⌘K</kbd>
-		</button>
-	{/if}
-
-	<button class="tb-new" onclick={onNewSession} title="New session (Cmd/Ctrl+N)">
-		<Plus size={16} strokeWidth={2} /><span class="tb-new-label">New session</span>
-	</button>
-
-	<div class="tb-dropdown">
-		<button
-			class="tb-icon-btn"
-			aria-haspopup="true"
-			aria-expanded={overflowOpen}
-			title="More"
-			onclick={(e) => { e.stopPropagation(); buildOpen = false; overflowOpen = !overflowOpen; }}
-		>
-			<MoreHorizontal size={18} strokeWidth={1.6} />
-		</button>
-		{#if overflowOpen}
-			<div class="tb-menu tb-menu-right" role="menu">
-				{#each filteredOverflow as item}
-					<button class="tb-menu-item" class:active={isActive(item.type)} role="menuitem" onclick={() => pick(item.type)}>
-						<item.icon size={15} strokeWidth={1.6} /><span>{item.label}</span>
-					</button>
-				{/each}
-			</div>
+	<!-- Right: actions -->
+	<div class="tb-right">
+		{#if onOpenSpotlight}
+			<button class="tb-search" onclick={onOpenSpotlight} title="Search (Cmd/Ctrl+K)">
+				<Search size={15} strokeWidth={1.6} />
+				<span class="tb-search-label">Search</span>
+				<kbd class="tb-kbd">⌘K</kbd>
+			</button>
 		{/if}
+
+		<button class="tb-new" onclick={onNewSession} title="New session (Cmd/Ctrl+N)">
+			<Plus size={16} strokeWidth={2} /><span class="tb-new-label">New session</span>
+		</button>
+
+		<div class="tb-dropdown" bind:this={overflowDropdownEl}>
+			<button
+				class="tb-icon-btn"
+				aria-haspopup="true"
+				aria-expanded={overflowOpen}
+				title="More"
+				onclick={() => { buildOpen = false; overflowOpen = !overflowOpen; }}
+			>
+				<MoreHorizontal size={18} strokeWidth={1.6} />
+			</button>
+			{#if overflowOpen}
+				<div class="tb-menu tb-menu-right" role="menu">
+					{#each filteredOverflow as item}
+						<button class="tb-menu-item" class:active={isActive(item.type)} role="menuitem" onclick={() => pick(item.type)}>
+							<item.icon size={15} strokeWidth={1.6} /><span>{item.label}</span>
+						</button>
+					{/each}
+				</div>
+			{/if}
+		</div>
 	</div>
 </header>
 
@@ -209,8 +219,20 @@
 		padding: 0 12px;
 		background: color-mix(in oklch, var(--muted) 40%, var(--background));
 		border-bottom: 1px solid var(--border);
-		z-index: 30;
+		position: relative;
+		z-index: 40;
 	}
+
+	/* Side sections flex equally so the nav stays centered */
+	.tb-left,
+	.tb-right {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex: 1 1 0;
+		min-width: 0;
+	}
+	.tb-right { justify-content: flex-end; }
 
 	/* Brand */
 	.brand {
@@ -230,16 +252,15 @@
 		color: var(--foreground);
 	}
 
-	/* Nav */
+	/* Nav — centered; overflow visible so dropdowns aren't clipped */
 	.tb-nav {
 		display: flex;
 		align-items: center;
+		justify-content: center;
 		gap: 2px;
-		min-width: 0;
-		overflow-x: auto;
-		scrollbar-width: none;
+		flex: 0 1 auto;
+		overflow: visible;
 	}
-	.tb-nav::-webkit-scrollbar { display: none; }
 
 	.tb-tab {
 		display: inline-flex;
@@ -262,8 +283,6 @@
 	.tb-tab :global(svg) { flex-shrink: 0; }
 	.tb-tab :global(.tb-caret) { transition: transform 180ms ease; opacity: 0.7; }
 	.tb-tab :global(.tb-caret.flipped) { transform: rotate(180deg); }
-
-	.tb-spacer { flex: 1; }
 
 	/* Dropdown */
 	.tb-dropdown { position: relative; }
