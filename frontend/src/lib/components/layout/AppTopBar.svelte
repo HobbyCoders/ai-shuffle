@@ -71,7 +71,7 @@
 	const filteredOverflow = $derived(overflowItems.filter((i) => !i.adminOnly || isAdmin));
 
 	const currentType = $derived($activeView?.type ?? null);
-	const sessionsActive = $derived(currentType === 'chat');
+	const sessionsActive = $derived(currentType === 'chat' || currentType === 'board');
 	const buildActive = $derived(currentType ? BUILD_MEMBERS.includes(currentType) : false);
 
 	function isActive(t: ViewType): boolean {

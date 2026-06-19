@@ -142,12 +142,7 @@
 	 * Return to the Sessions section — show the current chat, or start a new one.
 	 */
 	function handleOpenSessions() {
-		const sid = $activeSession?.sessionId ?? null;
-		if (sid) {
-			layout.openChat(sid);
-		} else {
-			handleNewSession();
-		}
+		layout.openBoard();
 	}
 
 	// ============================================

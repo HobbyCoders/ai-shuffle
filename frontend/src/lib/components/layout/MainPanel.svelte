@@ -6,7 +6,7 @@
 	 * based on the layout store's activeView state.
 	 */
 	import { untrack } from 'svelte';
-	import { activeView, sidebarCollapsed } from '$lib/stores/layout.svelte';
+	import { activeView, sidebarCollapsed, layout } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { projects } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -17,9 +17,10 @@
 	import { getPullRequests } from '$lib/api/github';
 	import { exportSession } from '$lib/api/sessions';
 	import { toast } from '$lib/stores/toast';
-	import { Download } from 'lucide-svelte';
+	import { Download, ArrowLeft } from 'lucide-svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import ChatView from './ChatView.svelte';
+	import SessionsBoard from './SessionsBoard.svelte';
 	import PageHeader from './PageHeader.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
@@ -44,12 +45,16 @@
 	interface Props {
 		onOpenSession?: (sessionId: string) => void;
 		onOpenPlugins?: () => void;
+		onNewSession?: () => void;
+		onNewSessionForProject?: (projectId: string) => void;
 		isMobile?: boolean;
 	}
 
 	let {
 		onOpenSession,
 		onOpenPlugins,
+		onNewSession,
+		onNewSessionForProject,
 		isMobile = false
 	}: Props = $props();
 
@@ -71,6 +76,7 @@
 	// Feature pages that use FeaturePageLayout (provide their own header)
 	// These don't need the generic PageHeader
 	const embeddedViews = new Set([
+		'board',
 		'profile', 'project', 'settings', 'subagent',
 		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'automations', 'stats', 'docs'
 	]);
@@ -529,6 +535,17 @@
 				hideGlobalStt={$activeView?.type === 'chat'}
 			>
 				{#snippet leftActions()}
+					{#if $activeView?.type === 'chat'}
+						<button
+							class="board-back-btn"
+							onclick={() => layout.openBoard()}
+							title="Back to all sessions"
+							aria-label="Back to all sessions"
+						>
+							<ArrowLeft size={15} strokeWidth={1.6} />
+							<span>Sessions</span>
+						</button>
+					{/if}
 					{#if $activeView?.type === 'chat' && activeTab?.sessionId && activeTab.messages.length > 0}
 						<button
 							class="download-jsonl-btn"
@@ -572,6 +589,14 @@
 		{/if}
 		{#if $activeView.type === 'chat'}
 			<ChatView />
+		{:else if $activeView.type === 'board'}
+			<div class="feature-panel">
+				<SessionsBoard
+					onOpenSession={onOpenSession || (() => {})}
+					onNewSession={onNewSession || (() => {})}
+					onNewSessionForProject={onNewSessionForProject}
+				/>
+			</div>
 		{:else if $activeView.type === 'profile'}
 			<!-- Embedded: uses FeaturePageLayout with its own header -->
 			<div class="feature-panel">
@@ -626,9 +651,13 @@
 			</div>
 		{/if}
 	{:else}
-		<!-- No active view - show a minimal placeholder -->
-		<div class="no-view">
-			<p>Select a session or create a new one</p>
+		<!-- Default landing: the Sessions board -->
+		<div class="feature-panel">
+			<SessionsBoard
+				onOpenSession={onOpenSession || (() => {})}
+				onNewSession={onNewSession || (() => {})}
+				onNewSessionForProject={onNewSessionForProject}
+			/>
 		</div>
 	{/if}
 </div>
@@ -682,6 +711,36 @@
 		min-width: 0;
 		overflow: hidden;
 		background: var(--background);
+	}
+
+	/* Back-to-board breadcrumb button (chat focus view) */
+	.board-back-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		height: 28px;
+		padding: 0 10px 0 7px;
+		flex-shrink: 0;
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius, 0.75rem) * 0.5);
+		color: var(--muted-foreground);
+		font-size: 0.78rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	.board-back-btn:hover {
+		background: var(--hover-overlay);
+		color: var(--foreground);
+		border-color: color-mix(in oklch, var(--foreground) 30%, var(--border));
+	}
+
+	.board-back-btn:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
 	}
 
 	/* Download chat history button — matches PageHeader's .header-btn styling */
@@ -742,17 +801,5 @@
 	.feature-panel :global(> *) {
 		flex: 1;
 		height: 100%;
-	}
-
-	.no-view {
-		flex: 1;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.no-view p {
-		color: var(--muted-foreground);
-		font-size: 0.875rem;
 	}
 </style>
