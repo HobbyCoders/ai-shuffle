@@ -65,65 +65,160 @@ class CloudMessageRequest(BaseModel):
     overrides: Optional[Dict[str, Any]] = None
 
 
+def _normalize_remote_url(url: Optional[str]) -> str:
+    """Normalize a git remote URL for comparison.
+
+    Strips a single trailing ``.git`` and any trailing slash, and lower-cases
+    the result so ``https://github.com/Owner/Repo.git`` and
+    ``https://github.com/owner/repo`` compare equal.
+    """
+    if not url:
+        return ""
+    normalized = url.strip().rstrip("/")
+    if normalized.lower().endswith(".git"):
+        normalized = normalized[: -len(".git")]
+    return normalized.lower()
+
+
+def _instance_suffixed_id(project_id: str) -> str:
+    """Derive a collision-free project id for THIS install.
+
+    Mirrors ``app.api.projects.create_project``: append a short hash of this
+    install's instance id so the same logical project id can live as a
+    *separate* row per install in the shared database.
+    """
+    import hashlib
+
+    from app.core.config import settings
+
+    instance_id = settings.effective_instance_id or ""
+    suffix = hashlib.sha256(instance_id.encode()).hexdigest()[:6]
+    return f"{project_id}-{suffix}"
+
+
 def _ensure_project_for_repo(
     project_id: str,
     repo_url: str,
     github_repo_name: Optional[str],
     default_branch: str,
 ) -> tuple[Dict[str, Any], bool]:
-    """Link to an existing project with this id, or create one in /workspace.
+    """Resolve THIS install's project for ``repo_url``, cloning if necessary.
 
-    Returns ``(project, created)``. When creating, the GitHub repo is cloned
-    into ``/workspace/<project_id>`` and a git_repositories record is written.
-    Project ids are intentionally matched verbatim across installs so the same
-    repo lands in the same logical project.
+    Returns ``(project, created)``.
+
+    Shared-DB rationale: cloud primary and worker installs share one Postgres
+    database, but ``database.get_project(id)`` looks up purely by id and does
+    NOT filter by ``instance_id``. So the verbatim ``project_id`` the primary
+    sends may resolve to the *primary's* own row, whose ``path`` is a directory
+    that exists only on the primary (e.g. a Windows path). Blindly reusing that
+    row makes the worker treat a non-existent path as the project root and fail
+    with "not a git repository". To avoid that we resolve to a project whose
+    working dir is actually a git repo *on this install*, in this order:
+
+    1. Verbatim id, only if it is a usable git repo here (single-install /
+       same-machine case).
+    2. This instance's own clone of the repo (``get_all_projects`` is already
+       instance-filtered) matched by normalized git remote URL.
+    3. Otherwise create + clone a fresh project, choosing an instance-suffixed
+       id when the verbatim id is already held by a foreign-instance row.
     """
     from app.api.projects import validate_project_path
     from app.api.git_helpers import ensure_git_repository_record
     from app.core.project_utils import get_project_working_dir
     from app.core.git_service import git_service
+    from app.core.config import settings
 
+    target_remote = _normalize_remote_url(repo_url)
+
+    # 1. Verbatim id — reuse only if its working dir is a real git repo *here*.
+    #    This keeps the single-install / same-machine path unchanged. On a shared
+    #    DB the row may belong to another install whose path doesn't exist here;
+    #    in that case is_git_repo() is False and we fall through.
     existing = database.get_project(project_id)
-    if existing:
-        # Make sure a git repo record exists so worktrees can be created.
-        working_dir = get_project_working_dir(existing)
+    if existing and git_service.is_git_repo(get_project_working_dir(existing)):
         try:
-            ensure_git_repository_record(project_id, working_dir)
+            ensure_git_repository_record(existing["id"], get_project_working_dir(existing))
         except Exception as e:  # noqa: BLE001
-            logger.warning("ensure_git_repository_record failed for %s: %s", project_id, e)
+            logger.warning("ensure_git_repository_record failed for %s: %s", existing["id"], e)
         return existing, False
 
-    # Create a fresh project rooted at /workspace/<project_id> and clone into it.
-    project_path = validate_project_path(project_id, allow_create=True)
-    project_path.mkdir(parents=True, exist_ok=True)
+    # 2. This instance's own clone of the same repo. get_all_projects() filters
+    #    by effective_instance_id, so these rows are guaranteed local. Match on
+    #    the git remote (from the git_repositories record or read live) and
+    #    require the working dir to actually be a git repo here.
+    if target_remote:
+        for candidate in database.get_all_projects():
+            working_dir = get_project_working_dir(candidate)
+            if not git_service.is_git_repo(working_dir):
+                continue
+            candidate_remote = ""
+            repo_record = database.get_git_repository_by_project(candidate["id"])
+            if repo_record and repo_record.get("remote_url"):
+                candidate_remote = _normalize_remote_url(repo_record["remote_url"])
+            if not candidate_remote:
+                candidate_remote = _normalize_remote_url(git_service.get_remote_url(working_dir))
+            if candidate_remote and candidate_remote == target_remote:
+                try:
+                    ensure_git_repository_record(candidate["id"], working_dir)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "ensure_git_repository_record failed for %s: %s", candidate["id"], e
+                    )
+                return candidate, False
 
-    project = database.create_project(
-        project_id=project_id,
-        name=github_repo_name or project_id,
-        description=f"Cloud offload of {github_repo_name or repo_url}",
-        path=project_id,
-        settings_dict=None,
-    )
+    # 3. Nothing usable on this install — create + clone a fresh project.
+    #    Pick an id that won't collide with a foreign row: if the verbatim id is
+    #    free use it; if it's held by a *different* instance's row, suffix it the
+    #    same way create_project() does so both rows can coexist.
+    target_id = project_id
+    if existing:
+        existing_instance = existing.get("instance_id")
+        if existing_instance and existing_instance != settings.effective_instance_id:
+            target_id = _instance_suffixed_id(project_id)
+        # If the colliding row is ours (same/empty instance) we still can't reuse
+        # it (step 1 proved it isn't a git repo here), so fall through and clone
+        # into its existing working dir below rather than re-creating the row.
 
-    working_dir = get_project_working_dir(project)
+    target_existing = database.get_project(target_id)
+    if target_existing:
+        # A row already exists at the target id but isn't a git repo (otherwise
+        # step 1 would have returned it). Clone into its existing dir instead of
+        # calling create_project again (which would hit a PK/path conflict).
+        project = target_existing
+        created = False
+        working_dir = get_project_working_dir(project)
+    else:
+        project_path = validate_project_path(target_id, allow_create=True)
+        project_path.mkdir(parents=True, exist_ok=True)
+        project = database.create_project(
+            project_id=target_id,
+            name=github_repo_name or target_id,
+            description=f"Cloud offload of {github_repo_name or repo_url}",
+            path=target_id,
+            settings_dict=None,
+        )
+        created = True
+        working_dir = get_project_working_dir(project)
+
     success, error = git_service.clone_repo(working_dir, repo_url)
     if not success:
-        # Roll back the empty project so a retry can start clean.
-        try:
-            database.delete_project(project_id)
-        except Exception:  # noqa: BLE001
-            pass
+        # Roll back only a row we freshly created so a retry can start clean.
+        if created:
+            try:
+                database.delete_project(target_id)
+            except Exception:  # noqa: BLE001
+                pass
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to clone repository: {error}",
         )
 
     try:
-        ensure_git_repository_record(project_id, working_dir)
+        ensure_git_repository_record(project["id"], working_dir)
     except Exception as e:  # noqa: BLE001
         logger.warning("ensure_git_repository_record failed after clone: %s", e)
 
-    return project, True
+    return project, created
 
 
 @router.post("/intake", response_model=CloudIntakeResponse)
