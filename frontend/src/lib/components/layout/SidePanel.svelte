@@ -44,6 +44,8 @@
 
 	interface Props {
 		isAdmin?: boolean;
+		/** Slim mode: hide the "Pages" nav + footer (owned by the global top bar) */
+		slim?: boolean;
 		onNewSession: () => void;
 		onNewSessionForProject?: (projectId: string) => void;
 		onOpenSession: (sessionId: string) => void;
@@ -52,6 +54,7 @@
 
 	let {
 		isAdmin = false,
+		slim = false,
 		onNewSession,
 		onNewSessionForProject,
 		onOpenSession,
@@ -432,6 +435,7 @@
 
 		<div class="side-panel-content">
 
+			{#if !slim}
 			<!-- Navigation Items -->
 			<div class="nav-section">
 				<button
@@ -467,6 +471,7 @@
 
 			<!-- Divider -->
 			<div class="divider"></div>
+			{/if}
 
 			<!-- Recent Sessions -->
 			{#if recentSessions.length > 0 && !searchQuery}
@@ -853,6 +858,7 @@
 		</div>
 
 		<!-- Footer bar: icon-only shortcuts -->
+		{#if !slim}
 		<div class="sidebar-footer">
 			{#each filteredFooterItems as item}
 				<button
@@ -865,6 +871,7 @@
 				</button>
 			{/each}
 		</div>
+		{/if}
 	{/if}
 </aside>
 

@@ -1,18 +1,18 @@
 <script lang="ts">
 	/**
-	 * AppLayout - Codex-style two-column layout
+	 * AppLayout - Top bar + body layout
 	 *
-	 * Replaces DeckLayout. Provides:
-	 * - Collapsible left sidebar (SidePanel)
-	 * - Full-width main content area (MainPanel)
-	 * - Responsive: sidebar overlays on mobile/tablet
-	 * - Resizable sidebar with drag handle
+	 * - Global AppTopBar provides primary navigation (pages as siblings).
+	 * - The session list (SidePanel) is contextual to the Sessions section
+	 *   (shown only for chat views); feature pages render full-width.
+	 * - Responsive: sidebar overlays on mobile/tablet.
 	 */
 	import { onMount, onDestroy } from 'svelte';
-	import { layout, sidebarCollapsed, sidebarOverlay, sidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH } from '$lib/stores/layout.svelte';
+	import { layout, activeView, sidebarCollapsed, sidebarOverlay, sidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import SidePanel from './SidePanel.svelte';
 	import MainPanel from './MainPanel.svelte';
+	import AppTopBar from './AppTopBar.svelte';
 	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 
 	interface Props {
@@ -21,7 +21,9 @@
 		onNewSessionForProject?: (projectId: string) => void;
 		onOpenSession: (sessionId: string) => void;
 		onOpenFeature: (type: ViewType) => void;
+		onOpenSessions: () => void;
 		onOpenPlugins?: () => void;
+		onOpenSpotlight?: () => void;
 	}
 
 	let {
@@ -30,12 +32,19 @@
 		onNewSessionForProject,
 		onOpenSession,
 		onOpenFeature,
-		onOpenPlugins
+		onOpenSessions,
+		onOpenPlugins,
+		onOpenSpotlight
 	}: Props = $props();
 
 	let isMobile = $state(false);
 	let shortcutReg: ShortcutRegistration | null = null;
 	let isResizing = $state(false);
+
+	// The session sidebar belongs to the Sessions section only. Feature pages
+	// (Files, Notes, Build group, Automations, …) render full-width.
+	const inSessions = $derived(($activeView?.type ?? 'chat') === 'chat');
+	const showSidebar = $derived(inSessions);
 
 	function checkMobile() {
 		const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
@@ -53,14 +62,12 @@
 	}
 
 	// Resize handling — use AbortController to prevent listener accumulation
-	// on rapid/multi-touch interactions
 	let resizeAbort: AbortController | null = null;
 
 	function startResize(e: PointerEvent) {
 		if ($sidebarOverlay || $sidebarCollapsed) return;
 		e.preventDefault();
 
-		// Clean up any previous resize listeners (prevents accumulation)
 		resizeAbort?.abort();
 		resizeAbort = new AbortController();
 
@@ -81,18 +88,28 @@
 		document.addEventListener('pointerup', onPointerUp, { signal: resizeAbort.signal });
 	}
 
+	// Mobile hamburger / Sessions affordance: ensure we're in the Sessions
+	// section and reveal the session drawer.
+	function handleToggleSidebar() {
+		if (!inSessions) {
+			onOpenSessions();
+			layout.setSidebarCollapsed(false);
+			return;
+		}
+		layout.toggleSidebar();
+	}
+
 	onMount(() => {
 		checkMobile();
 		window.addEventListener('resize', checkMobile);
 
-		// Register Cmd+B to toggle sidebar
 		shortcutReg = registerShortcut({
 			id: 'toggle-sidebar',
 			description: 'Toggle sidebar',
 			key: 'b',
 			cmdOrCtrl: true,
 			category: 'navigation',
-			action: () => layout.toggleSidebar()
+			action: () => handleToggleSidebar()
 		});
 	});
 
@@ -103,7 +120,6 @@
 		shortcutReg?.unregister();
 	});
 
-	// Close overlay sidebar when clicking main panel on mobile
 	function handleMainPanelClick() {
 		if ($sidebarOverlay && !$sidebarCollapsed) {
 			layout.setSidebarCollapsed(true);
@@ -111,69 +127,92 @@
 	}
 </script>
 
-<div
-	class="app-layout"
-	class:mobile={isMobile}
-	class:sidebar-overlay={$sidebarOverlay}
-	class:sidebar-collapsed={$sidebarCollapsed}
-	class:resizing={isResizing}
-	style:--sidebar-width="{$sidebarWidth}px"
->
-	<!-- Sidebar -->
-	<SidePanel
+<div class="app-shell">
+	<AppTopBar
 		{isAdmin}
+		{isMobile}
 		{onNewSession}
-		{onNewSessionForProject}
-		{onOpenSession}
+		{onOpenSessions}
 		{onOpenFeature}
+		{onOpenSpotlight}
+		onToggleSidebar={handleToggleSidebar}
 	/>
 
-	<!-- Resize handle (desktop only, when sidebar is open) -->
-	{#if !$sidebarOverlay && !$sidebarCollapsed}
-		<div
-			class="resize-handle"
-			onpointerdown={startResize}
-			role="separator"
-			aria-orientation="vertical"
-			aria-label="Resize sidebar"
-			tabindex="-1"
-		>
-			<div class="resize-handle-bar"></div>
+	<div
+		class="app-layout"
+		class:mobile={isMobile}
+		class:sidebar-overlay={$sidebarOverlay}
+		class:sidebar-collapsed={$sidebarCollapsed}
+		class:no-sidebar={!showSidebar}
+		class:resizing={isResizing}
+		style:--sidebar-width="{$sidebarWidth}px"
+	>
+		<!-- Sidebar (Sessions section only) -->
+		{#if showSidebar}
+			<SidePanel
+				slim
+				{isAdmin}
+				{onNewSession}
+				{onNewSessionForProject}
+				{onOpenSession}
+				{onOpenFeature}
+			/>
+
+			{#if !$sidebarOverlay && !$sidebarCollapsed}
+				<div
+					class="resize-handle"
+					onpointerdown={startResize}
+					role="separator"
+					aria-orientation="vertical"
+					aria-label="Resize sidebar"
+					tabindex="-1"
+				>
+					<div class="resize-handle-bar"></div>
+				</div>
+			{/if}
+
+			{#if $sidebarOverlay && !$sidebarCollapsed}
+				<button
+					class="sidebar-backdrop"
+					onclick={handleMainPanelClick}
+					tabindex="-1"
+					aria-label="Close sidebar"
+				></button>
+			{/if}
+		{/if}
+
+		<!-- Main content -->
+		<div class="main-content" role="main">
+			<MainPanel
+				onOpenSession={onOpenSession}
+				onOpenPlugins={onOpenPlugins}
+				{isMobile}
+			/>
 		</div>
-	{/if}
-
-	<!-- Overlay backdrop for mobile sidebar -->
-	{#if $sidebarOverlay && !$sidebarCollapsed}
-		<button
-			class="sidebar-backdrop"
-			onclick={handleMainPanelClick}
-			tabindex="-1"
-			aria-label="Close sidebar"
-		></button>
-	{/if}
-
-	<!-- Main content -->
-	<div class="main-content" role="main">
-		<MainPanel
-			onOpenSession={onOpenSession}
-			onOpenPlugins={onOpenPlugins}
-			{isMobile}
-		/>
 	</div>
 </div>
 
 <style>
-	.app-layout {
+	.app-shell {
 		display: flex;
+		flex-direction: column;
 		width: 100%;
 		height: 100vh;
 		height: 100dvh;
 		background: var(--background);
 		overflow: hidden;
+	}
+
+	.app-layout {
+		display: flex;
+		flex: 1;
+		min-height: 0;
+		width: 100%;
+		background: var(--background);
+		overflow: hidden;
 		perspective: 1200px;
 	}
 
-	/* Disable text selection and pointer events on iframes while resizing */
 	.app-layout.resizing {
 		user-select: none;
 		-webkit-user-select: none;
@@ -194,17 +233,16 @@
 		position: relative;
 		z-index: 1;
 		border-top-left-radius: 12px;
-		border-bottom-left-radius: 12px;
 		box-shadow: -2px 0 16px -4px rgba(0,0,0,0.06);
 		transition: border-radius 350ms cubic-bezier(0.16,1,0.3,1),
 			box-shadow 350ms cubic-bezier(0.16,1,0.3,1);
 	}
 
-	/* Remove rounded left edge when sidebar is collapsed or in mobile overlay */
+	/* Square the corner / drop the shadow when there's no docked sidebar */
 	.app-layout.sidebar-collapsed .main-content,
-	.app-layout.sidebar-overlay .main-content {
+	.app-layout.sidebar-overlay .main-content,
+	.app-layout.no-sidebar .main-content {
 		border-top-left-radius: 0;
-		border-bottom-left-radius: 0;
 		box-shadow: none;
 	}
 
@@ -224,7 +262,6 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		/* Extend the clickable area without taking visual space */
 		margin-left: -3px;
 		margin-right: -3px;
 	}
@@ -250,11 +287,11 @@
 		height: 64px;
 	}
 
-	/* Mobile: sidebar overlays on top */
+	/* Mobile: sidebar overlays on top (below the 52px top bar) */
 	.app-layout.sidebar-overlay :global(.side-panel) {
 		position: fixed;
 		left: 0;
-		top: 0;
+		top: 52px;
 		bottom: 0;
 		z-index: 1000;
 		box-shadow: var(--shadow-l);
@@ -269,6 +306,7 @@
 	.sidebar-backdrop {
 		position: fixed;
 		inset: 0;
+		top: 52px;
 		z-index: 999;
 		width: 100%;
 		height: 100%;
@@ -280,12 +318,12 @@
 		cursor: default;
 	}
 
-	/* Mobile: safe area insets for notched devices */
 	@media (max-width: 639px) {
 		.app-layout.sidebar-overlay :global(.side-panel) {
+			top: 48px;
 			padding-left: env(safe-area-inset-left, 0px);
 			padding-right: env(safe-area-inset-right, 0px);
-			padding-top: env(safe-area-inset-top, 0px);
 		}
+		.sidebar-backdrop { top: 48px; }
 	}
 </style>
