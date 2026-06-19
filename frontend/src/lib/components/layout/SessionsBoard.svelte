@@ -1,27 +1,22 @@
 <script lang="ts">
 	/**
-	 * SessionsBoard - Mission-control overview of all sessions
+	 * SessionsBoard - Mission-control navigator (scales to many projects/sessions)
 	 *
-	 * The Sessions section's index. A full-canvas grid of session cards grouped
-	 * by project; clicking a card drills into the focused chat. Replaces the
-	 * sidebar as the session navigator. Built on the app's theme tokens.
+	 * Two levels:
+	 *  - Overview: a "Recent" strip + a grid of project cards (one per project,
+	 *    with session count / running / last-active). Avoids rendering thousands
+	 *    of session cards at once.
+	 *  - Project: a dense, searchable session list (rows) for the chosen project.
+	 * A global search box flips the overview into a flat results list.
+	 *
+	 * Built on the app's theme tokens.
 	 */
-	import {
-		Plus,
-		Search,
-		X,
-		Star,
-		FolderClosed,
-		MessageSquare,
-		ChevronDown,
-		ChevronRight
-	} from 'lucide-svelte';
+	import { Plus, Search, X, Star, FolderClosed, MessageSquare, ChevronRight } from 'lucide-svelte';
 	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { toggleSessionFavorite } from '$lib/api/client';
 	import type { Session } from '$lib/api/client';
-	import type { Project } from '$lib/stores/types';
 	import { toast } from '$lib/stores/toast';
 
 	interface Props {
@@ -32,103 +27,123 @@
 
 	let { onOpenSession, onNewSession, onNewSessionForProject }: Props = $props();
 
+	const UNGROUPED = '__ungrouped__';
+	const RECENT_LIMIT = 6;
+
 	let searchQuery = $state('');
-	let collapsedProjects = $state<Set<string>>(new Set());
+	let selectedKey = $state<string | null>(null);
 	let deletingSessionId = $state<string | null>(null);
 	let deleteLoading = $state(false);
 
 	const activeId = $derived($activeSession.sessionId);
+	const projectsById = $derived(new Map($projects.map((p) => [p.id, p])));
 
-	function isStreaming(sessionId: string): boolean {
-		if ($activeSession.sessionId === sessionId) return $activeSession.isStreaming;
-		return $streamingSessions.has(sessionId);
+	function isStreaming(id: string): boolean {
+		if ($activeSession.sessionId === id) return $activeSession.isStreaming;
+		return $streamingSessions.has(id);
 	}
-	function needsAttention(sessionId: string): boolean {
-		return $backgroundPermissions.has(sessionId);
+	function needsAttention(id: string): boolean {
+		return $backgroundPermissions.has(id);
 	}
-
-	function sortWithFavorites(list: Session[]): Session[] {
+	function tsOf(s: Session): number {
+		return new Date(s.updated_at || s.created_at).getTime();
+	}
+	function sortSessions(list: Session[]): Session[] {
 		return [...list].sort((a, b) => {
-			if (a.is_favorite && !b.is_favorite) return -1;
-			if (!a.is_favorite && b.is_favorite) return 1;
-			return 0;
+			if (!!a.is_favorite !== !!b.is_favorite) return a.is_favorite ? -1 : 1;
+			return tsOf(b) - tsOf(a);
 		});
 	}
-
-	const filteredSessions = $derived.by(() => {
-		if (!searchQuery.trim()) return sortWithFavorites($sessions);
-		const q = searchQuery.toLowerCase();
-		return sortWithFavorites(
-			$sessions.filter(
-				(s) => s.title?.toLowerCase().includes(q) || s.id.toLowerCase().includes(q)
-			)
-		);
-	});
-
-	interface ProjectGroup {
-		key: string;
-		project: Project | null;
-		sessions: Session[];
+	function matches(s: Session, q: string): boolean {
+		return (s.title || '').toLowerCase().includes(q) || s.id.toLowerCase().includes(q);
 	}
-
-	const groupedSessions = $derived.by((): ProjectGroup[] => {
-		const projectMap = new Map<string, Project>();
-		for (const p of $projects) projectMap.set(p.id, p);
-
-		const groups = new Map<string, { project: Project | null; sessions: Session[] }>();
-		for (const session of filteredSessions) {
-			const key = session.project_id || '__ungrouped__';
-			if (!groups.has(key)) {
-				groups.set(key, {
-					project: session.project_id ? projectMap.get(session.project_id) || null : null,
-					sessions: []
-				});
-			}
-			groups.get(key)!.sessions.push(session);
-		}
-
-		const result: ProjectGroup[] = [];
-		const ungrouped = groups.get('__ungrouped__');
-		const projectGroups = [...groups.entries()]
-			.filter(([key]) => key !== '__ungrouped__')
-			.sort(([, a], [, b]) => (a.project?.name || '').localeCompare(b.project?.name || ''));
-		for (const [key, group] of projectGroups) {
-			result.push({ key, project: group.project, sessions: group.sessions });
-		}
-		if (ungrouped && ungrouped.sessions.length > 0) {
-			result.push({ key: '__ungrouped__', project: null, sessions: ungrouped.sessions });
-		}
-		return result;
-	});
+	function projectName(s: Session): string {
+		return s.project_id ? projectsById.get(s.project_id)?.name || 'Ungrouped' : 'Ungrouped';
+	}
 
 	const totalCount = $derived($sessions.length);
 
-	function isProjectExpanded(key: string): boolean {
-		return !collapsedProjects.has(key);
-	}
-	function toggleProject(key: string) {
-		const next = new Set(collapsedProjects);
-		if (next.has(key)) next.delete(key); else next.add(key);
-		collapsedProjects = next;
+	interface Group {
+		key: string;
+		name: string;
+		projectId: string | null;
+		sessions: Session[];
+		lastActivity: number;
+		running: number;
+		latest: Session | null;
 	}
 
-	async function handleToggleFavorite(e: MouseEvent | KeyboardEvent, session: Session) {
+	const projectGroups = $derived.by((): Group[] => {
+		const groups = new Map<string, Session[]>();
+		for (const s of $sessions) {
+			const key = s.project_id || UNGROUPED;
+			if (!groups.has(key)) groups.set(key, []);
+			groups.get(key)!.push(s);
+		}
+		const arr: Group[] = [...groups.entries()].map(([key, list]) => {
+			const sorted = sortSessions(list);
+			return {
+				key,
+				name: key === UNGROUPED ? 'Ungrouped' : projectsById.get(key)?.name || 'Ungrouped',
+				projectId: key === UNGROUPED ? null : key,
+				sessions: list,
+				lastActivity: list.reduce((m, s) => Math.max(m, tsOf(s)), 0),
+				running: list.filter((s) => isStreaming(s.id)).length,
+				latest: sorted[0] ?? null
+			};
+		});
+		arr.sort((a, b) => b.lastActivity - a.lastActivity);
+		return arr;
+	});
+
+	const recent = $derived(sortSessions($sessions).slice().sort((a, b) => tsOf(b) - tsOf(a)).slice(0, RECENT_LIMIT));
+
+	const selectedGroup = $derived(selectedKey ? projectGroups.find((g) => g.key === selectedKey) ?? null : null);
+
+	type Mode = 'overview' | 'project' | 'search';
+	const mode = $derived<Mode>(
+		selectedGroup ? 'project' : searchQuery.trim() ? 'search' : 'overview'
+	);
+
+	const displayList = $derived.by((): Session[] => {
+		const q = searchQuery.trim().toLowerCase();
+		if (selectedGroup) {
+			const list = q ? selectedGroup.sessions.filter((s) => matches(s, q)) : selectedGroup.sessions;
+			return sortSessions(list);
+		}
+		if (q) return sortSessions($sessions.filter((s) => matches(s, q)));
+		return [];
+	});
+
+	function openProject(key: string) {
+		searchQuery = '';
+		selectedKey = key;
+	}
+	function backToOverview() {
+		selectedKey = null;
+		searchQuery = '';
+	}
+	function handleNewHere() {
+		if (selectedGroup?.projectId && onNewSessionForProject) onNewSessionForProject(selectedGroup.projectId);
+		else onNewSession();
+	}
+
+	async function handleToggleFavorite(e: MouseEvent | KeyboardEvent, s: Session) {
 		e.stopPropagation();
 		try {
-			await toggleSessionFavorite(session.id);
+			await toggleSessionFavorite(s.id);
 			await appData.loadSessions();
 		} catch {
 			toast.push('Failed to update favorite', { tone: 'error' });
 		}
 	}
-
-	async function handleDelete(e: MouseEvent | KeyboardEvent, sessionId: string) {
+	async function handleDelete(e: MouseEvent | KeyboardEvent, id: string) {
 		e.stopPropagation();
-		if (deletingSessionId === sessionId) {
+		if (deletingSessionId === id) {
 			deleteLoading = true;
 			try {
-				if (activeId === sessionId) onNewSession();
-				await appData.deleteSession(sessionId);
+				if (activeId === id) onNewSession();
+				await appData.deleteSession(id);
 			} catch {
 				toast.push('Failed to delete session', { tone: 'error' });
 			} finally {
@@ -136,50 +151,46 @@
 				deletingSessionId = null;
 			}
 		} else {
-			deletingSessionId = sessionId;
-			setTimeout(() => { if (deletingSessionId === sessionId) deletingSessionId = null; }, 3000);
+			deletingSessionId = id;
+			setTimeout(() => { if (deletingSessionId === id) deletingSessionId = null; }, 3000);
 		}
 	}
-
 	function cancelDelete(e: MouseEvent | KeyboardEvent) {
 		e.stopPropagation();
 		deletingSessionId = null;
 	}
 
-	function formatRelativeTime(dateStr: string): string {
-		const date = new Date(dateStr);
-		const diffMs = Date.now() - date.getTime();
-		const diffMin = Math.floor(diffMs / 60000);
-		const diffHr = Math.floor(diffMs / 3600000);
-		const diffDay = Math.floor(diffMs / 86400000);
-		if (diffMin < 1) return 'now';
-		if (diffMin < 60) return `${diffMin}m`;
-		if (diffHr < 24) return `${diffHr}h`;
-		if (diffDay < 30) return `${diffDay}d`;
-		return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+	function relTime(input: string | number): string {
+		const ms = typeof input === 'number' ? input : new Date(input).getTime();
+		if (!ms) return '';
+		const diff = Date.now() - ms;
+		const min = Math.floor(diff / 60000);
+		const hr = Math.floor(diff / 3600000);
+		const day = Math.floor(diff / 86400000);
+		if (min < 1) return 'now';
+		if (min < 60) return `${min}m`;
+		if (hr < 24) return `${hr}h`;
+		if (day < 30) return `${day}d`;
+		return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 	}
-	function formatCost(cost: number): string {
-		if (cost < 0.01) return '<$0.01';
-		return `$${cost.toFixed(2)}`;
-	}
-	function formatDuration(createdAt: string, updatedAt: string): string {
-		const diffMs = new Date(updatedAt).getTime() - new Date(createdAt).getTime();
-		if (diffMs < 60000) return '<1m';
-		const mins = Math.floor(diffMs / 60000);
-		if (mins < 60) return `${mins}m`;
-		const hrs = Math.floor(mins / 60);
-		const rem = mins % 60;
-		if (hrs < 24) return rem > 0 ? `${hrs}h ${rem}m` : `${hrs}h`;
-		return `${Math.floor(hrs / 24)}d`;
+	function fmtCost(c: number): string {
+		return c < 0.01 ? '<$0.01' : `$${c.toFixed(2)}`;
 	}
 </script>
 
 <div class="board card-system">
 	<!-- Header -->
 	<header class="board-header">
-		<div class="board-title-wrap">
-			<h1 class="board-title">Sessions</h1>
-			<span class="board-count">{totalCount}</span>
+		<div class="board-head-left">
+			{#if mode === 'project' && selectedGroup}
+				<button class="crumb" onclick={backToOverview}>Sessions</button>
+				<ChevronRight size={14} strokeWidth={1.6} class="crumb-sep" />
+				<span class="crumb-current">{selectedGroup.name}</span>
+				<span class="board-count">{selectedGroup.sessions.length}</span>
+			{:else}
+				<h1 class="board-title">Sessions</h1>
+				<span class="board-count">{totalCount}</span>
+			{/if}
 		</div>
 		<div class="board-header-actions">
 			<div class="board-search">
@@ -187,7 +198,7 @@
 				<input
 					type="text"
 					autocomplete="off"
-					placeholder="Search sessions..."
+					placeholder={mode === 'project' && selectedGroup ? `Search ${selectedGroup.name}…` : 'Search all sessions…'}
 					bind:value={searchQuery}
 				/>
 				{#if searchQuery}
@@ -196,7 +207,7 @@
 					</button>
 				{/if}
 			</div>
-			<button class="board-new" onclick={onNewSession}>
+			<button class="board-new" onclick={handleNewHere}>
 				<Plus size={16} strokeWidth={2} /><span>New session</span>
 			</button>
 		</div>
@@ -204,136 +215,119 @@
 
 	<!-- Body -->
 	<div class="board-body">
-		{#if groupedSessions.length === 0}
-			<div class="board-empty">
-				<MessageSquare size={40} strokeWidth={1.25} />
-				<p class="board-empty-title">{searchQuery ? 'No sessions match your search' : 'No sessions yet'}</p>
-				{#if !searchQuery}
+		{#if mode === 'overview'}
+			{#if totalCount === 0}
+				<div class="board-empty">
+					<MessageSquare size={40} strokeWidth={1.25} />
+					<p class="board-empty-title">No sessions yet</p>
 					<button class="board-new" onclick={onNewSession}>
 						<Plus size={16} strokeWidth={2} /><span>Start your first session</span>
 					</button>
-				{/if}
-			</div>
-		{:else}
-			{#each groupedSessions as group (group.key)}
-				<section class="board-group">
-					<div class="board-group-header">
-						<button class="board-group-toggle" onclick={() => toggleProject(group.key)}>
-							{#if isProjectExpanded(group.key)}
-								<ChevronDown size={14} strokeWidth={1.6} />
-							{:else}
-								<ChevronRight size={14} strokeWidth={1.6} />
-							{/if}
-							<FolderClosed size={14} strokeWidth={1.6} />
-							<span class="board-group-name">{group.project?.name || 'Ungrouped'}</span>
-							<span class="board-group-count">{group.sessions.length}</span>
-						</button>
-						{#if group.project && onNewSessionForProject}
-							<button
-								class="board-group-new"
-								title="New session in this project"
-								onclick={() => onNewSessionForProject?.(group.project!.id)}
-							>
-								<Plus size={14} strokeWidth={1.75} />
-							</button>
-						{/if}
-					</div>
-
-					{#if isProjectExpanded(group.key)}
-						<div class="board-grid">
-							{#each group.sessions as session (session.id)}
-								<button
-									class="board-card"
-									class:active={activeId === session.id}
-									class:deleting={deletingSessionId === session.id}
-									onclick={() => onOpenSession(session.id)}
-								>
-									<div class="card-top">
-										<span class="card-status">
-											{#if isStreaming(session.id)}
-												<span class="dot dot-streaming" title="Running"></span>
-											{:else if needsAttention(session.id)}
-												<span class="dot dot-attention" title="Needs attention"></span>
-											{:else}
-												<span class="dot dot-idle"></span>
-											{/if}
-										</span>
-										<span class="card-title">{session.title || 'Untitled'}</span>
-										<span
-											class="card-fav"
-											class:is-fav={session.is_favorite}
-											role="button"
-											tabindex="0"
-											title={session.is_favorite ? 'Unfavorite' : 'Favorite'}
-											onclick={(e) => handleToggleFavorite(e, session)}
-											onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleToggleFavorite(e, session); }}
-										>
-											<Star size={13} strokeWidth={1.6} fill={session.is_favorite ? 'currentColor' : 'none'} />
-										</span>
-									</div>
-
-									{#if session.total_cost_usd > 0}
-										<div class="card-meta">
-											<span>{formatCost(session.total_cost_usd)}</span>
-											<span class="sep">·</span>
-											<span>{formatDuration(session.created_at, session.updated_at || session.created_at)}</span>
-											{#if session.turn_count > 0}
-												<span class="sep">·</span>
-												<span>{session.turn_count} {session.turn_count === 1 ? 'turn' : 'turns'}</span>
-											{/if}
-										</div>
-									{:else}
-										<div class="card-meta card-meta-empty">No activity yet</div>
-									{/if}
-
-									<div class="card-foot">
-										<span class="card-time">{formatRelativeTime(session.updated_at || session.created_at)}</span>
-										{#if deletingSessionId === session.id}
-											<span class="card-confirm">
-												<span
-													class="card-action danger"
-													class:disabled={deleteLoading}
-													role="button"
-													tabindex="0"
-													title="Confirm clear"
-													onclick={(e) => { if (!deleteLoading) handleDelete(e, session.id); }}
-													onkeydown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && !deleteLoading) handleDelete(e, session.id); }}
-												>
-													<BrushCleaning size={13} strokeWidth={2} />
-												</span>
-												<span
-													class="card-action"
-													role="button"
-													tabindex="0"
-													title="Cancel"
-													onclick={(e) => cancelDelete(e)}
-													onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') cancelDelete(e); }}
-												>
-													<X size={13} strokeWidth={2} />
-												</span>
-											</span>
-										{:else}
-											<span
-												class="card-action card-clear"
-												role="button"
-												tabindex="0"
-												title="Clear session"
-												onclick={(e) => handleDelete(e, session.id)}
-												onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleDelete(e, session.id); }}
-											>
-												<BrushCleaning size={13} strokeWidth={1.6} />
-											</span>
-										{/if}
-									</div>
-								</button>
-							{/each}
+				</div>
+			{:else}
+				{#if recent.length}
+					<section class="board-section">
+						<h2 class="section-label">Recent</h2>
+						<div class="row-list">
+							{#each recent as s (s.id)}{@render sessionRow(s, true)}{/each}
 						</div>
-					{/if}
+					</section>
+				{/if}
+				<section class="board-section">
+					<h2 class="section-label">Projects <span class="section-count">{projectGroups.length}</span></h2>
+					<div class="proj-grid">
+						{#each projectGroups as g (g.key)}
+							<button class="proj-card" onclick={() => openProject(g.key)}>
+								<div class="proj-top">
+									<span class="proj-icon"><FolderClosed size={16} strokeWidth={1.6} /></span>
+									<span class="proj-name">{g.name}</span>
+									{#if g.running > 0}
+										<span class="proj-running"><span class="dot dot-streaming"></span>{g.running}</span>
+									{/if}
+								</div>
+								<div class="proj-latest">{g.latest?.title || 'Untitled'}</div>
+								<div class="proj-stats">
+									<span class="proj-count-pill">{g.sessions.length}</span>
+									<span>{g.sessions.length === 1 ? 'session' : 'sessions'}</span>
+									<span class="sep">·</span>
+									<span>{relTime(g.lastActivity)}</span>
+									<ChevronRight size={14} strokeWidth={1.6} class="proj-chevron" />
+								</div>
+							</button>
+						{/each}
+					</div>
 				</section>
-			{/each}
+			{/if}
+		{:else}
+			<!-- project or search: dense list -->
+			{#if displayList.length === 0}
+				<div class="board-empty">
+					<Search size={36} strokeWidth={1.25} />
+					<p class="board-empty-title">No sessions match “{searchQuery}”</p>
+				</div>
+			{:else}
+				{#if mode === 'search'}
+					<p class="list-caption">{displayList.length} {displayList.length === 1 ? 'result' : 'results'} across all projects</p>
+				{/if}
+				<div class="row-list">
+					{#each displayList as s (s.id)}{@render sessionRow(s, mode === 'search')}{/each}
+				</div>
+			{/if}
 		{/if}
 	</div>
 </div>
+
+{#snippet sessionRow(session: Session, showProject: boolean)}
+	<div
+		class="row"
+		class:active={activeId === session.id}
+		class:deleting={deletingSessionId === session.id}
+		role="button"
+		tabindex="0"
+		onclick={() => onOpenSession(session.id)}
+		onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenSession(session.id); } }}
+	>
+		<span class="row-status">
+			{#if isStreaming(session.id)}
+				<span class="dot dot-streaming" title="Running"></span>
+			{:else if needsAttention(session.id)}
+				<span class="dot dot-attention" title="Needs attention"></span>
+			{:else}
+				<span class="dot dot-idle"></span>
+			{/if}
+		</span>
+		<span class="row-title">{session.title || 'Untitled'}</span>
+		{#if showProject}
+			<span class="row-proj">{projectName(session)}</span>
+		{/if}
+		{#if session.total_cost_usd > 0}
+			<span class="row-meta">{fmtCost(session.total_cost_usd)}{#if session.turn_count > 0} · {session.turn_count}t{/if}</span>
+		{/if}
+		<span class="row-time">{relTime(session.updated_at || session.created_at)}</span>
+		<span class="row-actions">
+			<button
+				class="row-action fav"
+				class:is-fav={session.is_favorite}
+				title={session.is_favorite ? 'Unfavorite' : 'Favorite'}
+				onclick={(e) => handleToggleFavorite(e, session)}
+			>
+				<Star size={13} strokeWidth={1.6} fill={session.is_favorite ? 'currentColor' : 'none'} />
+			</button>
+			{#if deletingSessionId === session.id}
+				<button class="row-action danger" disabled={deleteLoading} title="Confirm clear" onclick={(e) => handleDelete(e, session.id)}>
+					<BrushCleaning size={13} strokeWidth={2} />
+				</button>
+				<button class="row-action" title="Cancel" onclick={cancelDelete}>
+					<X size={13} strokeWidth={2} />
+				</button>
+			{:else}
+				<button class="row-action clear" title="Clear session" onclick={(e) => handleDelete(e, session.id)}>
+					<BrushCleaning size={13} strokeWidth={1.6} />
+				</button>
+			{/if}
+		</span>
+	</div>
+{/snippet}
 
 <style>
 	.board {
@@ -356,13 +350,37 @@
 		border-bottom: 1px solid var(--border-subtle, var(--border));
 		flex-shrink: 0;
 	}
-	.board-title-wrap { display: flex; align-items: baseline; gap: 10px; }
+	.board-head-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
 	.board-title {
 		font-family: var(--font-display, Georgia, serif);
 		font-size: 1.35rem;
 		font-weight: 700;
 		letter-spacing: -0.01em;
 		color: var(--foreground);
+	}
+	.crumb {
+		background: transparent;
+		border: none;
+		padding: 0;
+		font-family: var(--font-display, Georgia, serif);
+		font-size: 1.35rem;
+		font-weight: 700;
+		letter-spacing: -0.01em;
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: color 120ms ease;
+	}
+	.crumb:hover { color: var(--foreground); }
+	.board-head-left :global(.crumb-sep) { color: var(--muted-foreground); opacity: 0.6; }
+	.crumb-current {
+		font-family: var(--font-display, Georgia, serif);
+		font-size: 1.35rem;
+		font-weight: 700;
+		letter-spacing: -0.01em;
+		color: var(--foreground);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 	.board-count {
 		font-size: 0.75rem;
@@ -371,14 +389,11 @@
 		background: color-mix(in oklch, var(--primary) 12%, transparent);
 		padding: 2px 8px;
 		border-radius: 999px;
+		flex-shrink: 0;
 	}
 	.board-header-actions { display: flex; align-items: center; gap: 10px; }
 
-	.board-search {
-		position: relative;
-		display: flex;
-		align-items: center;
-	}
+	.board-search { position: relative; display: flex; align-items: center; }
 	.board-search :global(svg) {
 		position: absolute;
 		left: 10px;
@@ -386,7 +401,7 @@
 		pointer-events: none;
 	}
 	.board-search input {
-		width: 240px;
+		width: 260px;
 		max-width: 46vw;
 		height: 34px;
 		padding: 0 28px 0 32px;
@@ -445,79 +460,41 @@
 		padding: 16px 24px 32px;
 		display: flex;
 		flex-direction: column;
-		gap: 18px;
+		gap: 22px;
 	}
 
-	.board-group { display: flex; flex-direction: column; gap: 10px; }
-	.board-group-header {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-	}
-	.board-group-toggle {
+	.board-section { display: flex; flex-direction: column; gap: 10px; }
+	.section-label {
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		flex: 1;
-		min-width: 0;
-		padding: 4px 2px;
-		background: transparent;
-		border: none;
-		color: var(--muted-foreground);
 		font-size: 0.6875rem;
 		font-weight: 600;
 		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		cursor: pointer;
-		text-align: left;
-		transition: color 120ms ease;
+		letter-spacing: 0.06em;
+		color: var(--muted-foreground);
 	}
-	.board-group-toggle:hover { color: var(--foreground); }
-	.board-group-name {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		text-transform: none;
-		letter-spacing: 0;
-		font-size: 0.8125rem;
-	}
-	.board-group-count {
+	.section-count {
 		font-size: 0.625rem;
 		font-weight: 600;
 		color: var(--primary);
 		background: color-mix(in oklch, var(--primary) 12%, transparent);
 		padding: 1px 6px;
 		border-radius: 999px;
+		letter-spacing: 0;
 	}
-	.board-group-new {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 26px;
-		height: 26px;
-		background: transparent;
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) - 4px);
-		color: var(--muted-foreground);
-		cursor: pointer;
-		flex-shrink: 0;
-		transition: all 120ms ease;
-	}
-	.board-group-new:hover { color: var(--primary); border-color: var(--primary); background: color-mix(in oklch, var(--primary) 10%, transparent); }
 
-	/* Card grid */
-	.board-grid {
+	/* Project grid */
+	.proj-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+		grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
 		gap: 12px;
 	}
-
-	.board-card {
+	.proj-card {
 		display: flex;
 		flex-direction: column;
-		gap: 10px;
-		padding: 14px;
-		min-height: 104px;
+		gap: 8px;
+		padding: 14px 16px;
 		background: var(--card);
 		border: 1px solid var(--border);
 		border-radius: var(--radius, 0.75rem);
@@ -525,96 +502,138 @@
 		cursor: pointer;
 		transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
 	}
-	.board-card:hover {
+	.proj-card:hover {
 		border-color: color-mix(in oklch, var(--primary) 40%, var(--border));
 		box-shadow: var(--shadow-m), 0 0 0 1px color-mix(in oklch, var(--primary) 12%, transparent);
 		transform: translateY(-1px);
 	}
-	.board-card:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-	.board-card.active {
-		border-color: var(--primary);
-		box-shadow: 0 0 0 1px var(--primary), var(--shadow-m);
-	}
-	.board-card.deleting {
-		border-color: color-mix(in oklch, var(--destructive) 45%, transparent);
-		background: color-mix(in oklch, var(--destructive) 7%, var(--card));
-	}
-
-	.card-top { display: flex; align-items: flex-start; gap: 8px; }
-	.card-status { display: flex; align-items: center; padding-top: 4px; flex-shrink: 0; }
-	.dot { width: 7px; height: 7px; border-radius: 50%; display: block; }
-	.dot-streaming { background: var(--primary); animation: pulse 2s ease-in-out infinite; }
-	.dot-attention { background: var(--warning); animation: pulse 1.5s ease-in-out infinite; }
-	.dot-idle { background: color-mix(in oklch, var(--muted-foreground) 50%, transparent); }
-	@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-
-	.card-title {
+	.proj-card:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.proj-top { display: flex; align-items: center; gap: 8px; }
+	.proj-icon { display: flex; color: var(--muted-foreground); flex-shrink: 0; }
+	.proj-name {
 		flex: 1;
 		min-width: 0;
-		font-size: 0.875rem;
+		font-size: 0.9rem;
 		font-weight: 600;
 		color: var(--foreground);
-		line-height: 1.35;
-		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		line-clamp: 2;
-		-webkit-box-orient: vertical;
 		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
-	.card-fav {
-		flex-shrink: 0;
-		display: flex;
+	.proj-running {
+		display: inline-flex;
 		align-items: center;
-		justify-content: center;
-		width: 22px;
-		height: 22px;
-		border-radius: 6px;
-		color: var(--muted-foreground);
-		opacity: 0;
-		cursor: pointer;
-		transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
+		gap: 4px;
+		font-size: 0.6875rem;
+		font-weight: 600;
+		color: var(--primary);
+		flex-shrink: 0;
 	}
-	.card-fav.is-fav { opacity: 1; color: var(--warning); }
-	.board-card:hover .card-fav { opacity: 1; }
-	.card-fav:hover { color: var(--warning); background: var(--hover-overlay); }
-
-	.card-meta {
+	.proj-latest {
+		font-size: 0.78rem;
+		color: var(--muted-foreground);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.proj-stats {
 		display: flex;
 		align-items: center;
 		gap: 5px;
 		font-size: 0.6875rem;
 		color: var(--muted-foreground);
-		flex-wrap: wrap;
 	}
-	.card-meta .sep { opacity: 0.4; }
-	.card-meta-empty { font-style: italic; opacity: 0.7; }
+	.proj-stats .sep { opacity: 0.4; }
+	.proj-count-pill {
+		font-weight: 600;
+		color: var(--foreground);
+	}
+	.proj-card :global(.proj-chevron) { margin-left: auto; color: var(--muted-foreground); opacity: 0.5; }
 
-	.card-foot {
+	/* Dense session rows */
+	.list-caption {
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+		margin: -6px 0 0;
+	}
+	.row-list {
+		display: flex;
+		flex-direction: column;
+		border: 1px solid var(--border-subtle, var(--border));
+		border-radius: var(--radius, 0.75rem);
+		overflow: hidden;
+		background: var(--card);
+	}
+	.row {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		margin-top: auto;
+		gap: 12px;
+		padding: 0 12px;
+		height: 44px;
+		cursor: pointer;
+		border-bottom: 1px solid var(--border-subtle, var(--border));
+		transition: background-color 120ms ease;
 	}
-	.card-time { font-size: 0.6875rem; color: var(--muted-foreground); opacity: 0.7; }
+	.row:last-child { border-bottom: none; }
+	.row:hover { background: var(--hover-overlay); }
+	.row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+	.row.active { background: var(--selection-bg, color-mix(in oklch, var(--primary) 10%, transparent)); box-shadow: inset 3px 0 0 var(--primary); }
+	.row.deleting { background: color-mix(in oklch, var(--destructive) 8%, transparent); box-shadow: inset 3px 0 0 var(--destructive); }
 
-	.card-confirm { display: flex; gap: 4px; }
-	.card-action {
+	.row-status { display: flex; align-items: center; flex-shrink: 0; }
+	.dot { width: 7px; height: 7px; border-radius: 50%; display: block; }
+	.dot-streaming { background: var(--primary); animation: pulse 2s ease-in-out infinite; }
+	.dot-attention { background: var(--warning); animation: pulse 1.5s ease-in-out infinite; }
+	.dot-idle { background: color-mix(in oklch, var(--muted-foreground) 45%, transparent); }
+	@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+	.row-title {
+		flex: 1;
+		min-width: 0;
+		font-size: 0.8125rem;
+		font-weight: 500;
+		color: var(--foreground);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.row-proj {
+		flex-shrink: 0;
+		font-size: 0.6875rem;
+		color: var(--muted-foreground);
+		background: color-mix(in oklch, var(--muted) 45%, transparent);
+		padding: 2px 7px;
+		border-radius: 999px;
+		max-width: 160px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.row-meta { flex-shrink: 0; font-size: 0.6875rem; color: var(--muted-foreground); }
+	.row-time { flex-shrink: 0; font-size: 0.6875rem; color: var(--muted-foreground); opacity: 0.7; width: 34px; text-align: right; }
+
+	.row-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+	.row-action {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 24px;
-		height: 24px;
+		width: 26px;
+		height: 26px;
+		background: transparent;
+		border: none;
 		border-radius: 6px;
 		color: var(--muted-foreground);
 		cursor: pointer;
-		transition: color 120ms ease, background-color 120ms ease;
+		opacity: 0;
+		transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
 	}
-	.card-clear { opacity: 0; }
-	.board-card:hover .card-clear { opacity: 1; }
-	.card-action:hover { color: var(--foreground); background: var(--hover-overlay); }
-	.card-action.danger { color: var(--destructive); background: color-mix(in oklch, var(--destructive) 12%, transparent); }
-	.card-action.danger:hover { background: color-mix(in oklch, var(--destructive) 20%, transparent); }
-	.card-action.disabled { opacity: 0.5; cursor: not-allowed; }
+	.row:hover .row-action { opacity: 1; }
+	.row-action:hover { color: var(--foreground); background: color-mix(in oklch, var(--muted) 60%, transparent); }
+	.row-action.fav.is-fav { opacity: 1; color: var(--warning); }
+	.row-action.fav:hover { color: var(--warning); }
+	.row-action.danger { opacity: 1; color: var(--destructive); background: color-mix(in oklch, var(--destructive) 12%, transparent); }
+	.row-action.danger:hover { background: color-mix(in oklch, var(--destructive) 20%, transparent); }
+	.row-action:disabled { opacity: 0.5; cursor: not-allowed; }
 
 	/* Empty */
 	.board-empty {
@@ -631,21 +650,22 @@
 	.board-empty :global(svg) { opacity: 0.5; }
 	.board-empty-title { font-size: 0.9rem; }
 
-	/* Touch / mobile: always reveal hover actions */
+	/* Touch / mobile */
 	@media (hover: none), (max-width: 639px) {
-		.card-fav, .card-clear { opacity: 0.7; }
+		.row-action { opacity: 0.7; }
 	}
 	@media (max-width: 639px) {
 		.board-header { padding: 12px 16px; }
 		.board-body { padding: 12px 16px 28px; }
-		.board-grid { grid-template-columns: 1fr; }
-		.board-search input { width: 100%; }
+		.proj-grid { grid-template-columns: 1fr; }
 		.board-header-actions { width: 100%; }
 		.board-search { flex: 1; }
+		.board-search input { width: 100%; max-width: none; }
+		.row-meta { display: none; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.board-card { transition: none; }
+		.proj-card { transition: none; }
 		.dot-streaming, .dot-attention { animation: none; }
 	}
 </style>
