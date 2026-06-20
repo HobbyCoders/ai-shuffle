@@ -11,7 +11,7 @@
 	 *
 	 * Built on the app's theme tokens.
 	 */
-	import { Plus, Search, X, Star, FolderClosed, MessageSquare, ChevronRight, GitBranch } from 'lucide-svelte';
+	import { Plus, X, Star, FolderClosed, MessageSquare, ChevronRight, GitBranch } from 'lucide-svelte';
 	import BrushCleaning from 'lucide-svelte/icons/brush-cleaning';
 	import { appData, sessions, projects } from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
@@ -25,12 +25,14 @@
 		onNewSessionForProject?: (projectId: string) => void;
 	}
 
-	let { onOpenSession, onNewSession, onNewSessionForProject }: Props = $props();
+	// onNewSessionForProject is part of the component contract but the board no
+	// longer renders its own "New session" button (the top bar provides it), so
+	// it is intentionally left undestructured.
+	let { onOpenSession, onNewSession }: Props = $props();
 
 	const UNGROUPED = '__ungrouped__';
 	const RECENT_LIMIT = 6;
 
-	let searchQuery = $state('');
 	let selectedKey = $state<string | null>(null);
 	let deletingSessionId = $state<string | null>(null);
 	let deleteLoading = $state(false);
@@ -53,9 +55,6 @@
 			if (!!a.is_favorite !== !!b.is_favorite) return a.is_favorite ? -1 : 1;
 			return tsOf(b) - tsOf(a);
 		});
-	}
-	function matches(s: Session, q: string): boolean {
-		return (s.title || '').toLowerCase().includes(q) || s.id.toLowerCase().includes(q);
 	}
 	function projectName(s: Session): string {
 		return s.project_id ? projectsById.get(s.project_id)?.name || 'Ungrouped' : 'Ungrouped';
@@ -100,32 +99,18 @@
 
 	const selectedGroup = $derived(selectedKey ? projectGroups.find((g) => g.key === selectedKey) ?? null : null);
 
-	type Mode = 'overview' | 'project' | 'search';
-	const mode = $derived<Mode>(
-		selectedGroup ? 'project' : searchQuery.trim() ? 'search' : 'overview'
+	type Mode = 'overview' | 'project';
+	const mode = $derived<Mode>(selectedGroup ? 'project' : 'overview');
+
+	const displayList = $derived.by((): Session[] =>
+		selectedGroup ? sortSessions(selectedGroup.sessions) : []
 	);
 
-	const displayList = $derived.by((): Session[] => {
-		const q = searchQuery.trim().toLowerCase();
-		if (selectedGroup) {
-			const list = q ? selectedGroup.sessions.filter((s) => matches(s, q)) : selectedGroup.sessions;
-			return sortSessions(list);
-		}
-		if (q) return sortSessions($sessions.filter((s) => matches(s, q)));
-		return [];
-	});
-
 	function openProject(key: string) {
-		searchQuery = '';
 		selectedKey = key;
 	}
 	function backToOverview() {
 		selectedKey = null;
-		searchQuery = '';
-	}
-	function handleNewHere() {
-		if (selectedGroup?.projectId && onNewSessionForProject) onNewSessionForProject(selectedGroup.projectId);
-		else onNewSession();
 	}
 
 	async function handleToggleFavorite(e: MouseEvent | KeyboardEvent, s: Session) {
@@ -202,25 +187,6 @@
 				<span class="board-count">{totalCount}</span>
 			{/if}
 		</div>
-		<div class="board-header-actions">
-			<div class="board-search">
-				<Search size={15} strokeWidth={1.6} />
-				<input
-					type="text"
-					autocomplete="off"
-					placeholder={mode === 'project' && selectedGroup ? `Search ${selectedGroup.name}…` : 'Search all sessions…'}
-					bind:value={searchQuery}
-				/>
-				{#if searchQuery}
-					<button class="board-search-clear" onclick={() => (searchQuery = '')} aria-label="Clear search">
-						<X size={13} strokeWidth={2} />
-					</button>
-				{/if}
-			</div>
-			<button class="board-new" onclick={handleNewHere}>
-				<Plus size={16} strokeWidth={2} /><span>New session</span>
-			</button>
-		</div>
 	</header>
 
 	<!-- Body -->
@@ -269,18 +235,15 @@
 				</section>
 			{/if}
 		{:else}
-			<!-- project or search: dense list -->
+			<!-- project: dense session list -->
 			{#if displayList.length === 0}
 				<div class="board-empty">
-					<Search size={36} strokeWidth={1.25} />
-					<p class="board-empty-title">No sessions match “{searchQuery}”</p>
+					<MessageSquare size={36} strokeWidth={1.25} />
+					<p class="board-empty-title">No sessions in this project</p>
 				</div>
 			{:else}
-				{#if mode === 'search'}
-					<p class="list-caption">{displayList.length} {displayList.length === 1 ? 'result' : 'results'} across all projects</p>
-				{/if}
 				<div class="row-list">
-					{#each displayList as s (s.id)}{@render sessionRow(s, mode === 'search')}{/each}
+					{#each displayList as s (s.id)}{@render sessionRow(s, false)}{/each}
 				</div>
 			{/if}
 		{/if}
@@ -366,18 +329,17 @@
 		overflow: hidden;
 	}
 
-	/* Header */
+	/* Header — title + count centered */
 	.board-header {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
+		justify-content: center;
 		gap: 16px;
-		flex-wrap: wrap;
 		padding: 16px 24px;
 		border-bottom: 1px solid var(--border-subtle, var(--border));
 		flex-shrink: 0;
 	}
-	.board-head-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+	.board-head-left { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; }
 	.board-title {
 		font-family: var(--font-display, Georgia, serif);
 		font-size: 1.35rem;
@@ -418,48 +380,6 @@
 		border-radius: 999px;
 		flex-shrink: 0;
 	}
-	.board-header-actions { display: flex; align-items: center; gap: 10px; }
-
-	.board-search { position: relative; display: flex; align-items: center; }
-	.board-search :global(svg) {
-		position: absolute;
-		left: 10px;
-		color: var(--muted-foreground);
-		pointer-events: none;
-	}
-	.board-search input {
-		width: 260px;
-		max-width: 46vw;
-		height: 34px;
-		padding: 0 28px 0 32px;
-		background: var(--input-bg);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius, 0.75rem) - 2px);
-		color: var(--foreground);
-		font-size: 0.8125rem;
-		outline: none;
-		transition: border-color 120ms ease, box-shadow 120ms ease;
-	}
-	.board-search input::placeholder { color: var(--muted-foreground); }
-	.board-search input:focus {
-		border-color: var(--ring);
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 15%, transparent);
-	}
-	.board-search-clear {
-		position: absolute;
-		right: 6px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 20px;
-		height: 20px;
-		background: transparent;
-		border: none;
-		border-radius: 6px;
-		color: var(--muted-foreground);
-		cursor: pointer;
-	}
-	.board-search-clear:hover { color: var(--foreground); background: var(--hover-overlay); }
 
 	.board-new {
 		display: inline-flex;
@@ -583,12 +503,6 @@
 	.proj-card :global(.proj-chevron) { margin-left: auto; color: var(--muted-foreground); opacity: 0.5; }
 
 	/* Dense session rows */
-	.list-caption {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		margin: -6px 0 0;
-		flex-shrink: 0;
-	}
 	.row-list {
 		display: flex;
 		flex-direction: column;
@@ -716,9 +630,6 @@
 		.board-header { padding: 12px 16px; }
 		.board-body { padding: 12px 16px 28px; }
 		.proj-grid { grid-template-columns: 1fr; }
-		.board-header-actions { width: 100%; }
-		.board-search { flex: 1; }
-		.board-search input { width: 100%; max-width: none; }
 		.row { min-height: 64px; padding: 11px 14px; gap: 11px; }
 		.row-title { font-size: 0.9rem; }
 		.row-line2 { font-size: 0.72rem; gap: 7px; }
