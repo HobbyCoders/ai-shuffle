@@ -527,8 +527,10 @@
 		.fs-toolbar { padding: 12px 16px 10px; }
 		.fs-newfolder, .fs-error { margin: 0 16px 10px; }
 		.fs-layout { grid-template-columns: 1fr; padding: 0 16px 20px; overflow-y: auto; }
-		.fs-side { max-height: 220px; }
-		.fs-row { grid-template-columns: 1fr 70px 64px; }
+		/* No folder tree on mobile — a single-column flat file list (mockup #page-files). */
+		.fs-side { display: none; }
+		.fs-row--head { display: none; }
+		.fs-row { grid-template-columns: 1fr auto auto; gap: 10px; }
 		.fs-md { display: none; }
 		.fs-actions { opacity: 1; }
 	}

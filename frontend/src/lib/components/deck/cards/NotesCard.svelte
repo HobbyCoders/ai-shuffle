@@ -594,7 +594,7 @@
 	</button>
 {/snippet}
 
-<div class="ns">
+<div class="ns" class:editing={!!(editingNote || isCreatingNew)}>
 	<div class="ns-wrap">
 		<div class="ns-head">
 			<StudioPageHeader eyebrow="Global · across all projects" title="" accent="Notes">
@@ -973,8 +973,25 @@
 
 	@media (max-width: 767px) {
 		.ns-head { padding: 16px 16px 12px; }
-		.ns-layout { grid-template-columns: 1fr; padding: 0 16px 20px; overflow-y: auto; }
-		.ns-listcol { max-height: 300px; }
+		.ns-layout { grid-template-columns: 1fr; padding: 0 16px 18px; overflow: hidden; }
+
+		/* One pane at a time: the list fills the screen; the editor takes over
+		   full-screen when a note is open (mockup #page-notes). */
+		.ns-listcol { max-height: none; border: none; border-radius: 0; background: transparent; }
+		.ns-editorcol { display: none; }
+		.ns.editing .ns-listcol { display: none; }
+		.ns.editing .ns-editorcol { display: flex; flex: 1; min-height: 0; }
+
+		/* Search → standalone pill; tag chips → horizontal scroll strip. */
+		.ns-search { border: 1px solid var(--border); border-radius: calc(var(--radius, 0.75rem) - 2px); margin-bottom: 10px; }
+		.ns-tagbar { border-bottom: none; padding: 2px 0 12px; flex-wrap: nowrap; overflow-x: auto; }
+		.ns-tagbar::-webkit-scrollbar { display: none; }
+		.ns-tagbar .ns-tag { flex: 0 0 auto; }
+
+		/* Notes render as full-width cards (mockup .nitem). */
+		.ns-item { border: 1px solid var(--border); border-radius: 12px; margin-bottom: 10px; }
+		.ns-item.on { border-left-color: var(--primary); }
+		.ns-label { padding: 6px 2px 8px; }
 	}
 </style>
 
