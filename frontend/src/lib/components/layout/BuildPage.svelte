@@ -14,8 +14,13 @@
 	 * Styled with the app's existing theme tokens, not the mockup palette.
 	 */
 	import { browser } from '$app/environment';
-	import { untrack } from 'svelte';
+	import { untrack, onMount } from 'svelte';
 	import { Users, Bot, Server, Puzzle, Webhook } from 'lucide-svelte';
+	import { api } from '$lib/api/client';
+	import { appData, profiles } from '$lib/stores/app-data.svelte';
+	import { mcp, globalMcpServers } from '$lib/stores/mcp.svelte';
+	import { plugins, installedPlugins } from '$lib/stores/plugins.svelte';
+	import { hooks, projectHooks } from '$lib/stores/hooks.svelte';
 	import ProfileCard from '$lib/components/deck/cards/ProfileCard.svelte';
 	import SubagentCard from '$lib/components/deck/cards/SubagentCard.svelte';
 	import McpManagerCard from '$lib/components/deck/cards/McpManagerCard.svelte';
@@ -82,6 +87,29 @@
 	}
 
 	const gridMode = $derived(NATIVE.has(sub) && !detail);
+
+	// Per-section counts for the sub-nav badges. Trigger lightweight loads on mount
+	// so the numbers show even before a section is opened; badge hidden when 0.
+	let subagentCount = $state<number | null>(null);
+
+	onMount(() => {
+		appData.loadProfiles();
+		mcp.loadGlobalServers();
+		plugins.loadInstalled();
+		hooks.loadAppHooks();
+		api
+			.get<unknown[]>('/subagents')
+			.then((list) => { subagentCount = Array.isArray(list) ? list.length : 0; })
+			.catch(() => { /* count is best-effort */ });
+	});
+
+	const counts = $derived<Record<BuildSub, number>>({
+		profile: ($profiles ?? []).length,
+		subagent: subagentCount ?? 0,
+		mcp: ($globalMcpServers ?? []).length,
+		plugins: ($installedPlugins ?? []).length,
+		hooks: ($projectHooks ?? []).length
+	});
 </script>
 
 <div class="build-page">
@@ -99,6 +127,7 @@
 					>
 						<item.icon size={15} strokeWidth={1.7} />
 						<span>{item.label}</span>
+						{#if counts[item.id] > 0}<span class="bp-tab-count">{counts[item.id]}</span>{/if}
 					</button>
 				{/each}
 			</nav>
@@ -196,6 +225,16 @@
 	}
 	.bp-tab :global(svg) { flex-shrink: 0; opacity: 0.85; }
 	.bp-tab:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 6px; }
+	.bp-tab-count {
+		font-family: var(--font-mono, monospace);
+		font-size: 0.6875rem;
+		color: var(--muted-foreground);
+		background: color-mix(in oklch, var(--muted) 45%, transparent);
+		padding: 1px 7px;
+		border-radius: 999px;
+		line-height: 1.5;
+	}
+	.bp-tab.on .bp-tab-count { color: var(--foreground); }
 
 	/* Body */
 	.bp-body {

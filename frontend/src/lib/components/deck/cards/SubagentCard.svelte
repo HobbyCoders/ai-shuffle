@@ -24,7 +24,6 @@
 	} from '$lib/constants/models';
 	import './card-design-system.css';
 
-	import SubagentList from './subagents/SubagentList.svelte';
 	import SubagentEditor from './subagents/SubagentEditor.svelte';
 	import BuildSubagentList from '$lib/components/layout/build/BuildSubagentList.svelte';
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
@@ -463,7 +462,7 @@
 <!-- Hidden file input for import -->
 <input type="file" accept=".json" bind:this={importInput} onchange={handleImport} class="hidden" />
 
-{#if viewMode === 'list' && embedded}
+{#if viewMode === 'list'}
 	<BuildSubagentList
 		{subagents}
 		{importing}
@@ -482,36 +481,6 @@
 		isOpen={showGenerateDialog}
 		onClose={() => showGenerateDialog = false}
 		onGenerated={handleGeneratedSubagent}
-	/>
-{:else if viewMode === 'list'}
-	<SubagentList
-		{subagents}
-		{loading}
-		{error}
-		{searchQuery}
-		onSearchQueryChange={(v) => searchQuery = v}
-		{deletingId}
-		{deleteLoading}
-		{revertingId}
-		{revertLoading}
-		{importing}
-		{showGenerateDialog}
-		onShowGenerateDialogChange={(v) => showGenerateDialog = v}
-		onEdit={handleEdit}
-		onCreate={handleCreate}
-		onDeleteClick={handleDeleteClick}
-		onConfirmDelete={confirmDelete}
-		onCancelDelete={() => deletingId = null}
-		onRevert={handleRevert}
-		onConfirmRevert={confirmRevert}
-		onCancelRevert={() => revertingId = null}
-		onExport={exportSubagent}
-		onTriggerImport={triggerImport}
-		onClearError={() => error = null}
-		onGeneratedSubagent={handleGeneratedSubagent}
-		{getModelDisplay}
-		{getModelBadgeClass}
-		{filteredSubagents}
 	/>
 {:else}
 	<SubagentEditor

@@ -11,7 +11,7 @@
 	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import { toast } from '$lib/stores/toast';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
-	import { Users, Upload, Sparkles, Plus, Wrench, Bot, Settings, FileText, SlidersHorizontal, Check } from 'lucide-svelte';
+	import { Users, Wrench, Bot, Settings, FileText, SlidersHorizontal, Check } from 'lucide-svelte';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data.svelte';
 	import { groups as groupsStore } from '$lib/stores/groups.svelte';
 	import {
@@ -24,7 +24,6 @@
 	import './card-design-system.css';
 
 	// Sub-components
-	import ProfileList from './profiles/ProfileList.svelte';
 	import ProfileForm from './profiles/ProfileForm.svelte';
 	import BuildProfileGrid from '$lib/components/layout/build/BuildProfileGrid.svelte';
 	import { computeAiToolCount, computeEffectiveAiTools } from './profiles/toolAccess';
@@ -895,7 +894,7 @@
 				</div>
 			{/snippet}
 		</FeaturePageLayout>
-	{:else if embedded}
+	{:else}
 		<!-- Build page: header-less card grid (heading + sub-nav live in BuildPage) -->
 		<BuildProfileGrid
 			{profiles}
@@ -913,45 +912,6 @@
 			{getModelDisplay}
 			{getProfileToolCount}
 		/>
-	{:else}
-		<!-- Standalone List View -->
-		<FeaturePageLayout
-			icon={Users}
-			title="Profiles"
-			itemCount={profiles.length}
-			itemLabel="profiles"
-		>
-			{#snippet footer()}
-				<div class="pf-footer">
-					<div class="pf-footer-left">
-						<button class="fp-btn fp-btn--secondary" onclick={triggerImport} disabled={profileImporting} title="Import">
-							<Upload size={14} /> <span class="btn-label">Import</span>
-						</button>
-						<button class="fp-btn fp-btn--secondary" onclick={() => showGenerateDialog = true} title="AI Generate">
-							<Sparkles size={14} /> <span class="btn-label">Generate</span>
-						</button>
-					</div>
-					<div class="pf-footer-right">
-						<button class="fp-btn fp-btn--primary" onclick={openNewForm} title="New Profile">
-							<Plus size={14} /> <span class="btn-label">New Profile</span>
-						</button>
-					</div>
-				</div>
-			{/snippet}
-
-			<ProfileList
-				{profiles}
-				{groups}
-				{allSubagents}
-				{builtinAgentIds}
-				onEditProfile={openEditForm}
-				onExportProfile={handleExportProfile}
-				onDeleteProfile={handleDeleteProfile}
-				onRevertProfile={handleRevertProfile}
-				{getModelDisplay}
-				{getProfileToolCount}
-			/>
-		</FeaturePageLayout>
 	{/if}
 
 <!-- AI Generate Dialog -->
@@ -979,10 +939,6 @@
 		display: none;
 	}
 
-	.btn-label {
-		display: inline;
-	}
-
 	/* Tab labels — hide on small screens, icons only */
 	.tab-label {
 		display: none;
@@ -992,26 +948,6 @@
 		.tab-label {
 			display: inline;
 		}
-	}
-
-	/* Footer */
-	.pf-footer {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		width: 100%;
-	}
-
-	.pf-footer-left {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-
-	.pf-footer-right {
-		display: flex;
-		align-items: center;
-		gap: 10px;
 	}
 
 	.pf-btn-save {

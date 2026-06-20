@@ -16,8 +16,8 @@
 		mcpDisplayStats
 	} from '$lib/stores/mcp.svelte';
 	import type { McpServerInfo, McpServerType } from '$lib/api/mcp';
-	import { getServerTypeLabel, validateMcpServerConfig } from '$lib/api/mcp';
-	import { Server, AlertCircle, X, Plus, Search, Trash2, Check, Globe, Terminal, Zap, Info, ChevronRight } from 'lucide-svelte';
+	import { validateMcpServerConfig } from '$lib/api/mcp';
+	import { Server, AlertCircle, X, Check } from 'lucide-svelte';
 	import BuildMcpList from '$lib/components/layout/build/BuildMcpList.svelte';
 	import './card-design-system.css';
 
@@ -44,11 +44,7 @@
 		if (embedded) onDetailChange?.(viewMode === 'form');
 	});
 	let editingServer = $state<McpServerInfo | null>(null);
-	let searchQuery = $state('');
 
-	// Delete confirmation
-	let deletingName = $state<string | null>(null);
-	let deleteLoading = $state(false);
 
 	// Form state
 	let formName = $state('');
@@ -63,15 +59,6 @@
 
 	// Derived
 	const isEditing = $derived(!!editingServer);
-	const filteredServers = $derived(
-		searchQuery.trim()
-			? ($globalMcpServers ?? []).filter(
-					(s) =>
-						s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-						(s.description && s.description.toLowerCase().includes(searchQuery.toLowerCase()))
-				)
-			: ($globalMcpServers ?? [])
-	);
 
 	// Load data on mount
 	onMount(() => {
@@ -169,19 +156,6 @@
 		}
 	}
 
-	async function confirmDelete() {
-		if (!deletingName) return;
-		deleteLoading = true;
-		try {
-			await mcp.removeGlobalServer(deletingName);
-			await mcp.loadGlobalServers();
-			deletingName = null;
-		} catch (e) {
-			console.error('Failed to remove MCP server:', e);
-		} finally {
-			deleteLoading = false;
-		}
-	}
 
 	// Direct delete for the embedded Build list (which owns its inline-confirm UI).
 	async function embeddedDelete(name: string) {
@@ -189,27 +163,10 @@
 		await mcp.loadGlobalServers();
 	}
 
-	function getTypeIcon(type: string) {
-		switch (type) {
-			case 'stdio': return Terminal;
-			case 'sse': return Zap;
-			case 'http': return Globe;
-			default: return Server;
-		}
-	}
-
-	function getTypeBadgeClass(type: string): string {
-		switch (type) {
-			case 'stdio': return 'mcp-badge--stdio';
-			case 'sse': return 'mcp-badge--sse';
-			case 'http': return 'mcp-badge--http';
-			default: return '';
-		}
-	}
 </script>
 
-{#if viewMode === 'list' && embedded}
-	<!-- ═══ EMBEDDED LIST (Build page) ═══ -->
+{#if viewMode === 'list'}
+	<!-- ═══ LIST (Build page) ═══ -->
 	<BuildMcpList
 		servers={$globalMcpServers ?? []}
 		error={$mcpError}
@@ -384,131 +341,6 @@
 			</div>
 		</div>
 	</FeaturePageLayout>
-{:else}
-	<!-- ═══ LIST VIEW ═══ -->
-	<FeaturePageLayout
-		icon={Server}
-		title="MCP Servers"
-		itemCount={($globalMcpServers ?? []).length}
-		itemLabel="servers"
-	>
-		{#snippet footer()}
-			<div class="mcp-footer">
-				<div></div>
-				<button class="fp-btn fp-btn--primary" onclick={openNewForm}>
-					<Plus size={14} /> <span class="btn-label">Add Server</span>
-				</button>
-			</div>
-		{/snippet}
-
-		{#if ($globalMcpServers ?? []).length > 3}
-			<div class="fp-search-bar">
-				<div class="fph-search-wrapper">
-					<Search size={14} />
-					<input type="text" bind:value={searchQuery} placeholder="Search servers..." class="fph-search-input" />
-				</div>
-			</div>
-		{/if}
-
-		{#if $mcpError}
-			<div class="mcp-error-banner" style="margin: 12px 16px 0;">
-				<AlertCircle size={16} />
-				<span>{$mcpError}</span>
-				<button onclick={() => mcp.clearError()} class="mcp-error-close">
-					<X size={14} />
-				</button>
-			</div>
-		{/if}
-
-		<div class="mcp-info-note">
-			<Info size={14} />
-			<span>Add and remove servers here. To enable or disable them per project, use the MCP tab in the Projects card.</span>
-		</div>
-
-		{#if filteredServers.length === 0}
-			<div class="card-empty-state">
-				{#if searchQuery}
-					<p class="card-empty-title">No servers match your search</p>
-				{:else}
-					<svg class="card-empty-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
-					</svg>
-					<p class="card-empty-title">No MCP servers configured</p>
-					<p class="card-empty-description">Add an MCP server to extend Claude's capabilities</p>
-				{/if}
-			</div>
-		{:else}
-			<div class="fp-list">
-				{#each filteredServers as server, index (server.name)}
-					{#if index > 0}<div class="fp-list-divider"></div>{/if}
-					{#if deletingName === server.name}
-						<!-- Inline delete confirmation -->
-						<div class="fp-list-item fp-list-item--deleting">
-							<div class="fp-item-content">
-								<p class="delete-confirm-text">
-									Delete <strong>{server.name}</strong>? This cannot be undone.
-								</p>
-								<div class="delete-confirm-actions">
-									<button onclick={() => (deletingName = null)} disabled={deleteLoading} class="fp-btn fp-btn--secondary fp-btn--sm">Cancel</button>
-									<button onclick={confirmDelete} disabled={deleteLoading} class="fp-btn fp-btn--destructive fp-btn--sm">
-										{#if deleteLoading}<div class="card-spinner card-spinner--small"></div>{/if}
-										Delete
-									</button>
-								</div>
-							</div>
-						</div>
-					{:else}
-						<div
-							class="fp-list-item"
-							onclick={() => { if (!server.builtin) openEditForm(server); }}
-							role="button"
-							tabindex="0"
-							onkeydown={(e) => e.key === 'Enter' && !server.builtin && openEditForm(server)}
-						>
-							<div class="fp-item-indicator"></div>
-							<div class="fp-item-content">
-								<div class="fp-item-header">
-									<span class="fp-item-name">{server.name}</span>
-									<span class="fp-item-badge mcp-type-badge {getTypeBadgeClass(server.type)}">
-										{getServerTypeLabel(server.type)}
-									</span>
-									{#if server.builtin}
-										<span class="fp-item-badge mcp-builtin-badge">Built-in</span>
-									{/if}
-								</div>
-								<div class="fp-item-meta">
-									<span class="fp-meta-chip fp-meta-model">{getServerTypeLabel(server.type)}</span>
-									{#if server.type === 'stdio' && server.command}
-										<span class="fp-meta-sep">&middot;</span>
-										<span class="fp-meta-chip"><code>{server.command}{server.args ? ' ' + server.args.join(' ') : ''}</code></span>
-									{:else if (server.type === 'sse' || server.type === 'http') && server.url}
-										<span class="fp-meta-sep">&middot;</span>
-										<span class="fp-meta-chip">{server.url}</span>
-									{:else if server.builtin}
-										<span class="fp-meta-sep">&middot;</span>
-										<span class="fp-meta-chip">In-process SDK server</span>
-									{/if}
-								</div>
-							</div>
-							<!-- Item actions -->
-							{#if !server.builtin}
-								<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
-									<button
-										class="card-action-btn card-action-btn--destructive"
-										title="Delete"
-										onclick={() => { deletingName = server.name; }}
-									>
-										<Trash2 size={16} />
-									</button>
-								</div>
-							{/if}
-							<div class="fp-item-chevron"><ChevronRight size={16} /></div>
-						</div>
-					{/if}
-				{/each}
-			</div>
-		{/if}
-	</FeaturePageLayout>
 {/if}
 
 <style>
@@ -545,65 +377,6 @@
 		color: var(--destructive);
 		cursor: pointer;
 		border-radius: 4px;
-	}
-
-	/* Type badges */
-	.mcp-type-badge {
-		display: inline-flex;
-		align-items: center;
-		padding: 1px 6px;
-		font-size: 0.6875rem;
-		font-weight: 500;
-		border-radius: 4px;
-		background: var(--surface-2, color-mix(in oklch, var(--muted) 50%, transparent));
-		color: var(--text-secondary);
-	}
-
-	.mcp-badge--stdio {
-		background: color-mix(in oklch, oklch(0.7 0.15 250) 12%, transparent);
-		color: oklch(0.7 0.15 250);
-	}
-
-	.mcp-badge--sse {
-		background: color-mix(in oklch, oklch(0.75 0.15 85) 12%, transparent);
-		color: oklch(0.75 0.15 85);
-	}
-
-	.mcp-badge--http {
-		background: color-mix(in oklch, oklch(0.7 0.15 150) 12%, transparent);
-		color: oklch(0.7 0.15 150);
-	}
-
-	.mcp-builtin-badge {
-		display: inline-flex;
-		align-items: center;
-		padding: 1px 6px;
-		font-size: 0.6875rem;
-		font-weight: 500;
-		border-radius: 4px;
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		color: var(--primary);
-	}
-
-
-	/* Info note */
-	.mcp-info-note {
-		display: flex;
-		align-items: flex-start;
-		gap: 8px;
-		padding: 10px 12px;
-		margin: 8px 16px 0;
-		border-radius: 8px;
-		background: color-mix(in oklch, var(--primary) 8%, transparent);
-		color: var(--muted-foreground);
-		font-size: 0.75rem;
-		line-height: 1.4;
-	}
-
-	.mcp-info-note :global(svg) {
-		flex-shrink: 0;
-		color: var(--primary);
-		margin-top: 1px;
 	}
 
 	/* ═══════════════════════════════════════════════════════════════════════════
