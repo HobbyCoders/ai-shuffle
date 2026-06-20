@@ -247,10 +247,6 @@
 							<span>Install ({selectedForInstall.size})</span>
 						</button>
 					{/if}
-				{:else if activeTab === 'marketplaces'}
-					<button class="bpl-btn bpl-btn--primary" onclick={() => (showAddSource = true)}>
-						<Plus size={15} strokeWidth={2} /><span>Add source</span>
-					</button>
 				{/if}
 			</div>
 		</div>
@@ -345,39 +341,36 @@
 
 		<!-- ─── SOURCES ─── -->
 		{:else if activeTab === 'marketplaces'}
-			{#if $marketplaces.length === 0}
-				<div class="bpl-empty">
-					<Database size={34} strokeWidth={1.25} />
-					<p class="bpl-empty-title">No plugin sources configured</p>
-					<p class="bpl-empty-sub">Add a git repository to browse plugins</p>
-				</div>
-			{:else}
-				<div class="bpl-list">
-					{#each $marketplaces as m (m.id)}
-						<div class="bpl-row bpl-row--static">
-							<span class="bpl-ic"><Database size={17} strokeWidth={1.7} /></span>
-							<div class="bpl-body">
-								<h4 class="bpl-name">{m.id}<span class="bpl-tag">{m.source}</span></h4>
-								<p class="bpl-desc">{m.url}</p>
-								<p class="bpl-subline"><Clock size={11} strokeWidth={1.7} /> Last synced: {formatDate(m.last_updated)}</p>
-							</div>
-							<div class="bpl-actions bpl-actions--static" role="toolbar" tabindex="-1">
-								<button class="bpl-act" title="Sync from git" onclick={() => plugins.syncMarketplace(m.id)} disabled={$marketplaceSyncing[m.id]}>
-									<RefreshCw size={15} strokeWidth={1.7} class={$marketplaceSyncing[m.id] ? 'bpl-spin' : ''} />
-								</button>
-								{#if confirmDeleteSource === m.id}
-									<button class="bpl-btn bpl-btn--danger bpl-btn--sm" onclick={() => handleRemoveSource(m.id)}>Remove</button>
-									<button class="bpl-btn bpl-btn--sm" onclick={() => (confirmDeleteSource = null)}>Cancel</button>
-								{:else}
-									<button class="bpl-act bpl-act--danger" title="Remove source" onclick={() => handleRemoveSource(m.id)}>
-										<Trash2 size={15} strokeWidth={1.7} />
-									</button>
-								{/if}
-							</div>
+			<div class="bpl-list">
+				{#each $marketplaces as m (m.id)}
+					<div class="bpl-row bpl-row--static">
+						<span class="bpl-ic"><Database size={17} strokeWidth={1.7} /></span>
+						<div class="bpl-body">
+							<h4 class="bpl-name">{m.id}<span class="bpl-tag">{m.source}</span></h4>
+							<p class="bpl-desc">{m.url}</p>
+							<p class="bpl-subline"><Clock size={11} strokeWidth={1.7} /> Last synced: {formatDate(m.last_updated)}</p>
 						</div>
-					{/each}
-				</div>
-			{/if}
+						<div class="bpl-actions bpl-actions--static" role="toolbar" tabindex="-1">
+							<button class="bpl-act" title="Sync from git" onclick={() => plugins.syncMarketplace(m.id)} disabled={$marketplaceSyncing[m.id]}>
+								<RefreshCw size={15} strokeWidth={1.7} class={$marketplaceSyncing[m.id] ? 'bpl-spin' : ''} />
+							</button>
+							{#if confirmDeleteSource === m.id}
+								<button class="bpl-btn bpl-btn--danger bpl-btn--sm" onclick={() => handleRemoveSource(m.id)}>Remove</button>
+								<button class="bpl-btn bpl-btn--sm" onclick={() => (confirmDeleteSource = null)}>Cancel</button>
+							{:else}
+								<button class="bpl-act bpl-act--danger" title="Remove source" onclick={() => handleRemoveSource(m.id)}>
+									<Trash2 size={15} strokeWidth={1.7} />
+								</button>
+							{/if}
+						</div>
+					</div>
+				{/each}
+
+				<button class="bpl-new" onclick={() => (showAddSource = true)}>
+					<span class="bpl-new-plus"><Plus size={16} strokeWidth={2.2} /></span>
+					<span>Add source</span>
+				</button>
+			</div>
 
 			<!-- Auto-update settings -->
 			<div class="bpl-autoupdate">
@@ -535,10 +528,20 @@
 	.bpl-act--update { color: var(--warning, #f59e0b); }
 	.bpl-act--update:hover { background: color-mix(in oklch, var(--warning, #f59e0b) 14%, transparent); }
 
+	/* New row (matches the Subagents/MCP dashed add row) */
+	.bpl-new {
+		display: flex; align-items: center; justify-content: center; gap: 8px;
+		padding: 13px 16px; min-height: 52px;
+		background: transparent; border: none; border-top: 1px dashed color-mix(in oklch, var(--muted-foreground) 35%, transparent);
+		color: var(--muted-foreground); font-size: 0.8rem; font-weight: 600; cursor: pointer;
+		transition: color 120ms ease, background-color 120ms ease;
+	}
+	.bpl-new:hover { color: var(--foreground); background: var(--hover-overlay); }
+	.bpl-new-plus { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); }
+
 	/* Empty + loading */
 	.bpl-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 48px 24px; text-align: center; color: var(--muted-foreground); }
 	.bpl-empty-title { margin: 4px 0 0; font-size: 0.875rem; color: var(--foreground); }
-	.bpl-empty-sub { margin: 0; font-size: 0.78rem; }
 	.bpl-link { background: none; border: none; color: var(--primary); cursor: pointer; font-size: 0.8125rem; }
 	.bpl-link:hover { text-decoration: underline; }
 	.bpl-loading { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 48px; color: var(--muted-foreground); }

@@ -240,14 +240,16 @@
 
 	<!-- Two-column layout -->
 	<div class="fs-layout">
-		<aside class="fs-tree">
-			<button class="fs-tree-root" class:on={currentPath === ''} onclick={() => navigate('')}>
-				<Home size={14} strokeWidth={1.8} /><span>Workspace</span>
-			</button>
-			{#each rootDirs as dir (dir.path)}
-				<FilesTreeNode name={dir.name} path={dir.path} depth={0} {currentPath} {showHidden} onNavigate={navigate} />
-			{/each}
-		</aside>
+		<div class="fs-side">
+			<aside class="fs-tree">
+				<button class="fs-tree-root" class:on={currentPath === ''} onclick={() => navigate('')}>
+					<Home size={14} strokeWidth={1.8} /><span>Workspace</span>
+				</button>
+				{#each rootDirs as dir (dir.path)}
+					<FilesTreeNode name={dir.name} path={dir.path} depth={0} {currentPath} {showHidden} onNavigate={navigate} />
+				{/each}
+			</aside>
+		</div>
 
 		<div
 			class="fs-main"
@@ -440,8 +442,10 @@
 		display: grid; grid-template-columns: 240px 1fr; gap: 18px;
 		padding: 0 28px 28px; overflow: hidden;
 	}
+	/* Left column: a full-height scroll container (no chrome) wrapping a
+	   content-sized bordered panel — mirrors .fs-main + .fs-list on the right. */
+	.fs-side { min-height: 0; overflow-y: auto; }
 	.fs-tree {
-		min-height: 0; overflow-y: auto;
 		background: var(--card); border: 1px solid var(--border);
 		border-radius: var(--radius, 0.75rem); padding: 8px;
 	}
@@ -523,7 +527,7 @@
 		.fs-toolbar { padding: 12px 16px 10px; }
 		.fs-newfolder, .fs-error { margin: 0 16px 10px; }
 		.fs-layout { grid-template-columns: 1fr; padding: 0 16px 20px; overflow-y: auto; }
-		.fs-tree { max-height: 220px; }
+		.fs-side { max-height: 220px; }
 		.fs-row { grid-template-columns: 1fr 70px 64px; }
 		.fs-md { display: none; }
 		.fs-actions { opacity: 1; }

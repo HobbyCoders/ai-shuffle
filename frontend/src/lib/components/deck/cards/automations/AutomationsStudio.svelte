@@ -132,7 +132,7 @@
 <div class="as">
 	<div class="as-wrap">
 		<div class="as-head">
-			<StudioPageHeader eyebrow="Scheduled & triggered runs" title="Your" accent="automations">
+			<StudioPageHeader eyebrow="Scheduled & triggered runs" title="Automations">
 				{#snippet actions()}
 					<button class="as-btn as-btn--primary" onclick={onOpenCreate}>
 						<Plus size={15} strokeWidth={2} /><span>New automation</span>
