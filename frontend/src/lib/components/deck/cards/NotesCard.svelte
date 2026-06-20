@@ -5,11 +5,11 @@
 	 * Provides list view with search/filter, and editor view for editing notes.
 	 */
 
-	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import NoteFileAutocomplete from './NoteFileAutocomplete.svelte';
 	import './card-design-system.css';
-	import { StickyNote, Search as SearchIcon, Plus, Pin, Trash2, ChevronRight, Paperclip, X } from 'lucide-svelte';
+	import { StickyNote, Search as SearchIcon, Plus, Pin, Trash2, Paperclip, X } from 'lucide-svelte';
 	import {
 		getNotes,
 		createNote,
@@ -70,9 +70,16 @@
 	// The note id we can attach files to (created notes only)
 	let currentNoteId = $derived(editingNote?.id ?? null);
 
+	// Side-by-side list grouping.
+	const pinnedNotes = $derived(notes.filter((n) => n.is_pinned));
+	const recentNotes = $derived(notes.filter((n) => !n.is_pinned));
+
 	// Debounce for auto-save
 	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 	let hasUnsavedChanges = $state(false);
+
+	// Save-status label for the editor top bar.
+	const saveLabel = $derived(saving ? 'Saving…' : hasUnsavedChanges ? 'Unsaved' : 'Saved');
 
 	// A pending confirmation awaiting the user (replaces native confirm()).
 	let pendingConfirm = $state<{
@@ -121,17 +128,14 @@
 		};
 	});
 
-	// Reload when search/filter changes
+	// Reload the list when search/filter changes. In the side-by-side layout the
+	// list stays visible while editing, so filtering must work at all times.
 	$effect(() => {
 		// Access these to establish reactivity
 		searchQuery;
 		selectedTag;
-
-		if (!editingNote && !isCreatingNew) {
-			// Debounce search
-			const timeout = setTimeout(loadData, 300);
-			return () => clearTimeout(timeout);
-		}
+		const timeout = setTimeout(loadData, 300);
+		return () => clearTimeout(timeout);
 	});
 
 	// Start creating a new note
@@ -144,6 +148,7 @@
 		editorPinned = false;
 		hasUnsavedChanges = false;
 		attachments = [];
+		showPreview = false;
 		closeAutocomplete();
 	}
 
@@ -157,6 +162,7 @@
 		editorPinned = note.is_pinned;
 		hasUnsavedChanges = false;
 		attachments = [];
+		showPreview = false;
 		closeAutocomplete();
 		loadAttachments(note.id);
 	}
@@ -221,6 +227,13 @@
 				});
 				// Update the editing note reference with latest data
 				editingNote = updatedNote;
+			}
+			// Reflect the saved note in the list without a disruptive reload.
+			const saved = editingNote;
+			if (saved) {
+				const idx = notes.findIndex((n) => n.id === saved.id);
+				if (idx >= 0) notes[idx] = saved;
+				else notes = [saved, ...notes];
 			}
 			hasUnsavedChanges = false;
 			// Don't close editor - user stays in edit mode
@@ -567,258 +580,167 @@
 	}
 </script>
 
-{#snippet listView()}
-	<div class="notes-list">
-		<!-- Tag Filter -->
-		{#if tags.length > 0}
-			<div class="tag-filter">
-				<button
-					class="tag-pill"
-					class:active={selectedTag === null}
-					onclick={() => selectedTag = null}
-				>
-					all
-				</button>
-				{#each tags as tag}
-					<button
-						class="tag-pill"
-						class:active={selectedTag === tag.name}
-						onclick={() => selectedTag = selectedTag === tag.name ? null : tag.name}
-					>
-						{tag.name}
-						<span class="tag-count">{tag.count}</span>
-					</button>
-				{/each}
-			</div>
-		{/if}
-
-		<!-- Notes List -->
-		<div class="notes-scroll">
-			{#if loading}
-				<div class="loading-state">Loading notes...</div>
-			{:else if error}
-				<div class="error-state">{error}</div>
-			{:else if notes.length === 0}
-				<div class="empty-state">
-					<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-						<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-						<polyline points="14 2 14 8 20 8"/>
-						<line x1="16" y1="13" x2="8" y2="13"/>
-						<line x1="16" y1="17" x2="8" y2="17"/>
-						<polyline points="10 9 9 9 8 9"/>
-					</svg>
-					<p>{searchQuery || selectedTag ? 'No notes match your search' : 'No notes yet'}</p>
-					<button class="create-first-btn" onclick={startNewNote}>Create your first note</button>
-				</div>
-			{:else}
-				{#each notes as note, index}
-					{#if index > 0}<div class="fp-list-divider"></div>{/if}
-					<div class="note-item fp-list-item" onclick={() => openNote(note)} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && openNote(note)}>
-						<div class="fp-item-indicator"></div>
-						<div class="note-item-content fp-item-content">
-							<div class="note-header fp-item-header">
-								<span class="note-title fp-item-name">{note.title}</span>
-								{#if note.is_pinned}
-									<span class="fp-item-badge">Pinned</span>
-								{/if}
-							</div>
-							<div class="note-meta fp-item-meta">
-							{#if note.tags.length > 0}
-								<span class="note-tags">
-									{#each note.tags.slice(0, 3) as tag}
-										<span class="note-tag">{tag}</span>
-									{/each}
-									{#if note.tags.length > 3}
-										<span class="note-tag more">+{note.tags.length - 3}</span>
-									{/if}
-								</span>
-							{/if}
-							{#if note.tags.length > 0}
-								<span class="fp-meta-sep">&middot;</span>
-							{/if}
-							<span class="note-date">{formatRelativeTime(note.updated_at)}</span>
-							</div>
-						</div>
-						<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
-							<button class="card-action-btn" onclick={(e) => togglePin(note, e)} title={note.is_pinned ? 'Unpin' : 'Pin'}>
-								<Pin size={16} />
-							</button>
-							<button class="card-action-btn card-action-btn--destructive" onclick={(e) => handleDeleteFromList(note, e)} title="Delete">
-								<Trash2 size={16} />
-							</button>
-						</div>
-						<div class="fp-item-chevron"><ChevronRight size={16} /></div>
-					</div>
-				{/each}
-			{/if}
+{#snippet noteItem(note: Note)}
+	<button class="ns-item" class:on={editingNote?.id === note.id} onclick={() => openNote(note)}>
+		<h4 class="ns-item-title">
+			{#if note.is_pinned}<span class="ns-item-pin"><Pin size={12} /></span>{/if}
+			<span class="ns-item-title-text">{note.title || 'Untitled'}</span>
+		</h4>
+		{#if note.content}<p class="ns-item-preview">{note.content}</p>{/if}
+		<div class="ns-item-foot">
+			{#each note.tags.slice(0, 3) as tag (tag)}<span class="ns-chip ns-chip--sm">{tag}</span>{/each}
+			<span class="ns-item-date">{formatRelativeTime(note.updated_at)}</span>
 		</div>
-
-		<!-- Footer -->
-		<div class="notes-footer">
-			{notes.length} note{notes.length === 1 ? '' : 's'}
-		</div>
-	</div>
+	</button>
 {/snippet}
 
-{#snippet editorView()}
-	<div class="note-editor">
-		<!-- Title Row: title + actions -->
-		<div class="editor-title-row">
-			<input
-				type="text"
-				class="title-input"
-				placeholder="Note title..."
-				bind:value={editorTitle}
-				oninput={markDirty}
-			/>
-			<div class="editor-actions">
-				{#if saving || uploading}
-					<span class="autosave-status">{uploading ? 'Uploading...' : 'Saving...'}</span>
-				{/if}
-				<button
-					class="card-action-btn"
-					onclick={triggerFilePicker}
-					disabled={uploading}
-					title="Attach file"
-				>
-					<Paperclip size={16} />
-				</button>
-				<input
-					type="file"
-					multiple
-					bind:this={fileInputEl}
-					onchange={handleFileInputChange}
-					style="display: none;"
-				/>
-			</div>
+<div class="ns">
+	<div class="ns-wrap">
+		<div class="ns-head">
+			<StudioPageHeader eyebrow="Global · across all projects" title="Your" accent="notes">
+				{#snippet actions()}
+					<button class="ns-btn ns-btn--primary" onclick={startNewNote}>
+						<Plus size={15} strokeWidth={2} /><span>New note</span>
+					</button>
+				{/snippet}
+			</StudioPageHeader>
 		</div>
 
-		<!-- Attachments list -->
-		{#if attachments.length > 0}
-			<div class="attachments-bar">
-				{#each attachments as att (att.id)}
-					<div class="attachment-chip">
-						{#if currentNoteId}
-							<a
-								class="attachment-chip-link"
-								href={noteAttachmentDownloadUrl(currentNoteId, att.id)}
-								target="_blank"
-								rel="noopener noreferrer"
-								title={`Download ${att.filename}`}
-							>
-								<Paperclip size={12} />
-								<span class="attachment-chip-name">{att.filename}</span>
-							</a>
-						{:else}
-							<span class="attachment-chip-link">
-								<Paperclip size={12} />
-								<span class="attachment-chip-name">{att.filename}</span>
-							</span>
-						{/if}
-						<button
-							class="attachment-chip-remove"
-							onclick={() => removeAttachment(att)}
-							title="Remove attachment"
-						>
-							<X size={12} />
+		<div class="ns-layout">
+			<!-- LEFT: note list -->
+			<aside class="ns-listcol">
+				<div class="ns-search">
+					<SearchIcon size={14} strokeWidth={1.8} />
+					<input type="text" placeholder="Search notes…" bind:value={searchQuery} />
+				</div>
+				<div class="ns-tagbar">
+					<button class="ns-tag" class:on={selectedTag === null} onclick={() => (selectedTag = null)}>all</button>
+					{#each tags as tag (tag.name)}
+						<button class="ns-tag" class:on={selectedTag === tag.name} onclick={() => (selectedTag = selectedTag === tag.name ? null : tag.name)}>
+							{tag.name}<span class="ns-tag-count">{tag.count}</span>
 						</button>
-					</div>
-				{/each}
-			</div>
-		{/if}
-
-		<!-- Editor/Preview Toggle -->
-		<div class="editor-tabs">
-			<button class:active={!showPreview} onclick={() => showPreview = false}>Edit</button>
-			<button class:active={showPreview} onclick={() => showPreview = true}>Preview</button>
-		</div>
-
-		<!-- Content Area -->
-		<div
-			class="content-area"
-			class:drag-over={isDragOver}
-			role="region"
-			ondragover={handleDragOver}
-			ondragleave={handleDragLeave}
-			ondrop={handleDrop}
-		>
-			{#if showPreview}
-				<div class="preview-content">
-					{#if editorContent}
-						{@html sanitizeHtml(renderMarkdown(editorContent))}
+					{/each}
+				</div>
+				<div class="ns-scroll">
+					{#if loading}
+						<div class="ns-liststate">Loading notes…</div>
+					{:else if error}
+						<div class="ns-liststate ns-liststate--err">{error}</div>
+					{:else if notes.length === 0}
+						<div class="ns-listempty">
+							<StickyNote size={28} strokeWidth={1.25} />
+							<p>{searchQuery || selectedTag ? 'No notes match' : 'No notes yet'}</p>
+							<button class="ns-link" onclick={startNewNote}>Create your first note</button>
+						</div>
 					{:else}
-						<p class="preview-empty">Nothing to preview</p>
+						{#if pinnedNotes.length > 0}
+							<div class="ns-label">Pinned</div>
+							{#each pinnedNotes as note (note.id)}{@render noteItem(note)}{/each}
+						{/if}
+						{#if recentNotes.length > 0}
+							<div class="ns-label">{pinnedNotes.length ? 'Recent' : 'All notes'}</div>
+							{#each recentNotes as note (note.id)}{@render noteItem(note)}{/each}
+						{/if}
 					{/if}
 				</div>
-			{:else}
-				<div class="textarea-wrapper">
-					<textarea
-						class="content-textarea"
-						placeholder="Write your note in Markdown... Type @ to reference an attached file."
-						bind:value={editorContent}
-						bind:this={textareaEl}
-						oninput={() => { markDirty(); autoResizeTextarea(); detectAtMention(); }}
-						onkeydown={handleTextareaKeydown}
-						onclick={detectAtMention}
-						onkeyup={detectAtMention}
-						onblur={() => requestAnimationFrame(closeAutocomplete)}
-					></textarea>
-					<NoteFileAutocomplete
-						bind:this={autocompleteRef}
-						visible={autocompleteVisible}
-						query={atQuery ?? ''}
-						{attachments}
-						onSelect={insertAttachmentReference}
-						onClose={closeAutocomplete}
-					/>
-				</div>
-			{/if}
-			{#if isDragOver}
-				<div class="drop-overlay">Drop files to attach</div>
-			{/if}
-		</div>
+			</aside>
 
-	</div>
-{/snippet}
-
-<FeaturePageLayout
-	icon={StickyNote}
-	title="Notes"
-	itemCount={notes.length}
-	itemLabel={notes.length === 1 ? 'note' : 'notes'}
-	breadcrumbs={editingNote || isCreatingNew ? [
-		{ label: 'Notes', onclick: closeEditor },
-		{ label: editingNote ? editorTitle || 'Untitled' : 'New Note' }
-	] : undefined}
->
-	{#snippet footer()}
-		{#if !(editingNote || isCreatingNew)}
-			<button class="fp-btn fp-btn--primary" onclick={startNewNote} title="New Note">
-				<Plus size={14} /> <span class="btn-label">New Note</span>
-			</button>
-		{/if}
-	{/snippet}
-	{#snippet children()}
-		<div class="notes-card-content card-system">
-			{#if editingNote || isCreatingNew}
-				{@render editorView()}
-			{:else}
-				<div class="fp-search-bar">
-					<div class="fph-search-wrapper">
-						<SearchIcon size={14} />
-						<input
-							type="text"
-							placeholder="Search notes..."
-							bind:value={searchQuery}
-							class="fph-search-input"
-						/>
+			<!-- RIGHT: editor -->
+			<section class="ns-editorcol">
+				{#if editingNote || isCreatingNew}
+					<div class="ns-etop">
+						<span class="ns-etop-label">Markdown</span>
+						<div class="ns-etop-right">
+							<span class="ns-save"><span class="ns-save-dot" class:dirty={hasUnsavedChanges} class:busy={saving || uploading}></span>{uploading ? 'Uploading…' : saveLabel}</span>
+							<button class="ns-iconbtn" title="Attach file" onclick={triggerFilePicker} disabled={uploading}><Paperclip size={15} /></button>
+							<button class="ns-iconbtn" class:on={editorPinned} title={editorPinned ? 'Unpin' : 'Pin'} onclick={() => { editorPinned = !editorPinned; markDirty(); }}><Pin size={15} /></button>
+							<button class="ns-iconbtn ns-iconbtn--danger" title="Delete note" onclick={handleDelete} disabled={isCreatingNew}><Trash2 size={15} /></button>
+							<button class="ns-iconbtn" title="Close" onclick={closeEditor}><X size={16} /></button>
+						</div>
 					</div>
-				</div>
-				{@render listView()}
-			{/if}
+					<input type="file" multiple bind:this={fileInputEl} onchange={handleFileInputChange} style="display:none" />
+
+					<input class="ns-title-input" placeholder="Note title…" bind:value={editorTitle} oninput={markDirty} />
+
+					<div class="ns-etags">
+						{#each editorTags as tag (tag)}
+							<span class="ns-chip ns-chip--edit">{tag}<button class="ns-chip-x" onclick={() => removeTag(tag)} aria-label="Remove tag"><X size={11} /></button></span>
+						{/each}
+						<input class="ns-tag-input" placeholder="add tag…" bind:value={newTagInput} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addTag(); } }} />
+					</div>
+
+					{#if attachments.length > 0}
+						<div class="ns-attachbar">
+							{#each attachments as att (att.id)}
+								<div class="ns-attach">
+									{#if currentNoteId}
+										<a class="ns-attach-link" href={noteAttachmentDownloadUrl(currentNoteId, att.id)} target="_blank" rel="noopener noreferrer" title={`Download ${att.filename}`}>
+											<Paperclip size={12} /><span class="ns-attach-name">{att.filename}</span>
+										</a>
+									{:else}
+										<span class="ns-attach-link"><Paperclip size={12} /><span class="ns-attach-name">{att.filename}</span></span>
+									{/if}
+									<button class="ns-attach-x" onclick={() => removeAttachment(att)} title="Remove attachment"><X size={12} /></button>
+								</div>
+							{/each}
+						</div>
+					{/if}
+
+					<div class="ns-tabs">
+						<button class:active={!showPreview} onclick={() => (showPreview = false)}>Edit</button>
+						<button class:active={showPreview} onclick={() => (showPreview = true)}>Preview</button>
+					</div>
+
+					<div
+						class="ns-content"
+						class:drag-over={isDragOver}
+						role="region"
+						aria-label="Note content"
+						ondragover={handleDragOver}
+						ondragleave={handleDragLeave}
+						ondrop={handleDrop}
+					>
+						{#if showPreview}
+							<div class="ns-preview md">
+								{#if editorContent}{@html sanitizeHtml(renderMarkdown(editorContent))}{:else}<p class="ns-preview-empty">Nothing to preview</p>{/if}
+							</div>
+						{:else}
+							<div class="ns-ta-wrap">
+								<textarea
+									class="ns-textarea"
+									placeholder="Write your note in Markdown… Type @ to reference an attached file."
+									bind:value={editorContent}
+									bind:this={textareaEl}
+									oninput={() => { markDirty(); autoResizeTextarea(); detectAtMention(); }}
+									onkeydown={handleTextareaKeydown}
+									onclick={detectAtMention}
+									onkeyup={detectAtMention}
+									onblur={() => requestAnimationFrame(closeAutocomplete)}
+								></textarea>
+								<NoteFileAutocomplete
+									bind:this={autocompleteRef}
+									visible={autocompleteVisible}
+									query={atQuery ?? ''}
+									{attachments}
+									onSelect={insertAttachmentReference}
+									onClose={closeAutocomplete}
+								/>
+							</div>
+						{/if}
+						{#if isDragOver}<div class="ns-drop">Drop files to attach</div>{/if}
+					</div>
+				{:else}
+					<div class="ns-emptyeditor">
+						<StickyNote size={40} strokeWidth={1.1} />
+						<p class="ns-emptyeditor-title">Select a note</p>
+						<p class="ns-emptyeditor-sub">Pick a note on the left, or start a new one.</p>
+						<button class="ns-btn ns-btn--primary" onclick={startNewNote}><Plus size={15} strokeWidth={2} /><span>New note</span></button>
+					</div>
+				{/if}
+			</section>
 		</div>
-	{/snippet}
-</FeaturePageLayout>
+	</div>
+</div>
 
 <!-- Confirmation dialog (delete / discard) -->
 <ConfirmDialog
@@ -832,453 +754,227 @@
 />
 
 <style>
-	/* ============================================
-	   NOTES CARD - Uses card-design-system.css tokens
-	   ============================================ */
-	.notes-card-content {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-		min-height: 0;
-	}
-
-	/* ============================================
-	   LIST VIEW
-	   ============================================ */
-	.notes-list {
+	.ns {
 		display: flex;
 		flex-direction: column;
 		height: 100%;
-		overflow: hidden;
-	}
-
-	/* ============================================
-	   TAG FILTER
-	   ============================================ */
-	.tag-filter {
-		display: flex;
-		flex-wrap: wrap;
-		gap: calc(var(--space-1) * 1.5);
-		padding: var(--space-2) var(--space-3);
-	}
-
-	.tag-pill {
-		display: flex;
-		align-items: center;
-		gap: var(--space-1);
-		padding: var(--space-1) calc(var(--space-2) + 2px);
-		background: var(--surface-1);
-		border: 1px solid transparent;
-		border-radius: var(--radius-full);
-		color: var(--text-secondary);
-		font-size: var(--text-sm);
-		cursor: pointer;
-		transition: all var(--transition-smooth);
-	}
-
-	.tag-pill:hover {
-		background: var(--surface-hover);
-		border-color: var(--border-subtle);
-	}
-
-	.tag-pill.active {
-		background: var(--selection-bg-emphasis);
-		color: var(--selection-text);
-		box-shadow: var(--selection-shadow);
-	}
-
-	.tag-count {
-		font-size: var(--text-xs);
-		opacity: 0.7;
-	}
-
-	/* ============================================
-	   NOTES SCROLL & ITEMS
-	   ============================================ */
-	.notes-scroll {
-		flex: 1;
-		overflow-y: auto;
-		padding: var(--space-1) var(--space-2);
-	}
-
-	.note-item {
-		text-align: left;
-	}
-
-	.note-title {
-		flex: 1;
-		font-weight: 500;
-		font-size: var(--text-md);
-		color: var(--text-primary);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.note-meta {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		font-size: var(--text-sm);
-		color: var(--text-secondary);
-	}
-
-	.note-tags {
-		display: flex;
-		gap: var(--space-1);
-	}
-
-	.note-tag {
-		padding: 2px calc(var(--space-1) * 1.5);
-		background: color-mix(in oklch, var(--success) 15%, transparent);
-		color: var(--success);
-		border-radius: var(--radius-sm);
-		font-size: var(--text-xs);
-	}
-
-	.note-tag.more {
-		background: var(--surface-1);
-		color: var(--text-secondary);
-	}
-
-	.note-date {
-		color: var(--text-tertiary);
-	}
-
-	/* ============================================
-	   EMPTY & LOADING STATES
-	   ============================================ */
-	.empty-state,
-	.loading-state,
-	.error-state {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: var(--space-3);
-		height: 200px;
-		color: var(--text-secondary);
-		text-align: center;
-	}
-
-	.error-state {
-		color: var(--destructive);
-	}
-
-	.create-first-btn {
-		padding: var(--space-2) var(--space-4);
-		background: var(--primary);
-		color: var(--primary-foreground);
-		border: none;
-		border-radius: var(--radius-md);
-		font-size: var(--text-md);
-		cursor: pointer;
-		transition: all var(--transition-smooth);
-	}
-
-	.create-first-btn:hover {
-		box-shadow: var(--shadow-glow-soft);
-	}
-
-	/* ============================================
-	   FOOTER
-	   ============================================ */
-	.notes-footer {
-		padding: var(--space-2) var(--space-3);
-		border-top: 1px solid var(--border-default);
-		font-size: var(--text-sm);
-		color: var(--text-secondary);
-		text-align: center;
-	}
-
-	/* ============================================
-	   EDITOR VIEW
-	   ============================================ */
-	.note-editor {
-		display: flex;
-		flex-direction: column;
-		flex: 1;
 		min-height: 0;
 		overflow: hidden;
+		background: var(--background);
 	}
-
-	.editor-title-row {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		padding: var(--space-2) var(--space-3);
-		border-bottom: 1px solid var(--border-default);
-	}
-
-	.editor-actions {
-		display: flex;
-		align-items: center;
-		gap: var(--space-1);
-		flex-shrink: 0;
-	}
-
-	.autosave-status {
-		font-size: var(--text-sm);
-		color: var(--text-secondary);
-		display: flex;
-		align-items: center;
-		gap: var(--space-1);
-	}
-
-	.title-input {
-		flex: 1;
-		min-width: 0;
-		padding: var(--space-1) 0;
-		background: none;
-		border: none;
-		color: var(--text-primary);
-		font-size: var(--text-xl);
-		font-weight: 600;
-		outline: none;
-	}
-
-	.title-input::placeholder {
-		color: var(--text-secondary);
-	}
-
-	/* ============================================
-	   EDITOR TABS
-	   ============================================ */
-	.editor-tabs {
-		display: flex;
-		border-bottom: 1px solid var(--border-default);
-	}
-
-	.editor-tabs button {
-		flex: 1;
-		padding: var(--space-2);
-		background: none;
-		border: none;
-		border-bottom: 2px solid transparent;
-		color: var(--text-secondary);
-		font-size: var(--text-base);
-		cursor: pointer;
-		transition: all var(--transition-smooth);
-	}
-
-	.editor-tabs button:hover {
-		color: var(--text-primary);
-		background: var(--surface-hover);
-	}
-
-	.editor-tabs button.active {
-		color: var(--text-accent);
-		border-bottom-color: var(--primary);
-	}
-
-	/* ============================================
-	   CONTENT AREA
-	   ============================================ */
-	.content-area {
-		flex: 1;
-		overflow-y: auto;
-		display: flex;
-		flex-direction: column;
-		position: relative;
-	}
-
-	.content-area.drag-over {
-		outline: 2px dashed var(--primary);
-		outline-offset: -4px;
-	}
-
-	.drop-overlay {
-		position: absolute;
-		inset: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		color: var(--text-accent);
-		font-weight: 600;
-		pointer-events: none;
-		z-index: 5;
-	}
-
-	/* ============================================
-	   ATTACHMENTS
-	   ============================================ */
-	.attachments-bar {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-1);
-		padding: var(--space-2) var(--space-3);
-		border-bottom: 1px solid var(--border-default);
-	}
-
-	.attachment-chip {
-		display: inline-flex;
-		align-items: center;
-		gap: var(--space-1);
-		padding: 2px var(--space-1) 2px calc(var(--space-1) * 1.5);
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle, var(--border-default));
-		border-radius: var(--radius-full);
-		font-size: var(--text-xs);
-		max-width: 14rem;
-	}
-
-	.attachment-chip-link {
-		display: inline-flex;
-		align-items: center;
-		gap: var(--space-1);
-		color: var(--text-secondary);
-		text-decoration: none;
-		overflow: hidden;
-	}
-
-	.attachment-chip-link:hover {
-		color: var(--text-accent);
-	}
-
-	.attachment-chip-name {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.attachment-chip-remove {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		padding: 2px;
-		background: none;
-		border: none;
-		border-radius: var(--radius-full);
-		color: var(--text-tertiary);
-		cursor: pointer;
-	}
-
-	.attachment-chip-remove:hover {
-		color: var(--destructive);
-		background: var(--surface-hover);
-	}
-
-	.textarea-wrapper {
-		position: relative;
-		display: flex;
-		flex-direction: column;
-		flex: 1;
-		min-height: 0;
-	}
-
-	/* Rendered `@`-reference link in preview */
-	.preview-content :global(.note-ref) {
-		display: inline-flex;
-		align-items: center;
-		padding: 0 calc(var(--space-1) * 1.5);
-		background: color-mix(in oklch, var(--primary) 12%, transparent);
-		color: var(--text-accent);
-		border-radius: var(--radius-sm);
-		text-decoration: none;
-		font-size: 0.95em;
-	}
-
-	.preview-content :global(.note-ref:hover) {
-		background: color-mix(in oklch, var(--primary) 20%, transparent);
-	}
-
-	.preview-content :global(.note-ref--missing) {
-		background: var(--surface-1);
-		color: var(--text-tertiary);
-	}
-
-	.content-textarea {
+	/* Centered, max-width container — matches the mockup .wrap (not full-bleed). */
+	.ns-wrap {
 		width: 100%;
-		min-height: 120px;
-		padding: var(--space-3);
-		background: none;
-		border: none;
-		color: var(--text-primary);
-		font-family: var(--font-mono);
-		font-size: var(--text-md);
-		line-height: 1.6;
-		resize: none;
-		outline: none;
-		overflow: hidden;
-	}
-
-	@media (pointer: coarse), (max-width: 639px) {
-		.content-textarea {
-			flex: 1;
-			overflow-y: auto;
-		}
-	}
-
-	.content-textarea::placeholder {
-		color: var(--text-secondary);
-	}
-
-	.preview-content {
-		flex: 1;
-		padding: var(--space-3);
-		overflow-y: auto;
-		line-height: 1.6;
-		color: var(--text-primary);
-	}
-
-	.preview-content :global(h1),
-	.preview-content :global(h2),
-	.preview-content :global(h3) {
-		margin: 1em 0 0.5em;
-		font-weight: 600;
-	}
-
-	.preview-content :global(h1) { font-size: 1.5em; }
-	.preview-content :global(h2) { font-size: 1.3em; }
-	.preview-content :global(h3) { font-size: 1.1em; }
-
-	.preview-content :global(pre) {
-		padding: var(--space-3);
-		background: var(--surface-1);
-		border-radius: var(--radius-sm);
-		overflow-x: auto;
-	}
-
-	.preview-content :global(code) {
-		padding: 2px calc(var(--space-1) * 1.5);
-		background: var(--surface-1);
-		border-radius: var(--radius-sm);
-		font-family: var(--font-mono);
-		font-size: 0.9em;
-	}
-
-	.preview-content :global(pre code) {
-		padding: 0;
-		background: none;
-	}
-
-	.preview-content :global(li) {
-		margin-left: var(--space-5);
-	}
-
-	.preview-empty {
-		color: var(--text-secondary);
-		font-style: italic;
-	}
-
-	/* Search bar between header and list */
-	.fp-search-bar {
-		max-width: 640px;
-		width: 100%;
+		max-width: 1240px;
 		margin: 0 auto;
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+	}
+	.ns-head { flex-shrink: 0; padding: 22px 28px 18px; }
+
+	.ns-btn {
+		display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px;
+		background: var(--card); color: var(--foreground);
+		border: 1px solid var(--border); border-radius: calc(var(--radius, 0.75rem) - 2px);
+		font-size: 0.8125rem; font-weight: 500; cursor: pointer; white-space: nowrap;
+		transition: background-color 120ms ease, filter 120ms ease;
+	}
+	.ns-btn:hover { background: var(--hover-overlay); }
+	.ns-btn--primary { background: var(--primary); color: var(--primary-foreground); border-color: transparent; }
+	.ns-btn--primary:hover { filter: brightness(1.08); background: var(--primary); }
+
+	/* Two-column layout */
+	.ns-layout {
+		flex: 1; min-height: 0;
+		display: grid; grid-template-columns: 320px 1fr; gap: 18px;
+		padding: 0 28px 28px; overflow: hidden; align-items: stretch;
 	}
 
-	.fp-search-bar :global(.fph-search-wrapper) {
-		width: 100%;
+	/* Left: note list */
+	.ns-listcol {
+		min-height: 0; display: flex; flex-direction: column;
+		background: var(--card); border: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem); overflow: hidden;
+	}
+	.ns-search {
+		display: flex; align-items: center; gap: 8px; padding: 11px 13px;
+		border-bottom: 1px solid var(--border-subtle, var(--border)); flex-shrink: 0;
+	}
+	.ns-search :global(svg) { color: var(--muted-foreground); flex-shrink: 0; }
+	.ns-search input {
+		flex: 1; min-width: 0; background: transparent; border: none; outline: none;
+		color: var(--foreground); font-size: 0.8125rem;
+	}
+	.ns-search input::placeholder { color: var(--muted-foreground); }
+
+	.ns-tagbar {
+		display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 13px;
+		border-bottom: 1px solid var(--border-subtle, var(--border)); flex-shrink: 0;
+	}
+	.ns-tag {
+		display: inline-flex; align-items: center; gap: 5px;
+		font-family: var(--font-mono, monospace); font-size: 0.66rem; font-weight: 500;
+		padding: 3px 8px; border-radius: 6px; border: none; cursor: pointer;
+		background: color-mix(in oklch, var(--muted) 45%, transparent); color: var(--muted-foreground);
+		transition: background-color 110ms ease, color 110ms ease;
+	}
+	.ns-tag:hover { color: var(--foreground); }
+	.ns-tag.on { background: var(--primary); color: var(--primary-foreground); }
+	.ns-tag-count { opacity: 0.7; }
+
+	.ns-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+	.ns-label {
+		font-family: var(--font-mono, monospace); font-size: 0.625rem; letter-spacing: 0.1em;
+		text-transform: uppercase; color: var(--muted-foreground); font-weight: 600;
+		padding: 11px 14px 5px;
 	}
 
-	.fp-search-bar :global(.fph-search-input) {
-		width: 100% !important;
+	.ns-item {
+		display: block; width: 100%; text-align: left; cursor: pointer;
+		padding: 11px 14px; border: none; background: transparent;
+		border-bottom: 1px solid var(--border-subtle, var(--border));
+		border-left: 3px solid transparent;
+		transition: background-color 110ms ease;
+	}
+	.ns-item:hover { background: var(--hover-overlay); }
+	.ns-item.on {
+		background: color-mix(in oklch, var(--primary) 14%, var(--card));
+		border-left-color: var(--primary);
+	}
+	.ns-item-title {
+		display: flex; align-items: center; gap: 6px; margin: 0 0 4px;
+		font-family: var(--font-display, Georgia, serif); font-weight: 700; font-size: 0.875rem;
+		color: var(--foreground);
+	}
+	.ns-item-pin { color: var(--warning, #d97706); display: inline-flex; flex-shrink: 0; }
+	.ns-item-title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.ns-item-preview {
+		margin: 0 0 7px; font-size: 0.75rem; color: var(--muted-foreground); line-height: 1.45;
+		display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+	}
+	.ns-item-foot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+	.ns-item-date { font-family: var(--font-mono, monospace); font-size: 0.625rem; color: var(--muted-foreground); margin-left: auto; }
+
+	.ns-chip {
+		font-family: var(--font-mono, monospace); font-size: 0.6rem; font-weight: 500;
+		padding: 2px 7px; border-radius: 6px;
+		background: color-mix(in oklch, var(--muted) 45%, transparent); color: var(--muted-foreground);
+	}
+	.ns-chip--edit { display: inline-flex; align-items: center; gap: 4px; font-size: 0.68rem; padding: 3px 4px 3px 9px; }
+	.ns-chip-x { display: grid; place-items: center; background: transparent; border: none; color: inherit; cursor: pointer; padding: 1px; border-radius: 4px; opacity: 0.7; }
+	.ns-chip-x:hover { opacity: 1; background: var(--hover-overlay); }
+
+	.ns-liststate, .ns-listempty { padding: 32px 16px; text-align: center; color: var(--muted-foreground); font-size: 0.8rem; }
+	.ns-liststate--err { color: var(--destructive); }
+	.ns-listempty { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+	.ns-listempty :global(svg) { opacity: 0.6; }
+	.ns-link { background: none; border: none; color: var(--primary); cursor: pointer; font-size: 0.8125rem; }
+	.ns-link:hover { text-decoration: underline; }
+
+	/* Right: editor */
+	.ns-editorcol {
+		min-height: 0; display: flex; flex-direction: column; overflow-y: auto;
+		background: var(--card); border: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem); padding: 18px 22px 22px;
+	}
+	.ns-etop { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+	.ns-etop-label { font-family: var(--font-mono, monospace); font-size: 0.625rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted-foreground); }
+	.ns-etop-right { display: flex; align-items: center; gap: 4px; }
+	.ns-save { display: flex; align-items: center; gap: 6px; font-size: 0.7rem; color: var(--muted-foreground); margin-right: 6px; }
+	.ns-save-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success, #22c55e); transition: background 150ms ease; }
+	.ns-save-dot.dirty { background: var(--warning, #d97706); }
+	.ns-save-dot.busy { background: var(--muted-foreground); animation: ns-pulse 1s ease-in-out infinite; }
+	@keyframes ns-pulse { 50% { opacity: 0.35; } }
+
+	.ns-iconbtn {
+		display: grid; place-items: center; width: 28px; height: 28px;
+		background: transparent; border: none; border-radius: 7px;
+		color: var(--muted-foreground); cursor: pointer; transition: color 110ms ease, background-color 110ms ease;
+	}
+	.ns-iconbtn:hover { color: var(--foreground); background: var(--hover-overlay); }
+	.ns-iconbtn:disabled { opacity: 0.4; cursor: not-allowed; }
+	.ns-iconbtn.on { color: var(--warning, #d97706); }
+	.ns-iconbtn--danger:hover { color: var(--destructive); background: color-mix(in oklch, var(--destructive) 12%, transparent); }
+
+	.ns-title-input {
+		width: 100%; background: transparent; border: none; outline: none;
+		font-family: var(--font-display, Georgia, serif); font-weight: 800; font-size: 1.5rem;
+		letter-spacing: -0.02em; color: var(--foreground); margin-bottom: 10px;
+	}
+	.ns-title-input::placeholder { color: var(--muted-foreground); opacity: 0.6; }
+
+	.ns-etags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+	.ns-tag-input {
+		min-width: 80px; flex: 1; background: transparent; border: none; outline: none;
+		font-family: var(--font-mono, monospace); font-size: 0.7rem; color: var(--foreground);
+	}
+	.ns-tag-input::placeholder { color: var(--muted-foreground); }
+
+	.ns-attachbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+	.ns-attach { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 8px; border-radius: 7px; background: color-mix(in oklch, var(--muted) 40%, transparent); font-size: 0.72rem; }
+	.ns-attach-link { display: inline-flex; align-items: center; gap: 5px; color: var(--foreground); text-decoration: none; }
+	.ns-attach-link:hover { color: var(--primary); }
+	.ns-attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+	.ns-attach-x { display: grid; place-items: center; background: transparent; border: none; color: var(--muted-foreground); cursor: pointer; padding: 1px; border-radius: 4px; }
+	.ns-attach-x:hover { color: var(--destructive); }
+
+	.ns-tabs { display: inline-flex; gap: 2px; padding: 3px; background: color-mix(in oklch, var(--muted) 40%, transparent); border-radius: 8px; width: fit-content; margin-bottom: 12px; }
+	.ns-tabs button {
+		padding: 4px 14px; border: none; background: transparent; border-radius: 6px;
+		color: var(--muted-foreground); font-size: 0.78rem; font-weight: 500; cursor: pointer;
+	}
+	.ns-tabs button:hover { color: var(--foreground); }
+	.ns-tabs button.active { background: var(--card); color: var(--foreground); }
+
+	.ns-content { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+	.ns-content.drag-over { outline: 2px dashed var(--primary); outline-offset: 2px; border-radius: 8px; }
+	.ns-ta-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+	.ns-textarea {
+		width: 100%; min-height: 240px; padding: 4px 0; background: transparent; border: none; outline: none;
+		color: var(--foreground); font-family: var(--font-mono, monospace); font-size: 0.85rem; line-height: 1.65;
+		resize: none; overflow: hidden;
+	}
+	.ns-textarea::placeholder { color: var(--muted-foreground); }
+	@media (pointer: coarse), (max-width: 639px) {
+		.ns-textarea { flex: 1; overflow-y: auto; }
 	}
 
-	.btn-label {
-		display: inline;
+	.ns-drop {
+		position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+		background: color-mix(in oklch, var(--primary) 10%, transparent); color: var(--primary);
+		font-size: 0.9rem; font-weight: 600; border-radius: 8px; pointer-events: none;
+	}
+
+	.ns-emptyeditor {
+		flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+		text-align: center; color: var(--muted-foreground);
+	}
+	.ns-emptyeditor :global(svg) { opacity: 0.45; }
+	.ns-emptyeditor-title { margin: 4px 0 0; font-size: 1rem; font-weight: 600; color: var(--foreground); }
+	.ns-emptyeditor-sub { margin: 0 0 8px; font-size: 0.82rem; }
+
+	/* Rendered Markdown preview */
+	.ns-preview { flex: 1; min-height: 0; overflow-y: auto; font-size: 0.9rem; line-height: 1.7; color: var(--foreground); }
+	.ns-preview :global(h1), .ns-preview :global(h2), .ns-preview :global(h3) { font-family: var(--font-display, Georgia, serif); margin: 1.1em 0 0.5em; font-weight: 700; }
+	.ns-preview :global(h1) { font-size: 1.5em; }
+	.ns-preview :global(h2) { font-size: 1.3em; }
+	.ns-preview :global(h3) { font-size: 1.12em; }
+	.ns-preview :global(p) { margin: 0 0 0.8em; }
+	.ns-preview :global(li) { margin: 0 0 0.4em 1.4em; }
+	.ns-preview :global(pre) { padding: 12px; background: color-mix(in oklch, var(--muted) 40%, transparent); border-radius: 8px; overflow-x: auto; margin: 0 0 0.8em; }
+	.ns-preview :global(code) { font-family: var(--font-mono, monospace); font-size: 0.82em; background: color-mix(in oklch, var(--muted) 45%, transparent); padding: 1px 5px; border-radius: 4px; }
+	.ns-preview :global(pre code) { padding: 0; background: none; }
+	.ns-preview :global(.note-ref) { display: inline-flex; align-items: center; padding: 0 6px; background: color-mix(in oklch, var(--primary) 14%, transparent); color: var(--primary); border-radius: 5px; text-decoration: none; font-size: 0.95em; }
+	.ns-preview :global(.note-ref:hover) { background: color-mix(in oklch, var(--primary) 22%, transparent); }
+	.ns-preview :global(.note-ref--missing) { background: color-mix(in oklch, var(--muted) 45%, transparent); color: var(--muted-foreground); }
+	.ns-preview-empty { color: var(--muted-foreground); font-style: italic; }
+
+	@media (max-width: 767px) {
+		.ns-head { padding: 16px 16px 12px; }
+		.ns-layout { grid-template-columns: 1fr; padding: 0 16px 20px; overflow-y: auto; }
+		.ns-listcol { max-height: 300px; }
 	}
 </style>
+
