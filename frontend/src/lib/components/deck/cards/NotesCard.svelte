@@ -597,7 +597,7 @@
 <div class="ns">
 	<div class="ns-wrap">
 		<div class="ns-head">
-			<StudioPageHeader eyebrow="Global · across all projects" title="Your" accent="notes">
+			<StudioPageHeader eyebrow="Global · across all projects" title="" accent="Notes">
 				{#snippet actions()}
 					<button class="ns-btn ns-btn--primary" onclick={startNewNote}>
 						<Plus size={15} strokeWidth={2} /><span>New note</span>
