@@ -584,6 +584,86 @@
 	{/if}
 {/snippet}
 
+{#snippet tabBar()}
+	<div class="fp-tab-bar">
+		{#each tabs as tab}
+			<button
+				class="fp-tab"
+				class:active={activeTab === tab.id}
+				onclick={() => {
+					activeTab = tab.id;
+					if (tab.id !== 'details') {
+						plugins.clearSelectedPlugin();
+					}
+				}}
+			>
+				{tab.label}
+				<span class="fp-tab-count">{tab.count}</span>
+				{#if tab.updatesBadge > 0}
+					<span class="tab-updates-badge">{tab.updatesBadge}</span>
+				{/if}
+			</button>
+		{/each}
+		{#if $selectedPlugin}
+			<button
+				class="fp-tab"
+				class:active={activeTab === 'details'}
+				onclick={() => activeTab = 'details'}
+			>
+				Details
+			</button>
+		{/if}
+	</div>
+{/snippet}
+
+{#snippet footerActions()}
+	{#if activeTab === 'available'}
+		{#if selectedForInstall.size > 0}
+			<button
+				onclick={handleBatchInstall}
+				disabled={batchInstalling}
+				class="batch-install-btn"
+			>
+				{#if batchInstalling}
+					<Loader2 size={16} class="animate-spin" />
+				{/if}
+				Install ({selectedForInstall.size})
+			</button>
+		{/if}
+	{:else if activeTab === 'installed'}
+		{#if $updatesCount > 0}
+			<button
+				onclick={handleUpdateAll}
+				disabled={updatingAll}
+				class="batch-install-btn batch-update-btn"
+			>
+				{#if updatingAll}
+					<Loader2 size={16} class="animate-spin" />
+				{:else}
+					<ArrowUpCircle size={16} />
+				{/if}
+				Update All ({$updatesCount})
+			</button>
+		{/if}
+	{/if}
+{/snippet}
+
+{#snippet searchBar()}
+	{#if activeTab === 'available' || activeTab === 'installed'}
+		<div class="fp-search-bar">
+			<div class="fph-search-wrapper">
+				<Search size={14} />
+				<input
+					type="text"
+					bind:value={searchQuery}
+					placeholder="Search plugins..."
+					class="fph-search-input"
+				/>
+			</div>
+		</div>
+	{/if}
+{/snippet}
+
 <FeaturePageLayout
 	icon={Package}
 	title="Plugins"
@@ -591,82 +671,14 @@
 	itemLabel="installed"
 >
 	{#snippet headerTabs()}
-		<div class="fp-tab-bar">
-			{#each tabs as tab}
-				<button
-					class="fp-tab"
-					class:active={activeTab === tab.id}
-					onclick={() => {
-						activeTab = tab.id;
-						if (tab.id !== 'details') {
-							plugins.clearSelectedPlugin();
-						}
-					}}
-				>
-					{tab.label}
-					<span class="fp-tab-count">{tab.count}</span>
-					{#if tab.updatesBadge > 0}
-						<span class="tab-updates-badge">{tab.updatesBadge}</span>
-					{/if}
-				</button>
-			{/each}
-			{#if $selectedPlugin}
-				<button
-					class="fp-tab"
-					class:active={activeTab === 'details'}
-					onclick={() => activeTab = 'details'}
-				>
-					Details
-				</button>
-			{/if}
-		</div>
+		{@render tabBar()}
 	{/snippet}
 	{#snippet footer()}
-		{#if activeTab === 'available'}
-			{#if selectedForInstall.size > 0}
-				<button
-					onclick={handleBatchInstall}
-					disabled={batchInstalling}
-					class="batch-install-btn"
-				>
-					{#if batchInstalling}
-						<Loader2 size={16} class="animate-spin" />
-					{/if}
-					Install ({selectedForInstall.size})
-				</button>
-			{/if}
-		{:else if activeTab === 'installed'}
-			{#if $updatesCount > 0}
-				<button
-					onclick={handleUpdateAll}
-					disabled={updatingAll}
-					class="batch-install-btn batch-update-btn"
-				>
-					{#if updatingAll}
-						<Loader2 size={16} class="animate-spin" />
-					{:else}
-						<ArrowUpCircle size={16} />
-					{/if}
-					Update All ({$updatesCount})
-				</button>
-			{/if}
-		{/if}
+		{@render footerActions()}
 	{/snippet}
 	{#snippet children()}
 		<div class="plugin-card card-system">
-			{#if activeTab === 'available' || activeTab === 'installed'}
-				<div class="fp-search-bar">
-					<div class="fph-search-wrapper">
-						<Search size={14} />
-						<input
-							type="text"
-							bind:value={searchQuery}
-							placeholder="Search plugins..."
-							class="fph-search-input"
-						/>
-					</div>
-				</div>
-			{/if}
+			{@render searchBar()}
 			{@render pluginMainContent()}
 		</div>
 	{/snippet}

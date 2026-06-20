@@ -18,18 +18,31 @@
 	import type { McpServerInfo, McpServerType } from '$lib/api/mcp';
 	import { getServerTypeLabel, validateMcpServerConfig } from '$lib/api/mcp';
 	import { Server, AlertCircle, X, Plus, Search, Trash2, Check, Globe, Terminal, Zap, Info, ChevronRight } from 'lucide-svelte';
+	import BuildMcpList from '$lib/components/layout/build/BuildMcpList.svelte';
 	import './card-design-system.css';
 
 	interface Props {
 		mobile?: boolean;
+		/** When embedded in the Build page, render the header-less rows list
+		 *  instead of the FeaturePageLayout list. The form is unchanged. */
+		embedded?: boolean;
+		/** Reports full-canvas detail/editor state so BuildPage can hide its chrome. */
+		onDetailChange?: (detail: boolean) => void;
 	}
 
 	let {
-		mobile = false
+		mobile = false,
+		embedded = false,
+		onDetailChange
 	}: Props = $props();
 
 	// View state
 	let viewMode = $state<'list' | 'form'>('list');
+
+	// Tell the Build page when we enter/leave the editor (form takes the canvas).
+	$effect(() => {
+		if (embedded) onDetailChange?.(viewMode === 'form');
+	});
 	let editingServer = $state<McpServerInfo | null>(null);
 	let searchQuery = $state('');
 
@@ -170,6 +183,12 @@
 		}
 	}
 
+	// Direct delete for the embedded Build list (which owns its inline-confirm UI).
+	async function embeddedDelete(name: string) {
+		await mcp.removeGlobalServer(name);
+		await mcp.loadGlobalServers();
+	}
+
 	function getTypeIcon(type: string) {
 		switch (type) {
 			case 'stdio': return Terminal;
@@ -189,7 +208,17 @@
 	}
 </script>
 
-{#if viewMode === 'form'}
+{#if viewMode === 'list' && embedded}
+	<!-- ═══ EMBEDDED LIST (Build page) ═══ -->
+	<BuildMcpList
+		servers={$globalMcpServers ?? []}
+		error={$mcpError}
+		onEdit={openEditForm}
+		onNew={openNewForm}
+		onDelete={embeddedDelete}
+		onClearError={() => mcp.clearError()}
+	/>
+{:else if viewMode === 'form'}
 	<!-- ═══ FORM VIEW ═══ -->
 	<FeaturePageLayout
 		icon={Server}

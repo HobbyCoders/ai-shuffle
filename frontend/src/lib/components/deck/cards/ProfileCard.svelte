@@ -26,6 +26,7 @@
 	// Sub-components
 	import ProfileList from './profiles/ProfileList.svelte';
 	import ProfileForm from './profiles/ProfileForm.svelte';
+	import BuildProfileGrid from '$lib/components/layout/build/BuildProfileGrid.svelte';
 	import { computeAiToolCount, computeEffectiveAiTools } from './profiles/toolAccess';
 
 	// Icon map for tabs
@@ -82,10 +83,18 @@
 
 	interface Props {
 		mobile?: boolean;
+		/** When embedded in the Build page, render the header-less card grid
+		 *  instead of the FeaturePageLayout list. The editor (form) is unchanged. */
+		embedded?: boolean;
+		/** Reports whether the section is in a full-canvas detail/editor state so
+		 *  the Build page can hide its heading + sub-nav while editing. */
+		onDetailChange?: (detail: boolean) => void;
 	}
 
 	let {
-		mobile = false
+		mobile = false,
+		embedded = false,
+		onDetailChange
 	}: Props = $props();
 
 	// Internal data state - loaded from stores/API
@@ -128,6 +137,12 @@
 	let viewMode = $state<'list' | 'form'>('list');
 	let editingProfile = $state<Profile | null>(null);
 	let activeTab = $state('general');
+
+	// Tell the Build page when we enter/leave the editor (form takes the canvas)
+	// so it can hide its heading + sub-nav while editing.
+	$effect(() => {
+		if (embedded) onDetailChange?.(viewMode === 'form');
+	});
 
 	// Profile form state
 	let profileForm = $state({
@@ -809,6 +824,9 @@
 </script>
 
 
+<!-- Shared hidden file input (used by both the embedded grid and the list view) -->
+<input type="file" accept=".json" bind:this={profileImportInput} onchange={handleImport} class="hidden" />
+
 {#if viewMode === 'form'}
 		<FeaturePageLayout
 			icon={Users}
@@ -877,8 +895,26 @@
 				</div>
 			{/snippet}
 		</FeaturePageLayout>
+	{:else if embedded}
+		<!-- Build page: header-less card grid (heading + sub-nav live in BuildPage) -->
+		<BuildProfileGrid
+			{profiles}
+			{groups}
+			{allSubagents}
+			{builtinAgentIds}
+			importing={profileImporting}
+			onEditProfile={openEditForm}
+			onNewProfile={openNewForm}
+			onGenerate={() => showGenerateDialog = true}
+			onImport={triggerImport}
+			onExportProfile={handleExportProfile}
+			onDeleteProfile={handleDeleteProfile}
+			onRevertProfile={handleRevertProfile}
+			{getModelDisplay}
+			{getProfileToolCount}
+		/>
 	{:else}
-		<!-- Embedded List View -->
+		<!-- Standalone List View -->
 		<FeaturePageLayout
 			icon={Users}
 			title="Profiles"
@@ -902,8 +938,6 @@
 					</div>
 				</div>
 			{/snippet}
-
-			<input type="file" accept=".json" bind:this={profileImportInput} onchange={handleImport} class="hidden" />
 
 			<ProfileList
 				{profiles}

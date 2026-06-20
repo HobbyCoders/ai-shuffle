@@ -29,17 +29,30 @@
 	import HookListItem from '$lib/components/hooks/HookListItem.svelte';
 	import HookForm from '$lib/components/hooks/HookForm.svelte';
 	import PluginHookItem from '$lib/components/hooks/PluginHookItem.svelte';
+	import BuildHookList from '$lib/components/layout/build/BuildHookList.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { Search, X, Loader2, Zap, Plus, AlertCircle, CheckCircle, XCircle } from 'lucide-svelte';
 	import './card-design-system.css';
 
 	interface Props {
 		mobile?: boolean;
+		/** When embedded in the Build page, render the header-less rows list
+		 *  instead of the FeaturePageLayout list. The editor is unchanged. */
+		embedded?: boolean;
+		/** Reports full-canvas detail/editor state so BuildPage can hide its chrome. */
+		onDetailChange?: (detail: boolean) => void;
 	}
 
 	let {
-		mobile = false
+		mobile = false,
+		embedded = false,
+		onDetailChange
 	}: Props = $props();
+
+	// Tell the Build page when we enter/leave the editor (form takes the canvas).
+	$effect(() => {
+		if (embedded) onDetailChange?.(currentView !== 'list');
+	});
 
 	// ── View state ─────────────────────────────────────────────────────
 	type View = 'list' | 'create' | 'edit';
@@ -198,6 +211,11 @@
 		}
 	}
 
+	// Direct delete for the embedded Build list (it owns its own inline confirm).
+	async function embeddedDelete(hookId: string) {
+		await hooks.deleteHook(hookId);
+	}
+
 	// Tab definitions
 	const tabs = $derived([
 		{ id: 'app' as Tab, label: 'App', count: appHookCount },
@@ -206,8 +224,28 @@
 	]);
 </script>
 
+<!-- ═══════════════════ EMBEDDED LIST (Build page) ═══════════════════ -->
+{#if embedded && currentView === 'list'}
+	<BuildHookList
+		allHooks={$projectHooks}
+		pluginHooks={$pluginHooks}
+		hasProject={!!$selectedProject}
+		loading={$hooksLoading}
+		error={$hooksError}
+		{testResult}
+		testing={$hookTesting}
+		saving={$hookSaving}
+		onCreate={openCreate}
+		onEdit={openEdit}
+		onDelete={embeddedDelete}
+		onToggle={(id) => hooks.toggleHook(id)}
+		onTest={handleTestHook}
+		onClearError={() => hooks.clearError()}
+		onClearTest={() => (testResult = null)}
+	/>
+
 <!-- ═══════════════════ CREATE / EDIT VIEW ═══════════════════ -->
-{#if currentView === 'create' || currentView === 'edit'}
+{:else if currentView === 'create' || currentView === 'edit'}
 	<FeaturePageLayout
 		icon={Zap}
 		title="Hooks"

@@ -15,6 +15,7 @@ import { createSubscribers } from './store-utils';
 export type ViewType =
 	| 'chat'
 	| 'board'
+	| 'build'
 	| 'settings'
 	| 'profile'
 	| 'subagent'

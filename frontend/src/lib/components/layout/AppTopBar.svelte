@@ -13,12 +13,6 @@
 		StickyNote,
 		Hammer,
 		CalendarClock,
-		Users,
-		Bot,
-		Server,
-		Puzzle,
-		Webhook,
-		ChevronDown,
 		Search,
 		Plus,
 		MoreHorizontal,
@@ -51,16 +45,9 @@
 		onToggleSidebar
 	}: Props = $props();
 
-	// Build group members — the agent-configuration pages collapse into one tab.
-	const BUILD_MEMBERS: ViewType[] = ['profile', 'subagent', 'mcp', 'plugins', 'hooks'];
-
-	const buildItems: { type: ViewType; label: string; icon: typeof Users }[] = [
-		{ type: 'profile', label: 'Profiles', icon: Users },
-		{ type: 'subagent', label: 'Subagents', icon: Bot },
-		{ type: 'mcp', label: 'MCP Servers', icon: Server },
-		{ type: 'plugins', label: 'Plugins', icon: Puzzle },
-		{ type: 'hooks', label: 'Hooks', icon: Webhook }
-	];
+	// Build group members — the agent-config tools live inside the Build page.
+	// Listed so the "Build" tab highlights when a member view (deep-link) is active.
+	const BUILD_MEMBERS: ViewType[] = ['build', 'profile', 'subagent', 'mcp', 'plugins', 'hooks'];
 
 	const overflowItems: { type: ViewType; label: string; icon: typeof Settings; adminOnly?: boolean }[] = [
 		{ type: 'docs', label: 'Docs', icon: BookOpen },
@@ -78,33 +65,20 @@
 		return currentType === t;
 	}
 
-	// Dropdown state
-	let buildOpen = $state(false);
+	// Overflow ("More") dropdown state
 	let overflowOpen = $state(false);
-	let buildDropdownEl = $state<HTMLDivElement | null>(null);
 	let overflowDropdownEl = $state<HTMLDivElement | null>(null);
-
-	function closeMenus() {
-		buildOpen = false;
-		overflowOpen = false;
-	}
 
 	// Close on outside click (robust: ignore clicks inside the open menu/trigger).
 	function handleWindowClick(e: MouseEvent) {
 		const t = e.target as Node;
-		if (buildOpen && buildDropdownEl && !buildDropdownEl.contains(t)) buildOpen = false;
 		if (overflowOpen && overflowDropdownEl && !overflowDropdownEl.contains(t)) overflowOpen = false;
 	}
 
 	function pick(type: ViewType) {
-		closeMenus();
+		overflowOpen = false;
 		onOpenFeature(type);
 	}
-
-	const buildLabel = $derived.by(() => {
-		const member = buildItems.find((b) => b.type === currentType);
-		return member ? member.label : 'Build';
-	});
 </script>
 
 <svelte:window onclick={handleWindowClick} />
@@ -141,29 +115,10 @@
 			<StickyNote size={16} strokeWidth={1.6} /><span>Notes</span>
 		</button>
 
-		<!-- Build group dropdown -->
-		<div class="tb-dropdown" bind:this={buildDropdownEl}>
-			<button
-				class="tb-tab"
-				class:active={buildActive}
-				aria-haspopup="true"
-				aria-expanded={buildOpen}
-				onclick={() => { overflowOpen = false; buildOpen = !buildOpen; }}
-			>
-				<Hammer size={16} strokeWidth={1.6} /><span>{buildActive ? buildLabel : 'Build'}</span>
-				<ChevronDown size={13} strokeWidth={1.75} class="tb-caret {buildOpen ? 'flipped' : ''}" />
-			</button>
-			{#if buildOpen}
-				<div class="tb-menu" role="menu">
-					<div class="tb-menu-label">Configure agents</div>
-					{#each buildItems as item}
-						<button class="tb-menu-item" class:active={isActive(item.type)} role="menuitem" onclick={() => pick(item.type)}>
-							<item.icon size={15} strokeWidth={1.6} /><span>{item.label}</span>
-						</button>
-					{/each}
-				</div>
-			{/if}
-		</div>
+		<!-- Build: single tab → unified Build page (sections live in an in-page sub-nav) -->
+		<button class="tb-tab" class:active={buildActive} onclick={() => onOpenFeature('build')}>
+			<Hammer size={16} strokeWidth={1.6} /><span>Build</span>
+		</button>
 
 		{#if isAdmin}
 			<button class="tb-tab" class:active={isActive('automations')} onclick={() => onOpenFeature('automations')}>
@@ -192,7 +147,7 @@
 				aria-haspopup="true"
 				aria-expanded={overflowOpen}
 				title="More"
-				onclick={() => { buildOpen = false; overflowOpen = !overflowOpen; }}
+				onclick={() => { overflowOpen = !overflowOpen; }}
 			>
 				<MoreHorizontal size={18} strokeWidth={1.6} />
 			</button>
@@ -281,8 +236,6 @@
 	.tb-tab:hover { color: var(--foreground); background: var(--hover-overlay); }
 	.tb-tab.active { color: var(--selection-text); background: var(--selection-bg-emphasis); }
 	.tb-tab :global(svg) { flex-shrink: 0; }
-	.tb-tab :global(.tb-caret) { transition: transform 180ms ease; opacity: 0.7; }
-	.tb-tab :global(.tb-caret.flipped) { transform: rotate(180deg); }
 
 	/* Dropdown */
 	.tb-dropdown { position: relative; }
@@ -300,14 +253,6 @@
 		animation: tb-pop 140ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
 	.tb-menu-right { left: auto; right: 0; }
-	.tb-menu-label {
-		font-size: 0.625rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		color: var(--muted-foreground);
-		padding: 6px 8px 4px;
-	}
 	.tb-menu-item {
 		display: flex;
 		align-items: center;
@@ -415,6 +360,5 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.tb-menu { animation: none; }
-		.tb-tab :global(.tb-caret) { transition: none; }
 	}
 </style>
