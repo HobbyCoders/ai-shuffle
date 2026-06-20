@@ -27,7 +27,7 @@
 	<div class="sph-text">
 		{#if eyebrow}<div class="sph-eyebrow">{eyebrow}</div>{/if}
 		<h1 class="sph-title">
-			{#if title}{title} {/if}{#if accent}<span class="sph-accent">{accent}</span>{/if}
+			{#if title}{title}{/if}{#if title && accent}{' '}{/if}{#if accent}<span class="sph-accent">{accent}</span>{/if}
 		</h1>
 	</div>
 	{#if actions}

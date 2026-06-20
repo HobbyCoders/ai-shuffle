@@ -60,6 +60,7 @@
 
 	// Sub-components
 	import AutomationsList from './automations/AutomationsList.svelte';
+	import AutomationsStudio from './automations/AutomationsStudio.svelte';
 	import AutomationForm from './automations/AutomationForm.svelte';
 	import AutomationDetail from './automations/AutomationDetail.svelte';
 
@@ -709,57 +710,68 @@
 				</div>
 			{/snippet}
 		</FeaturePageLayout>
+	{:else if currentView === 'detail' && selectedAutomation}
+		<!-- Detail (run history) — full canvas; AutomationDetail renders its own header/back. -->
+		<div class="automations-card card-system" style="position: relative;">
+			{#if error}
+				<div class="auto-error" transition:slide={{ duration: 200 }}>
+					<AlertCircle size={16} />
+					<span>{error}</span>
+					<button onclick={() => error = ''} class="toast-close"><X size={14} /></button>
+				</div>
+			{/if}
+			<div class="auto-content">
+				<div class="auto-detail-center">
+				<AutomationDetail
+					automation={selectedAutomation}
+					{runs}
+					{runsLoading}
+					{expandedRunIds}
+					{detailStats}
+					onBack={() => currentView = 'list'}
+					onEdit={openEdit}
+					onTrigger={handleTrigger}
+					onDelete={handleDelete}
+					onToggleRunExpanded={toggleRunExpanded}
+					{formatTime}
+					{formatCost}
+					{formatDuration}
+					{getStatusColor}
+					{getRunStatusBadgeClass}
+					{triggerTypeLabel}
+				/>
+				</div>
+			</div>
+		</div>
 	{:else}
-		<FeaturePageLayout
-			icon={CalendarClock}
-			title="Automations"
-			itemCount={automations.length}
-			itemLabel="automation"
-		>
-			{#snippet headerTabs()}
-				<div class="fp-tab-bar">
-					<button
-						class="fp-tab"
-						class:active={currentView === 'list' || currentView === 'detail'}
-						onclick={() => currentView = 'list'}
-					>
-						All
-						<span class="fp-tab-count">{automations.length}</span>
-					</button>
-					<button
-						class="fp-tab"
-						class:active={currentView === 'approvals'}
-						onclick={() => currentView = 'approvals'}
-					>
-						Approvals
-						{#if approvalCount > 0}
-							<span class="fp-tab-count auto-approval-badge">{approvalCount}</span>
-						{/if}
-					</button>
-				</div>
-			{/snippet}
-			{#snippet footer()}
-				<button class="fp-btn fp-btn--primary" onclick={openCreate} title="New Automation">
-					<Plus size={14} /> <span class="btn-label">New Automation</span>
-				</button>
-			{/snippet}
-			{#snippet children()}
-				<div class="automations-card card-system" style="position: relative;">
-					<div class="fp-search-bar">
-						<div class="fph-search-wrapper">
-							<Search size={14} />
-							<input
-								type="text"
-								bind:value={searchQuery}
-								placeholder="Search automations..."
-								class="fph-search-input"
-							/>
-						</div>
-					</div>
-					{@render automationsMainContent()}
-				</div>
-			{/snippet}
-		</FeaturePageLayout>
+		<!-- List — Studio-v2 surface (header + approval banners + run list) -->
+		{#if loading}
+			<div class="auto-loading">
+				<Loader2 size={32} class="animate-spin" />
+				<p>Loading automations...</p>
+			</div>
+		{:else}
+			<AutomationsStudio
+				{automations}
+				{pendingApprovals}
+				{profiles}
+				{loading}
+				{error}
+				{triggeringId}
+				onOpenCreate={openCreate}
+				onOpenDetail={openDetail}
+				onOpenEdit={openEdit}
+				onToggleEnabled={handleToggleEnabled}
+				onTrigger={handleTrigger}
+				onDelete={handleDelete}
+				onApprove={handleApprove}
+				onDeny={handleDeny}
+				onClearError={() => error = ''}
+				{formatTime}
+				{formatCost}
+				{triggerTypeLabel}
+			/>
+		{/if}
 	{/if}
 {:else if mobile}
 	<div class="automations-card card-system mobile">
@@ -1026,6 +1038,14 @@
 		overflow-y: auto;
 	}
 
+	/* Centered detail (run history) — matches the list's max-width wrap, not full-bleed. */
+	.auto-detail-center {
+		width: 100%;
+		max-width: 1240px;
+		min-height: 100%;
+		margin: 0 auto;
+	}
+
 	.auto-loading {
 		display: flex;
 		flex-direction: column;
@@ -1181,20 +1201,6 @@
 		.auto-approval-btn {
 			flex: 1;
 		}
-	}
-
-	.fp-search-bar {
-		max-width: 640px;
-		width: 100%;
-		margin: 0 auto;
-	}
-
-	.fp-search-bar :global(.fph-search-wrapper) {
-		width: 100%;
-	}
-
-	.fp-search-bar :global(.fph-search-input) {
-		width: 100% !important;
 	}
 
 	.btn-label {
