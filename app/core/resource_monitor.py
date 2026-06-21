@@ -131,18 +131,39 @@ async def _collect_metrics() -> dict:
         logger.debug(f"{_PREFIX} Failed to collect automation metrics: {e}")
 
     # --- Process-level metrics ---
+    # Prefer psutil (cross-platform, and gives child-process RSS so a leak in the
+    # bundled Node CLI / spawned Chrome subprocesses is visible — not just our own
+    # heap). Fall back to /proc on Linux so a container without psutil still reports
+    # at least its own RSS instead of silently dropping all memory metrics.
     try:
         import psutil
         process = psutil.Process(os.getpid())
-        mem_info = process.memory_info()
-        metrics["process_rss_mb"] = round(mem_info.rss / (1024 * 1024), 1)
+        rss_mb = round(process.memory_info().rss / (1024 * 1024), 1)
+        metrics["process_rss_mb"] = rss_mb
         metrics["process_threads"] = process.num_threads()
-        # Count child processes (SDK subprocesses)
+        # Child processes (SDK Node subprocesses, any spawned Chrome, etc.) — count
+        # AND sum their RSS, since a child-process leak never shows in our own RSS.
+        child_rss_mb = 0.0
         children = process.children(recursive=True)
+        for child in children:
+            try:
+                child_rss_mb += child.memory_info().rss / (1024 * 1024)
+            except Exception:
+                continue  # child may have exited mid-iteration
         metrics["child_processes"] = len(children)
+        metrics["child_rss_mb"] = round(child_rss_mb, 1)
+        metrics["tree_rss_mb"] = round(rss_mb + child_rss_mb, 1)
     except ImportError:
-        # psutil not available, skip process metrics
-        pass
+        # psutil not installed — fall back to /proc for our own RSS (Linux only).
+        try:
+            with open(f"/proc/{os.getpid()}/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        # VmRSS is reported in kB.
+                        metrics["process_rss_mb"] = round(int(line.split()[1]) / 1024, 1)
+                        break
+        except Exception:
+            pass  # non-Linux without psutil: no RSS available
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to collect process metrics: {e}")
 

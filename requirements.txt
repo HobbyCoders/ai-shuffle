@@ -13,6 +13,7 @@ pygit2>=1.19.0
 firebase-admin>=6.4.0  # FCM push notifications
 apscheduler>=3.10.4  # Proactive scheduling
 psycopg2-binary==2.9.9
+psutil>=5.9  # Process + child-process RSS for ResourceMonitor leak diagnostics (manylinux wheels; no build toolchain needed)
 # Computer-use dependencies (host desktop control) live in requirements-native.txt.
 # They are installed only for native/local runs — never in the Docker image, where
 # computer-use is auto-disabled and pynput's transitive `evdev` build fails (needs
