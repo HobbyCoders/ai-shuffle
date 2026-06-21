@@ -462,12 +462,12 @@
 					</select>
 				</div>
 			</div>
-			<div class="set-row">
+			<div class="set-row stack">
 				<div class="lab"><h4>Platform chat ID</h4><p>Chat, channel ID, or email to deliver to.</p></div>
 				<div class="ctl"><input type="text" class="inp mono" value={formOutputConfig.platform_chat_id || ''} oninput={(e) => onUpdateFormOutputConfig({ ...formOutputConfig, platform_chat_id: e.currentTarget.value })} placeholder="chat / channel ID / email" /></div>
 			</div>
 		{:else if formOutputType === 'webhook'}
-			<div class="set-row">
+			<div class="set-row stack">
 				<div class="lab"><h4>Webhook URL</h4><p>The endpoint to POST the result to.</p></div>
 				<div class="ctl"><input type="text" class="inp mono" value={formOutputConfig.url || ''} oninput={(e) => onUpdateFormOutputConfig({ ...formOutputConfig, url: e.currentTarget.value })} placeholder="https://example.com/webhook" /></div>
 			</div>

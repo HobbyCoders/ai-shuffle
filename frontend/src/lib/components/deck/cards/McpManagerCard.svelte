@@ -242,12 +242,12 @@
 					<div class="lab"><h4>Command <span class="req">*</span></h4><p>The executable to launch.</p></div>
 					<div class="ctl"><input type="text" bind:value={formCommand} placeholder="node, python, npx, etc." class="inp mono" /></div>
 				</div>
-				<div class="set-row">
+				<div class="set-row stack">
 					<div class="lab"><h4>Arguments</h4><p>Space-separated arguments. Optional.</p></div>
 					<div class="ctl"><input type="text" bind:value={formArgsText} placeholder="./server.js --port 3000" class="inp mono" /></div>
 				</div>
 			{:else}
-				<div class="set-row">
+				<div class="set-row stack">
 					<div class="lab"><h4>URL <span class="req">*</span></h4><p>The remote endpoint to connect to.</p></div>
 					<div class="ctl"><input type="url" bind:value={formUrl} placeholder="https://api.example.com/mcp" class="inp mono" /></div>
 				</div>

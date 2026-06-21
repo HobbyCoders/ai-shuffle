@@ -166,7 +166,7 @@
 			<div class="ctl"><input type="number" bind:value={timeout} min="1000" max="300000" step="1000" class="inp" /></div>
 		</div>
 	{:else if hookType === 'webhook'}
-		<div class="set-row">
+		<div class="set-row stack">
 			<div class="lab"><h4>URL <span class="req">*</span></h4><p>HTTP endpoint to POST event data to.</p></div>
 			<div class="ctl"><input type="url" bind:value={url} placeholder="https://example.com/webhook" class="inp mono" /></div>
 		</div>

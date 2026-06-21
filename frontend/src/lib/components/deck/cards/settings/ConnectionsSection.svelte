@@ -456,10 +456,17 @@
 	}
 
 	@media (max-width: 560px) {
-		.kc-acts .kc-in {
-			width: 100%;
+		/* Let the card wrap so the action area drops onto its own full-width
+		   row. Without this the flex-shrink:0 actions column demands 100% width
+		   in the same row and crushes the body text to one word per line. */
+		.keycard {
+			flex-wrap: wrap;
 		}
 		.kc-acts {
+			width: 100%;
+			justify-content: flex-start;
+		}
+		.kc-acts .kc-in {
 			width: 100%;
 		}
 	}

@@ -238,10 +238,10 @@
 					<input class="inp" value={profileForm.name} oninput={(e) => onFormChange('name', (e.target as HTMLInputElement).value)} placeholder="My Custom Agent" />
 				</div>
 			</div>
-			<div class="set-row">
+			<div class="set-row stack">
 				<div class="lab"><h4>Description</h4><p>A short summary of what this profile is for.</p></div>
 				<div class="ctl">
-					<input class="inp" value={profileForm.description} oninput={(e) => onFormChange('description', (e.target as HTMLInputElement).value)} placeholder="A coding assistant for frontend work" />
+					<textarea class="fld" rows={2} value={profileForm.description} oninput={(e) => onFormChange('description', (e.target as HTMLTextAreaElement).value)} placeholder="A coding assistant for frontend work"></textarea>
 				</div>
 			</div>
 			{#if editingProfile}
@@ -495,7 +495,7 @@
 		<!-- ADVANCED TAB -->
 		<div class="set-group">
 			<div class="set-grouphead"><h3>Environment</h3><p>Configure the working environment for this profile.</p></div>
-			<div class="set-row">
+			<div class="set-row stack">
 				<div class="lab"><h4>Working directory</h4><p>Where the agent runs by default.</p></div>
 				<div class="ctl"><input class="inp mono" value={profileForm.cwd} oninput={(e) => onFormChange('cwd', (e.target as HTMLInputElement).value)} placeholder="/home/user/projects/my-api" /></div>
 			</div>

@@ -401,6 +401,12 @@
 	.ed-content :global(.set-row.stack .ctl) {
 		display: block;
 	}
+	/* Inline inputs/selects span the full width when the row is stacked —
+	   used for long free-text fields (paths, URLs) that need room. */
+	.ed-content :global(.set-row.stack .ctl .inp),
+	.ed-content :global(.set-row.stack .ctl .sel) {
+		width: 100%;
+	}
 	.ed-content :global(.fld) {
 		width: 100%;
 		font: inherit;
@@ -693,5 +699,27 @@
 	.ed-scroll::-webkit-scrollbar-thumb {
 		background: var(--border);
 		border-radius: 4px;
+	}
+
+	/* ══════════════════════════════════════════════════════════════════
+	   Mobile — stack each row's label over its control so inputs get the
+	   full width instead of being crushed against a 220px control column.
+	   Declared last so it overrides the primitives above.
+	   ══════════════════════════════════════════════════════════════════ */
+	@media (max-width: 560px) {
+		.ed-content :global(.set-row) {
+			flex-direction: column;
+			align-items: stretch;
+			gap: 10px;
+		}
+		.ed-content :global(.set-row .ctl) {
+			width: 100%;
+			justify-content: flex-start;
+		}
+		.ed-content :global(.set-row .ctl .inp),
+		.ed-content :global(.set-row .ctl .sel) {
+			width: 100%;
+			min-width: 0;
+		}
 	}
 </style>

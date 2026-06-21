@@ -2,17 +2,20 @@
 	/**
 	 * ProjectMcpTab - MCP server visibility tab for project detail view
 	 *
+	 * Studio-v2 grouped-field design (.set-group / .set-row), mirroring the
+	 * Profile editor. Field primitives come from project-tabs.css (.ptab).
+	 *
 	 * Shows ALL MCP servers available to this project across all scopes:
-	 * - USER scope (global servers like "pencil mcp") — with enable/disable toggle + remove
-	 * - INSTALLED scope (~/.claude.json project mcpServers) — with edit + remove
-	 * - LOCAL scope (.claude/.mcp.json) — with edit capability
-	 * - PROJECT scope (.mcp.json) — with edit capability
+	 * - USER scope (global servers) — enable/disable toggle + remove
+	 * - INSTALLED scope (~/.claude.json project mcpServers) — toggle + remove
+	 * - LOCAL scope (.claude/.mcp.json) — edit
+	 * - PROJECT scope (.mcp.json) — edit
 	 */
 	import { mcp, projectMcpServers, mcpLoading } from '$lib/stores/mcp.svelte';
 	import type { McpServerInfo } from '$lib/api/mcp';
 	import McpServerForm from '$lib/components/mcp/McpServerForm.svelte';
-	import { Search, Server, Globe, Terminal, Zap, FolderGit2, FolderLock, Download, Trash2, ToggleLeft, ToggleRight, ChevronRight } from 'lucide-svelte';
-	import './card-design-system.css';
+	import { Search, Server, Globe, FolderGit2, FolderLock, Download, Trash2, Pencil } from 'lucide-svelte';
+	import './project-tabs.css';
 
 	interface Props {
 		projectId: string;
@@ -124,7 +127,7 @@
 		}
 	}
 
-	// Server type icon helper
+	// Server type label helper
 	function getTypeLabel(type: string): string {
 		switch (type) {
 			case 'stdio': return 'stdio';
@@ -135,217 +138,127 @@
 	}
 </script>
 
-<div class="mcp-tab">
+{#snippet serverMeta(server: McpServerInfo)}
+	{#if server.type === 'stdio' && server.command}
+		<p class="mono">{server.command}{server.args ? ' ' + server.args.join(' ') : ''}</p>
+	{:else if (server.type === 'sse' || server.type === 'http') && server.url}
+		<p class="mono">{server.url}</p>
+	{/if}
+{/snippet}
+
+{#snippet toggleRow(server: McpServerInfo, removable: boolean)}
+	<div class="set-row" class:disabled={!server.enabled}>
+		<div class="lab">
+			<h4>
+				{server.name}
+				<span class="hint">· {getTypeLabel(server.type)}</span>
+				{#if server.builtin}<span class="badge muted">Built-in</span>{/if}
+			</h4>
+			{@render serverMeta(server)}
+		</div>
+		<div class="ctl">
+			<button
+				type="button"
+				class="switch"
+				class:on={server.enabled}
+				role="switch"
+				aria-checked={server.enabled}
+				aria-label={server.enabled ? 'Disable server' : 'Enable server'}
+				title={server.enabled ? 'Disable server' : 'Enable server'}
+				onclick={() => handleToggle(server)}
+			><i></i></button>
+			{#if removable}
+				<button type="button" class="icon-btn danger" title="Remove server" onclick={() => handleRemoveServer(server)}>
+					<Trash2 size={15} />
+				</button>
+			{/if}
+		</div>
+	</div>
+{/snippet}
+
+{#snippet editRow(server: McpServerInfo)}
+	<div class="set-row">
+		<div class="lab">
+			<h4>{server.name} <span class="hint">· {getTypeLabel(server.type)}</span></h4>
+			{@render serverMeta(server)}
+		</div>
+		<div class="ctl">
+			<button type="button" class="icon-btn" title="Edit server" onclick={() => handleEditServer(server)}>
+				<Pencil size={15} />
+			</button>
+		</div>
+	</div>
+{/snippet}
+
+<div class="ptab">
 	<!-- Search -->
 	{#if totalServers > 3}
-		<div class="tab-search">
-			<div class="card-search-container">
-				<Search class="card-search-icon" />
-				<input
-					type="text"
-					bind:value={searchQuery}
-					placeholder="Search MCP servers..."
-					class="card-search-input"
-				/>
-			</div>
+		<div class="tsearch">
+			<Search />
+			<input type="text" bind:value={searchQuery} placeholder="Search MCP servers…" class="inp" />
 		</div>
 	{/if}
 
-	<div class="server-list">
-		<!-- Global (User) MCP Servers -->
-		{#if filteredUserServers().length > 0}
-			<div class="scope-section">
-				<div class="scope-header">
-					<Globe class="scope-icon" />
-					<span>Global MCP Servers</span>
-					<span class="card-badge card-badge--muted">~/.claude.json</span>
-				</div>
-				{#each filteredUserServers() as server, index (server.name)}
-					{#if index > 0}<div class="fp-list-divider"></div>{/if}
-					<div class="fp-list-item" class:fp-list-item--disabled={!server.enabled}>
-						<div class="fp-item-indicator"></div>
-						<div class="fp-item-content">
-							<div class="fp-item-header">
-								<span class="fp-item-name">{server.name}</span>
-								<span class="fp-item-badge">{getTypeLabel(server.type)}</span>
-								{#if server.builtin}
-									<span class="fp-item-badge">Built-in</span>
-								{/if}
-								{#if server.enabled}
-									<span class="fp-item-badge" style="color: var(--success)">Enabled</span>
-								{:else}
-									<span class="fp-item-badge">Disabled</span>
-								{/if}
-							</div>
-							<div class="fp-item-meta">
-								{#if server.type === 'stdio' && server.command}
-									<span class="fp-meta-chip"><code>{server.command}{server.args ? ' ' + server.args.join(' ') : ''}</code></span>
-								{:else if (server.type === 'sse' || server.type === 'http') && server.url}
-									<span class="fp-meta-chip">{server.url}</span>
-								{/if}
-							</div>
-						</div>
-						<!-- svelte-ignore a11y_no_static_element_interactions -->
-						<!-- svelte-ignore a11y_click_events_have_key_events -->
-						<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
-							<button
-								class="card-action-btn"
-								title={server.enabled ? 'Disable server' : 'Enable server'}
-								onclick={() => handleToggle(server)}
-							>
-								{#if server.enabled}
-									<ToggleRight size={16} />
-								{:else}
-									<ToggleLeft size={16} />
-								{/if}
-							</button>
-							{#if !server.builtin}
-								<button
-									class="card-action-btn card-action-btn--danger"
-									title="Remove server"
-									onclick={() => handleRemoveServer(server)}
-								>
-									<Trash2 size={14} />
-								</button>
-							{/if}
-						</div>
-						<div class="fp-item-chevron"><ChevronRight size={16} /></div>
-					</div>
-				{/each}
+	<!-- Global (User) MCP Servers -->
+	{#if filteredUserServers().length > 0}
+		<div class="set-group">
+			<div class="set-grouphead grouphead-row">
+				<div><h3><Globe />Global MCP Servers</h3></div>
+				<span class="badge mono">~/.claude.json</span>
 			</div>
-		{/if}
+			{#each filteredUserServers() as server (server.name)}
+				{@render toggleRow(server, !server.builtin)}
+			{/each}
+		</div>
+	{/if}
 
-		<!-- Installed MCP Servers (per-project in ~/.claude.json) -->
-		{#if filteredInstalledServers().length > 0}
-			<div class="scope-section">
-				<div class="scope-header">
-					<Download class="scope-icon" />
-					<span>Installed MCP Servers</span>
-					<span class="card-badge card-badge--muted">~/.claude.json</span>
-				</div>
-				{#each filteredInstalledServers() as server, index (server.name)}
-					{#if index > 0}<div class="fp-list-divider"></div>{/if}
-					<div class="fp-list-item" class:fp-list-item--disabled={!server.enabled}>
-						<div class="fp-item-indicator"></div>
-						<div class="fp-item-content">
-							<div class="fp-item-header">
-								<span class="fp-item-name">{server.name}</span>
-								<span class="fp-item-badge">{getTypeLabel(server.type)}</span>
-								{#if server.enabled}
-									<span class="fp-item-badge" style="color: var(--success)">Enabled</span>
-								{:else}
-									<span class="fp-item-badge">Disabled</span>
-								{/if}
-							</div>
-							<div class="fp-item-meta">
-								{#if server.type === 'stdio' && server.command}
-									<span class="fp-meta-chip"><code>{server.command}{server.args ? ' ' + server.args.join(' ') : ''}</code></span>
-								{:else if (server.type === 'sse' || server.type === 'http') && server.url}
-									<span class="fp-meta-chip">{server.url}</span>
-								{/if}
-							</div>
-						</div>
-						<!-- svelte-ignore a11y_no_static_element_interactions -->
-						<!-- svelte-ignore a11y_click_events_have_key_events -->
-						<div class="fp-item-actions" onclick={(e) => e.stopPropagation()} role="toolbar" tabindex="-1">
-							<button
-								class="card-action-btn"
-								title={server.enabled ? 'Disable server' : 'Enable server'}
-								onclick={() => handleToggle(server)}
-							>
-								{#if server.enabled}
-									<ToggleRight size={16} />
-								{:else}
-									<ToggleLeft size={16} />
-								{/if}
-							</button>
-							<button
-								class="card-action-btn card-action-btn--danger"
-								title="Remove server"
-								onclick={() => handleRemoveServer(server)}
-							>
-								<Trash2 size={14} />
-							</button>
-						</div>
-						<div class="fp-item-chevron"><ChevronRight size={16} /></div>
-					</div>
-				{/each}
+	<!-- Installed MCP Servers (per-project in ~/.claude.json) -->
+	{#if filteredInstalledServers().length > 0}
+		<div class="set-group">
+			<div class="set-grouphead grouphead-row">
+				<div><h3><Download />Installed MCP Servers</h3></div>
+				<span class="badge mono">~/.claude.json</span>
 			</div>
-		{/if}
+			{#each filteredInstalledServers() as server (server.name)}
+				{@render toggleRow(server, true)}
+			{/each}
+		</div>
+	{/if}
 
-		<!-- Local MCP Servers -->
-		{#if filteredLocalServers().length > 0}
-			<div class="scope-section">
-				<div class="scope-header">
-					<FolderLock class="scope-icon" />
-					<span>Local MCP Servers</span>
-					<span class="card-badge card-badge--muted">.claude/.mcp.json</span>
-				</div>
-				{#each filteredLocalServers() as server, index (server.name)}
-					{#if index > 0}<div class="fp-list-divider"></div>{/if}
-					<button class="fp-list-item" onclick={() => handleEditServer(server)}>
-						<div class="fp-item-indicator"></div>
-						<div class="fp-item-content">
-							<div class="fp-item-header">
-								<span class="fp-item-name">{server.name}</span>
-								<span class="fp-item-badge">{getTypeLabel(server.type)}</span>
-							</div>
-							<div class="fp-item-meta">
-								{#if server.type === 'stdio' && server.command}
-									<span class="fp-meta-chip"><code>{server.command}{server.args ? ' ' + server.args.join(' ') : ''}</code></span>
-								{:else if (server.type === 'sse' || server.type === 'http') && server.url}
-									<span class="fp-meta-chip">{server.url}</span>
-								{/if}
-							</div>
-						</div>
-						<div class="fp-item-chevron"><ChevronRight size={16} /></div>
-					</button>
-				{/each}
+	<!-- Local MCP Servers -->
+	{#if filteredLocalServers().length > 0}
+		<div class="set-group">
+			<div class="set-grouphead grouphead-row">
+				<div><h3><FolderLock />Local MCP Servers</h3></div>
+				<span class="badge mono">.claude/.mcp.json</span>
 			</div>
-		{/if}
+			{#each filteredLocalServers() as server (server.name)}
+				{@render editRow(server)}
+			{/each}
+		</div>
+	{/if}
 
-		<!-- Project MCP Servers -->
-		{#if filteredProjectServers().length > 0}
-			<div class="scope-section">
-				<div class="scope-header">
-					<FolderGit2 class="scope-icon" />
-					<span>Project MCP Servers</span>
-					<span class="card-badge card-badge--muted">.mcp.json</span>
-				</div>
-				{#each filteredProjectServers() as server, index (server.name)}
-					{#if index > 0}<div class="fp-list-divider"></div>{/if}
-					<button class="fp-list-item" onclick={() => handleEditServer(server)}>
-						<div class="fp-item-indicator"></div>
-						<div class="fp-item-content">
-							<div class="fp-item-header">
-								<span class="fp-item-name">{server.name}</span>
-								<span class="fp-item-badge">{getTypeLabel(server.type)}</span>
-							</div>
-							<div class="fp-item-meta">
-								{#if server.type === 'stdio' && server.command}
-									<span class="fp-meta-chip"><code>{server.command}{server.args ? ' ' + server.args.join(' ') : ''}</code></span>
-								{:else if (server.type === 'sse' || server.type === 'http') && server.url}
-									<span class="fp-meta-chip">{server.url}</span>
-								{/if}
-							</div>
-						</div>
-						<div class="fp-item-chevron"><ChevronRight size={16} /></div>
-					</button>
-				{/each}
+	<!-- Project MCP Servers -->
+	{#if filteredProjectServers().length > 0}
+		<div class="set-group">
+			<div class="set-grouphead grouphead-row">
+				<div><h3><FolderGit2 />Project MCP Servers</h3></div>
+				<span class="badge mono">.mcp.json</span>
 			</div>
-		{/if}
+			{#each filteredProjectServers() as server (server.name)}
+				{@render editRow(server)}
+			{/each}
+		</div>
+	{/if}
 
-		<!-- Empty state -->
-		{#if totalServers === 0}
-			<div class="card-empty-state">
-				<Server class="card-empty-icon" />
-				<p class="card-empty-title">No MCP servers available</p>
-				<p class="card-empty-description">
-					Add MCP servers from the MCP Servers card to see them here.
-				</p>
-			</div>
-		{/if}
-	</div>
+	<!-- Empty state -->
+	{#if totalServers === 0}
+		<div class="empty-state">
+			<Server />
+			<p class="es-title">No MCP servers available</p>
+			<p class="es-desc">Add MCP servers from the MCP Servers card to see them here.</p>
+		</div>
+	{/if}
 
 	<!-- MCP Server Form Modal -->
 	<McpServerForm
@@ -361,47 +274,3 @@
 		}}
 	/>
 </div>
-
-<style>
-	.mcp-tab {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		gap: var(--space-3);
-	}
-
-	.tab-search {
-		padding: 0 var(--space-4);
-	}
-
-	.server-list {
-		flex: 1;
-		overflow-y: auto;
-		padding: 0 var(--space-4);
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
-	}
-
-	.scope-section {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-	}
-
-	.scope-header {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		font-size: var(--text-sm);
-		font-weight: 500;
-		color: var(--muted-foreground);
-		padding: var(--space-1) 0;
-	}
-
-	/* ─── Server Items ─── */
-
-	:global(.fp-list-item).fp-list-item--disabled {
-		opacity: 0.5;
-	}
-</style>

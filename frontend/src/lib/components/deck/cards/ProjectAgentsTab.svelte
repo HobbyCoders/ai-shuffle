@@ -2,9 +2,11 @@
 	/**
 	 * ProjectAgentsTab - Agent list tab for project detail view
 	 *
-	 * Features:
+	 * Studio-v2 grouped-field design (.set-group / .set-row), mirroring the
+	 * Profile editor. Field primitives come from project-tabs.css (.ptab).
+	 *
 	 * - View agents in .claude/agents/
-	 * - Delete agents
+	 * - Delete agents (inline confirm)
 	 * - Search/filter
 	 */
 	import {
@@ -14,12 +16,9 @@
 		projectAgentsError,
 		projectAgentCount
 	} from '$lib/stores/projectAgents.svelte';
-	import { Search, Bot, Trash2, X, ChevronRight } from 'lucide-svelte';
-	import {
-		getModelBadgeClass as getModelBadgeClassShared,
-		getModelLabel
-	} from '$lib/constants/models';
-	import './card-design-system.css';
+	import { Search, Bot, Trash2, X } from 'lucide-svelte';
+	import { getModelLabel } from '$lib/constants/models';
+	import './project-tabs.css';
 
 	interface Props {
 		projectId: string;
@@ -53,13 +52,11 @@
 	});
 
 	// Project agents display "Inherit" when no model is set; otherwise the
-	// shared registry handles label + badge lookup.
+	// shared registry handles label lookup.
 	function getModelDisplay(model?: string | null): string {
 		if (!model) return 'Inherit';
 		return getModelLabel(model);
 	}
-
-	const getModelBadgeClass = getModelBadgeClassShared;
 
 	// Delete agent
 	async function handleDelete(agentName: string) {
@@ -75,163 +72,76 @@
 	}
 </script>
 
-<div class="card-system agents-tab">
+<div class="ptab">
 	{#if $projectAgentsLoading}
-		<div class="card-content">
-			<div class="loading-container">
-				<div class="card-spinner"></div>
-			</div>
-		</div>
+		<div class="ptab-loading"><div class="ptab-spinner"></div></div>
 	{:else}
-		<!-- Search bar (show if > 3 agents) -->
+		<!-- Search (show if > 3 agents) -->
 		{#if $projectAgentCount > 3}
-			<div class="card-search-wrapper">
-				<div class="card-search-container">
-					<Search class="card-search-icon" />
-					<input
-						type="text"
-						bind:value={searchQuery}
-						placeholder="Search agents..."
-						class="card-search-input"
-					/>
-				</div>
+			<div class="tsearch">
+				<Search />
+				<input type="text" bind:value={searchQuery} placeholder="Search agents…" class="inp" />
 			</div>
 		{/if}
 
-		<!-- Content -->
-		<div class="card-content">
-			<div class="centered-content">
-				{#if $projectAgentsError}
-					<div class="card-error-banner">
-						<span class="flex-1">{$projectAgentsError}</span>
-						<button onclick={() => projectAgents.clearError()}>
-							<X class="w-4 h-4" />
-						</button>
-					</div>
-				{/if}
+		{#if $projectAgentsError}
+			<div class="err-banner">
+				<span class="flex-1">{$projectAgentsError}</span>
+				<button onclick={() => projectAgents.clearError()} aria-label="Dismiss error"><X size={15} /></button>
+			</div>
+		{/if}
 
-				{#if filteredAgents().length === 0}
-					<div class="card-empty-state">
-						{#if searchQuery}
-							<Search class="card-empty-icon" />
-							<p class="card-empty-title">No agents match "{searchQuery}"</p>
-							<button onclick={() => (searchQuery = '')} class="card-empty-action">
-								Clear search
-							</button>
-						{:else}
-							<Bot class="card-empty-icon" />
-							<p class="card-empty-title">No agents defined</p>
-							<p class="card-empty-description">
-								Create agents from the Subagents card to add specialized capabilities.
-							</p>
-						{/if}
-					</div>
+		{#if filteredAgents().length === 0}
+			<div class="empty-state">
+				{#if searchQuery}
+					<Search />
+					<p class="es-title">No agents match "{searchQuery}"</p>
+					<button class="ed-btn sm es-action" onclick={() => (searchQuery = '')}>Clear search</button>
 				{:else}
-					{#each filteredAgents() as agent, index (agent.name)}
-						{#if index > 0}<div class="fp-list-divider"></div>{/if}
-						{#if deletingAgent === agent.name}
-							<!-- Inline delete confirmation -->
-							<div class="fp-list-item fp-list-item--deleting">
-								<div class="fp-item-content">
-									<p class="delete-confirm-text">
-										Delete <strong>{agent.name}</strong>? This cannot be undone.
-									</p>
-									<div class="delete-confirm-actions">
-										<button
-											onclick={() => (deletingAgent = null)}
-											disabled={deleteLoading}
-											class="card-btn-secondary"
-										>
-											Cancel
-										</button>
-										<button
-											onclick={() => handleDelete(agent.name)}
-											disabled={deleteLoading}
-											class="card-btn-destructive"
-										>
-											{#if deleteLoading}
-												<div class="card-spinner card-spinner--small"></div>
-											{/if}
-											Delete
-										</button>
-									</div>
-								</div>
-							</div>
-						{:else}
-							<div class="fp-list-item">
-								<div class="fp-item-indicator"></div>
-								<div class="fp-item-content">
-									<div class="fp-item-header">
-										<span class="fp-item-name">{agent.name}</span>
-										<span class="fp-item-badge">
-											{getModelDisplay(agent.model)}
-										</span>
-									</div>
-									<div class="fp-item-meta">
-										<span class="fp-meta-model">{getModelDisplay(agent.model)}</span>
-										{#if agent.tools && agent.tools.length > 0}
-											<span class="fp-meta-sep">&middot;</span>
-											<span class="fp-meta-chip">{agent.tools.length} tools</span>
-										{/if}
-									</div>
-								</div>
-								<div class="fp-item-actions">
-									<button
-										onclick={(e) => { e.stopPropagation(); deletingAgent = agent.name; }}
-										class="card-action-btn card-action-btn--destructive"
-										title="Delete"
-									>
-										<Trash2 />
-									</button>
-								</div>
-								<div class="fp-item-chevron">
-									<ChevronRight size={16} />
-								</div>
-							</div>
-						{/if}
-					{/each}
+					<Bot />
+					<p class="es-title">No agents defined</p>
+					<p class="es-desc">Create agents from the Subagents card to add specialized capabilities.</p>
 				{/if}
 			</div>
-		</div>
+		{:else}
+			<div class="set-group">
+				<div class="set-grouphead">
+					<h3><Bot />Agents</h3>
+					<p>Custom sub-agents available to this project, from <code>.claude/agents/</code>.</p>
+				</div>
+				{#each filteredAgents() as agent (agent.name)}
+					{#if deletingAgent === agent.name}
+						<div class="set-row stack">
+							<div class="lab">
+								<h4 class="danger">Delete “{agent.name}”?</h4>
+								<p>This removes the agent file. This cannot be undone.</p>
+							</div>
+							<div class="ctl">
+								<button class="ed-btn sm" onclick={() => (deletingAgent = null)} disabled={deleteLoading}>Cancel</button>
+								<button class="ed-btn sm danger" onclick={() => handleDelete(agent.name)} disabled={deleteLoading}>
+									{deleteLoading ? 'Deleting…' : 'Delete'}
+								</button>
+							</div>
+						</div>
+					{:else}
+						<div class="set-row">
+							<div class="lab">
+								<h4>{agent.name} <span class="badge muted">{getModelDisplay(agent.model)}</span></h4>
+								{#if agent.tools && agent.tools.length > 0}
+									<p>{agent.tools.length} tool{agent.tools.length === 1 ? '' : 's'}</p>
+								{:else}
+									<p>All tools</p>
+								{/if}
+							</div>
+							<div class="ctl">
+								<button class="icon-btn danger" title="Delete agent" onclick={() => (deletingAgent = agent.name)}>
+									<Trash2 size={15} />
+								</button>
+							</div>
+						</div>
+					{/if}
+				{/each}
+			</div>
+		{/if}
 	{/if}
 </div>
-
-<style>
-	.agents-tab {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		overflow: hidden;
-	}
-
-	.centered-content {
-		width: 100%;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4, 16px);
-	}
-
-	.flex-1 {
-		flex: 1;
-	}
-
-	.card-search-wrapper {
-		padding: 0 var(--space-4) var(--space-3);
-		border-bottom: 1px solid var(--border-subtle);
-		background: linear-gradient(180deg, transparent 0%, color-mix(in oklch, var(--muted) 20%, transparent) 100%);
-	}
-
-	.loading-container {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: var(--space-8);
-	}
-
-	/* Center actions on mobile */
-	@media (max-width: 639px) {
-		.agents-tab :global(.fp-item-actions) {
-			justify-content: center;
-		}
-	}
-</style>

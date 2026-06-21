@@ -597,3 +597,27 @@
 .settings .status.success {
 	color: var(--success);
 }
+
+/* ── Mobile ────────────────────────────────────────────────────
+   Stack rows whose control is a wide text field so the input gets
+   the full width instead of fighting the label for a 240px+ column.
+   Toggle / button / segmented rows stay inline (their controls are
+   already compact). Without this, the min-width:240px inputs
+   overflow the card on a phone-width viewport. ── */
+@media (max-width: 560px) {
+	.settings .setting-row:not(.vertical):has(> .input),
+	.settings .setting-row:not(.vertical):has(> .input-group) {
+		flex-direction: column;
+		align-items: stretch;
+		gap: 10px;
+	}
+	.settings .setting-row:not(.vertical) > .input,
+	.settings .setting-row:not(.vertical) > select.input {
+		width: 100%;
+		min-width: 0;
+		max-width: none;
+	}
+	.settings .connection-row {
+		flex-wrap: wrap;
+	}
+}

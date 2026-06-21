@@ -2,8 +2,10 @@
 	/**
 	 * ProjectHooksTab - Hook list tab for project detail view
 	 *
-	 * Read-only list of custom and plugin hooks.
-	 * Supports toggle, test, and delete for custom hooks.
+	 * Studio-v2 grouped-field design (.set-group / .set-row), mirroring the
+	 * Profile editor. Field primitives come from project-tabs.css (.ptab).
+	 *
+	 * Custom + plugin hooks. Custom hooks support toggle, test, and delete.
 	 */
 	import {
 		hooks,
@@ -15,11 +17,11 @@
 		hookSaving,
 		hookStats
 	} from '$lib/stores/hooks.svelte';
-	import type { Hook, HookUpdate, HookTestResult } from '$lib/api/client';
+	import type { HookTestResult } from '$lib/api/client';
 	import HookListItem from '$lib/components/hooks/HookListItem.svelte';
 	import PluginHookItem from '$lib/components/hooks/PluginHookItem.svelte';
-	import { Search, X, Loader2, Zap, Package } from 'lucide-svelte';
-	import './card-design-system.css';
+	import { Search, X, Zap, Package, CheckCircle2, AlertTriangle } from 'lucide-svelte';
+	import './project-tabs.css';
 
 	interface Props {
 		projectId: string;
@@ -105,208 +107,139 @@
 			console.error('Failed to test hook:', e);
 		}
 	}
+
+	const showSearch = $derived(
+		($projectHooks.length > 3 && activeTab === 'custom') ||
+		($pluginHooks.length > 3 && activeTab === 'plugins')
+	);
 </script>
 
-<div class="hooks-tab">
+<div class="ptab">
 	{#if $hooksLoading}
-		<div class="card-empty-state">
-			<Loader2 class="card-empty-icon animate-spin" />
-			<p class="card-empty-title">Loading hooks...</p>
-		</div>
+		<div class="ptab-loading"><div class="ptab-spinner"></div></div>
 	{:else if $hooksError}
-		<div class="card-error-banner">
+		<div class="err-banner">
 			<span class="flex-1">{$hooksError}</span>
-			<button onclick={() => hooks.clearError()}>
-				<X class="w-4 h-4" />
-			</button>
+			<button onclick={() => hooks.clearError()} aria-label="Dismiss error"><X size={15} /></button>
 		</div>
 	{:else}
-		<!-- Tabs -->
-		<div class="tab-bar">
-			<button
-				class="tab-btn"
-				class:active={activeTab === 'custom'}
-				onclick={() => (activeTab = 'custom')}
-			>
-				<Zap class="w-4 h-4" />
-				Custom
-				{#if $hookStats.totalCustom > 0}
-					<span class="tab-badge">{$hookStats.totalCustom}</span>
-				{/if}
-			</button>
-			<button
-				class="tab-btn"
-				class:active={activeTab === 'plugins'}
-				onclick={() => (activeTab = 'plugins')}
-			>
-				<Package class="w-4 h-4" />
-				Plugins
-				{#if $hookStats.totalPlugin > 0}
-					<span class="tab-badge">{$hookStats.totalPlugin}</span>
-				{/if}
-			</button>
+		<!-- Custom / Plugins segmented control -->
+		<div class="hooks-head">
+			<div class="seg">
+				<button class:on={activeTab === 'custom'} onclick={() => (activeTab = 'custom')}>
+					<Zap />Custom{#if $hookStats.totalCustom > 0} ({$hookStats.totalCustom}){/if}
+				</button>
+				<button class:on={activeTab === 'plugins'} onclick={() => (activeTab = 'plugins')}>
+					<Package />Plugins{#if $hookStats.totalPlugin > 0} ({$hookStats.totalPlugin}){/if}
+				</button>
+			</div>
 		</div>
 
 		<!-- Search -->
-		{#if ($projectHooks.length > 3 && activeTab === 'custom') || ($pluginHooks.length > 3 && activeTab === 'plugins')}
-			<div class="tab-search">
-				<div class="card-search-container">
-					<Search class="card-search-icon" />
-					<input
-						type="text"
-						bind:value={searchQuery}
-						placeholder="Search hooks..."
-						class="card-search-input"
-					/>
-				</div>
+		{#if showSearch}
+			<div class="tsearch">
+				<Search />
+				<input type="text" bind:value={searchQuery} placeholder="Search hooks…" class="inp" />
 			</div>
 		{/if}
 
 		<!-- Test result toast -->
 		{#if testResult}
-			<div class="test-toast" class:success={testResult.result.success} class:error={!testResult.result.success}>
+			<div class="test-toast" class:ok={testResult.result.success} class:bad={!testResult.result.success}>
 				{#if testResult.result.success}
-					<span>Test passed ({testResult.result.duration_ms}ms)</span>
+					<CheckCircle2 size={15} />
+					<span class="flex-1">Test passed ({testResult.result.duration_ms}ms)</span>
 				{:else}
-					<span>Test failed: {testResult.result.error}</span>
+					<AlertTriangle size={15} />
+					<span class="flex-1">Test failed: {testResult.result.error}</span>
 				{/if}
-				<button onclick={() => (testResult = null)}>
-					<X class="w-4 h-4" />
-				</button>
+				<button onclick={() => (testResult = null)} aria-label="Dismiss"><X size={14} /></button>
 			</div>
 		{/if}
 
 		<!-- Hook list -->
-		<div class="list-view">
-			{#if activeTab === 'custom'}
-				{#if filteredHooks().length === 0}
-					<div class="card-empty-state">
-						<Zap class="card-empty-icon" />
-						<p class="card-empty-title">No custom hooks</p>
-						<p class="card-empty-description">
-							Create hooks from the Hooks card to automate actions on tool use events.
-						</p>
-					</div>
-				{:else}
-					{#each filteredHooks() as hook, index (hook.id)}
-						{#if index > 0}<div class="fp-list-divider"></div>{/if}
+		{#if activeTab === 'custom'}
+			{#if filteredHooks().length === 0}
+				<div class="empty-state">
+					<Zap />
+					<p class="es-title">No custom hooks</p>
+					<p class="es-desc">Create hooks from the Hooks card to automate actions on tool-use events.</p>
+				</div>
+			{:else}
+				<div class="set-group">
+					<div class="set-grouphead"><h3><Zap />Custom hooks</h3></div>
+					{#each filteredHooks() as hook (hook.id)}
 						<HookListItem
 							{hook}
 							testing={$hookTesting[hook.id] || false}
 							saving={$hookSaving[hook.id] || false}
-							onEdit={() => {}}
 							onDelete={() => handleDeleteHook(hook.id)}
 							onToggle={() => handleToggleHook(hook.id, !hook.enabled)}
 							onTest={() => handleTestHook(hook.id)}
 						/>
 					{/each}
-				{/if}
+				</div>
+			{/if}
+		{:else}
+			{#if filteredPluginHooks().length === 0}
+				<div class="empty-state">
+					<Package />
+					<p class="es-title">No plugin hooks</p>
+					<p class="es-desc">Install plugins with hooks to see them here.</p>
+				</div>
 			{:else}
-				{#if filteredPluginHooks().length === 0}
-					<div class="card-empty-state">
-						<Package class="card-empty-icon" />
-						<p class="card-empty-title">No plugin hooks</p>
-						<p class="card-empty-description">
-							Install plugins with hooks to see them here.
-						</p>
-					</div>
-				{:else}
-					{#each filteredPluginHooks() as hook, index (hook.plugin_id + hook.event)}
-						{#if index > 0}<div class="fp-list-divider"></div>{/if}
+				<div class="set-group">
+					<div class="set-grouphead"><h3><Package />Plugin hooks</h3></div>
+					{#each filteredPluginHooks() as hook (hook.plugin_id + hook.event)}
 						<PluginHookItem {hook} />
 					{/each}
-				{/if}
+				</div>
 			{/if}
-		</div>
+		{/if}
 	{/if}
 </div>
 
 <style>
-	.hooks-tab {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-	}
-
-	.tab-bar {
-		display: flex;
-		gap: var(--space-1);
-		padding: var(--space-2) var(--space-4);
-		border-bottom: 1px solid var(--border);
-		background: var(--muted);
-	}
-
-	.tab-btn {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		padding: var(--space-2) var(--space-3);
-		font-size: var(--text-sm);
-		border-radius: var(--radius);
-		background: transparent;
-		border: none;
-		cursor: pointer;
-		color: var(--muted-foreground);
-		transition: all 0.15s ease;
-	}
-
-	.tab-btn:hover {
-		color: var(--foreground);
-	}
-
-	.tab-btn.active {
-		background: var(--background);
-		color: var(--foreground);
-		font-weight: 500;
-	}
-
-	.tab-badge {
-		font-size: var(--text-xs);
-		padding: 0 var(--space-1);
-		border-radius: var(--radius-full);
-		background: var(--muted);
-	}
-
-	.tab-btn.active .tab-badge {
-		background: var(--selection);
-		color: var(--primary-foreground);
-	}
-
-	.tab-search {
-		padding: var(--space-2) var(--space-4);
-	}
-
-	.list-view {
-		flex: 1;
-		overflow-y: auto;
-		padding: 0 var(--space-4);
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
+	.hooks-head {
+		margin-bottom: 16px;
 	}
 
 	.test-toast {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		padding: var(--space-2) var(--space-4);
-		margin: 0 var(--space-4);
-		border-radius: var(--radius);
-		font-size: var(--text-sm);
+		gap: 9px;
+		padding: 10px 14px;
+		margin-bottom: 16px;
+		border-radius: 10px;
+		font-size: 12.5px;
+		font-weight: 500;
 	}
 
-	.test-toast.success {
-		background: color-mix(in oklch, var(--success) 20%, transparent);
+	.test-toast .flex-1 {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.test-toast button {
+		display: flex;
+		background: none;
+		border: none;
+		color: inherit;
+		cursor: pointer;
+		flex-shrink: 0;
+	}
+
+	.test-toast :global(svg) {
+		flex-shrink: 0;
+	}
+
+	.test-toast.ok {
+		background: color-mix(in oklch, var(--success) 14%, transparent);
 		color: var(--success);
 	}
 
-	.test-toast.error {
-		background: color-mix(in oklch, var(--destructive) 20%, transparent);
+	.test-toast.bad {
+		background: color-mix(in oklch, var(--destructive) 12%, transparent);
 		color: var(--destructive);
 	}
-
-	.flex-1 {
-		flex: 1;
-	}
-
 </style>
