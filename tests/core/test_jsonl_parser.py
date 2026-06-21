@@ -449,6 +449,80 @@ class TestGetAgentJsonlPaths:
                 result = jsonl_parser.get_agent_jsonl_paths(session_id, "/workspace")
                 assert "bad123" not in result
 
+    def test_find_agent_files_in_nested_subagents_dir(self):
+        """Should find agent files in the CLI 2.1.x nested layout:
+        <project_dir>/<sid>/subagents/agent-*.jsonl."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            project_dir = projects_dir / "-workspace"
+            project_dir.mkdir(parents=True)
+            session_id = "test-session-123"
+            # Main transcript stays flat (project-dir resolution unchanged)
+            session_file = project_dir / f"{session_id}.jsonl"
+            session_file.write_text('{"test": true}\n')
+            # Subagent transcript lives in nested <sid>/subagents/ dir
+            subagents_dir = project_dir / session_id / "subagents"
+            subagents_dir.mkdir(parents=True)
+            agent_file = subagents_dir / "agent-ad54465c88efd6b1a.jsonl"
+            agent_file.write_text(
+                json.dumps({
+                    "sessionId": session_id,
+                    "isSidechain": True,
+                    "agentId": "ad54465c88efd6b1a",
+                    "type": "user",
+                }) + '\n'
+            )
+            with patch('app.core.jsonl_parser.settings') as mock_settings:
+                mock_settings.get_claude_projects_dir = projects_dir
+                result = jsonl_parser.get_agent_jsonl_paths(session_id, "/workspace")
+                assert "ad54465c88efd6b1a" in result
+                assert result["ad54465c88efd6b1a"] == agent_file
+
+    def test_nested_agent_file_different_session_ignored(self):
+        """Should ignore nested agent files whose sessionId mismatches."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            project_dir = projects_dir / "-workspace"
+            project_dir.mkdir(parents=True)
+            session_id = "test-session-123"
+            session_file = project_dir / f"{session_id}.jsonl"
+            session_file.write_text('{"test": true}\n')
+            subagents_dir = project_dir / session_id / "subagents"
+            subagents_dir.mkdir(parents=True)
+            agent_file = subagents_dir / "agent-nope.jsonl"
+            agent_file.write_text(
+                json.dumps({"sessionId": "different-session"}) + '\n'
+            )
+            with patch('app.core.jsonl_parser.settings') as mock_settings:
+                mock_settings.get_claude_projects_dir = projects_dir
+                result = jsonl_parser.get_agent_jsonl_paths(session_id, "/workspace")
+                assert "nope" not in result
+
+    def test_find_both_flat_and_nested_agent_files(self):
+        """Should discover BOTH a flat agent-*.jsonl and a nested
+        <sid>/subagents/agent-*.jsonl together."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            project_dir = projects_dir / "-workspace"
+            project_dir.mkdir(parents=True)
+            session_id = "test-session-123"
+            session_file = project_dir / f"{session_id}.jsonl"
+            session_file.write_text('{"test": true}\n')
+            # Flat (legacy) layout
+            flat_agent = project_dir / "agent-a.jsonl"
+            flat_agent.write_text(json.dumps({"sessionId": session_id}) + '\n')
+            # Nested (current) layout
+            subagents_dir = project_dir / session_id / "subagents"
+            subagents_dir.mkdir(parents=True)
+            nested_agent = subagents_dir / "agent-b.jsonl"
+            nested_agent.write_text(json.dumps({"sessionId": session_id}) + '\n')
+            with patch('app.core.jsonl_parser.settings') as mock_settings:
+                mock_settings.get_claude_projects_dir = projects_dir
+                result = jsonl_parser.get_agent_jsonl_paths(session_id, "/workspace")
+                assert result["a"] == flat_agent
+                assert result["b"] == nested_agent
+                assert len(result) == 2
+
 
 class TestParseAgentHistory:
     """Test agent history parsing."""

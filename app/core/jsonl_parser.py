@@ -447,6 +447,10 @@ def get_agent_jsonl_paths(sdk_session_id: str, working_dir: str = "/workspace") 
     Agent files are named agent-{agent_id}.jsonl and contain entries with
     matching sessionId field.
 
+    Discovers BOTH layouts:
+      - Legacy flat:   <project_dir>/agent-*.jsonl
+      - Current nested (CLI 2.1.x): <project_dir>/<sdk_session_id>/subagents/agent-*.jsonl
+
     Returns:
         Dict mapping agent_id to Path
     """
@@ -472,21 +476,27 @@ def get_agent_jsonl_paths(sdk_session_id: str, working_dir: str = "/workspace") 
                         project_dirs_to_search.append(proj_dir)
                         break
 
-    # Check cache - validated by project directory mtime
-    for search_dir in project_dirs_to_search:
+    def _cache_mtime(search_dir: Path) -> float:
+        """Cache-validity key for ``search_dir``.
+
+        A new nested ``<sid>/subagents/agent-*.jsonl`` file lives in a
+        subdirectory whose creation may not bump the top-level project dir's
+        mtime, which would otherwise serve a stale (empty) cached result.
+        Base the key on the MAX of the project dir's mtime and (if it exists)
+        the nested ``<sid>/subagents`` dir's mtime.
+        """
+        mtime = search_dir.stat().st_mtime
+        subagents_dir = search_dir / sdk_session_id / "subagents"
         try:
-            dir_mtime = search_dir.stat().st_mtime
-            with _agent_paths_cache_lock:
-                cached = _agent_paths_cache.get(sdk_session_id)
-                if cached and cached[0] == dir_mtime:
-                    _agent_paths_cache.move_to_end(sdk_session_id)
-                    logger.debug(f"Agent paths cache hit for session {sdk_session_id}")
-                    return dict(cached[1])  # Return copy to prevent mutation of cached data
+            if subagents_dir.exists():
+                mtime = max(mtime, subagents_dir.stat().st_mtime)
         except OSError:
             pass
+        return mtime
 
-    for search_dir in project_dirs_to_search:
-        for agent_file in search_dir.glob("agent-*.jsonl"):
+    def _scan_dir(scan_dir: Path) -> None:
+        """Glob agent-*.jsonl in ``scan_dir`` and record matching subagents."""
+        for agent_file in scan_dir.glob("agent-*.jsonl"):
             # Extract agent_id from filename (agent-{id}.jsonl)
             agent_id = agent_file.stem.replace("agent-", "")
 
@@ -502,10 +512,35 @@ def get_agent_jsonl_paths(sdk_session_id: str, working_dir: str = "/workspace") 
             except Exception as e:
                 logger.warning(f"Failed to check agent file {agent_file}: {e}")
 
+    # Check cache - validated by project directory mtime (incl. nested subagents dir)
+    for search_dir in project_dirs_to_search:
+        try:
+            dir_mtime = _cache_mtime(search_dir)
+            with _agent_paths_cache_lock:
+                cached = _agent_paths_cache.get(sdk_session_id)
+                if cached and cached[0] == dir_mtime:
+                    _agent_paths_cache.move_to_end(sdk_session_id)
+                    logger.debug(f"Agent paths cache hit for session {sdk_session_id}")
+                    return dict(cached[1])  # Return copy to prevent mutation of cached data
+        except OSError:
+            pass
+
+    for search_dir in project_dirs_to_search:
+        # Legacy flat layout: <project_dir>/agent-*.jsonl
+        _scan_dir(search_dir)
+
+        # Current nested layout (CLI 2.1.x):
+        #   <project_dir>/<sdk_session_id>/subagents/agent-*.jsonl
+        # dict key dedup means an agent_id present in both layouts is not
+        # double-counted; the nested scan runs second so it wins on collision.
+        nested_dir = search_dir / sdk_session_id / "subagents"
+        if nested_dir.exists():
+            _scan_dir(nested_dir)
+
     # Cache the results (with LRU eviction)
     if project_dirs_to_search:
         try:
-            dir_mtime = project_dirs_to_search[0].stat().st_mtime
+            dir_mtime = _cache_mtime(project_dirs_to_search[0])
             with _agent_paths_cache_lock:
                 _agent_paths_cache[sdk_session_id] = (dir_mtime, agent_files)
                 while len(_agent_paths_cache) > _PARSE_CACHE_MAX_SIZE:
