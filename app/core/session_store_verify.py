@@ -16,7 +16,8 @@ Interpreting the logs (grep ``[StoreVerify]``):
 
 * ``no DB entries`` — the session predates mirror enablement (no backfill
   yet). Expected, not drift.
-* ``OK`` (debug) — DB and JSONL agree on main + subagent transcripts.
+* ``OK`` (info) — DB and JSONL agree on main + subagent transcripts. Logged
+  at INFO so a faithful mirror is visible at the default log level.
 * ``DRIFT count`` / ``DRIFT uuid`` / ``DRIFT subagents`` (warning) — the mirror
   lost, duplicated, or reordered entries. This is the signal that must reach
   zero before a read cutover is safe.
@@ -147,7 +148,10 @@ def log_session_store_drift(sdk_session_id: str, working_dir: str = "/workspace"
             )
             return
 
-        logger.debug(
+        # INFO (not DEBUG) so a faithful mirror is visible at the default log
+        # level during the mirror-mode validation window — otherwise a clean
+        # match prints nothing and can't be told apart from "never ran".
+        logger.info(
             "%s OK %s: %d main + %d subagent transcripts match DB↔JSONL",
             _PREFIX, sdk_session_id, db_n, len(db_subpaths),
         )
