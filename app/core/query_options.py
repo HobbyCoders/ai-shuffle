@@ -847,5 +847,18 @@ def build_options_from_profile(
     if _store is not None:
         options.session_store = _store
         options.session_store_flush = "eager"
+        # The SDK forbids combining a session_store with file checkpointing
+        # ("checkpoints are local-disk only and would diverge from the mirrored
+        # transcript") and raises at connect time, which fails the whole query.
+        # When the store is attached it is the source of truth, so suppress
+        # checkpointing rather than let the connection fail.
+        if getattr(options, "enable_file_checkpointing", False):
+            logger.warning(
+                "Disabling enable_file_checkpointing because a session_store is "
+                "attached (session_store_mode=%s) — the SDK rejects combining the "
+                "two, and the mirrored transcript supersedes local-disk checkpoints.",
+                settings.session_store_mode,
+            )
+            options.enable_file_checkpointing = False
 
     return options, agents_dict
