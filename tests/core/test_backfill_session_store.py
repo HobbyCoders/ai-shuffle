@@ -334,3 +334,30 @@ def test_verify_empty_when_no_db_rows(patched_jsonl, monkeypatch):
     assert summary["empty"] == [sid]
     assert summary["ok"] == []
     assert summary["drift"] == []
+
+
+def test_verify_elsewhere_when_db_rows_but_no_local_jsonl(patched_jsonl, monkeypatch):
+    """DB rows present but no local JSONL on disk -> ELSEWHERE, not DRIFT.
+
+    The ``session_store_entries`` table is shared across machines while JSONL
+    transcripts are local, so a session whose transcript lives on another host
+    must NOT be flagged as corruption/drift.
+    """
+    # Deliberately never write a JSONL file for this sid, so
+    # get_session_jsonl_path returns None (no local transcript on disk).
+    sid = "fffffff6-0000-0000-0000-000000000006"
+
+    import app.core.session_store_verify as ssv
+    # DB has rows for this session (backfilled by another machine).
+    monkeypatch.setattr(
+        ssv, "_db_main_uuids", lambda s: [f"{sid}-u0", f"{sid}-u1"]
+    )
+    monkeypatch.setattr(ssv, "_db_subagent_subpaths", lambda s: set())
+
+    summary = bf.verify_session_store_backfill([_make_session(sid)])
+
+    assert summary["total"] == 1
+    assert any(sid in e for e in summary["elsewhere"])
+    assert summary["ok"] == []
+    assert summary["empty"] == []
+    assert summary["drift"] == []

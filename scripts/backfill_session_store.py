@@ -326,9 +326,20 @@ def verify_session_store_backfill(
     * For a machine-readable pass/fail tally we also call the verifier's own
       DB/JSONL comparison helpers (``_db_main_uuids`` /
       ``_db_subagent_subpaths`` + ``parse_jsonl_file`` / ``get_agent_jsonl_paths``)
-      and classify each session as OK / DRIFT / EMPTY.
+      and classify each session as OK / ELSEWHERE / EMPTY / DRIFT.
 
-    Returns a dict summary with explicit OK and DRIFT lists.
+    Classification:
+
+    * OK        — DB rows present and they match the local JSONL transcript.
+    * ELSEWHERE — DB rows present but no local JSONL on disk. The
+      ``session_store_entries`` table is SHARED across machines while JSONL
+      transcripts live on each machine's local disk, so this just means the
+      session is "owned" by another machine. It is NOT corruption.
+    * EMPTY     — no DB rows (e.g. pre-mirror, never backfilled).
+    * DRIFT     — DB rows present and the local JSONL exists but disagrees
+      (row-count, uuid/order, or subagent-count mismatch), or a verify error.
+
+    Returns a dict summary with explicit OK / ELSEWHERE / EMPTY / DRIFT lists.
     """
     from app.core import session_store_verify as ssv
     from app.core.config import settings
@@ -341,6 +352,7 @@ def verify_session_store_backfill(
     ok: List[str] = []
     drift: List[str] = []
     empty: List[str] = []
+    elsewhere: List[str] = []
 
     # Force mirror mode so log_session_store_drift actually runs; restore after.
     prev_mode = settings.session_store_mode
@@ -361,7 +373,13 @@ def verify_session_store_backfill(
                     continue
                 jsonl_path = get_session_jsonl_path(sid, working_dir)
                 if not jsonl_path:
-                    drift.append(f"{sid}: DB rows but no JSONL on disk")
+                    # Shared DB, local-only JSONL: this session's transcript
+                    # lives on another machine. Not corruption — classify as
+                    # ELSEWHERE rather than DRIFT.
+                    elsewhere.append(
+                        f"{sid}: DB rows but no local JSONL "
+                        f"(likely owned by another machine)"
+                    )
                     continue
                 jsonl_uuids = [e.get("uuid") for e in parse_jsonl_file(jsonl_path)]
                 db_subpaths = ssv._db_subagent_subpaths(sid)
@@ -390,19 +408,26 @@ def verify_session_store_backfill(
         "ok": ok,
         "drift": drift,
         "empty": empty,
+        "elsewhere": elsewhere,
     }
 
 
 def _print_verify_summary(summary: Dict[str, Any]) -> None:
     print("\n===== Drift verification =====")
     print(f"  sessions checked : {summary['total']}")
+    elsewhere = summary.get("elsewhere", [])
     print(f"  OK               : {len(summary['ok'])}")
     print(f"  EMPTY (no DB rows): {len(summary['empty'])}")
+    print(f"  ELSEWHERE (other host): {len(elsewhere)}")
     print(f"  DRIFT            : {len(summary['drift'])}")
     if summary["drift"]:
         print("  --- DRIFT detail ---")
         for line in summary["drift"]:
             print(f"    ! {line}")
+    if elsewhere:
+        print("  --- ELSEWHERE detail ---")
+        for line in elsewhere:
+            print(f"    ~ {line}")
 
 
 # ---------------------------------------------------------------------------
