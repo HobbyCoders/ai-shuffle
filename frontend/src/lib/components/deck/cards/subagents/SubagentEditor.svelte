@@ -1,9 +1,9 @@
 <script lang="ts">
-	import { Bot, Plus, Trash2, X, Check, Settings, Terminal, User, Wrench, ChevronRight } from 'lucide-svelte';
+	import { Plus, Trash2, X, Check, Settings, Terminal, User, Wrench, ChevronDown } from 'lucide-svelte';
 	import { groups } from '$lib/stores/groups.svelte';
 	import type { SubagentExport } from '$lib/api/client';
 	import AIGenerateDialog from '../AIGenerateDialog.svelte';
-	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import {
 		getModels,
 		CUSTOM_VALUE,
@@ -174,35 +174,26 @@
 	}
 </script>
 
-<FeaturePageLayout
-	icon={Bot}
-	title="Subagents"
-	breadcrumbs={[
-		{ label: 'Subagents', onclick: onBack },
-		{ label: isEditMode ? (editingSubagent?.name || 'Edit') : 'New Subagent' }
-	]}
+<StudioEditorShell
+	title={isEditMode ? (editingSubagent?.name || 'Edit subagent') : 'New Subagent'}
+	subtitle={isEditMode ? 'Subagent' : 'Create a new subagent'}
+	backLabel="Subagents"
+	{onBack}
+	sections={tabs.map((t) => ({ id: t.id, label: t.label, icon: t.icon }))}
+	active={activeTab}
+	onSelect={(id) => (activeTab = id as EditorTab)}
+	railLabel="Subagent sections"
 >
-	{#snippet footer()}
-		<button type="button" class="pf-btn-save" onclick={onSave} disabled={!isValid() || saving}>
+	{#snippet actions()}
+		<button type="button" class="ed-btn primary" onclick={onSave} disabled={!isValid() || saving}>
 			{#if saving}
 				<div class="card-spinner card-spinner--small"></div>
-				<span>Saving...</span>
+				<span>Saving…</span>
 			{:else}
 				<Check size={14} />
-				<span>{isEditMode ? 'Save Subagent' : 'Create Subagent'}</span>
+				<span>{isEditMode ? 'Save' : 'Create'}</span>
 			{/if}
 		</button>
-	{/snippet}
-
-	{#snippet headerTabs()}
-		<div class="fp-tab-bar">
-			{#each tabs as tab}
-				<button class="fp-tab" class:active={activeTab === tab.id} onclick={() => (activeTab = tab.id)}>
-					<tab.icon size={14} />
-					<span class="tab-label">{tab.label}</span>
-				</button>
-			{/each}
-		</div>
 	{/snippet}
 
 	{#if error}
@@ -216,156 +207,110 @@
 
 	<!-- Identity Tab -->
 	{#if activeTab === 'identity'}
-		<div class="editor-tab-content">
+		<div class="set-group">
+			<div class="set-grouphead"><h3><User />Identity</h3></div>
 			{#if !isEditMode}
-				<div class="card-form-section">
-					<label for="agent-id" class="card-form-label">
-						ID <span class="required">*</span>
-					</label>
-					<input
-						id="agent-id"
-						type="text"
-						value={formId}
-						oninput={(e) => onFormIdChange(e.currentTarget.value)}
-						placeholder="my-agent-id"
-						class="card-form-input card-form-input--mono"
-					/>
-					<p class="card-form-hint">
-						Lowercase letters, numbers, and hyphens only.
-					</p>
+				<div class="set-row">
+					<div class="lab"><h4>ID <span class="req">*</span></h4><p>Lowercase letters, numbers, and hyphens only.</p></div>
+					<div class="ctl"><input type="text" value={formId} oninput={(e) => onFormIdChange(e.currentTarget.value)} placeholder="my-agent-id" class="inp mono" /></div>
 				</div>
 			{/if}
-
-			<div class="card-form-section">
-				<label for="agent-name" class="card-form-label">
-					Display Name <span class="required">*</span>
-				</label>
-				<input
-					id="agent-name"
-					type="text"
-					value={formName}
-					oninput={(e) => onFormNameChange(e.currentTarget.value)}
-					placeholder="Research Assistant"
-					class="card-form-input"
-				/>
+			<div class="set-row">
+				<div class="lab"><h4>Display name <span class="req">*</span></h4><p>Shown in the agent picker.</p></div>
+				<div class="ctl"><input type="text" value={formName} oninput={(e) => onFormNameChange(e.currentTarget.value)} placeholder="Research Assistant" class="inp" /></div>
 			</div>
-
-			<div class="card-form-section">
-				<label for="agent-description" class="card-form-label">
-					Description <span class="required">*</span>
-				</label>
-				<textarea
-					id="agent-description"
-					value={formDescription}
-					oninput={(e) => onFormDescriptionChange(e.currentTarget.value)}
-					placeholder="Use this agent when you need to research topics..."
-					rows={3}
-					class="card-form-input card-form-textarea"
-				></textarea>
-				<p class="card-form-hint">
-					Describes when Claude should invoke this subagent.
-				</p>
-			</div>
-
-			<div class="card-form-section">
-				<label for="agent-model" class="card-form-label">Model</label>
-				<div class="agent-model-row">
-					<select
-						id="agent-model"
-						class="card-form-input"
-						value={customModelMode ? CUSTOM_VALUE : getBaseModel(formModel)}
-						onchange={(e) => {
-							const v = (e.target as HTMLSelectElement).value;
-							if (v === CUSTOM_VALUE) {
-								onCustomModelModeChange(true, '');
-							} else {
-								onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(formModel)));
-							}
-						}}
-					>
-						<option value={INHERIT_VALUE}>Inherit</option>
-						{#each getModels() as model (model.value)}
-							<option value={model.value}>{model.label}</option>
-						{/each}
-						<option value={CUSTOM_VALUE}>Custom...</option>
-					</select>
-					{#if !customModelMode && modelSupports1M(formModel)}
-						<label class="agent-1m-toggle">
-							<input
-								type="checkbox"
-								class="checkbox-input"
-								checked={has1MContext(formModel)}
-								onchange={(e) => onFormModelChange(withContextSuffix(formModel, (e.target as HTMLInputElement).checked))}
-							/>
-							<span class="checkbox-label">1M context</span>
-						</label>
-					{/if}
+			<div class="set-row stack">
+				<div class="lab"><h4>Description <span class="req">*</span></h4><p>Describes when Claude should invoke this subagent.</p></div>
+				<div class="ctl">
+					<textarea value={formDescription} oninput={(e) => onFormDescriptionChange(e.currentTarget.value)} placeholder="Use this agent when you need to research topics…" rows={3} class="fld"></textarea>
 				</div>
-				{#if customModelMode}
-					<input
-						type="text"
-						value={formModel}
-						oninput={(e) => onFormModelChange((e.target as HTMLInputElement).value)}
-						class="card-form-input card-form-input--mono"
-						placeholder="e.g. claude-opus-4-6"
-						style="margin-top: 6px;"
-					/>
-				{/if}
 			</div>
-
-			{#if isEditMode && editingSubagent}
-				<div class="card-form-section">
-					<label class="card-form-label" for="subagent-group">Group</label>
-					<div class="pf-group-wrapper">
-					<div class="pf-group-row">
+			<div class="set-row">
+				<div class="lab"><h4>Model</h4><p>Defaults to the session model when set to Inherit.</p></div>
+				<div class="ctl ctl-col">
+					<div class="grp-row">
 						<select
-							id="subagent-group"
-							class="pf-select"
-							value={$groups.subagents.assignments[editingSubagent.id] ?? ''}
+							class="sel"
+							value={customModelMode ? CUSTOM_VALUE : getBaseModel(formModel)}
 							onchange={(e) => {
 								const v = (e.target as HTMLSelectElement).value;
-								if (editingSubagent) {
-									if (v) onAssignToGroup(editingSubagent.id, v);
-									else onRemoveFromGroup(editingSubagent.id);
+								if (v === CUSTOM_VALUE) {
+									onCustomModelModeChange(true, '');
+								} else {
+									onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(formModel)));
 								}
 							}}
 						>
-							<option value="">No group</option>
-							{#each $groups.subagents.groups as group}
-								<option value={group.name}>{group.name}</option>
+							<option value={INHERIT_VALUE}>Inherit</option>
+							{#each getModels() as model (model.value)}
+								<option value={model.value}>{model.label}</option>
 							{/each}
+							<option value={CUSTOM_VALUE}>Custom…</option>
 						</select>
-						{#if creatingGroup}
-							<button type="button" class="pf-btn-new-group" onclick={() => editingSubagent && onConfirmGroupCreate(editingSubagent.id)} title="Create">
-								<Check size={14} />
-							</button>
-						{:else}
-							<button type="button" class="pf-btn-new-group" onclick={onStartGroupCreate} title="New group">
-								<Plus size={14} />
-							</button>
-							{#if ($groups.subagents.assignments[editingSubagent.id] ?? "")}
-								<button type="button" class="pf-btn-new-group pf-btn-new-group--delete" onclick={() => { const g = $groups.subagents.assignments[editingSubagent?.id ?? ""]; if (g) { onRemoveFromGroup(editingSubagent!.id); groups.deleteGroup("subagents", g); } }} title="Delete group">
-									<Trash2 size={14} />
-								</button>
-							{/if}
+						{#if !customModelMode && modelSupports1M(formModel)}
+							<label class="chk">
+								<input type="checkbox" checked={has1MContext(formModel)} onchange={(e) => onFormModelChange(withContextSuffix(formModel, (e.target as HTMLInputElement).checked))} />
+								<span>1M context</span>
+							</label>
 						{/if}
 					</div>
-					{#if creatingGroup}
-						<!-- svelte-ignore a11y_autofocus -->
-						<input
-							type="text"
-							class="card-form-input pf-group-input"
-							placeholder="Group name..."
-							value={newGroupName}
-							oninput={(e) => onNewGroupNameChange(e.currentTarget.value)}
-							onkeydown={(e) => {
-								if (e.key === 'Enter') { e.preventDefault(); editingSubagent && onConfirmGroupCreate(editingSubagent.id); }
-								if (e.key === 'Escape') { e.preventDefault(); onCancelGroupCreate(); }
-							}}
-							autofocus
-						/>
+					{#if customModelMode}
+						<input type="text" value={formModel} oninput={(e) => onFormModelChange((e.target as HTMLInputElement).value)} class="inp mono" placeholder="e.g. claude-opus-4-6" />
 					{/if}
 				</div>
+			</div>
+			{#if isEditMode && editingSubagent}
+				<div class="set-row">
+					<div class="lab"><h4>Group</h4><p>Organize related subagents together.</p></div>
+					<div class="ctl ctl-col">
+						<div class="grp-row">
+							<select
+								class="sel"
+								value={$groups.subagents.assignments[editingSubagent.id] ?? ''}
+								onchange={(e) => {
+									const v = (e.target as HTMLSelectElement).value;
+									if (editingSubagent) {
+										if (v) onAssignToGroup(editingSubagent.id, v);
+										else onRemoveFromGroup(editingSubagent.id);
+									}
+								}}
+							>
+								<option value="">No group</option>
+								{#each $groups.subagents.groups as group}
+									<option value={group.name}>{group.name}</option>
+								{/each}
+							</select>
+							{#if creatingGroup}
+								<button type="button" class="icon-btn" onclick={() => editingSubagent && onConfirmGroupCreate(editingSubagent.id)} title="Create">
+									<Check size={14} />
+								</button>
+							{:else}
+								<button type="button" class="icon-btn" onclick={onStartGroupCreate} title="New group">
+									<Plus size={14} />
+								</button>
+								{#if ($groups.subagents.assignments[editingSubagent.id] ?? '')}
+									<button type="button" class="icon-btn danger" onclick={() => { const g = $groups.subagents.assignments[editingSubagent?.id ?? '']; if (g) { onRemoveFromGroup(editingSubagent!.id); groups.deleteGroup('subagents', g); } }} title="Delete group">
+										<Trash2 size={14} />
+									</button>
+								{/if}
+							{/if}
+						</div>
+						{#if creatingGroup}
+							<!-- svelte-ignore a11y_autofocus -->
+							<input
+								type="text"
+								class="inp"
+								placeholder="Group name…"
+								value={newGroupName}
+								oninput={(e) => onNewGroupNameChange(e.currentTarget.value)}
+								onkeydown={(e) => {
+									if (e.key === 'Enter') { e.preventDefault(); editingSubagent && onConfirmGroupCreate(editingSubagent.id); }
+									if (e.key === 'Escape') { e.preventDefault(); onCancelGroupCreate(); }
+								}}
+								autofocus
+							/>
+						{/if}
+					</div>
 				</div>
 			{/if}
 		</div>
@@ -373,108 +318,82 @@
 
 	<!-- Tools Tab -->
 	{#if activeTab === 'config'}
-		<div class="editor-tab-content card-system pf-content">
-			<div class="pf-section">
-				<div class="pf-section-header">
-					<Wrench size={16} />
-					<h3>Tool Access</h3>
+		<div class="set-group">
+			<div class="set-grouphead"><h3><Wrench />Tool access</h3><p>Control which tools this subagent can use.</p></div>
+			<div class="set-row">
+				<div class="lab"><h4>Mode</h4><p>Inherit all tools, or curate a custom selection.</p></div>
+				<div class="ctl">
+					<select class="sel" value={toolSelectionMode} onchange={(e) => { const v = (e.target as HTMLSelectElement).value as 'all' | 'select'; onToolSelectionModeChange(v); if (v === 'all') onFormToolsChange([]); }}>
+						<option value="all">All Tools</option>
+						<option value="select">Custom Selection</option>
+					</select>
 				</div>
-				<p class="pf-desc">Control which tools this subagent can use.</p>
-				<select class="pf-select" value={toolSelectionMode} onchange={(e) => { const v = (e.target as HTMLSelectElement).value as 'all' | 'select'; onToolSelectionModeChange(v); if (v === 'all') onFormToolsChange([]); }}>
-					<option value="all">All Tools</option>
-					<option value="select">Custom Selection</option>
-				</select>
 			</div>
-
-			{#if toolSelectionMode === 'select'}
-				<div class="pf-section">
-					<div class="pf-section-header">
-						<Settings size={16} />
-						<h3>Tool Categories</h3>
-					</div>
-					<p class="pf-desc">Select which tools this subagent can access.</p>
-					<div class="pf-category-list">
-						<button type="button" class="pf-category-card" onclick={() => onToggleSection('sdk')}>
-							<div class="pf-category-icon">
-								<Wrench size={18} />
-							</div>
-							<div class="pf-category-info">
-								<span class="pf-category-name">Built-in Tools</span>
-								<span class="pf-category-desc">{availableTools.categories.map(c => c.name).join(', ')}</span>
-							</div>
-							<span class="pf-category-count">{formTools.length}/{availableTools.all_tools.length}</span>
-							<ChevronRight size={16} class="pf-category-chevron" />
-						</button>
-
-						{#if expandedSections.sdk}
-							<div class="pf-category-expanded">
-								<div class="tools-list">
-									{#each availableTools.categories as category}
-										{#if category.tools.length > 0}
-											{@const state = getCategorySelectionState(category)}
-											<div class="tool-category">
-												<button type="button" class="category-header" onclick={() => selectAllInCategory(category)}>
-													<div class="category-checkbox" class:checked={state !== 'none'} class:partial={state === 'partial'}>
-														{#if state === 'all'}
-															<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
-														{:else if state === 'partial'}
-															<svg class="check-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 12h14" /></svg>
-														{/if}
-													</div>
-													<span class="category-name">{category.name}</span>
-													<span class="category-count">{category.tools.length}</span>
-												</button>
-												<div class="category-tools">
-													{#each category.tools as tool}
-														<label class="tool-item">
-															<input type="checkbox" checked={formTools.includes(tool.name)} onchange={() => toggleTool(tool.name)} class="tool-checkbox" />
-															<span class="tool-name" title={tool.description}>{tool.name}</span>
-														</label>
-													{/each}
-												</div>
-											</div>
-										{/if}
-									{/each}
-								</div>
-								<div class="selection-count">
-									{formTools.length} tool{formTools.length !== 1 ? 's' : ''} selected
-								</div>
-							</div>
-						{/if}
-					</div>
-				</div>
-			{:else}
-				<div class="pf-summary-bar">
-					<div class="pf-summary-left">
-						<Wrench size={14} />
-						<span>{availableTools.all_tools.length} tools enabled</span>
-					</div>
-				</div>
-			{/if}
 		</div>
+
+		{#if toolSelectionMode === 'select'}
+			<div class="set-group">
+				<div class="set-grouphead"><h3><Settings />Tool categories</h3><p>Select which tools this subagent can access.</p></div>
+				<div class="cat-list">
+					<button type="button" class="cat-card" onclick={() => onToggleSection('sdk')}>
+						<div class="cat-icon"><Wrench size={17} /></div>
+						<div class="cat-info">
+							<span class="cat-name">Built-in tools</span>
+							<span class="cat-desc">{availableTools.categories.map((c) => c.name).join(', ')}</span>
+						</div>
+						<span class="pill-s acc">{formTools.length}/{availableTools.all_tools.length}</span>
+						<ChevronDown size={16} class={expandedSections.sdk ? 'cat-chev open' : 'cat-chev'} />
+					</button>
+					{#if expandedSections.sdk}
+						<div class="cat-body">
+							{#each availableTools.categories as category}
+								{#if category.tools.length > 0}
+									{@const state = getCategorySelectionState(category)}
+									<div class="catgroup">
+										<div class="catgroup-head">
+											<span class="catgroup-name">{category.name} <span class="hint">{category.tools.length}</span></span>
+											<button type="button" class="lnk" onclick={() => selectAllInCategory(category)}>{state === 'all' ? 'Clear' : 'Select all'}</button>
+										</div>
+										<div class="chips-select">
+											{#each category.tools as tool}
+												{@const sel = formTools.includes(tool.name)}
+												<button type="button" class="chsel" class:on={sel} title={tool.description} onclick={() => toggleTool(tool.name)}>
+													{#if sel}<Check size={12} />{/if}
+													{tool.name}
+												</button>
+											{/each}
+										</div>
+									</div>
+								{/if}
+							{/each}
+							<div class="sel-count">{formTools.length} tool{formTools.length !== 1 ? 's' : ''} selected</div>
+						</div>
+					{/if}
+				</div>
+			</div>
+		{:else}
+			<div class="ed-note"><Wrench /><span>All {availableTools.all_tools.length} tools are available to this subagent.</span></div>
+		{/if}
 	{/if}
 
 	<!-- Prompt Tab -->
 	{#if activeTab === 'prompt'}
-		<div class="editor-tab-content prompt-tab">
-			<div class="prompt-header">
-				<label for="agent-prompt" class="card-form-label">
-					System Prompt <span class="required">*</span>
-				</label>
-				<span class="char-count">
-					{formPrompt.length} characters
-				</span>
+		<div class="set-group">
+			<div class="set-grouphead"><h3><Terminal />System prompt</h3><p>Instructions that define the subagent's behavior and capabilities.</p></div>
+			<div class="set-row stack">
+				<div class="lab lab-row">
+					<h4>Prompt <span class="req">*</span></h4>
+					<span class="count">{formPrompt.length} characters</span>
+				</div>
+				<div class="ctl">
+					<textarea
+						value={formPrompt}
+						oninput={(e) => onFormPromptChange(e.currentTarget.value)}
+						placeholder="You are a specialized agent that helps users with…"
+						class="fld code prompt-area"
+					></textarea>
+				</div>
 			</div>
-			<textarea
-				id="agent-prompt"
-				value={formPrompt}
-				oninput={(e) => onFormPromptChange(e.currentTarget.value)}
-				placeholder="You are a specialized agent that helps users with..."
-				class="card-form-input card-form-textarea prompt-textarea"
-			></textarea>
-			<p class="card-form-hint">
-				Instructions that define the subagent's behavior and capabilities.
-			</p>
 		</div>
 	{/if}
 
@@ -485,453 +404,211 @@
 		onClose={() => onShowGenerateDialogChange(false)}
 		onGenerated={onGeneratedSubagent}
 	/>
-</FeaturePageLayout>
+</StudioEditorShell>
 
 <style>
 	.flex-1 {
 		flex: 1;
 	}
 
-	/* Tab label visibility */
-	.tab-label {
-		display: none;
-	}
-
-	@media (min-width: 400px) {
-		.tab-label {
-			display: inline;
-		}
-	}
-
-	/* Editor tab content */
-	.editor-tab-content {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
-	}
-
-	.prompt-tab {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-	}
-
-	.prompt-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-	}
-
-	.char-count {
-		font-size: var(--text-xs);
-		color: var(--text-tertiary);
-	}
-
-	.prompt-textarea {
-		flex: 1;
-		min-height: 200px;
-		font-family: var(--card-font-mono);
-		font-size: var(--text-sm);
-	}
-
-	/* Tools List */
-	.tools-list {
-		max-height: 256px;
-		overflow-y: auto;
-		padding-right: var(--space-2, 8px);
-		margin-top: var(--space-3, 12px);
-	}
-
-	.tool-category {
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		overflow: hidden;
-		margin-bottom: var(--space-2, 8px);
-	}
-
-	.category-header {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3, 12px);
-		width: 100%;
-		padding: var(--space-3, 12px);
-		background: var(--surface-1);
-		border: none;
-		color: var(--text-primary);
-		font-size: var(--text-md, 0.875rem);
-		cursor: pointer;
-		transition: all var(--transition-smooth, 200ms);
-	}
-
-	.category-header:hover {
-		background: var(--surface-hover);
-	}
-
-	.category-checkbox {
-		width: 16px;
-		height: 16px;
-		border-radius: 4px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: var(--surface-1);
-		border: 1px solid var(--border-default);
-		transition: all var(--transition-fast, 100ms);
-	}
-
-	.category-checkbox.checked {
-		background: var(--primary);
-		border-color: var(--primary);
-	}
-
-	.category-checkbox.partial {
-		background: var(--primary);
-		border-color: var(--primary);
-	}
-
-	.check-icon {
-		width: 12px;
-		height: 12px;
-		color: var(--primary-foreground);
-	}
-
-	.category-name {
-		flex: 1;
-		text-align: left;
-		font-weight: 500;
-	}
-
-	.category-count {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-	}
-
-	.category-tools {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		gap: 4px;
-		padding: var(--space-2, 8px);
-		background: var(--surface-0);
-	}
-
-	@media (max-width: 480px) {
-		.category-tools {
-			grid-template-columns: 1fr;
-		}
-	}
-
-	.tool-item {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2, 8px);
-		padding: 6px var(--space-2, 8px);
-		border-radius: var(--radius-sm, 6px);
-		cursor: pointer;
-		transition: background var(--transition-fast, 100ms);
-	}
-
-	.tool-item:hover {
-		background: var(--surface-1);
-	}
-
-	.tool-checkbox {
-		width: 14px;
-		height: 14px;
-		flex-shrink: 0;
-	}
-
-	.tool-name {
-		font-size: var(--text-base, 0.8125rem);
-		color: var(--text-primary);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.selection-count {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-		margin-top: var(--space-3, 12px);
-		padding-top: var(--space-3, 12px);
-		border-top: 1px solid var(--border-subtle);
-	}
-
-	/* Required indicator */
-	.required {
+	/* Required asterisk */
+	.req {
 		color: var(--destructive);
+		font-weight: 700;
 	}
 
-	/* Model select + 1M context toggle, side by side */
-	.agent-model-row {
+	/* Stacked label header (prompt char count) */
+	.lab-row {
 		display: flex;
-		align-items: center;
+		align-items: baseline;
+		justify-content: space-between;
 		gap: 12px;
 	}
+	.count {
+		font-family: var(--font-mono, monospace);
+		font-size: 11px;
+		color: var(--muted-foreground);
+		flex-shrink: 0;
+	}
+	textarea.prompt-area {
+		min-height: 220px;
+	}
 
-	.agent-model-row .card-form-input {
+	/* Stacked control with helper below */
+	.ctl-col {
+		flex-direction: column;
+		align-items: stretch;
+		gap: 8px;
+	}
+	.ctl-col :global(.inp),
+	.ctl-col :global(.sel) {
+		width: 100%;
+	}
+
+	/* Select + adjacent control row */
+	.grp-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+	}
+	.grp-row :global(.sel) {
 		flex: 1;
 		min-width: 0;
 	}
 
-	/* 1M context toggle (inline, right of model select) */
-	.agent-1m-toggle {
-		display: flex;
+	/* Inline checkbox (1M context) */
+	.chk {
+		display: inline-flex;
 		align-items: center;
-		gap: 8px;
-		flex-shrink: 0;
+		gap: 7px;
+		font-size: 12.5px;
+		color: var(--muted-foreground);
 		white-space: nowrap;
 		cursor: pointer;
+		flex-shrink: 0;
 	}
-
-	.checkbox-input {
-		width: 16px;
-		height: 16px;
+	.chk input {
+		width: 15px;
+		height: 15px;
 		accent-color: var(--primary);
 		color-scheme: dark;
 	}
 
-	.checkbox-label {
-		font-size: var(--text-md, 0.875rem);
-		color: var(--text-primary);
-	}
-
-	/* ─── Profile-style content & sections ─── */
-	.pf-content {
-		padding: 24px 20px;
-		display: flex;
-		flex-direction: column;
-		gap: 28px;
-	}
-
-	.pf-section {
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-	}
-
-	.pf-section-header {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		color: var(--text-primary);
-	}
-
-	.pf-section-header h3 {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 600;
-		margin: 0;
-		color: var(--text-primary);
-	}
-
-	.pf-desc {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-		margin: 0;
-	}
-
-	.pf-select {
-		width: 100%;
-		padding: 10px 14px;
-		padding-right: 36px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		color: var(--text-primary);
-		font-size: var(--text-md, 0.875rem);
-		cursor: pointer;
-		appearance: none;
-		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-		background-repeat: no-repeat;
-		background-position: right 12px center;
-		transition: border-color 200ms, box-shadow 200ms;
-	}
-
-	.pf-select:focus {
-		border-color: var(--primary);
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
-	}
-
-	/* ─── Category cards ─── */
-	.pf-category-list {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-
-	.pf-category-card {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		width: 100%;
-		padding: 14px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		cursor: pointer;
-		transition: all 200ms;
-		color: var(--text-primary);
-		font-size: var(--text-md, 0.875rem);
-	}
-
-	.pf-category-card:hover {
-		border-color: color-mix(in oklch, var(--primary) 30%, transparent);
-		background: var(--surface-hover);
-	}
-
-	.pf-category-icon {
-		width: 36px;
-		height: 36px;
+	/* Square icon button (group new/delete) */
+	.icon-btn {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		border-radius: 8px;
-		color: var(--primary);
+		width: 36px;
+		height: 36px;
 		flex-shrink: 0;
+		background: var(--background);
+		border: 1px solid var(--border);
+		border-radius: 9px;
+		color: var(--muted-foreground);
+		cursor: pointer;
+		transition: background 0.12s, color 0.12s, border-color 0.12s;
+	}
+	.icon-btn:hover {
+		background: var(--muted);
+		color: var(--foreground);
+	}
+	.icon-btn.danger {
+		color: var(--destructive);
+	}
+	.icon-btn.danger:hover {
+		background: color-mix(in oklch, var(--destructive) 14%, transparent);
+		border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
 	}
 
-	.pf-category-info {
+	/* Tool categories */
+	.cat-list {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		padding: 14px 18px 18px;
+	}
+	.cat-card {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		width: 100%;
+		padding: 12px 14px;
+		background: var(--background);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		cursor: pointer;
+		text-align: left;
+		color: var(--foreground);
+		transition: background 0.12s, border-color 0.12s;
+	}
+	.cat-card:hover {
+		background: var(--muted);
+	}
+	.cat-icon {
+		width: 34px;
+		height: 34px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--muted);
+		border-radius: 8px;
+		color: var(--foreground);
+		flex-shrink: 0;
+	}
+	.cat-info {
 		flex: 1;
 		min-width: 0;
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
 	}
-
-	.pf-category-name {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 500;
+	.cat-name {
+		font-size: 13.5px;
+		font-weight: 600;
 	}
-
-	.pf-category-desc {
-		font-size: var(--text-xs, 0.6875rem);
-		color: var(--text-secondary);
+	.cat-desc {
+		font-size: 11.5px;
+		color: var(--muted-foreground);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-
-	.pf-category-count {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 600;
-		color: var(--primary);
-		padding: 2px 8px;
-		background: color-mix(in oklch, var(--primary) 10%, transparent);
-		border-radius: 6px;
-	}
-
-	.pf-category-card :global(.pf-category-chevron) {
-		color: var(--text-secondary);
+	.cat-card :global(.cat-chev) {
+		color: var(--muted-foreground);
 		flex-shrink: 0;
+		transition: transform 0.18s;
 	}
-
-	.pf-category-expanded {
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		overflow: hidden;
+	.cat-card :global(.cat-chev.open) {
+		transform: rotate(180deg);
+	}
+	.cat-body {
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+		padding: 14px;
 		margin-top: -4px;
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		background: color-mix(in oklch, var(--muted) 35%, transparent);
 	}
-
-	/* ─── Summary bar ─── */
-	.pf-summary-bar {
+	.catgroup {
+		display: flex;
+		flex-direction: column;
+		gap: 9px;
+	}
+	.catgroup-head {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 12px 16px;
-		background: color-mix(in oklch, var(--primary) 3%, transparent);
-		border: 1px solid color-mix(in oklch, var(--primary) 20%, transparent);
-		border-radius: var(--radius-md, 10px);
+		gap: 12px;
 	}
-
-	.pf-summary-left {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-	}
-
-	.pf-summary-left :global(svg) {
-		color: var(--primary);
-	}
-
-	.pf-btn-save {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 8px 22px;
-		background: linear-gradient(135deg, var(--primary), color-mix(in oklch, var(--primary) 80%, #2FA88D));
-		border: none;
-		border-radius: var(--radius-md, 10px);
-		color: var(--primary-foreground);
-		font-size: var(--text-sm, 0.75rem);
+	.catgroup-name {
+		font-size: 12.5px;
 		font-weight: 600;
-		cursor: pointer;
-		transition: all 200ms;
-		box-shadow: 0 1px 3px rgba(0,0,0,0.12);
-	}
-
-	.pf-btn-save:hover {
-		filter: brightness(1.1);
-		box-shadow: 0 0 12px color-mix(in oklch, var(--primary) 30%, transparent);
-	}
-
-	.pf-btn-save:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-		filter: none;
-		box-shadow: none;
-	}
-
-	/* ─── Group assignment ─── */
-	.pf-group-wrapper {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.pf-group-row {
-		display: flex;
-		gap: 6px;
+		color: var(--foreground);
+		display: inline-flex;
 		align-items: center;
+		gap: 7px;
 	}
-
-	.pf-group-row .pf-select {
-		flex: 1;
-	}
-
-	.pf-btn-new-group {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 36px;
-		height: 36px;
-		flex-shrink: 0;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		color: var(--text-secondary);
+	.lnk {
+		background: none;
+		border: none;
+		padding: 0;
+		font: inherit;
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--foreground);
 		cursor: pointer;
-		transition: all 200ms;
 	}
-
-	.pf-btn-new-group:hover {
-		background: var(--surface-hover);
-		color: var(--text-primary);
-		border-color: var(--border-default);
+	.lnk:hover {
+		text-decoration: underline;
 	}
-
-	.pf-btn-new-group--delete {
-		color: var(--destructive);
-	}
-
-	.pf-btn-new-group--delete:hover {
-		background: color-mix(in oklch, var(--destructive) 15%, transparent);
-		color: var(--destructive);
-		border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
-	}
-
-	.pf-group-input {
-		width: 100%;
+	.sel-count {
+		font-size: 12px;
+		color: var(--muted-foreground);
+		padding-top: 12px;
+		border-top: 1px solid var(--border);
 	}
 </style>

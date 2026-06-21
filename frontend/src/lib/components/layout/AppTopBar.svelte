@@ -3,8 +3,9 @@
 	 * AppTopBar - Global navigation bar
 	 *
 	 * Replaces the sidebar's "Pages" nav as the primary navigation. Pages are
-	 * siblings reached from one row: Sessions · Files · Notes · Build · Automations.
-	 * The session list (SidePanel) becomes contextual to the Sessions section.
+	 * siblings reached from one row, left-aligned beside the brand:
+	 * Sessions · Files · Notes · Build · Automations · Projects.
+	 * The active tab is marked with a Build-style 2px underline.
 	 *
 	 * Styled entirely with the app's existing theme tokens (no bespoke palette).
 	 */
@@ -15,11 +16,11 @@
 		CalendarClock,
 		Search,
 		Plus,
-		MoreHorizontal,
+		CircleUser,
 		Settings,
 		BarChart3,
 		BookOpen,
-		PanelLeft,
+		FolderKanban,
 		MessagesSquare
 	} from 'lucide-svelte';
 	import { activeView } from '$lib/stores/layout.svelte';
@@ -27,28 +28,25 @@
 
 	interface Props {
 		isAdmin?: boolean;
-		isMobile?: boolean;
 		onNewSession: () => void;
 		onOpenSessions: () => void;
 		onOpenFeature: (type: ViewType) => void;
 		onOpenSpotlight?: () => void;
-		onToggleSidebar?: () => void;
 	}
 
 	let {
 		isAdmin = false,
-		isMobile = false,
 		onNewSession,
 		onOpenSessions,
 		onOpenFeature,
-		onOpenSpotlight,
-		onToggleSidebar
+		onOpenSpotlight
 	}: Props = $props();
 
 	// Build group members — the agent-config tools live inside the Build page.
 	// Listed so the "Build" tab highlights when a member view (deep-link) is active.
 	const BUILD_MEMBERS: ViewType[] = ['build', 'profile', 'subagent', 'mcp', 'plugins', 'hooks'];
 
+	// "Account & more" dropdown — Projects now lives in the main nav row.
 	const overflowItems: { type: ViewType; label: string; icon: typeof Settings; adminOnly?: boolean }[] = [
 		{ type: 'docs', label: 'Docs', icon: BookOpen },
 		{ type: 'stats', label: 'Stats', icon: BarChart3 },
@@ -65,7 +63,7 @@
 		return currentType === t;
 	}
 
-	// Overflow ("More") dropdown state
+	// Overflow ("Account & more") dropdown state
 	let overflowOpen = $state(false);
 	let overflowDropdownEl = $state<HTMLDivElement | null>(null);
 
@@ -84,26 +82,19 @@
 <svelte:window onclick={handleWindowClick} />
 
 <header class="topbar">
-	<!-- Left: brand (+ mobile sessions toggle) -->
-	<div class="tb-left">
-		{#if isMobile}
-			<button class="tb-icon-btn" onclick={onToggleSidebar} title="Sessions" aria-label="Toggle sessions">
-				<PanelLeft size={18} strokeWidth={1.6} />
-			</button>
-		{/if}
-		<div class="brand">
-			<span class="brand-mark" aria-hidden="true">
-				<svg width="22" height="22" viewBox="0 0 40 40" fill="none">
-					<path d="M20 4C11.16 4 4 11.16 4 20s7.16 16 16 16 16-7.16 16-16S28.84 4 20 4zm0 28c-6.63 0-12-5.37-12-12S13.37 8 20 8s12 5.37 12 12-5.37 12-12 12z" fill="currentColor" opacity="0.25"/>
-					<path d="M15 17c0-1.1.9-2 2-2h6c1.1 0 2 .9 2 2v6c0 1.1-.9 2-2 2h-6c-1.1 0-2-.9-2-2v-6z" fill="currentColor" opacity="0.55"/>
-					<circle cx="20" cy="20" r="3" fill="currentColor"/>
-				</svg>
-			</span>
-			<span class="brand-name">ai-shuffle</span>
-		</div>
+	<!-- Brand -->
+	<div class="brand">
+		<span class="brand-mark" aria-hidden="true">
+			<svg width="22" height="22" viewBox="0 0 40 40" fill="none">
+				<path d="M20 4C11.16 4 4 11.16 4 20s7.16 16 16 16 16-7.16 16-16S28.84 4 20 4zm0 28c-6.63 0-12-5.37-12-12S13.37 8 20 8s12 5.37 12 12-5.37 12-12 12z" fill="currentColor" opacity="0.25"/>
+				<path d="M15 17c0-1.1.9-2 2-2h6c1.1 0 2 .9 2 2v6c0 1.1-.9 2-2 2h-6c-1.1 0-2-.9-2-2v-6z" fill="currentColor" opacity="0.55"/>
+				<circle cx="20" cy="20" r="3" fill="currentColor"/>
+			</svg>
+		</span>
+		<span class="brand-name">ai-shuffle</span>
 	</div>
 
-	<!-- Center: primary page navigation -->
+	<!-- Primary page navigation — left-aligned, Build-style underline on active -->
 	<nav class="tb-nav" aria-label="Workspace">
 		<button class="tb-tab" class:active={sessionsActive} onclick={onOpenSessions}>
 			<MessagesSquare size={16} strokeWidth={1.6} /><span>Sessions</span>
@@ -125,7 +116,13 @@
 				<CalendarClock size={16} strokeWidth={1.6} /><span>Automations</span>
 			</button>
 		{/if}
+
+		<button class="tb-tab" class:active={isActive('project')} onclick={() => onOpenFeature('project')}>
+			<FolderKanban size={16} strokeWidth={1.6} /><span>Projects</span>
+		</button>
 	</nav>
+
+	<div class="tb-spacer"></div>
 
 	<!-- Right: actions -->
 	<div class="tb-right">
@@ -143,13 +140,14 @@
 
 		<div class="tb-dropdown" bind:this={overflowDropdownEl}>
 			<button
-				class="tb-icon-btn"
+				class="tb-user"
 				aria-haspopup="true"
 				aria-expanded={overflowOpen}
-				title="More"
+				title="Account & more"
+				aria-label="Account & more"
 				onclick={() => { overflowOpen = !overflowOpen; }}
 			>
-				<MoreHorizontal size={18} strokeWidth={1.6} />
+				<CircleUser size={20} strokeWidth={1.6} />
 			</button>
 			{#if overflowOpen}
 				<div class="tb-menu tb-menu-right" role="menu">
@@ -178,16 +176,13 @@
 		z-index: 40;
 	}
 
-	/* Side sections flex equally so the nav stays centered */
-	.tb-left,
+	.tb-spacer { flex: 1 1 auto; }
 	.tb-right {
 		display: flex;
 		align-items: center;
 		gap: 6px;
-		flex: 1 1 0;
-		min-width: 0;
+		flex-shrink: 0;
 	}
-	.tb-right { justify-content: flex-end; }
 
 	/* Brand */
 	.brand {
@@ -195,8 +190,7 @@
 		align-items: center;
 		gap: 8px;
 		flex-shrink: 0;
-		padding-right: 8px;
-		margin-right: 2px;
+		padding-right: 10px;
 	}
 	.brand-mark { color: var(--primary); display: flex; }
 	.brand-name {
@@ -207,35 +201,42 @@
 		color: var(--foreground);
 	}
 
-	/* Nav — centered; overflow visible so dropdowns aren't clipped */
+	/* Nav — left-aligned, full-height tabs with a Build-style underline on active */
 	.tb-nav {
 		display: flex;
-		align-items: center;
-		justify-content: center;
+		align-items: stretch;
+		align-self: stretch;
 		gap: 2px;
-		flex: 0 1 auto;
-		overflow: visible;
 	}
 
 	.tb-tab {
+		position: relative;
 		display: inline-flex;
 		align-items: center;
 		gap: 7px;
-		height: 34px;
-		padding: 0 12px;
+		padding: 0 13px;
 		background: transparent;
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) - 2px);
 		color: var(--muted-foreground);
 		font-size: 0.8125rem;
 		font-weight: 500;
 		white-space: nowrap;
 		cursor: pointer;
-		transition: color 120ms ease, background-color 120ms ease;
+		transition: color 120ms ease;
 	}
-	.tb-tab:hover { color: var(--foreground); background: var(--hover-overlay); }
-	.tb-tab.active { color: var(--selection-text); background: var(--selection-bg-emphasis); }
-	.tb-tab :global(svg) { flex-shrink: 0; }
+	.tb-tab:hover { color: var(--foreground); }
+	.tb-tab.active { color: var(--foreground); }
+	.tb-tab.active::after {
+		content: '';
+		position: absolute;
+		left: 11px;
+		right: 11px;
+		bottom: 0;
+		height: 2px;
+		border-radius: 2px 2px 0 0;
+		background: var(--primary);
+	}
+	.tb-tab :global(svg) { flex-shrink: 0; opacity: 0.9; }
 
 	/* Dropdown */
 	.tb-dropdown { position: relative; }
@@ -324,8 +325,8 @@
 	}
 	.tb-new:hover { filter: brightness(1.08); }
 
-	/* Icon button */
-	.tb-icon-btn {
+	/* User / account button (replaces the old three-dot "More") */
+	.tb-user {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
@@ -334,12 +335,12 @@
 		flex-shrink: 0;
 		background: transparent;
 		border: none;
-		border-radius: calc(var(--radius, 0.75rem) - 2px);
+		border-radius: 50%;
 		color: var(--muted-foreground);
 		cursor: pointer;
 		transition: color 120ms ease, background-color 120ms ease;
 	}
-	.tb-icon-btn:hover { color: var(--foreground); background: var(--hover-overlay); }
+	.tb-user:hover { color: var(--foreground); background: var(--hover-overlay); }
 
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
@@ -348,14 +349,16 @@
 		.tb-search-label { display: none; }
 		.tb-kbd { display: none; }
 		.tb-tab span { display: none; }
-		.tb-tab { padding: 0 9px; }
+		.tb-tab { padding: 0 10px; }
 	}
 
 	@media (max-width: 639px) {
 		.topbar { height: 48px; padding: 0 8px; gap: 4px; }
 		.brand-name { display: none; }
+		.brand { padding-right: 4px; }
 		.tb-new-label { display: none; }
 		.tb-new { padding: 0; width: 34px; justify-content: center; }
+		.tb-tab { padding: 0 8px; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {

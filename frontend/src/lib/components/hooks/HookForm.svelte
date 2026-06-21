@@ -7,6 +7,7 @@
 	 * Exposes save() and getIsValid() for parent to call/check via bind:this.
 	 */
 	import { untrack } from 'svelte';
+	import { Bell, Zap, Power } from 'lucide-svelte';
 	import type { Hook, HookCreate, HookUpdate, HookEventType, HookType } from '$lib/api/client';
 	import { HOOK_EVENT_TYPES } from '$lib/api/client';
 	import { projects } from '$lib/stores/app-data.svelte';
@@ -98,275 +99,137 @@
 	};
 </script>
 
-<div class="hook-form-fields">
-	<div class="form-group">
-		<label for="hook-name">Name</label>
-		<input
-			id="hook-name"
-			type="text"
-			bind:value={name}
-			placeholder="e.g., Slack Notification"
-			class="form-input"
-		/>
+<!-- Trigger -->
+<div class="set-group">
+	<div class="set-grouphead"><h3><Bell />Trigger</h3><p>When and where this hook fires.</p></div>
+	<div class="set-row">
+		<div class="lab"><h4>Name <span class="req">*</span></h4><p>A label to recognize this hook.</p></div>
+		<div class="ctl"><input type="text" bind:value={name} placeholder="e.g., Slack Notification" class="inp" /></div>
 	</div>
-
-	<div class="form-group">
-		<label for="hook-scope">Scope</label>
-		<select id="hook-scope" bind:value={scopeProjectId} class="form-select">
-			<option value={null}>App (all sessions)</option>
-			{#each $projects as project (project.id)}
-				<option value={project.id}>{project.name}</option>
-			{/each}
-		</select>
-		<p class="form-hint">{scopeProjectId ? 'Fires only for sessions in this project' : 'Fires for all sessions regardless of project'}</p>
+	<div class="set-row">
+		<div class="lab"><h4>Scope</h4><p>{scopeProjectId ? 'Fires only for sessions in this project.' : 'Fires for all sessions regardless of project.'}</p></div>
+		<div class="ctl">
+			<select bind:value={scopeProjectId} class="sel">
+				<option value={null}>App (all sessions)</option>
+				{#each $projects as project (project.id)}
+					<option value={project.id}>{project.name}</option>
+				{/each}
+			</select>
+		</div>
 	</div>
-
-	<div class="form-group">
-		<label for="hook-event">Event Type</label>
-		<select id="hook-event" bind:value={event} class="form-select">
-			{#each HOOK_EVENT_TYPES as eventType}
-				<option value={eventType}>{eventType}</option>
-			{/each}
-		</select>
-		<p class="form-hint">{eventDescriptions[event]}</p>
+	<div class="set-row">
+		<div class="lab"><h4>Event</h4><p>{eventDescriptions[event]}</p></div>
+		<div class="ctl">
+			<select bind:value={event} class="sel">
+				{#each HOOK_EVENT_TYPES as eventType}
+					<option value={eventType}>{eventType}</option>
+				{/each}
+			</select>
+		</div>
 	</div>
-
 	{#if isToolEvent}
-		<div class="form-group">
-			<label for="hook-toolMatcher">Tool Matcher (optional)</label>
-			<input
-				id="hook-toolMatcher"
-				type="text"
-				bind:value={toolMatcher}
-				placeholder="e.g., Bash|Edit|Write"
-				class="form-input mono"
-			/>
-			<p class="form-hint">Regex pattern to filter which tools trigger the hook</p>
+		<div class="set-row">
+			<div class="lab"><h4>Tool matcher</h4><p>Regex to filter which tools trigger the hook. Optional.</p></div>
+			<div class="ctl"><input type="text" bind:value={toolMatcher} placeholder="e.g., Bash|Edit|Write" class="inp mono" /></div>
 		</div>
 	{/if}
+</div>
 
-	<div class="form-group">
-		<span class="form-label">Hook Type</span>
-		<div class="hook-type-selector">
-			<button
-				type="button"
-				class="type-btn"
-				class:active={hookType === 'bash'}
-				onclick={() => hookType = 'bash'}
-			>
-				Bash Command
-			</button>
-			<button
-				type="button"
-				class="type-btn"
-				class:active={hookType === 'webhook'}
-				onclick={() => hookType = 'webhook'}
-			>
-				Webhook URL
-			</button>
-			<button
-				type="button"
-				class="type-btn"
-				class:active={hookType === 'message'}
-				onclick={() => hookType = 'message'}
-			>
-				Send Message
-			</button>
+<!-- Action -->
+<div class="set-group">
+	<div class="set-grouphead"><h3><Zap />Action</h3><p>What this hook does when it runs.</p></div>
+	<div class="set-row">
+		<div class="lab"><h4>Type</h4><p>Run a command, call a webhook, or post a message.</p></div>
+		<div class="ctl">
+			<div class="seg">
+				<button type="button" class:on={hookType === 'bash'} onclick={() => hookType = 'bash'}>Bash</button>
+				<button type="button" class:on={hookType === 'webhook'} onclick={() => hookType = 'webhook'}>Webhook</button>
+				<button type="button" class:on={hookType === 'message'} onclick={() => hookType = 'message'}>Message</button>
+			</div>
 		</div>
 	</div>
 
 	{#if hookType === 'bash'}
-		<div class="form-group">
-			<label for="hook-command">Command</label>
-			<textarea
-				id="hook-command"
-				bind:value={command}
-				placeholder={'e.g., curl -X POST https://slack.webhook.url -d \'{"text":"Session complete"}\''}
-				class="form-textarea mono"
-				rows="3"
-			></textarea>
-			<p class="form-hint">Shell command to execute. Event data is available as environment variables.</p>
+		<div class="set-row stack">
+			<div class="lab"><h4>Command <span class="req">*</span></h4><p>Shell command to execute. Event data is available as environment variables.</p></div>
+			<div class="ctl">
+				<textarea
+					bind:value={command}
+					placeholder={'e.g., curl -X POST https://slack.webhook.url -d \'{"text":"Session complete"}\''}
+					class="fld code"
+					rows="3"
+				></textarea>
+			</div>
 		</div>
-
-		<div class="form-group">
-			<label for="hook-timeout">Timeout (ms)</label>
-			<input
-				id="hook-timeout"
-				type="number"
-				bind:value={timeout}
-				min="1000"
-				max="300000"
-				step="1000"
-				class="form-input"
-			/>
-			<p class="form-hint">Maximum execution time (1-300 seconds)</p>
+		<div class="set-row">
+			<div class="lab"><h4>Timeout</h4><p>Maximum execution time in ms (1–300 seconds).</p></div>
+			<div class="ctl"><input type="number" bind:value={timeout} min="1000" max="300000" step="1000" class="inp" /></div>
 		</div>
 	{:else if hookType === 'webhook'}
-		<div class="form-group">
-			<label for="hook-url">Webhook URL</label>
-			<input
-				id="hook-url"
-				type="url"
-				bind:value={url}
-				placeholder="https://example.com/webhook"
-				class="form-input"
-			/>
-			<p class="form-hint">HTTP endpoint to POST event data to</p>
+		<div class="set-row">
+			<div class="lab"><h4>URL <span class="req">*</span></h4><p>HTTP endpoint to POST event data to.</p></div>
+			<div class="ctl"><input type="url" bind:value={url} placeholder="https://example.com/webhook" class="inp mono" /></div>
 		</div>
-
-		<div class="form-group">
-			<label for="hook-secret">Secret (optional)</label>
-			<input
-				id="hook-secret"
-				type="password"
-				bind:value={secret}
-				placeholder="HMAC secret for signature"
-				class="form-input"
-			/>
-			<p class="form-hint">Used to sign the payload (X-Hook-Signature header)</p>
+		<div class="set-row">
+			<div class="lab"><h4>Secret</h4><p>Signs the payload via the X-Hook-Signature header. Optional.</p></div>
+			<div class="ctl"><input type="password" bind:value={secret} placeholder="HMAC secret for signature" class="inp" /></div>
 		</div>
 	{:else if hookType === 'message'}
-		<div class="form-group">
-			<label for="hook-message-template">Message Template</label>
-			<textarea
-				id="hook-message-template"
-				bind:value={messageTemplate}
-				placeholder="e.g., Summarize the work done in this session and list any remaining tasks."
-				class="form-textarea"
-				rows="4"
-			></textarea>
-			<p class="form-hint">
-				Prompt sent as a new user message in the active chat when this hook fires.
-				Available variables: <code>{'{event}'}</code>, <code>{'{tool_name}'}</code>, <code>{'{timestamp}'}</code>, <code>{'{session_id}'}</code>
-			</p>
+		<div class="set-row stack">
+			<div class="lab"><h4>Message template <span class="req">*</span></h4><p>Prompt sent as a new user message in the active chat when this hook fires.</p></div>
+			<div class="ctl">
+				<textarea
+					bind:value={messageTemplate}
+					placeholder="e.g., Summarize the work done in this session and list any remaining tasks."
+					class="fld"
+					rows="4"
+				></textarea>
+				<p class="var-hint">Available variables: <code>{'{event}'}</code> <code>{'{tool_name}'}</code> <code>{'{timestamp}'}</code> <code>{'{session_id}'}</code></p>
+			</div>
 		</div>
 	{/if}
+</div>
 
-	<div class="form-group checkbox-group">
-		<label class="checkbox-label">
-			<input type="checkbox" bind:checked={enabled} />
-			<span>Enable hook</span>
-		</label>
+<!-- Status -->
+<div class="set-group">
+	<div class="set-grouphead"><h3><Power />Status</h3></div>
+	<div class="set-row">
+		<div class="lab"><h4>Enabled</h4><p>Turn this hook on or off without deleting it.</p></div>
+		<div class="ctl">
+			<button
+				type="button"
+				class="switch"
+				class:on={enabled}
+				role="switch"
+				aria-checked={enabled}
+				aria-label="Toggle hook enabled"
+				onclick={() => (enabled = !enabled)}
+			><i></i></button>
+		</div>
 	</div>
 </div>
 
 <style>
-	.hook-form-fields {
-		display: flex;
-		flex-direction: column;
-		gap: 16px;
-		max-width: 640px;
-		margin: 0 auto;
-		padding: 16px;
+	.req {
+		color: var(--destructive);
+		font-weight: 700;
 	}
 
-	.form-group {
+	.var-hint {
+		margin: 8px 0 0;
+		font-size: 11.5px;
+		color: var(--muted-foreground);
 		display: flex;
-		flex-direction: column;
+		flex-wrap: wrap;
+		align-items: center;
 		gap: 6px;
 	}
-
-	.form-group label,
-	.form-label {
-		font-size: 0.875rem;
-		font-weight: 500;
-		color: var(--muted-foreground);
-	}
-
-	.form-input,
-	.form-select,
-	.form-textarea {
-		padding: 10px 12px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		background: var(--input);
-		border: 1px solid var(--border);
-		color: var(--foreground);
-		font-size: 0.875rem;
-		transition: all 150ms ease;
-	}
-
-	.form-input.mono,
-	.form-textarea.mono {
-		font-family: var(--font-mono);
-		font-size: 0.8125rem;
-	}
-
-	.form-input::placeholder,
-	.form-textarea::placeholder {
-		color: var(--muted-foreground);
-	}
-
-	.form-input:focus,
-	.form-select:focus,
-	.form-textarea:focus {
-		outline: none;
-		border-color: var(--ring);
-		box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 25%, transparent);
-	}
-
-	.form-textarea {
-		resize: vertical;
-		min-height: 80px;
-	}
-
-	.form-hint {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		margin: 0;
-	}
-
-	.form-hint code {
-		font-family: var(--font-mono);
-		font-size: 0.6875rem;
-		padding: 1px 4px;
+	.var-hint code {
+		font-family: var(--font-mono, monospace);
+		font-size: 11px;
+		padding: 1px 5px;
 		background: var(--muted);
-		border-radius: calc(var(--radius, 0.75rem) * 0.25);
-	}
-
-	.hook-type-selector {
-		display: flex;
-		gap: 8px;
-	}
-
-	.type-btn {
-		flex: 1;
-		padding: 8px 12px;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		background: var(--secondary);
-		border: 1px solid var(--border);
-		color: var(--muted-foreground);
-		font-size: 0.875rem;
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-
-	.type-btn:hover {
-		border-color: var(--ring);
-	}
-
-	.type-btn.active {
-		background: var(--selection-bg-emphasis);
-		border-color: var(--selection-ring);
-		color: var(--selection-text);
-		box-shadow: var(--selection-shadow);
-	}
-
-	.checkbox-group {
-		flex-direction: row;
-	}
-
-	.checkbox-label {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		cursor: pointer;
-		font-weight: normal !important;
-		color: var(--foreground) !important;
-	}
-
-	.checkbox-label input[type="checkbox"] {
-		width: 16px;
-		height: 16px;
-		accent-color: var(--primary);
+		border-radius: 5px;
+		color: var(--foreground);
 	}
 </style>

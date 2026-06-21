@@ -137,11 +137,11 @@
 	.search-input-wrapper {
 		display: flex;
 		align-items: center;
-		gap: var(--space-2);
-		padding: 0 var(--space-2);
-		background: var(--surface-0);
-		border: 1px solid var(--border-subtle);
-		border-radius: 6px;
+		gap: 8px;
+		padding: 0 10px;
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
 		transition: border-color 0.15s;
 	}
 
@@ -150,22 +150,22 @@
 	}
 
 	.search-input-wrapper :global(.search-icon) {
-		color: var(--text-tertiary);
+		color: var(--muted-foreground);
 		flex-shrink: 0;
 	}
 
 	.search-input {
 		flex: 1;
-		padding: 6px 0;
+		padding: 7px 0;
 		background: none;
 		border: none;
 		outline: none;
 		font-size: 13px;
-		color: var(--text-primary);
+		color: var(--foreground);
 	}
 
 	.search-input::placeholder {
-		color: var(--text-tertiary);
+		color: var(--muted-foreground);
 	}
 
 	.search-clear {
@@ -174,12 +174,12 @@
 		padding: 2px;
 		background: none;
 		border: none;
-		color: var(--text-tertiary);
+		color: var(--muted-foreground);
 		cursor: pointer;
 	}
 
 	.search-clear:hover {
-		color: var(--text-primary);
+		color: var(--foreground);
 	}
 
 	.search-results {
@@ -189,10 +189,10 @@
 		right: 0;
 		max-height: 400px;
 		overflow-y: auto;
-		background: var(--surface-card);
-		border: 1px solid var(--border-default);
-		border-radius: 8px;
-		box-shadow: var(--shadow-md);
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
 		z-index: 100;
 	}
 
@@ -202,7 +202,7 @@
 		padding: 10px 12px;
 		background: none;
 		border: none;
-		border-bottom: 1px solid var(--border-subtle);
+		border-bottom: 1px solid var(--border);
 		cursor: pointer;
 		text-align: left;
 		transition: background 0.1s;
@@ -214,27 +214,27 @@
 
 	.search-result:hover,
 	.search-result.selected {
-		background: var(--surface-active);
+		background: var(--muted);
 	}
 
 	.result-header {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: var(--space-2);
+		gap: 8px;
 		margin-bottom: 2px;
 	}
 
 	.result-title {
 		font-size: 13px;
 		font-weight: 500;
-		color: var(--text-primary);
+		color: var(--foreground);
 	}
 
 	.result-badge {
 		font-size: 11px;
-		color: var(--text-tertiary);
-		background: var(--surface-0);
+		color: var(--muted-foreground);
+		background: var(--muted);
 		padding: 1px 6px;
 		border-radius: 4px;
 		flex-shrink: 0;
@@ -242,7 +242,7 @@
 
 	.result-snippet {
 		font-size: 12px;
-		color: var(--text-tertiary);
+		color: var(--muted-foreground);
 		line-height: 1.4;
 		overflow: hidden;
 		text-overflow: ellipsis;

@@ -8,7 +8,7 @@
 	 */
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import { toast } from '$lib/stores/toast';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
 	import { Users, Wrench, Bot, Settings, FileText, SlidersHorizontal, Check } from 'lucide-svelte';
@@ -827,26 +827,16 @@
 <input type="file" accept=".json" bind:this={profileImportInput} onchange={handleImport} class="hidden" />
 
 {#if viewMode === 'form'}
-		<FeaturePageLayout
-			icon={Users}
-			title="Profiles"
-			breadcrumbs={[
-				{ label: 'Profiles', onclick: backToList },
-				{ label: editingProfile ? editingProfile.name : 'New Profile' }
-			]}
-			noPadding={true}
+		<StudioEditorShell
+			title={editingProfile ? editingProfile.name : 'New Profile'}
+			subtitle={editingProfile ? `Profile · ${getModelDisplay(profileForm.model)}` : 'Create a new profile'}
+			backLabel="Profiles"
+			onBack={backToList}
+			sections={tabs.map((t) => ({ id: t.id, label: t.label, icon: tabIcons[t.id as keyof typeof tabIcons] }))}
+			active={activeTab}
+			onSelect={(id) => (activeTab = id)}
+			railLabel="Profile sections"
 		>
-			{#snippet headerTabs()}
-				<div class="fp-tab-bar">
-					{#each tabs as tab}
-						{@const IconComponent = tabIcons[tab.id as keyof typeof tabIcons]}
-						<button class="fp-tab" class:active={activeTab === tab.id} onclick={() => (activeTab = tab.id)}>
-							<IconComponent size={14} />
-							<span class="tab-label">{tab.label}</span>
-						</button>
-					{/each}
-				</div>
-			{/snippet}
 
 			<ProfileForm
 				{activeTab}
@@ -885,15 +875,13 @@
 				{getModelDisplay}
 			/>
 
-			{#snippet footer()}
-				<div class="pf-form-footer">
-					<button type="button" class="pf-btn-save" onclick={saveProfile} disabled={!profileForm.name}>
-						<Check size={14} />
-						<span>Save Profile</span>
-					</button>
-				</div>
+			{#snippet actions()}
+				<button type="button" class="ed-btn primary" onclick={saveProfile} disabled={!profileForm.name}>
+					<Check size={14} />
+					<span>Save</span>
+				</button>
 			{/snippet}
-		</FeaturePageLayout>
+		</StudioEditorShell>
 	{:else}
 		<!-- Build page: header-less card grid (heading + sub-nav live in BuildPage) -->
 		<BuildProfileGrid
@@ -938,51 +926,4 @@
 	.hidden {
 		display: none;
 	}
-
-	/* Tab labels — hide on small screens, icons only */
-	.tab-label {
-		display: none;
-	}
-
-	@media (min-width: 480px) {
-		.tab-label {
-			display: inline;
-		}
-	}
-
-	.pf-btn-save {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 8px 22px;
-		background: linear-gradient(135deg, var(--primary), color-mix(in oklch, var(--primary) 80%, #2FA88D));
-		border: none;
-		border-radius: var(--radius-md, 10px);
-		color: var(--primary-foreground);
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 600;
-		cursor: pointer;
-		transition: all 200ms;
-	}
-
-	.pf-btn-save:hover {
-		filter: brightness(1.1);
-		box-shadow: 0 0 12px color-mix(in oklch, var(--primary) 30%, transparent);
-	}
-
-	.pf-btn-save:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-		filter: none;
-		box-shadow: none;
-	}
-
-	.pf-form-footer {
-		display: flex;
-		align-items: center;
-		justify-content: flex-end;
-		gap: 8px;
-		width: 100%;
-	}
-
 </style>

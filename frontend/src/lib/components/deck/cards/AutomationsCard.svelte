@@ -9,7 +9,7 @@
 	 * - Approve/deny pending automation runs
 	 */
 	import { onMount } from 'svelte';
-	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import type {
 		Automation,
@@ -54,7 +54,7 @@
 		XCircle,
 		ArrowLeft,
 		Shield,
-		CalendarClock
+		Check
 	} from 'lucide-svelte';
 	import './card-design-system.css';
 
@@ -685,31 +685,27 @@
 <!-- ═══════════════════ RENDER ═══════════════════ -->
 {#if !mobile}
 	{#if currentView === 'create' || currentView === 'edit'}
-		<FeaturePageLayout
-			icon={CalendarClock}
-			title="Automations"
-			breadcrumbs={[
-				{ label: 'Automations', onclick: backToList },
-				{ label: currentView === 'edit' && selectedAutomation ? selectedAutomation.name : 'New Automation' }
-			]}
-			noPadding={true}
+		<StudioEditorShell
+			title={currentView === 'edit' && selectedAutomation ? selectedAutomation.name : 'New Automation'}
+			subtitle={currentView === 'edit' ? 'Automation' : 'Create a new automation'}
+			backLabel="Automations"
+			onBack={backToList}
 		>
-			{#snippet footer()}
-				<button class="fp-btn fp-btn--primary" onclick={handleSave} disabled={formSaving}>
+			{#snippet actions()}
+				<button type="button" class="ed-btn primary" onclick={handleSave} disabled={formSaving}>
 					{#if formSaving}
 						<Loader2 size={14} class="animate-spin" />
-						<span class="btn-label">Saving...</span>
+						<span>Saving...</span>
 					{:else}
-						<span class="btn-label">{currentView === 'edit' ? 'Save Changes' : 'Create Automation'}</span>
+						<Check size={14} />
+						<span>{currentView === 'edit' ? 'Save' : 'Create'}</span>
 					{/if}
 				</button>
 			{/snippet}
-			{#snippet children()}
-				<div class="automations-card card-system" style="position: relative;">
-					{@render automationsMainContent()}
-				</div>
-			{/snippet}
-		</FeaturePageLayout>
+			<div class="card-system" style="position: relative;">
+				{@render automationsMainContent()}
+			</div>
+		</StudioEditorShell>
 	{:else if currentView === 'detail' && selectedAutomation}
 		<!-- Detail (run history) — full canvas; AutomationDetail renders its own header/back. -->
 		<div class="automations-card card-system" style="position: relative;">
@@ -1203,7 +1199,4 @@
 		}
 	}
 
-	.btn-label {
-		display: inline;
-	}
 </style>

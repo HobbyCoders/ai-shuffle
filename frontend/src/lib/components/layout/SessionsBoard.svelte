@@ -191,62 +191,64 @@
 
 	<!-- Body -->
 	<div class="board-body">
-		{#if mode === 'overview'}
-			{#if totalCount === 0}
-				<div class="board-empty">
-					<MessageSquare size={40} strokeWidth={1.25} />
-					<p class="board-empty-title">No sessions yet</p>
-					<button class="board-new" onclick={onNewSession}>
-						<Plus size={16} strokeWidth={2} /><span>Start your first session</span>
-					</button>
-				</div>
-			{:else}
-				{#if recent.length}
+		<div class="board-wrap">
+			{#if mode === 'overview'}
+				{#if totalCount === 0}
+					<div class="board-empty">
+						<MessageSquare size={40} strokeWidth={1.25} />
+						<p class="board-empty-title">No sessions yet</p>
+						<button class="board-new" onclick={onNewSession}>
+							<Plus size={16} strokeWidth={2} /><span>Start your first session</span>
+						</button>
+					</div>
+				{:else}
+					{#if recent.length}
+						<section class="board-section">
+							<h2 class="section-label">Recent</h2>
+							<div class="row-list">
+								{#each recent as s (s.id)}{@render sessionRow(s, true)}{/each}
+							</div>
+						</section>
+					{/if}
 					<section class="board-section">
-						<h2 class="section-label">Recent</h2>
-						<div class="row-list">
-							{#each recent as s (s.id)}{@render sessionRow(s, true)}{/each}
+						<h2 class="section-label">Projects <span class="section-count">{projectGroups.length}</span></h2>
+						<div class="proj-grid">
+							{#each projectGroups as g (g.key)}
+								<button class="proj-card" onclick={() => openProject(g.key)}>
+									<div class="proj-top">
+										<span class="proj-icon"><FolderClosed size={16} strokeWidth={1.6} /></span>
+										<span class="proj-name">{g.name}</span>
+										{#if g.running > 0}
+											<span class="proj-running"><span class="dot dot-streaming"></span>{g.running}</span>
+										{/if}
+									</div>
+									<div class="proj-latest">{g.latest?.title || 'Untitled'}</div>
+									<div class="proj-stats">
+										<span class="proj-count-pill">{g.sessions.length}</span>
+										<span>{g.sessions.length === 1 ? 'session' : 'sessions'}</span>
+										<span class="sep">·</span>
+										<span>{relTime(g.lastActivity)}</span>
+										<ChevronRight size={14} strokeWidth={1.6} class="proj-chevron" />
+									</div>
+								</button>
+							{/each}
 						</div>
 					</section>
 				{/if}
-				<section class="board-section">
-					<h2 class="section-label">Projects <span class="section-count">{projectGroups.length}</span></h2>
-					<div class="proj-grid">
-						{#each projectGroups as g (g.key)}
-							<button class="proj-card" onclick={() => openProject(g.key)}>
-								<div class="proj-top">
-									<span class="proj-icon"><FolderClosed size={16} strokeWidth={1.6} /></span>
-									<span class="proj-name">{g.name}</span>
-									{#if g.running > 0}
-										<span class="proj-running"><span class="dot dot-streaming"></span>{g.running}</span>
-									{/if}
-								</div>
-								<div class="proj-latest">{g.latest?.title || 'Untitled'}</div>
-								<div class="proj-stats">
-									<span class="proj-count-pill">{g.sessions.length}</span>
-									<span>{g.sessions.length === 1 ? 'session' : 'sessions'}</span>
-									<span class="sep">·</span>
-									<span>{relTime(g.lastActivity)}</span>
-									<ChevronRight size={14} strokeWidth={1.6} class="proj-chevron" />
-								</div>
-							</button>
-						{/each}
-					</div>
-				</section>
-			{/if}
-		{:else}
-			<!-- project: dense session list -->
-			{#if displayList.length === 0}
-				<div class="board-empty">
-					<MessageSquare size={36} strokeWidth={1.25} />
-					<p class="board-empty-title">No sessions in this project</p>
-				</div>
 			{:else}
-				<div class="row-list">
-					{#each displayList as s (s.id)}{@render sessionRow(s, false)}{/each}
-				</div>
+				<!-- project: dense session list -->
+				{#if displayList.length === 0}
+					<div class="board-empty">
+						<MessageSquare size={36} strokeWidth={1.25} />
+						<p class="board-empty-title">No sessions in this project</p>
+					</div>
+				{:else}
+					<div class="row-list">
+						{#each displayList as s (s.id)}{@render sessionRow(s, false)}{/each}
+					</div>
+				{/if}
 			{/if}
-		{/if}
+		</div>
 	</div>
 </div>
 
@@ -399,12 +401,21 @@
 	}
 	.board-new:hover { filter: brightness(1.08); }
 
-	/* Body */
+	/* Body — full-width scroll container; inner content centered at 1240px to
+	   match every other Studio-v2 surface (the mockup's `.wrap`). */
 	.board-body {
 		flex: 1;
 		min-height: 0;
 		overflow-y: auto;
-		padding: 16px 24px 32px;
+		padding: 24px 24px 40px;
+		display: flex;
+		flex-direction: column;
+	}
+	.board-wrap {
+		width: 100%;
+		max-width: 1240px;
+		margin: 0 auto;
+		flex: 1;
 		display: flex;
 		flex-direction: column;
 		gap: 22px;

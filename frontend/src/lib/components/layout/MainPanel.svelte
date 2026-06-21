@@ -6,7 +6,7 @@
 	 * based on the layout store's activeView state.
 	 */
 	import { untrack } from 'svelte';
-	import { activeView, sidebarCollapsed } from '$lib/stores/layout.svelte';
+	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { projects } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -541,7 +541,6 @@
 		{#if $activeView.type === 'chat' || !embeddedViews.has($activeView.type)}
 			<PageHeader
 				title={headerTitle}
-				showSidebarToggle={$sidebarCollapsed}
 				{isMobile}
 				hideGlobalStt={$activeView?.type === 'chat'}
 			>

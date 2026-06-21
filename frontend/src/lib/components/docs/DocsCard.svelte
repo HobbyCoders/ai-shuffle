@@ -1,17 +1,16 @@
 <script lang="ts">
 	/**
-	 * DocsCard - Main documentation feature page
+	 * DocsCard — Studio-v2 documentation surface.
 	 *
-	 * Three-column layout: sidebar nav | content | table of contents
-	 * Uses FeaturePageLayout with category tabs and search.
+	 * Three-column layout (nav · prose · on-this-page TOC) centered at 1240px,
+	 * framed by the shared StudioPageHeader. Theme tokens only — the Neo-Glass
+	 * card-design-system overlay has been dropped in favour of the app theme.
 	 */
-	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
-	import '../deck/cards/card-design-system.css';
+	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
 	import { BookOpen } from 'lucide-svelte';
 	import { categories, docs, getDocsByCategory, getDocBySlug } from '$lib/docs/index';
 	import { DocsSearchEngine } from '$lib/docs/search';
 	import type { DocSection } from '$lib/docs/types';
-	import DocsSidebar from './DocsSidebar.svelte';
 	import DocsContent from './DocsContent.svelte';
 	import DocsTableOfContents from './DocsTableOfContents.svelte';
 	import DocsSearch from './DocsSearch.svelte';
@@ -26,7 +25,7 @@
 	let activeCategory = $state(categories[0]?.id || 'getting-started');
 	let activeSlug = $state('');
 	let headings = $state<DocSection[]>([]);
-	let scrollAreaEl = $state<HTMLDivElement | null>(null);
+	let scrollEl = $state<HTMLDivElement | null>(null);
 
 	// Search engine (lazy initialized)
 	const searchEngine = new DocsSearchEngine(docs);
@@ -40,7 +39,7 @@
 		return map;
 	});
 
-	// Auto-select first doc in category when category changes
+	// Auto-select first doc in category when nothing is selected yet
 	$effect(() => {
 		const catDocs = docsByCategory[activeCategory];
 		if (catDocs && catDocs.length > 0 && !activeSlug) {
@@ -58,164 +57,205 @@
 		activeCategory = category;
 		activeSlug = slug;
 		headings = [];
-		// Scroll content to top
-		if (scrollAreaEl) scrollAreaEl.scrollTop = 0;
+		if (scrollEl) scrollEl.scrollTop = 0;
 	}
 
 	function handleSearchResult(fullSlug: string) {
 		const [cat, slug] = fullSlug.split('/');
-		if (cat && slug) {
-			selectDoc(cat, slug);
-		}
-	}
-
-	function handleTabChange(catId: string) {
-		activeCategory = catId;
-		const catDocs = docsByCategory[catId];
-		activeSlug = catDocs?.[0]?.slug || '';
-		headings = [];
-		if (scrollAreaEl) scrollAreaEl.scrollTop = 0;
+		if (cat && slug) selectDoc(cat, slug);
 	}
 </script>
 
-<FeaturePageLayout
-	icon={BookOpen}
-	title="Documentation"
-	itemCount={docs.length}
-	itemLabel="pages"
-	noPadding={true}
->
-	{#snippet headerActions()}
-		<DocsSearch {searchEngine} onSelectResult={handleSearchResult} />
-	{/snippet}
+<div class="dc">
+	<div class="dc-scroll" bind:this={scrollEl}>
+		<div class="dc-wrap">
+			<header class="dc-head">
+				<StudioPageHeader eyebrow="Help" title="" accent="Docs">
+					{#snippet actions()}
+						<DocsSearch {searchEngine} onSelectResult={handleSearchResult} />
+					{/snippet}
+				</StudioPageHeader>
+				<p class="dc-sub">Guides for getting the most out of ai-shuffle.</p>
+			</header>
 
-	{#snippet headerTabs()}
-		<div class="fp-tab-bar">
-			{#each categories as cat}
-				<button
-					class="fp-tab"
-					class:active={activeCategory === cat.id}
-					onclick={() => handleTabChange(cat.id)}
-				>
-					{cat.label}
-				</button>
-			{/each}
-		</div>
-	{/snippet}
+			<div class="docs-layout" class:solo={mobile}>
+				<!-- Left navigation -->
+				{#if !mobile}
+					<nav class="doc-nav">
+						{#each categories as cat}
+							{#if docsByCategory[cat.id]?.length}
+								<div class="doc-navlabel">{cat.label}</div>
+								{#each docsByCategory[cat.id] as doc}
+									<button
+										type="button"
+										class="doc-navitem"
+										class:on={activeCategory === cat.id && activeSlug === doc.slug}
+										onclick={() => selectDoc(cat.id, doc.slug)}
+									>
+										{doc.title}
+									</button>
+								{/each}
+							{/if}
+						{/each}
+					</nav>
+				{/if}
 
-	{#snippet children()}
-		<div class="docs-layout">
-			<!-- Left sidebar navigation -->
-			{#if !mobile}
-				<DocsSidebar
-					{categories}
-					{docsByCategory}
-					{activeSlug}
-					{activeCategory}
-					onSelectDoc={selectDoc}
-				/>
-			{/if}
+				<!-- Center content -->
+				<article class="doc-content">
+					{#if currentDoc}
+						<DocsContent
+							content={currentDoc.content}
+							onHeadingsExtracted={(h) => (headings = h)}
+						/>
+					{:else}
+						<div class="doc-empty">
+							<BookOpen size={44} strokeWidth={1} />
+							<p>Select a document to get started.</p>
+						</div>
+					{/if}
+				</article>
 
-			<!-- Center content area -->
-			<div class="docs-scroll-area" bind:this={scrollAreaEl}>
-				{#if currentDoc}
-					<DocsContent
-						content={currentDoc.content}
-						onHeadingsExtracted={(h) => (headings = h)}
-					/>
-				{:else}
-					<div class="docs-empty">
-						<BookOpen size={48} strokeWidth={1} />
-						<p>Select a document from the sidebar to get started.</p>
-					</div>
+				<!-- Right table of contents -->
+				{#if !mobile}
+					<DocsTableOfContents {headings} scrollContainer={scrollEl} />
 				{/if}
 			</div>
-
-			<!-- Right table of contents -->
-			{#if !mobile}
-				<DocsTableOfContents {headings} scrollContainer={scrollAreaEl} />
-			{/if}
 		</div>
-	{/snippet}
-</FeaturePageLayout>
+	</div>
+</div>
 
 <style>
-	.docs-layout {
-		display: flex;
+	.dc {
 		height: 100%;
-		overflow: hidden;
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
 	}
-
-	.docs-scroll-area {
+	.dc-scroll {
 		flex: 1;
+		min-height: 0;
 		overflow-y: auto;
 		overflow-x: hidden;
-		display: flex;
-		justify-content: center;
+	}
+	.dc-wrap {
+		max-width: 1240px;
+		margin: 0 auto;
+		padding: 28px 28px 64px;
 	}
 
-	.docs-empty {
+	.dc-head {
+		margin-bottom: 24px;
+	}
+	.dc-sub {
+		margin: 10px 0 0;
+		font-size: 0.875rem;
+		color: var(--muted-foreground);
+	}
+
+	/* ── 3-column grid ── */
+	.docs-layout {
+		display: grid;
+		grid-template-columns: 214px 1fr 184px;
+		gap: 28px;
+		align-items: start;
+	}
+	.docs-layout.solo {
+		grid-template-columns: 1fr;
+	}
+
+	/* ── Left nav ── */
+	.doc-nav {
+		position: sticky;
+		top: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
+	}
+	.doc-navlabel {
+		font-family: var(--font-mono, 'JetBrains Mono', monospace);
+		font-size: 10px;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--muted-foreground);
+		padding: 14px 10px 5px;
+		font-weight: 600;
+	}
+	.doc-navlabel:first-child {
+		padding-top: 0;
+	}
+	.doc-navitem {
+		padding: 7px 10px;
+		border-radius: 7px;
+		font-size: 13px;
+		color: var(--muted-foreground);
+		font-weight: 500;
+		border: none;
+		background: none;
+		text-align: left;
+		width: 100%;
+		cursor: pointer;
+		transition:
+			background 0.12s,
+			color 0.12s;
+	}
+	.doc-navitem:hover {
+		background: var(--muted);
+		color: var(--foreground);
+	}
+	.doc-navitem.on {
+		background: var(--foreground);
+		color: var(--background);
+	}
+
+	/* ── Content card ── */
+	.doc-content {
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		padding: 36px 42px;
+		min-width: 0;
+	}
+	.doc-empty {
 		display: flex;
 		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: var(--space-3);
-		height: 100%;
-		min-height: 400px;
-		color: var(--text-tertiary);
+		gap: 12px;
+		min-height: 320px;
+		color: var(--muted-foreground);
+	}
+	.doc-empty p {
+		font-size: 0.875rem;
 	}
 
-	.docs-empty p {
-		font-size: 14px;
+	/* ── Scrollbar ── */
+	.dc-scroll::-webkit-scrollbar {
+		width: 8px;
 	}
-
-	/* Tab bar styling */
-	.fp-tab-bar {
-		display: flex;
-		gap: 2px;
-		padding: 0 var(--space-3);
-		overflow-x: auto;
-	}
-
-	.fp-tab {
-		padding: 8px 16px;
-		font-size: 13px;
-		font-weight: 500;
-		color: var(--text-tertiary);
-		background: none;
-		border: none;
-		border-bottom: 2px solid transparent;
-		cursor: pointer;
-		white-space: nowrap;
-		transition: all 0.15s;
-	}
-
-	.fp-tab:hover {
-		color: var(--text-primary);
-	}
-
-	.fp-tab.active {
-		color: var(--primary);
-		border-bottom-color: var(--primary);
-	}
-
-	/* Scrollbar */
-	.docs-scroll-area::-webkit-scrollbar {
-		width: 6px;
-	}
-
-	.docs-scroll-area::-webkit-scrollbar-track {
+	.dc-scroll::-webkit-scrollbar-track {
 		background: transparent;
 	}
-
-	.docs-scroll-area::-webkit-scrollbar-thumb {
-		background: var(--border-default);
-		border-radius: 3px;
+	.dc-scroll::-webkit-scrollbar-thumb {
+		background: var(--border);
+		border-radius: 4px;
 	}
 
-	@media (max-width: 768px) {
+	/* ── Responsive (TOC hides itself at <=1200px) ── */
+	@media (max-width: 1200px) {
 		.docs-layout {
-			flex-direction: column;
+			grid-template-columns: 214px 1fr;
+		}
+	}
+	@media (max-width: 820px) {
+		.docs-layout {
+			grid-template-columns: 1fr;
+		}
+		.doc-nav {
+			display: none;
+		}
+		.doc-content {
+			padding: 26px 22px;
 		}
 	}
 </style>

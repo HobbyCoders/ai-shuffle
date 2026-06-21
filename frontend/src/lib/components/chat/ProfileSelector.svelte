@@ -243,10 +243,11 @@
 			max-width: none;
 		}
 
-		/* Bigger touch target on mobile. */
+		/* Keep the same pill metrics as the branch selector / worktree badge
+		   (28px) so all context pills line up at the same height on mobile. */
 		.context-selector-btn {
-			height: 36px;
-			padding: 0 12px;
+			height: 28px;
+			padding: 0 10px;
 			font-size: 0.75rem;
 		}
 	}

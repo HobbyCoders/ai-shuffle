@@ -11,22 +11,13 @@
 	 * Replaces the monolithic inline AI tab in SettingsCard.
 	 */
 	import '../deck/cards/card-design-system.css';
-	import { api, getErrorMessage } from '$lib/api/client';
+	import { api } from '$lib/api/client';
 	import { onMount } from 'svelte';
 	import { AI_TOOL_CATEGORIES, getDefaultModelSelections } from '$lib/types/ai-tool-registry';
 	import { catalogStore } from '$lib/stores/catalog';
 	import ToolCategoryCard from './ToolCategoryCard.svelte';
 	import ModelBrowser from './ModelBrowser.svelte';
 	import type { CatalogModel } from '$lib/types/ai-models';
-
-	// ─── API Key State ───
-	let falApiKey = $state('');
-	let falApiKeyMasked = $state('');
-	let falApiKeySet = $state(false);
-	let savingFalKey = $state(false);
-	let removingFalKey = $state(false);
-	let falKeySuccess = $state('');
-	let falKeyError = $state('');
 
 	// ─── Model & Setting Selections ───
 	// Keyed by backend setting names (e.g., 'image_model', 'video_model')
@@ -87,10 +78,6 @@
 		try {
 			const settings = await api.get<Record<string, unknown>>('/settings/integrations');
 
-			// API key
-			falApiKeySet = (settings.fal_api_key_set as boolean) ?? false;
-			falApiKeyMasked = (settings.fal_api_key_masked as string) || '';
-
 			// Model selections from backend
 			const defaults = getDefaultModelSelections();
 			for (const [key, defaultVal] of Object.entries(defaults)) {
@@ -115,49 +102,6 @@
 		} catch (e) {
 			console.error('Failed to load AI settings:', e);
 			loaded = true;
-		}
-	}
-
-	// ─── API Key handlers ───
-	async function saveFalApiKey() {
-		if (!falApiKey.trim()) {
-			falKeyError = 'Please enter an API key';
-			return;
-		}
-		savingFalKey = true;
-		falKeyError = '';
-		falKeySuccess = '';
-		try {
-			const result = await api.post<{ success: boolean; masked_key: string; valid: boolean }>(
-				'/settings/integrations/fal-ai',
-				{ api_key: falApiKey }
-			);
-			falApiKeyMasked = result.masked_key;
-			falApiKeySet = true;
-			falApiKey = '';
-			falKeySuccess = result.valid ? 'Key saved & verified' : 'Key saved (could not verify)';
-			setTimeout(() => (falKeySuccess = ''), 4000);
-		} catch (e: unknown) {
-			falKeyError = getErrorMessage(e, 'Failed to save');
-		} finally {
-			savingFalKey = false;
-		}
-	}
-
-	async function removeFalApiKey() {
-		removingFalKey = true;
-		falKeyError = '';
-		falKeySuccess = '';
-		try {
-			await api.delete('/settings/integrations/fal-ai');
-			falApiKeySet = false;
-			falApiKeyMasked = '';
-			falKeySuccess = 'Key removed';
-			setTimeout(() => (falKeySuccess = ''), 3000);
-		} catch (e: unknown) {
-			falKeyError = getErrorMessage(e, 'Failed to remove');
-		} finally {
-			removingFalKey = false;
 		}
 	}
 
@@ -226,57 +170,6 @@
 	</div>
 
 	{#if activeView === 'categories'}
-		<!-- API Key Section -->
-		<div class="api-key-card">
-			<div class="api-key-header">
-				<div class="api-key-title">
-					<span class="api-key-label">fal.ai API Key</span>
-					{#if falApiKeySet}
-						<span class="status-dot connected" title="Connected"></span>
-					{:else}
-						<span class="status-dot disconnected" title="Not Set"></span>
-					{/if}
-				</div>
-				<span class="api-key-hint">One key powers all AI tools</span>
-			</div>
-
-			<div class="api-key-body">
-				{#if falApiKeyMasked}
-					<code class="masked-key">{falApiKeyMasked}</code>
-				{/if}
-				<div class="api-key-input-row">
-					<input
-						type="password"
-						autocomplete="off"
-						bind:value={falApiKey}
-						placeholder={falApiKeySet ? 'Enter new key to replace...' : 'Enter your fal.ai API key'}
-						class="input"
-						onkeydown={(e) => e.key === 'Enter' && saveFalApiKey()}
-					/>
-					<button
-						onclick={saveFalApiKey}
-						disabled={savingFalKey || !falApiKey.trim()}
-						class="btn primary compact"
-						type="button"
-					>
-						{savingFalKey ? '...' : 'Save'}
-					</button>
-					{#if falApiKeySet}
-						<button
-							onclick={removeFalApiKey}
-							disabled={removingFalKey}
-							class="btn destructive compact"
-							type="button"
-						>
-							{removingFalKey ? '...' : 'Remove'}
-						</button>
-					{/if}
-				</div>
-				{#if falKeySuccess}<span class="feedback-success">{falKeySuccess}</span>{/if}
-				{#if falKeyError}<span class="feedback-error">{falKeyError}</span>{/if}
-			</div>
-		</div>
-
 		<!-- Tool Category Cards -->
 		{#if loaded}
 			<div class="categories-grid">
@@ -356,159 +249,6 @@
 		height: 15px;
 	}
 
-	/* === API Key Card === */
-	.api-key-card {
-		background: var(--card);
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		overflow: hidden;
-	}
-
-	.api-key-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 10px 16px;
-		border-bottom: 1px solid var(--border);
-	}
-
-	.api-key-title {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-
-	.api-key-label {
-		font-size: 0.875rem;
-		font-weight: 600;
-		color: var(--foreground);
-	}
-
-	.status-dot {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		flex-shrink: 0;
-	}
-
-	.status-dot.connected {
-		background: var(--success, #22c55e);
-		box-shadow: 0 0 4px var(--success, #22c55e);
-	}
-
-	.status-dot.disconnected {
-		background: var(--muted-foreground);
-	}
-
-	.api-key-hint {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-	}
-
-	.api-key-body {
-		padding: 12px 16px;
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-
-	.masked-key {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		background: var(--muted);
-		padding: 2px 6px;
-		border-radius: 4px;
-		font-family: monospace;
-		align-self: flex-start;
-	}
-
-	.api-key-input-row {
-		display: flex;
-		gap: 6px;
-	}
-
-	.api-key-input-row .input {
-		flex: 1;
-	}
-
-	/* === Shared Styles === */
-	.input {
-		padding: 8px 12px;
-		background-color: var(--input);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius) - 2px);
-		color: var(--foreground);
-		font-size: 0.875rem;
-		transition: border-color 150ms ease, box-shadow 150ms ease;
-	}
-
-	.input:focus {
-		outline: none;
-		border-color: var(--ring);
-		box-shadow: 0 0 0 2px var(--primary-20);
-	}
-
-	.input::placeholder {
-		color: var(--muted-foreground);
-	}
-
-	.btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		padding: 8px 16px;
-		border: none;
-		border-radius: calc(var(--radius) - 2px);
-		font-size: 0.875rem;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 150ms ease;
-		white-space: nowrap;
-	}
-
-	.btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.btn:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.btn.primary {
-		background: var(--primary);
-		color: var(--primary-foreground);
-	}
-
-	.btn.primary:hover:not(:disabled) {
-		filter: brightness(1.1);
-	}
-
-	.btn.destructive {
-		background: var(--destructive);
-		color: var(--destructive-foreground, #fff);
-	}
-
-	.btn.destructive:hover:not(:disabled) {
-		filter: brightness(1.1);
-	}
-
-	.btn.compact {
-		padding: 6px 12px;
-		font-size: 0.8125rem;
-	}
-
-	.feedback-success {
-		font-size: 0.8125rem;
-		color: var(--success, #22c55e);
-	}
-
-	.feedback-error {
-		font-size: 0.8125rem;
-		color: var(--destructive);
-	}
-
 	/* === Categories Grid === */
 	.categories-grid {
 		display: flex;
@@ -547,18 +287,5 @@
 	@keyframes spin {
 		from { transform: rotate(0deg); }
 		to { transform: rotate(360deg); }
-	}
-
-	/* Mobile */
-	@media (max-width: 640px) {
-		.api-key-header {
-			flex-direction: column;
-			align-items: flex-start;
-			gap: 2px;
-		}
-
-		.api-key-input-row {
-			flex-direction: column;
-		}
 	}
 </style>

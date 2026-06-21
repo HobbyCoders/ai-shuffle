@@ -1,64 +1,48 @@
 <script lang="ts">
-	import { slide } from 'svelte/transition';
-	import { quintOut } from 'svelte/easing';
+	import { Mic } from 'lucide-svelte';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import HotkeyCapture from '$lib/components/settings/HotkeyCapture.svelte';
-	import './settings-shared.css';
-
-	interface Props {
-		expanded: boolean;
-		onToggle: () => void;
-	}
-
-	let {
-		expanded,
-		onToggle,
-	}: Props = $props();
 </script>
 
-<section class="section">
-	<button class="section-header" onclick={onToggle}>
-		<h3>Hotkeys</h3>
-		<svg class="chevron" class:expanded viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-			<polyline points="6 9 12 15 18 9"/>
-		</svg>
-	</button>
-	{#if expanded}
-		<div class="section-content" transition:slide={{ duration: 200, easing: quintOut }}>
-			<!-- Global Voice Input -->
-			<div class="setting-row">
-				<div class="setting-info">
-					<span>Global Voice Input</span>
-					<span class="setting-desc">Press hotkey anywhere to start voice-to-text</span>
-				</div>
-				<button
+<div class="set-group">
+	<div class="set-grouphead">
+		<h3><Mic />Voice &amp; hotkeys</h3>
+		<p>Dictation and the keyboard shortcut that triggers it.</p>
+	</div>
+	<div class="set-row">
+		<div class="lab"><h4>Global voice input</h4><p>Press the hotkey anywhere to start voice-to-text.</p></div>
+		<div class="ctl">
+			<button
+				type="button"
+				class="switch"
+				class:on={$hotkeyPreferences.globalSttEnabled}
 				role="switch"
 				aria-checked={$hotkeyPreferences.globalSttEnabled}
+				aria-label="Global voice input"
 				onclick={() => hotkeyPreferences.setGlobalSttEnabled(!$hotkeyPreferences.globalSttEnabled)}
-				class="toggle"
-				class:active={$hotkeyPreferences.globalSttEnabled}
-				aria-label="Global Voice Input"
-			>
-				<span class="toggle-knob"></span>
-			</button>
-			</div>
-
-			{#if $hotkeyPreferences.globalSttEnabled}
-				<div class="setting-row vertical">
-					<div class="setting-info">
-						<span>Voice Input Hotkey</span>
-						<span class="setting-desc">Click to capture a new key combination</span>
-					</div>
-					<HotkeyCapture
-						value={$hotkeyPreferences.globalSttHotkey}
-						onChange={(v) => hotkeyPreferences.setGlobalSttHotkey(v)}
-					/>
-				</div>
-			{/if}
-
-			<div class="setting-hint">
-				When triggered, transcribed text is copied to clipboard. If a text field is focused, it will also be pasted automatically.
+			><i></i></button>
+		</div>
+	</div>
+	{#if $hotkeyPreferences.globalSttEnabled}
+		<div class="set-row">
+			<div class="lab"><h4>Voice input hotkey</h4><p>Click to capture a new key combination.</p></div>
+			<div class="ctl">
+				<HotkeyCapture
+					value={$hotkeyPreferences.globalSttHotkey}
+					onChange={(v) => hotkeyPreferences.setGlobalSttHotkey(v)}
+				/>
 			</div>
 		</div>
 	{/if}
-</section>
+	<div class="set-row">
+		<div class="lab">
+			<p class="hint-row">When triggered, transcribed text is copied to the clipboard. If a text field is focused, it is also pasted automatically.</p>
+		</div>
+	</div>
+</div>
+
+<style>
+	.hint-row {
+		margin: 0;
+	}
+</style>

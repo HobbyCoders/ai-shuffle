@@ -82,19 +82,47 @@
 
 <style>
 	.docs-content {
-		padding: var(--space-5);
-		max-width: 800px;
 		width: 100%;
+	}
+
+	/* ── Studio-v2 prose headings (serif display) ── */
+	.docs-content :global(h1) {
+		font-family: var(--font-display, Georgia, serif);
+		font-weight: 800;
+		font-size: 1.85rem;
+		letter-spacing: -0.02em;
+		line-height: 1.15;
+		margin: 0 0 12px;
+	}
+
+	.docs-content :global(h2) {
+		font-family: var(--font-display, Georgia, serif);
+		font-weight: 700;
+		font-size: 1.3rem;
+		line-height: 1.2;
+		margin: 32px 0 12px;
+	}
+
+	.docs-content :global(h3) {
+		font-weight: 700;
+		font-size: 1.05rem;
+		margin: 24px 0 8px;
+	}
+
+	.docs-content :global(p),
+	.docs-content :global(li) {
+		font-size: 0.95rem;
+		line-height: 1.7;
 	}
 
 	/* Code block wrapper styling */
 	.docs-content :global(.code-block-wrapper) {
 		position: relative;
 		margin: 1rem 0;
-		border: 1px solid var(--border-subtle);
-		border-radius: 8px;
+		border: 1px solid var(--border);
+		border-radius: 10px;
 		overflow: hidden;
-		background: var(--surface-0);
+		background: var(--muted);
 	}
 
 	.docs-content :global(.code-block-header) {
@@ -102,13 +130,13 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 6px 12px;
-		background: var(--surface-active);
-		border-bottom: 1px solid var(--border-subtle);
+		background: var(--card);
+		border-bottom: 1px solid var(--border);
 		font-size: 12px;
 	}
 
 	.docs-content :global(.code-lang) {
-		color: var(--text-tertiary);
+		color: var(--muted-foreground);
 		font-family: var(--font-mono, 'JetBrains Mono', monospace);
 		text-transform: uppercase;
 		font-size: 11px;
@@ -118,17 +146,17 @@
 	.docs-content :global(.code-copy-btn) {
 		padding: 2px 10px;
 		font-size: 12px;
-		color: var(--text-secondary);
-		background: var(--surface-0);
-		border: 1px solid var(--border-default);
+		color: var(--muted-foreground);
+		background: var(--card);
+		border: 1px solid var(--border);
 		border-radius: 4px;
 		cursor: pointer;
 		transition: all 0.15s;
 	}
 
 	.docs-content :global(.code-copy-btn:hover) {
-		color: var(--text-primary);
-		background: var(--surface-active);
+		color: var(--foreground);
+		background: var(--muted);
 	}
 
 	.docs-content :global(.code-block-wrapper pre) {
@@ -144,6 +172,7 @@
 		border: none;
 		padding: 0;
 		font-size: 13px;
+		font-family: var(--font-mono, 'JetBrains Mono', monospace);
 	}
 
 	/* Table styling enhancements */
@@ -158,19 +187,19 @@
 		text-align: left;
 		font-weight: 600;
 		padding: 10px 12px;
-		background: var(--surface-active);
-		border-bottom: 2px solid var(--border-default);
-		color: var(--text-primary);
+		background: var(--muted);
+		border-bottom: 2px solid var(--border);
+		color: var(--foreground);
 	}
 
 	.docs-content :global(td) {
 		padding: 8px 12px;
-		border-bottom: 1px solid var(--border-subtle);
-		color: var(--text-secondary);
+		border-bottom: 1px solid var(--border);
+		color: var(--muted-foreground);
 	}
 
 	.docs-content :global(tr:hover td) {
-		background: var(--surface-0);
+		background: var(--muted);
 	}
 
 	/* Heading anchor hover indicator */
@@ -186,15 +215,11 @@
 		content: '#';
 		position: absolute;
 		left: -1.5em;
-		color: var(--text-tertiary);
+		color: var(--muted-foreground);
 		font-weight: 400;
 	}
 
 	@media (max-width: 639px) {
-		.docs-content {
-			padding: var(--space-3);
-		}
-
 		.docs-content :global(h2:hover::before),
 		.docs-content :global(h3:hover::before) {
 			display: none;

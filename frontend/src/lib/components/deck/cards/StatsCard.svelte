@@ -1,17 +1,15 @@
 <script lang="ts">
 	/**
-	 * StatsCard - Usage Statistics Dashboard
+	 * StatsCard — the Studio-v2 Stats surface.
 	 *
-	 * A bold "Data Brutalism meets Luxury" aesthetic:
-	 * - Monospace numbers for technical precision
-	 * - Bento-box grid layout with asymmetric stat blocks
-	 * - Dramatic gradients and glass effects
-	 * - Subtle geometric patterns for depth
-	 * - Animated transitions and hover states
+	 * Matches the mockup `#page-stats`: a Studio page header (eyebrow + serif title +
+	 * accent + date-range segment / refresh / export actions) over a bento dashboard —
+	 * four metric cards, a spend-over-time bar chart, cost-by-profile, and top sessions.
+	 * Reuses the analytics API + all data/state logic; only the surface is new.
+	 * Theme tokens only — never the mockup palette.
 	 */
-	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
 	import { onMount } from 'svelte';
-	import { fly, fade } from 'svelte/transition';
+	import { fade } from 'svelte/transition';
 	import {
 		getAnalyticsSummary,
 		getCostBreakdown,
@@ -23,18 +21,15 @@
 		type TrendDataPoint,
 		type TopSession
 	} from '$lib/api/client';
-	import { Download, RefreshCw, Loader2, TrendingUp, TrendingDown, Zap, DollarSign, MessageSquare, Activity, ChevronRight, Calendar, BarChart3 } from 'lucide-svelte';
-	import './card-design-system.css';
+	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
+	import { Download, RefreshCw, Loader2, Zap, DollarSign, MessageSquare, Gauge, ChevronRight } from 'lucide-svelte';
 
 	interface Props {
 		mobile?: boolean;
 		onSessionClick?: (sessionId: string) => void;
 	}
 
-	let {
-		mobile = false,
-		onSessionClick
-	}: Props = $props();
+	let { mobile = false, onSessionClick }: Props = $props();
 
 	// Date range state
 	let startDate = $state('');
@@ -56,10 +51,7 @@
 	// Error state
 	let error = $state<string | null>(null);
 
-	// Animation state
-	let mounted = $state(false);
-
-	// Initialize dates
+	// Date helpers
 	function initializeDates(preset: PresetRange) {
 		const end = new Date();
 		const start = new Date();
@@ -74,6 +66,7 @@
 	}
 
 	function formatDisplayDate(dateStr: string): string {
+		if (!dateStr) return '';
 		const date = new Date(dateStr);
 		return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 	}
@@ -144,746 +137,310 @@
 		return '$' + cost.toFixed(4);
 	}
 
+	const PRESETS: { id: PresetRange; label: string }[] = [
+		{ id: '7d', label: '7 days' },
+		{ id: '30d', label: '30 days' },
+		{ id: '90d', label: '90 days' }
+	];
+
 	// Derived stats
 	const totalTokens = $derived(summary ? summary.total_input_tokens + summary.total_output_tokens : 0);
-	const maxCost = $derived(Math.max(...costBreakdown.map(d => d.cost), 0.0001));
+	const maxProfileCost = $derived(Math.max(...costBreakdown.map((d) => d.cost), 0.0001));
+	const maxTopCost = $derived(Math.max(...topSessions.map((s) => s.total_cost_usd), 0.0001));
 
-	// Sparkline path generator
-	function generateSparkline(data: TrendDataPoint[]): string {
-		if (data.length < 2) return '';
-		const maxVal = Math.max(...data.map(d => d.input_tokens + d.output_tokens), 1);
-		const width = 100;
-		const height = 32;
-		const points = data.map((d, i) => {
-			const x = (i / (data.length - 1)) * width;
-			const y = height - ((d.input_tokens + d.output_tokens) / maxVal) * height;
-			return `${x},${y}`;
+	// Spend-over-time bars: index of the highest-spend day (accented).
+	const maxTrendCost = $derived(Math.max(...usageTrends.map((d) => d.cost), 0.0001));
+	const peakTrendIndex = $derived.by(() => {
+		let idx = -1;
+		let peak = -1;
+		usageTrends.forEach((d, i) => {
+			if (d.cost > peak) {
+				peak = d.cost;
+				idx = i;
+			}
 		});
-		return `M${points.join(' L')}`;
-	}
+		return idx;
+	});
 
 	onMount(() => {
 		initializeDates('30d');
 		loadAnalytics();
-		setTimeout(() => mounted = true, 50);
 	});
 </script>
 
-{#snippet statsContent()}
-	<div class="stats-container" class:mobile class:mounted>
-		<!-- Decorative background pattern -->
-		<div class="stats-bg-pattern"></div>
-
-		<!-- Header -->
-		<header class="stats-header">
-			<div class="stats-title-row">
-				<div class="stats-title">
-					<Activity class="w-5 h-5" strokeWidth={2.5} />
-					<span>Usage Analytics</span>
-				</div>
-				<div class="stats-actions">
-					<button
-						class="stats-btn"
-						onclick={handleRefresh}
-						disabled={refreshing}
-						title="Refresh"
-					>
-						<RefreshCw class="w-4 h-4 {refreshing ? 'spin' : ''}" />
+<div class="st" class:mobile>
+	<div class="st-wrap">
+		<div class="st-head">
+			<StudioPageHeader eyebrow="Usage, spend & activity" title="Your" accent="stats">
+				{#snippet actions()}
+					<div class="st-seg" role="group" aria-label="Date range">
+						{#each PRESETS as p}
+							<button class="st-seg-btn" class:on={selectedPreset === p.id} onclick={() => selectPreset(p.id)}>
+								{p.label}
+							</button>
+						{/each}
+					</div>
+					<button class="st-btn st-btn--icon" onclick={handleRefresh} disabled={refreshing} title="Refresh" aria-label="Refresh">
+						<RefreshCw size={15} strokeWidth={1.9} class={refreshing ? 'st-spin' : ''} />
 					</button>
-					<button
-						class="stats-btn"
-						onclick={handleExport}
-						disabled={exportLoading}
-						title="Export CSV"
-					>
-						{#if exportLoading}
-							<Loader2 class="w-4 h-4 spin" />
-						{:else}
-							<Download class="w-4 h-4" />
-						{/if}
+					<button class="st-btn st-btn--icon" onclick={handleExport} disabled={exportLoading} title="Export CSV" aria-label="Export CSV">
+						{#if exportLoading}<Loader2 size={15} class="st-spin" />{:else}<Download size={15} strokeWidth={1.9} />{/if}
 					</button>
-				</div>
-			</div>
+				{/snippet}
+			</StudioPageHeader>
+			<p class="st-sub">{formatDisplayDate(startDate)} — {formatDisplayDate(endDate)}</p>
+		</div>
 
-			<!-- Date range selector -->
-			<div class="date-selector">
-				<div class="date-pills">
-					{#each ['7d', '30d', '90d'] as preset}
-						<button
-							class="date-pill"
-							class:active={selectedPreset === preset}
-							onclick={() => selectPreset(preset as PresetRange)}
-						>
-							{preset === '7d' ? '7D' : preset === '30d' ? '30D' : '90D'}
-						</button>
-					{/each}
-				</div>
-				<div class="date-range">
-					<Calendar class="w-3.5 h-3.5" />
-					<span>{formatDisplayDate(startDate)} — {formatDisplayDate(endDate)}</span>
-				</div>
-			</div>
-		</header>
+		<div class="st-scroll">
+			{#if error}
+				<div class="st-error" transition:fade={{ duration: 160 }}>{error}</div>
+			{/if}
 
-		{#if error}
-			<div class="stats-error" transition:fade={{ duration: 200 }}>
-				{error}
-			</div>
-		{/if}
-
-		<!-- Main content -->
-		<div class="stats-content">
 			{#if loading}
-				<div class="stats-loading">
-					<div class="loading-pulse"></div>
-					<span>Loading analytics...</span>
-				</div>
+				<div class="st-loading"><Loader2 size={28} class="st-spin" /><p>Loading analytics…</p></div>
 			{:else}
-				<!-- Bento Grid Layout -->
-				<div class="bento-grid" class:mobile>
-					<!-- Total Tokens - Large hero card -->
-					<div class="bento-card hero" style="--delay: 0">
-						<div class="bento-card-inner">
-							<div class="stat-label">
-								<Zap class="w-4 h-4" />
-								Total Tokens
-							</div>
-							<div class="stat-value mono">{formatTokens(totalTokens)}</div>
-							<div class="stat-breakdown">
-								<span class="in">{formatTokens(summary?.total_input_tokens ?? 0)} in</span>
-								<span class="separator">/</span>
-								<span class="out">{formatTokens(summary?.total_output_tokens ?? 0)} out</span>
-							</div>
-							<!-- Mini sparkline -->
-							{#if usageTrends.length > 1}
-								<svg class="sparkline" viewBox="0 0 100 32" preserveAspectRatio="none">
-									<path d={generateSparkline(usageTrends)} fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
-								</svg>
-							{/if}
-						</div>
+				<div class="bento">
+					<!-- Metric cards -->
+					<div class="bcard">
+						<div class="blabel"><DollarSign size={14} strokeWidth={2} /> Total spend</div>
+						<div class="bignum">{formatCost(summary?.total_cost ?? 0)}</div>
+						<div class="bsub">across {summary?.session_count ?? 0} sessions</div>
 					</div>
 
-					<!-- Total Cost -->
-					<div class="bento-card cost" style="--delay: 1">
-						<div class="bento-card-inner">
-							<div class="stat-label">
-								<DollarSign class="w-4 h-4" />
-								Total Cost
-							</div>
-							<div class="stat-value mono cost-value">{formatCost(summary?.total_cost ?? 0)}</div>
-							<div class="stat-detail">USD spent</div>
-						</div>
+					<div class="bcard">
+						<div class="blabel"><Zap size={14} strokeWidth={2} /> Tokens</div>
+						<div class="bignum">{formatTokens(totalTokens)}</div>
+						<div class="bsub">{formatTokens(summary?.total_input_tokens ?? 0)} in · {formatTokens(summary?.total_output_tokens ?? 0)} out</div>
 					</div>
 
-					<!-- Sessions -->
-					<div class="bento-card sessions" style="--delay: 2">
-						<div class="bento-card-inner">
-							<div class="stat-label">
-								<MessageSquare class="w-4 h-4" />
-								Sessions
-							</div>
-							<div class="stat-value mono">{summary?.session_count ?? 0}</div>
-							<div class="stat-detail">conversations</div>
-						</div>
+					<div class="bcard">
+						<div class="blabel"><MessageSquare size={14} strokeWidth={2} /> Sessions</div>
+						<div class="bignum">{summary?.session_count ?? 0}</div>
+						<div class="bsub">conversations in range</div>
 					</div>
 
-					<!-- Cost per Session -->
-					<div class="bento-card avg" style="--delay: 3">
-						<div class="bento-card-inner">
-							<div class="stat-label">Avg / Session</div>
-							<div class="stat-value mono small">{formatCost(summary?.average_cost_per_session ?? 0)}</div>
-						</div>
+					<div class="bcard">
+						<div class="blabel"><Gauge size={14} strokeWidth={2} /> Avg / session</div>
+						<div class="bignum">{formatCost(summary?.average_cost_per_session ?? 0)}</div>
+						<div class="bsub">mean spend per session</div>
 					</div>
 
-					<!-- Cost Breakdown -->
-					<div class="bento-card breakdown" style="--delay: 4">
-						<div class="bento-card-inner">
-							<div class="section-header">
-								<span>Cost by Profile</span>
+					<!-- Spend over time (tall, wide) -->
+					<div class="bcard c2 r2 bflex">
+						<div class="blabel">Spend over time</div>
+						{#if usageTrends.length === 0}
+							<div class="bempty">No usage in this range</div>
+						{:else}
+							<div class="bars" role="img" aria-label="Daily spend">
+								{#each usageTrends as d, i}
+									<i
+										class:acc={i === peakTrendIndex}
+										style="height:{Math.max((d.cost / maxTrendCost) * 100, 3)}%"
+										title="{formatDisplayDate(d.date)}: {formatCost(d.cost)}"
+									></i>
+								{/each}
 							</div>
-							{#if costBreakdown.length === 0}
-								<div class="empty-state">No data</div>
-							{:else}
-								<div class="breakdown-list">
-									{#each costBreakdown.slice(0, 4) as item, i}
-										{@const barWidth = (item.cost / maxCost) * 100}
-										<div class="breakdown-item" style="--i: {i}">
-											<div class="breakdown-name">{item.name || 'Unknown'}</div>
-											<div class="breakdown-bar-container">
-												<div class="breakdown-bar" style="width: {barWidth}%"></div>
-											</div>
-											<div class="breakdown-cost mono">{formatCost(item.cost)}</div>
-										</div>
-									{/each}
-								</div>
-							{/if}
-						</div>
+						{/if}
 					</div>
 
-					<!-- Top Sessions -->
-					<div class="bento-card top-sessions" style="--delay: 5">
-						<div class="bento-card-inner">
-							<div class="section-header">
-								<span>Top Sessions</span>
+					<!-- Cost by profile -->
+					<div class="bcard c2 bflex">
+						<div class="blabel">Cost by profile</div>
+						{#if costBreakdown.length === 0}
+							<div class="bempty">No data</div>
+						{:else}
+							<div class="brk">
+								{#each costBreakdown.slice(0, 5) as item}
+									<div class="brk-row">
+										<span class="brk-name">{item.name || 'Unknown'}</span>
+										<span class="brk-track"><span class="brk-fill" style="width:{(item.cost / maxProfileCost) * 100}%"></span></span>
+										<span class="brk-val">{formatCost(item.cost)}</span>
+									</div>
+								{/each}
 							</div>
-							{#if topSessions.length === 0}
-								<div class="empty-state">No sessions</div>
-							{:else}
-								<div class="sessions-list">
-									{#each topSessions.slice(0, 4) as session, i}
-										<button
-											class="session-item"
-											style="--i: {i}"
-											onclick={() => handleSessionClick(session.id)}
-										>
-											<span class="session-rank">{i + 1}</span>
-											<span class="session-title">{session.title || 'Untitled'}</span>
-											<span class="session-cost mono">{formatCost(session.total_cost_usd)}</span>
-											<ChevronRight class="w-3.5 h-3.5 session-arrow" />
-										</button>
-									{/each}
-								</div>
-							{/if}
-						</div>
+						{/if}
+					</div>
+
+					<!-- Top sessions by cost -->
+					<div class="bcard c2 bflex">
+						<div class="blabel">Top sessions by cost</div>
+						{#if topSessions.length === 0}
+							<div class="bempty">No sessions</div>
+						{:else}
+							<div class="tops">
+								{#each topSessions.slice(0, 5) as s, i}
+									<button class="top-row" onclick={() => handleSessionClick(s.id)}>
+										<span class="top-rank">{i + 1}</span>
+										<span class="top-name">{s.title || 'Untitled'}</span>
+										<span class="top-track"><span class="top-fill" style="width:{(s.total_cost_usd / maxTopCost) * 100}%"></span></span>
+										<span class="top-val">{formatCost(s.total_cost_usd)}</span>
+										<ChevronRight size={14} strokeWidth={1.8} class="top-arrow" />
+									</button>
+								{/each}
+							</div>
+						{/if}
 					</div>
 				</div>
 			{/if}
 		</div>
 	</div>
-{/snippet}
-
-<FeaturePageLayout icon={BarChart3} title="Stats">
-	{#snippet children()}
-		{@render statsContent()}
-	{/snippet}
-</FeaturePageLayout>
+</div>
 
 <style>
-	/* ============================================
-	   STATS CONTAINER
-	   ============================================ */
-	.stats-container {
+	.st {
 		display: flex;
 		flex-direction: column;
 		height: 100%;
-		color: var(--card-foreground);
-		position: relative;
+		min-height: 0;
 		overflow: hidden;
-	}
-
-	.stats-container.mobile {
-		border-radius: 0;
-	}
-
-	/* Background layer (for future patterns if needed) */
-	.stats-bg-pattern {
-		position: absolute;
-		inset: 0;
-		pointer-events: none;
-		z-index: 0;
-	}
-
-	/* ============================================
-	   HEADER
-	   ============================================ */
-	.stats-header {
-		padding: 1rem 1.25rem;
-		border-bottom: 1px solid var(--border);
-		position: relative;
-		z-index: 1;
-		flex-shrink: 0;
-	}
-
-	.stats-title-row {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		margin-bottom: 0.75rem;
-	}
-
-	.stats-title {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		font-weight: 600;
-		font-size: 1rem;
-		letter-spacing: -0.01em;
-	}
-
-	.stats-title :global(svg) {
-		color: var(--primary);
-	}
-
-	.stats-actions {
-		display: flex;
-		gap: 0.375rem;
-	}
-
-	.stats-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 32px;
-		height: 32px;
-		border-radius: calc(var(--radius) * 0.67);
-		background: var(--muted);
-		color: var(--muted-foreground);
-		border: 1px solid transparent;
-		cursor: pointer;
-		transition: all 180ms ease;
-	}
-
-	.stats-btn:hover:not(:disabled) {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-		border-color: var(--border);
-	}
-
-	.stats-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.stats-btn :global(.spin) {
-		animation: spin 1s linear infinite;
-	}
-
-	@keyframes spin {
-		from { transform: rotate(0deg); }
-		to { transform: rotate(360deg); }
-	}
-
-	/* Date Selector */
-	.date-selector {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.5rem 1rem;
-		flex-wrap: wrap;
-	}
-
-	.date-pills {
-		display: flex;
-		gap: 0.25rem;
-		padding: 3px;
-		background: var(--muted);
-		border-radius: calc(var(--radius) * 0.85);
-	}
-
-	.date-pill {
-		padding: 0.375rem 0.875rem;
-		font-size: 0.75rem;
-		font-weight: 600;
-		letter-spacing: 0.02em;
-		border: none;
-		border-radius: calc(var(--radius) * 0.6);
-		background: transparent;
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: all 180ms ease;
-	}
-
-	.date-pill:hover {
-		color: var(--foreground);
-	}
-
-	.date-pill.active {
 		background: var(--background);
-		color: var(--foreground);
-		box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 	}
-
-	.date-range {
-		display: flex;
-		align-items: center;
-		gap: 0.375rem;
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		font-family: var(--font-mono);
-	}
-
-	/* ============================================
-	   CONTENT
-	   ============================================ */
-	.stats-content {
+	/* Centered, max-width container — matches the mockup's .wrap (not full-bleed). */
+	.st-wrap {
+		width: 100%;
+		max-width: 1240px;
+		margin: 0 auto;
 		flex: 1;
-		overflow-y: auto;
-		padding: 1rem 1.25rem;
-		position: relative;
-		z-index: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
 	}
+	.st-head { flex-shrink: 0; padding: 22px 28px 0; }
+	.st-sub { margin: 8px 0 0; font-size: 0.8125rem; color: var(--muted-foreground); font-family: var(--font-mono, monospace); }
 
-	.stats-error {
-		margin-bottom: 1rem;
-		padding: 0.75rem 1rem;
-		border-radius: calc(var(--radius) * 0.85);
+	.st-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 28px 28px; }
+
+	/* Header actions: segmented date range + icon buttons */
+	.st-seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--muted); border-radius: calc(var(--radius, 0.75rem) - 2px); }
+	.st-seg-btn {
+		height: 28px; padding: 0 12px; border: none; background: transparent;
+		color: var(--muted-foreground); font-size: 0.78rem; font-weight: 500; cursor: pointer;
+		border-radius: calc(var(--radius, 0.75rem) - 4px); transition: background-color 120ms ease, color 120ms ease;
+	}
+	.st-seg-btn:hover { color: var(--foreground); }
+	.st-seg-btn.on { background: var(--card); color: var(--foreground); box-shadow: 0 1px 2px rgba(0,0,0,0.18); }
+
+	.st-btn {
+		display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+		height: 34px; padding: 0 12px; background: var(--card); color: var(--foreground);
+		border: 1px solid var(--border); border-radius: calc(var(--radius, 0.75rem) - 2px);
+		font-size: 0.8125rem; font-weight: 500; cursor: pointer;
+		transition: background-color 120ms ease, border-color 120ms ease;
+	}
+	.st-btn:hover:not(:disabled) { background: var(--hover-overlay); }
+	.st-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+	.st-btn--icon { width: 34px; padding: 0; color: var(--muted-foreground); }
+	.st-btn--icon:hover:not(:disabled) { color: var(--foreground); }
+
+	:global(.st-spin) { animation: st-spin 1s linear infinite; }
+	@keyframes st-spin { to { transform: rotate(360deg); } }
+
+	/* Error + loading */
+	.st-error {
+		margin-bottom: 14px; padding: 10px 12px;
+		border-radius: calc(var(--radius, 0.75rem) - 2px);
 		background: color-mix(in oklch, var(--destructive) 12%, transparent);
-		color: var(--destructive);
-		font-size: 0.875rem;
+		color: var(--destructive); font-size: 0.8125rem;
 		border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
 	}
+	.st-loading { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 56px; color: var(--muted-foreground); }
+	.st-loading :global(svg) { color: var(--primary); }
 
-	.stats-loading {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		padding: 4rem 2rem;
-		gap: 1rem;
-		color: var(--muted-foreground);
-	}
-
-	.loading-pulse {
-		width: 40px;
-		height: 40px;
-		border-radius: 50%;
-		background: var(--primary);
-		animation: pulse 1.5s ease-in-out infinite;
-	}
-
-	@keyframes pulse {
-		0%, 100% { opacity: 0.3; transform: scale(0.8); }
-		50% { opacity: 1; transform: scale(1); }
-	}
-
-	/* ============================================
-	   BENTO GRID
-	   ============================================ */
-	.bento-grid {
+	/* ============================ BENTO ============================ */
+	.bento {
 		display: grid;
-		grid-template-columns: repeat(3, 1fr);
-		grid-template-rows: auto auto auto;
-		gap: 0.75rem;
+		grid-template-columns: repeat(4, 1fr);
+		gap: 14px;
+		grid-auto-rows: minmax(118px, auto);
 	}
-
-	/* Card placements - desktop (3 col) */
-	.bento-card.hero { grid-column: span 2; }
-	.bento-card.cost { grid-column: span 1; }
-	.bento-card.sessions { grid-column: span 1; }
-	.bento-card.avg { grid-column: span 1; }
-	.bento-card.breakdown { grid-column: span 2; grid-row: span 1; }
-	.bento-card.top-sessions { grid-column: span 3; }
-
-	/* Tablet (2 col) */
-	@media (max-width: 767px) {
-		.bento-grid {
-			grid-template-columns: 1fr 1fr;
-		}
-		.bento-card.hero { grid-column: span 2; }
-		.bento-card.breakdown { grid-column: span 2; }
-		.bento-card.top-sessions { grid-column: span 2; }
-	}
-
-	/* Mobile (1 col) */
-	@media (max-width: 479px) {
-		.bento-grid {
-			grid-template-columns: 1fr;
-		}
-		.bento-card.hero,
-		.bento-card.cost,
-		.bento-card.sessions,
-		.bento-card.avg,
-		.bento-card.breakdown,
-		.bento-card.top-sessions {
-			grid-column: span 1;
-		}
-	}
-
-	/* Base card styling */
-	.bento-card {
-		border-radius: var(--radius);
-		background: var(--surface-0);
-		border: 1px solid var(--border-subtle);
+	.bcard {
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: var(--radius, 0.75rem);
+		padding: 16px 18px;
+		position: relative;
 		overflow: hidden;
-		transition: all 250ms ease;
-		opacity: 0;
-		transform: translateY(8px);
+		transition: border-color 160ms ease, box-shadow 160ms ease;
+	}
+	.bcard:hover { border-color: color-mix(in oklch, var(--primary) 40%, var(--border)); }
+	.bcard.c2 { grid-column: span 2; }
+	.bcard.r2 { grid-row: span 2; }
+	.bflex { display: flex; flex-direction: column; }
+
+	.blabel {
+		display: flex; align-items: center; gap: 6px;
+		font-family: var(--font-mono, monospace);
+		font-size: 0.65rem; letter-spacing: 0.08em; text-transform: uppercase;
+		color: var(--muted-foreground); margin-bottom: 12px;
+	}
+	.blabel :global(svg) { opacity: 0.85; }
+
+	.bignum {
+		font-family: var(--font-display, Georgia, serif);
+		font-weight: 800; font-size: 2.35rem; letter-spacing: -0.03em; line-height: 1;
+		color: var(--foreground); font-variant-numeric: tabular-nums;
+	}
+	.bsub { margin-top: 10px; font-size: 0.75rem; color: var(--muted-foreground); }
+
+	.bempty { margin: auto 0; padding: 18px 0; text-align: center; color: var(--muted-foreground); font-size: 0.8125rem; opacity: 0.7; }
+
+	/* Spend-over-time bars */
+	.bars { display: flex; align-items: flex-end; gap: 4px; flex: 1; min-height: 120px; margin-top: auto; padding-top: 14px; }
+	.bars i {
+		flex: 1; min-width: 2px; min-height: 3px;
+		background: color-mix(in oklch, var(--foreground) 55%, transparent);
+		border-radius: 4px 4px 0 0; transition: background-color 160ms ease;
+	}
+	.bars i.acc { background: var(--primary); }
+	.bars:hover i { background: color-mix(in oklch, var(--foreground) 35%, transparent); }
+	.bars i:hover { background: var(--primary) !important; }
+
+	/* Cost-by-profile rows */
+	.brk { display: flex; flex-direction: column; gap: 11px; margin-top: 2px; }
+	.brk-row { display: grid; grid-template-columns: minmax(64px, 96px) 1fr auto; align-items: center; gap: 10px; }
+	.brk-name { font-size: 0.8125rem; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.brk-track { height: 6px; background: var(--muted); border-radius: 999px; overflow: hidden; }
+	.brk-fill { display: block; height: 100%; background: var(--primary); border-radius: 999px; transition: width 450ms ease; }
+	.brk-val { font-family: var(--font-mono, monospace); font-size: 0.75rem; font-weight: 600; color: var(--muted-foreground); text-align: right; }
+
+	/* Top-sessions rows */
+	.tops { display: flex; flex-direction: column; gap: 2px; margin: 0 -8px; }
+	.top-row {
+		display: grid; grid-template-columns: 20px minmax(0, 1fr) 56px auto 14px;
+		align-items: center; gap: 10px; width: 100%;
+		padding: 7px 8px; border: none; background: transparent; cursor: pointer;
+		border-radius: calc(var(--radius, 0.75rem) - 4px); text-align: left;
+		transition: background-color 120ms ease;
+	}
+	.top-row:hover { background: var(--hover-overlay); }
+	.top-rank {
+		display: grid; place-items: center; width: 20px; height: 20px;
+		border-radius: 6px; background: color-mix(in oklch, var(--primary) 15%, transparent);
+		color: var(--primary); font-size: 0.65rem; font-weight: 700; font-family: var(--font-mono, monospace);
+	}
+	.top-name { font-size: 0.8125rem; color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.top-track { height: 5px; background: var(--muted); border-radius: 999px; overflow: hidden; }
+	.top-fill { display: block; height: 100%; background: color-mix(in oklch, var(--primary) 75%, transparent); border-radius: 999px; }
+	.top-val { font-family: var(--font-mono, monospace); font-size: 0.75rem; font-weight: 600; color: var(--muted-foreground); text-align: right; }
+	.top-row :global(.top-arrow) { color: var(--muted-foreground); opacity: 0; transition: opacity 120ms ease; }
+	.top-row:hover :global(.top-arrow) { opacity: 1; }
+
+	/* Tablet: 2-col grid */
+	@media (max-width: 860px) {
+		.bento { grid-template-columns: 1fr 1fr; }
+		.bcard.c2 { grid-column: span 2; }
+		.bcard.r2 { grid-row: auto; }
+		.bars { min-height: 96px; }
 	}
 
-	.mounted .bento-card {
-		opacity: 1;
-		transform: translateY(0);
-		transition-delay: calc(var(--delay, 0) * 60ms);
-	}
-
-	.bento-card:hover {
-		border-color: var(--border-emphasis);
-		box-shadow: var(--shadow-sm);
-	}
-
-	.bento-card-inner {
-		padding: 1rem;
-		height: 100%;
-		display: flex;
-		flex-direction: column;
-	}
-
-	/* Stat labels and values */
-	.stat-label {
-		display: flex;
-		align-items: center;
-		gap: 0.375rem;
-		font-size: 0.75rem;
-		font-weight: 500;
-		color: var(--muted-foreground);
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		margin-bottom: 0.5rem;
-	}
-
-	.stat-label :global(svg) {
-		opacity: 0.7;
-	}
-
-	.stat-value {
-		font-size: 2rem;
-		font-weight: 700;
-		line-height: 1;
-		color: var(--foreground);
-		letter-spacing: -0.02em;
-	}
-
-	.stat-value.small {
-		font-size: 1.5rem;
-	}
-
-	.stat-value.mono, .mono {
-		font-family: var(--font-mono);
-		font-feature-settings: 'tnum' 1;
-	}
-
-	.stat-value.cost-value {
-		background: linear-gradient(135deg, var(--success) 0%, color-mix(in oklch, var(--success) 70%, var(--primary)) 100%);
-		-webkit-background-clip: text;
-		-webkit-text-fill-color: transparent;
-		background-clip: text;
-	}
-
-	.stat-detail {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		margin-top: 0.25rem;
-	}
-
-	.stat-breakdown {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		font-size: 0.75rem;
-		margin-top: 0.5rem;
-		font-family: var(--font-mono);
-	}
-
-	.stat-breakdown .in {
-		color: var(--info);
-	}
-
-	.stat-breakdown .out {
-		color: var(--warning);
-	}
-
-	.stat-breakdown .separator {
-		color: var(--muted-foreground);
-		opacity: 0.5;
-	}
-
-	/* Sparkline */
-	.sparkline {
-		margin-top: auto;
-		height: 32px;
-		width: 100%;
-		color: var(--primary);
-		opacity: 0.6;
-	}
-
-	/* Section headers */
-	.section-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		font-size: 0.75rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		color: var(--muted-foreground);
-		margin-bottom: 0.75rem;
-	}
-
-	.empty-state {
-		color: var(--muted-foreground);
-		font-size: 0.875rem;
-		text-align: center;
-		padding: 1.5rem;
-		opacity: 0.6;
-	}
-
-	/* ============================================
-	   BREAKDOWN LIST
-	   ============================================ */
-	.breakdown-list {
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-
-	.breakdown-item {
-		display: grid;
-		grid-template-columns: minmax(60px, 90px) 1fr auto;
-		align-items: center;
-		gap: 0.5rem;
-		opacity: 0;
-		animation: slideIn 300ms ease forwards;
-		animation-delay: calc(var(--i, 0) * 50ms + 200ms);
-	}
-
-	.mounted .breakdown-item {
-		opacity: 1;
-	}
-
-	@keyframes slideIn {
-		from { opacity: 0; transform: translateX(-8px); }
-		to { opacity: 1; transform: translateX(0); }
-	}
-
-	.breakdown-name {
-		font-size: 0.8125rem;
-		color: var(--foreground);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.breakdown-bar-container {
-		height: 6px;
-		background: var(--muted);
-		border-radius: calc(var(--radius) * 0.25);
-		overflow: hidden;
-	}
-
-	.breakdown-bar {
-		height: 100%;
-		background: var(--primary);
-		border-radius: calc(var(--radius) * 0.25);
-		transition: width 500ms ease;
-	}
-
-	.breakdown-cost {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		text-align: right;
-	}
-
-	/* ============================================
-	   SESSIONS LIST
-	   ============================================ */
-	.sessions-list {
-		display: flex;
-		flex-direction: column;
-		gap: 0.25rem;
-	}
-
-	.session-item {
-		display: flex;
-		align-items: center;
-		gap: 0.625rem;
-		padding: 0.5rem 0.625rem;
-		border-radius: calc(var(--radius) * 0.67);
-		background: transparent;
-		border: none;
-		color: var(--foreground);
-		cursor: pointer;
-		transition: all 180ms ease;
-		text-align: left;
-		width: 100%;
-		opacity: 0;
-		animation: slideIn 300ms ease forwards;
-		animation-delay: calc(var(--i, 0) * 50ms + 300ms);
-	}
-
-	.mounted .session-item {
-		opacity: 1;
-	}
-
-	.session-item:hover {
-		background: var(--muted);
-	}
-
-	.session-rank {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 20px;
-		height: 20px;
-		border-radius: calc(var(--radius) * 0.4);
-		background: color-mix(in oklch, var(--primary) 15%, transparent);
-		color: var(--primary);
-		font-size: 0.6875rem;
-		font-weight: 700;
-		flex-shrink: 0;
-	}
-
-	.session-title {
-		flex: 1;
-		font-size: 0.8125rem;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.session-cost {
-		font-size: 0.75rem;
-		color: var(--muted-foreground);
-		flex-shrink: 0;
-	}
-
-	/* ============================================
-	   MOBILE ADJUSTMENTS
-	   ============================================ */
-	@media (max-width: 639px) {
-		.stats-header {
-			padding: 0.75rem 1rem;
-		}
-
-		.stats-content {
-			padding: 0.75rem 1rem;
-		}
-
-		.stat-value {
-			font-size: 1.5rem;
-		}
-
-		.stat-value.small {
-			font-size: 1.25rem;
-		}
-
-		.bento-card-inner {
-			padding: 0.875rem;
-		}
-
-		.stat-breakdown {
-			flex-wrap: wrap;
-			gap: 0.25rem;
-		}
-
-		.stat-breakdown .separator {
-			display: none;
-		}
-	}
-
-	/* Touch targets */
-	@media (pointer: coarse) {
-		.stats-btn {
-			width: 44px;
-			height: 44px;
-		}
-
-		.date-pill {
-			padding: 0.5rem 1rem;
-			min-height: 44px;
-		}
-
-		.session-item {
-			min-height: 48px;
-		}
+	/* Mobile: single column */
+	@media (max-width: 539px) {
+		.st-head { padding: 18px 16px 0; }
+		.st-scroll { padding: 14px 16px 22px; }
+		.bento { grid-template-columns: 1fr; }
+		.bcard.c2 { grid-column: span 1; }
+		.bignum { font-size: 2rem; }
+		.top-track { display: none; }
+		.top-row { grid-template-columns: 20px minmax(0, 1fr) auto 14px; }
 	}
 </style>

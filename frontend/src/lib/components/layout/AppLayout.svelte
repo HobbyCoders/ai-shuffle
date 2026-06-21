@@ -56,12 +56,10 @@
 <div class="app-shell">
 	<AppTopBar
 		{isAdmin}
-		{isMobile}
 		{onNewSession}
 		{onOpenSessions}
 		{onOpenFeature}
 		{onOpenSpotlight}
-		onToggleSidebar={onOpenSessions}
 	/>
 
 	<div class="app-body">

@@ -10,7 +10,7 @@
 	 * - Enable/disable hooks
 	 * - Page-based navigation with breadcrumbs (no modals)
 	 */
-	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import {
 		hooks,
 		projectHooks,
@@ -27,7 +27,7 @@
 	import type { Hook, HookCreate, HookUpdate, HookTestResult } from '$lib/api/client';
 	import HookForm from '$lib/components/hooks/HookForm.svelte';
 	import BuildHookList from '$lib/components/layout/build/BuildHookList.svelte';
-	import { Loader2, Zap } from 'lucide-svelte';
+	import { Loader2, Check } from 'lucide-svelte';
 	import './card-design-system.css';
 
 	interface Props {
@@ -166,55 +166,34 @@
 
 <!-- ═══════════════════ CREATE / EDIT VIEW ═══════════════════ -->
 {:else if currentView === 'create' || currentView === 'edit'}
-	<FeaturePageLayout
-		icon={Zap}
-		title="Hooks"
-		breadcrumbs={[
-			{ label: 'Hooks', onclick: backToList },
-			{ label: currentView === 'edit' && selectedHook ? selectedHook.name : 'New Hook' }
-		]}
-		noPadding={true}
+	<StudioEditorShell
+		title={currentView === 'edit' && selectedHook ? selectedHook.name : 'New Hook'}
+		subtitle={currentView === 'edit' ? 'Hook' : 'Create a new hook'}
+		backLabel="Hooks"
+		onBack={backToList}
 	>
-		{#snippet footer()}
-			<button
-				class="fp-btn fp-btn--primary"
-				onclick={handleSave}
-				disabled={formSaving}
-			>
+		{#snippet actions()}
+			<button type="button" class="ed-btn primary" onclick={handleSave} disabled={formSaving}>
 				{#if formSaving}
 					<Loader2 size={14} class="animate-spin" />
-					<span class="btn-label">Saving...</span>
+					<span>Saving...</span>
 				{:else}
-					<span class="btn-label">{currentView === 'edit' ? 'Save Changes' : 'Create Hook'}</span>
+					<Check size={14} />
+					<span>{currentView === 'edit' ? 'Save' : 'Create'}</span>
 				{/if}
 			</button>
 		{/snippet}
-		{#snippet children()}
-			<div class="hooks-card card-system">
-				<HookForm
-					bind:this={formRef}
-					hook={selectedHook}
-					onSave={handleFormSave}
-				/>
-			</div>
-		{/snippet}
-	</FeaturePageLayout>
+		<HookForm
+			bind:this={formRef}
+			hook={selectedHook}
+			onSave={handleFormSave}
+		/>
+	</StudioEditorShell>
 
 {/if}
 
 
 <style>
-	.hooks-card {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		overflow: hidden;
-	}
-
-	.btn-label {
-		display: inline;
-	}
-
 	/* Spinner animation */
 	:global(.animate-spin) {
 		animation: spin 1s linear infinite;

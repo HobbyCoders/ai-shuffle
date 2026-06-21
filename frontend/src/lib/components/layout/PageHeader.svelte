@@ -19,8 +19,7 @@
 	 * The project/worktree context badge that used to render here now lives in the
 	 * ContextPillBar above the chat input, alongside the profile + branch pills.
 	 */
-	import { PanelLeftOpen, Mic } from 'lucide-svelte';
-	import { layout, sidebarCollapsed } from '$lib/stores/layout.svelte';
+	import { Mic } from 'lucide-svelte';
 	import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 	import { globalSttState, triggerToggle } from '$lib/services/globalStt';
 	import ClaudeStatusIndicator from '$lib/components/ClaudeStatusIndicator.svelte';
@@ -29,7 +28,6 @@
 
 	interface Props {
 		title: string;
-		showSidebarToggle?: boolean;
 		isMobile?: boolean;
 		hideGlobalStt?: boolean;
 		/** Profile selector — left cluster (desktop) / bottom rail start (mobile). */
@@ -42,7 +40,6 @@
 
 	let {
 		title,
-		showSidebarToggle = false,
 		isMobile = false,
 		hideGlobalStt = false,
 		profile,
@@ -50,24 +47,12 @@
 		actions
 	}: Props = $props();
 
-	let showToggle = $derived(showSidebarToggle && $sidebarCollapsed);
 	let showStt = $derived(isMobile && $hotkeyPreferences.globalSttEnabled && !hideGlobalStt);
 </script>
 
 <header class="page-header">
-	<!-- Row 1: toggle + title + meta (static row on mobile; flattened on desktop) -->
+	<!-- Row 1: title + meta (static row on mobile; flattened on desktop) -->
 	<div class="hdr-row1">
-		{#if showToggle || isMobile}
-			<button
-				class="sidebar-toggle"
-				onclick={(e) => { e.stopPropagation(); layout.toggleSidebar(); }}
-				title="Open sidebar"
-				aria-label="Open sidebar"
-			>
-				<PanelLeftOpen size={16} strokeWidth={1.5} />
-			</button>
-		{/if}
-
 		<h1 class="header-title">{title}</h1>
 
 		<div class="hdr-meta">
@@ -146,11 +131,10 @@
 	}
 
 	/* Desktop ordering across the flattened single row:
-	   [toggle] [profile] [meta] ...[title fills/centers]... [git/right]
+	   [profile] [meta] ...[title fills/centers]... [git/right]
 	   The title is an in-flow flex item that occupies the space between the
 	   side clusters. It grows to centre itself and shrinks (ellipsising) so it
 	   can never overlap the profile selector or git actions on narrow screens. */
-	.sidebar-toggle { order: 1; }
 	.hdr-profile { order: 2; }
 	.hdr-meta { order: 3; }
 	.header-title { order: 4; }
@@ -173,32 +157,6 @@
 		margin: 0;
 		line-height: 1;
 		pointer-events: none;
-	}
-
-	/* Sidebar toggle button */
-	.sidebar-toggle {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 28px;
-		height: 28px;
-		flex-shrink: 0;
-		background: transparent;
-		border: none;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: background-color 150ms ease, color 150ms ease;
-	}
-
-	.sidebar-toggle:hover {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-
-	.sidebar-toggle:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: -2px;
 	}
 
 	/* Header action buttons (mic) */
@@ -307,7 +265,6 @@
 		}
 
 		/* Reset desktop ordering / absolute centering. */
-		.sidebar-toggle,
 		.hdr-meta,
 		.hdr-profile,
 		.hdr-right {
@@ -337,7 +294,6 @@
 			flex-shrink: 0;
 		}
 
-		.sidebar-toggle,
 		.header-btn {
 			width: 36px;
 			height: 36px;
@@ -346,9 +302,6 @@
 
 	/* Reduced motion */
 	@media (prefers-reduced-motion: reduce) {
-		.sidebar-toggle {
-			transition: none;
-		}
 		.header-btn {
 			transition: none;
 		}

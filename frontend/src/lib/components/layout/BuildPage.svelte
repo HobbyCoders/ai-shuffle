@@ -266,7 +266,8 @@
 	@media (max-width: 639px) {
 		.bp-head { padding: 16px 16px 0; }
 		.bp-body.grid .bp-inner { padding: 14px 16px 32px; }
-		.bp-subnav { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; }
+		.bp-subnav { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+		.bp-subnav::-webkit-scrollbar { display: none; }
 		.bp-tab { flex-shrink: 0; }
 	}
 </style>
