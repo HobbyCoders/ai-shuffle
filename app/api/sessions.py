@@ -476,6 +476,20 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             logger.error(f"Failed to parse JSONL for session {session_id}: {e}")
             messages = []
 
+    # Mirror-mode drift check — no-op unless session_store_mode == "mirror".
+    # Pure observability: compares the Postgres transcript mirror against the
+    # JSONL we just read and logs any divergence (see app/core/session_store_verify).
+    # Read-only; offloaded to a worker thread so it never blocks the loop, and
+    # wrapped so a verification glitch can't affect the response.
+    if sdk_session_id:
+        from app.core.config import settings as _settings
+        if _settings.session_store_mode == "mirror":
+            try:
+                from app.core.session_store_verify import log_session_store_drift
+                await run_sync(log_session_store_drift, sdk_session_id, working_dir)
+            except Exception:
+                pass
+
     # Fallback 2: Try SDK get_session_messages() if custom parser failed.
     # The SDK handles JSONL parsing + conversation chain building independently,
     # so it may succeed where our parser has edge-case issues.
