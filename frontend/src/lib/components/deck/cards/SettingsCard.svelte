@@ -9,19 +9,18 @@
 	 */
 	import { onMount } from 'svelte';
 	import './card-design-system.css';
-	import { auth, username, isAdmin, claudeAuthenticated, githubAuthenticated } from '$lib/stores/auth.svelte';
+	import { auth, username, isAdmin } from '$lib/stores/auth.svelte';
 	import { api } from '$lib/api/client';
 	import type { Profile, WorkspaceConfig, WorkspaceValidation } from '$lib/api/client';
 	import type { Project } from '$lib/stores/types';
 	import { getWorkspaceConfig, validateWorkspacePath, setWorkspaceConfig, changePassword, startClaudeLogin, completeClaudeLogin } from '$lib/api/auth';
 	import ConnectorManager from '$lib/components/ConnectorManager.svelte';
 	import { slide, fade } from 'svelte/transition';
-	import { quintOut } from 'svelte/easing';
 	import { chatPreferences, type ChatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
-	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import { Settings } from 'lucide-svelte';
+	import { User, MessageSquare, KeyRound, Boxes, Plug, SlidersHorizontal, ScrollText } from 'lucide-svelte';
 	import AIToolsSettings from '$lib/components/settings/AIToolsSettings.svelte';
 
 	// Sub-components
@@ -41,29 +40,32 @@
 		mobile = false
 	}: Props = $props();
 
-	// Navigation - simplified to 3 main tabs
-	type Tab = 'account' | 'ai' | 'connectors' | 'system' | 'logs';
+	// Navigation — rail mirrors the mockup's information architecture.
+	type Tab = 'account' | 'chat' | 'connections' | 'ai' | 'connectors' | 'system' | 'logs';
 	let activeTab: Tab = $state('account');
 
-	const settingsTabs = $derived([
-		{ id: 'account' as Tab, label: 'Account' },
-		{ id: 'ai' as Tab, label: 'AI Models' },
-		...($isAdmin ? [{ id: 'connectors' as Tab, label: 'Connectors' }] : []),
-		...($isAdmin ? [{ id: 'system' as Tab, label: 'System' }] : []),
-		...($isAdmin ? [{ id: 'logs' as Tab, label: 'Logs' }] : [])
-	]);
-
-	// Collapsible sections state
-	let expandedSections: Set<string> = $state(new Set(['general']));
-
-	function toggleSection(section: string) {
-		if (expandedSections.has(section)) {
-			expandedSections.delete(section);
-		} else {
-			expandedSections.add(section);
-		}
-		expandedSections = new Set(expandedSections);
+	interface RailItem {
+		id: string;
+		label: string;
+		icon?: typeof User;
+		heading?: boolean;
+		count?: number | string;
 	}
+
+	const settingsTabs: RailItem[] = $derived([
+		{ id: 'account', label: 'Account', icon: User },
+		{ id: 'chat', label: 'Chat & Input', icon: MessageSquare },
+		{ id: 'connections', label: 'Connections', icon: KeyRound },
+		{ id: 'ai', label: 'AI Models', icon: Boxes },
+		...($isAdmin
+			? [
+					{ id: 'admin-divider', label: 'Admin', heading: true } as RailItem,
+					{ id: 'connectors', label: 'Connectors', icon: Plug },
+					{ id: 'system', label: 'System', icon: SlidersHorizontal },
+					{ id: 'logs', label: 'Logs', icon: ScrollText }
+				]
+			: [])
+	]);
 
 	// Data state
 	let profiles: Profile[] = $state([]);
@@ -381,46 +383,6 @@
 
 <!-- Define settings content as a local snippet to avoid duplication -->
 {#snippet settingsContent()}
-	<!-- Tab Bar -->
-			<nav class="tab-bar">
-				<button
-					class="tab-btn"
-					class:active={activeTab === 'account'}
-					onclick={() => activeTab = 'account'}
-				>
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-						<circle cx="12" cy="7" r="4"/>
-					</svg>
-					<span>Account</span>
-				</button>
-				<button
-					class="tab-btn"
-					class:active={activeTab === 'ai'}
-					onclick={() => activeTab = 'ai'}
-				>
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<path d="M12 2L2 7l10 5 10-5-10-5z"/>
-						<path d="M2 17l10 5 10-5"/>
-						<path d="M2 12l10 5 10-5"/>
-					</svg>
-					<span>AI Models</span>
-				</button>
-				{#if $isAdmin}
-					<button
-						class="tab-btn"
-						class:active={activeTab === 'system'}
-						onclick={() => activeTab = 'system'}
-					>
-						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-							<circle cx="12" cy="12" r="3"/>
-							<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-						</svg>
-						<span>System</span>
-					</button>
-				{/if}
-			</nav>
-
 			<!-- Content -->
 			<div class="content">
 				{#if error}
@@ -430,12 +392,22 @@
 					</div>
 				{/if}
 
-				<!-- ACCOUNT TAB -->
+				<!-- ACCOUNT -->
 				{#if activeTab === 'account'}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<!-- Profile -->
+						<div class="set-group">
+							<div class="set-grouphead">
+								<h3><User />Profile</h3>
+								<p>Your account on this install.</p>
+							</div>
+							<div class="set-row">
+								<div class="lab"><h4>Username</h4><p>The name you sign in with.</p></div>
+								<div class="ctl"><span class="ro-val">{$username ?? '—'}</span></div>
+							</div>
+						</div>
+
 						<GeneralSection
-							expanded={expandedSections.has('general')}
-							onToggle={() => toggleSection('general')}
 							{workspacePath}
 							onWorkspacePathChange={(v) => workspacePath = v}
 							{workspaceValidation}
@@ -449,8 +421,6 @@
 						/>
 
 						<SecuritySection
-							expanded={expandedSections.has('security')}
-							onToggle={() => toggleSection('security')}
 							{currentPassword}
 							onCurrentPasswordChange={(v) => currentPassword = v}
 							{newPassword}
@@ -462,10 +432,21 @@
 							{passwordChangeError}
 							onChangePassword={handleChangePassword}
 						/>
+					</div>
+				{/if}
 
+				<!-- CHAT & INPUT -->
+				{#if activeTab === 'chat'}
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<ChatBehaviorSection {chatPrefs} />
+						<HotkeysSection />
+					</div>
+				{/if}
+
+				<!-- CONNECTIONS -->
+				{#if activeTab === 'connections'}
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
 						<ConnectionsSection
-							expanded={expandedSections.has('connections')}
-							onToggle={() => toggleSection('connections')}
 							{claudeLoginLoading}
 							{claudeOAuthUrl}
 							{claudeAuthCode}
@@ -480,54 +461,43 @@
 							onConnectGithub={connectGithub}
 							onDisconnectGithub={disconnectGithub}
 						/>
-
-						<ChatBehaviorSection
-							expanded={expandedSections.has('chat-behavior')}
-							onToggle={() => toggleSection('chat-behavior')}
-							{chatPrefs}
-						/>
-
-						<HotkeysSection
-							expanded={expandedSections.has('hotkeys')}
-							onToggle={() => toggleSection('hotkeys')}
-						/>
 					</div>
 				{/if}
 
-				<!-- AI TAB -->
+				<!-- AI MODELS -->
 				{#if activeTab === 'ai'}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
 						<AIToolsSettings />
 					</div>
 				{/if}
 
-				<!-- CONNECTORS TAB -->
+				<!-- CONNECTORS -->
 				{#if activeTab === 'connectors' && $isAdmin}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
 						<ConnectorManager />
 					</div>
 				{/if}
 
-				<!-- SYSTEM TAB -->
+				<!-- SYSTEM -->
 				{#if activeTab === 'system' && $isAdmin}
-					<SystemTab
-						{expandedSections}
-						onToggleSection={toggleSection}
-						{securityInstructions}
-						onSecurityInstructionsChange={(v) => securityInstructions = v}
-						{defaultSecurityInstructions}
-						{isSecurityInstructionsCustomized}
-						{securityInstructionsChanged}
-						{loadingSecurityInstructions}
-						{savingSecurityInstructions}
-						{securityInstructionsSuccess}
-						{securityInstructionsError}
-						onSaveSecurityInstructions={saveSecurityInstructions}
-						onRevertSecurityInstructions={revertSecurityInstructions}
-					/>
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<SystemTab
+							{securityInstructions}
+							onSecurityInstructionsChange={(v) => securityInstructions = v}
+							{defaultSecurityInstructions}
+							{isSecurityInstructionsCustomized}
+							{securityInstructionsChanged}
+							{loadingSecurityInstructions}
+							{savingSecurityInstructions}
+							{securityInstructionsSuccess}
+							{securityInstructionsError}
+							onSaveSecurityInstructions={saveSecurityInstructions}
+							onRevertSecurityInstructions={revertSecurityInstructions}
+						/>
+					</div>
 				{/if}
 
-				<!-- LOGS TAB -->
+				<!-- LOGS -->
 				{#if activeTab === 'logs' && $isAdmin}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
 						<LogsTab />
@@ -536,21 +506,18 @@
 			</div>
 {/snippet}
 
-<FeaturePageLayout icon={Settings} title="Settings">
-	{#snippet headerTabs()}
-		<div class="fp-tab-bar">
-			{#each settingsTabs as tab}
-				<button class="fp-tab" class:active={activeTab === tab.id} onclick={() => activeTab = tab.id}>
-					{tab.label}
-				</button>
-			{/each}
-		</div>
-	{/snippet}
-
-	<div class="settings card-system embedded">
+<StudioEditorShell
+	title="Settings"
+	subtitle="Account, connections, AI models & system"
+	sections={settingsTabs}
+	active={activeTab}
+	onSelect={(id) => (activeTab = id as Tab)}
+	railLabel="Settings sections"
+>
+	<div class="settings card-system">
 		{@render settingsContent()}
 	</div>
-</FeaturePageLayout>
+</StudioEditorShell>
 
 <!-- Revert security instructions confirmation -->
 <ConfirmDialog
@@ -569,75 +536,31 @@
 	   Theme-compliant using CSS variables
 	   ======================================== */
 
+	/* Hosted inside StudioEditorShell: the shell owns scroll, width (1240px),
+	   padding and the side-rail. Here we just lay out the section stack. */
 	.settings {
 		display: flex;
 		flex-direction: column;
-		height: 100%;
 		background: transparent;
 		color: var(--card-foreground);
 		font-family: var(--font-sans);
 	}
 
-	/* Tab Bar */
-	.tab-bar {
-		display: flex;
-		gap: 2px;
-		padding: 12px 16px;
-		background: var(--muted);
-		border-bottom: 1px solid var(--border);
-		flex-shrink: 0;
-	}
-
-	.tab-btn {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 8px 16px;
-		background: transparent;
-		border: none;
-		border-radius: var(--radius);
-		color: var(--muted-foreground);
-		font-size: 0.875rem;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 150ms ease;
-	}
-
-	.tab-btn:hover {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-
-	.tab-btn:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.tab-btn.active {
-		background: var(--selection-bg-emphasis);
-		color: var(--selection-text);
-		box-shadow: var(--selection-shadow);
-	}
-
-	.tab-btn svg {
-		width: 18px;
-		height: 18px;
-		/* Ensure icon inherits color from parent button */
-		stroke: currentColor;
-		transition: stroke 150ms ease;
-	}
-
-	/* Content Area */
 	.content {
-		flex: 1;
-		overflow-y: auto;
-		padding: 16px;
+		min-width: 0;
 	}
 
+	/* Block flow so each .set-group's own margin-bottom governs spacing —
+	   matches the 5 editors exactly (no extra flex gap stacking). */
 	.tab-content {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
+		min-width: 0;
+	}
+
+	/* Read-only field value (e.g. username in Profile) */
+	.ro-val {
+		font-size: 13.5px;
+		font-weight: 500;
+		color: var(--foreground);
 	}
 
 	/* Alerts & Messages */
@@ -670,15 +593,4 @@
 	.close-btn:hover {
 		opacity: 1;
 	}
-
-	/* -----------------------------------------------------------------------
-	   EMBEDDED MODE
-	   ----------------------------------------------------------------------- */
-
-	/* Hide the original tab bar when embedded (replaced by fp-tab-bar in header) */
-	.settings.embedded .tab-bar {
-		display: none;
-	}
-
-
 </style>

@@ -8,10 +8,10 @@
 	 */
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
+	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import { toast } from '$lib/stores/toast';
 	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
-	import { Users, Upload, Sparkles, Plus, Wrench, Bot, Settings, FileText, SlidersHorizontal, Check } from 'lucide-svelte';
+	import { Users, Wrench, Bot, Settings, FileText, SlidersHorizontal, Check } from 'lucide-svelte';
 	import { profiles as profilesStore, appData as tabsStore } from '$lib/stores/app-data.svelte';
 	import { groups as groupsStore } from '$lib/stores/groups.svelte';
 	import {
@@ -24,8 +24,8 @@
 	import './card-design-system.css';
 
 	// Sub-components
-	import ProfileList from './profiles/ProfileList.svelte';
 	import ProfileForm from './profiles/ProfileForm.svelte';
+	import BuildProfileGrid from '$lib/components/layout/build/BuildProfileGrid.svelte';
 	import { computeAiToolCount, computeEffectiveAiTools } from './profiles/toolAccess';
 
 	// Icon map for tabs
@@ -82,10 +82,18 @@
 
 	interface Props {
 		mobile?: boolean;
+		/** When embedded in the Build page, render the header-less card grid
+		 *  instead of the FeaturePageLayout list. The editor (form) is unchanged. */
+		embedded?: boolean;
+		/** Reports whether the section is in a full-canvas detail/editor state so
+		 *  the Build page can hide its heading + sub-nav while editing. */
+		onDetailChange?: (detail: boolean) => void;
 	}
 
 	let {
-		mobile = false
+		mobile = false,
+		embedded = false,
+		onDetailChange
 	}: Props = $props();
 
 	// Internal data state - loaded from stores/API
@@ -128,6 +136,12 @@
 	let viewMode = $state<'list' | 'form'>('list');
 	let editingProfile = $state<Profile | null>(null);
 	let activeTab = $state('general');
+
+	// Tell the Build page when we enter/leave the editor (form takes the canvas)
+	// so it can hide its heading + sub-nav while editing.
+	$effect(() => {
+		if (embedded) onDetailChange?.(viewMode === 'form');
+	});
 
 	// Profile form state
 	let profileForm = $state({
@@ -809,27 +823,20 @@
 </script>
 
 
+<!-- Shared hidden file input (used by both the embedded grid and the list view) -->
+<input type="file" accept=".json" bind:this={profileImportInput} onchange={handleImport} class="hidden" />
+
 {#if viewMode === 'form'}
-		<FeaturePageLayout
-			icon={Users}
-			title="Profiles"
-			breadcrumbs={[
-				{ label: 'Profiles', onclick: backToList },
-				{ label: editingProfile ? editingProfile.name : 'New Profile' }
-			]}
-			noPadding={true}
+		<StudioEditorShell
+			title={editingProfile ? editingProfile.name : 'New Profile'}
+			subtitle={editingProfile ? `Profile · ${getModelDisplay(profileForm.model)}` : 'Create a new profile'}
+			backLabel="Profiles"
+			onBack={backToList}
+			sections={tabs.map((t) => ({ id: t.id, label: t.label, icon: tabIcons[t.id as keyof typeof tabIcons] }))}
+			active={activeTab}
+			onSelect={(id) => (activeTab = id)}
+			railLabel="Profile sections"
 		>
-			{#snippet headerTabs()}
-				<div class="fp-tab-bar">
-					{#each tabs as tab}
-						{@const IconComponent = tabIcons[tab.id as keyof typeof tabIcons]}
-						<button class="fp-tab" class:active={activeTab === tab.id} onclick={() => (activeTab = tab.id)}>
-							<IconComponent size={14} />
-							<span class="tab-label">{tab.label}</span>
-						</button>
-					{/each}
-				</div>
-			{/snippet}
 
 			<ProfileForm
 				{activeTab}
@@ -868,56 +875,31 @@
 				{getModelDisplay}
 			/>
 
-			{#snippet footer()}
-				<div class="pf-form-footer">
-					<button type="button" class="pf-btn-save" onclick={saveProfile} disabled={!profileForm.name}>
-						<Check size={14} />
-						<span>Save Profile</span>
-					</button>
-				</div>
+			{#snippet actions()}
+				<button type="button" class="ed-btn primary" onclick={saveProfile} disabled={!profileForm.name}>
+					<Check size={14} />
+					<span>Save</span>
+				</button>
 			{/snippet}
-		</FeaturePageLayout>
+		</StudioEditorShell>
 	{:else}
-		<!-- Embedded List View -->
-		<FeaturePageLayout
-			icon={Users}
-			title="Profiles"
-			itemCount={profiles.length}
-			itemLabel="profiles"
-		>
-			{#snippet footer()}
-				<div class="pf-footer">
-					<div class="pf-footer-left">
-						<button class="fp-btn fp-btn--secondary" onclick={triggerImport} disabled={profileImporting} title="Import">
-							<Upload size={14} /> <span class="btn-label">Import</span>
-						</button>
-						<button class="fp-btn fp-btn--secondary" onclick={() => showGenerateDialog = true} title="AI Generate">
-							<Sparkles size={14} /> <span class="btn-label">Generate</span>
-						</button>
-					</div>
-					<div class="pf-footer-right">
-						<button class="fp-btn fp-btn--primary" onclick={openNewForm} title="New Profile">
-							<Plus size={14} /> <span class="btn-label">New Profile</span>
-						</button>
-					</div>
-				</div>
-			{/snippet}
-
-			<input type="file" accept=".json" bind:this={profileImportInput} onchange={handleImport} class="hidden" />
-
-			<ProfileList
-				{profiles}
-				{groups}
-				{allSubagents}
-				{builtinAgentIds}
-				onEditProfile={openEditForm}
-				onExportProfile={handleExportProfile}
-				onDeleteProfile={handleDeleteProfile}
-				onRevertProfile={handleRevertProfile}
-				{getModelDisplay}
-				{getProfileToolCount}
-			/>
-		</FeaturePageLayout>
+		<!-- Build page: header-less card grid (heading + sub-nav live in BuildPage) -->
+		<BuildProfileGrid
+			{profiles}
+			{groups}
+			{allSubagents}
+			{builtinAgentIds}
+			importing={profileImporting}
+			onEditProfile={openEditForm}
+			onNewProfile={openNewForm}
+			onGenerate={() => showGenerateDialog = true}
+			onImport={triggerImport}
+			onExportProfile={handleExportProfile}
+			onDeleteProfile={handleDeleteProfile}
+			onRevertProfile={handleRevertProfile}
+			{getModelDisplay}
+			{getProfileToolCount}
+		/>
 	{/if}
 
 <!-- AI Generate Dialog -->
@@ -944,75 +926,4 @@
 	.hidden {
 		display: none;
 	}
-
-	.btn-label {
-		display: inline;
-	}
-
-	/* Tab labels — hide on small screens, icons only */
-	.tab-label {
-		display: none;
-	}
-
-	@media (min-width: 480px) {
-		.tab-label {
-			display: inline;
-		}
-	}
-
-	/* Footer */
-	.pf-footer {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		width: 100%;
-	}
-
-	.pf-footer-left {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-
-	.pf-footer-right {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-	}
-
-	.pf-btn-save {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 8px 22px;
-		background: linear-gradient(135deg, var(--primary), color-mix(in oklch, var(--primary) 80%, #2FA88D));
-		border: none;
-		border-radius: var(--radius-md, 10px);
-		color: var(--primary-foreground);
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 600;
-		cursor: pointer;
-		transition: all 200ms;
-	}
-
-	.pf-btn-save:hover {
-		filter: brightness(1.1);
-		box-shadow: 0 0 12px color-mix(in oklch, var(--primary) 30%, transparent);
-	}
-
-	.pf-btn-save:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-		filter: none;
-		box-shadow: none;
-	}
-
-	.pf-form-footer {
-		display: flex;
-		align-items: center;
-		justify-content: flex-end;
-		gap: 8px;
-		width: 100%;
-	}
-
 </style>

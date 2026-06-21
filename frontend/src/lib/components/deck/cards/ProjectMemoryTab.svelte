@@ -2,7 +2,10 @@
 	/**
 	 * ProjectMemoryTab - CLAUDE.md memory file management tab
 	 *
-	 * Features:
+	 * Studio-v2 grouped-field design (.set-group), mirroring the Profile
+	 * editor. Card shell primitives come from project-tabs.css (.ptab);
+	 * the preview/editor bodies are styled locally with theme tokens.
+	 *
 	 * - View/edit CLAUDE.md at project root and .claude/CLAUDE.md
 	 * - Create new memory files
 	 * - Delete memory files with confirmation
@@ -17,7 +20,7 @@
 	} from '$lib/stores/projectMemory.svelte';
 	import type { MemoryFile, MemoryLocation } from '$lib/api/projectMemory';
 	import { FileText, Plus, Trash2, X, Save, RotateCcw, FolderOpen, Lock } from 'lucide-svelte';
-	import './card-design-system.css';
+	import './project-tabs.css';
 
 	interface Props {
 		projectId: string;
@@ -139,408 +142,186 @@
 	}
 </script>
 
-<div class="card-system memory-tab">
+<div class="ptab">
 	{#if $memoryLoading}
-		<div class="card-content">
-			<div class="loading-container">
-				<div class="card-spinner"></div>
-			</div>
-		</div>
+		<div class="ptab-loading"><div class="ptab-spinner"></div></div>
 	{:else}
-		<div class="card-content">
-			<div class="centered-content">
-				{#if $memoryError}
-					<div class="card-error-banner">
-						<span class="flex-1">{$memoryError}</span>
-						<button onclick={() => projectMemory.clearError()}>
-							<X size={14} />
-						</button>
+		{#if $memoryError}
+			<div class="err-banner">
+				<span class="flex-1">{$memoryError}</span>
+				<button onclick={() => projectMemory.clearError()} aria-label="Dismiss error"><X size={15} /></button>
+			</div>
+		{/if}
+
+		{#each $allMemoryFiles as file (file.location)}
+			{@const meta = LOCATION_META[file.location]}
+			{@const isEditing = editingLocation === file.location}
+			{@const isDeleting = deletingLocation === file.location}
+			{@const MetaIcon = meta.icon}
+
+			<div class="set-group">
+				<!-- Header -->
+				<div class="set-grouphead grouphead-row">
+					<div>
+						<h3>
+							<MetaIcon />{meta.label}
+							{#if file.exists}<span class="badge success">Active</span>{:else}<span class="badge muted">Not created</span>{/if}
+						</h3>
+						<p class="mpath">{file.file_path}</p>
+					</div>
+					<div class="head-acts">
+						{#if file.exists && !isEditing}
+							<button class="icon-btn" onclick={() => startEdit(file)} title="Edit"><FileText size={14} /></button>
+							<button class="icon-btn danger" onclick={() => (deletingLocation = file.location)} title="Delete"><Trash2 size={14} /></button>
+						{:else if !file.exists && !isEditing}
+							<button class="ed-btn sm primary" onclick={() => startCreate(file.location)}><Plus size={14} /> Create</button>
+						{/if}
+					</div>
+				</div>
+
+				<!-- Delete confirmation -->
+				{#if isDeleting && !isEditing}
+					<div class="mem-confirm">
+						<p>Delete <strong>{file.file_path}</strong>? This cannot be undone.</p>
+						<div class="mem-confirm-acts">
+							<button class="ed-btn sm" onclick={() => (deletingLocation = null)} disabled={deleteLoading}>Cancel</button>
+							<button class="ed-btn sm danger" onclick={() => handleDelete(file.location)} disabled={deleteLoading}>
+								{deleteLoading ? 'Deleting…' : 'Delete'}
+							</button>
+						</div>
 					</div>
 				{/if}
 
-				{#each $allMemoryFiles as file (file.location)}
-					{@const meta = LOCATION_META[file.location]}
-					{@const isEditing = editingLocation === file.location}
-					{@const isDeleting = deletingLocation === file.location}
-
-					<div class="memory-section">
-						<!-- Section Header -->
-						<div class="memory-header">
-							<div class="memory-header-left">
-								<div class="memory-icon" class:memory-icon--active={file.exists}>
-									{#if meta.icon}
-										{@const MetaIcon = meta.icon}
-										<MetaIcon size={16} />
-									{/if}
-								</div>
-								<div class="memory-header-info">
-									<div class="memory-header-title">
-										<span class="memory-label">{meta.label}</span>
-										{#if file.exists}
-											<span class="card-badge card-badge--success">Active</span>
-										{:else}
-											<span class="card-badge card-badge--muted">Not created</span>
-										{/if}
-									</div>
-									<span class="memory-path">{file.file_path}</span>
-								</div>
-							</div>
-							<div class="memory-header-actions">
-								{#if file.exists && !isEditing}
-									<button
-										class="card-action-btn"
-										onclick={() => startEdit(file)}
-										title="Edit"
-									>
-										<FileText size={14} />
-									</button>
-									<button
-										class="card-action-btn card-action-btn--destructive"
-										onclick={() => (deletingLocation = file.location)}
-										title="Delete"
-									>
-										<Trash2 size={14} />
-									</button>
-								{:else if !file.exists && !isEditing}
-									<button
-										class="memory-create-btn"
-										onclick={() => startCreate(file.location)}
-									>
-										<Plus size={14} /> Create
-									</button>
-								{/if}
+				<!-- Editor -->
+				{#if isEditing}
+					<div class="mem-editor">
+						<textarea
+							class="mem-textarea"
+							value={editContent}
+							oninput={handleInput}
+							placeholder="Enter markdown instructions for Claude…"
+							rows={12}
+							spellcheck={false}
+						></textarea>
+						<div class="mem-foot">
+							<span class="hint">Markdown supported</span>
+							<div class="mem-foot-acts">
+								<button class="ed-btn sm" onclick={cancelEdit} disabled={$memorySaving}><RotateCcw size={12} /> Cancel</button>
+								<button class="ed-btn sm primary" onclick={handleSave} disabled={$memorySaving || !isDirty}>
+									<Save size={12} /> {$memorySaving ? 'Saving…' : 'Save'}
+								</button>
 							</div>
 						</div>
-
-						<!-- Delete Confirmation -->
-						{#if isDeleting && !isEditing}
-							<div class="memory-delete-confirm">
-								<p class="delete-confirm-text">
-									Delete <strong>{file.file_path}</strong>? This cannot be undone.
-								</p>
-								<div class="delete-confirm-actions">
-									<button
-										onclick={() => (deletingLocation = null)}
-										disabled={deleteLoading}
-										class="card-btn-secondary"
-									>
-										Cancel
-									</button>
-									<button
-										onclick={() => handleDelete(file.location)}
-										disabled={deleteLoading}
-										class="card-btn-destructive"
-									>
-										{#if deleteLoading}
-											<div class="card-spinner card-spinner--small"></div>
-										{/if}
-										Delete
-									</button>
-								</div>
-							</div>
-						{/if}
-
-						<!-- Editor -->
-						{#if isEditing}
-							<div class="memory-editor">
-								<textarea
-									class="memory-textarea"
-									value={editContent}
-									oninput={handleInput}
-									placeholder="Enter markdown instructions for Claude..."
-									rows={12}
-									spellcheck={false}
-								></textarea>
-								<div class="memory-editor-footer">
-									<span class="memory-editor-hint">
-										Markdown supported
-									</span>
-									<div class="memory-editor-actions">
-										<button
-											class="card-btn-secondary"
-											onclick={cancelEdit}
-											disabled={$memorySaving}
-										>
-											<RotateCcw size={12} /> Cancel
-										</button>
-										<button
-											class="card-btn-primary"
-											onclick={handleSave}
-											disabled={$memorySaving || !isDirty}
-										>
-											{#if $memorySaving}
-												<div class="card-spinner card-spinner--small"></div>
-											{:else}
-												<Save size={12} />
-											{/if}
-											Save
-										</button>
-									</div>
-								</div>
-							</div>
-						{:else if file.exists}
-							<!-- File Info / Preview -->
-							<div class="memory-preview" onclick={() => startEdit(file)} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && startEdit(file)}>
-								{#if file.content.trim()}
-									<pre class="memory-preview-text">{file.content.length > 500 ? file.content.slice(0, 500) + '...' : file.content}</pre>
-								{:else}
-									<p class="memory-preview-empty">File is empty. Click to edit.</p>
-								{/if}
-								<div class="memory-meta">
-									<span class="memory-meta-item">{formatSize(file.size)}</span>
-									{#if file.updated_at}
-										<span class="memory-meta-item">Modified {formatDate(file.updated_at)}</span>
-									{/if}
-								</div>
-							</div>
-						{:else if !isEditing}
-							<!-- Empty state for non-existent file -->
-							<div class="memory-empty">
-								<p class="memory-empty-text">{meta.description}</p>
-							</div>
-						{/if}
 					</div>
-				{/each}
-
-				<!-- Show empty state if no files returned at all -->
-				{#if $allMemoryFiles.length === 0 && !$memoryLoading}
-					<div class="card-empty-state">
-						<FileText class="card-empty-icon" />
-						<p class="card-empty-title">No memory files</p>
-						<p class="card-empty-description">
-							CLAUDE.md files provide persistent instructions and context for Claude Code sessions.
-						</p>
+				{:else if file.exists}
+					<!-- Preview -->
+					<div class="mem-preview" onclick={() => startEdit(file)} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && startEdit(file)}>
+						{#if file.content.trim()}
+							<pre class="mem-pre">{file.content.length > 500 ? file.content.slice(0, 500) + '…' : file.content}</pre>
+						{:else}
+							<p class="mem-empty-line">File is empty. Click to edit.</p>
+						{/if}
+						<div class="mem-meta">
+							<span>{formatSize(file.size)}</span>
+							{#if file.updated_at}<span>Modified {formatDate(file.updated_at)}</span>{/if}
+						</div>
 					</div>
+				{:else}
+					<!-- Empty (not created) -->
+					<div class="mem-empty"><p>{meta.description}</p></div>
 				{/if}
 			</div>
-		</div>
+		{/each}
+
+		<!-- No files at all -->
+		{#if $allMemoryFiles.length === 0 && !$memoryLoading}
+			<div class="empty-state">
+				<FileText />
+				<p class="es-title">No memory files</p>
+				<p class="es-desc">CLAUDE.md files provide persistent instructions and context for Claude Code sessions.</p>
+			</div>
+		{/if}
 	{/if}
 </div>
 
 <style>
-	.memory-tab {
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		background: var(--card);
-		overflow: hidden;
+	.mpath {
+		margin: 5px 0 0;
+		font-family: var(--font-mono, monospace);
+		font-size: 11.5px;
+		color: var(--muted-foreground);
+		word-break: break-all;
 	}
 
-	.centered-content {
+	/* Delete confirmation */
+	.mem-confirm {
+		padding: 13px 18px;
+		background: color-mix(in oklch, var(--destructive) 6%, var(--card));
+		border-bottom: 1px solid color-mix(in oklch, var(--destructive) 18%, transparent);
+	}
+	.mem-confirm p {
+		margin: 0 0 10px;
+		font-size: 12.5px;
+		color: var(--foreground);
+	}
+	.mem-confirm-acts {
+		display: flex;
+		gap: 8px;
+	}
+
+	/* Editor */
+	.mem-textarea {
 		width: 100%;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-5, 20px);
-	}
-
-	.flex-1 {
-		flex: 1;
-	}
-
-	.loading-container {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: var(--space-8);
-	}
-
-	/* -----------------------------------------------------------------------
-	   MEMORY SECTION
-	   ----------------------------------------------------------------------- */
-
-	.memory-section {
-		border: 1px solid var(--border-subtle, color-mix(in oklch, var(--border) 60%, transparent));
-		border-radius: var(--radius-md, 8px);
-		overflow: hidden;
-		background: var(--surface-0, var(--card));
-		transition: border-color 0.15s ease;
-	}
-
-	.memory-section:hover {
-		border-color: var(--border-default, var(--border));
-	}
-
-	/* -----------------------------------------------------------------------
-	   MEMORY HEADER
-	   ----------------------------------------------------------------------- */
-
-	.memory-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-3, 12px);
-		padding: var(--space-3, 12px) var(--space-4, 16px);
-		background: var(--surface-1, color-mix(in oklch, var(--muted) 60%, transparent));
-		border-bottom: 1px solid var(--border-subtle, color-mix(in oklch, var(--border) 60%, transparent));
-	}
-
-	.memory-header-left {
-		display: flex;
-		align-items: center;
-		gap: var(--space-3, 12px);
-		flex: 1;
-		min-width: 0;
-	}
-
-	.memory-icon {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 32px;
-		height: 32px;
-		border-radius: var(--radius, 6px);
-		background: var(--surface-2, color-mix(in oklch, var(--muted) 80%, transparent));
-		color: var(--text-tertiary, color-mix(in oklch, var(--muted-foreground) 70%, transparent));
-		flex-shrink: 0;
-	}
-
-	.memory-icon--active {
-		background: color-mix(in oklch, var(--primary) 15%, transparent);
-		color: var(--primary);
-	}
-
-	.memory-header-info {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		min-width: 0;
-	}
-
-	.memory-header-title {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2, 8px);
-	}
-
-	.memory-label {
-		font-weight: 600;
-		font-size: var(--text-base, 0.8125rem);
-		color: var(--text-primary, var(--foreground));
-	}
-
-	.memory-path {
-		font-size: var(--text-xs, 0.6875rem);
-		font-family: var(--card-font-mono, 'JetBrains Mono', 'SF Mono', monospace);
-		color: var(--text-tertiary, color-mix(in oklch, var(--muted-foreground) 70%, transparent));
-	}
-
-	.memory-header-actions {
-		display: flex;
-		align-items: center;
-		gap: var(--space-1, 4px);
-		flex-shrink: 0;
-	}
-
-	/* -----------------------------------------------------------------------
-	   CREATE BUTTON
-	   ----------------------------------------------------------------------- */
-
-	.memory-create-btn {
-		display: inline-flex;
-		align-items: center;
-		gap: var(--space-1, 4px);
-		padding: var(--space-1, 4px) var(--space-3, 12px);
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 500;
-		border-radius: var(--radius, 6px);
-		background: color-mix(in oklch, var(--primary) 15%, transparent);
-		color: var(--primary);
-		border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
-		cursor: pointer;
-		transition: all 0.15s ease;
-		white-space: nowrap;
-	}
-
-	.memory-create-btn:hover {
-		background: color-mix(in oklch, var(--primary) 25%, transparent);
-		border-color: color-mix(in oklch, var(--primary) 50%, transparent);
-		box-shadow: 0 0 12px color-mix(in oklch, var(--primary) 20%, transparent);
-	}
-
-	/* -----------------------------------------------------------------------
-	   DELETE CONFIRMATION
-	   ----------------------------------------------------------------------- */
-
-	.memory-delete-confirm {
-		padding: var(--space-3, 12px) var(--space-4, 16px);
-		background: color-mix(in oklch, var(--destructive) 5%, var(--card));
-		border-bottom: 1px solid color-mix(in oklch, var(--destructive) 15%, transparent);
-	}
-
-	/* -----------------------------------------------------------------------
-	   EDITOR
-	   ----------------------------------------------------------------------- */
-
-	.memory-editor {
-		display: flex;
-		flex-direction: column;
-	}
-
-	.memory-textarea {
-		width: 100%;
-		min-height: 200px;
-		max-height: 500px;
-		padding: var(--space-4, 16px);
-		font-family: var(--card-font-mono, 'JetBrains Mono', 'SF Mono', monospace);
-		font-size: var(--text-sm, 0.75rem);
+		min-height: 220px;
+		max-height: 520px;
+		padding: 14px 18px;
+		font-family: var(--font-mono, monospace);
+		font-size: 12.5px;
 		line-height: 1.6;
-		color: var(--text-primary, var(--foreground));
-		background: var(--card);
+		color: var(--foreground);
+		background: var(--background);
 		border: none;
 		outline: none;
 		resize: vertical;
 		tab-size: 2;
+		display: block;
 	}
-
-	.memory-textarea::placeholder {
-		color: var(--text-tertiary, color-mix(in oklch, var(--muted-foreground) 50%, transparent));
+	.mem-textarea::placeholder {
+		color: var(--muted-foreground);
+		opacity: 0.6;
 	}
-
-	.memory-editor-footer {
+	.mem-foot {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: var(--space-3, 12px);
-		padding: var(--space-2, 8px) var(--space-4, 16px);
-		background: var(--surface-1, color-mix(in oklch, var(--muted) 60%, transparent));
-		border-top: 1px solid var(--border-subtle, color-mix(in oklch, var(--border) 60%, transparent));
+		gap: 12px;
+		padding: 10px 14px;
+		background: var(--muted);
+		border-top: 1px solid var(--border);
 	}
-
-	.memory-editor-hint {
-		font-size: var(--text-xs, 0.6875rem);
-		color: var(--text-tertiary, color-mix(in oklch, var(--muted-foreground) 70%, transparent));
-	}
-
-	.memory-editor-actions {
+	.mem-foot-acts {
 		display: flex;
-		align-items: center;
-		gap: var(--space-2, 8px);
+		gap: 8px;
 	}
 
-	/* -----------------------------------------------------------------------
-	   PREVIEW
-	   ----------------------------------------------------------------------- */
-
-	.memory-preview {
-		padding: var(--space-3, 12px) var(--space-4, 16px);
+	/* Preview */
+	.mem-preview {
+		padding: 14px 18px;
 		cursor: pointer;
-		transition: background 0.15s ease;
+		transition: background 0.12s ease;
 	}
-
-	.memory-preview:hover {
-		background: var(--surface-hover, color-mix(in oklch, var(--muted) 40%, transparent));
+	.mem-preview:hover {
+		background: var(--hover-overlay, color-mix(in oklch, var(--muted) 40%, transparent));
 	}
-
-	.memory-preview:focus-visible {
+	.mem-preview:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
 	}
-
-	.memory-preview-text {
-		font-family: var(--card-font-mono, 'JetBrains Mono', 'SF Mono', monospace);
-		font-size: var(--text-xs, 0.6875rem);
+	.mem-pre {
+		font-family: var(--font-mono, monospace);
+		font-size: 11.5px;
 		line-height: 1.6;
-		color: var(--text-secondary, var(--muted-foreground));
+		color: var(--muted-foreground);
 		white-space: pre-wrap;
 		word-break: break-word;
 		margin: 0;
@@ -549,108 +330,40 @@
 		mask-image: linear-gradient(to bottom, black 80%, transparent 100%);
 		-webkit-mask-image: linear-gradient(to bottom, black 80%, transparent 100%);
 	}
-
-	.memory-preview-empty {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-tertiary, color-mix(in oklch, var(--muted-foreground) 50%, transparent));
+	.mem-empty-line {
+		font-size: 12.5px;
+		color: var(--muted-foreground);
 		font-style: italic;
 		margin: 0;
 	}
-
-	.memory-meta {
+	.mem-meta {
 		display: flex;
 		align-items: center;
-		gap: var(--space-3, 12px);
-		margin-top: var(--space-2, 8px);
-		padding-top: var(--space-2, 8px);
-		border-top: 1px solid var(--border-subtle, color-mix(in oklch, var(--border) 40%, transparent));
+		gap: 12px;
+		margin-top: 10px;
+		padding-top: 10px;
+		border-top: 1px solid var(--border);
+		font-size: 11px;
+		color: var(--muted-foreground);
 	}
 
-	.memory-meta-item {
-		font-size: var(--text-xs, 0.6875rem);
-		color: var(--text-tertiary, color-mix(in oklch, var(--muted-foreground) 70%, transparent));
+	/* Empty (not created) */
+	.mem-empty {
+		padding: 13px 18px;
 	}
-
-	/* -----------------------------------------------------------------------
-	   EMPTY STATE
-	   ----------------------------------------------------------------------- */
-
-	.memory-empty {
-		padding: var(--space-3, 12px) var(--space-4, 16px);
-	}
-
-	.memory-empty-text {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-tertiary, color-mix(in oklch, var(--muted-foreground) 70%, transparent));
+	.mem-empty p {
 		margin: 0;
+		font-size: 12.5px;
+		color: var(--muted-foreground);
 	}
 
-	/* -----------------------------------------------------------------------
-	   BUTTON OVERRIDES
-	   ----------------------------------------------------------------------- */
-
-	.card-btn-secondary {
-		display: inline-flex;
-		align-items: center;
-		gap: var(--space-1, 4px);
-		padding: var(--space-1, 4px) var(--space-3, 12px);
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 500;
-		border-radius: var(--radius, 6px);
-		white-space: nowrap;
-	}
-
-	.card-btn-primary {
-		display: inline-flex;
-		align-items: center;
-		gap: var(--space-1, 4px);
-		padding: var(--space-1, 4px) var(--space-3, 12px);
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 500;
-		border-radius: var(--radius, 6px);
-		background: var(--primary);
-		color: var(--primary-foreground);
-		border: 1px solid var(--primary);
-		cursor: pointer;
-		transition: all 0.15s ease;
-		white-space: nowrap;
-	}
-
-	.card-btn-primary:hover:not(:disabled) {
-		filter: brightness(1.1);
-		box-shadow: 0 0 12px color-mix(in oklch, var(--primary) 30%, transparent);
-	}
-
-	.card-btn-primary:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	/* -----------------------------------------------------------------------
-	   RESPONSIVE
-	   ----------------------------------------------------------------------- */
-
-	@media (max-width: 639px) {
-		.memory-header {
-			flex-wrap: wrap;
-		}
-
-		.memory-header-actions {
-			width: 100%;
-			justify-content: flex-end;
-		}
-
-		.memory-textarea {
-			min-height: 150px;
-		}
-
-		.memory-editor-footer {
+	@media (max-width: 560px) {
+		.mem-foot {
 			flex-direction: column;
 			align-items: stretch;
-			gap: var(--space-2, 8px);
+			gap: 8px;
 		}
-
-		.memory-editor-actions {
+		.mem-foot-acts {
 			justify-content: flex-end;
 		}
 	}

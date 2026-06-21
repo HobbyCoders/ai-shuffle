@@ -14,6 +14,8 @@ import { createSubscribers } from './store-utils';
 
 export type ViewType =
 	| 'chat'
+	| 'board'
+	| 'build'
 	| 'settings'
 	| 'profile'
 	| 'subagent'
@@ -146,6 +148,14 @@ export const layout = {
 		_update((s) => ({
 			...s,
 			activeView: { type: 'chat', sessionId }
+		}));
+	},
+
+	/** Navigate to the Sessions board (mission-control overview) */
+	openBoard() {
+		_update((s) => ({
+			...s,
+			activeView: { type: 'board', sessionId: null }
 		}));
 	},
 

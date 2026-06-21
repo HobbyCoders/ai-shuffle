@@ -138,6 +138,13 @@
 		}
 	}
 
+	/**
+	 * Return to the Sessions section — show the current chat, or start a new one.
+	 */
+	function handleOpenSessions() {
+		layout.openBoard();
+	}
+
 	// ============================================
 	// Lifecycle
 	// ============================================
@@ -367,6 +374,8 @@
 		onNewSessionForProject={handleNewSessionForProject}
 		onOpenSession={handleOpenSession}
 		onOpenFeature={handleOpenFeature}
+		onOpenSessions={handleOpenSessions}
+		onOpenSpotlight={() => showSpotlight = true}
 		onOpenPlugins={() => handleOpenFeature('plugins')}
 	/>
 

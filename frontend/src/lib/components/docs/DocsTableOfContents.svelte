@@ -33,7 +33,7 @@
 
 		// Small delay to let DOM update
 		const timer = setTimeout(() => {
-			const root = scrollContainer || document.querySelector('.docs-scroll-area');
+			const root = scrollContainer || document.querySelector('.dc-scroll');
 			if (!root) return;
 
 			observer = new IntersectionObserver(
@@ -93,23 +93,22 @@
 <style>
 	.docs-toc {
 		position: sticky;
-		top: var(--space-5);
-		width: 200px;
-		min-width: 200px;
-		max-height: calc(100vh - 140px);
+		top: 0;
+		width: 100%;
+		max-height: calc(100vh - 120px);
 		overflow-y: auto;
-		padding: var(--space-4) var(--space-3);
-		border-left: 1px solid var(--border-subtle);
+		padding: 0;
 	}
 
 	.toc-title {
-		font-size: 12px;
+		font-family: var(--font-mono, 'JetBrains Mono', monospace);
+		font-size: 10px;
 		font-weight: 600;
-		color: var(--text-tertiary);
+		color: var(--muted-foreground);
 		text-transform: uppercase;
-		letter-spacing: 0.5px;
-		margin-bottom: var(--space-3);
-		padding-left: var(--space-2);
+		letter-spacing: 0.1em;
+		margin-bottom: 9px;
+		padding-left: 13px;
 	}
 
 	.toc-list {
@@ -122,33 +121,34 @@
 		margin: 0;
 	}
 
-	.toc-item.level-3 {
-		padding-left: var(--space-3);
+	.toc-item.level-3 .toc-link {
+		padding-left: 24px;
 	}
 
 	.toc-link {
 		display: block;
 		width: 100%;
 		text-align: left;
-		padding: 4px var(--space-2);
-		font-size: 13px;
-		color: var(--text-tertiary);
+		padding: 5px 0 5px 13px;
+		font-size: 12px;
+		color: var(--muted-foreground);
 		background: none;
 		border: none;
-		border-left: 2px solid transparent;
+		border-left: 2px solid var(--border);
 		cursor: pointer;
-		transition: all 0.15s;
+		transition: color 0.15s, border-color 0.15s;
 		line-height: 1.4;
 		border-radius: 0;
 	}
 
 	.toc-link:hover {
-		color: var(--text-primary);
+		color: var(--foreground);
 	}
 
 	.toc-link.active {
-		color: var(--primary);
+		color: var(--foreground);
 		border-left-color: var(--primary);
+		font-weight: 600;
 	}
 
 	/* Scrollbar */
@@ -157,7 +157,7 @@
 	}
 
 	.docs-toc::-webkit-scrollbar-thumb {
-		background: var(--border-default);
+		background: var(--border);
 		border-radius: 2px;
 	}
 

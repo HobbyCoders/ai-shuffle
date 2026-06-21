@@ -1,14 +1,12 @@
 <script lang="ts">
 	/**
-	 * FileBrowserCard - File browser card
+	 * FileBrowserCard — Files surface (Studio-v2).
 	 *
-	 * Wraps the existing FilesView component in a FeaturePageLayout.
-	 * Provides full file management: browse, upload, download, rename, delete.
+	 * Renders the full two-column FilesStudio page (tree + columnar list) which
+	 * owns the header, toolbar, and all browse/upload/download/rename/delete
+	 * functionality via the `files` store.
 	 */
-
-	import FeaturePageLayout from '$lib/components/layout/FeaturePageLayout.svelte';
-	import FilesView from '../files/FilesView.svelte';
-	import { FolderTree } from 'lucide-svelte';
+	import FilesStudio from '../files/FilesStudio.svelte';
 
 	interface Props {
 		mobile?: boolean;
@@ -17,27 +15,4 @@
 	let { mobile = false }: Props = $props();
 </script>
 
-<FeaturePageLayout icon={FolderTree} title="Files" noPadding={true}>
-	{#snippet children()}
-		<div class="files-card-content">
-			<FilesView />
-		</div>
-	{/snippet}
-</FeaturePageLayout>
-
-<style>
-	.files-card-content {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-		min-height: 0;
-		border-radius: 0 0 12px 12px;
-	}
-
-	/* Ensure FilesView fills the card */
-	.files-card-content :global(.files-view) {
-		flex: 1;
-		min-height: 0;
-	}
-</style>
+<FilesStudio />

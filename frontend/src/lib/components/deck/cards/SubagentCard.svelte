@@ -24,8 +24,9 @@
 	} from '$lib/constants/models';
 	import './card-design-system.css';
 
-	import SubagentList from './subagents/SubagentList.svelte';
 	import SubagentEditor from './subagents/SubagentEditor.svelte';
+	import BuildSubagentList from '$lib/components/layout/build/BuildSubagentList.svelte';
+	import AIGenerateDialog from './AIGenerateDialog.svelte';
 
 	interface Subagent {
 		id: string;
@@ -61,15 +62,27 @@
 
 	interface Props {
 		mobile?: boolean;
+		/** When embedded in the Build page, render the header-less rows list
+		 *  instead of the FeaturePageLayout list. The editor is unchanged. */
+		embedded?: boolean;
+		/** Reports full-canvas detail/editor state so BuildPage can hide its chrome. */
+		onDetailChange?: (detail: boolean) => void;
 	}
 
 	let {
-		mobile = false
+		mobile = false,
+		embedded = false,
+		onDetailChange
 	}: Props = $props();
 
 	// View mode state
 	type ViewMode = 'list' | 'editor';
 	let viewMode = $state<ViewMode>('list');
+
+	// Tell the Build page when we enter/leave the editor (form takes the canvas).
+	$effect(() => {
+		if (embedded) onDetailChange?.(viewMode === 'editor');
+	});
 
 	// List state
 	let subagents = $state<Subagent[]>([]);
@@ -309,8 +322,8 @@
 	}
 
 	// Export subagent
-	async function exportSubagent(agentId: string, e: Event) {
-		e.stopPropagation();
+	async function exportSubagent(agentId: string, e?: Event) {
+		e?.stopPropagation();
 		try {
 			const data = await api.get<unknown>(`/export-import/subagents/${agentId}`);
 			const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -367,6 +380,22 @@
 		}
 
 		importing = false;
+	}
+
+	// Direct delete/revert for the embedded Build list (which owns its own
+	// inline-confirm UI, so it just needs the action to run).
+	async function embeddedDelete(id: string) {
+		const agent = subagents.find((s) => s.id === id);
+		if (agent?.is_builtin) {
+			error = 'Built-in subagents cannot be deleted. You can disable them in profile settings.';
+			return;
+		}
+		await api.delete(`/subagents/${id}`);
+		await loadSubagents();
+	}
+	async function embeddedRevert(id: string) {
+		await api.post(`/subagents/${id}/revert`);
+		await loadSubagents();
 	}
 
 	// Group assignment
@@ -434,34 +463,24 @@
 <input type="file" accept=".json" bind:this={importInput} onchange={handleImport} class="hidden" />
 
 {#if viewMode === 'list'}
-	<SubagentList
+	<BuildSubagentList
 		{subagents}
-		{loading}
-		{error}
-		{searchQuery}
-		onSearchQueryChange={(v) => searchQuery = v}
-		{deletingId}
-		{deleteLoading}
-		{revertingId}
-		{revertLoading}
 		{importing}
-		{showGenerateDialog}
-		onShowGenerateDialogChange={(v) => showGenerateDialog = v}
 		onEdit={handleEdit}
 		onCreate={handleCreate}
-		onDeleteClick={handleDeleteClick}
-		onConfirmDelete={confirmDelete}
-		onCancelDelete={() => deletingId = null}
-		onRevert={handleRevert}
-		onConfirmRevert={confirmRevert}
-		onCancelRevert={() => revertingId = null}
-		onExport={exportSubagent}
-		onTriggerImport={triggerImport}
-		onClearError={() => error = null}
-		onGeneratedSubagent={handleGeneratedSubagent}
+		onGenerate={() => showGenerateDialog = true}
+		onImport={triggerImport}
+		onExport={(id) => exportSubagent(id)}
+		onDelete={embeddedDelete}
+		onRevert={embeddedRevert}
 		{getModelDisplay}
-		{getModelBadgeClass}
-		{filteredSubagents}
+	/>
+	<!-- BuildSubagentList has no header chrome, so the generate dialog lives here -->
+	<AIGenerateDialog
+		type="subagent"
+		isOpen={showGenerateDialog}
+		onClose={() => showGenerateDialog = false}
+		onGenerated={handleGeneratedSubagent}
 	/>
 {:else}
 	<SubagentEditor

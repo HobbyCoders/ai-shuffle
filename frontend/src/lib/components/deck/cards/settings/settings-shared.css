@@ -1,336 +1,552 @@
-/* ========================================
-   SETTINGS SHARED STYLES
-   Used by all settings sub-components
-   ======================================== */
+/* ============================================================
+   SETTINGS SHARED STYLES — Studio-v2 grouped design language
 
-/* Sections */
-.section {
-	background: transparent;
+   The settings sub-sections render inside StudioEditorShell's
+   `.ed-content`, under the SettingsCard `.settings` wrapper, so
+   these primitives are tuned to read as the exact same system as
+   the editor `.set-group` / `.set-row` / `.inp` / `.sel` /
+   `.switch` / `.seg` fields. Class names are kept (section /
+   setting-row / input / toggle / …) so the real forms and
+   handlers are untouched — only the look changes.
+
+   Every rule is scoped under `.settings` so these common class
+   names (.btn / .input / .section / .badge / …) can't leak into
+   the rest of the app from this plain (unscoped) stylesheet.
+   ============================================================ */
+
+/* Section stack (SystemTab renders its own .tab-content) */
+.settings .tab-content {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+}
+
+/* ── Grouped section card (≈ .set-group) ───────────────────── */
+.settings .section {
+	background: var(--card);
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
 	overflow: hidden;
 }
 
-.section-header {
+/* Collapsible head (≈ .set-grouphead, rendered as a button) */
+.settings .section-header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
+	gap: 12px;
 	width: 100%;
-	padding: 12px 16px;
+	padding: 14px 18px;
 	background: transparent;
 	border: none;
+	text-align: left;
 	cursor: pointer;
-	transition: background 150ms ease;
+	transition: background 0.12s ease;
 }
 
-.section-header:hover {
-	background: var(--hover-overlay);
+.settings .section-header:hover {
+	background: color-mix(in oklch, var(--muted) 45%, transparent);
 }
 
-.section-header:focus-visible {
+.settings .section-header:focus-visible {
 	outline: 2px solid var(--ring);
-	outline-offset: 2px;
+	outline-offset: -2px;
 }
 
-.section-header h3 {
+/* Divider beneath the head only while a panel is expanded below it. */
+.settings .section-header:has(+ .section-content) {
+	border-bottom: 1px solid var(--border);
+}
+
+.settings .section-header h3 {
 	margin: 0;
-	font-size: 0.9375rem;
+	font-family: var(--font-display, Georgia, serif);
+	font-weight: 700;
+	font-size: 16px;
+	letter-spacing: -0.01em;
+	color: var(--foreground);
+}
+
+.settings .chevron {
+	width: 16px;
+	height: 16px;
+	flex-shrink: 0;
+	color: var(--muted-foreground);
+	transition: transform 0.18s ease;
+}
+
+.settings .chevron.expanded {
+	transform: rotate(180deg);
+}
+
+/* Expanded body — edge-to-edge rows divided by hairlines. */
+.settings .section-content {
+	display: flex;
+	flex-direction: column;
+	padding: 4px 18px 8px;
+}
+
+/* ── Rows (≈ .set-row) ─────────────────────────────────────── */
+.settings .setting-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 18px;
+	padding: 13px 0;
+	border-bottom: 1px solid var(--border);
+}
+
+.settings .setting-row:last-child {
+	border-bottom: none;
+}
+
+.settings .setting-row.vertical {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 10px;
+}
+
+/* Label block (≈ .lab) */
+.settings .setting-info {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	min-width: 0;
+	flex: 1;
+}
+
+.settings .setting-info > span:first-child,
+.settings .setting-info > label {
+	font-size: 13.5px;
 	font-weight: 600;
 	color: var(--foreground);
 }
 
-/* Center section header text on desktop */
-@media (min-width: 640px) {
-	.section-header {
-		justify-content: center;
-		position: relative;
-	}
-
-	.section-header .chevron {
-		position: absolute;
-		right: 16px;
-	}
-}
-
-.chevron {
-	width: 20px;
-	height: 20px;
-	color: var(--muted-foreground);
-	transition: transform 200ms ease;
-}
-
-.chevron.expanded {
-	transform: rotate(180deg);
-}
-
-.section-content {
-	padding: 8px 16px 16px;
-	display: flex;
-	flex-direction: column;
-	gap: 12px;
-}
-
-/* Setting Rows */
-.setting-row {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 16px;
-	padding: 8px 0;
-}
-
-.setting-row.vertical {
-	flex-direction: column;
-	align-items: stretch;
-}
-
-.setting-info {
-	display: flex;
-	flex-direction: column;
-	gap: 2px;
-}
-
-.setting-info label {
-	font-size: 0.875rem;
-	font-weight: 500;
-	color: var(--foreground);
-}
-
-.setting-desc {
-	font-size: 0.75rem;
+.settings .setting-desc {
+	font-size: 12px;
+	line-height: 1.45;
 	color: var(--muted-foreground);
 }
 
-/* Inputs */
-.input {
-	padding: 8px 12px;
-	background-color: var(--input);
+.settings .setting-hint {
+	font-size: 12px;
+	line-height: 1.5;
+	color: var(--muted-foreground);
+	padding: 13px 0 2px;
+}
+
+/* ── Inputs / selects (≈ .inp / .sel) ──────────────────────── */
+.settings .input {
+	height: 36px;
+	padding: 0 12px;
 	border: 1px solid var(--border);
-	border-radius: calc(var(--radius) - 2px);
+	border-radius: 9px;
+	background: var(--background);
+	font: inherit;
+	font-size: 13px;
 	color: var(--foreground);
-	font-size: 0.875rem;
-	transition: border-color 150ms ease, box-shadow 150ms ease;
+	transition: border-color 0.15s ease;
 }
 
-.input:focus {
+.settings .input:focus {
 	outline: none;
-	border-color: var(--ring);
-	box-shadow: 0 0 0 2px var(--primary-20);
+	border-color: var(--ring, var(--primary));
 }
 
-.input::placeholder {
+.settings .input::placeholder {
 	color: var(--muted-foreground);
+	opacity: 0.65;
 }
 
-.input.compact {
-	padding: 6px 10px;
-	font-size: 0.8125rem;
+/* A lone control on the right of a row: size to content (overriding the
+   global `.input { width: 100% }`), with a comfortable min and a cap. */
+.settings .setting-row:not(.vertical) > .input,
+.settings .setting-row:not(.vertical) > select.input {
+	width: auto;
+	min-width: 240px;
+	max-width: 340px;
 }
 
-.input-group {
+/* Select — same metrics as .input plus a themed chevron. */
+.settings select.input {
+	padding: 0 32px 0 12px;
+	font-weight: 500;
+	appearance: none;
+	cursor: pointer;
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%239090a8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+	background-repeat: no-repeat;
+	background-position: right 10px center;
+}
+
+/* Compact variant (oauth flows, logs toolbar). */
+.settings .input.compact {
+	height: 32px;
+	font-size: 12.5px;
+}
+
+.settings select.input.compact {
+	padding-right: 30px;
+}
+
+/* Multiline inputs behave like the editor .fld. */
+.settings textarea.input,
+.settings .security-textarea {
+	height: auto;
+	padding: 10px 12px;
+	line-height: 1.5;
+	border-radius: 10px;
+	resize: vertical;
+}
+
+.settings .input-group {
 	display: flex;
 	gap: 8px;
 	align-items: center;
 }
 
-.input-group .input {
+.settings .input-group .input {
 	flex: 1;
+	min-width: 0;
 }
 
-/* Buttons */
-.btn {
+.settings .password-form .input,
+.settings .field .input {
+	width: 100%;
+}
+
+/* ── Buttons (≈ .ed-btn) ───────────────────────────────────── */
+.settings .btn {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	gap: 6px;
-	padding: 8px 16px;
-	border: none;
-	border-radius: calc(var(--radius) - 2px);
-	font-size: 0.875rem;
-	font-weight: 500;
+	height: 36px;
+	padding: 0 14px;
+	border: 1px solid transparent;
+	border-radius: 9px;
+	font: inherit;
+	font-size: 13px;
+	font-weight: 600;
 	cursor: pointer;
-	transition: all 150ms ease;
+	white-space: nowrap;
+	transition: background 0.12s ease, border-color 0.12s ease, filter 0.12s ease;
 }
 
-.btn:disabled {
+.settings .btn:disabled {
 	opacity: 0.5;
 	cursor: not-allowed;
 }
 
-.btn:focus-visible {
+.settings .btn:focus-visible {
 	outline: 2px solid var(--ring);
 	outline-offset: 2px;
 }
 
-.btn.primary {
+.settings .btn.primary {
 	background: var(--primary);
 	color: var(--primary-foreground);
 }
 
-.btn.primary:hover:not(:disabled) {
-	filter: brightness(1.1);
+.settings .btn.primary:hover:not(:disabled) {
+	filter: brightness(0.92);
 }
 
-.btn.secondary {
-	background: var(--secondary);
-	color: var(--secondary-foreground);
-	border: 1px solid var(--border);
+.settings .btn.secondary {
+	background: var(--background);
+	color: var(--foreground);
+	border-color: var(--border);
 }
 
-.btn.secondary:hover:not(:disabled) {
-	background: var(--hover-overlay);
+.settings .btn.secondary:hover:not(:disabled) {
+	border-color: var(--muted-foreground);
 }
 
-.btn.danger {
-	background: var(--destructive);
-	color: var(--destructive-foreground);
+.settings .btn.danger {
+	background: transparent;
+	color: var(--destructive);
+	border-color: color-mix(in oklch, var(--destructive) 45%, var(--border));
 }
 
-.btn.compact {
-	padding: 6px 12px;
-	font-size: 0.8125rem;
+.settings .btn.danger:hover:not(:disabled) {
+	background: color-mix(in oklch, var(--destructive) 12%, transparent);
 }
 
-/* Toggle Switch */
-.toggle {
+.settings .btn.compact {
+	height: 32px;
+	padding: 0 12px;
+	font-size: 12.5px;
+}
+
+/* ── Toggle switch (≈ .switch) ─────────────────────────────── */
+.settings .toggle {
 	position: relative;
-	width: 44px;
-	height: 24px;
+	width: 34px;
+	height: 20px;
+	flex-shrink: 0;
 	background: var(--muted);
 	border: 1px solid var(--border);
-	border-radius: var(--radius, 0.75rem);
+	border-radius: 11px;
 	cursor: pointer;
-	transition: all 200ms ease;
-	flex-shrink: 0;
+	padding: 0;
+	transition: background 0.18s ease, border-color 0.18s ease;
 }
 
-.toggle:hover {
-	border-color: var(--ring);
+.settings .toggle:hover {
+	border-color: var(--muted-foreground);
 }
 
-.toggle:focus-visible {
+.settings .toggle:focus-visible {
 	outline: 2px solid var(--ring);
 	outline-offset: 2px;
 }
 
-.toggle.active {
+.settings .toggle.active {
 	background: var(--primary);
 	border-color: var(--primary);
 }
 
-.toggle-knob {
+.settings .toggle:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.settings .toggle-knob {
 	position: absolute;
-	top: 2px;
-	left: 2px;
-	width: 18px;
-	height: 18px;
-	background: var(--primary-foreground);
+	top: 1px;
+	left: 1px;
+	width: 15px;
+	height: 15px;
 	border-radius: 50%;
-	transition: transform 200ms ease;
-	box-shadow: var(--shadow-s);
+	background: var(--foreground);
+	transition: left 0.18s ease, background 0.18s ease;
 }
 
-.toggle.active .toggle-knob {
-	transform: translateX(20px);
+.settings .toggle.active .toggle-knob {
+	left: 16px;
+	background: var(--primary-foreground);
 }
 
-/* Theme Switcher */
-.theme-switcher {
-	display: flex;
-	gap: 4px;
-	background: var(--muted);
-	padding: 4px;
-	border-radius: var(--radius);
+/* ── Theme switcher (≈ .seg) ───────────────────────────────── */
+.settings .theme-switcher {
+	display: inline-flex;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	overflow: hidden;
+	background: var(--background);
 }
 
-.theme-option {
+.settings .theme-option {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	width: 36px;
-	height: 32px;
-	background: transparent;
+	width: 40px;
+	height: 34px;
+	background: none;
 	border: none;
-	border-radius: calc(var(--radius) - 4px);
+	border-right: 1px solid var(--border);
 	color: var(--muted-foreground);
 	cursor: pointer;
-	transition: all 150ms ease;
+	transition: background 0.12s ease, color 0.12s ease;
 }
 
-.theme-option:hover {
-	background: var(--hover-overlay);
+.settings .theme-option:last-child {
+	border-right: none;
+}
+
+.settings .theme-option:hover {
 	color: var(--foreground);
 }
 
-.theme-option:focus-visible {
+.settings .theme-option:focus-visible {
 	outline: 2px solid var(--ring);
-	outline-offset: 2px;
+	outline-offset: -2px;
 }
 
-.theme-option.active {
-	background: var(--card);
-	color: var(--primary);
-	box-shadow: var(--shadow-s);
+.settings .theme-option.active {
+	background: var(--primary);
+	color: var(--primary-foreground);
 }
 
-.theme-option svg {
-	width: 18px;
-	height: 18px;
+.settings .theme-option svg {
+	width: 17px;
+	height: 17px;
 }
 
-/* Badges */
-.badge {
+/* ── Status badges ─────────────────────────────────────────── */
+.settings .badge {
 	display: inline-flex;
 	align-items: center;
-	padding: 2px 8px;
-	font-size: 0.6875rem;
+	padding: 3px 9px;
+	font-size: 11px;
 	font-weight: 600;
-	border-radius: 9999px;
-	text-transform: uppercase;
-	letter-spacing: 0.025em;
+	letter-spacing: 0.01em;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	background: var(--muted);
+	color: var(--muted-foreground);
 }
 
-.badge.success {
+.settings .badge.success {
 	background: color-mix(in oklch, var(--success) 15%, transparent);
 	color: var(--success);
-	border: 1px solid color-mix(in oklch, var(--success) 30%, transparent);
+	border-color: color-mix(in oklch, var(--success) 30%, transparent);
 }
 
-.badge.muted {
-	background: color-mix(in oklch, var(--muted-foreground) 15%, transparent);
+.settings .badge.primary {
+	background: var(--primary);
+	color: var(--primary-foreground);
+	border-color: var(--primary);
+}
+
+.settings .badge.muted {
+	background: var(--muted);
 	color: var(--muted-foreground);
-	border: 1px solid color-mix(in oklch, var(--muted-foreground) 30%, transparent);
+	border-color: var(--border);
 }
 
-.badge.primary {
-	background: color-mix(in oklch, var(--primary) 15%, transparent);
-	color: var(--primary);
-	border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
-}
-
-.badge.warning {
-	background: color-mix(in oklch, var(--warning) 15%, transparent);
+.settings .badge.warning {
+	background: color-mix(in oklch, var(--warning) 16%, transparent);
 	color: var(--warning);
-	border: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);
+	border-color: color-mix(in oklch, var(--warning) 32%, transparent);
 }
 
-/* Security Instructions Editor */
-.security-instructions-editor {
+/* ── Connections — divided rows with a brand icon ──────────── */
+.settings .connection-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	padding: 14px 0;
+	border-bottom: 1px solid var(--border);
+}
+
+.settings .connection-row:last-child {
+	border-bottom: none;
+}
+
+.settings .connection-info {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	min-width: 0;
+}
+
+/* Name + status badge stack to the right of the icon. */
+.settings .connection-info > div:last-child {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 4px;
+	min-width: 0;
+}
+
+.settings .connection-icon {
+	width: 36px;
+	height: 36px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 9px;
+	color: #fff;
+	flex-shrink: 0;
+}
+
+.settings .connection-icon.claude {
+	background: linear-gradient(135deg, var(--warning), color-mix(in oklch, var(--warning) 80%, oklch(0.3 0 0)));
+}
+
+.settings .connection-icon.github {
+	background: var(--foreground);
+	color: var(--background);
+}
+
+/* Anthropic brand — warm clay gradient matching their palette */
+.settings .connection-icon.anthropic {
+	background: linear-gradient(135deg, #cc785c, #8b4a3a);
+}
+
+.settings .connection-icon svg {
+	width: 20px;
+	height: 20px;
+}
+
+.settings .connection-name {
+	font-weight: 600;
+	font-size: 13.5px;
+	color: var(--foreground);
+}
+
+.settings .connection-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.settings .oauth-flow {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+}
+
+.settings .connected-text {
+	font-size: 12.5px;
+	color: var(--muted-foreground);
+}
+
+.settings .connected-text code {
+	font-family: var(--font-mono, monospace);
+	font-size: 12px;
+}
+
+/* ── Messages & helpers ────────────────────────────────────── */
+.settings .success-msg,
+.settings .success-text {
+	font-size: 12.5px;
+	color: var(--success);
+}
+
+.settings .error-msg,
+.settings .error-text {
+	font-size: 12.5px;
+	color: var(--destructive);
+}
+
+.settings .validation-result {
+	font-size: 12.5px;
+	padding: 7px 11px;
+	border-radius: 8px;
+	background: color-mix(in oklch, var(--destructive) 10%, transparent);
+	color: var(--destructive);
+}
+
+.settings .validation-result.valid {
+	background: color-mix(in oklch, var(--success) 10%, transparent);
+	color: var(--success);
+}
+
+/* Password form (vertical stack of fields). */
+.settings .password-form {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+/* Security instructions editor (SystemTab). */
+.settings .security-instructions-editor {
 	display: flex;
 	flex-direction: column;
 	gap: 12px;
+	padding: 4px 0 2px;
 }
 
-.security-textarea {
+.settings .security-textarea {
 	width: 100%;
-	min-height: 200px;
-	font-family: var(--font-mono);
-	font-size: 0.8125rem;
-	line-height: 1.5;
-	resize: vertical;
+	min-height: 220px;
+	font-family: var(--font-mono, monospace);
+	font-size: 12.5px;
 }
 
-.security-instructions-footer {
+.settings .security-instructions-footer {
 	display: flex;
 	justify-content: space-between;
 	align-items: center;
@@ -338,153 +554,70 @@
 	gap: 12px;
 }
 
-.security-status {
+.settings .security-status {
 	display: flex;
 	gap: 8px;
 	align-items: center;
 }
 
-.security-actions {
+.settings .security-actions {
 	display: flex;
 	gap: 8px;
-}
-
-/* Messages */
-.success-msg {
-	font-size: 0.8125rem;
-	color: var(--success);
-}
-
-.error-msg {
-	font-size: 0.8125rem;
-	color: var(--destructive);
-}
-
-.validation-result {
-	font-size: 0.8125rem;
-	padding: 6px 10px;
-	border-radius: calc(var(--radius) - 2px);
-	background: color-mix(in oklch, var(--destructive) 10%, transparent);
-	color: var(--destructive);
-}
-
-.validation-result.valid {
-	background: color-mix(in oklch, var(--success) 10%, transparent);
-	color: var(--success);
-}
-
-/* Password Form */
-.password-form {
-	display: flex;
-	flex-direction: column;
-	gap: 8px;
-}
-
-/* Connections */
-.connection-row {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 16px;
-	padding: 12px;
-	background: var(--muted);
-	border-radius: var(--radius);
-}
-
-.connection-info {
-	display: flex;
-	align-items: center;
-	gap: 12px;
-}
-
-.connection-icon {
-	width: 36px;
-	height: 36px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	border-radius: var(--radius, 0.75rem);
-	color: var(--primary-foreground);
-}
-
-.connection-icon.claude {
-	background: linear-gradient(135deg, var(--warning), color-mix(in oklch, var(--warning) 80%, oklch(0.3 0 0)));
-}
-
-.connection-icon.github {
-	background: var(--muted-foreground);
-}
-
-/* Anthropic brand — warm clay gradient matching their palette */
-.connection-icon.anthropic {
-	background: linear-gradient(135deg, #cc785c, #8b4a3a);
-}
-
-.error-text {
-	font-size: 0.8125rem;
-	color: var(--destructive, #dc2626);
-}
-
-.success-text {
-	font-size: 0.8125rem;
-	color: var(--success);
-}
-
-.connection-icon svg {
-	width: 20px;
-	height: 20px;
-}
-
-.connection-name {
-	font-weight: 500;
-	font-size: 0.875rem;
-}
-
-.connection-actions {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-}
-
-.oauth-flow {
-	display: flex;
-	gap: 6px;
-	align-items: center;
-}
-
-.connected-text {
-	font-size: 0.8125rem;
-	color: var(--success);
 }
 
 /* Dividers */
-.divider {
+.settings .divider {
 	border: none;
 	border-top: 1px solid var(--border);
-	margin: 12px 0;
+	margin: 4px 0;
 }
 
 /* Utility */
-.loading-text {
+.settings .loading-text {
 	text-align: center;
-	padding: 20px;
+	padding: 22px;
 	color: var(--muted-foreground);
+	font-size: 13px;
 }
 
-.mb-3 {
+.settings .mb-3 {
 	margin-bottom: 12px;
 }
 
-/* Status messages (used in SystemTab) */
-.status {
-	font-size: 0.8125rem;
+/* Status messages (SystemTab, CloudSection). */
+.settings .status {
+	font-size: 12.5px;
 	margin: 0;
 }
 
-.status.error {
+.settings .status.error {
 	color: var(--destructive);
 }
 
-.status.success {
+.settings .status.success {
 	color: var(--success);
+}
+
+/* ── Mobile ────────────────────────────────────────────────────
+   Stack rows whose control is a wide text field so the input gets
+   the full width instead of fighting the label for a 240px+ column.
+   Toggle / button / segmented rows stay inline (their controls are
+   already compact). Without this, the min-width:240px inputs
+   overflow the card on a phone-width viewport. ── */
+@media (max-width: 560px) {
+	.settings .setting-row:not(.vertical):has(> .input),
+	.settings .setting-row:not(.vertical):has(> .input-group) {
+		flex-direction: column;
+		align-items: stretch;
+		gap: 10px;
+	}
+	.settings .setting-row:not(.vertical) > .input,
+	.settings .setting-row:not(.vertical) > select.input {
+		width: 100%;
+		min-width: 0;
+		max-width: none;
+	}
+	.settings .connection-row {
+		flex-wrap: wrap;
+	}
 }

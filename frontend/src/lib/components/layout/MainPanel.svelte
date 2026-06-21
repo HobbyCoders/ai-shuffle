@@ -6,7 +6,7 @@
 	 * based on the layout store's activeView state.
 	 */
 	import { untrack } from 'svelte';
-	import { activeView, sidebarCollapsed } from '$lib/stores/layout.svelte';
+	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { projects } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -20,6 +20,8 @@
 	import { Download } from 'lucide-svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import ChatView from './ChatView.svelte';
+	import SessionsBoard from './SessionsBoard.svelte';
+	import BuildPage from './BuildPage.svelte';
 	import PageHeader from './PageHeader.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import CreateBranchModal from '$lib/components/git/CreateBranchModal.svelte';
@@ -27,16 +29,12 @@
 	import ChangedFilesPanel from '$lib/components/git/ChangedFilesPanel.svelte';
 	import DiffViewer from '$lib/components/git/DiffViewer.svelte';
 
-	// Feature page components
+	// Feature page components (Profiles/Subagents/MCP/Plugins/Hooks now live
+	// inside BuildPage, so they're imported there rather than here).
 	import SettingsCard from '$lib/components/deck/cards/SettingsCard.svelte';
-	import ProfileCard from '$lib/components/deck/cards/ProfileCard.svelte';
-	import SubagentCard from '$lib/components/deck/cards/SubagentCard.svelte';
 	import ProjectCard from '$lib/components/deck/cards/ProjectCard.svelte';
 	import FileBrowserCard from '$lib/components/deck/cards/FileBrowserCard.svelte';
-	import PluginManagerCard from '$lib/components/deck/cards/PluginManagerCard.svelte';
-	import McpManagerCard from '$lib/components/deck/cards/McpManagerCard.svelte';
 	import NotesCard from '$lib/components/deck/cards/NotesCard.svelte';
-	import HooksCard from '$lib/components/deck/cards/HooksCard.svelte';
 	import AutomationsCard from '$lib/components/deck/cards/AutomationsCard.svelte';
 	import StatsCard from '$lib/components/deck/cards/StatsCard.svelte';
 	import DocsCard from '$lib/components/docs/DocsCard.svelte';
@@ -44,12 +42,16 @@
 	interface Props {
 		onOpenSession?: (sessionId: string) => void;
 		onOpenPlugins?: () => void;
+		onNewSession?: () => void;
+		onNewSessionForProject?: (projectId: string) => void;
 		isMobile?: boolean;
 	}
 
 	let {
 		onOpenSession,
 		onOpenPlugins,
+		onNewSession,
+		onNewSessionForProject,
 		isMobile = false
 	}: Props = $props();
 
@@ -71,9 +73,24 @@
 	// Feature pages that use FeaturePageLayout (provide their own header)
 	// These don't need the generic PageHeader
 	const embeddedViews = new Set([
+		'board', 'build',
 		'profile', 'project', 'settings', 'subagent',
 		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'automations', 'stats', 'docs'
 	]);
+
+	// The Build page hosts the agent-config tools under one surface. The five
+	// member view types remain as deep-link targets ("Configure agents →",
+	// "Manage plugins") and resolve to BuildPage with the right sub-tab.
+	type BuildSub = 'profile' | 'subagent' | 'mcp' | 'plugins' | 'hooks';
+	const BUILD_SUBS: BuildSub[] = ['profile', 'subagent', 'mcp', 'plugins', 'hooks'];
+	const isBuildView = $derived(
+		$activeView?.type === 'build' || BUILD_SUBS.includes($activeView?.type as BuildSub)
+	);
+	const buildRequestedSub = $derived(
+		BUILD_SUBS.includes($activeView?.type as BuildSub)
+			? ($activeView!.type as BuildSub)
+			: undefined
+	);
 
 	// Get the active session state (if in chat view)
 	const activeTab = $derived(
@@ -524,7 +541,6 @@
 		{#if $activeView.type === 'chat' || !embeddedViews.has($activeView.type)}
 			<PageHeader
 				title={headerTitle}
-				showSidebarToggle={$sidebarCollapsed}
 				{isMobile}
 				hideGlobalStt={$activeView?.type === 'chat'}
 			>
@@ -572,10 +588,18 @@
 		{/if}
 		{#if $activeView.type === 'chat'}
 			<ChatView />
-		{:else if $activeView.type === 'profile'}
-			<!-- Embedded: uses FeaturePageLayout with its own header -->
+		{:else if $activeView.type === 'board'}
 			<div class="feature-panel">
-				<ProfileCard />
+				<SessionsBoard
+					onOpenSession={onOpenSession || (() => {})}
+					onNewSession={onNewSession || (() => {})}
+					onNewSessionForProject={onNewSessionForProject}
+				/>
+			</div>
+		{:else if isBuildView}
+			<!-- Unified Build page (hosts Profiles/Subagents/MCP/Plugins/Hooks) -->
+			<div class="feature-panel">
+				<BuildPage requestedSub={buildRequestedSub} />
 			</div>
 		{:else if $activeView.type === 'project'}
 			<!-- Embedded: uses FeaturePageLayout with its own header -->
@@ -586,29 +610,13 @@
 			<div class="feature-panel">
 				<SettingsCard />
 			</div>
-		{:else if $activeView.type === 'subagent'}
-			<div class="feature-panel">
-				<SubagentCard />
-			</div>
 		{:else if $activeView.type === 'file-browser'}
 			<div class="feature-panel">
 				<FileBrowserCard />
 			</div>
-		{:else if $activeView.type === 'plugins'}
-			<div class="feature-panel">
-				<PluginManagerCard />
-			</div>
-		{:else if $activeView.type === 'mcp'}
-			<div class="feature-panel">
-				<McpManagerCard />
-			</div>
 		{:else if $activeView.type === 'notes'}
 			<div class="feature-panel">
 				<NotesCard />
-			</div>
-		{:else if $activeView.type === 'hooks'}
-			<div class="feature-panel">
-				<HooksCard />
 			</div>
 		{:else if $activeView.type === 'automations'}
 			<div class="feature-panel">
@@ -626,9 +634,13 @@
 			</div>
 		{/if}
 	{:else}
-		<!-- No active view - show a minimal placeholder -->
-		<div class="no-view">
-			<p>Select a session or create a new one</p>
+		<!-- Default landing: the Sessions board -->
+		<div class="feature-panel">
+			<SessionsBoard
+				onOpenSession={onOpenSession || (() => {})}
+				onNewSession={onNewSession || (() => {})}
+				onNewSessionForProject={onNewSessionForProject}
+			/>
 		</div>
 	{/if}
 </div>
@@ -742,17 +754,5 @@
 	.feature-panel :global(> *) {
 		flex: 1;
 		height: 100%;
-	}
-
-	.no-view {
-		flex: 1;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.no-view p {
-		color: var(--muted-foreground);
-		font-size: 0.875rem;
 	}
 </style>

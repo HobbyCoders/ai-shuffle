@@ -1,12 +1,13 @@
 <script lang="ts">
 	/**
 	 * ProfileForm — Form tab content for create/edit profile
-	 * Renders the active tab's content (general, tools, agents, prompt, advanced).
-	 * The parent handles FeaturePageLayout, tab bar, and footer.
+	 * Renders the active tab's content (general, tools, agents, prompt, advanced)
+	 * in the Studio-v2 grouped-field design language (.set-group / .set-row).
+	 * The parent (ProfileCard) owns the StudioEditorShell chrome, rail, and footer.
 	 */
 	import type { Profile } from '$lib/api/client';
 	import { layout } from '$lib/stores/layout.svelte';
-	import { Users, Settings, Wrench, Bot, FileText, SlidersHorizontal, Check, Plus, Trash2 } from 'lucide-svelte';
+	import { Users, Settings, SlidersHorizontal, Bot, Check, Plus, Trash2 } from 'lucide-svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import ProfileSystemPrompt from './ProfileSystemPrompt.svelte';
 	import {
@@ -211,33 +212,45 @@
 		creatingGroup = false;
 		newGroupName = '';
 	}
+
+	const settingSources = [
+		{ id: 'user', label: 'User (~/.claude)' },
+		{ id: 'project', label: 'Project (.claude)' },
+		{ id: 'local', label: 'Local' }
+	];
+
+	// Count of enabled custom (non-builtin) agents, for the summary note.
+	const enabledCustomCount = $derived(
+		profileForm.enabled_agents.filter(
+			(id) => !builtinAgentIds.includes(id) && customAgents.some((a) => a.id === id)
+		).length
+	);
 </script>
 
-<div class="card-system pf-content">
+<div class="card-system pf-body">
 	{#if activeTab === 'general'}
-	<!-- GENERAL TAB -->
-		<div class="pf-section">
-			<div class="pf-section-header">
-				<Users size={16} />
-				<h3>Profile Information</h3>
+		<!-- GENERAL TAB -->
+		<div class="set-group">
+			<div class="set-grouphead"><h3><Users />Identity</h3></div>
+			<div class="set-row">
+				<div class="lab"><h4>Name <span class="req">*</span></h4><p>Display name shown across the app.</p></div>
+				<div class="ctl">
+					<input class="inp" value={profileForm.name} oninput={(e) => onFormChange('name', (e.target as HTMLInputElement).value)} placeholder="My Custom Agent" />
+				</div>
 			</div>
-			<div class="pf-field-grid">
-				<div class="pf-field">
-					<label class="pf-label" for="profile-name">Name <span class="required">*</span></label>
-					<input id="profile-name" value={profileForm.name} oninput={(e) => onFormChange('name', (e.target as HTMLInputElement).value)} class="pf-input" placeholder="My Custom Agent" />
+			<div class="set-row stack">
+				<div class="lab"><h4>Description</h4><p>A short summary of what this profile is for.</p></div>
+				<div class="ctl">
+					<textarea class="fld" rows={2} value={profileForm.description} oninput={(e) => onFormChange('description', (e.target as HTMLTextAreaElement).value)} placeholder="A coding assistant for frontend work"></textarea>
 				</div>
-				<div class="pf-field">
-					<label class="pf-label" for="profile-description">Description</label>
-					<input id="profile-description" value={profileForm.description} oninput={(e) => onFormChange('description', (e.target as HTMLInputElement).value)} class="pf-input" placeholder="A coding assistant for frontend work" />
-				</div>
-				{#if editingProfile}
-					<div class="pf-field">
-						<label class="pf-label" for="profile-group">Group</label>
-						<div class="pf-group-wrapper">
-						<div class="pf-group-row">
+			</div>
+			{#if editingProfile}
+				<div class="set-row">
+					<div class="lab"><h4>Group</h4><p>Organize related profiles together.</p></div>
+					<div class="ctl ctl-col">
+						<div class="grp-row">
 							<select
-								id="profile-group"
-								class="pf-select"
+								class="sel"
 								value={groups?.profiles?.assignments?.[editingProfile.id] ?? ''}
 								onchange={(e) => {
 									const v = (e.target as HTMLSelectElement).value;
@@ -253,15 +266,15 @@
 								{/each}
 							</select>
 							{#if creatingGroup}
-								<button type="button" class="pf-btn-new-group" onclick={() => editingProfile && confirmGroupCreate(editingProfile.id)} title="Create">
+								<button type="button" class="icon-btn" onclick={() => editingProfile && confirmGroupCreate(editingProfile.id)} title="Create">
 									<Check size={14} />
 								</button>
 							{:else}
-								<button type="button" class="pf-btn-new-group" onclick={startGroupCreate} title="New group">
+								<button type="button" class="icon-btn" onclick={startGroupCreate} title="New group">
 									<Plus size={14} />
 								</button>
-								{#if editingProfile && (groups?.profiles?.assignments?.[editingProfile.id] ?? "")}
-									<button type="button" class="pf-btn-new-group pf-btn-new-group--delete" onclick={() => { if (!editingProfile) return; const g = groups?.profiles?.assignments?.[editingProfile.id]; if (g) { onRemoveFromGroup(editingProfile.id); onDeleteGroup("profiles", g); } }} title="Delete group">
+								{#if editingProfile && (groups?.profiles?.assignments?.[editingProfile.id] ?? '')}
+									<button type="button" class="icon-btn danger" onclick={() => { if (!editingProfile) return; const g = groups?.profiles?.assignments?.[editingProfile.id]; if (g) { onRemoveFromGroup(editingProfile.id); onDeleteGroup('profiles', g); } }} title="Delete group">
 										<Trash2 size={14} />
 									</button>
 								{/if}
@@ -271,8 +284,8 @@
 							<!-- svelte-ignore a11y_autofocus -->
 							<input
 								type="text"
-								class="pf-input pf-group-input"
-								placeholder="Group name..."
+								class="inp"
+								placeholder="Group name…"
 								bind:value={newGroupName}
 								onkeydown={(e) => {
 									if (e.key === 'Enter') { e.preventDefault(); editingProfile && confirmGroupCreate(editingProfile.id); }
@@ -282,47 +295,38 @@
 							/>
 						{/if}
 					</div>
-					</div>
-				{/if}
-			</div>
+				</div>
+			{/if}
 		</div>
 
-		<div class="pf-divider"></div>
-
-		<div class="pf-section">
-			<div class="pf-section-header">
-				<Settings size={16} />
-				<h3>Model & AI Settings</h3>
-			</div>
-			<div class="pf-field-grid">
-				<div class="pf-field">
-					<label class="pf-label" for="profile-model">Model</label>
-					<div class="pf-model-row">
-						<select id="profile-model" class="pf-select" value={customModelMode ? CUSTOM_VALUE : getBaseModel(profileForm.model)} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v === CUSTOM_VALUE) { onCustomModelModeChange(true, ''); } else { onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(profileForm.model))); } }}>
+		<div class="set-group">
+			<div class="set-grouphead"><h3><Settings />Model &amp; reasoning</h3></div>
+			<div class="set-row">
+				<div class="lab"><h4>Model</h4><p>The Claude model this profile runs on.</p></div>
+				<div class="ctl ctl-col">
+					<div class="grp-row">
+						<select class="sel" value={customModelMode ? CUSTOM_VALUE : getBaseModel(profileForm.model)} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v === CUSTOM_VALUE) { onCustomModelModeChange(true, ''); } else { onCustomModelModeChange(false, withContextSuffix(v, modelSupports1M(v) && has1MContext(profileForm.model))); } }}>
 							{#each getModels() as model (model.value)}
 								<option value={model.value}>{model.label}</option>
 							{/each}
-							<option value={CUSTOM_VALUE}>Custom...</option>
+							<option value={CUSTOM_VALUE}>Custom…</option>
 						</select>
 						{#if !customModelMode && modelSupports1M(profileForm.model)}
-							<label class="inline-checkbox pf-1m-toggle">
-								<input
-									type="checkbox"
-									class="checkbox-input"
-									checked={has1MContext(profileForm.model)}
-									onchange={(e) => onFormChange('model', withContextSuffix(profileForm.model, (e.target as HTMLInputElement).checked))}
-								/>
-								<span class="checkbox-label">1M context</span>
+							<label class="chk">
+								<input type="checkbox" checked={has1MContext(profileForm.model)} onchange={(e) => onFormChange('model', withContextSuffix(profileForm.model, (e.target as HTMLInputElement).checked))} />
+								<span>1M context</span>
 							</label>
 						{/if}
 					</div>
 					{#if customModelMode}
-						<input type="text" value={profileForm.model} oninput={(e) => onFormChange('model', (e.target as HTMLInputElement).value)} class="pf-input pf-input--mono" placeholder="e.g. claude-opus-4-7" style="margin-top: 6px;" />
+						<input type="text" value={profileForm.model} oninput={(e) => onFormChange('model', (e.target as HTMLInputElement).value)} class="inp mono" placeholder="e.g. claude-opus-4-7" />
 					{/if}
 				</div>
-				<div class="pf-field">
-					<label class="pf-label" for="profile-permission">Permission Mode</label>
-					<select id="profile-permission" class="pf-select" value={profileForm.permission_mode} onchange={(e) => onFormChange('permission_mode', (e.target as HTMLSelectElement).value)}>
+			</div>
+			<div class="set-row">
+				<div class="lab"><h4>Permission mode</h4><p>How the agent asks before taking actions.</p></div>
+				<div class="ctl">
+					<select class="sel" value={profileForm.permission_mode} onchange={(e) => onFormChange('permission_mode', (e.target as HTMLSelectElement).value)}>
 						<option value="default">Default</option>
 						<option value="auto">Auto</option>
 						<option value="acceptEdits">Accept Edits</option>
@@ -330,9 +334,11 @@
 						<option value="bypassPermissions">Bypass Permissions</option>
 					</select>
 				</div>
-				<div class="pf-field">
-					<label class="pf-label" for="profile-thinking">Thinking Mode</label>
-					<select id="profile-thinking" class="pf-select" value={profileForm.thinking_mode} onchange={(e) => onFormChange('thinking_mode', (e.target as HTMLSelectElement).value)}>
+			</div>
+			<div class="set-row">
+				<div class="lab"><h4>Thinking mode</h4><p>Extended reasoning budget for the model.</p></div>
+				<div class="ctl">
+					<select class="sel" value={profileForm.thinking_mode} onchange={(e) => onFormChange('thinking_mode', (e.target as HTMLSelectElement).value)}>
 						<option value="default">Default</option>
 						<option value="disabled">Off</option>
 						<option value="adaptive">Adaptive</option>
@@ -341,9 +347,11 @@
 						<option value="ultra_think">64K Budget</option>
 					</select>
 				</div>
-				<div class="pf-field">
-					<label class="pf-label" for="profile-effort">Effort Level</label>
-					<select id="profile-effort" class="pf-select" value={profileForm.effort || ''} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; onFormChange('effort', v ? v : null); }}>
+			</div>
+			<div class="set-row">
+				<div class="lab"><h4>Effort level</h4><p>Trade speed against depth of work.</p></div>
+				<div class="ctl">
+					<select class="sel" value={profileForm.effort || ''} onchange={(e) => { const v = (e.target as HTMLSelectElement).value; onFormChange('effort', v ? v : null); }}>
 						<option value="">Default</option>
 						<option value="low">Low</option>
 						<option value="medium">Medium</option>
@@ -352,113 +360,55 @@
 						<option value="max">Max</option>
 					</select>
 				</div>
-				<div class="pf-field">
-					<label class="pf-label" for="profile-max-turns">Max Turns</label>
-					<input id="profile-max-turns" type="number" value={profileForm.max_turns} oninput={(e) => { const v = (e.target as HTMLInputElement).value; onFormChange('max_turns', v ? Number(v) : null); }} class="pf-input" placeholder="Unlimited" />
+			</div>
+			<div class="set-row">
+				<div class="lab"><h4>Max turns</h4><p>Cap on agent turns per run. Empty = unlimited.</p></div>
+				<div class="ctl">
+					<input class="inp" type="number" value={profileForm.max_turns} oninput={(e) => { const v = (e.target as HTMLInputElement).value; onFormChange('max_turns', v ? Number(v) : null); }} placeholder="Unlimited" />
 				</div>
-				</div>
+			</div>
 		</div>
 
-		<div class="pf-divider"></div>
-
-		<div class="pf-section">
-			<div class="pf-section-header">
-				<SlidersHorizontal size={16} />
-				<h3>Behavior</h3>
-			</div>
-			<div class="pf-toggle-row">
-				<div class="pf-toggle-info">
-					<span class="pf-toggle-title">Include Partial Messages</span>
-					<span class="pf-toggle-desc">Stream partial text during AI generation for real-time feedback</span>
+		<div class="set-group">
+			<div class="set-grouphead"><h3><SlidersHorizontal />Behavior</h3></div>
+			<div class="set-row">
+				<div class="lab"><h4>Include partial messages</h4><p>Stream partial text during AI generation for real-time feedback.</p></div>
+				<div class="ctl">
+					<button type="button" class="switch" class:on={profileForm.include_partial_messages} role="switch" aria-checked={profileForm.include_partial_messages} aria-label="Toggle include partial messages" onclick={() => onFormChange('include_partial_messages', !profileForm.include_partial_messages)}><i></i></button>
 				</div>
-				<button
-					type="button"
-					class="pf-toggle"
-					class:active={profileForm.include_partial_messages}
-					role="switch"
-					aria-checked={profileForm.include_partial_messages}
-					aria-label="Toggle include partial messages"
-					onclick={() => onFormChange('include_partial_messages', !profileForm.include_partial_messages)}
-				>
-					<span class="pf-toggle-knob"></span>
-				</button>
 			</div>
-			<div class="pf-toggle-row">
-				<div class="pf-toggle-info">
-					<span class="pf-toggle-title">File Checkpointing</span>
-					<span class="pf-toggle-desc">Create restore points before file modifications.</span>
+			<div class="set-row">
+				<div class="lab"><h4>File checkpointing</h4><p>Create restore points before file modifications.</p></div>
+				<div class="ctl">
+					<button type="button" class="switch" class:on={profileForm.enable_file_checkpointing} role="switch" aria-checked={profileForm.enable_file_checkpointing} aria-label="Toggle file checkpointing" onclick={() => onFormChange('enable_file_checkpointing', !profileForm.enable_file_checkpointing)}><i></i></button>
 				</div>
-				<button
-					type="button"
-					class="pf-toggle"
-					class:active={profileForm.enable_file_checkpointing}
-					role="switch"
-					aria-checked={profileForm.enable_file_checkpointing}
-					aria-label="Toggle file checkpointing"
-					onclick={() => onFormChange('enable_file_checkpointing', !profileForm.enable_file_checkpointing)}
-				>
-					<span class="pf-toggle-knob"></span>
-				</button>
 			</div>
-			<div class="pf-toggle-row">
-				<div class="pf-toggle-info">
-					<span class="pf-toggle-title">App Config via Chat</span>
-					<span class="pf-toggle-desc">Allow AI to manage hooks, automations, MCP servers, and profiles through conversation. Admin only.</span>
+			<div class="set-row">
+				<div class="lab"><h4>App config via chat</h4><p>Allow AI to manage hooks, automations, MCP servers, and profiles through conversation. Admin only.</p></div>
+				<div class="ctl">
+					<button type="button" class="switch" class:on={profileForm.app_config_tools} role="switch" aria-checked={profileForm.app_config_tools} aria-label="Toggle app configuration tools" onclick={() => onFormChange('app_config_tools', !profileForm.app_config_tools)}><i></i></button>
 				</div>
-				<button
-					type="button"
-					class="pf-toggle"
-					class:active={profileForm.app_config_tools}
-					role="switch"
-					aria-checked={profileForm.app_config_tools}
-					aria-label="Toggle app configuration tools"
-					onclick={() => onFormChange('app_config_tools', !profileForm.app_config_tools)}
-				>
-					<span class="pf-toggle-knob"></span>
-				</button>
 			</div>
-			<!-- Slice F (SDK 0.1.81): strict MCP config — fail-fast on broken servers. -->
-			<div class="pf-toggle-row">
-				<div class="pf-toggle-info">
-					<span class="pf-toggle-title">Strict MCP config</span>
-					<span class="pf-toggle-desc">Fail-fast if any MCP server is misconfigured. Recommended for production profiles.</span>
+			<div class="set-row">
+				<div class="lab"><h4>Strict MCP config</h4><p>Fail-fast if any MCP server is misconfigured. Recommended for production profiles.</p></div>
+				<div class="ctl">
+					<button type="button" class="switch" class:on={profileForm.strict_mcp_config} role="switch" aria-checked={profileForm.strict_mcp_config} aria-label="Toggle strict MCP config" onclick={() => onFormChange('strict_mcp_config', !profileForm.strict_mcp_config)}><i></i></button>
 				</div>
-				<button
-					type="button"
-					class="pf-toggle"
-					class:active={profileForm.strict_mcp_config}
-					role="switch"
-					aria-checked={profileForm.strict_mcp_config}
-					aria-label="Toggle strict MCP config"
-					onclick={() => onFormChange('strict_mcp_config', !profileForm.strict_mcp_config)}
-				>
-					<span class="pf-toggle-knob"></span>
-				</button>
 			</div>
-			<!-- Computer Use: control the host desktop (screenshots, mouse, keyboard). -->
-			<div class="pf-toggle-row" class:pf-toggle-row--disabled={!computerUse.available}>
-				<div class="pf-toggle-info">
-					<span class="pf-toggle-title">Computer Use</span>
-					<span class="pf-toggle-desc">
+			<div class="set-row" class:disabled={!computerUse.available}>
+				<div class="lab">
+					<h4>Computer use</h4>
+					<p>
 						Let the agent control this machine's screen — screenshots, mouse, and keyboard,
 						like Claude Desktop. Shares one cursor with you. Native (non-Docker) hosts only.
 						{#if !computerUse.available}
 							<br /><strong>{COMPUTER_USE_REASONS[computerUse.reason] ?? `Unavailable (${computerUse.reason}).`}</strong>
 						{/if}
-					</span>
+					</p>
 				</div>
-				<button
-					type="button"
-					class="pf-toggle"
-					class:active={profileForm.computer_use_enabled}
-					role="switch"
-					aria-checked={profileForm.computer_use_enabled}
-					aria-label="Toggle computer use"
-					disabled={!computerUse.available}
-					onclick={() => onFormChange('computer_use_enabled', !profileForm.computer_use_enabled)}
-				>
-					<span class="pf-toggle-knob"></span>
-				</button>
+				<div class="ctl">
+					<button type="button" class="switch" class:on={profileForm.computer_use_enabled} role="switch" aria-checked={profileForm.computer_use_enabled} aria-label="Toggle computer use" disabled={!computerUse.available} onclick={() => onFormChange('computer_use_enabled', !profileForm.computer_use_enabled)}><i></i></button>
+				</div>
 			</div>
 		</div>
 
@@ -487,53 +437,45 @@
 
 	{:else if activeTab === 'agents'}
 		<!-- AGENTS TAB -->
-		<div class="pf-section">
-			<div class="pf-section-header">
-				<Bot size={16} />
-				<h3>Sub-Agents</h3>
+		<div class="set-group">
+			<div class="set-grouphead grouphead-row">
+				<div>
+					<h3><Bot />Sub-agents</h3>
+					<p>Built-in agents are always available. Choose which custom agents to enable.</p>
+				</div>
 				{#if customAgents.length > 0}
-					<div class="pf-section-actions">
-						<button type="button" class="text-btn primary" onclick={() => onFormChange('enabled_agents', [...builtinAgentIds, ...customAgents.map((a) => a.id)])}>Select All</button>
-						<button type="button" class="text-btn muted" onclick={() => onFormChange('enabled_agents', [...builtinAgentIds])}>Clear Custom</button>
+					<div class="head-acts">
+						<button type="button" class="lnk" onclick={() => onFormChange('enabled_agents', [...builtinAgentIds, ...customAgents.map((a) => a.id)])}>Select all</button>
+						<button type="button" class="lnk muted" onclick={() => onFormChange('enabled_agents', [...builtinAgentIds])}>Clear custom</button>
 					</div>
 				{/if}
 			</div>
-			<p class="pf-desc">Built-in agents are always available. Choose which custom agents to enable.</p>
-		</div>
-
-		{#if allSubagents.length === 0}
-			<div class="card-empty-state"><p class="card-empty-description">No agents configured</p></div>
-		{:else}
-			<div class="fp-list" style="padding: 0 20px;">
-				{#each allSubagents as agent, index (agent.id)}
+			{#if allSubagents.length === 0}
+				<div class="set-row"><div class="lab"><p>No agents configured.</p></div></div>
+			{:else}
+				{#each allSubagents as agent (agent.id)}
 					{@const isBuiltin = agent.is_builtin}
 					{@const isSelected = isBuiltin || profileForm.enabled_agents.includes(agent.id)}
-					{#if index > 0}<div class="fp-list-divider"></div>{/if}
-					<label class="fp-list-item pf-agent-row" class:pf-agent-row--selected={isSelected} class:pf-agent-row--builtin={isBuiltin}>
-						<input type="checkbox" checked={isSelected} disabled={isBuiltin} onchange={() => onToggleAgent(agent.id)} class="pf-agent-checkbox" />
-						<div class="fp-item-indicator" style={isSelected ? 'background: var(--primary)' : 'background: var(--text-tertiary); opacity: 0.3'}></div>
-						<div class="fp-item-content">
-							<div class="fp-item-header">
-								<span class="fp-item-name">{agent.name}</span>
-								{#if isBuiltin}
-									<span class="fp-item-badge">Always on</span>
-								{/if}
-							</div>
-							<div class="fp-item-meta">
-								<span class="fp-meta-model">{getModelDisplay(agent.model)}</span>
-							</div>
+					<div class="set-row">
+						<div class="lab">
+							<h4>{agent.name}{#if isBuiltin}<span class="hint"> · Always on</span>{/if}</h4>
+							<p>{getModelDisplay(agent.model)}</p>
 						</div>
-					</label>
+						<div class="ctl">
+							<button type="button" class="switch" class:on={isSelected} disabled={isBuiltin} aria-checked={isSelected} role="switch" aria-label={`Toggle ${agent.name}`} onclick={() => onToggleAgent(agent.id)}><i></i></button>
+						</div>
+					</div>
 				{/each}
-			</div>
+			{/if}
+		</div>
 
-			<!-- Agents Summary Bar -->
-			<div class="pf-summary-bar">
-				<div class="pf-summary-left">
-					<Bot size={14} />
-						<span>{builtinAgentIds.length} built-in{#if customAgents.length > 0} + {profileForm.enabled_agents.filter(id => !builtinAgentIds.includes(id) && customAgents.some(a => a.id === id)).length} of {customAgents.length} custom{/if}</span>
-				</div>
-				<button type="button" class="pf-summary-link" onclick={() => layout.openFeaturePage('subagent')}>Configure agents &rarr;</button>
+		{#if allSubagents.length > 0}
+			<div class="ed-note">
+				<Bot />
+				<span>
+					{builtinAgentIds.length} built-in{#if customAgents.length > 0} + {enabledCustomCount} of {customAgents.length} custom{/if} enabled.
+					<button type="button" class="lnk-inline" onclick={() => layout.openFeaturePage('subagent')}>Configure agents →</button>
+				</span>
 			</div>
 		{/if}
 
@@ -551,550 +493,255 @@
 
 	{:else if activeTab === 'advanced'}
 		<!-- ADVANCED TAB -->
-		<div class="pf-section">
-			<div class="pf-section-header">
-				<SlidersHorizontal size={16} />
-				<h3>Environment</h3>
+		<div class="set-group">
+			<div class="set-grouphead"><h3>Environment</h3><p>Configure the working environment for this profile.</p></div>
+			<div class="set-row stack">
+				<div class="lab"><h4>Working directory</h4><p>Where the agent runs by default.</p></div>
+				<div class="ctl"><input class="inp mono" value={profileForm.cwd} oninput={(e) => onFormChange('cwd', (e.target as HTMLInputElement).value)} placeholder="/home/user/projects/my-api" /></div>
 			</div>
-			<p class="pf-desc">Configure the working environment for this profile.</p>
-			<div class="pf-field-grid">
-				<div class="pf-field">
-					<label class="pf-label" for="profile-cwd">Working Directory</label>
-					<input id="profile-cwd" value={profileForm.cwd} oninput={(e) => onFormChange('cwd', (e.target as HTMLInputElement).value)} class="pf-input pf-input--mono" placeholder="/home/user/projects/my-api" />
-				</div>
-				<div class="pf-field">
-					<label class="pf-label" for="profile-user">Run as User</label>
-					<input id="profile-user" value={profileForm.user} oninput={(e) => onFormChange('user', (e.target as HTMLInputElement).value)} class="pf-input" placeholder="default" />
-				</div>
+			<div class="set-row">
+				<div class="lab"><h4>Run as user</h4><p>System user the agent process runs under.</p></div>
+				<div class="ctl"><input class="inp" value={profileForm.user} oninput={(e) => onFormChange('user', (e.target as HTMLInputElement).value)} placeholder="default" /></div>
 			</div>
 		</div>
 
-		<div class="pf-section">
-			<div class="pf-section-header">
-				<Settings size={16} />
-				<h3>Performance & Limits</h3>
-			</div>
-			<div class="pf-field-grid">
-				<div class="pf-field">
-					<label class="pf-label" for="profile-max-buffer">Max Output Buffer</label>
-					<input id="profile-max-buffer" type="number" value={profileForm.max_buffer_size} oninput={(e) => { const v = (e.target as HTMLInputElement).value; onFormChange('max_buffer_size', v ? Number(v) : null); }} class="pf-input" placeholder="200,000 chars" />
-				</div>
+		<div class="set-group">
+			<div class="set-grouphead"><h3>Performance &amp; limits</h3></div>
+			<div class="set-row">
+				<div class="lab"><h4>Max output buffer</h4><p>Maximum characters of tool output to retain.</p></div>
+				<div class="ctl"><input class="inp" type="number" value={profileForm.max_buffer_size} oninput={(e) => { const v = (e.target as HTMLInputElement).value; onFormChange('max_buffer_size', v ? Number(v) : null); }} placeholder="200,000 chars" /></div>
 			</div>
 		</div>
 
-		<div class="pf-section">
-			<div class="pf-section-header">
-				<FileText size={16} />
-				<h3>Settings Sources</h3>
-			</div>
-			<p class="pf-desc">Load settings from filesystem locations</p>
-			<div class="inline-checkboxes">
-				{#each [{ id: 'user', label: 'User (~/.claude)' }, { id: 'project', label: 'Project (.claude)' }, { id: 'local', label: 'Local' }] as source}
-					<label class="inline-checkbox">
-						<input type="checkbox" checked={profileForm.setting_sources.includes(source.id)} onchange={() => onToggleSettingSource(source.id)} class="checkbox-input" />
-						<span class="checkbox-label">{source.label}</span>
-					</label>
-				{/each}
-			</div>
-		</div>
-
-		<div class="pf-section">
-			<div class="pf-section-header">
-				<SlidersHorizontal size={16} />
-				<h3>Environment Variables</h3>
-				<button type="button" class="pf-add-var-btn" onclick={() => { onFormChange('env_vars', [...profileForm.env_vars, { key: '', value: '' }]); }}>
-					+ Add Variable
-				</button>
-			</div>
-			<select class="pf-select" onchange={(e) => { const target = e.target as HTMLSelectElement; const key = target.value; if (key && !profileForm.env_vars.some(v => v.key === key)) { onFormChange('env_vars', [...profileForm.env_vars, { key, value: '' }]); } target.value = ''; }}>
-				<option value="">Select a known variable to add...</option>
-				{#each envVarPresets as preset}
-					{#if !profileForm.env_vars.some(v => v.key === preset.key)}
-						<option value={preset.key}>{preset.key}</option>
-					{/if}
-				{/each}
-			</select>
-			{#if profileForm.env_vars.length > 0}
-				<div class="pf-env-list">
-					{#each profileForm.env_vars as envVar, index}
-						{@const preset = envVarPresets.find(p => p.key === envVar.key)}
-						<div class="pf-env-row">
-							<input type="text" value={envVar.key} class="pf-input pf-input--mono pf-env-key" placeholder="VARIABLE_NAME" oninput={(e) => { const target = e.target as HTMLInputElement; let val = target.value.replace(/,/g, ''); const updated = [...profileForm.env_vars]; updated[index] = { ...updated[index], key: val }; onFormChange('env_vars', updated); }} />
-							<input type="text" value={envVar.value} class="pf-input pf-input--mono pf-env-value" placeholder={preset?.placeholder || 'value'} oninput={(e) => { const target = e.target as HTMLInputElement; let val = target.value.replace(/,/g, ''); const updated = [...profileForm.env_vars]; updated[index] = { ...updated[index], value: val }; onFormChange('env_vars', updated); }} />
-							<button type="button" class="pf-env-remove" title="Remove variable" onclick={() => { onFormChange('env_vars', profileForm.env_vars.filter((_, i) => i !== index)); }}>
-								<Trash2 size={14} />
+		<div class="set-group">
+			<div class="set-grouphead"><h3>Settings sources</h3><p>Load settings from filesystem locations.</p></div>
+			<div class="set-row stack">
+				<div class="lab"><h4>Sources</h4></div>
+				<div class="ctl">
+					<div class="chips-select">
+						{#each settingSources as source}
+							{@const on = profileForm.setting_sources.includes(source.id)}
+							<button type="button" class="chsel" class:on onclick={() => onToggleSettingSource(source.id)}>
+								{#if on}<Check size={12} />{/if}
+								{source.label}
 							</button>
-						</div>
-					{/each}
+						{/each}
+					</div>
 				</div>
-			{:else}
-				<p class="pf-desc">No environment variables configured.</p>
-			{/if}
+			</div>
+		</div>
+
+		<div class="set-group">
+			<div class="set-grouphead grouphead-row">
+				<div><h3>Environment variables</h3><p>Set environment variables for the agent's runtime.</p></div>
+				<button type="button" class="lnk" onclick={() => onFormChange('env_vars', [...profileForm.env_vars, { key: '', value: '' }])}>+ Add variable</button>
+			</div>
+			<div class="set-row stack">
+				<div class="lab"><h4>Known variables</h4><p>Pick a recognized variable to add it quickly.</p></div>
+				<div class="ctl">
+					<select class="sel fld" onchange={(e) => { const target = e.target as HTMLSelectElement; const key = target.value; if (key && !profileForm.env_vars.some((v) => v.key === key)) { onFormChange('env_vars', [...profileForm.env_vars, { key, value: '' }]); } target.value = ''; }}>
+						<option value="">Select a known variable to add…</option>
+						{#each envVarPresets as preset}
+							{#if !profileForm.env_vars.some((v) => v.key === preset.key)}
+								<option value={preset.key}>{preset.key}</option>
+							{/if}
+						{/each}
+					</select>
+					{#if profileForm.env_vars.length > 0}
+						<div class="env-list">
+							{#each profileForm.env_vars as envVar, index}
+								{@const preset = envVarPresets.find((p) => p.key === envVar.key)}
+								<div class="env-row">
+									<input type="text" value={envVar.key} class="inp mono env-key" placeholder="VARIABLE_NAME" oninput={(e) => { const target = e.target as HTMLInputElement; let val = target.value.replace(/,/g, ''); const updated = [...profileForm.env_vars]; updated[index] = { ...updated[index], key: val }; onFormChange('env_vars', updated); }} />
+									<input type="text" value={envVar.value} class="inp mono env-val" placeholder={preset?.placeholder || 'value'} oninput={(e) => { const target = e.target as HTMLInputElement; let val = target.value.replace(/,/g, ''); const updated = [...profileForm.env_vars]; updated[index] = { ...updated[index], value: val }; onFormChange('env_vars', updated); }} />
+									<button type="button" class="icon-btn danger" title="Remove variable" onclick={() => onFormChange('env_vars', profileForm.env_vars.filter((_, i) => i !== index))}>
+										<Trash2 size={14} />
+									</button>
+								</div>
+							{/each}
+						</div>
+					{:else}
+						<p class="empty">No environment variables configured.</p>
+					{/if}
+				</div>
+			</div>
 		</div>
 	{/if}
 </div>
 
 <style>
-	/* Content Area */
-	.pf-content {
-		padding: 24px 20px;
-		display: flex;
-		flex-direction: column;
-		gap: 28px;
-		flex: 1;
+	.pf-body {
+		display: block;
 	}
 
-	/* Sections */
-	.pf-section {
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
+	/* Required asterisk */
+	.req {
+		color: var(--destructive);
+		font-weight: 700;
 	}
 
-	.pf-section-header {
+	/* Control stacked vertically (control + helper input below) */
+	.ctl-col {
+		flex-direction: column;
+		align-items: stretch;
+		gap: 8px;
+	}
+	.ctl-col :global(.inp),
+	.ctl-col :global(.sel) {
+		width: 100%;
+	}
+
+	/* Inline control row (select + adjacent icon button / checkbox) */
+	.grp-row {
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		color: var(--text-primary);
-	}
-
-	.pf-section-header h3 {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 600;
-		margin: 0;
-		color: var(--text-primary);
-	}
-
-	.pf-section-actions {
-		margin-left: auto;
-		display: flex;
-		gap: 12px;
-	}
-
-	.pf-divider {
-		height: 1px;
-		background: var(--border-subtle);
 		width: 100%;
 	}
-
-	.pf-desc {
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-		margin: 0;
-	}
-
-	/* Field Grid */
-	.pf-field-grid {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		gap: 16px;
-	}
-
-	@media (max-width: 480px) {
-		.pf-field-grid {
-			grid-template-columns: 1fr;
-		}
-	}
-
-	.pf-field {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.pf-label {
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 500;
-		color: var(--text-secondary);
-	}
-
-	/* Inputs */
-	.pf-input {
-		width: 100%;
-		padding: 10px 14px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		color: var(--text-primary);
-		font-size: var(--text-md, 0.875rem);
-		font-family: inherit;
-		transition: border-color 200ms, box-shadow 200ms;
-		outline: none;
-	}
-
-	.pf-input:focus {
-		border-color: var(--primary);
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
-	}
-
-	.pf-input::placeholder {
-		color: var(--text-tertiary);
-	}
-
-	.pf-input--mono {
-		font-family: var(--card-font-mono, 'JetBrains Mono', monospace);
-		font-size: var(--text-sm, 0.75rem);
-	}
-
-	/* Selects */
-	.pf-select {
-		width: 100%;
-		padding: 10px 14px;
-		padding-right: 36px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		color: var(--text-primary);
-		font-size: var(--text-md, 0.875rem);
-		font-family: inherit;
-		cursor: pointer;
-		outline: none;
-		appearance: none;
-		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239090A8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
-		background-repeat: no-repeat;
-		background-position: right 12px center;
-		background-size: 16px;
-		transition: border-color 200ms, box-shadow 200ms;
-	}
-
-	.pf-select:focus {
-		border-color: var(--primary);
-		box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 15%, transparent);
-	}
-
-	/* Toggle Switch */
-	.pf-toggle-row {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 14px 16px;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-	}
-
-	.pf-toggle-info {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
+	.grp-row :global(.sel) {
 		flex: 1;
 		min-width: 0;
 	}
 
-	.pf-toggle-title {
-		font-size: var(--text-md, 0.875rem);
-		font-weight: 500;
-		color: var(--text-primary);
-	}
-
-	.pf-toggle-desc {
-		font-size: var(--text-xs, 0.6875rem);
-		color: var(--text-secondary);
-	}
-
-	.pf-toggle {
-		position: relative;
-		width: 44px;
-		height: 24px;
-		background: var(--muted);
-		border: 1px solid var(--border-subtle);
-		border-radius: 12px;
-		cursor: pointer;
-		transition: all 200ms ease;
-		flex-shrink: 0;
-		margin-left: 16px;
-	}
-
-	.pf-toggle.active {
-		background: var(--primary);
-		border-color: var(--primary);
-	}
-
-	.pf-toggle-knob {
-		position: absolute;
-		top: 2px;
-		left: 2px;
-		width: 18px;
-		height: 18px;
-		background: var(--primary-foreground);
-		border-radius: 50%;
-		transition: transform 200ms ease;
-	}
-
-	.pf-toggle.active .pf-toggle-knob {
-		transform: translateX(20px);
-	}
-
-	.pf-toggle:disabled {
-		cursor: not-allowed;
-		opacity: 0.4;
-	}
-
-	.pf-toggle-row--disabled .pf-toggle-title {
-		opacity: 0.6;
-	}
-
-	/* Summary Bar */
-	.pf-summary-bar {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 12px 16px;
-		background: color-mix(in oklch, var(--primary) 3%, transparent);
-		border: 1px solid color-mix(in oklch, var(--primary) 20%, transparent);
-		border-radius: var(--radius-md, 10px);
-	}
-
-	.pf-summary-left {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		font-size: var(--text-sm, 0.75rem);
-		color: var(--text-secondary);
-	}
-
-	.pf-summary-left :global(svg) {
-		color: var(--primary);
-	}
-
-	.pf-summary-link {
-		font-size: var(--text-xs, 0.6875rem);
-		font-weight: 500;
-		color: var(--text-secondary);
-		background: none;
-		border: none;
-		padding: 0;
-		cursor: pointer;
-		transition: color 120ms;
-	}
-
-	.pf-summary-link:hover {
-		color: var(--primary);
-	}
-
-	/* Agent Cards */
-	.pf-agent-row {
-		cursor: pointer;
-	}
-
-	.pf-agent-row--builtin {
-		cursor: default;
-		opacity: 0.85;
-	}
-
-	.pf-agent-checkbox {
-		width: 18px;
-		height: 18px;
-		flex-shrink: 0;
-		accent-color: var(--primary);
-	}
-
-	.pf-agent-checkbox:disabled {
-		opacity: 0.5;
-		cursor: default;
-	}
-
-	/* Group */
-	.pf-group-wrapper {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.pf-group-row {
-		display: flex;
-		gap: 6px;
-		align-items: center;
-	}
-
-	.pf-group-row .pf-select {
-		flex: 1;
-	}
-
-	.pf-btn-new-group {
+	/* Square icon button next to a select (new/delete group, remove var) */
+	.icon-btn {
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		width: 36px;
 		height: 36px;
 		flex-shrink: 0;
-		background: var(--surface-1);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-md, 10px);
-		color: var(--text-secondary);
+		background: var(--background);
+		border: 1px solid var(--border);
+		border-radius: 9px;
+		color: var(--muted-foreground);
 		cursor: pointer;
-		transition: all 200ms;
+		transition: background 0.12s, color 0.12s, border-color 0.12s;
 	}
-
-	.pf-btn-new-group:hover {
-		background: var(--surface-hover);
-		color: var(--text-primary);
-		border-color: var(--border-default);
+	.icon-btn:hover {
+		background: var(--muted);
+		color: var(--foreground);
 	}
-
-	.pf-btn-new-group--delete {
+	.icon-btn.danger {
 		color: var(--destructive);
 	}
-
-	.pf-btn-new-group--delete:hover {
-		background: color-mix(in oklch, var(--destructive) 15%, transparent);
-		color: var(--destructive);
+	.icon-btn.danger:hover {
+		background: color-mix(in oklch, var(--destructive) 14%, transparent);
 		border-color: color-mix(in oklch, var(--destructive) 30%, transparent);
 	}
 
-	.pf-group-input {
-		width: 100%;
-	}
-
-	/* Environment Variables */
-	.pf-env-list {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.pf-env-row {
-		display: flex;
+	/* Inline checkbox label (1M context) */
+	.chk {
+		display: inline-flex;
 		align-items: center;
-		gap: 8px;
-	}
-
-	.pf-env-key {
-		width: 200px;
-		flex-shrink: 0;
-	}
-
-	.pf-env-value {
-		flex: 1;
-	}
-
-	.pf-env-remove {
-		width: 32px;
-		height: 32px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: color-mix(in oklch, var(--destructive) 10%, transparent);
-		border: none;
-		border-radius: 6px;
-		color: var(--destructive);
-		cursor: pointer;
-		transition: all 150ms;
-		flex-shrink: 0;
-	}
-
-	.pf-env-remove:hover {
-		background: color-mix(in oklch, var(--destructive) 20%, transparent);
-	}
-
-	.pf-add-var-btn {
-		margin-left: auto;
-		background: none;
-		border: none;
-		color: var(--primary);
-		font-size: var(--text-sm, 0.75rem);
-		font-weight: 500;
-		cursor: pointer;
-	}
-
-	.pf-add-var-btn:hover {
-		text-decoration: underline;
-	}
-
-	@media (max-width: 480px) {
-		.pf-env-row {
-			display: grid;
-			grid-template-columns: 1fr auto;
-			grid-template-rows: auto auto;
-		}
-
-		.pf-env-key {
-			width: 100%;
-			grid-column: 1;
-			grid-row: 1;
-		}
-
-		.pf-env-value {
-			grid-column: 1;
-			grid-row: 2;
-		}
-
-		.pf-env-remove {
-			grid-column: 2;
-			grid-row: 1 / 3;
-			align-self: center;
-		}
-	}
-
-	.text-btn {
-		background: transparent;
-		border: none;
-		font-size: var(--text-xs, 0.75rem);
-		cursor: pointer;
-		transition: color 100ms;
-	}
-
-	.text-btn.muted {
-		color: var(--text-secondary);
-	}
-
-	.text-btn.muted:hover {
-		color: var(--text-primary);
-	}
-
-	.text-btn.primary {
-		color: var(--primary);
-	}
-
-	.text-btn.primary:hover {
-		text-decoration: underline;
-	}
-
-	.required {
-		color: var(--destructive);
-	}
-
-	/* Model select + 1M context toggle, side by side */
-	.pf-model-row {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-	}
-
-	.pf-model-row .pf-select {
-		flex: 1;
-		min-width: 0;
-	}
-
-	/* 1M context toggle (inline, right of model select) */
-	.pf-1m-toggle {
-		flex-shrink: 0;
+		gap: 7px;
+		font-size: 12.5px;
+		color: var(--muted-foreground);
 		white-space: nowrap;
-	}
-
-	/* Inline checkboxes */
-	.inline-checkboxes {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 16px;
-	}
-
-	.inline-checkbox {
-		display: flex;
-		align-items: center;
-		gap: 8px;
 		cursor: pointer;
+		flex-shrink: 0;
 	}
-
-	.checkbox-input {
-		width: 16px;
-		height: 16px;
+	.chk input {
+		width: 15px;
+		height: 15px;
 		accent-color: var(--primary);
 		color-scheme: dark;
 	}
 
-	.checkbox-label {
-		font-size: var(--text-md, 0.875rem);
-		color: var(--text-primary);
+	/* Group header with trailing actions */
+	.grouphead-row {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 14px;
+	}
+	.head-acts {
+		display: flex;
+		gap: 14px;
+		flex-shrink: 0;
+		padding-top: 2px;
+	}
+
+	/* Text-link buttons */
+	.lnk {
+		background: none;
+		border: none;
+		padding: 0;
+		font: inherit;
+		font-size: 12.5px;
+		font-weight: 600;
+		color: var(--foreground);
+		cursor: pointer;
+	}
+	.lnk:hover {
+		text-decoration: underline;
+	}
+	.lnk.muted {
+		color: var(--muted-foreground);
+		font-weight: 500;
+	}
+	.lnk-inline {
+		background: none;
+		border: none;
+		padding: 0;
+		font: inherit;
+		font-weight: 600;
+		color: var(--foreground);
+		cursor: pointer;
+		text-decoration: underline;
+	}
+
+	/* Disabled toggle row (computer use unavailable) */
+	.set-row.disabled .lab h4 {
+		opacity: 0.6;
+	}
+
+	/* Environment variable rows */
+	.env-list {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		margin-top: 10px;
+	}
+	.env-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.env-row :global(.inp.env-key) {
+		min-width: 0;
+		width: 200px;
+		flex-shrink: 0;
+	}
+	.env-row :global(.inp.env-val) {
+		min-width: 0;
+		flex: 1;
+	}
+	.empty {
+		margin: 10px 0 0;
+		font-size: 12.5px;
+		color: var(--muted-foreground);
+	}
+
+	@media (max-width: 560px) {
+		.env-row {
+			display: grid;
+			grid-template-columns: 1fr auto;
+			grid-template-rows: auto auto;
+		}
+		.env-row :global(.inp.env-key) {
+			width: 100%;
+			grid-column: 1;
+			grid-row: 1;
+		}
+		.env-row :global(.inp.env-val) {
+			grid-column: 1;
+			grid-row: 2;
+		}
+		.env-row .icon-btn {
+			grid-column: 2;
+			grid-row: 1 / 3;
+			align-self: center;
+		}
 	}
 </style>
