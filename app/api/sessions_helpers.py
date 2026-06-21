@@ -338,7 +338,7 @@ def enrich_search_results_with_tags(results: list) -> list:
 # Shared filter logic
 # ---------------------------------------------------------------------------
 
-def _apply_session_filters(
+async def _apply_session_filters(
     request: Request,
     project_id: Optional[str],
     profile_id: Optional[str],
@@ -349,9 +349,10 @@ def _apply_session_filters(
 ) -> tuple:
     """Apply API user restrictions and sync Claude sessions.
 
-    Shared logic for list_sessions and list_sessions_paginated:
+    Shared logic for list_sessions / list_sessions_paginated / list_sessions_cursor:
     1. Force project/profile/api_user_id from API user restrictions
-    2. Auto-sync Claude Code sessions for the project
+    2. Auto-sync Claude Code sessions for the project (disk scan offloaded
+       to a worker thread so it never blocks the event loop)
     3. Build filter_api_user_id and filter_api_users_only from the flags
 
     Returns (project_id, profile_id, filter_api_user_id, filter_api_users_only).
@@ -379,9 +380,16 @@ def _apply_session_filters(
             try:
                 from app.core.session_sync import session_sync_service
                 _last_sync_times[project_id] = now
-                sync_result = session_sync_service.sync_project_sessions(
+                # Offload the disk scan + N DB lookups to a worker thread.
+                # Run inline (as before) it blocked the event loop for the full
+                # scan, freezing EVERY concurrent request — the observed "all
+                # endpoints return at the same elapsed time" stall. Throttle is
+                # stamped before the await so a concurrent list request inside
+                # the same 60 s window still skips the scan.
+                sync_result = await run_sync(
+                    session_sync_service.sync_project_sessions,
                     project_id=project_id,
-                    profile_id=profile_id or "default"
+                    profile_id=profile_id or "default",
                 )
                 if sync_result["imported_count"] > 0:
                     logger.debug(

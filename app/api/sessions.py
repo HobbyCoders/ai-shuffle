@@ -149,7 +149,7 @@ async def list_sessions(
     yet in the database. This ensures users see all their sessions regardless of whether they
     were created in Claude Code or AI Shuffle.
     """
-    project_id, profile_id, filter_api_user_id, filter_api_users_only = _apply_session_filters(
+    project_id, profile_id, filter_api_user_id, filter_api_users_only = await _apply_session_filters(
         request, project_id, profile_id, api_user_id, admin_only, api_users_only, sync_claude_sessions
     )
 
@@ -188,7 +188,7 @@ async def list_sessions_paginated(
     List sessions with pagination metadata (total count, has_more).
     Use this endpoint for infinite scroll UIs that need to know the total count.
     """
-    project_id, profile_id, filter_api_user_id, filter_api_users_only = _apply_session_filters(
+    project_id, profile_id, filter_api_user_id, filter_api_users_only = await _apply_session_filters(
         request, project_id, profile_id, api_user_id, admin_only, api_users_only, sync_claude_sessions
     )
 
@@ -239,7 +239,7 @@ async def list_sessions_cursor(
     More efficient than offset-based pagination for deep scrolling — O(1) seek
     instead of O(n) scan-and-discard.
     """
-    project_id, profile_id, filter_api_user_id, filter_api_users_only = _apply_session_filters(
+    project_id, profile_id, filter_api_user_id, filter_api_users_only = await _apply_session_filters(
         request, project_id, profile_id, api_user_id, admin_only, api_users_only, sync_claude_sessions
     )
 
