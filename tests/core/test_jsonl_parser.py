@@ -107,6 +107,21 @@ class TestGetProjectDirName:
         result = jsonl_parser.get_project_dir_name("workspace/project")
         assert result == "workspace-project"
 
+    def test_windows_path_with_space(self):
+        """Spaces are replaced with dashes to match the Claude CLI's encoding.
+
+        A cwd like D:\\Projects\\new folder is stored by the CLI under the
+        project dir D--Projects-new-folder (space -> dash). Preserving the
+        space would point at a non-existent / ghost dir.
+        """
+        result = jsonl_parser.get_project_dir_name(r"D:\Projects\new folder")
+        assert result == "D--Projects-new-folder"
+
+    def test_posix_path_with_space(self):
+        """Spaces in POSIX paths are also replaced with dashes."""
+        result = jsonl_parser.get_project_dir_name("/workspace/new folder")
+        assert result == "-workspace-new-folder"
+
 
 class TestExtractTextFromContent:
     """Test text extraction from message content."""
@@ -497,6 +512,57 @@ class TestGetAgentJsonlPaths:
                 mock_settings.get_claude_projects_dir = projects_dir
                 result = jsonl_parser.get_agent_jsonl_paths(session_id, "/workspace")
                 assert "nope" not in result
+
+    def test_ghost_dir_falls_back_to_real_dir_for_nested_agent(self):
+        """Regression (Fix B): when the COMPUTED project dir exists but is a
+        "ghost" lacking the session's main file, resolution must still fall back
+        to the REAL dir (containing <sid>.jsonl + nested subagent) and find the
+        nested agent. The ghost dir merely existing must NOT short-circuit the
+        fallback.
+
+        Mirrors the real-world bug: working_dir 'D:\\Projects\\new folder'
+        previously mapped to a ghost dir 'D--Projects-new folder' (space
+        preserved) that get_hooks_jsonl_path had created but which holds no
+        transcripts, while the CLI stored everything under the dash-encoded
+        'D--Projects-new-folder'. Here we force the mismatch by mapping the
+        working_dir to a ghost name and placing the session under a different
+        ("real") dir so the test exercises Fix B independently of Fix A.
+        """
+        jsonl_parser._agent_paths_cache.clear()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            projects_dir = Path(tmpdir) / "projects"
+            session_id = "test-session-123"
+
+            # GHOST dir: matches the name get_project_dir_name() computes for the
+            # working_dir below, EXISTS, but has NO <sid>.jsonl (no transcripts).
+            working_dir = "/ghost"
+            ghost_name = jsonl_parser.get_project_dir_name(working_dir)
+            ghost_dir = projects_dir / ghost_name
+            ghost_dir.mkdir(parents=True)
+
+            # REAL dir: a differently-named project dir that actually holds the
+            # session's main file and the nested subagent transcript.
+            real_dir = projects_dir / "-real-project"
+            real_dir.mkdir(parents=True)
+            session_file = real_dir / f"{session_id}.jsonl"
+            session_file.write_text('{"test": true}\n')
+            subagents_dir = real_dir / session_id / "subagents"
+            subagents_dir.mkdir(parents=True)
+            agent_file = subagents_dir / "agent-ad54465c88efd6b1a.jsonl"
+            agent_file.write_text(
+                json.dumps({
+                    "sessionId": session_id,
+                    "isSidechain": True,
+                    "agentId": "ad54465c88efd6b1a",
+                    "type": "user",
+                }) + '\n'
+            )
+
+            with patch('app.core.jsonl_parser.settings') as mock_settings:
+                mock_settings.get_claude_projects_dir = projects_dir
+                result = jsonl_parser.get_agent_jsonl_paths(session_id, working_dir)
+                assert "ad54465c88efd6b1a" in result
+                assert result["ad54465c88efd6b1a"] == agent_file
 
     def test_find_both_flat_and_nested_agent_files(self):
         """Should discover BOTH a flat agent-*.jsonl and a nested

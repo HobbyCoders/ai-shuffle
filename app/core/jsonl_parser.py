@@ -122,11 +122,22 @@ def get_project_dir_name(working_dir: str) -> str:
 
     The colon after drive letter (D:) becomes a dash, and each backslash becomes a dash,
     resulting in D-- at the start for D:\\ paths.
+
+    Spaces in the path are ALSO replaced with dashes, matching the Claude CLI's
+    encoding — e.g. D:\\Projects\\new folder -> D--Projects-new-folder. Without
+    this, a cwd containing a space would resolve to a "ghost" project dir name that
+    differs from where the CLI actually stored the transcripts.
     """
     import os
-    # Replace Windows drive colon (D: -> D-), path separators (\, /), all with dashes
-    # Order matters: os.sep first for native, then / for any mixed paths, then : for Windows drives
-    return working_dir.replace(os.sep, "-").replace("/", "-").replace(":", "-")
+    # Replace Windows drive colon (D: -> D-), path separators (\, /), and spaces, all
+    # with dashes. Order matters: os.sep first for native, then / for any mixed paths,
+    # then : for Windows drives, then spaces to match the CLI's project-dir encoding.
+    return (
+        working_dir.replace(os.sep, "-")
+        .replace("/", "-")
+        .replace(":", "-")
+        .replace(" ", "-")
+    )
 
 
 def get_session_jsonl_path(sdk_session_id: str, working_dir: str = "/workspace") -> Optional[Path]:
@@ -461,12 +472,17 @@ def get_agent_jsonl_paths(sdk_session_id: str, working_dir: str = "/workspace") 
     project_dir_name = get_project_dir_name(working_dir)
     project_dir = claude_projects_dir / project_dir_name
 
-    # If not found, search all project directories (fallback)
+    # Resolve the project dir robustly, mirroring get_session_jsonl_path: only trust
+    # the computed project_dir when it actually contains the session's main file. A
+    # computed dir can EXIST yet be the wrong one — e.g. a "ghost" dir created from a
+    # mis-encoded path (space-preserving vs CLI's space->dash) that holds no
+    # transcripts. Merely existing must not short-circuit the fallback, or the real
+    # dir (with the nested <sid>/subagents/agent-*.jsonl) is never searched.
     project_dirs_to_search = []
-    if project_dir.exists():
+    if (project_dir / f"{sdk_session_id}.jsonl").exists():
         project_dirs_to_search.append(project_dir)
     else:
-        # Fallback: search all project directories
+        # Fallback: search all project directories for the one holding this session.
         if claude_projects_dir.exists():
             for proj_dir in claude_projects_dir.iterdir():
                 if proj_dir.is_dir():
