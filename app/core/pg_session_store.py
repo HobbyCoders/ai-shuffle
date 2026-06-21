@@ -156,6 +156,126 @@ def _append_sync(key: SessionKey, entries: list[SessionStoreEntry]) -> None:
         )
 
 
+def _count_entries_sync(key: SessionKey) -> int:
+    """Return how many rows already exist for ``key`` (incl. its subpath).
+
+    Used by the backfill's idempotency pre-check: ``session_store_entries`` has
+    a ``BIGSERIAL`` primary key and **no** unique constraint on
+    ``(project_key, session_id, subpath)``, so a plain re-INSERT would duplicate
+    rows. There is no ``ON CONFLICT`` target to lean on. The backfill therefore
+    skips any (project_key, session_id, subpath) that already has rows — the
+    on-disk JSONL transcript is the complete, append-only history, so "any rows
+    present" means "already backfilled (or live-mirrored)".
+    """
+    project_key = key["project_key"]
+    session_id = key["session_id"]
+    subpath = _subpath_of(key)
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        if subpath is None:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM session_store_entries "
+                "WHERE project_key = %s AND session_id = %s AND subpath IS NULL",
+                (project_key, session_id),
+            )
+        else:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM session_store_entries "
+                "WHERE project_key = %s AND session_id = %s AND subpath = %s",
+                (project_key, session_id, subpath),
+            )
+        row = cur.fetchone()
+    return int(row["n"]) if row else 0
+
+
+def _backfill_entries_sync(
+    key: SessionKey,
+    entries: list[SessionStoreEntry],
+    batch_size: int = 500,
+) -> int:
+    """Insert ``entries`` for ``key`` using the SAME row shape as
+    :func:`_append_sync`, batched, and update the summary sidecar for main
+    transcripts.
+
+    Returns the number of rows written. This deliberately reuses the exact
+    column set / ``Json(dict(e))`` encoding ``_append_sync`` uses so backfilled
+    rows are shape-identical to live-mirrored rows and the drift verifier
+    (which compares ``entry->>'uuid'`` ordered by ``id``) passes unchanged.
+
+    Caller is responsible for the idempotency pre-check (see
+    :func:`_count_entries_sync`) — this function unconditionally inserts.
+    Insertion order is preserved by the ``BIGSERIAL id`` exactly as live
+    appends are, because rows are inserted in list order within one
+    transaction.
+    """
+    if not entries:
+        return 0
+
+    project_key = key["project_key"]
+    session_id = key["session_id"]
+    subpath = _subpath_of(key)
+
+    written = 0
+    with get_db() as conn:
+        cur = conn.cursor()
+        # Batched inserts keep a single session's (possibly large) transcript
+        # from building one giant executemany / huge transaction snapshot.
+        for start in range(0, len(entries), batch_size):
+            chunk = entries[start : start + batch_size]
+            cur.executemany(
+                "INSERT INTO session_store_entries "
+                "(project_key, session_id, subpath, entry) "
+                "VALUES (%s, %s, %s, %s)",
+                [(project_key, session_id, subpath, Json(dict(e))) for e in chunk],
+            )
+            written += len(chunk)
+
+        # Subagent transcripts MUST NOT touch the main session's summary —
+        # identical guard to _append_sync.
+        if subpath is not None:
+            return written
+
+        # Fold the whole transcript into the summary sidecar in one shot,
+        # mirroring _append_sync's create-then-fold flow. prev=None seeds
+        # created_at / is_sidechain from the first entry. mtime_ms is stamped
+        # Postgres-side with the same NOW()-epoch-ms formula as live appends.
+        cur.execute(
+            "INSERT INTO session_store_summaries "
+            "(project_key, session_id, data, mtime_ms) "
+            "VALUES (%s, %s, %s, 0) "
+            "ON CONFLICT (project_key, session_id) DO NOTHING",
+            (project_key, session_id, Json({})),
+        )
+        cur.execute(
+            "SELECT data, mtime_ms FROM session_store_summaries "
+            "WHERE project_key = %s AND session_id = %s FOR UPDATE",
+            (project_key, session_id),
+        )
+        row = cur.fetchone()
+        prev_data = row["data"] if row and row["data"] else {}
+        prev_mtime = row["mtime_ms"] if row else 0
+        if prev_data or prev_mtime:
+            prev_summary: SessionSummaryEntry | None = {
+                "session_id": session_id,
+                "mtime": int(prev_mtime),
+                "data": dict(prev_data),
+            }
+        else:
+            prev_summary = None
+
+        folded = fold_session_summary(prev_summary, key, list(entries))
+        cur.execute(
+            "UPDATE session_store_summaries "
+            "SET data = %s, "
+            "    mtime_ms = (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT "
+            "WHERE project_key = %s AND session_id = %s",
+            (Json(folded["data"]), project_key, session_id),
+        )
+
+    return written
+
+
 def _load_sync(key: SessionKey) -> list[SessionStoreEntry] | None:
     project_key = key["project_key"]
     session_id = key["session_id"]
@@ -311,6 +431,50 @@ class PgSessionStore:
 
     async def list_subkeys(self, key: SessionListSubkeysKey) -> list[str]:
         return await asyncio.to_thread(_list_subkeys_sync, key)
+
+    # ------------------------------------------------------------------
+    # Backfill API (operational; used by scripts.backfill_session_store).
+    #
+    # NOT part of the SDK SessionStore protocol. The live mirror appends
+    # incrementally; these methods bulk-load a complete on-disk transcript
+    # into the SAME tables, in the SAME row shape, so backfilled history is
+    # indistinguishable from mirrored history to readers and the verifier.
+    # ------------------------------------------------------------------
+
+    async def count_entries(self, key: SessionKey) -> int:
+        """Rows already present for ``key`` (used for the idempotency check)."""
+        return await asyncio.to_thread(_count_entries_sync, key)
+
+    async def backfill(
+        self,
+        key: SessionKey,
+        entries: list[SessionStoreEntry],
+        *,
+        skip_if_present: bool = True,
+        batch_size: int = 500,
+    ) -> int:
+        """Bulk-insert a full transcript for ``key``, idempotently.
+
+        Idempotency: ``session_store_entries`` has no unique constraint
+        (BIGSERIAL PK only), so there is no ``ON CONFLICT`` target. When
+        ``skip_if_present`` is True (default) this first counts existing rows
+        for the exact (project_key, session_id, subpath) and returns ``0``
+        without writing if any exist — the on-disk JSONL is the complete,
+        append-only history, so partial overlap is not expected. Pass
+        ``skip_if_present=False`` only when you have already truncated the
+        target rows yourself.
+
+        Returns the number of rows written (``0`` when skipped or empty).
+        """
+        if not entries:
+            return 0
+        if skip_if_present:
+            existing = await asyncio.to_thread(_count_entries_sync, key)
+            if existing > 0:
+                return 0
+        return await asyncio.to_thread(
+            _backfill_entries_sync, key, entries, batch_size
+        )
 
 
 __all__ = ["PgSessionStore"]
