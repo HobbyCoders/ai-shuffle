@@ -529,10 +529,18 @@ async def create_profile(request: ProfileCreate, token: str = Depends(require_ad
         profile_id = re.sub(r'[^a-z0-9-]', '-', request.name.lower())
         profile_id = re.sub(r'-+', '-', profile_id).strip('-')
 
-    # Ensure uniqueness
+    # Ensure uniqueness. Bounded so a store that keeps reporting a conflict (a
+    # bug, a stale read, or absurd collision counts) can never spin forever and
+    # exhaust memory — an unbounded `while` calling out to the DB is a foot-gun.
     base_id = profile_id
     counter = 1
+    max_attempts = 10000
     while database.get_profile(profile_id):
+        if counter > max_attempts:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Could not allocate a unique profile id for: {base_id}",
+            )
         profile_id = f"{base_id}-{counter}"
         counter += 1
 

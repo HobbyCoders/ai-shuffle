@@ -409,28 +409,67 @@ class TestCreateProfileEndpoint:
             mock_db.create_profile.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_create_profile_conflict(self):
-        """Creating a profile with existing ID should raise 409."""
+    async def test_create_profile_conflict_auto_uniquifies(self):
+        """A taken ID is auto-uniquified with a numeric suffix (see PR #109).
+
+        The endpoint no longer raises 409 on a plain conflict — it appends
+        ``-1``, ``-2``, ... until a free id is found, then persists that.
+        """
         from app.api.profiles import create_profile
         from app.core.models import ProfileCreate, ProfileConfig
-        from fastapi import HTTPException
 
-        profile = sample_profile()
+        existing = sample_profile()  # id == "test-profile"
+        created = {**existing, "id": "test-profile-1"}
 
         with patch("app.api.profiles.database") as mock_db:
-            mock_db.get_profile.return_value = profile  # Already exists
+            # "test-profile" is taken; the suffixed id is free, so the loop
+            # terminates after exactly one bump.
+            mock_db.get_profile.side_effect = (
+                lambda pid: existing if pid == "test-profile" else None
+            )
+            mock_db.create_profile.return_value = created
 
             request = ProfileCreate(
                 id="test-profile",
                 name="Duplicate Profile",
-                config=ProfileConfig(model="sonnet")
+                config=ProfileConfig(model="sonnet"),
+            )
+
+            result = await create_profile(request, token="test-token")
+
+            assert result["id"] == "test-profile-1"
+            assert mock_db.create_profile.call_args.kwargs["profile_id"] == "test-profile-1"
+
+    @pytest.mark.asyncio
+    async def test_create_profile_unique_id_search_is_bounded(self):
+        """A store that always reports a conflict must not loop unbounded.
+
+        Regression guard for the OOM where ``get_profile`` returning truthy for
+        every id span the uniqueness loop forever — each call accreted onto the
+        MagicMock call history until RAM hit tens of GB. The loop is now capped
+        and raises 409 instead of spinning.
+        """
+        from app.api.profiles import create_profile
+        from app.core.models import ProfileCreate, ProfileConfig
+        from fastapi import HTTPException
+
+        with patch("app.api.profiles.database") as mock_db:
+            mock_db.get_profile.return_value = sample_profile()  # always "exists"
+
+            request = ProfileCreate(
+                id="test-profile",
+                name="Duplicate Profile",
+                config=ProfileConfig(model="sonnet"),
             )
 
             with pytest.raises(HTTPException) as exc_info:
                 await create_profile(request, token="test-token")
 
             assert exc_info.value.status_code == 409
-            assert "already exists" in exc_info.value.detail.lower()
+            # Bounded: the DB was consulted a finite number of times, not forever.
+            assert mock_db.get_profile.call_count <= 10002
+            # And nothing was actually created.
+            mock_db.create_profile.assert_not_called()
 
 
 # =============================================================================
