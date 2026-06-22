@@ -67,7 +67,20 @@ _background_tasks: Dict[str, _BackgroundTask] = {}
 _BACKGROUND_LINE_LIMIT = 5000  # avoid unbounded growth
 
 
-async def _spawn_background(command: str, cwd: Optional[str]) -> _BackgroundTask:
+def _registry_safe(fn) -> None:
+    """Run a task-registry call, swallowing any error so it can never break a
+    spawn/reader path. The registry is a best-effort observability surface."""
+    try:
+        fn()
+    except Exception:
+        logger.debug("task_registry update failed", exc_info=True)
+
+
+async def _spawn_background(
+    command: str,
+    cwd: Optional[str],
+    session_id: Optional[str] = None,
+) -> _BackgroundTask:
     task_id = str(uuid.uuid4())[:8]
     task = _BackgroundTask(task_id=task_id, command=command, cwd=cwd)
     proc = await asyncio.create_subprocess_shell(
@@ -77,6 +90,15 @@ async def _spawn_background(command: str, cwd: Optional[str]) -> _BackgroundTask
         stderr=asyncio.subprocess.STDOUT,
     )
     task.process = proc
+
+    # Register the shell task so TaskList / /live can surface it. Keyed by the
+    # AI Shuffle session that spawned it; module-level spawns (no session) skip
+    # registration.
+    if session_id:
+        from app.core.task_registry import task_registry
+        _registry_safe(
+            lambda: task_registry.start_task(session_id, task_id, "shell", command)
+        )
 
     async def _reader() -> None:
         assert proc.stdout is not None
@@ -90,6 +112,21 @@ async def _spawn_background(command: str, cwd: Optional[str]) -> _BackgroundTask
                 # drop oldest
                 del task.lines[: len(task.lines) - _BACKGROUND_LINE_LIMIT]
         task.exit_code = await proc.wait()
+        if session_id:
+            from app.core.task_registry import task_registry
+            status = "completed" if task.exit_code == 0 else "error"
+
+            def _finish() -> None:
+                # Don't clobber a deliberate TaskStop "killed" with the reader's
+                # "error" (terminate() yields a non-zero exit code).
+                existing = (
+                    task_registry._tasks.get(session_id, {}).get(task_id) or {}
+                ).get("status")
+                if existing == "killed":
+                    return
+                task_registry.complete_task(session_id, task_id, status)
+
+            _registry_safe(_finish)
 
     task._reader_task = asyncio.create_task(_reader(), name=f"monitor-{task_id}")
     _background_tasks[task_id] = task
@@ -473,7 +510,7 @@ def create_builtin_tools_server(
         if not command:
             return _err("command is required.")
         try:
-            task = await _spawn_background(command, args.get("cwd"))
+            task = await _spawn_background(command, args.get("cwd"), session_id)
             return _ok({
                 "task_id": task.task_id,
                 "pid": task.process.pid if task.process else None,
@@ -548,6 +585,14 @@ def create_builtin_tools_server(
                     await task.process.wait()
             except ProcessLookupError:
                 pass
+        # Mark the task killed in the registry. The reader's completion path may
+        # also fire (with exit_code from terminate); the last write wins and both
+        # are terminal, so the surfaced status stays sane.
+        if session_id:
+            from app.core.task_registry import task_registry
+            _registry_safe(
+                lambda: task_registry.complete_task(session_id, tid, "killed")
+            )
         return _ok({
             "task_id": tid,
             "running": task.is_running(),
@@ -555,6 +600,42 @@ def create_builtin_tools_server(
         })
 
     all_tools.append(task_stop)
+
+    # ------------------------------------------------------------------
+    # TaskList — live view of this session's background tasks
+    # ------------------------------------------------------------------
+    @tool(
+        "TaskList",
+        "List your currently-running background tasks for this session. "
+        "Covers both background AGENT tasks (Task tool) and background shell "
+        "commands spawned via Monitor. This is a LIVE query — it reflects task "
+        "completions immediately, so call it whenever you need the current "
+        "picture (e.g. before deciding whether to wait, follow up, or move on) "
+        "rather than relying on an earlier snapshot.",
+        {
+            "type": "object",
+            "properties": {
+                "include_finished": {
+                    "type": "boolean",
+                    "description": "Include recently-finished tasks (default true).",
+                },
+            },
+        },
+    )
+    async def task_list(args: dict) -> dict:
+        if not session_id:
+            return _err("TaskList requires an active session context.")
+        from app.core.task_registry import task_registry
+
+        include_finished = args.get("include_finished", True)
+        if include_finished:
+            tasks = task_registry.get_all(session_id)
+        else:
+            tasks = task_registry.get_active(session_id)
+        running_count = sum(1 for t in tasks if t.get("status") == "running")
+        return _ok({"tasks": tasks, "running_count": running_count})
+
+    all_tools.append(task_list)
 
     # ------------------------------------------------------------------
     # ToolSearch — search local tool registry
@@ -689,6 +770,7 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__Monitor",
         "mcp__builtins__TaskOutput",
         "mcp__builtins__TaskStop",
+        "mcp__builtins__TaskList",
         "mcp__builtins__ToolSearch",
         "mcp__builtins__GetAppErrors",
     ]

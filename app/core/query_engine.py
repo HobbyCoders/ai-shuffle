@@ -78,6 +78,7 @@ from app.core.permission_handler import permission_handler, _DeferSentinel
 from app.core.user_question_handler import user_question_handler
 
 from app.core.live_session_store import live_session_store
+from app.core.task_registry import task_registry
 from app.core.message_resolver import message_resolver, resolve_working_dir
 from app.core.system_message_filter import HIDDEN_SYSTEM_SUBTYPES
 
@@ -129,6 +130,50 @@ from app.core.query_session_lifecycle import (  # noqa: F401 — re-exports
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Map the SDK's terminal TaskNotificationStatus ("completed"/"failed"/"stopped")
+# onto the registry's terminal statuses. TaskNotificationMessage is ALWAYS
+# terminal (the Literal has no in-progress value), so any notification completes
+# the task. Unknown values fall back to "completed".
+_TASK_NOTIFICATION_STATUS_MAP = {
+    "completed": "completed",
+    "failed": "error",
+    "stopped": "killed",
+}
+
+
+def _record_task_message(session_id: Optional[str], message: Any) -> None:
+    """Feed an SDK task message into the in-memory ``task_registry``.
+
+    Best-effort and fully defensive: any failure is logged at debug and
+    swallowed so a registry hiccup can never disturb the stream. Does NOT change
+    what is yielded to the client — purely a side-effect for TaskList / /live.
+    """
+    if not session_id:
+        return
+    try:
+        if isinstance(message, TaskStartedMessage):
+            task_registry.start_task(
+                session_id, message.task_id, "agent", getattr(message, "description", None)
+            )
+        elif isinstance(message, TaskProgressMessage):
+            # Progress carries the latest description — surface it as the title.
+            task_registry.update_task(
+                session_id, message.task_id, title=getattr(message, "description", None)
+            )
+        elif isinstance(message, TaskNotificationMessage):
+            raw_status = message.status
+            raw_status = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
+            mapped = _TASK_NOTIFICATION_STATUS_MAP.get(raw_status, "completed")
+            # Preserve the human-readable summary on the record before flipping
+            # to terminal, then complete. (TaskNotification is always terminal.)
+            summary = getattr(message, "summary", None)
+            if summary is not None:
+                task_registry.update_task(session_id, message.task_id, summary=summary)
+            task_registry.complete_task(session_id, message.task_id, mapped)
+    except Exception:
+        logger.debug("task_registry update for SDK task message failed", exc_info=True)
 
 
 async def execute_query(
@@ -230,6 +275,10 @@ async def execute_query(
 
     try:
         async for message in query(prompt=_prompt_stream(), options=options):
+            # Mirror background-task lifecycle into the registry (TaskList / /live).
+            # Task messages subclass SystemMessage, so this must run before the
+            # isinstance chain claims them via the SystemMessage branch below.
+            _record_task_message(session_id, message)
             if isinstance(message, SystemMessage):
                 # session_id comes in warmup message data after first query
                 if message.subtype == "init" and "session_id" in message.data:
@@ -567,6 +616,8 @@ async def stream_query(
         async for message in state.client.receive_response():
             # Check typed task messages before generic SystemMessage
             # (they are subclasses and would match isinstance SystemMessage)
+            # Mirror background-task lifecycle into the registry (TaskList / /live).
+            _record_task_message(session_id, message)
             if isinstance(message, TaskNotificationMessage):
                 yield {
                     "type": "task_notification",
@@ -1371,6 +1422,8 @@ async def stream_to_websocket(
 
             # Check typed task messages before generic SystemMessage
             # (they are subclasses and would match isinstance SystemMessage)
+            # Mirror background-task lifecycle into the registry (TaskList / /live).
+            _record_task_message(session_id, message)
             if isinstance(message, TaskNotificationMessage):
                 has_visible_content = True
                 yield {
