@@ -95,6 +95,7 @@ function mockState(): ActiveSessionState {
 		deferredPermissions: [],
 		pendingQuestions: [],
 		queuedMessages: [],
+		activeTasks: [],
 		draft: '',
 		scrollTop: 0,
 		streamStartTime: null,
