@@ -33,11 +33,10 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# Allowed value sets — informational; the registry does not reject unknowns so a
-# new SDK status can flow through without a code change.
-_KINDS = ("agent", "shell")
-_STATUSES = ("running", "completed", "error", "killed")
-_TERMINAL_STATUSES = ("completed", "error", "killed")
+# Value vocabulary (documented, not enforced): the registry deliberately does NOT
+# reject unknown values, so a new SDK kind/status can flow through without a code
+# change. kind ∈ {"agent", "shell"}; status ∈ {"running", "completed", "error",
+# "killed"} (the last three terminal).
 
 
 def to_wire(record: Dict[str, Any]) -> Dict[str, Any]:
