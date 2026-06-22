@@ -192,6 +192,8 @@ async def _persist_turn_results(
     plugin_messages: Optional[list] = None,
     turn_events: Optional[list] = None,
     subagent_children: Optional[dict] = None,
+    prompt: Optional[str] = None,
+    working_dir: Optional[str] = None,
 ) -> Optional[dict]:
     """Persist a completed turn's data to the database in batched writes.
 
@@ -225,6 +227,18 @@ async def _persist_turn_results(
 
     # 1. Update session metadata (sdk_session_id, cost, tokens, turns)
     #
+    # This runs in ALL modes — including postgres_only. The `sessions` row is
+    # canonical session state that the transcript store does NOT replace: it
+    # holds the cost/token/turn aggregates AND, critically, the
+    # `sdk_session_id` that links an app session to its SDK transcript. The
+    # postgres_only READ path (GET /{session_id}) looks the session_store
+    # entries up by `sessions.sdk_session_id`; if this write is skipped the
+    # column stays NULL, the store lookup keys on NULL, and a session that
+    # streamed and stored its turn correctly reads back EMPTY on reload (the
+    # "messages disappear after sending a second message" bug). Only the
+    # per-message legacy `session_messages` batch in step 3 belongs behind the
+    # postgres_only gate — not this sessions-row metadata update.
+    #
     # Context-window columns must store the LAST API call's per-call usage,
     # not ResultMessage aggregates. SDK's ResultMessage.usage sums every API
     # hop in the agent loop (one user turn can make many calls via tools), so
@@ -237,41 +251,37 @@ async def _persist_turn_results(
     # ResultMessage aggregate only when the per-call capture is missing
     # (pre-fix metadata, non-streaming paths without AssistantMessages, etc.)
     # so the update is still safe.
-    #
-    # TODO: remove this block (and step 2 below) once postgres_only mode is
-    # proven stable and mirror-verify diff logging shows zero drift (Slice A.2).
-    if settings.session_store_mode != "postgres_only":
-        try:
-            if sdk_session_id:
-                last_input_tokens = metadata.get(
-                    "last_call_tokens_in",
-                    metadata.get("tokens_in", 0),
-                )
-                last_cache_creation = metadata.get(
-                    "last_call_cache_creation_tokens",
-                    metadata.get("cache_creation_tokens", 0),
-                )
-                last_cache_read = metadata.get(
-                    "last_call_cache_read_tokens",
-                    metadata.get("cache_read_tokens", 0),
-                )
-                await run_sync(
-                    database.update_session,
-                    session_id=session_id,
-                    sdk_session_id=sdk_session_id,
-                    cost_increment=metadata.get("total_cost_usd", 0),
-                    tokens_in_increment=metadata.get("tokens_in", 0),
-                    tokens_out_increment=metadata.get("tokens_out", 0),
-                    turn_increment=metadata.get("num_turns", 0),
-                    # Persist per-turn context-window values so /live can render
-                    # the context bar on session reload without scanning JSONL.
-                    last_input_tokens=last_input_tokens,
-                    cache_creation_tokens=last_cache_creation,
-                    cache_read_tokens=last_cache_read,
-                )
-                logger.debug(f"{log_prefix}Updated session {session_id}, sdk_session_id={sdk_session_id}")
-        except Exception as e:
-            logger.error(f"{log_prefix}Failed to update session {session_id} in database: {e}")
+    try:
+        if sdk_session_id:
+            last_input_tokens = metadata.get(
+                "last_call_tokens_in",
+                metadata.get("tokens_in", 0),
+            )
+            last_cache_creation = metadata.get(
+                "last_call_cache_creation_tokens",
+                metadata.get("cache_creation_tokens", 0),
+            )
+            last_cache_read = metadata.get(
+                "last_call_cache_read_tokens",
+                metadata.get("cache_read_tokens", 0),
+            )
+            await run_sync(
+                database.update_session,
+                session_id=session_id,
+                sdk_session_id=sdk_session_id,
+                cost_increment=metadata.get("total_cost_usd", 0),
+                tokens_in_increment=metadata.get("tokens_in", 0),
+                tokens_out_increment=metadata.get("tokens_out", 0),
+                turn_increment=metadata.get("num_turns", 0),
+                # Persist per-turn context-window values so /live can render
+                # the context bar on session reload without scanning JSONL.
+                last_input_tokens=last_input_tokens,
+                cache_creation_tokens=last_cache_creation,
+                cache_read_tokens=last_cache_read,
+            )
+            logger.debug(f"{log_prefix}Updated session {session_id}, sdk_session_id={sdk_session_id}")
+    except Exception as e:
+        logger.error(f"{log_prefix}Failed to update session {session_id} in database: {e}")
 
     # 2. Build batch of messages to insert in one transaction
     full_response = "\n".join(response_text) if response_text else ""
@@ -382,6 +392,20 @@ async def _persist_turn_results(
                         break
         except Exception as e:
             logger.error(f"{log_prefix}Failed to store messages for session {session_id}: {e}")
+
+    # 3b. (removed) App-level durable write to PgSessionStore.
+    #
+    # An earlier iteration wrote the turn to session_store_entries here on the
+    # premise that the SDK's --session-mirror was not producing durable rows
+    # under postgres_only. Direct inspection of the store proved that premise
+    # false: the mirror DOES write complete, rich transcript rows (entrypoint
+    # "sdk-py", full usage.iterations, requestId, etc.) for every live turn.
+    # The real reason postgres_only sessions read back EMPTY was that the
+    # sessions-row `sdk_session_id` linkage (step 1) was gated off, so the read
+    # path looked the store up by NULL. With step 1 now running in all modes,
+    # the mirror's rows are found directly — an app-level write here only
+    # duplicated every user/assistant message on reload, so it has been removed.
+    # The SDK mirror is the single durable writer; the read transform is shared.
 
     # 4. Log sync event for polling fallback
     if assistant_msg:

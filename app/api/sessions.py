@@ -690,18 +690,29 @@ async def get_live_session(
     working_dir = "/workspace"
     usage_data = None
 
-    # Fast path: DB message loader (~10-60ms vs 6-20s JSONL parse)
-    from app.core.db_message_loader import load_messages_from_db
-    try:
-        db_messages, has_db = await run_sync(load_messages_from_db, session_id)
-        if has_db:
-            messages = db_messages
-            logger.debug(f"Live endpoint: loaded {len(messages)} messages from DB for {session_id}")
-    except Exception as e:
-        logger.warning(f"DB message load failed for live {session_id}: {e}")
-
     from app.core.config import settings as _store_settings
     _postgres_only = _store_settings.session_store_mode == "postgres_only"
+
+    # Fast path: DB message loader (~10-60ms vs 6-20s JSONL parse).
+    #
+    # SKIPPED under postgres_only: load_messages_from_db reads the legacy
+    # `session_messages` table, which in postgres_only only holds the USER rows —
+    # assistant/system turns now live exclusively in the session store
+    # (session_store_entries, written by the SDK mirror). Reading the legacy table
+    # here returned a user-only transcript (the "assistant replies vanish on
+    # reopen" bug): has_db was True from the user rows, so this short-circuited
+    # before the store-backed parser (Fallback 1) could run. The session-detail
+    # read (GET /{id}) was already cut over to the store in PR C.1; this brings the
+    # /live read path to the same single source of truth.
+    if not _postgres_only:
+        from app.core.db_message_loader import load_messages_from_db
+        try:
+            db_messages, has_db = await run_sync(load_messages_from_db, session_id)
+            if has_db:
+                messages = db_messages
+                logger.debug(f"Live endpoint: loaded {len(messages)} messages from DB for {session_id}")
+        except Exception as e:
+            logger.warning(f"DB message load failed for live {session_id}: {e}")
 
     # Fallback 1: JSONL parsing (legacy sessions without DB messages).
     # In postgres_only this loads from the session store instead of JSONL.

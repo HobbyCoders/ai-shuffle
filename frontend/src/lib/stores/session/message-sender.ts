@@ -290,11 +290,18 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				}
 			}
 
-			internal.awaitingNewSession = true;
+			// awaitingNewSession means "we sent a prompt with no session id yet and
+			// are waiting for the backend to mint one" (consumed as
+			// `!state.sessionId && awaitingNewSession` in ws-message-handlers and
+			// session_created/start acceptance). It must only be set when there is
+			// NO session id — setting it on the 2nd+ send of an EXISTING session
+			// left a stale flag that forced shouldNotify=true for every event and
+			// muddied session-routing. Gate it on the absence of a session id.
 			if (!_state.sessionId) {
+				internal.awaitingNewSession = true;
 				sessionEphemeralCache.remove('__new_chat__');
 			}
-			console.debug(`[ActiveSession] sendMessage: sessionId=${_state.sessionId}, awaitingNewSession=true, wsConnected=${wsConn.isConnected()}, mustInterrupt=${mustInterrupt}`);
+			console.debug(`[ActiveSession] sendMessage: sessionId=${_state.sessionId}, awaitingNewSession=${internal.awaitingNewSession}, wsConnected=${wsConn.isConnected()}, mustInterrupt=${mustInterrupt}`);
 
 			// Single atomic update — avoids intermediate render where streaming
 			// is cleared but the new user message hasn't been appended yet.

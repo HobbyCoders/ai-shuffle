@@ -338,6 +338,8 @@ async def execute_query(
         response_text=response_text,
         metadata=metadata,
         profile_id=profile_id,
+        prompt=prompt,
+        working_dir=getattr(options, "cwd", None),
     )
 
     # Notify connected frontends that this session has new messages
@@ -871,6 +873,8 @@ async def stream_query(
         metadata=metadata,
         profile_id=profile_id,
         interrupted=interrupted,
+        prompt=prompt,
+        working_dir=getattr(options, "cwd", None),
     )
 
     # Yield terminal event. CancelledError path already yielded 'interrupted'
@@ -2165,6 +2169,8 @@ async def stream_to_websocket(
         plugin_messages=plugin_messages_acc,
         turn_events=turn_events,
         subagent_children=subagent_children,
+        prompt=prompt,
+        working_dir=getattr(options, "cwd", None),
     )
 
     # For slash commands that produced no visible content, yield a notification
