@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from fastapi.websockets import WebSocketState
 from starlette.websockets import WebSocket
@@ -39,6 +39,62 @@ from app.api.ws_cleanup import (  # noqa: E402  (after logger by design)
     _interrupt_pending_sessions,
     _stopped_sessions,
 )
+
+
+# Terminal background-task statuses that should wake the parent (mirror the SDK's
+# TaskNotificationStatus literal — every TaskNotificationMessage is terminal).
+_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped"})
+
+# The note Claude Code attaches to every task-notification: it fires each time the
+# agent comes to rest with no live background children, and the user can resume it
+# so the same task-id may notify more than once.
+_TASK_NOTIFICATION_NOTE = (
+    "This notification fires each time the agent comes to rest with no live "
+    "background children; the user can resume it, so the same task-id may notify "
+    "more than once."
+)
+
+
+def _build_task_notification_prompt(pending: list) -> str:
+    """Build ONE synthesized user prompt consolidating all pending notifications.
+
+    Mirrors Claude Code's reference ``<task-notification>`` contract so the parent
+    wakes with each sub-agent's FULL result. The full result text is read off the
+    local disk via ``query_engine._read_task_output_file`` (the only way to obtain
+    it — the SDK message carries only a summary + path). The returned string always
+    contains the literal ``<task-notification>`` substring, so the existing user-
+    message filters keep it from rendering as a chat bubble.
+    """
+    from app.core.query_engine import _read_task_output_file
+
+    def _esc(value: Any) -> str:
+        return "" if value is None else str(value)
+
+    blocks: List[str] = []
+    for note in pending:
+        output_file = note.get("output_file") or ""
+        result_text = _read_task_output_file(output_file)
+        usage = note.get("usage") or {}
+        usage_xml = (
+            "  <usage>\n"
+            f"    <subagent_tokens>{_esc(usage.get('total_tokens'))}</subagent_tokens>\n"
+            f"    <tool_uses>{_esc(usage.get('tool_uses'))}</tool_uses>\n"
+            f"    <duration_ms>{_esc(usage.get('duration_ms'))}</duration_ms>\n"
+            "  </usage>"
+        )
+        blocks.append(
+            "<task-notification>\n"
+            f"  <task-id>{_esc(note.get('task_id'))}</task-id>\n"
+            f"  <tool-use-id>{_esc(note.get('tool_use_id'))}</tool-use-id>\n"
+            f"  <output-file>{_esc(output_file)}</output-file>\n"
+            f"  <status>{_esc(note.get('status'))}</status>\n"
+            f"  <summary>{_esc(note.get('summary'))}</summary>\n"
+            f"  <note>{_TASK_NOTIFICATION_NOTE}</note>\n"
+            f"  <result>{result_text}</result>\n"
+            f"{usage_xml}\n"
+            "</task-notification>"
+        )
+    return "\n".join(blocks)
 
 
 class WebSocketRateLimiter:
@@ -1190,6 +1246,7 @@ class ChatWebSocketHandler:
         from app.api.ws_event_handlers import EventContext, MutableStreamState, dispatch_event
         from app.core.query_engine import stream_to_websocket
         from app.core.jsonl_parser import parse_session_history
+        from app.core.task_registry import task_registry
         import time
 
         # Cancel any pending delayed cleanup for this session — a new query is starting,
@@ -1329,6 +1386,27 @@ class ChatWebSocketHandler:
                 # Dispatch to handler — updates live_session_store and broadcasts via sync_engine
                 await dispatch_event(event, event_ctx, stream_state)
 
+                # --- Background-agent "unpark" stash ---
+                # A terminal task_notification arrives IN-STREAM (the receive loop
+                # stays open the whole time the sub-agent runs), immediately before
+                # the ResultMessage that ends this loop. Stash it now (deduped by
+                # task_registry.mark_notified) and fire ONE consolidated follow-up
+                # turn in the post-loop block — never start a new query mid-loop.
+                if event_type == 'task_notification' and event.get('status') in _TERMINAL_TASK_STATUSES:
+                    _task_id = event.get('task_id')
+                    _output_file = event.get('output_file')
+                    _signature = event.get('uuid') or f"{_output_file}:{event.get('status')}"
+                    if task_registry.mark_notified(session_id, _task_id, _signature):
+                        stream_state.pending_task_notifications.append({
+                            "task_id": _task_id,
+                            "status": event.get('status'),
+                            "summary": event.get('summary'),
+                            "output_file": _output_file,
+                            "uuid": event.get('uuid'),
+                            "usage": event.get('usage'),
+                            "tool_use_id": event.get('tool_use_id'),
+                        })
+
                 # NOTE: Queued ("Send Later") messages are intentionally NOT sent
                 # at intermediate turn boundaries (e.g. stop_reason="tool_use").
                 # Interrupting the SDK mid-query at a tool_use boundary leaves an
@@ -1341,6 +1419,79 @@ class ChatWebSocketHandler:
                 # query.
 
             ctx.debug(logger, "Query completed")
+
+            # --- Background-agent "unpark" follow-up turn ---
+            # If any terminal task_notifications were stashed in-loop, synthesize
+            # ONE consolidated user prompt carrying each sub-agent's FULL result
+            # (read off local disk) and start a fresh turn so the parent "unparks"
+            # and responds. Modeled EXACTLY on the queue-handoff pattern below
+            # (persist user msg → broadcast → end_streaming → create_task → return)
+            # so streaming tears down + re-inits without a race.
+            #
+            # The synthesized prompt contains the literal "<task-notification>"
+            # substring, so the poller + live_session_store.end_streaming filters
+            # suppress it from rendering as a chat bubble. It is a plain user
+            # message (not an SDK TaskNotificationMessage), so it cannot itself
+            # emit a task_notification event; combined with mark_notified keyed on
+            # uuid, the same completion can never re-trigger this branch.
+            if (
+                stream_state.pending_task_notifications
+                and session_id not in _stopped_sessions
+                and session_id not in _interrupt_pending_sessions
+            ):
+                pending = stream_state.pending_task_notifications
+                stream_state.pending_task_notifications = []  # clear before handing off
+
+                synth_prompt = _build_task_notification_prompt(pending)
+
+                ctx.debug(
+                    logger,
+                    f"Unpark: delivering {len(pending)} background task notification(s) as a follow-up turn",
+                )
+
+                # Persist as a user message (same call the queue path uses).
+                await run_sync(
+                    database.add_session_message,
+                    session_id=session_id,
+                    role="user",
+                    content=synth_prompt,
+                    metadata=None,
+                    profile_id=profile_id,
+                )
+
+                # Broadcast it (filters strip the <task-notification> bubble).
+                await sync_engine.broadcast_message_added(
+                    session_id=session_id,
+                    message={
+                        "role": "user",
+                        "content": synth_prompt,
+                        "profile_id": profile_id,
+                    },
+                    source_device_id=None,
+                )
+
+                # End current streaming state so the follow-up query can re-init.
+                await live_session_store.end_streaming(
+                    session_id=session_id,
+                    metadata=stream_state.final_metadata,
+                    interrupted=False,
+                )
+
+                try:
+                    task = asyncio.create_task(
+                        self.run_query(synth_prompt, session_id, profile_id, project_id, None, worktree_id)
+                    )
+                    async with _active_sessions_lock:
+                        _active_chat_sessions[session_id] = task
+                    self.query_task = task
+                    handed_off_to_queued = True
+                    ctx.debug(logger, "Unpark: follow-up query started (handed off)")
+                    return  # Exit this run_query — the follow-up task continues streaming
+                except Exception as exc:
+                    # Best-effort: if the follow-up couldn't start, fall through to
+                    # normal completion (the notification was already deduped, so it
+                    # won't retrigger — the parent simply won't unpark this time).
+                    ctx.error(logger, f"Unpark: failed to start follow-up query: {exc}")
 
             # --- Pre-close queue processing ---
             # Before ending the session, check for queued messages.  If any
