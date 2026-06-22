@@ -1066,6 +1066,11 @@ def reset_global_stores():
     except Exception:
         pass
     try:
+        from app.core.task_registry import task_registry
+        task_registry.reset_all()
+    except Exception:
+        pass
+    try:
         from app.core.permission_handler import permission_handler
         permission_handler.reset_all()
     except Exception:
