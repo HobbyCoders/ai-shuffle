@@ -168,6 +168,15 @@
 <style>
 	/* ===== CONTROLS DOCK ===== */
 	.controls-dock {
+		/* The Effort/Permission dropdowns inside this dock open UPWARD, so they
+		   overlap the `.input-wrapper` (the message box) that sits directly above
+		   the dock in ChatInput. That wrapper sets `z-index: 20` and establishes a
+		   stacking context (backdrop-filter), so without an explicit z-index here
+		   the whole dock — and its z-50 dropdowns — stacks below the wrapper and the
+		   popups render BEHIND the message box. Lifting the dock above the wrapper
+		   keeps the override popups fully visible on top. */
+		position: relative;
+		z-index: 30;
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
