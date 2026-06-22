@@ -12,7 +12,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import type { ExecutionMode } from '$lib/stores/types';
 	import { syncWorktrees, createWorktree as createWorktreeApi, type Worktree, type Branch } from '$lib/api/git';
-	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch } from '$lib/stores/git.svelte';
+	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch, gitStatus } from '$lib/stores/git.svelte';
 	import { ChevronDown, GitBranch, Monitor, GitFork, Plus, Loader2, Cloud } from 'lucide-svelte';
 	import { untrack } from 'svelte';
 	import { api } from '$lib/api/client';
@@ -52,6 +52,24 @@
 		// preference left this session in cloud mode, fall back to local — the Cloud
 		// pill is hidden, so the toggle would otherwise have no active option.
 		if (cloudConfigured === false && untrack(() => $activeSession.executionMode) === 'cloud') {
+			setMode('local');
+		}
+	});
+
+	// --- Git-repo gating ---
+	// Worktree/Cloud modes and the branch selector only make sense for a git
+	// repository. Reuse the existing git-status signal (loaded by MainPanel's git
+	// store effect for the active project) rather than inventing a new one — the
+	// same `is_git_repo !== false` convention GitHeaderActions uses, so non-git
+	// controls only hide once the backend confirms the folder isn't a repo (during
+	// the brief load window status is null and we optimistically show everything).
+	const isGitRepo = $derived($gitStatus?.is_git_repo !== false);
+
+	$effect(() => {
+		// A non-git project can only run Local. If a stale persisted preference (or
+		// a switch from a git project) left this session in a hidden Worktree/Cloud
+		// mode, fall back to Local so the toggle always has a visible active option.
+		if (!isGitRepo && untrack(() => $activeSession.executionMode) !== 'local') {
 			setMode('local');
 		}
 	});
@@ -281,27 +299,31 @@
 				<Monitor size={13} strokeWidth={1.5} />
 				<span>Local</span>
 			</button>
-			<button
-				type="button"
-				class="mode-option"
-				class:active={$activeSession.executionMode === 'worktree'}
-				onclick={() => setMode('worktree')}
-			>
-				<GitFork size={13} strokeWidth={1.5} />
-				<span>Worktree</span>
-			</button>
-			<!-- Cloud is only offered when a second install is configured in Settings -->
-			{#if cloudConfigured === true}
+			<!-- Worktree/Cloud only apply to a git repository. For a non-git project
+			     only Local is offered (and the mode is forced to Local above). -->
+			{#if isGitRepo}
 				<button
 					type="button"
 					class="mode-option"
-					class:active={$activeSession.executionMode === 'cloud'}
-					onclick={() => setMode('cloud')}
-					title="Offload this session to a second AI Shuffle install (GitHub repos only)"
+					class:active={$activeSession.executionMode === 'worktree'}
+					onclick={() => setMode('worktree')}
 				>
-					<Cloud size={13} strokeWidth={1.5} />
-					<span>Cloud</span>
+					<GitFork size={13} strokeWidth={1.5} />
+					<span>Worktree</span>
 				</button>
+				<!-- Cloud is only offered when a second install is configured in Settings -->
+				{#if cloudConfigured === true}
+					<button
+						type="button"
+						class="mode-option"
+						class:active={$activeSession.executionMode === 'cloud'}
+						onclick={() => setMode('cloud')}
+						title="Offload this session to a second AI Shuffle install (GitHub repos only)"
+					>
+						<Cloud size={13} strokeWidth={1.5} />
+						<span>Cloud</span>
+					</button>
+				{/if}
 			{/if}
 		</div>
 

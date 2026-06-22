@@ -169,4 +169,20 @@ describe('shouldShowEmptyStateBranchPill', () => {
 	it('hides when GitHub CLI is not authenticated', () => {
 		expect(shouldShowEmptyStateBranchPill(branchBase({ githubAuthenticated: false }))).toBe(false);
 	});
+
+	it('hides when the project folder is not a git repository', () => {
+		expect(shouldShowEmptyStateBranchPill(branchBase({ isGitRepo: false }))).toBe(false);
+	});
+
+	it('shows when explicitly a git repo (local + authenticated + project)', () => {
+		expect(shouldShowEmptyStateBranchPill(branchBase({ isGitRepo: true }))).toBe(true);
+	});
+
+	it('defaults to showing when the git-repo signal is unknown (pre-load)', () => {
+		// isGitRepo omitted ⇒ optimistic default of true, matching the brief window
+		// before git status loads.
+		const { isGitRepo: _omit, ...rest } = branchBase();
+		void _omit;
+		expect(shouldShowEmptyStateBranchPill(rest)).toBe(true);
+	});
 });

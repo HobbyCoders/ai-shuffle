@@ -30,7 +30,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { projects } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
-	import { git } from '$lib/stores/git.svelte';
+	import { git, gitStatus } from '$lib/stores/git.svelte';
 	import { FolderClosed, GitBranch, Lock, Cloud } from 'lucide-svelte';
 
 	const projectName = $derived(
@@ -61,7 +61,9 @@
 			messageCount: $activeSession.messages.length,
 			project: $activeSession.project || null,
 			githubAuthenticated: $githubAuthenticated,
-			executionMode: $activeSession.executionMode
+			executionMode: $activeSession.executionMode,
+			// Reuse the git store's repo signal — a non-git project has no branches.
+			isGitRepo: $gitStatus?.is_git_repo !== false
 		})
 	);
 

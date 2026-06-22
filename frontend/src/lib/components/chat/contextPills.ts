@@ -110,6 +110,12 @@ export interface EmptyStateBranchInput {
 	githubAuthenticated: boolean;
 	/** Session execution mode ('local' | 'worktree'). */
 	executionMode: string;
+	/**
+	 * Whether the selected project folder is a git repository. The branch pill
+	 * only makes sense for a repo; a non-git folder has no branches to pick.
+	 * Defaults to true so the (brief) pre-load state still shows the pill.
+	 */
+	isGitRepo?: boolean;
 }
 
 /**
@@ -127,12 +133,14 @@ export interface EmptyStateBranchInput {
  * when branch controls are available.
  */
 export function shouldShowEmptyStateBranchPill(input: EmptyStateBranchInput): boolean {
-	const { messageCount, project, githubAuthenticated, executionMode } = input;
+	const { messageCount, project, githubAuthenticated, executionMode, isGitRepo = true } = input;
 
 	// New-session screen only — once a chat is active the branch pill / context
 	// badge (computeContextBadge) owns this slot.
 	if (messageCount !== 0) return false;
 	if (!project || !githubAuthenticated) return false;
+	// A non-git project has no branches to pick — hide the branch pill entirely.
+	if (!isGitRepo) return false;
 	// Only local mode has a working branch to pick here. Worktree mode's branch
 	// picker lives in the ExecutionModeBar, and cloud mode lets the worker pick
 	// the branch — so neither shows the local branch pill.
