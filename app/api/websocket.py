@@ -251,41 +251,77 @@ async def chat_websocket(
             logger.debug(f"[RUN_QUERY] using LIVE_STORE branch, {len(initial_messages)} msgs, last={initial_messages[-1].get('role')!r}/{repr((initial_messages[-1].get('content') or '')[:60])}")
             ctx.debug(logger, f"Using {len(initial_messages)} messages from live store (interrupted session)")
         else:
-            # DB-first loading (fast path: indexed query + simple transform)
-            from app.core.db_message_loader import load_messages_from_db
+            from app.core.config import settings as _seed_settings
+            _postgres_only = _seed_settings.session_store_mode == "postgres_only"
 
             initial_messages = []
-            try:
-                db_start = time.monotonic()
-                db_messages, has_db = await run_sync(load_messages_from_db, session_id)
-                db_elapsed = time.monotonic() - db_start
-                if has_db:
-                    initial_messages = db_messages
-                    ctx.debug(logger, f"DB message load: {db_elapsed:.2f}s ({len(db_messages)} messages)")
-            except Exception as e:
-                ctx.warning(logger, f"DB message load failed, falling back to JSONL: {e}")
 
-            # Fallback to JSONL for legacy sessions without DB messages
-            if not initial_messages:
+            if _postgres_only:
+                # postgres_only: the legacy `session_messages` table holds USER
+                # rows only — assistant/system turns now live exclusively in the
+                # session store. Seeding the live store from load_messages_from_db
+                # here returned a USER-ONLY transcript, so every historical
+                # assistant reply vanished from the view for the duration of
+                # streaming and only reappeared on reload (when /live falls back to
+                # the full store-backed transcript). Seed from the SAME store-backed
+                # parser the /live read path uses (see sessions.py get_live_session,
+                # Fix #3) so history stays complete while the new turn streams.
                 session_data = await run_sync(database.get_session, session_id)
-                if session_data:
-                    sdk_session_id = session_data.get("sdk_session_id")
-                    if sdk_session_id:
-                        working_dir = str(settings.workspace_dir)
-                        if project_id:
-                            project = await run_sync(database.get_project, project_id)
-                            if project:
-                                working_dir = get_project_working_dir(project)
-                        try:
-                            jsonl_start = time.monotonic()
-                            initial_messages, _usage = await run_sync(parse_session_history, sdk_session_id, working_dir)
-                            jsonl_elapsed = time.monotonic() - jsonl_start
-                            if jsonl_elapsed > 1.0:
-                                ctx.warning(logger, f"JSONL fallback took {jsonl_elapsed:.1f}s ({len(initial_messages)} messages)")
-                            else:
-                                ctx.debug(logger, f"JSONL fallback: {jsonl_elapsed:.2f}s ({len(initial_messages)} messages)")
-                        except Exception as e:
-                            ctx.warning(logger, f"Failed to load history for live store: {e}")
+                sdk_session_id = session_data.get("sdk_session_id") if session_data else None
+                if sdk_session_id:
+                    working_dir = str(settings.workspace_dir)
+                    if project_id:
+                        project = await run_sync(database.get_project, project_id)
+                        if project:
+                            working_dir = get_project_working_dir(project)
+                    try:
+                        from app.api.sessions_helpers import parse_session_history_via_store
+                        store_start = time.monotonic()
+                        initial_messages, _usage = await run_sync(
+                            parse_session_history_via_store, sdk_session_id, working_dir
+                        )
+                        ctx.debug(
+                            logger,
+                            f"Store-backed seed: {time.monotonic() - store_start:.2f}s "
+                            f"({len(initial_messages)} messages)",
+                        )
+                    except Exception as e:
+                        ctx.warning(logger, f"Store-backed history load failed for live store seed: {e}")
+            else:
+                # DB-first loading (fast path: indexed query + simple transform)
+                from app.core.db_message_loader import load_messages_from_db
+
+                try:
+                    db_start = time.monotonic()
+                    db_messages, has_db = await run_sync(load_messages_from_db, session_id)
+                    db_elapsed = time.monotonic() - db_start
+                    if has_db:
+                        initial_messages = db_messages
+                        ctx.debug(logger, f"DB message load: {db_elapsed:.2f}s ({len(db_messages)} messages)")
+                except Exception as e:
+                    ctx.warning(logger, f"DB message load failed, falling back to JSONL: {e}")
+
+                # Fallback to JSONL for legacy sessions without DB messages
+                if not initial_messages:
+                    session_data = await run_sync(database.get_session, session_id)
+                    if session_data:
+                        sdk_session_id = session_data.get("sdk_session_id")
+                        if sdk_session_id:
+                            working_dir = str(settings.workspace_dir)
+                            if project_id:
+                                project = await run_sync(database.get_project, project_id)
+                                if project:
+                                    working_dir = get_project_working_dir(project)
+                            try:
+                                jsonl_start = time.monotonic()
+                                initial_messages, _usage = await run_sync(parse_session_history, sdk_session_id, working_dir)
+                                jsonl_elapsed = time.monotonic() - jsonl_start
+                                if jsonl_elapsed > 1.0:
+                                    ctx.warning(logger, f"JSONL fallback took {jsonl_elapsed:.1f}s ({len(initial_messages)} messages)")
+                                else:
+                                    ctx.debug(logger, f"JSONL fallback: {jsonl_elapsed:.2f}s ({len(initial_messages)} messages)")
+                            except Exception as e:
+                                ctx.warning(logger, f"Failed to load history for live store: {e}")
 
         # Strip the current user message from DB-loaded initial messages.
         # The user message was already written to DB (above) before run_query starts,

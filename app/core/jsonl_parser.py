@@ -787,27 +787,54 @@ def pre_seed_parse_cache(
     Returns:
         True if cache was pre-seeded, False on failure (falls back to invalidation)
     """
+    # Serialize once and reuse for both cache namespaces.
+    # default=str: live-store messages can carry non-JSON-native values
+    # (e.g. PostgreSQL datetime timestamps). Without it a single such value
+    # raises, the pre-seed is abandoned, and the next load pays a full re-parse.
+    try:
+        messages_json = json.dumps(messages, default=str)
+        usage_json = json.dumps(usage_data, default=str)
+    except Exception as e:
+        logger.error(f"Failed to serialize messages for pre-seed {sdk_session_id}: {e}")
+        invalidate_parse_cache(sdk_session_id)
+        return False
+
+    # Refresh the store-backed cache namespace (the postgres_only READ path).
+    # Unlike _parse_cache, _store_parse_cache has NO on-disk mtime to
+    # self-invalidate — once primed it is served verbatim until an explicit
+    # invalidate or LRU eviction. The run_query live-store seed reads the
+    # transcript through this SAME cache at stream START (before the new turn
+    # exists), so without refreshing it here the just-completed exchange
+    # "disappears" on the next session open (the newest turn missing) until the
+    # process restarts. Overwrite it with the post-turn transcript so store
+    # reads stay coherent after every turn. Done independently of JSONL presence
+    # — postgres_only machines may have no local JSONL file at all.
+    with _store_parse_cache_lock:
+        _store_parse_cache[sdk_session_id] = (messages_json, usage_json)
+        _store_parse_cache.move_to_end(sdk_session_id)
+        while len(_store_parse_cache) > _PARSE_CACHE_MAX_SIZE:
+            _store_parse_cache.popitem(last=False)
+
+    # JSONL cache namespace (legacy / non-postgres_only reads): validated by the
+    # JSONL file's mtime + size, so it needs a real file to stamp the entry.
     try:
         jsonl_path = get_session_jsonl_path(sdk_session_id, working_dir)
         if not jsonl_path:
-            logger.warning(f"Cannot pre-seed cache: JSONL path not found for {sdk_session_id}")
-            invalidate_parse_cache(sdk_session_id)
-            return False
+            # No JSONL on this machine (expected under postgres_only). The store
+            # cache above is already fresh; there is nothing to seed for JSONL.
+            logger.debug(
+                f"Pre-seeded store parse cache for {sdk_session_id} "
+                f"with {len(messages)} messages (no JSONL file present)"
+            )
+            return True
 
         stat = jsonl_path.stat()
-        file_mtime = stat.st_mtime
-        file_size = stat.st_size
-
         with _parse_cache_lock:
             _parse_cache[sdk_session_id] = (
-                file_mtime,
-                file_size,
-                # default=str: live-store messages can carry non-JSON-native values
-                # (e.g. PostgreSQL datetime timestamps). Without it a single such value
-                # raises here, the pre-seed is abandoned, and the next load pays a full
-                # JSONL re-parse instead of a cache hit.
-                json.dumps(messages, default=str),
-                json.dumps(usage_data, default=str)
+                stat.st_mtime,
+                stat.st_size,
+                messages_json,
+                usage_json,
             )
             _parse_cache.move_to_end(sdk_session_id)
             while len(_parse_cache) > _PARSE_CACHE_MAX_SIZE:
@@ -817,8 +844,10 @@ def pre_seed_parse_cache(
         return True
 
     except Exception as e:
-        logger.error(f"Failed to pre-seed parse cache for {sdk_session_id}: {e}")
-        invalidate_parse_cache(sdk_session_id)
+        # The store cache is already refreshed and correct; only the JSONL
+        # mtime probe failed. Leave the store seed in place (do NOT invalidate,
+        # which would clobber it) — non-postgres_only reads simply re-parse JSONL.
+        logger.error(f"Failed to pre-seed JSONL parse cache for {sdk_session_id}: {e}")
         return False
 
 

@@ -182,8 +182,31 @@ class MessageResolver:
         if existing and not existing.is_streaming and existing.messages:
             return [m.to_dict() for m in existing.messages]
 
-        # Fall back to JSONL
+        # Fall back to the durable transcript.
         if sdk_session_id:
+            from app.core.config import settings as _cfg
+
+            # postgres_only: JSONL on disk is not the source of truth (and may be
+            # absent on this machine) — the session store is. Seed from the store
+            # so historical assistant turns aren't dropped while the new turn
+            # streams (mirrors the run_query seed + /live read paths).
+            if _cfg.session_store_mode == "postgres_only":
+                try:
+                    from app.core.pg_session_store import _load_entries_by_session_id_sync
+                    from app.core.jsonl_parser import parse_session_history_from_store
+
+                    def _store_loader(sid: str, subpath: Optional[str] = None) -> list:
+                        return _load_entries_by_session_id_sync(sid, subpath)
+
+                    messages, _usage = parse_session_history_from_store(
+                        sdk_session_id,
+                        working_dir or _default_working_dir(),
+                        _store_loader,
+                    )
+                    return messages
+                except Exception as e:
+                    logger.warning(f"Store-backed history load failed for live store init: {e}")
+
             try:
                 from app.core.jsonl_parser import parse_session_history
                 messages, _usage = parse_session_history(
