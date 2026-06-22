@@ -18,6 +18,7 @@ compatibility.
 """
 
 import logging
+import os
 import re
 import time
 import uuid
@@ -131,6 +132,13 @@ from app.core.query_session_lifecycle import (  # noqa: F401 — re-exports
 
 logger = logging.getLogger(__name__)
 
+# Gate for verbose SDK-frame-ordering tracing in the streaming loop. Off unless
+# either env var is truthy. Read once at import so the hot path only does a bool
+# check. (Mirrors the STREAM_DEBUG/AIHUB_DEBUG_STREAM gate used elsewhere.)
+_STREAM_DEBUG = bool(
+    os.environ.get("STREAM_DEBUG") or os.environ.get("AIHUB_DEBUG_STREAM")
+)
+
 
 # Map the SDK's terminal TaskNotificationStatus ("completed"/"failed"/"stopped")
 # onto the registry's terminal statuses. TaskNotificationMessage is ALWAYS
@@ -174,6 +182,34 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
             task_registry.complete_task(session_id, message.task_id, mapped)
     except Exception:
         logger.debug("task_registry update for SDK task message failed", exc_info=True)
+
+
+def _read_task_output_file(output_file: str, max_chars: int = 60_000) -> str:
+    """Read a completed background task's full result off the local disk.
+
+    The SDK's ``TaskNotificationMessage`` carries only a ``summary`` plus a path
+    to ``output_file`` on the local host; the FULL sub-agent result lives in that
+    file and there is no SDK helper to read it. This is the only way to obtain it.
+
+    Fully defensive: the file may be missing or already cleaned up, so ANY error
+    returns "" rather than raising. Oversize content is truncated via the shared
+    ``truncate_large_payload`` helper (falls back to a simple slice).
+    """
+    if not output_file:
+        return ""
+    try:
+        with open(output_file, "r", encoding="utf-8", errors="replace") as fh:
+            content = fh.read()
+    except Exception:
+        logger.debug("failed to read task output_file %r", output_file, exc_info=True)
+        return ""
+    if len(content) <= max_chars:
+        return content
+    try:
+        return truncate_large_payload(content, max_chars)
+    except Exception:
+        # Simple slice fallback if the shared helper is unavailable/changed.
+        return content[:max_chars] + "\n…[truncated]"
 
 
 async def execute_query(
@@ -619,11 +655,25 @@ async def stream_query(
             # Mirror background-task lifecycle into the registry (TaskList / /live).
             _record_task_message(session_id, message)
             if isinstance(message, TaskNotificationMessage):
+                # Mirror the enrichment from the WS path (stream_to_websocket) so
+                # this REST-streaming consumer sees the same terminal-frame shape.
+                _usage = getattr(message, "usage", None)
+                _usage_data = None
+                if _usage:
+                    _usage_data = {
+                        "total_tokens": _usage.get("total_tokens", 0),
+                        "tool_uses": _usage.get("tool_uses", 0),
+                        "duration_ms": _usage.get("duration_ms", 0),
+                    }
                 yield {
                     "type": "task_notification",
                     "task_id": message.task_id,
                     "status": message.status.value if hasattr(message.status, 'value') else str(message.status),
                     "summary": message.summary,
+                    "tool_use_id": getattr(message, "tool_use_id", None),
+                    "output_file": message.output_file,
+                    "uuid": getattr(message, "uuid", None),
+                    "usage": _usage_data,
                 }
             elif isinstance(message, TaskProgressMessage):
                 yield {
@@ -1424,14 +1474,46 @@ async def stream_to_websocket(
             # (they are subclasses and would match isinstance SystemMessage)
             # Mirror background-task lifecycle into the registry (TaskList / /live).
             _record_task_message(session_id, message)
+
+            # STREAM_DEBUG: trace SDK frame ordering ONLY while a background task
+            # is active for this session, so a live test can confirm the exact
+            # ordering (the terminal TaskNotificationMessage arrives in-stream
+            # immediately before the ResultMessage that ends this loop). Fully
+            # gated + cheap: the env lookup is the only cost when disabled.
+            if _STREAM_DEBUG and session_id and task_registry.get_active(session_id):
+                logger.info(
+                    "[STREAM_DEBUG] t=%.3f session=%s frame=%s",
+                    time.monotonic(),
+                    session_id,
+                    type(message).__name__,
+                )
+
             if isinstance(message, TaskNotificationMessage):
-                has_visible_content = True
+                # Only count this as visible content when there's an actual
+                # summary to show — an empty summary would otherwise force a
+                # spurious empty card (Bug 2 artifact).
+                if message.summary:
+                    has_visible_content = True
+                # TaskUsage is a TypedDict (a plain dict at runtime); guard None.
+                _usage = getattr(message, "usage", None)
+                _usage_data = None
+                if _usage:
+                    _usage_data = {
+                        "total_tokens": _usage.get("total_tokens", 0),
+                        "tool_uses": _usage.get("tool_uses", 0),
+                        "duration_ms": _usage.get("duration_ms", 0),
+                    }
                 yield {
                     "type": "task_notification",
                     "task_id": message.task_id,
                     "status": message.status.value if hasattr(message.status, 'value') else str(message.status),
                     "summary": message.summary,
                     "tool_use_id": message.tool_use_id,
+                    # Enrichment so the post-loop follow-up turn can read the
+                    # full sub-agent result off disk and de-dupe by uuid.
+                    "output_file": message.output_file,
+                    "uuid": getattr(message, "uuid", None),
+                    "usage": _usage_data,
                 }
             elif isinstance(message, TaskProgressMessage):
                 # Include usage stats so the event handler can update subagent progress
