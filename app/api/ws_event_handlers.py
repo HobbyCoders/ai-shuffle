@@ -17,7 +17,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from app.core.config import settings
 from app.core.live_session_store import live_session_store
@@ -59,6 +59,10 @@ class MutableStreamState:
     # `handle_tool_result` can recover the original tool_input / tool_name
     # without re-parsing the live store.
     team_tool_buffer: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Terminal background-task notifications stashed in-loop (deduped via
+    # task_registry.mark_notified) so run_query can fire ONE consolidated
+    # "unpark" follow-up turn after the streaming loop closes.
+    pending_task_notifications: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +599,31 @@ async def handle_task_progress(
         )
 
 
+async def handle_task_notification(
+    event: dict,
+    ectx: EventContext,
+    state: MutableStreamState,
+) -> None:
+    """Handle a terminal task_notification event (background sub-agent finished).
+
+    Marks the matching sub-agent node complete (mirrors handle_task_progress,
+    applying final usage if present). It deliberately does NOT call
+    add_system_message with empty content — that empty card was the Bug-2
+    artifact — and it does NOT start a new query. The parent's "unpark" follow-up
+    turn is triggered separately in run_query's post-loop block.
+    """
+    tool_use_id = event.get("tool_use_id")
+    status = event.get("status")
+    is_error = status in ("failed", "stopped")
+    if tool_use_id:
+        await live_session_store.complete_subagent_by_tool_id(
+            session_id=ectx.session_id,
+            tool_use_id=tool_use_id,
+            is_error=is_error,
+            usage=event.get("usage"),
+        )
+
+
 async def handle_stream_block_start(
     event: dict,
     ectx: EventContext,
@@ -765,6 +794,7 @@ EVENT_HANDLERS: Dict[str, Callable[..., Awaitable[None]]] = {
     "subagent_tool_result": handle_subagent_tool_result,
     "subagent_done": handle_subagent_done,
     "task_progress": handle_task_progress,
+    "task_notification": handle_task_notification,
     "stream_block_start": handle_stream_block_start,
     "stream_block_stop": handle_stream_block_stop,
     "stream_message_delta": handle_stream_message_delta,

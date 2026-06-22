@@ -1111,6 +1111,43 @@ class LiveSessionStore:
 
             return False
 
+    async def complete_subagent_by_tool_id(
+        self,
+        session_id: str,
+        tool_use_id: str,
+        is_error: bool = False,
+        usage: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Mark a subagent complete, matched by its parent ``tool_use_id``.
+
+        The SDK's ``TaskNotificationMessage`` identifies the finished sub-agent by
+        ``tool_use_id`` (not ``agent_id``), so this mirrors ``complete_subagent``
+        but matches on ``tool_id`` and optionally applies final usage stats.
+        Does NOT overwrite the subagent's accumulated content (the result text is
+        delivered to the parent via the unpark turn, not stuffed into the card).
+        Returns True if a matching subagent was found.
+        """
+        async with self._get_session_lock(session_id):
+            session = self._sessions.get(session_id)
+            if not session:
+                return False
+
+            for msg in session.messages:
+                if msg.type == "subagent" and msg.tool_id == tool_use_id:
+                    msg.agent_status = (
+                        AgentStatus.ERROR.value if is_error else AgentStatus.COMPLETED.value
+                    )
+                    msg.streaming = False
+                    if usage:
+                        msg.agent_usage = usage
+                    if msg.agent_children:
+                        for child in msg.agent_children:
+                            child.streaming = False
+                    self._increment_update_id(session)
+                    return True
+
+            return False
+
     # ------------------------------------------------------------------
     # Team member methods (Claude Code agent-teams feature)
     # ------------------------------------------------------------------
