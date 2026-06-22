@@ -212,6 +212,36 @@ def _read_task_output_file(output_file: str, max_chars: int = 60_000) -> str:
         return content[:max_chars] + "\n…[truncated]"
 
 
+def _task_notification_frame(message: Any) -> Dict[str, Any]:
+    """Build the wire frame for a terminal ``TaskNotificationMessage``.
+
+    Shared by both streaming paths so the enriched shape (output_file/uuid/usage
+    alongside task_id/status/summary/tool_use_id) stays identical. ``usage`` is a
+    TypedDict (a plain dict at runtime), guarded to ``None``.
+    """
+    usage = getattr(message, "usage", None)
+    usage_data = None
+    if usage:
+        usage_data = {
+            "total_tokens": usage.get("total_tokens", 0),
+            "tool_uses": usage.get("tool_uses", 0),
+            "duration_ms": usage.get("duration_ms", 0),
+        }
+    status = message.status
+    return {
+        "type": "task_notification",
+        "task_id": message.task_id,
+        "status": status.value if hasattr(status, "value") else str(status),
+        "summary": message.summary,
+        "tool_use_id": getattr(message, "tool_use_id", None),
+        # Enrichment so the post-loop follow-up turn can read the full sub-agent
+        # result off disk and de-dupe by uuid.
+        "output_file": getattr(message, "output_file", None),
+        "uuid": getattr(message, "uuid", None),
+        "usage": usage_data,
+    }
+
+
 async def execute_query(
     prompt: str,
     profile_id: str,
@@ -657,24 +687,7 @@ async def stream_query(
             if isinstance(message, TaskNotificationMessage):
                 # Mirror the enrichment from the WS path (stream_to_websocket) so
                 # this REST-streaming consumer sees the same terminal-frame shape.
-                _usage = getattr(message, "usage", None)
-                _usage_data = None
-                if _usage:
-                    _usage_data = {
-                        "total_tokens": _usage.get("total_tokens", 0),
-                        "tool_uses": _usage.get("tool_uses", 0),
-                        "duration_ms": _usage.get("duration_ms", 0),
-                    }
-                yield {
-                    "type": "task_notification",
-                    "task_id": message.task_id,
-                    "status": message.status.value if hasattr(message.status, 'value') else str(message.status),
-                    "summary": message.summary,
-                    "tool_use_id": getattr(message, "tool_use_id", None),
-                    "output_file": message.output_file,
-                    "uuid": getattr(message, "uuid", None),
-                    "usage": _usage_data,
-                }
+                yield _task_notification_frame(message)
             elif isinstance(message, TaskProgressMessage):
                 yield {
                     "type": "task_progress",
@@ -1494,27 +1507,7 @@ async def stream_to_websocket(
                 # spurious empty card (Bug 2 artifact).
                 if message.summary:
                     has_visible_content = True
-                # TaskUsage is a TypedDict (a plain dict at runtime); guard None.
-                _usage = getattr(message, "usage", None)
-                _usage_data = None
-                if _usage:
-                    _usage_data = {
-                        "total_tokens": _usage.get("total_tokens", 0),
-                        "tool_uses": _usage.get("tool_uses", 0),
-                        "duration_ms": _usage.get("duration_ms", 0),
-                    }
-                yield {
-                    "type": "task_notification",
-                    "task_id": message.task_id,
-                    "status": message.status.value if hasattr(message.status, 'value') else str(message.status),
-                    "summary": message.summary,
-                    "tool_use_id": message.tool_use_id,
-                    # Enrichment so the post-loop follow-up turn can read the
-                    # full sub-agent result off disk and de-dupe by uuid.
-                    "output_file": message.output_file,
-                    "uuid": getattr(message, "uuid", None),
-                    "usage": _usage_data,
-                }
+                yield _task_notification_frame(message)
             elif isinstance(message, TaskProgressMessage):
                 # Include usage stats so the event handler can update subagent progress
                 usage_data = None

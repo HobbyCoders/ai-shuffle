@@ -1228,6 +1228,99 @@ class ChatWebSocketHandler:
                 logger.error(f"[Queue] Failed to re-queue message: {requeue_err}")
             raise
 
+    async def _maybe_unpark_followup(
+        self,
+        *,
+        stream_state,
+        session_id: str,
+        profile_id: str,
+        project_id: Optional[str],
+        worktree_id: Optional[str],
+        ctx,
+    ) -> bool:
+        """Deliver any stashed terminal task notifications as ONE follow-up turn.
+
+        If ``stream_state.pending_task_notifications`` is non-empty (and the
+        session isn't stopped/interrupting), synthesize a single consolidated
+        ``<task-notification>`` user prompt carrying each sub-agent's FULL result
+        (read off local disk) and start a fresh turn so the parent "unparks" and
+        responds. Modeled EXACTLY on the queue-handoff pattern (persist user msg →
+        broadcast → end_streaming → create_task(run_query)) so streaming tears
+        down + re-inits without a race.
+
+        The synthesized prompt contains the literal ``<task-notification>``
+        substring, so the poller + ``live_session_store.end_streaming`` filters
+        suppress it from rendering as a chat bubble. It is a plain user message
+        (not an SDK TaskNotificationMessage), so it cannot itself emit a
+        task_notification event; combined with ``mark_notified`` keyed on uuid, the
+        same completion can never re-trigger.
+
+        Returns ``True`` if a follow-up turn was handed off (caller must return),
+        ``False`` otherwise (caller continues to normal completion).
+        """
+        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
+
+        if (
+            not stream_state.pending_task_notifications
+            or session_id in _stopped_sessions
+            or session_id in _interrupt_pending_sessions
+        ):
+            return False
+
+        pending = stream_state.pending_task_notifications
+        stream_state.pending_task_notifications = []  # clear before handing off
+
+        synth_prompt = _build_task_notification_prompt(pending)
+
+        ctx.debug(
+            logger,
+            f"Unpark: delivering {len(pending)} background task notification(s) as a follow-up turn",
+        )
+
+        # Persist as a user message (same call the queue path uses).
+        await run_sync(
+            database.add_session_message,
+            session_id=session_id,
+            role="user",
+            content=synth_prompt,
+            metadata=None,
+            profile_id=profile_id,
+        )
+
+        # Broadcast it (filters strip the <task-notification> bubble).
+        await sync_engine.broadcast_message_added(
+            session_id=session_id,
+            message={
+                "role": "user",
+                "content": synth_prompt,
+                "profile_id": profile_id,
+            },
+            source_device_id=None,
+        )
+
+        # End current streaming state so the follow-up query can re-init.
+        await live_session_store.end_streaming(
+            session_id=session_id,
+            metadata=stream_state.final_metadata,
+            interrupted=False,
+        )
+
+        try:
+            task = asyncio.create_task(
+                self.run_query(synth_prompt, session_id, profile_id, project_id, None, worktree_id)
+            )
+            async with _active_sessions_lock:
+                _active_chat_sessions[session_id] = task
+            self.query_task = task
+            ctx.debug(logger, "Unpark: follow-up query started (handed off)")
+            return True
+        except Exception as exc:
+            # Best-effort: if the follow-up couldn't start, fall through to normal
+            # completion (the notification was already deduped, so it won't
+            # retrigger — the parent simply won't unpark this time).
+            ctx.error(logger, f"Unpark: failed to start follow-up query: {exc}")
+            return False
+
     # ------------------------------------------------------------------
     # run_query — the streaming pipeline
     # ------------------------------------------------------------------
@@ -1421,77 +1514,20 @@ class ChatWebSocketHandler:
             ctx.debug(logger, "Query completed")
 
             # --- Background-agent "unpark" follow-up turn ---
-            # If any terminal task_notifications were stashed in-loop, synthesize
-            # ONE consolidated user prompt carrying each sub-agent's FULL result
-            # (read off local disk) and start a fresh turn so the parent "unparks"
-            # and responds. Modeled EXACTLY on the queue-handoff pattern below
-            # (persist user msg → broadcast → end_streaming → create_task → return)
-            # so streaming tears down + re-inits without a race.
-            #
-            # The synthesized prompt contains the literal "<task-notification>"
-            # substring, so the poller + live_session_store.end_streaming filters
-            # suppress it from rendering as a chat bubble. It is a plain user
-            # message (not an SDK TaskNotificationMessage), so it cannot itself
-            # emit a task_notification event; combined with mark_notified keyed on
-            # uuid, the same completion can never re-trigger this branch.
-            if (
-                stream_state.pending_task_notifications
-                and session_id not in _stopped_sessions
-                and session_id not in _interrupt_pending_sessions
+            # If any terminal task_notifications were stashed in-loop, deliver them
+            # as ONE consolidated follow-up turn so the parent "unparks" and
+            # responds. Returns True when it handed off (in which case this turn is
+            # done — the follow-up task now owns streaming).
+            if await self._maybe_unpark_followup(
+                stream_state=stream_state,
+                session_id=session_id,
+                profile_id=profile_id,
+                project_id=project_id,
+                worktree_id=worktree_id,
+                ctx=ctx,
             ):
-                pending = stream_state.pending_task_notifications
-                stream_state.pending_task_notifications = []  # clear before handing off
-
-                synth_prompt = _build_task_notification_prompt(pending)
-
-                ctx.debug(
-                    logger,
-                    f"Unpark: delivering {len(pending)} background task notification(s) as a follow-up turn",
-                )
-
-                # Persist as a user message (same call the queue path uses).
-                await run_sync(
-                    database.add_session_message,
-                    session_id=session_id,
-                    role="user",
-                    content=synth_prompt,
-                    metadata=None,
-                    profile_id=profile_id,
-                )
-
-                # Broadcast it (filters strip the <task-notification> bubble).
-                await sync_engine.broadcast_message_added(
-                    session_id=session_id,
-                    message={
-                        "role": "user",
-                        "content": synth_prompt,
-                        "profile_id": profile_id,
-                    },
-                    source_device_id=None,
-                )
-
-                # End current streaming state so the follow-up query can re-init.
-                await live_session_store.end_streaming(
-                    session_id=session_id,
-                    metadata=stream_state.final_metadata,
-                    interrupted=False,
-                )
-
-                try:
-                    task = asyncio.create_task(
-                        self.run_query(synth_prompt, session_id, profile_id, project_id, None, worktree_id)
-                    )
-                    async with _active_sessions_lock:
-                        _active_chat_sessions[session_id] = task
-                    self.query_task = task
-                    handed_off_to_queued = True
-                    ctx.debug(logger, "Unpark: follow-up query started (handed off)")
-                    return  # Exit this run_query — the follow-up task continues streaming
-                except Exception as exc:
-                    # Best-effort: if the follow-up couldn't start, fall through to
-                    # normal completion (the notification was already deduped, so it
-                    # won't retrigger — the parent simply won't unpark this time).
-                    ctx.error(logger, f"Unpark: failed to start follow-up query: {exc}")
+                handed_off_to_queued = True
+                return  # Exit this run_query — the follow-up task continues streaming
 
             # --- Pre-close queue processing ---
             # Before ending the session, check for queued messages.  If any

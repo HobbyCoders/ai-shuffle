@@ -29,6 +29,7 @@ from app.api.ws_event_handlers import (
     handle_stream_block_stop,
     handle_stream_message_delta,
     handle_done,
+    handle_task_notification,
 )
 from app.core.streaming_context import StreamingContext
 
@@ -94,6 +95,7 @@ class TestDispatchTable:
             "stream_start", "stream_delta", "chunk", "tool_use",
             "tool_result", "system", "subagent_start", "subagent_chunk",
             "subagent_tool_use", "subagent_tool_result", "subagent_done",
+            "task_progress", "task_notification",
             "stream_block_start", "stream_block_stop", "stream_message_delta",
             "done", "interrupted",
         }
@@ -741,3 +743,68 @@ class TestStreamBlockAndDelta:
             chunk_data = mock_sync.broadcast_stream_chunk.call_args[1]["chunk_data"]
             assert chunk_data["delta"] == {"stop_reason": "end_turn"}
             assert chunk_data["usage"] == {"output_tokens": 50}
+
+
+# ---------------------------------------------------------------------------
+# handle_task_notification (background-agent unpark)
+# ---------------------------------------------------------------------------
+
+class TestHandleTaskNotification:
+    @pytest.mark.asyncio
+    async def test_marks_subagent_complete_by_tool_use_id(self):
+        """A terminal task_notification marks the matching subagent node complete
+        (by tool_use_id) and applies usage — it must NOT add an empty system card."""
+        ectx = make_ctx()
+        state = make_state()
+        event = {
+            "type": "task_notification",
+            "task_id": "task-1",
+            "status": "completed",
+            "summary": "did the thing",
+            "tool_use_id": "tu-1",
+            "usage": {"total_tokens": 10, "tool_uses": 2, "duration_ms": 100},
+        }
+
+        with patch("app.api.ws_event_handlers.live_session_store") as mock_store:
+            mock_store.complete_subagent_by_tool_id = AsyncMock(return_value=True)
+            mock_store.add_system_message = AsyncMock()
+
+            await handle_task_notification(event, ectx, state)
+
+            mock_store.complete_subagent_by_tool_id.assert_awaited_once()
+            call_kwargs = mock_store.complete_subagent_by_tool_id.call_args[1]
+            assert call_kwargs["session_id"] == "sess-1"
+            assert call_kwargs["tool_use_id"] == "tu-1"
+            assert call_kwargs["is_error"] is False
+            assert call_kwargs["usage"] == {"total_tokens": 10, "tool_uses": 2, "duration_ms": 100}
+            # The Bug-2 artifact must never appear.
+            mock_store.add_system_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_and_stopped_mark_is_error(self):
+        ectx = make_ctx()
+        state = make_state()
+        for status in ("failed", "stopped"):
+            event = {"type": "task_notification", "task_id": "t", "status": status, "tool_use_id": "tu-x"}
+            with patch("app.api.ws_event_handlers.live_session_store") as mock_store:
+                mock_store.complete_subagent_by_tool_id = AsyncMock(return_value=True)
+                mock_store.add_system_message = AsyncMock()
+                await handle_task_notification(event, ectx, state)
+                assert mock_store.complete_subagent_by_tool_id.call_args[1]["is_error"] is True
+                mock_store.add_system_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_tool_use_id_is_noop(self):
+        ectx = make_ctx()
+        state = make_state()
+        event = {"type": "task_notification", "task_id": "t", "status": "completed"}
+        with patch("app.api.ws_event_handlers.live_session_store") as mock_store:
+            mock_store.complete_subagent_by_tool_id = AsyncMock()
+            mock_store.add_system_message = AsyncMock()
+            await handle_task_notification(event, ectx, state)
+            mock_store.complete_subagent_by_tool_id.assert_not_called()
+            mock_store.add_system_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_registered_in_dispatch_table(self):
+        assert EVENT_HANDLERS.get("task_notification") is handle_task_notification

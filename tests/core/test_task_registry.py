@@ -167,6 +167,43 @@ class TestToWire:
 # clear_session / reset_all / unknown no-ops
 # =============================================================================
 
+class TestMarkNotified:
+    def test_true_once_then_false_for_same_signature(self, reg):
+        # First time a (task_id, uuid) is seen -> True; duplicate -> False.
+        assert reg.mark_notified("s1", "t1", "uuid-1") is True
+        assert reg.mark_notified("s1", "t1", "uuid-1") is False
+        assert reg.mark_notified("s1", "t1", "uuid-1") is False
+
+    def test_new_uuid_rearms_for_same_task(self, reg):
+        assert reg.mark_notified("s1", "t1", "uuid-1") is True
+        assert reg.mark_notified("s1", "t1", "uuid-1") is False
+        # A NEW uuid (the task was resumed and notified again) re-arms -> True.
+        assert reg.mark_notified("s1", "t1", "uuid-2") is True
+        assert reg.mark_notified("s1", "t1", "uuid-2") is False
+
+    def test_independent_per_session(self, reg):
+        assert reg.mark_notified("s1", "t1", "uuid-1") is True
+        # Same task_id + signature in a DIFFERENT session is independent.
+        assert reg.mark_notified("s2", "t1", "uuid-1") is True
+
+    def test_blank_ids_never_latch(self, reg):
+        assert reg.mark_notified("", "t1", "sig") is False
+        assert reg.mark_notified("s1", "", "sig") is False
+        # No state stranded -> a real (session, task) still latches True.
+        assert reg.mark_notified("s1", "t1", "sig") is True
+
+    def test_cleared_by_clear_session(self, reg):
+        assert reg.mark_notified("s1", "t1", "uuid-1") is True
+        reg.clear_session("s1")
+        # After clearing, the same signature re-arms (fresh session state).
+        assert reg.mark_notified("s1", "t1", "uuid-1") is True
+
+    def test_cleared_by_reset_all(self, reg):
+        assert reg.mark_notified("s1", "t1", "uuid-1") is True
+        reg.reset_all()
+        assert reg.mark_notified("s1", "t1", "uuid-1") is True
+
+
 class TestClearAndNoOps:
     def test_clear_session(self, reg):
         reg.start_task("s1", "t1", "agent", "x")
