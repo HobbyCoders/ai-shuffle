@@ -125,6 +125,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ── Backend code ──
 COPY --chown=appuser:appuser app/ ./app/
 
+# ── Maintenance / migration scripts (e.g. session-store backfill) ──
+COPY --chown=appuser:appuser scripts/ ./scripts/
+
 # ── Copy pre-built frontend assets from builder stage ──
 RUN mkdir -p /app/app/static
 COPY --from=frontend-builder --chown=appuser:appuser /build/build/ /app/app/static/
