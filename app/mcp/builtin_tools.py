@@ -540,6 +540,27 @@ def create_builtin_tools_server(
         tid = (args.get("task_id") or "").strip()
         task = _background_tasks.get(tid)
         if not task:
+            # Not a Monitor shell task — it may be a background AGENT task tracked
+            # in the registry. Agent tasks have no buffered stdout here (their
+            # output arrives via <task-notification> + the subagent transcript),
+            # so return their live status/summary rather than a confusing
+            # "not found" for an id the agent legitimately saw via TaskList.
+            if session_id:
+                from app.core.task_registry import task_registry
+                record = task_registry.get_task(session_id, tid)
+                if record is not None:
+                    return _ok({
+                        "task_id": tid,
+                        "kind": record.get("kind"),
+                        "status": record.get("status"),
+                        "summary": record.get("summary"),
+                        "lines": [],
+                        "note": (
+                            "Background agent task — output is delivered via "
+                            "<task-notification> and the subagent transcript; no "
+                            "buffered stdout is available here."
+                        ),
+                    })
             return _err("task not found.", task_id=tid)
         lines = task.lines
         since = int(args.get("since_line") or 0)
@@ -574,6 +595,22 @@ def create_builtin_tools_server(
         tid = (args.get("task_id") or "").strip()
         task = _background_tasks.get(tid)
         if not task:
+            # A background AGENT task (SDK-managed) can't be force-stopped from
+            # here — the app has no handle on it. Say so clearly instead of
+            # "not found" when the id is a real agent task the registry knows.
+            if session_id:
+                from app.core.task_registry import task_registry
+                record = task_registry.get_task(session_id, tid)
+                if record is not None:
+                    return _err(
+                        "Background agent tasks are managed by the SDK and cannot "
+                        "be stopped from here; they finish on their own and notify "
+                        "via <task-notification>. Only Monitor shell tasks support "
+                        "TaskStop.",
+                        task_id=tid,
+                        kind=record.get("kind"),
+                        status=record.get("status"),
+                    )
             return _err("task not found.", task_id=tid)
         if task.process and task.process.returncode is None:
             try:
@@ -636,6 +673,57 @@ def create_builtin_tools_server(
         return _ok({"tasks": tasks, "running_count": running_count})
 
     all_tools.append(task_list)
+
+    # ------------------------------------------------------------------
+    # TaskGet — inspect ONE background task in detail
+    # ------------------------------------------------------------------
+    @tool(
+        "TaskGet",
+        "Get the current details of ONE of your background tasks by task_id "
+        "(background AGENT task or Monitor shell command). This is a LIVE query — "
+        "it reflects completion immediately. For shell tasks it also returns "
+        "whether the process is still running, its exit code, and the tail of its "
+        "output buffer. Use TaskList first to discover task ids.",
+        {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "tail": {
+                    "type": "integer",
+                    "description": "For shell tasks, return at most N most recent output lines (default 20).",
+                },
+            },
+            "required": ["task_id"],
+        },
+    )
+    async def task_get(args: dict) -> dict:
+        if not session_id:
+            return _err("TaskGet requires an active session context.")
+        tid = (args.get("task_id") or "").strip()
+        if not tid:
+            return _err("task_id is required.")
+        from app.core.task_registry import task_registry
+
+        record = task_registry.get_task(session_id, tid)
+        shell = _background_tasks.get(tid)
+        if record is None and shell is None:
+            return _err("task not found.", task_id=tid)
+
+        out: Dict[str, Any] = {"task": record}
+        # Enrich with live process detail for Monitor shell tasks.
+        if shell is not None:
+            try:
+                tail_raw = args.get("tail")
+                tail_n = 20 if tail_raw is None else int(tail_raw)
+            except (TypeError, ValueError):
+                tail_n = 20
+            out["running"] = shell.is_running()
+            out["exit_code"] = shell.exit_code
+            out["total_lines"] = len(shell.lines)
+            out["lines"] = shell.lines[-tail_n:] if tail_n > 0 else []
+        return _ok(out)
+
+    all_tools.append(task_get)
 
     # ------------------------------------------------------------------
     # ToolSearch — search local tool registry
@@ -771,6 +859,7 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__TaskOutput",
         "mcp__builtins__TaskStop",
         "mcp__builtins__TaskList",
+        "mcp__builtins__TaskGet",
         "mcp__builtins__ToolSearch",
         "mcp__builtins__GetAppErrors",
     ]

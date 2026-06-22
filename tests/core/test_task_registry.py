@@ -341,3 +341,122 @@ class TestLiveActiveTasks:
         assert result["activeTasks"] == []
         await live_session_store.cleanup_session(session_id)
         tr.reset_all()
+
+
+# =============================================================================
+# get_task accessor
+# =============================================================================
+
+class TestGetTask:
+    def test_returns_wire_dict_for_known_task(self, reg):
+        reg.start_task("s1", "t1", "agent", "do work", summary="halfway")
+        wire = reg.get_task("s1", "t1")
+        assert wire is not None
+        assert wire["id"] == "t1"
+        assert wire["kind"] == "agent"
+        assert wire["subject"] == "do work"
+        assert set(wire.keys()) == {
+            "id", "subject", "status", "kind", "summary", "startedAt", "updatedAt"
+        }
+
+    def test_returns_none_for_unknown(self, reg):
+        assert reg.get_task("s1", "missing") is None
+        reg.start_task("s1", "t1", "shell", "x")
+        assert reg.get_task("s1", "other") is None
+        assert reg.get_task("other-sess", "t1") is None
+
+
+# =============================================================================
+# TaskGet tool + registry-aware TaskOutput / TaskStop
+# =============================================================================
+
+def _build_builtin_handlers(session_id):
+    """Build the builtins server and return {tool_name: async handler}."""
+    import claude_agent_sdk as sdk
+    import app.mcp.builtin_tools as bt
+
+    captured = {}
+    real_create = sdk.create_sdk_mcp_server
+
+    def _spy(name, version, tools):
+        captured["tools"] = tools
+        return real_create(name=name, version=version, tools=tools)
+
+    with patch.object(sdk, "create_sdk_mcp_server", side_effect=_spy):
+        bt.create_builtin_tools_server(
+            session_id=session_id, profile_id="p", project_id=None
+        )
+    return {t.name: t.handler for t in captured["tools"]}
+
+
+class TestTaskGetTool:
+    @pytest.mark.asyncio
+    async def test_requires_session(self):
+        handlers = _build_builtin_handlers(session_id=None)
+        payload = _parse_envelope(await handlers["TaskGet"]({"task_id": "t1"}))
+        assert payload["success"] is False
+        assert "active session" in payload["error"]
+
+    @pytest.mark.asyncio
+    async def test_requires_task_id(self):
+        handlers = _build_builtin_handlers(session_id="sess")
+        payload = _parse_envelope(await handlers["TaskGet"]({}))
+        assert payload["success"] is False
+        assert "task_id is required" in payload["error"]
+
+    @pytest.mark.asyncio
+    async def test_returns_agent_task_record(self):
+        task_registry.reset_all()
+        task_registry.start_task("sess", "a1", "agent", "background agent", summary="working")
+        handlers = _build_builtin_handlers(session_id="sess")
+        payload = _parse_envelope(await handlers["TaskGet"]({"task_id": "a1"}))
+        assert payload["success"] is True
+        assert payload["task"]["id"] == "a1"
+        assert payload["task"]["kind"] == "agent"
+        # No Monitor shell process backs this id -> no live-process fields.
+        assert "running" not in payload
+        task_registry.reset_all()
+
+    @pytest.mark.asyncio
+    async def test_unknown_task_not_found(self):
+        task_registry.reset_all()
+        handlers = _build_builtin_handlers(session_id="sess")
+        payload = _parse_envelope(await handlers["TaskGet"]({"task_id": "nope"}))
+        assert payload["success"] is False
+        assert "not found" in payload["error"]
+        task_registry.reset_all()
+
+
+class TestRegistryAwareOutputStop:
+    @pytest.mark.asyncio
+    async def test_task_output_falls_back_to_agent_record(self):
+        task_registry.reset_all()
+        task_registry.start_task("sess", "a1", "agent", "agent task", summary="mid")
+        handlers = _build_builtin_handlers(session_id="sess")
+        payload = _parse_envelope(await handlers["TaskOutput"]({"task_id": "a1"}))
+        assert payload["success"] is True
+        assert payload["kind"] == "agent"
+        assert payload["status"] == "running"
+        assert payload["lines"] == []
+        assert "note" in payload
+        task_registry.reset_all()
+
+    @pytest.mark.asyncio
+    async def test_task_output_unknown_still_not_found(self):
+        task_registry.reset_all()
+        handlers = _build_builtin_handlers(session_id="sess")
+        payload = _parse_envelope(await handlers["TaskOutput"]({"task_id": "ghost"}))
+        assert payload["success"] is False
+        assert "not found" in payload["error"]
+        task_registry.reset_all()
+
+    @pytest.mark.asyncio
+    async def test_task_stop_agent_task_reports_unsupported(self):
+        task_registry.reset_all()
+        task_registry.start_task("sess", "a1", "agent", "agent task")
+        handlers = _build_builtin_handlers(session_id="sess")
+        payload = _parse_envelope(await handlers["TaskStop"]({"task_id": "a1"}))
+        assert payload["success"] is False
+        assert "cannot" in payload["error"].lower()
+        assert payload.get("kind") == "agent"
+        task_registry.reset_all()

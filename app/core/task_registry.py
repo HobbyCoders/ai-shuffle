@@ -153,6 +153,16 @@ class TaskRegistry:
         records.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
         return [to_wire(r) for r in records[:limit]]
 
+    def get_task(self, session_id: str, task_id: str) -> Optional[Dict[str, Any]]:
+        """A single task as a wire dict, or None if the task is unknown.
+
+        Lets the ``TaskGet`` tool (and registry-aware ``TaskOutput``/``TaskStop``)
+        resolve one task by id across BOTH sources without reaching into the
+        private ``_tasks`` map.
+        """
+        record = self._tasks.get(session_id, {}).get(task_id)
+        return to_wire(record) if record is not None else None
+
     def clear_session(self, session_id: str) -> None:
         """Drop all tasks for a session (called when the live session is removed)."""
         self._tasks.pop(session_id, None)
