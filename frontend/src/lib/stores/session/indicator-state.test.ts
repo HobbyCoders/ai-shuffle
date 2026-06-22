@@ -2,27 +2,36 @@
  * Tests for the indicator-state derivation (Bug 1 fix).
  *
  * The bottom-of-chat activity indicator is derived purely from
- * (isStreaming, activeTaskCount):
- *   - streaming                       → 'dots'    (bouncing "...")
- *   - parked (!streaming) + tasks > 0 → 'waiting' (calm "Waiting for N task(s)…")
- *   - parked + no tasks               → 'none'
+ * (isStreaming, activeTaskCount), with ACTIVE TASKS taking priority:
+ *   - tasks > 0              → 'waiting' (calm "Waiting for N task(s)…")
+ *   - no tasks + streaming   → 'dots'    (bouncing "...")
+ *   - no tasks + parked      → 'none'
  *
- * This guarantees the "..." dots never persist after a turn parks waiting on
- * background work.
+ * Active-tasks-first matters because, while parked on a background sub-agent,
+ * the backend keeps reporting isStreaming = true for the whole run; checking
+ * streaming first would show the "..." dots the entire time (the "stuck" look
+ * of Bug 1). The follow-up RESPONSE turn runs with activeTaskCount = 0, so the
+ * parent's reply still streams with 'dots'.
  */
 
 import { describe, expect, it } from 'vitest';
 import { deriveIndicatorState, waitingLabel } from './indicator-state';
 
 describe('deriveIndicatorState', () => {
-	it('shows bouncing dots while streaming (regardless of task count)', () => {
-		expect(deriveIndicatorState(true, 0)).toBe('dots');
-		expect(deriveIndicatorState(true, 3)).toBe('dots');
+	it('prioritizes active tasks: shows waiting even when isStreaming is true (the park)', () => {
+		// During the park the SDK loop stays open so isStreaming stays true — the
+		// calm waiting indicator must win over the bouncing dots.
+		expect(deriveIndicatorState(true, 1)).toBe('waiting');
+		expect(deriveIndicatorState(true, 3)).toBe('waiting');
 	});
 
 	it('shows the calm waiting indicator when parked with active tasks', () => {
 		expect(deriveIndicatorState(false, 1)).toBe('waiting');
 		expect(deriveIndicatorState(false, 5)).toBe('waiting');
+	});
+
+	it('shows bouncing dots while streaming with no active tasks (normal turn / unpark reply)', () => {
+		expect(deriveIndicatorState(true, 0)).toBe('dots');
 	});
 
 	it('shows nothing when parked with no active tasks', () => {
