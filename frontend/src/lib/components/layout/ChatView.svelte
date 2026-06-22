@@ -16,6 +16,7 @@
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import QueuedMessages from '$lib/components/chat/QueuedMessages.svelte';
+	import ActiveTasks from '$lib/components/chat/ActiveTasks.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
@@ -135,6 +136,15 @@
 			{/if}
 
 			<div class="input-wrapper">
+				<!-- In-flight background tasks (sub-agents + shell subprocesses).
+				     Renders nothing when empty; appears during a turn — and notably
+				     while the turn is PARKED waiting on tasks — so the user can see
+				     what's pending. -->
+				{#if $activeSession.activeTasks && $activeSession.activeTasks.length > 0}
+					<div class="active-tasks-strip">
+						<ActiveTasks tasks={$activeSession.activeTasks} />
+					</div>
+				{/if}
 				<!-- Slice B: deferred-only strip when there are no active requests to
 				     review (when there are, the strip is rendered inside the modal
 				     PermissionQueue above). -->
@@ -248,6 +258,10 @@
 
 	.inline-deferred-strip {
 		padding: 4px 12px 0;
+	}
+
+	.active-tasks-strip {
+		padding: 4px 0 0;
 	}
 
 	.transitioning-from-empty .message-area-wrapper {
