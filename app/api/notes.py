@@ -4,6 +4,7 @@ Notes management API routes - Global notes for ideas, bugs, planning
 
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, status, Query, UploadFile, File
@@ -15,7 +16,7 @@ from app.core.note_files import (
     rename_note_file, get_file_path_for_storage, get_absolute_file_path,
     sanitize_attachment_filename, get_unique_attachment_path,
     get_attachment_storage_path, delete_note_attachment_file,
-    delete_all_note_attachments,
+    delete_all_note_attachments, read_note_file, get_note_file_mtime,
 )
 from app.db import database
 from app.api.auth import require_auth
@@ -27,6 +28,72 @@ router = APIRouter(prefix="/api/v1/notes", tags=["Notes"])
 # Max attachment size (25 MB) — notes attachments are reference material, not
 # bulk storage. Mirrors the audio-upload ceiling used elsewhere.
 MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024
+
+
+def _parse_db_timestamp(value) -> Optional[datetime]:
+    """Parse a stored ISO timestamp into a tz-aware datetime (assume UTC)."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _reconcile_note_with_disk(note: dict) -> dict:
+    """Refresh a note from its on-disk markdown file when edited externally.
+
+    The database is the source of truth, but notes are also materialized as
+    ``.md`` files that users (or other tools) may edit directly on disk. When
+    the file's modification time is newer than the note's ``updated_at``, the
+    file was changed outside the app; re-read it, push the new title/content
+    back into the database, and return the refreshed row so the UI reflects the
+    external edit. Tags and pin state live only in the DB and are preserved.
+
+    Best-effort: any failure leaves the original DB row untouched.
+    """
+    file_path = note.get("file_path")
+    if not file_path:
+        return note
+
+    filename = file_path.split("/")[-1]
+    mtime = get_note_file_mtime(filename)
+    if mtime is None:
+        return note
+
+    db_updated = _parse_db_timestamp(note.get("updated_at"))
+    file_mtime = datetime.fromtimestamp(mtime, tz=timezone.utc)
+    # Only adopt the file when it is strictly newer than the DB row. The app
+    # sets updated_at right after writing the file on its own create/update, so
+    # files it wrote are never newer than the row and won't trigger a rewrite.
+    if db_updated is not None and file_mtime <= db_updated:
+        return note
+
+    parsed = read_note_file(filename)
+    if parsed is None:
+        return note
+    file_title, file_content = parsed
+
+    # If the external edit dropped the leading heading, keep the DB title.
+    new_title = file_title or note.get("title") or ""
+    new_content = file_content
+
+    if new_title == note.get("title") and new_content == note.get("content"):
+        return note
+
+    try:
+        updated = database.update_note(
+            note_id=note["id"],
+            title=new_title,
+            content=new_content,
+        )
+        return updated or note
+    except Exception:
+        logger.exception("Failed to reconcile note %s from disk", note.get("id"))
+        return note
 
 
 @router.get("", response_model=List[Note])
@@ -41,6 +108,9 @@ async def list_notes(
     List all notes globally.
     Notes are ordered by pinned status (pinned first) then by updated_at descending.
     """
+    # Note: reconciliation with on-disk files happens only in get_note (the
+    # single-note read), not here — that keeps list reads free of the per-note
+    # stat/write scan. The open note is refreshed via get_note on the client.
     return database.get_all_notes(
         search=search,
         tag=tag,
@@ -112,7 +182,8 @@ async def get_note(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Note not found: {note_id}"
         )
-    return note
+    # Adopt any external edit made directly to the on-disk markdown file.
+    return _reconcile_note_with_disk(note)
 
 
 @router.patch("/{note_id}", response_model=Note)

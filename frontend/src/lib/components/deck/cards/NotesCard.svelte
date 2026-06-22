@@ -12,6 +12,7 @@
 	import { StickyNote, Search as SearchIcon, Plus, Pin, Trash2, Paperclip, X } from 'lucide-svelte';
 	import {
 		getNotes,
+		getNote,
 		createNote,
 		updateNote,
 		deleteNote,
@@ -118,10 +119,42 @@
 		}
 	}
 
+	// Re-read the open note from the single-note endpoint, which reconciles the
+	// note against its on-disk markdown file. Adopt newer content into the editor
+	// only when there are no unsaved local edits, so an external file edit shows
+	// up without clobbering in-progress work.
+	async function refreshOpenNote() {
+		if (!editingNote || hasUnsavedChanges || saving) return;
+		const id = editingNote.id;
+		try {
+			const fresh = await getNote(id);
+			if (fresh.content !== editorContent || fresh.title !== editorTitle) {
+				editingNote = fresh;
+				editorTitle = fresh.title;
+				editorContent = fresh.content;
+				editorTags = [...fresh.tags];
+				editorPinned = fresh.is_pinned;
+			}
+		} catch {
+			// Best-effort refresh; leave the editor as-is on failure.
+		}
+	}
+
+	// Refresh on tab/window focus. Notes are materialized as markdown files that
+	// may be edited outside the app; the single-note GET reconciles those edits,
+	// so refresh the list and re-read the open note. Skips while editing/uploading.
+	function handleWindowFocus() {
+		if (saving || uploading || hasUnsavedChanges) return;
+		loadData();
+		refreshOpenNote();
+	}
+
 	// Load data on mount
 	onMount(() => {
 		loadData();
+		window.addEventListener('focus', handleWindowFocus);
 		return () => {
+			window.removeEventListener('focus', handleWindowFocus);
 			if (saveTimeout) {
 				clearTimeout(saveTimeout);
 			}

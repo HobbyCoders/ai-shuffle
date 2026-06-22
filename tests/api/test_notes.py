@@ -258,3 +258,94 @@ class TestDeleteNoteAttachment:
             f"/api/v1/notes/{sample_note['id']}/attachments/natt-x"
         )
         assert response.status_code == 404
+
+
+# =============================================================================
+# External-edit reconciliation (GET re-reads the on-disk markdown file when it
+# has been edited outside the app, and pushes the new content into the DB).
+# =============================================================================
+
+import os
+import time as _time
+
+
+class TestExternalEditReconciliation:
+    def _write_note_file(self, temp_data_dir, filename, body):
+        notes_dir = temp_data_dir / "notes"
+        notes_dir.mkdir(parents=True, exist_ok=True)
+        (notes_dir / filename).write_text(body, encoding="utf-8")
+        return notes_dir / filename
+
+    def test_get_note_reflects_external_file_edit(
+        self, client, mock_database, sample_note, temp_data_dir
+    ):
+        # DB row is "old"; the file on disk was edited more recently.
+        old = dict(sample_note, updated_at="2000-01-01T00:00:00+00:00")
+        mock_database.get_note.return_value = old
+
+        path = self._write_note_file(
+            temp_data_dir, "my-note.md", "# My Note\n\nEdited externally"
+        )
+        # Force a recent mtime so it is strictly newer than the DB row.
+        os.utime(path, (_time.time(), _time.time()))
+
+        refreshed = dict(old, content="Edited externally")
+        mock_database.update_note.return_value = refreshed
+
+        response = client.get(f"/api/v1/notes/{sample_note['id']}")
+        assert response.status_code == 200
+        assert response.json()["content"] == "Edited externally"
+
+        # The DB was updated with the content read from disk.
+        kwargs = mock_database.update_note.call_args.kwargs
+        assert kwargs["note_id"] == sample_note["id"]
+        assert kwargs["content"] == "Edited externally"
+        assert kwargs["title"] == "My Note"
+
+    def test_get_note_no_rewrite_when_file_unchanged(
+        self, client, mock_database, sample_note, temp_data_dir
+    ):
+        # File mtime is OLDER than the DB row → no reconciliation should happen.
+        recent = dict(sample_note, updated_at="2999-01-01T00:00:00+00:00")
+        mock_database.get_note.return_value = recent
+
+        path = self._write_note_file(
+            temp_data_dir, "my-note.md", "# My Note\n\nSome content"
+        )
+        old_ts = _time.mktime((2001, 1, 1, 0, 0, 0, 0, 0, 0))
+        os.utime(path, (old_ts, old_ts))
+
+        response = client.get(f"/api/v1/notes/{sample_note['id']}")
+        assert response.status_code == 200
+        mock_database.update_note.assert_not_called()
+
+    def test_get_note_missing_file_left_untouched(
+        self, client, mock_database, sample_note
+    ):
+        # No file on disk → return the DB row as-is, no update.
+        mock_database.get_note.return_value = sample_note
+        response = client.get(f"/api/v1/notes/{sample_note['id']}")
+        assert response.status_code == 200
+        assert response.json()["content"] == "Some content"
+        mock_database.update_note.assert_not_called()
+
+    def test_list_notes_does_not_reconcile(
+        self, client, mock_database, sample_note, temp_data_dir
+    ):
+        # Reconciliation is intentionally limited to the single-note GET, so
+        # even when the file on disk is newer, the list returns DB content as-is
+        # and performs no write — keeping list reads free of a per-note scan.
+        old = dict(sample_note, updated_at="2000-01-01T00:00:00+00:00")
+        mock_database.get_all_notes.return_value = [old]
+
+        path = self._write_note_file(
+            temp_data_dir, "my-note.md", "# My Note\n\nList edit"
+        )
+        os.utime(path, (_time.time(), _time.time()))
+
+        response = client.get("/api/v1/notes")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["content"] == "Some content"  # original DB content, not reconciled
+        mock_database.update_note.assert_not_called()

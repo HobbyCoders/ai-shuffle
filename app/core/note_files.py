@@ -62,6 +62,54 @@ def build_file_content(title: str, content: str) -> str:
     return f"# {title}\n\n{content}"
 
 
+def parse_file_content(raw: str) -> tuple[str, str]:
+    """Parse a note markdown file back into (title, content).
+
+    Reverses ``build_file_content``: the first line is expected to be a
+    leading ``# {title}`` heading, optionally followed by a blank line, with
+    everything after that being the note body. Falls back gracefully when the
+    file was edited externally and no longer follows that exact shape (e.g. the
+    heading was removed) by treating the whole text as the body and leaving the
+    title to the caller.
+    """
+    if raw.startswith("# "):
+        # Split off the heading line; the body is everything after the first
+        # newline. We strip a single blank separator line if present so the
+        # round-trip is stable for files we wrote ourselves.
+        first_newline = raw.find("\n")
+        if first_newline == -1:
+            return raw[2:].strip(), ""
+        title = raw[2:first_newline].strip()
+        body = raw[first_newline + 1:]
+        if body.startswith("\n"):
+            body = body[1:]
+        return title, body
+    # No recognizable heading — treat the entire file as the body.
+    return "", raw
+
+
+def read_note_file(filename: str) -> Optional[tuple[str, str]]:
+    """Read a note markdown file from disk and parse it into (title, content).
+
+    Returns ``None`` if the file does not exist or cannot be read.
+    """
+    file_path = get_notes_dir() / filename
+    try:
+        raw = file_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return parse_file_content(raw)
+
+
+def get_note_file_mtime(filename: str) -> Optional[float]:
+    """Return the POSIX modification time of a note file, or ``None`` if absent."""
+    file_path = get_notes_dir() / filename
+    try:
+        return file_path.stat().st_mtime
+    except OSError:
+        return None
+
+
 def write_note_file(filename: str, title: str, content: str) -> Path:
     """Write a note to disk as a markdown file. Returns the absolute file path."""
     notes_dir = get_notes_dir()
