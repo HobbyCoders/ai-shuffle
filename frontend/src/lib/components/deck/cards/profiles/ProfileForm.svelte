@@ -708,14 +708,19 @@
 		align-items: center;
 		gap: 8px;
 	}
-	.env-row :global(.inp.env-key) {
+	/* Extra `.env-list` qualifier raises specificity above the shell's
+	   `.set-row.stack .ctl .inp { width: 100% }` rule, which otherwise ties
+	   and (by source order) forces the no-shrink key input to 100% width —
+	   pushing the value input and delete button off the right edge. */
+	.env-list .env-row :global(.inp.env-key) {
 		min-width: 0;
 		width: 200px;
-		flex-shrink: 0;
+		flex: 0 0 200px;
 	}
-	.env-row :global(.inp.env-val) {
+	.env-list .env-row :global(.inp.env-val) {
 		min-width: 0;
-		flex: 1;
+		width: auto;
+		flex: 1 1 0;
 	}
 	.empty {
 		margin: 10px 0 0;
@@ -729,12 +734,15 @@
 			grid-template-columns: 1fr auto;
 			grid-template-rows: auto auto;
 		}
-		.env-row :global(.inp.env-key) {
+		.env-list .env-row :global(.inp.env-key) {
 			width: 100%;
+			flex: none;
 			grid-column: 1;
 			grid-row: 1;
 		}
-		.env-row :global(.inp.env-val) {
+		.env-list .env-row :global(.inp.env-val) {
+			width: 100%;
+			flex: none;
 			grid-column: 1;
 			grid-row: 2;
 		}
