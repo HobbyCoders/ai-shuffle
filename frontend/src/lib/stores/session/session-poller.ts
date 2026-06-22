@@ -8,23 +8,37 @@
  * - All state transitions (streaming start/end) are detected from poll responses.
  *
  * Polling rates:
- * - 300ms during streaming (real-time feel)
- * - Stops entirely when streaming ends (no idle polling)
+ * - 150ms during streaming (real-time feel)
+ * - 1500ms "park poll" while a turn is parked waiting on background tasks
+ *   (isStreaming=false but activeTasks.length>0) — keeps tasks fresh AND
+ *   detects the wake when streaming resumes
+ * - Stops entirely only when streaming ends AND there are no active tasks
  *
  * Key behaviors:
  * - Sends ?since_update_id=N → gets 304 if nothing changed (cheap)
  * - On update: replaces session state entirely (no merging)
- * - Stops automatically when streaming ends
+ * - Upshifts to streaming rate when isStreaming flips true; downshifts to the
+ *   park rate when parked with active tasks; stops when fully idle.
  */
 
-import type { ChatMessage, SubagentChildMessage, MessageType } from '../types';
+import type { ChatMessage, SubagentChildMessage, MessageType, Task } from '../types';
 import { sessionState, type SessionUsage } from './session-state';
 import { messageCache } from '../message-cache';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
+/** Fast poll rate while a turn is actively streaming. */
 const STREAMING_POLL_INTERVAL_MS = 150;
+
+/**
+ * Slow "park poll" rate. Used when a turn has parked (isStreaming=false) but
+ * still has background tasks in flight (activeTasks.length>0). Keeps the active
+ * tasks fresh and detects the wake (next poll where isStreaming flips back to
+ * true) so we can upshift to the streaming rate. Without this, a parked session
+ * waiting on a long task goes stale and never auto-refreshes (Bug 2).
+ */
+const PARK_POLL_INTERVAL_MS = 1500;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -52,6 +66,13 @@ export interface PollAppliedData {
 	isStreaming: boolean;
 	usage: SessionUsage;
 	sessionMeta?: SessionMeta;
+	/**
+	 * Currently-running background tasks (sub-agents + shell subprocesses) for
+	 * this session. Always present; `[]` when none. Fresh on every poll,
+	 * independent of message deltas. Non-empty exactly while the session has
+	 * background work in flight (including while a turn is PARKED).
+	 */
+	activeTasks: Task[];
 }
 
 /** Number of consecutive failures before notifying the error callback */
@@ -173,12 +194,27 @@ class SessionPoller {
 
 		// Poll immediately, then on interval
 		this._poll(sessionId);
-		const timer = setInterval(() => this._poll(sessionId), STREAMING_POLL_INTERVAL_MS);
-		this._timers.set(sessionId, {
-			timer,
-			sessionId,
-			interval: STREAMING_POLL_INTERVAL_MS,
-		});
+		this._ensureTimer(sessionId, STREAMING_POLL_INTERVAL_MS);
+	}
+
+	/**
+	 * Ensure a polling timer is running for `sessionId` at exactly `interval`.
+	 *
+	 * Idempotent: if a timer at the requested interval already exists, this is a
+	 * no-op. If a timer at a DIFFERENT interval exists, it is swapped for one at
+	 * the new interval (this is the upshift/downshift between the streaming rate
+	 * and the park rate). Does NOT poll immediately — callers that need a fresh
+	 * poll (e.g. startStreaming) trigger one themselves; the lifecycle transitions
+	 * in _applyPollResult are already running inside a poll.
+	 */
+	private _ensureTimer(sessionId: string, interval: number): void {
+		const existing = this._timers.get(sessionId);
+		if (existing) {
+			if (existing.interval === interval) return; // already at the right rate
+			clearInterval(existing.timer);
+		}
+		const timer = setInterval(() => this._poll(sessionId), interval);
+		this._timers.set(sessionId, { timer, sessionId, interval });
 	}
 
 	/**
@@ -353,6 +389,7 @@ class SessionPoller {
 					isStreaming: session.isStreaming,
 					usage: session.usage,
 					sessionMeta,
+					activeTasks: parseActiveTasks(data.activeTasks ?? data.active_tasks),
 				};
 			}
 			return null;
@@ -428,6 +465,11 @@ class SessionPoller {
 		const serverMessages = (data.messages as Array<Record<string, unknown>>) || [];
 		const initialMessageCount = (data.initial_message_count as number) || 0;
 
+		// Active background tasks (sub-agents + shell subprocesses). Always present
+		// on a fresh backend; tolerate a missing field gracefully (treat as []).
+		// Only ever contains currently-running tasks.
+		const activeTasks = parseActiveTasks(data.activeTasks ?? data.active_tasks);
+
 		const rawMessages = serverMessages.map((m, i) => convertServerMessage(m, i));
 
 		// Filter noise messages
@@ -439,6 +481,16 @@ class SessionPoller {
 				return false;
 			}
 			return true;
+		}).map(m => {
+			// Bug 1: when the turn is no longer streaming, no message may carry a
+			// streaming flag — otherwise the bouncing "..." dots persist forever
+			// after a turn parks/ends. The server payload should already reflect
+			// this, but force-clear here as the authoritative belt-and-suspenders
+			// (the synthetic injected streaming message in active-session state is
+			// separately reconciled away by the poll-apply merge once we deliver
+			// non-streaming server messages).
+			if (!isStreaming && m.streaming) return { ...m, streaming: false };
+			return m;
 		});
 
 		// Get existing state for merging and transition detection
@@ -528,30 +580,100 @@ class SessionPoller {
 					isStreaming: session.isStreaming,
 					usage: session.usage,
 					sessionMeta,
+					activeTasks,
 				});
 			} else {
 				console.warn(`[Poller] onPollApplied(${sessionId}): session not found in sessionState after apply`);
 			}
 		}
 
-		// Handle streaming state transitions
-		if (streamingJustEnded) {
-			if (this._timers.has(sessionId)) {
-				this.stop(sessionId);
+		// ── Poll lifecycle: upshift / downshift / stop ──────────────────────
+		//
+		// Three modes, selected by (isStreaming, activeTasks):
+		//   1. isStreaming                     → STREAMING rate (upshift / keep fast)
+		//   2. !isStreaming && tasks in flight → PARK rate (downshift, keep polling)
+		//   3. !isStreaming && no tasks        → STOP (fully idle)
+		//
+		// Bug 2: previously mode 2 fell into the stop path, so a turn parked on a
+		// long-running background task went stale and never auto-refreshed (the
+		// user had to send a message to unfreeze). The park poll keeps activeTasks
+		// fresh AND detects the wake — the next poll where isStreaming flips back
+		// to true upshifts to the streaming rate.
+		const hasActiveTasks = activeTasks.length > 0;
+		const hasTimer = this._timers.has(sessionId);
+
+		if (isStreaming) {
+			// Upshift (or keep): ensure the fast streaming-rate timer is running.
+			// Only manage the timer if one already exists for this session, so a
+			// one-shot loadSession (no timer) doesn't silently start a background
+			// poll loop — its caller (onConnected) owns the startStreaming call.
+			if (hasTimer) this._ensureTimer(sessionId, STREAMING_POLL_INTERVAL_MS);
+		} else if (hasActiveTasks) {
+			// Park: downshift to the slow park-poll rate (or start it). We start a
+			// timer even from loadSession here, because a freshly-loaded parked
+			// session must keep itself fresh to detect the wake. _ensureTimer is
+			// idempotent and swaps the interval if we were at the streaming rate.
+			const wasStreamingTimer = hasTimer &&
+				this._timers.get(sessionId)!.interval === STREAMING_POLL_INTERVAL_MS;
+			this._ensureTimer(sessionId, PARK_POLL_INTERVAL_MS);
+			// On the streaming→parked transition, fire the stream-end side effects
+			// (session list refresh, message cache write) once — the turn's
+			// foreground output is done even though background work continues.
+			if (streamingJustEnded || wasStreamingTimer) {
+				if (this._onStreamEnd) this._onStreamEnd(sessionId, usage);
 			}
-			if (this._onStreamEnd) {
-				this._onStreamEnd(sessionId, usage);
-			}
-		} else if (!isStreaming && this._timers.has(sessionId)) {
-			const entry = this._timers.get(sessionId)!;
-			if (entry.interval === STREAMING_POLL_INTERVAL_MS) {
-				this.stop(sessionId);
-				if (this._onStreamEnd) {
-					this._onStreamEnd(sessionId, usage);
-				}
+		} else {
+			// Idle: fully stop. Covers both the streaming→ended transition with no
+			// tasks, and a park poll whose last task just finished.
+			if (hasTimer) this.stop(sessionId);
+			if (streamingJustEnded || hasTimer) {
+				if (this._onStreamEnd) this._onStreamEnd(sessionId, usage);
 			}
 		}
 	}
+}
+
+// ─── Active-task parsing ──────────────────────────────────────────────────────
+
+const VALID_TASK_STATUSES = new Set(['running', 'completed', 'error', 'killed']);
+const VALID_TASK_KINDS = new Set(['agent', 'shell']);
+
+/**
+ * Parse the `activeTasks` field from a /live response into well-typed Task[].
+ *
+ * Tolerant by contract: a missing/non-array field yields `[]`. Each entry is
+ * lightly validated (id present, known status/kind) and normalized — malformed
+ * rows are dropped rather than rendered. The backend contract guarantees
+ * camelCase + only currently-running tasks, but we accept a snake_case
+ * `started_at`/`updated_at` fallback so the UI degrades gracefully.
+ */
+function parseActiveTasks(raw: unknown): Task[] {
+	if (!Array.isArray(raw)) return [];
+	const tasks: Task[] = [];
+	for (const entry of raw) {
+		if (!entry || typeof entry !== 'object') continue;
+		const t = entry as Record<string, unknown>;
+		const id = typeof t.id === 'string' ? t.id : '';
+		if (!id) continue;
+		const status = typeof t.status === 'string' && VALID_TASK_STATUSES.has(t.status)
+			? (t.status as Task['status'])
+			: 'running';
+		const kind = typeof t.kind === 'string' && VALID_TASK_KINDS.has(t.kind)
+			? (t.kind as Task['kind'])
+			: 'shell';
+		tasks.push({
+			id,
+			subject: typeof t.subject === 'string' ? t.subject : '',
+			status,
+			kind,
+			summary: typeof t.summary === 'string' ? t.summary : null,
+			startedAt: (typeof t.startedAt === 'string' ? t.startedAt
+				: typeof t.started_at === 'string' ? t.started_at : ''),
+			updatedAt: (typeof t.updatedAt === 'string' ? t.updatedAt
+				: typeof t.updated_at === 'string' ? t.updated_at : ''),
+		});
+	}
+	return tasks;
 }
 
 // ─── Message conversion helpers ──────────────────────────────────────────────

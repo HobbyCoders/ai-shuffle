@@ -47,7 +47,7 @@ import { createStore, createSubscribers } from './store-utils';
 // Shared types
 import type {
 	ChatMessage, MessageType,
-	QueuedMessage, ExecutionMode
+	QueuedMessage, ExecutionMode, Task
 } from './types';
 
 // ─── Module-Level Exports ────────────────────────────────────────────────────
@@ -111,6 +111,15 @@ export interface ActiveSessionState {
 	deferredPermissions: PermissionRequestType[];
 	pendingQuestions: UserQuestionRequest[];
 	queuedMessages: QueuedMessage[];
+	/**
+	 * Currently-running background tasks (sub-agents + shell subprocesses) for
+	 * the active session. Default `[]`. Written by the poller's onPollApplied
+	 * callback from each /live response. Non-empty exactly while the session has
+	 * background work in flight — including while a turn is PARKED (isStreaming
+	 * may be false then). Drives the ActiveTasks strip + the "waiting for N
+	 * background task(s)" parked indicator.
+	 */
+	activeTasks: Task[];
 	draft: string;
 	scrollTop: number;
 	streamStartTime: number | null;
@@ -192,6 +201,7 @@ function defaultState(): ActiveSessionState {
 		deferredPermissions: [],
 		pendingQuestions: [],
 		queuedMessages: [],
+		activeTasks: [],
 		draft: '',
 		scrollTop: 0,
 		streamStartTime: null,
@@ -673,6 +683,7 @@ export const activeMessages = createDerived(() => _state.messages);
 export const activeIsStreaming = createDerived(() => _state.isStreaming);
 export const activeWsConnected = createDerived(() => _state.wsConnected);
 export const activePendingPermissions = createDerived(() => _state.pendingPermissions);
+export const activeTasks = createDerived(() => _state.activeTasks);
 export const activeDeferredPermissions = createDerived(() => _state.deferredPermissions);
 export const activePendingQuestions = createDerived(() => _state.pendingQuestions);
 export const activeError = createDerived(() => _state.error);

@@ -38,6 +38,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 		deferredPermissions: [],
 		pendingQuestions: [],
 		queuedMessages: [],
+		activeTasks: [],
 		draft: 'draft from session A',
 		scrollTop: 250,
 		streamStartTime: 123456,
