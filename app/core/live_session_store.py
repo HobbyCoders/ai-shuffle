@@ -1468,6 +1468,15 @@ class LiveSessionStore:
                 msg_count = len(session.messages)
                 del self._sessions[session_id]
                 self._session_locks.pop(session_id, None)
+                # The live session is FINALLY gone — drop its background-task
+                # registry too. Tasks intentionally outlive a single turn, so
+                # this is the only place we clear them. Lazy import avoids a
+                # circular dependency (task_registry imports nothing from here).
+                try:
+                    from app.core.task_registry import task_registry
+                    task_registry.clear_session(session_id)
+                except Exception:
+                    logger.debug("task_registry.clear_session failed", exc_info=True)
                 remaining = len(self._sessions)
                 remaining_locks = len(self._session_locks)
                 logger.info(f"Cleaned up ended session {session_id} ({msg_count} messages). Remaining: sessions={remaining} locks={remaining_locks}")

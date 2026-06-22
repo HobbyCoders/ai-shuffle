@@ -611,9 +611,16 @@ async def get_live_session(
     """
     from starlette.responses import Response
     from app.core.live_session_store import live_session_store
+    from app.core.task_registry import task_registry
 
     # Check session exists and user has access
     session = await require_session(request, session_id)
+
+    # Active background tasks (SDK agent tasks + Monitor shell subprocesses).
+    # Attached fresh to EVERY local response path (delta or full, streaming or
+    # not) — never routed through the live store's last_update_id delta logic, so
+    # a task finishing is reflected on the very next poll. [] when none.
+    active_tasks = task_registry.get_active(session_id)
 
     # Cloud sessions run on a second install — proxy the worker's live state so
     # the user sees the remote stream (and history) exactly like a local one.
@@ -672,14 +679,31 @@ async def get_live_session(
         if since_update_id > 0:
             live_data = live_session_store.get_session_since(session_id, since_update_id)
             if live_data is None:
-                # No updates since last check
+                # No MESSAGE updates since last check. Tasks live outside the
+                # live store's update-id delta, so if any are running we still
+                # return a lightweight body carrying the fresh activeTasks rather
+                # than a 304 that would hide a task change from the poller.
+                if active_tasks:
+                    body = {
+                        "session_id": session_id,
+                        "is_streaming": live_session_store.is_streaming(session_id),
+                        "last_update_id": since_update_id,
+                        "messages": [],
+                        "initial_message_count": since_update_id,
+                        "activeTasks": active_tasks,
+                    }
+                    if session_meta:
+                        body["session_meta"] = session_meta
+                    return body
                 return Response(status_code=304)
+            live_data["activeTasks"] = active_tasks
             if session_meta:
                 live_data["session_meta"] = session_meta
             return live_data
         else:
             live_data = live_session_store.get_session_dict(session_id)
             if live_data:
+                live_data["activeTasks"] = active_tasks
                 if session_meta:
                     live_data["session_meta"] = session_meta
                 return live_data
@@ -819,7 +843,8 @@ async def get_live_session(
             "output_tokens": output_tokens,
             "cache_creation_tokens": cache_creation,
             "cache_read_tokens": cache_read,
-        }
+        },
+        "activeTasks": active_tasks,
     }
     if session_meta:
         result["session_meta"] = session_meta

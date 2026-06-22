@@ -363,8 +363,10 @@ async def shutdown_services() -> None:
     try:
         from app.core.live_session_store import live_session_store
         from app.core.permission_handler import permission_handler
+        from app.core.task_registry import task_registry
         live_session_store.reset_all()
         permission_handler.reset_all()
+        task_registry.reset_all()
     except Exception:
         pass
 
