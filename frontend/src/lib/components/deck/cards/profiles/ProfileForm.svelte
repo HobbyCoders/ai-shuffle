@@ -714,13 +714,13 @@
 	   pushing the value input and delete button off the right edge. */
 	.env-list .env-row :global(.inp.env-key) {
 		min-width: 0;
-		width: 200px;
-		flex: 0 0 200px;
+		width: auto;
+		flex: 1 1 0;
 	}
 	.env-list .env-row :global(.inp.env-val) {
 		min-width: 0;
-		width: auto;
-		flex: 1 1 0;
+		width: 150px;
+		flex: 0 0 150px;
 	}
 	.empty {
 		margin: 10px 0 0;
