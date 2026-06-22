@@ -62,6 +62,31 @@ class TaskRegistry:
     def __init__(self) -> None:
         # session_id -> {task_id -> record}
         self._tasks: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # session_id -> set of (task_id, signature) already delivered to the
+        # parent as an "unpark" notification. Guards the post-loop follow-up turn
+        # against re-triggering on a duplicate TaskNotificationMessage.
+        self._notified: Dict[str, set] = {}
+
+    def mark_notified(self, session_id: str, task_id: str, signature: str) -> bool:
+        """Idempotency latch for the parent "unpark" follow-up turn.
+
+        Returns ``True`` only the FIRST time a given ``(task_id, signature)`` is
+        seen for ``session_id``; every subsequent call with the same pair returns
+        ``False``. Callers pass ``signature = uuid or f"{output_file}:{status}"``,
+        so a NEW completion of the same task (fresh uuid — the agent can be
+        resumed and may notify again) RE-ARMS the latch and yields ``True`` again.
+
+        Defensive: a missing ``session_id``/``task_id`` never latches (returns
+        ``False``) so a stray notification can't strand state.
+        """
+        if not session_id or not task_id:
+            return False
+        key = (task_id, signature)
+        seen = self._notified.setdefault(session_id, set())
+        if key in seen:
+            return False
+        seen.add(key)
+        return True
 
     def start_task(
         self,
@@ -166,10 +191,12 @@ class TaskRegistry:
     def clear_session(self, session_id: str) -> None:
         """Drop all tasks for a session (called when the live session is removed)."""
         self._tasks.pop(session_id, None)
+        self._notified.pop(session_id, None)
 
     def reset_all(self) -> None:
         """Drop all task state. Used on shutdown and between tests."""
         self._tasks.clear()
+        self._notified.clear()
 
 
 # Global instance
