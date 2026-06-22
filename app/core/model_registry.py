@@ -140,12 +140,6 @@ def get_model(value: Optional[str]) -> Optional[ModelOption]:
     return _BY_VALUE.get(strip_context_suffix(value))
 
 
-def supports_1m_context(value: Optional[str]) -> bool:
-    """True when the model's base is a registry model capable of a 1M context window."""
-    match = get_model(value)
-    return match is not None and match.supports_1m
-
-
 def get_model_label(value: Optional[str]) -> str:
     """Human-readable label; falls back to the raw value, then 'Default'.
 

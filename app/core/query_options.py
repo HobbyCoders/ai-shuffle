@@ -44,7 +44,6 @@ from app.core.environment import (  # noqa: F401
     _get_hook_tool_names,
     _build_extra_args,
     _build_env_with_ai_tools,
-    apply_1m_context_env,
     generate_environment_details,
 )
 
@@ -605,11 +604,6 @@ def build_options_from_profile(
     # 1. MCP server creation (so Node.js tool subprocesses get the keys)
     # 2. ClaudeAgentOptions env (so the Claude CLI subprocess also gets them)
     full_env = _build_env_with_ai_tools(config.get("env"), ai_tools_config, api_user_id)
-
-    # Pin the 1M context window to the profile's 1M-context toggle (the "[1m]"
-    # model suffix). 1M-capable models like claude-opus-4-8 default to the 1M
-    # window on the CLI side, so disabling it requires an explicit env var.
-    apply_1m_context_env(full_env, model_to_use)
 
     ai_tool_env = full_env if full_env else None
 
