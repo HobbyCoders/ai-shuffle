@@ -73,6 +73,7 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     _SESSION_SYNC_THROTTLE_S,
     _last_sync_times,
     _transform_sdk_messages,
+    parse_session_history_via_store,
     check_session_access,
     require_session,
     enrich_sessions_with_tags,
@@ -393,6 +394,9 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
     messages = []
     working_dir = "/workspace"
 
+    from app.core.config import settings as _store_settings
+    _postgres_only = _store_settings.session_store_mode == "postgres_only"
+
     if sdk_session_id:
         try:
             from app.core.jsonl_parser import parse_session_history
@@ -405,7 +409,17 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             # and relies on a cross-dir scan to recover.
             working_dir = await run_sync(resolve_working_dir, dict(session))
 
-            jsonl_messages, usage_data = await run_sync(parse_session_history, sdk_session_id, working_dir)
+            if _postgres_only:
+                # postgres_only read cutover: Postgres (session_store_entries) is
+                # the source of truth. Load the rich transcript from the store and
+                # run it through the SAME transform as the JSONL path (so
+                # messages/usage are identical). The JSONL block is skipped
+                # entirely. In mirror/disabled this branch is never entered.
+                jsonl_messages, usage_data = await run_sync(
+                    parse_session_history_via_store, sdk_session_id, working_dir
+                )
+            else:
+                jsonl_messages, usage_data = await run_sync(parse_session_history, sdk_session_id, working_dir)
             if jsonl_messages:
                 # Get profile_id map (cached to avoid loading all DB messages every time)
                 from app.core.cost_utils import get_cached_profile_map
@@ -490,38 +504,52 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
             except Exception:
                 pass
 
-    # Fallback 2: Try SDK get_session_messages() if custom parser failed.
-    # The SDK handles JSONL parsing + conversation chain building independently,
-    # so it may succeed where our parser has edge-case issues.
-    if not messages and sdk_session_id and sdk_get_session_messages:
-        try:
-            sdk_msgs = sdk_get_session_messages(
-                session_id=sdk_session_id,
-                directory=working_dir,
+    if _postgres_only:
+        # postgres_only HARD-CUT: the store is the single source of truth. An
+        # empty result here returns empty messages with a loud WARNING — it must
+        # NEVER fall through to the SDK disk reader (Fallback 2, reads JSONL) or
+        # the legacy session_messages table (Fallback 3, the least-rich "TRAP").
+        # Those JSONL/legacy fallbacks below run ONLY in mirror/disabled.
+        if not messages and sdk_session_id:
+            logger.warning(
+                "[Session API] postgres_only: no entries in session_store for "
+                "session %s (sdk_session_id=%s) — returning empty messages; "
+                "NOT falling back to JSONL/legacy DB.",
+                session_id, sdk_session_id,
             )
-            if sdk_msgs:
-                messages = _transform_sdk_messages(sdk_msgs)
-                logger.debug(
-                    f"Loaded {len(messages)} messages via SDK get_session_messages "
-                    f"for session {session_id}"
+    else:
+        # Fallback 2: Try SDK get_session_messages() if custom parser failed.
+        # The SDK handles JSONL parsing + conversation chain building independently,
+        # so it may succeed where our parser has edge-case issues.
+        if not messages and sdk_session_id and sdk_get_session_messages:
+            try:
+                sdk_msgs = sdk_get_session_messages(
+                    session_id=sdk_session_id,
+                    directory=working_dir,
                 )
-        except Exception as e:
-            logger.warning(f"SDK get_session_messages fallback failed for {session_id}: {e}")
+                if sdk_msgs:
+                    messages = _transform_sdk_messages(sdk_msgs)
+                    logger.debug(
+                        f"Loaded {len(messages)} messages via SDK get_session_messages "
+                        f"for session {session_id}"
+                    )
+            except Exception as e:
+                logger.warning(f"SDK get_session_messages fallback failed for {session_id}: {e}")
 
-    # Fallback 3: Database messages (oldest data, least rich)
-    if not messages:
-        db_messages = await run_sync(database.get_session_messages, session_id)
-        # Transform DB messages to include type field for frontend compatibility
-        for m in db_messages:
-            msg = dict(m)
-            # Infer type from role for legacy DB messages
-            if msg.get("tool_name"):
-                msg["type"] = "tool_use"
-                msg["toolName"] = msg.get("tool_name")
-                msg["toolInput"] = msg.get("tool_input")
-            elif msg.get("role") == "assistant":
-                msg["type"] = "text"
-            messages.append(msg)
+        # Fallback 3: Database messages (oldest data, least rich)
+        if not messages:
+            db_messages = await run_sync(database.get_session_messages, session_id)
+            # Transform DB messages to include type field for frontend compatibility
+            for m in db_messages:
+                msg = dict(m)
+                # Infer type from role for legacy DB messages
+                if msg.get("tool_name"):
+                    msg["type"] = "tool_use"
+                    msg["toolName"] = msg.get("tool_name")
+                    msg["toolInput"] = msg.get("tool_input")
+                elif msg.get("role") == "assistant":
+                    msg["type"] = "text"
+                messages.append(msg)
 
     # Attach cost/duration metadata to final assistant messages (cached, O(N))
     from app.core.cost_utils import attach_cost_metadata
@@ -672,7 +700,11 @@ async def get_live_session(
     except Exception as e:
         logger.warning(f"DB message load failed for live {session_id}: {e}")
 
-    # Fallback 1: JSONL parsing (legacy sessions without DB messages)
+    from app.core.config import settings as _store_settings
+    _postgres_only = _store_settings.session_store_mode == "postgres_only"
+
+    # Fallback 1: JSONL parsing (legacy sessions without DB messages).
+    # In postgres_only this loads from the session store instead of JSONL.
     if not messages and sdk_session_id:
         try:
             from app.core.jsonl_parser import parse_session_history
@@ -682,7 +714,14 @@ async def get_live_session(
             # Worktree-aware working dir (worktree → project → default).
             working_dir = await run_sync(resolve_working_dir, dict(session))
 
-            jsonl_messages, usage_data = await run_sync(parse_session_history, sdk_session_id, working_dir)
+            if _postgres_only:
+                # postgres_only: replace the JSONL fallback with the store-backed
+                # parser (SAME transform). The DB fast path above is unchanged.
+                jsonl_messages, usage_data = await run_sync(
+                    parse_session_history_via_store, sdk_session_id, working_dir
+                )
+            else:
+                jsonl_messages, usage_data = await run_sync(parse_session_history, sdk_session_id, working_dir)
             if jsonl_messages:
                 # Optional fields to include when present (system, tool, subagent, metadata)
                 _OPTIONAL_LIVE_FIELDS = (
@@ -711,8 +750,10 @@ async def get_live_session(
         except Exception as e:
             logger.error(f"Failed to parse JSONL for live session {session_id}: {e}")
 
-    # Fallback 2: SDK get_session_messages()
-    if not messages and sdk_session_id and sdk_get_session_messages:
+    # Fallback 2: SDK get_session_messages() — JSONL disk reader. HARD-CUT in
+    # postgres_only (the store is the single source of truth; the DB fast path
+    # + store-backed parser above already cover it). Runs in mirror/disabled.
+    if not _postgres_only and not messages and sdk_session_id and sdk_get_session_messages:
         try:
             sdk_msgs = sdk_get_session_messages(
                 session_id=sdk_session_id,

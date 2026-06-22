@@ -79,7 +79,9 @@ def _safe_json(value):
 # v43: Add session_store_entries + session_store_summaries (SDK 0.1.65 SessionStore)
 # v44: Add error_log (app-wide error capture readable by the GetAppErrors MCP tool)
 # v45: Add cloud_remote_url + cloud_remote_session_id to sessions (cloud offload mode)
-SCHEMA_VERSION = 45
+# v46: Add session_id-only partial indexes on session_store_entries for the
+#      postgres_only read cutover (idx_sse_session, idx_sse_session_sub)
+SCHEMA_VERSION = 46
 
 
 def _run_column_migrations(cursor):
@@ -346,6 +348,20 @@ def _run_column_migrations(cursor):
         "CREATE INDEX IF NOT EXISTS idx_sse_project "
         "ON session_store_entries(project_key) "
         "WHERE subpath IS NULL"
+    )
+    # PR C.1 read cutover (v46): session_id-only partial indexes for the app's
+    # detail/resume read path, which matches on session_id ALONE (the
+    # SDK-derived project_key diverges from the stored folder name). Idempotent
+    # CREATE INDEX IF NOT EXISTS so existing/live DBs pick them up on startup.
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_session "
+        "ON session_store_entries (session_id, id) "
+        "WHERE subpath IS NULL"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_session_sub "
+        "ON session_store_entries (session_id, subpath, id) "
+        "WHERE subpath IS NOT NULL"
     )
     if not table_exists(cursor, "session_store_summaries"):
         cursor.execute("""

@@ -121,6 +121,33 @@ class WorktreeSessionResponse(BaseModel):
 # SDK message transformation
 # ---------------------------------------------------------------------------
 
+def parse_session_history_via_store(
+    sdk_session_id: str, working_dir: str
+) -> tuple[list, dict]:
+    """Parse a session transcript from the Postgres session store (postgres_only).
+
+    Synchronous (call via ``run_sync``). Builds a ``PgSessionStore`` and a sync
+    ``store_loader`` that matches entries on ``session_id`` (+subpath) ALONE —
+    the stored ``project_key`` is the on-disk folder name and diverges from any
+    cwd-derived key, so we never reconstruct it (see
+    ``app/core/pg_session_store.py``). Delegates to
+    :func:`app.core.jsonl_parser.parse_session_history_from_store`, which runs
+    the entries through the SAME transform as the JSONL path. Returns the same
+    ``(messages, usage_data)`` shape as ``parse_session_history``.
+    """
+    from app.core.pg_session_store import (
+        _load_entries_by_session_id_sync,
+    )
+    from app.core.jsonl_parser import parse_session_history_from_store
+
+    def _store_loader(session_id: str, subpath: Optional[str] = None) -> list:
+        return _load_entries_by_session_id_sync(session_id, subpath)
+
+    return parse_session_history_from_store(
+        sdk_session_id, working_dir, _store_loader
+    )
+
+
 def _transform_sdk_messages(sdk_messages: list) -> list:
     """Transform SDK SessionMessage objects into our frontend-compatible format.
 

@@ -276,34 +276,74 @@ def _backfill_entries_sync(
     return written
 
 
-def _load_sync(key: SessionKey) -> list[SessionStoreEntry] | None:
-    project_key = key["project_key"]
-    session_id = key["session_id"]
-    subpath = _subpath_of(key)
+def _load_entries_by_session_id_sync(
+    session_id: str, subpath: str | None = None
+) -> list[SessionStoreEntry]:
+    """Return the raw ``entry`` dicts for ``session_id`` (+``subpath``), id ASC.
 
+    Matched by ``session_id`` (and ``subpath``) ALONE — the ``project_key``
+    predicate is deliberately dropped. The ``project_key`` stored at write time
+    is the on-disk folder name, but the SDK's read helpers derive a project key
+    via ``_sanitize_path(realpath(cwd))`` that DIVERGES from it (Windows drives,
+    ``/workspace`` vs worktree paths, symlinks). SDK session UUIDs are globally
+    unique (a live DB check confirmed 0 sessions span multiple project_keys),
+    so matching on ``session_id`` alone is both correct and the only way to make
+    resume work regardless of which (possibly-wrong) project_key the caller
+    reconstructs. This is the same strategy the drift verifier uses at 0 drift.
+    """
     with get_db() as conn:
         cur = conn.cursor()
         if subpath is None:
             cur.execute(
                 "SELECT entry FROM session_store_entries "
-                "WHERE project_key = %s AND session_id = %s AND subpath IS NULL "
+                "WHERE session_id = %s AND subpath IS NULL "
                 "ORDER BY id ASC",
-                (project_key, session_id),
+                (session_id,),
             )
         else:
             cur.execute(
                 "SELECT entry FROM session_store_entries "
-                "WHERE project_key = %s AND session_id = %s AND subpath = %s "
+                "WHERE session_id = %s AND subpath = %s "
                 "ORDER BY id ASC",
-                (project_key, session_id, subpath),
+                (session_id, subpath),
             )
         rows = cur.fetchall()
 
-    if not rows:
-        return None
     # psycopg2 JSONB returns dicts already; SDK contract is deep-equal not
     # byte-equal so no round-trip normalization is required.
     return [row["entry"] for row in rows]
+
+
+def _list_subpaths_by_session_id_sync(session_id: str) -> list[str]:
+    """Distinct non-null subpaths for ``session_id`` (matched by id alone).
+
+    Like :func:`_load_entries_by_session_id_sync`, this drops the ``project_key``
+    predicate — see that function for the rationale.
+    """
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT subpath FROM session_store_entries "
+            "WHERE session_id = %s AND subpath IS NOT NULL",
+            (session_id,),
+        )
+        rows = cur.fetchall()
+    return [r["subpath"] for r in rows]
+
+
+def _load_sync(key: SessionKey) -> list[SessionStoreEntry] | None:
+    # Match on (session_id, subpath) ONLY — the project_key the SDK passes in
+    # via load(key) is derived from cwd and DIVERGES from the on-disk folder
+    # name stored at write time (Windows, /workspace, worktrees, symlinks).
+    # SDK session UUIDs are globally unique, so this is correct and makes resume
+    # robust. See _load_entries_by_session_id_sync for the full rationale.
+    session_id = key["session_id"]
+    subpath = _subpath_of(key)
+
+    rows = _load_entries_by_session_id_sync(session_id, subpath)
+    if not rows:
+        return None
+    return rows
 
 
 def _list_sessions_sync(project_key: str) -> list[SessionStoreListEntry]:
@@ -380,15 +420,10 @@ def _delete_sync(key: SessionKey) -> None:
 
 
 def _list_subkeys_sync(key: SessionListSubkeysKey) -> list[str]:
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT DISTINCT subpath FROM session_store_entries "
-            "WHERE project_key = %s AND session_id = %s AND subpath IS NOT NULL",
-            (key["project_key"], key["session_id"]),
-        )
-        rows = cur.fetchall()
-    return [r["subpath"] for r in rows]
+    # Match on session_id ONLY (drop the project_key predicate) so the SDK's
+    # resume subkey materialization works regardless of the cwd-derived
+    # project_key it passes in. See _load_entries_by_session_id_sync.
+    return _list_subpaths_by_session_id_sync(key["session_id"])
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +466,39 @@ class PgSessionStore:
 
     async def list_subkeys(self, key: SessionListSubkeysKey) -> list[str]:
         return await asyncio.to_thread(_list_subkeys_sync, key)
+
+    # ------------------------------------------------------------------
+    # App-facing read API (PR C.1 — postgres_only read cutover).
+    #
+    # NOT part of the SDK SessionStore protocol. The backend has a
+    # ``session_id`` (the SDK session UUID), not an SDK key dict, and must NOT
+    # reconstruct a project_key from cwd (it diverges from the on-disk folder
+    # name stored at write time). These methods match on ``session_id`` (+
+    # ``subpath``) alone so reads are correct regardless of cwd encoding.
+    # ------------------------------------------------------------------
+
+    async def load_entries_by_session_id(
+        self, session_id: str, subpath: str | None = None
+    ) -> list[dict]:
+        """Return raw ``entry`` JSONB dicts for ``session_id`` (+``subpath``).
+
+        Ordered by ``id ASC``. ``subpath IS NULL`` when ``subpath is None``;
+        otherwise an exact subpath match. Matched by ``session_id`` alone (no
+        project_key predicate) — see :func:`_load_entries_by_session_id_sync`.
+        """
+        return await asyncio.to_thread(
+            _load_entries_by_session_id_sync, session_id, subpath
+        )
+
+    async def list_subpaths_by_session_id(self, session_id: str) -> list[str]:
+        """Distinct non-null subpaths for ``session_id`` (subagent transcripts).
+
+        Matched by ``session_id`` alone — see
+        :func:`_list_subpaths_by_session_id_sync`.
+        """
+        return await asyncio.to_thread(
+            _list_subpaths_by_session_id_sync, session_id
+        )
 
     # ------------------------------------------------------------------
     # Backfill API (operational; used by scripts.backfill_session_store).

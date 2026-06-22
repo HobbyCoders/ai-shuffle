@@ -1107,6 +1107,20 @@ def create_postgres_schema(cursor) -> None:
         "ON session_store_entries(project_key) "
         "WHERE subpath IS NULL"
     )
+    # PR C.1 read cutover: the app's detail/resume reads match on session_id
+    # ALONE (the SDK-derived project_key diverges from the stored folder name —
+    # see app/core/pg_session_store.py). These project_key-free partial indexes
+    # serve that hot path (main transcript ordered by id; subagent subpaths).
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_session "
+        "ON session_store_entries (session_id, id) "
+        "WHERE subpath IS NULL"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sse_session_sub "
+        "ON session_store_entries (session_id, subpath, id) "
+        "WHERE subpath IS NOT NULL"
+    )
 
     # Summary sidecar written inside append() via fold_session_summary().
     # Scoped to main transcripts only (subagent appends must not mutate).

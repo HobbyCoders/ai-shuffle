@@ -41,6 +41,16 @@ _PARSE_CACHE_MAX_SIZE = 50
 _parse_cache: OrderedDict = OrderedDict()
 _parse_cache_lock = threading.Lock()
 
+# Separate cache namespace for the postgres_only store-backed parse path.
+# Keyed by sdk_session_id, value is (messages_json, usage_json). Kept ENTIRELY
+# separate from _parse_cache so flipping session_store_mode (mirror ->
+# postgres_only) without a process restart can never serve a JSONL-derived
+# result for a postgres_only read, or vice-versa. There is no on-disk mtime to
+# validate a store result against, so entries are invalidated alongside the
+# JSONL cache via invalidate_parse_cache().
+_store_parse_cache: OrderedDict = OrderedDict()
+_store_parse_cache_lock = threading.Lock()
+
 # Cache: sdk_session_id -> (dir_mtime, agent_files_dict)
 _agent_paths_cache: OrderedDict = OrderedDict()
 _agent_paths_cache_lock = threading.Lock()
@@ -573,11 +583,25 @@ def parse_agent_history(agent_path: Path) -> List[Dict[str, Any]]:
 
     Returns list of child messages with: id, type, content, toolName, toolId, toolInput, toolResult, toolStatus, timestamp
     Tool results are grouped with their corresponding tool_use entries.
+
+    This is a thin wrapper that reads entries from the JSONL file then delegates
+    to :func:`transform_agent_entries`. In ``postgres_only`` mode the same
+    transform is fed entries pulled from the session store instead.
+    """
+    return transform_agent_entries(parse_jsonl_file(agent_path))
+
+
+def transform_agent_entries(entries) -> List[Dict[str, Any]]:
+    """Transform agent transcript entries into child messages.
+
+    Source-agnostic core of :func:`parse_agent_history`: ``entries`` is any
+    iterable of raw transcript dicts (from a JSONL file OR the Postgres session
+    store). The transform is byte-identical regardless of source.
     """
     children: List[Dict[str, Any]] = []
     tool_names_by_id: Dict[str, str] = {}
 
-    for entry in parse_jsonl_file(agent_path):
+    for entry in entries:
         entry_type = entry.get("type")
         message_data = entry.get("message", {})
         role = message_data.get("role")
@@ -729,6 +753,12 @@ def invalidate_parse_cache(sdk_session_id: str = None) -> None:
         else:
             _agent_paths_cache.clear()
 
+    with _store_parse_cache_lock:
+        if sdk_session_id:
+            _store_parse_cache.pop(sdk_session_id, None)
+        else:
+            _store_parse_cache.clear()
+
 
 def pre_seed_parse_cache(
     sdk_session_id: str,
@@ -792,36 +822,38 @@ def pre_seed_parse_cache(
         return False
 
 
-def _parse_session_history_uncached(
+def _transform_entries(
+    entries,
     sdk_session_id: str,
     working_dir: str,
-    jsonl_path: Path
+    agent_children_loader=None,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """
-    Parse a session's JSONL history file and return messages + usage data in a single pass.
+    """Transform raw transcript entries into chat messages + usage data.
 
-    This transforms the JSONL format to match the format used by live streaming,
-    ensuring visual consistency between resumed and live sessions.
-
-    Also parses associated agent JSONL files for Task tool calls and creates
-    subagent message groups.
+    This is the PURE, source-agnostic core shared by the JSONL file path and
+    the Postgres session-store path. ``entries`` is any iterable of raw
+    transcript dicts; the transform is byte-identical regardless of where the
+    entries came from. Subagent child lookup is delegated to
+    ``agent_children_loader`` so each source can resolve children its own way.
 
     Args:
-        sdk_session_id: The Claude SDK session ID
-        working_dir: The working directory for finding the project
-        jsonl_path: Path to the JSONL file (caller is responsible for resolving this)
+        entries: Iterable of raw transcript dicts (JSONL lines or store rows).
+        sdk_session_id: The Claude SDK session ID (used for ids/logging).
+        working_dir: The working directory (passed through for context).
+        agent_children_loader: Optional ``callable(agent_id) -> list[dict] | None``
+            returning the parsed child messages for a subagent. Returns ``None``
+            when the agent's transcript can't be found. To match the original
+            consume-once semantics (an agent's children attach to at most one
+            subagent message), the loader is expected to return the children on
+            the first call for an agent_id and ``[]`` (or already-consumed) on
+            subsequent calls. When ``None``, subagent messages carry no children.
 
     Returns:
-        Tuple of (messages, usage_data):
-        - messages: List of messages in the same format as WebSocket streaming events
-        - usage_data: Dict with total_tokens_in, total_tokens_out, cache_creation_tokens,
-          cache_read_tokens, last_input_tokens, model (empty dict if no usage found)
+        Tuple of (messages, usage_data) — identical shape to the legacy parser.
     """
-    logger.debug(f"Parsing JSONL history from {jsonl_path}")
-
-    # Find agent file paths (lazy — files are parsed on-demand when needed)
-    agent_files = get_agent_jsonl_paths(sdk_session_id, working_dir)
-    agent_children_cache: Dict[str, List[Dict[str, Any]]] = {}
+    if agent_children_loader is None:
+        def agent_children_loader(_agent_id):  # noqa: ANN001
+            return None
 
     messages: List[Dict[str, Any]] = []
     msg_counter = 0
@@ -842,7 +874,7 @@ def _parse_session_history_uncached(
     usage_model = None
     last_usage = {}
 
-    for entry in parse_jsonl_file(jsonl_path):
+    for entry in entries:
         entry_type = entry.get("type")
 
         # Skip non-message entries
@@ -1093,14 +1125,15 @@ def _parse_session_history_uncached(
                                     msg["content"] = output[:2000] if output else ""
                                     msg["agentStatus"] = "error" if is_error else "completed"
 
-                                    # Lazy-load agent children on demand
+                                    # Lazy-load agent children via the injected
+                                    # loader (file- or store-backed). The loader
+                                    # owns the consume-once semantics so an
+                                    # agent's children attach to one subagent.
                                     if agent_id:
-                                        if agent_id not in agent_children_cache and agent_id in agent_files:
-                                            agent_children_cache[agent_id] = parse_agent_history(agent_files[agent_id])
-                                        if agent_id in agent_children_cache:
+                                        children = agent_children_loader(agent_id)
+                                        if children is not None:
                                             msg["agentId"] = agent_id
-                                            msg["agentChildren"] = agent_children_cache[agent_id]
-                                            agent_children_cache[agent_id] = []
+                                            msg["agentChildren"] = children
 
                                 # Don't add a separate tool_result message for Task tools
                                 continue
@@ -1395,28 +1428,7 @@ def _parse_session_history_uncached(
                     "streaming": False
                 })
 
-    logger.debug(f"Parsed {len(messages)} messages from JSONL history")
-
-    # Merge plugin warning messages from hooks JSONL file using O(N+M) merge
-    hook_messages = parse_hooks_jsonl(sdk_session_id, working_dir)
-    if hook_messages:
-        logger.debug(f"Merging {len(hook_messages)} hook messages from hooks.jsonl")
-        # Both lists are roughly in timestamp order — merge them
-        merged = []
-        mi, hi = 0, 0
-        while mi < len(messages) and hi < len(hook_messages):
-            msg_ts = messages[mi].get("metadata", {}).get("timestamp", "")
-            hook_ts = hook_messages[hi].get("metadata", {}).get("timestamp", "")
-            if hook_ts and msg_ts and hook_ts < msg_ts:
-                merged.append(hook_messages[hi])
-                hi += 1
-            else:
-                merged.append(messages[mi])
-                mi += 1
-        merged.extend(messages[mi:])
-        merged.extend(hook_messages[hi:])
-        messages = merged
-        logger.debug(f"Total messages after merging hooks: {len(messages)}")
+    logger.debug(f"Transformed {len(messages)} messages from {len(messages)} transcript entries")
 
     # Build usage_data from accumulated values
     usage_data = {}
@@ -1429,6 +1441,202 @@ def _parse_session_history_uncached(
             "last_input_tokens": last_usage.get("input_tokens", 0),
             "model": usage_model
         }
+
+    return messages, usage_data
+
+
+def _merge_hook_messages(
+    messages: List[Dict[str, Any]],
+    sdk_session_id: str,
+    working_dir: str,
+) -> List[Dict[str, Any]]:
+    """Merge plugin-warning hook messages (from ``<sid>.hooks.jsonl``) into the
+    timeline using an O(N+M) timestamp merge.
+
+    JSONL-source only. In ``postgres_only`` mode hooks JSONL is NOT mirrored,
+    so this is intentionally skipped — a known, accepted parity gap (hook
+    warnings simply aren't rendered on reload). See PR C.1 / follow-up.
+    """
+    hook_messages = parse_hooks_jsonl(sdk_session_id, working_dir)
+    if not hook_messages:
+        return messages
+    logger.debug(f"Merging {len(hook_messages)} hook messages from hooks.jsonl")
+    # Both lists are roughly in timestamp order — merge them
+    merged: List[Dict[str, Any]] = []
+    mi, hi = 0, 0
+    while mi < len(messages) and hi < len(hook_messages):
+        msg_ts = messages[mi].get("metadata", {}).get("timestamp", "")
+        hook_ts = hook_messages[hi].get("metadata", {}).get("timestamp", "")
+        if hook_ts and msg_ts and hook_ts < msg_ts:
+            merged.append(hook_messages[hi])
+            hi += 1
+        else:
+            merged.append(messages[mi])
+            mi += 1
+    merged.extend(messages[mi:])
+    merged.extend(hook_messages[hi:])
+    logger.debug(f"Total messages after merging hooks: {len(merged)}")
+    return merged
+
+
+def _make_file_agent_children_loader(sdk_session_id: str, working_dir: str):
+    """Build a consume-once subagent-children loader backed by JSONL files.
+
+    Mirrors the legacy lazy-load + clear-after-consume behavior so an agent's
+    children attach to exactly one subagent message. Agent files are discovered
+    once; each file is parsed on first request and the result handed out a
+    single time (subsequent requests for the same agent_id return ``[]``).
+    """
+    agent_files = get_agent_jsonl_paths(sdk_session_id, working_dir)
+    cache: Dict[str, List[Dict[str, Any]]] = {}
+
+    def _loader(agent_id: str):
+        if agent_id not in cache and agent_id in agent_files:
+            cache[agent_id] = parse_agent_history(agent_files[agent_id])
+        if agent_id in cache:
+            children = cache[agent_id]
+            cache[agent_id] = []  # consume-once
+            return children
+        return None
+
+    return _loader
+
+
+def _parse_session_history_uncached(
+    sdk_session_id: str,
+    working_dir: str,
+    jsonl_path: Path
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Parse a session's JSONL history file and return messages + usage data.
+
+    Reads transcript entries from the JSONL file and runs them through the
+    shared :func:`_transform_entries`, then merges plugin-warning hook messages
+    from the sidecar hooks JSONL. Behavior-preserving wrapper around the
+    refactored core.
+
+    Args:
+        sdk_session_id: The Claude SDK session ID
+        working_dir: The working directory for finding the project
+        jsonl_path: Path to the JSONL file (caller is responsible for resolving this)
+
+    Returns:
+        Tuple of (messages, usage_data) — see :func:`_transform_entries`.
+    """
+    logger.debug(f"Parsing JSONL history from {jsonl_path}")
+
+    agent_children_loader = _make_file_agent_children_loader(sdk_session_id, working_dir)
+
+    messages, usage_data = _transform_entries(
+        parse_jsonl_file(jsonl_path),
+        sdk_session_id,
+        working_dir,
+        agent_children_loader=agent_children_loader,
+    )
+
+    # Merge plugin warning messages from the hooks JSONL sidecar (file-only).
+    messages = _merge_hook_messages(messages, sdk_session_id, working_dir)
+
+    return messages, usage_data
+
+
+def _make_store_agent_children_loader(sdk_session_id: str, store_loader):
+    """Build a consume-once subagent-children loader backed by the session store.
+
+    ``store_loader`` is a synchronous callable
+    ``store_loader(session_id, subpath=None) -> list[dict]`` that returns raw
+    transcript entries from ``session_store_entries``. Subagent transcripts live
+    under ``subpath="subagents/agent-<agent_id>"``. Children are parsed on first
+    request and handed out a single time (consume-once), mirroring the file
+    loader so an agent's children attach to exactly one subagent message.
+    """
+    cache: Dict[str, List[Dict[str, Any]]] = {}
+    loaded: set = set()
+
+    def _loader(agent_id: str):
+        if agent_id not in loaded:
+            loaded.add(agent_id)
+            subpath = f"subagents/agent-{agent_id}"
+            try:
+                entries = store_loader(sdk_session_id, subpath) or []
+            except Exception as e:
+                logger.warning(
+                    f"Store subagent load failed for {sdk_session_id} {subpath}: {e}"
+                )
+                entries = []
+            cache[agent_id] = transform_agent_entries(entries) if entries else []
+        if agent_id in cache:
+            children = cache[agent_id]
+            cache[agent_id] = []  # consume-once
+            return children
+        return None
+
+    return _loader
+
+
+def parse_session_history_from_store(
+    sdk_session_id: str,
+    working_dir: str,
+    store_loader,
+    *,
+    use_cache: bool = True,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Parse a session's transcript from the Postgres session store.
+
+    The ``postgres_only`` analogue of :func:`parse_session_history`. Loads the
+    main transcript entries (``subpath IS NULL``) from the store and runs them
+    through the SAME :func:`_transform_entries` core, so the resulting
+    messages/usage are identical to feeding the same entries through the JSONL
+    path. Subagent children are pulled from the store (``subpath="subagents/
+    agent-<id>"``) via :func:`_make_store_agent_children_loader`.
+
+    Hooks JSONL is intentionally NOT merged — it is not mirrored into the store
+    (a known, accepted parity gap; see PR C.1).
+
+    Args:
+        sdk_session_id: The Claude SDK session ID.
+        working_dir: The working directory (passed through for context only;
+            NOT used to reconstruct a project_key — the store reads match on
+            session_id alone).
+        store_loader: Synchronous callable
+            ``store_loader(session_id, subpath=None) -> list[dict]`` returning
+            raw ``entry`` dicts ordered by id ASC.
+        use_cache: When True (default) use the dedicated ``_store_parse_cache``
+            namespace (kept separate from the JSONL cache).
+
+    Returns:
+        Tuple of (messages, usage_data) — see :func:`_transform_entries`.
+    """
+    if use_cache:
+        with _store_parse_cache_lock:
+            cached = _store_parse_cache.get(sdk_session_id)
+            if cached is not None:
+                _store_parse_cache.move_to_end(sdk_session_id)
+                c_messages_json, c_usage_json = cached
+                return json.loads(c_messages_json), json.loads(c_usage_json)
+
+    main_entries = store_loader(sdk_session_id, None) or []
+
+    agent_children_loader = _make_store_agent_children_loader(
+        sdk_session_id, store_loader
+    )
+
+    messages, usage_data = _transform_entries(
+        main_entries,
+        sdk_session_id,
+        working_dir,
+        agent_children_loader=agent_children_loader,
+    )
+
+    if use_cache:
+        with _store_parse_cache_lock:
+            _store_parse_cache[sdk_session_id] = (
+                json.dumps(messages, default=str),
+                json.dumps(usage_data, default=str),
+            )
+            _store_parse_cache.move_to_end(sdk_session_id)
+            while len(_store_parse_cache) > _PARSE_CACHE_MAX_SIZE:
+                _store_parse_cache.popitem(last=False)
 
     return messages, usage_data
 
