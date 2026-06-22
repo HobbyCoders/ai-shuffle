@@ -1258,8 +1258,6 @@ class ChatWebSocketHandler:
         Returns ``True`` if a follow-up turn was handed off (caller must return),
         ``False`` otherwise (caller continues to normal completion).
         """
-        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
-
         if (
             not stream_state.pending_task_notifications
             or session_id in _stopped_sessions
@@ -1269,6 +1267,49 @@ class ChatWebSocketHandler:
 
         pending = stream_state.pending_task_notifications
         stream_state.pending_task_notifications = []  # clear before handing off
+
+        return await self._deliver_unpark(
+            pending=pending,
+            session_id=session_id,
+            profile_id=profile_id,
+            project_id=project_id,
+            worktree_id=worktree_id,
+            ctx=ctx,
+            final_metadata=stream_state.final_metadata,
+        )
+
+    async def _deliver_unpark(
+        self,
+        *,
+        pending: list,
+        session_id: str,
+        profile_id: str,
+        project_id: Optional[str],
+        worktree_id: Optional[str],
+        ctx,
+        final_metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Persist + broadcast a consolidated ``<task-notification>`` prompt and
+        start ONE follow-up turn so the parent "unparks" and responds.
+
+        Shared by ``_maybe_unpark_followup`` (in-stream stash path) and
+        ``_drain_notifications`` (between-turns drain-pump path). Modeled EXACTLY
+        on the queue-handoff pattern (persist user msg → broadcast → end_streaming
+        → create_task(run_query)) so streaming tears down + re-inits without a
+        race.
+
+        The caller is responsible for any stopped/interrupting guards and for
+        deduping each notification via ``task_registry.mark_notified`` BEFORE
+        building ``pending`` — by the time we are called the completion is
+        latched, so a failure here cannot re-trigger.
+
+        Returns ``True`` if a follow-up turn was handed off (caller must return),
+        ``False`` otherwise.
+        """
+        from app.api.websocket import _active_chat_sessions, _active_sessions_lock
+
+        if not pending:
+            return False
 
         synth_prompt = _build_task_notification_prompt(pending)
 
@@ -1299,9 +1340,11 @@ class ChatWebSocketHandler:
         )
 
         # End current streaming state so the follow-up query can re-init.
+        # (Between-turns pump path: streaming already ended for this turn, so
+        # end_streaming is a harmless no-op / idempotent re-end.)
         await live_session_store.end_streaming(
             session_id=session_id,
-            metadata=stream_state.final_metadata,
+            metadata=final_metadata or {},
             interrupted=False,
         )
 
@@ -1322,6 +1365,181 @@ class ChatWebSocketHandler:
             return False
 
     # ------------------------------------------------------------------
+    # _drain_notifications — between-turns drain pump
+    # ------------------------------------------------------------------
+
+    async def _drain_notifications(
+        self,
+        session_id: str,
+        profile_id: str,
+        project_id: Optional[str],
+        worktree_id: Optional[str],
+    ) -> None:
+        """Between-turns reader that catches a SLOW sub-agent's terminal
+        ``TaskNotificationMessage`` and unparks the parent.
+
+        Why this exists: the parent turn's ``receive_response()`` loop returns at
+        the parent's ``ResultMessage`` (SDK ``client.py``: "Receive messages from
+        Claude until and including a ResultMessage" → ``return``). It does NOT stay
+        open while a background sub-agent runs. So a FAST sub-agent's terminal
+        notification wins the race (caught in-stream by the stash in ``run_query``)
+        but a SLOW one arrives LATER on the pooled, still-alive SDK client with
+        nothing reading it — the registry stays "running" (frozen indicator) and
+        the parent never unparks.
+
+        This pump uses ``client.receive_messages()`` (which, unlike
+        ``receive_response()``, does NOT stop at a ResultMessage) to read the
+        pooled client BETWEEN turns and:
+          * feeds EVERY message into ``task_registry`` (this alone unfreezes the
+            indicator when the terminal notification lands), and
+          * on the FIRST terminal notification, dedupes via
+            ``task_registry.mark_notified``, then delivers ONE unpark follow-up
+            turn and exits.
+
+        SINGLE-READER INVARIANT: this is reader R2. It runs ONLY when no turn owns
+        the client (``is_streaming`` False) and is cancelled by ``stop_drain_pump``
+        at the start of every turn, so R1 (a turn's ``receive_response``) and R2
+        never read the same client concurrently. Fires per-completion (one
+        notification → one follow-up) so nothing is lost if a user message cancels
+        the pump mid-wait; the follow-up turn's completion restarts a fresh pump
+        to catch any remaining tasks.
+        """
+        from app.api.websocket import _drain_pumps
+        from app.core.session_pool import get_session_pool
+        from app.core.task_registry import task_registry
+        from app.core.query_engine import (
+            _record_task_message,
+            _task_notification_frame,
+            TaskNotificationMessage,
+        )
+
+        ctx = StreamingContext(
+            session_id=session_id,
+            device_id=self.device_id,
+            message_id=str(uuid.uuid4()),
+            user_id=self.user_id,
+        )
+
+        pending: Optional[Dict[str, Any]] = None
+        try:
+            state = get_session_pool().peek(session_id)  # peek = no LRU promote
+            if state is None or not state.adapter.is_alive() or state.is_streaming:
+                # A turn owns the client, or the client is gone — nothing to drain.
+                return
+
+            client = state.client
+            if client is None:
+                return
+
+            ctx.debug(logger, "Drain pump: started reading pooled client between turns")
+
+            async for message in client.receive_messages():
+                # Feed EVERY message into the registry — this is what unfreezes the
+                # indicator (start/update/complete_task) for the terminal
+                # notification even before we deliver the unpark.
+                _record_task_message(session_id, message)
+
+                if not isinstance(message, TaskNotificationMessage):
+                    continue
+
+                frame = _task_notification_frame(message)
+                status = frame.get("status")
+                if status not in _TERMINAL_TASK_STATUSES:
+                    continue
+
+                # Optional: broadcast to the FE for an immediate UI update. The
+                # registry update + the FE poll already clear the indicator, so
+                # this is a nicety; best-effort.
+                try:
+                    await self.send_json(dict(frame, session_id=session_id))
+                except Exception:
+                    pass
+
+                task_id = frame.get("task_id")
+                output_file = frame.get("output_file")
+                signature = frame.get("uuid") or f"{output_file}:{status}"
+                if not task_registry.mark_notified(session_id, task_id, signature):
+                    # Already delivered (e.g. also caught in-stream) — skip, keep
+                    # draining for OTHER tasks' notifications.
+                    continue
+
+                pending = {
+                    "task_id": task_id,
+                    "status": status,
+                    "summary": frame.get("summary"),
+                    "output_file": output_file,
+                    "uuid": frame.get("uuid"),
+                    "usage": frame.get("usage"),
+                    "tool_use_id": frame.get("tool_use_id"),
+                }
+                # Fire per-completion: break out and deliver immediately so a
+                # later user message cancelling the pump can't lose this one.
+                break
+        except asyncio.CancelledError:
+            # Stopped by stop_drain_pump (a new turn is starting) — exit without
+            # firing. Re-raise so the awaiter sees the cancellation.
+            self._drop_drain_pump_self(session_id, _drain_pumps)
+            raise
+        except Exception as exc:
+            ctx.debug(logger, f"Drain pump error (swallowed): {exc}")
+            self._drop_drain_pump_self(session_id, _drain_pumps)
+            return
+
+        # Remove OURSELVES from the registry BEFORE spawning the follow-up turn so
+        # that the follow-up's start-of-turn stop_drain_pump() does not try to
+        # cancel/await the very pump that is spawning it (self-deadlock).
+        self._drop_drain_pump_self(session_id, _drain_pumps)
+
+        if pending is not None:
+            # Re-check guards before delivering — a stop/interrupt may have raced.
+            if session_id in _stopped_sessions or session_id in _interrupt_pending_sessions:
+                ctx.debug(logger, "Drain pump: session stopped/interrupting — not delivering unpark")
+                return
+            await self._deliver_unpark(
+                pending=[pending],
+                session_id=session_id,
+                profile_id=profile_id,
+                project_id=project_id,
+                worktree_id=worktree_id,
+                ctx=ctx,
+                final_metadata=None,
+            )
+
+    @staticmethod
+    def _drop_drain_pump_self(session_id: str, drain_pumps: Dict[str, asyncio.Task]) -> None:
+        """Remove this pump from the registry iff the entry is still us.
+
+        Guards the TOCTOU where stop_drain_pump already popped/replaced the entry.
+        """
+        current = asyncio.current_task()
+        if drain_pumps.get(session_id) is current:
+            drain_pumps.pop(session_id, None)
+
+    def _start_drain_pump(
+        self,
+        session_id: str,
+        profile_id: str,
+        project_id: Optional[str],
+        worktree_id: Optional[str],
+    ) -> None:
+        """Start a between-turns drain pump for a session (replacing any existing).
+
+        Caller MUST ensure no turn owns the client (is_streaming False) and that
+        there is in-flight ``kind=="agent"`` work to wait for.
+        """
+        from app.api.websocket import _drain_pumps
+
+        existing = _drain_pumps.get(session_id)
+        if existing is not None and not existing.done():
+            # A pump is already running for this session — leave it.
+            return
+        task = asyncio.create_task(
+            self._drain_notifications(session_id, profile_id, project_id, worktree_id)
+        )
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        _drain_pumps[session_id] = task
+
+    # ------------------------------------------------------------------
     # run_query — the streaming pipeline
     # ------------------------------------------------------------------
 
@@ -1335,7 +1553,10 @@ class ChatWebSocketHandler:
         worktree_id: Optional[str] = None,
     ) -> None:
         """Execute query and stream results directly to WebSocket."""
-        from app.api.websocket import _active_chat_sessions, _active_sessions_lock, schedule_delayed_cleanup, cancel_pending_cleanup
+        from app.api.websocket import (
+            _active_chat_sessions, _active_sessions_lock, schedule_delayed_cleanup,
+            cancel_pending_cleanup, stop_drain_pump,
+        )
         from app.api.ws_event_handlers import EventContext, MutableStreamState, dispatch_event
         from app.core.query_engine import stream_to_websocket
         from app.core.jsonl_parser import parse_session_history
@@ -1345,6 +1566,12 @@ class ChatWebSocketHandler:
         # Cancel any pending delayed cleanup for this session — a new query is starting,
         # so the old cleanup must not fire and remove the session from live_session_store.
         cancel_pending_cleanup(session_id)
+
+        # SINGLE-READER INVARIANT: stop any between-turns drain pump BEFORE this
+        # turn connects/queries the pooled SDK client. The pump reads the same
+        # client via receive_messages(); this turn will read it via
+        # receive_response() — at most one reader at a time.
+        await stop_drain_pump(session_id)
 
         # Generate a message ID for this streaming session
         message_id = str(uuid.uuid4())
@@ -1479,12 +1706,21 @@ class ChatWebSocketHandler:
                 # Dispatch to handler — updates live_session_store and broadcasts via sync_engine
                 await dispatch_event(event, event_ctx, stream_state)
 
-                # --- Background-agent "unpark" stash ---
-                # A terminal task_notification arrives IN-STREAM (the receive loop
-                # stays open the whole time the sub-agent runs), immediately before
-                # the ResultMessage that ends this loop. Stash it now (deduped by
-                # task_registry.mark_notified) and fire ONE consolidated follow-up
-                # turn in the post-loop block — never start a new query mid-loop.
+                # --- Background-agent "unpark" stash (FAST sub-agent path) ---
+                # If a sub-agent finishes BEFORE the parent's ResultMessage, its
+                # terminal task_notification arrives IN-STREAM and we stash it
+                # here (deduped by task_registry.mark_notified) to fire ONE
+                # consolidated follow-up turn in the post-loop block — never start
+                # a new query mid-loop.
+                #
+                # IMPORTANT: this receive loop does NOT stay open while the
+                # sub-agent runs — stream_to_websocket uses the SDK's
+                # receive_response(), which returns at the PARENT's ResultMessage
+                # (see client.py: "until and including a ResultMessage"). A SLOWER
+                # sub-agent's notification therefore arrives AFTER this loop has
+                # already ended; that case is handled by the between-turns drain
+                # pump (ChatWebSocketHandler._drain_notifications), started on
+                # normal completion below.
                 if event_type == 'task_notification' and event.get('status') in _TERMINAL_TASK_STATUSES:
                     _task_id = event.get('task_id')
                     _output_file = event.get('output_file')
@@ -1613,6 +1849,33 @@ class ChatWebSocketHandler:
                         queue = await run_sync(database.get_queued_messages, session_id)
                         await sync_engine.broadcast_queue_updated(session_id, queue)
                         # Fall through to normal completion
+
+            # --- Background-agent "unpark" drain pump (SLOW sub-agent path) ---
+            # This turn is genuinely ending: no in-stream notification handed off
+            # above and there was no queued successor. If there is still in-flight
+            # background AGENT work, its terminal TaskNotificationMessage will
+            # arrive LATER on the pooled, still-alive SDK client (after this turn's
+            # receive_response() already returned at the parent ResultMessage).
+            # Start a between-turns drain pump to catch it and unpark the parent.
+            # By here stream_to_websocket's finally has set state.is_streaming
+            # False and handle_done has called live_session_store.end_streaming,
+            # so the pump sees the client idle and not owned by a turn.
+            if (
+                session_id not in _stopped_sessions
+                and session_id not in _interrupt_pending_sessions
+                and not handed_off_to_queued
+            ):
+                _active_agent_tasks = [
+                    t for t in task_registry.get_active(session_id)
+                    if t.get("kind") == "agent"
+                ]
+                if _active_agent_tasks:
+                    ctx.debug(
+                        logger,
+                        f"Unpark: {len(_active_agent_tasks)} background agent task(s) still "
+                        f"in flight — starting between-turns drain pump",
+                    )
+                    self._start_drain_pump(session_id, profile_id, project_id, worktree_id)
 
             # Dispatch notifications for session completion (non-blocking)
             import time as time_module

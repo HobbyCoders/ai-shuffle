@@ -349,6 +349,15 @@ async def shutdown_services() -> None:
     from app.core.connectors.manager import connector_manager
     await connector_manager.shutdown_all()
 
+    # Stop any between-turns drain pumps BEFORE disconnecting the pooled SDK
+    # clients they read (single-reader invariant — a pump must not be reading a
+    # client that's being torn down).
+    try:
+        from app.api.ws_cleanup import stop_all_drain_pumps
+        await stop_all_drain_pumps()
+    except Exception:
+        pass
+
     # Shutdown SDK session pool (disconnect all live subprocesses)
     try:
         from app.core.session_pool import get_session_pool

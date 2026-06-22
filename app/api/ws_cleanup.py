@@ -18,6 +18,57 @@ _active_sessions_lock = asyncio.Lock()
 # old cleanup fires and removes a newly-started streaming session from memory).
 _pending_cleanup_tasks: dict[str, asyncio.Task] = {}
 
+# Track per-session "drain pump" tasks (see ChatWebSocketHandler._drain_notifications).
+# A drain pump is a between-turns reader of a session's pooled SDK client that
+# catches a slow background sub-agent's terminal TaskNotificationMessage AFTER the
+# parent turn's receive_response() loop already returned at the parent ResultMessage.
+#
+# CRITICAL SINGLE-READER INVARIANT: at most ONE coroutine may read a given
+# session's pooled SDK client at any time. The two readers are (R1) a user turn's
+# receive_response() inside stream_to_websocket, and (R2) the drain pump's
+# receive_messages(). The pump runs ONLY between turns (is_streaming == False) and
+# MUST be stopped before any new turn begins — see stop_drain_pump().
+_drain_pumps: dict[str, asyncio.Task] = {}
+
+
+async def stop_drain_pump(session_id: str) -> bool:
+    """Cancel and await any between-turns drain pump for a session.
+
+    MUST be called at the start of every turn (before the turn connects to /
+    queries the pooled SDK client) so the drain pump's receive_messages() is not
+    reading the same client that the turn's receive_response() is about to read —
+    that would violate the single-reader invariant.
+
+    Idempotent: a no-op if no pump exists or it is already done. Swallows the
+    pump's CancelledError so the caller never has to.
+
+    Returns:
+        True if a live pump was cancelled, False otherwise.
+    """
+    task = _drain_pumps.pop(session_id, None)
+    if task is None:
+        return False
+    if task.done():
+        return False
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.debug(f"Drain pump for session {session_id} raised on cancel", exc_info=True)
+    logger.debug(f"Stopped drain pump for session {session_id}")
+    return True
+
+
+async def stop_all_drain_pumps() -> None:
+    """Cancel and await every drain pump. Called on shutdown."""
+    for session_id in list(_drain_pumps.keys()):
+        try:
+            await stop_drain_pump(session_id)
+        except Exception:
+            logger.debug(f"Error stopping drain pump for {session_id}", exc_info=True)
+
 # Module-level set tracking sessions with a pending ``interrupt_for_query``
 # (two-phase interrupt + query). Consulted by the streaming query's finally
 # block to skip automatic queue-drain processing so the in-flight interrupt
@@ -58,6 +109,12 @@ async def cleanup_session_handlers(session_id: str) -> None:
         await user_question_handler.cancel_all(session_id)
     except Exception:
         logger.debug(f"Question handler cleanup failed for {session_id}", exc_info=True)
+    # Stop any between-turns drain pump so it can't outlive the session it was
+    # reading (the pooled SDK client is being torn down alongside this cleanup).
+    try:
+        await stop_drain_pump(session_id)
+    except Exception:
+        logger.debug(f"Drain pump cleanup failed for {session_id}", exc_info=True)
 
 
 def cancel_pending_cleanup(session_id: str) -> bool:
