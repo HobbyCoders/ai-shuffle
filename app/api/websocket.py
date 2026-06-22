@@ -30,7 +30,17 @@ from app.core.connectors.manager import connector_manager
 from app.core.project_utils import get_project_working_dir
 from app.core.permission_handler import permission_handler
 from app.core.user_question_handler import user_question_handler
-from app.api.chat_ws_handler import WebSocketRateLimiter
+from app.api.chat_ws_handler import (
+    WebSocketRateLimiter,
+    # Shared background-agent park→wake ("unpark") machinery. These live in
+    # chat_ws_handler so BOTH the class-based headless handler AND this inline
+    # /ws/chat route drive identical behaviour (see chat_ws_handler.py header).
+    _stash_terminal_notification,
+    _deliver_unpark_impl,
+    _maybe_unpark_followup_impl,
+    _drain_notifications_impl,
+    _start_drain_pump_impl,
+)
 
 # Import from split modules — these are the canonical definitions.
 # Re-exported here so that existing ``from app.api.websocket import ...``
@@ -241,6 +251,41 @@ async def chat_websocket(
         await sync_engine.unregister_device(device_id, session_id)
         ctx.debug(logger, "Unregistered device during streaming to prevent duplicates")
 
+        # --- Background-agent "unpark" wiring (shared with the headless handler) ---
+        # Cancel any between-turns drain pump so THIS turn (reader R1, the
+        # stream_to_websocket receive loop) exclusively owns the pooled SDK client.
+        # A drain pump (reader R2) only ever runs BETWEEN turns; the single-reader
+        # invariant requires it be stopped before a turn opens the client.
+        await stop_drain_pump(session_id)
+
+        def _set_query_task(task: asyncio.Task) -> None:
+            nonlocal query_task
+            query_task = task
+
+        async def _deliver_unpark(
+            *,
+            pending: list,
+            session_id: str,
+            profile_id: str,
+            project_id: Optional[str],
+            worktree_id: Optional[str],
+            ctx,
+            final_metadata: Optional[Dict[str, Any]] = None,
+        ) -> bool:
+            """Bind this connection's run_query + query_task to the shared impl so a
+            background sub-agent's completion starts a follow-up turn here."""
+            return await _deliver_unpark_impl(
+                pending=pending,
+                session_id=session_id,
+                profile_id=profile_id,
+                project_id=project_id,
+                worktree_id=worktree_id,
+                ctx=ctx,
+                final_metadata=final_metadata,
+                run_query=run_query,
+                set_query_task=_set_query_task,
+            )
+
         # Initialize LiveSessionStore for server-authoritative state
         # IMPORTANT: Check live store first for complete messages from an interrupted session.
         # During interrupt_for_query, end_streaming() preserves messages in memory, but
@@ -429,6 +474,15 @@ async def chat_websocket(
                 # Dispatch to handler — updates live_session_store and broadcasts via sync_engine
                 await dispatch_event(event, event_ctx, stream_state)
 
+                # --- Background-agent "unpark" stash (FAST sub-agent path) ---
+                # A sub-agent finishing BEFORE the parent's ResultMessage arrives
+                # in-stream; stash it (deduped via task_registry.mark_notified) to
+                # deliver ONE consolidated follow-up turn after the loop. The SLOW
+                # case (notification lands AFTER receive_response() returns at the
+                # parent's ResultMessage) is caught by the between-turns drain pump
+                # started on normal completion below. No-op for other events.
+                _stash_terminal_notification(stream_state, event, session_id)
+
                 # NOTE: Queued ("Send Later") messages are intentionally NOT sent
                 # at intermediate turn boundaries (e.g. stop_reason="tool_use").
                 # Interrupting the SDK mid-query at a tool_use boundary leaves an
@@ -442,6 +496,60 @@ async def chat_websocket(
 
             query_wall_elapsed = time.monotonic() - query_wall_start
             ctx.info(logger, f"Query completed in {query_wall_elapsed:.1f}s")
+
+            # --- Background-agent "unpark" follow-up turn (FAST path) ---
+            # If any terminal task_notifications were stashed in-loop, deliver them
+            # as ONE consolidated follow-up turn so the parent "unparks" and
+            # responds. On handoff this turn is done — the follow-up task now owns
+            # streaming (registered in _active_chat_sessions), so the finally below
+            # won't tear it down and the queue drain will see the running successor
+            # and skip.
+            if await _maybe_unpark_followup_impl(
+                stream_state=stream_state,
+                session_id=session_id,
+                profile_id=profile_id,
+                project_id=project_id,
+                worktree_id=worktree_id,
+                ctx=ctx,
+                deliver_unpark=_deliver_unpark,
+            ):
+                return  # follow-up task continues streaming for this session
+
+            # --- Background-agent "unpark" between-turns drain pump (SLOW path) ---
+            # If a sub-agent is STILL in flight, its terminal notification will land
+            # on the pooled, still-alive SDK client AFTER this turn's
+            # receive_response() already returned at the parent's ResultMessage —
+            # with nothing reading it. Start a between-turns pump to catch it and
+            # unpark the parent. (state.is_streaming is False by here, so the pump
+            # sees the client idle and not owned by a turn.)
+            if (
+                session_id not in _stopped_sessions
+                and session_id not in _interrupt_pending_sessions
+            ):
+                from app.core.task_registry import task_registry
+                _active_agent_tasks = [
+                    t for t in task_registry.get_active(session_id)
+                    if t.get("kind") == "agent"
+                ]
+                if _active_agent_tasks:
+                    ctx.debug(
+                        logger,
+                        f"Unpark: {len(_active_agent_tasks)} background agent task(s) still "
+                        f"in flight — starting between-turns drain pump",
+                    )
+                    _start_drain_pump_impl(
+                        session_id,
+                        drain_coro_factory=lambda: _drain_notifications_impl(
+                            session_id,
+                            profile_id,
+                            project_id,
+                            worktree_id,
+                            device_id=device_id,
+                            user_id=user_id,
+                            send_json=send_json,
+                            deliver_unpark=_deliver_unpark,
+                        ),
+                    )
 
             # Dispatch notifications for session completion (non-blocking)
             import time as time_module
