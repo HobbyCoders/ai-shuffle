@@ -12,7 +12,7 @@
 
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
-import type { ChatMessage } from '../types';
+import type { ChatMessage, Task } from '../types';
 import type { SessionUsage } from './session-state';
 import type { PollAppliedData } from './session-poller';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
@@ -126,6 +126,32 @@ export function usageStoreUpdate(usage: SessionUsage): Partial<ActiveSessionStat
 	};
 }
 
+/**
+ * Shallow structural compare of two active-task lists. Returns true when they
+ * are equivalent for rendering (same length + same per-task fields that affect
+ * display). Lets the poll callback keep the existing array reference when only
+ * messages/usage changed, avoiding needless ActiveTasks re-renders.
+ */
+function sameTasks(existing: Task[], incoming: Task[]): boolean {
+	if (existing === incoming) return true;
+	if (existing.length !== incoming.length) return false;
+	for (let i = 0; i < existing.length; i++) {
+		const a = existing[i];
+		const b = incoming[i];
+		if (
+			a.id !== b.id ||
+			a.status !== b.status ||
+			a.kind !== b.kind ||
+			a.subject !== b.subject ||
+			a.summary !== b.summary ||
+			a.updatedAt !== b.updatedAt
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
 function sameAgentUsage(
 	existing: ChatMessage['agentUsage'],
 	incoming: ChatMessage['agentUsage']
@@ -196,6 +222,14 @@ export function createSessionInit(deps: SessionInitDeps) {
 			const usageHasUpdate = usageDelta.contextUsed !== _state.contextUsed;
 			const streamingChanged = _state.isStreaming !== data.isStreaming;
 
+			// Active background tasks: fresh on every poll, independent of message
+			// deltas. Compare cheaply by length + per-index identity-ish fields so a
+			// poll that only changed message content doesn't churn the tasks array
+			// (and vice-versa). `data.activeTasks` is always present (poller defaults
+			// it to []), but guard for older mocked responses.
+			const incomingTasks = data.activeTasks ?? [];
+			const tasksChanged = !sameTasks(_state.activeTasks, incomingTasks);
+
 			// Build worktree metadata delta from server (corrects stale client state)
 			const metaDelta: Partial<ActiveSessionState> = {};
 			if (data.sessionMeta) {
@@ -220,7 +254,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 
 			// Skip if nothing actually changed
 			const msgsMatch = _state.messages === data.messages;
-			if (msgsMatch && !usageHasUpdate && !streamingChanged && !metaHasUpdate) {
+			if (msgsMatch && !usageHasUpdate && !streamingChanged && !metaHasUpdate && !tasksChanged) {
 				console.debug(`[PollCB] skipped: no changes for ${sessionId}`);
 				return;
 			}
@@ -484,7 +518,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 					msgsUnchanged &&
 					finalWsContent === s.wsStreamContent &&
 					data.isStreaming === s.isStreaming &&
-					!usageHasUpdate && !streamingChanged && !metaHasUpdate
+					!usageHasUpdate && !streamingChanged && !metaHasUpdate && !tasksChanged
 				) {
 					return s;
 				}
@@ -495,6 +529,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 					isStreaming: data.isStreaming,
 					streamStartTime: data.isStreaming ? s.streamStartTime : null,
 					wsStreamContent: finalWsContent,
+					// Only swap the array reference when tasks actually changed so a
+					// pure message/usage poll doesn't re-render the ActiveTasks strip.
+					activeTasks: tasksChanged ? incomingTasks : s.activeTasks,
 					...usageDelta,
 					...metaDelta,
 				};

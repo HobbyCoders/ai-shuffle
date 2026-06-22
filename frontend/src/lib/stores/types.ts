@@ -33,6 +33,34 @@ export interface SubagentChildMessage {
 	timestamp?: string;
 }
 
+// ─── Background Tasks ─────────────────────────────────────────────────────────
+
+/** Status of a background task surfaced via the /live response's activeTasks. */
+export type TaskStatus = 'running' | 'completed' | 'error' | 'killed';
+
+/** Kind of background task (a sub-agent or a shell subprocess). */
+export type TaskKind = 'agent' | 'shell';
+
+/**
+ * A background task spun up by the in-app agent (background sub-agent or shell
+ * subprocess). Surfaced fresh on every `/live` poll via the top-level
+ * `activeTasks` field. `activeTasks` only ever contains currently-RUNNING tasks,
+ * and is non-empty exactly while the session has background work in flight —
+ * including while the turn is PARKED waiting on a task (`isStreaming` may be
+ * false then).
+ */
+export interface Task {
+	id: string;
+	subject: string;
+	status: TaskStatus;
+	kind: TaskKind;
+	summary: string | null;
+	/** ISO-8601 timestamp when the task started. */
+	startedAt: string;
+	/** ISO-8601 timestamp of the last update. */
+	updatedAt: string;
+}
+
 // Todo item for task tracking
 export interface TodoItem {
 	content: string;
