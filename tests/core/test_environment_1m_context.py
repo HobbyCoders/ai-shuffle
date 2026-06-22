@@ -3,11 +3,12 @@ Tests for apply_1m_context_env — the per-profile 1M context window toggle.
 
 1M-capable models (e.g. claude-opus-4-8) default to the 1M context window on
 the CLI side, so a profile with 1M context *disabled* must explicitly send
-CLAUDE_CODE_DISABLE_1M_CONTEXT=1. The "[1m]" model suffix is the source of
-truth for the toggle:
+CLAUDE_CODE_DISABLE_1M_CONTEXT=1. The var is only meaningful for 1M-capable
+models, so it is left unset for everything else. Three-way behavior:
 
-    [1m] present (enabled)  -> CLAUDE_CODE_DISABLE_1M_CONTEXT=0
-    [1m] absent  (disabled) -> CLAUDE_CODE_DISABLE_1M_CONTEXT=1
+    [1m] present (enabled)                    -> CLAUDE_CODE_DISABLE_1M_CONTEXT=0
+    1M-capable base, [1m] absent (disabled)  -> CLAUDE_CODE_DISABLE_1M_CONTEXT=1
+    not 1M-capable (haiku, inherit, unknown) -> var left unset
 """
 
 import pytest
@@ -25,14 +26,11 @@ class TestApply1MContextEnv:
             "claude-opus-4-7",
             "claude-opus-4-6",
             "claude-sonnet-4-6",
-            "claude-haiku-4-5",     # not 1M-capable at all
             "opus",                 # legacy slug -> claude-opus-4-8 (no [1m])
-            "",                     # inherit / unset
-            None,                   # no model
         ],
     )
-    def test_disabled_sets_1(self, model):
-        """No [1m] suffix => 1M explicitly disabled."""
+    def test_capable_but_disabled_sets_1(self, model):
+        """1M-capable base, no [1m] suffix => 1M explicitly disabled."""
         env = apply_1m_context_env({}, model)
         assert env[VAR] == "1"
 
@@ -49,6 +47,20 @@ class TestApply1MContextEnv:
         """[1m] suffix present => 1M explicitly enabled."""
         env = apply_1m_context_env({}, model)
         assert env[VAR] == "0"
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-haiku-4-5",     # not 1M-capable at all
+            "",                     # inherit / unset
+            None,                   # no model
+            "my-custom-model",      # unknown / custom model not in registry
+        ],
+    )
+    def test_not_capable_leaves_var_unset(self, model):
+        """Models that cannot use 1M context don't get the meaningless var."""
+        env = apply_1m_context_env({}, model)
+        assert VAR not in env
 
     def test_explicit_value_is_an_escape_hatch(self):
         """A value already in env (e.g. a profile's custom env var) wins."""
