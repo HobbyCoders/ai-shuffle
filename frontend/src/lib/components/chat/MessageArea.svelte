@@ -26,6 +26,7 @@
 	import { findStreamingAnchorIndex, shouldShowGapIndicator } from '$lib/stores/session/gap-indicator';
 	import {
 		isNearBottom as computeIsNearBottom,
+		isUserScrollUpGesture,
 		nextStickToBottom,
 		shouldAutoScrollOnChange,
 		type ScrollMetrics
@@ -487,6 +488,53 @@
 		});
 	}
 
+	/**
+	 * Release stick-to-bottom in response to a genuine user scroll-up gesture.
+	 *
+	 * This is THE fix for "streaming yanks me back to the bottom even though I
+	 * scrolled up to read". While streaming, scrollToBottom() fires on every
+	 * delta, so programmaticScrollDepth is elevated almost continuously and
+	 * handleScroll keeps swallowing the user's scroll-up (the programmatic-scroll
+	 * guard) — shouldAutoScroll never flips false and the next message/tool call
+	 * drags them back down. Wheel/touch events are emitted ONLY for real user
+	 * input (never by a programmatic scrollTop assignment), so they let us
+	 * disengage immediately, regardless of the guard.
+	 *
+	 * Re-engagement is left to handleScroll: once disengaged, no programmatic
+	 * scroll fires, so the guard clears and a normal scroll back to the bottom
+	 * re-sticks via nextStickToBottom().
+	 */
+	function disengageAutoScroll() {
+		if (!shouldAutoScroll && !pendingScrollToBottom) return;
+		// Stop any in-flight programmatic scroll loop so it can't keep fighting
+		// the user after they've expressed intent to read earlier content.
+		if (pendingScrollTimer) { clearInterval(pendingScrollTimer); pendingScrollTimer = null; }
+		pendingScrollToBottom = false;
+		shouldAutoScroll = false;
+		// eslint-disable-next-line no-console
+		if (STREAM_DEBUG) console.log(`[AS] disengageAutoScroll (user gesture) ST=${containerRef?.scrollTop} SH=${containerRef?.scrollHeight} CH=${containerRef?.clientHeight}`);
+	}
+
+	// Wheel/trackpad: an upward wheel is an unambiguous intent to read earlier
+	// content. Passive — we never preventDefault, just observe direction.
+	function handleWheel(e: WheelEvent) {
+		if (isUserScrollUpGesture(e.deltaY, 0)) disengageAutoScroll();
+	}
+
+	// Touch: dragging the finger DOWN reveals earlier content (scroll-up). Track
+	// the finger delta between touchmove events to detect that direction. Wheel
+	// events don't fire on touch devices, so this is the mobile equivalent.
+	let touchLastY = 0;
+	function handleTouchStart(e: TouchEvent) {
+		touchLastY = e.touches[0]?.clientY ?? 0;
+	}
+	function handleTouchMove(e: TouchEvent) {
+		const y = e.touches[0]?.clientY ?? touchLastY;
+		const touchDeltaY = y - touchLastY; // finger moved down (>0) ⇒ scrolling up
+		touchLastY = y;
+		if (isUserScrollUpGesture(0, touchDeltaY)) disengageAutoScroll();
+	}
+
 	// Restore scroll position only on mount - not on every reactive update
 	onMount(() => {
 		isMounted = true;
@@ -809,8 +857,13 @@
 					pin();
 				});
 			} else {
-				// Normal streaming: single scroll is enough.
-				tick().then(() => requestAnimationFrame(scrollToBottom));
+				// Normal streaming: single scroll is enough. Re-check shouldAutoScroll
+				// in the deferred callback — the user may have scrolled up (wheel/touch
+				// disengage) in the frames between scheduling this and it running, and
+				// we must not yank them back down after they've released.
+				tick().then(() => requestAnimationFrame(() => {
+					if (shouldAutoScroll) scrollToBottom();
+				}));
 			}
 		}
 
@@ -824,6 +877,11 @@
 <div
 	bind:this={containerRef}
 	onscroll={handleScroll}
+	onwheel={handleWheel}
+	ontouchstart={handleTouchStart}
+	ontouchmove={handleTouchMove}
+	role="log"
+	aria-label="Conversation messages"
 	class="flex-1 overflow-y-auto overscroll-contain"
 >
 	{#if $activeSession.messages.length === 0}
