@@ -1,10 +1,12 @@
 <script lang="ts">
 	/**
-	 * ExecutionModeBar - Local/Worktree toggle with branch management
+	 * ExecutionModeBar - Local/Worktree/Cloud selector with branch management
 	 *
-	 * Positioned below the chat input island. Shows a segmented
-	 * pill toggle for execution mode with an inline branch selector
-	 * when worktree mode is active. Includes "New Branch" creation modal.
+	 * Positioned below the chat input island. Shows a single dropdown
+	 * pill for execution mode (the current mode's icon + label + chevron;
+	 * clicking opens an upward menu of the available modes) with an inline
+	 * branch selector when worktree mode is active. Includes "New Branch"
+	 * creation modal.
 	 *
 	 * Uses the git store for worktree/branch data and syncWorktrees()
 	 * to clean up stale DB records on project change.
@@ -21,6 +23,10 @@
 	// --- UI state ---
 	let showBranchDropdown = $state(false);
 	let dropdownRef = $state<HTMLDivElement | null>(null);
+	// Separate dropdown for the execution-mode picker (coexists with the branch
+	// dropdown above; its own container ref so outside-click closes it independently).
+	let showModeDropdown = $state(false);
+	let modeDropdownRef = $state<HTMLDivElement | null>(null);
 	let loading = $state(false);
 	let lastSyncedProject = $state<string | null>(null);
 
@@ -135,6 +141,52 @@
 
 	function setMode(mode: ExecutionMode) {
 		activeSession.setExecutionMode(mode);
+	}
+
+	// --- Execution-mode dropdown ---
+
+	type ModeOption = {
+		mode: ExecutionMode;
+		label: string;
+		icon: typeof Monitor;
+		title?: string;
+	};
+
+	// All mode options keyed by mode, so the trigger can render the current one and
+	// the menu can render the available subset from a single source of truth.
+	const MODE_OPTIONS: Record<ExecutionMode, ModeOption> = {
+		local: { mode: 'local', label: 'Local', icon: Monitor },
+		worktree: { mode: 'worktree', label: 'Worktree', icon: GitFork },
+		cloud: {
+			mode: 'cloud',
+			label: 'Cloud',
+			icon: Cloud,
+			title: 'Offload this session to a second AI Shuffle install (GitHub repos only)'
+		}
+	};
+
+	// The currently-active mode option (drives the trigger pill's icon + label).
+	const currentMode = $derived(MODE_OPTIONS[$activeSession.executionMode] ?? MODE_OPTIONS.local);
+
+	// The modes offered in the menu, gated the same way the old segmented toggle was:
+	// Local is always available; Worktree only for a git repo; Cloud only when a
+	// second install is configured.
+	const availableModes = $derived.by(() => {
+		const modes: ModeOption[] = [MODE_OPTIONS.local];
+		if (isGitRepo) {
+			modes.push(MODE_OPTIONS.worktree);
+			if (cloudConfigured === true) modes.push(MODE_OPTIONS.cloud);
+		}
+		return modes;
+	});
+
+	function toggleModeDropdown() {
+		showModeDropdown = !showModeDropdown;
+	}
+
+	function selectMode(mode: ExecutionMode) {
+		setMode(mode);
+		showModeDropdown = false;
 	}
 
 	function selectWorktree(wt: Worktree) {
@@ -257,11 +309,13 @@
 		}
 	}
 
-	// Close dropdown on outside click (guarded to only run when open)
+	// Close either dropdown on outside click (each guarded to only act when open)
 	function handleClickOutside(e: MouseEvent) {
-		if (!showBranchDropdown) return;
-		if (dropdownRef && !dropdownRef.contains(e.target as Node)) {
+		if (showBranchDropdown && dropdownRef && !dropdownRef.contains(e.target as Node)) {
 			showBranchDropdown = false;
+		}
+		if (showModeDropdown && modeDropdownRef && !modeDropdownRef.contains(e.target as Node)) {
+			showModeDropdown = false;
 		}
 	}
 
@@ -288,42 +342,42 @@
 
 <div class="execution-mode-bar">
 	<div class="mode-bar-row">
-		<!-- Segmented pill toggle -->
-		<div class="mode-toggle">
+		<!-- Mode dropdown pill: shows the current mode and, on click, opens an
+		     upward menu of the available modes (Worktree/Cloud are gated to a git
+		     repo / configured second install; for a non-git project only Local is
+		     offered and the mode is forced to Local above). -->
+		<div class="mode-selector" bind:this={modeDropdownRef}>
 			<button
 				type="button"
-				class="mode-option"
-				class:active={$activeSession.executionMode === 'local'}
-				onclick={() => setMode('local')}
+				class="mode-trigger"
+				class:open={showModeDropdown}
+				onclick={toggleModeDropdown}
+				title={currentMode.title}
+				aria-haspopup="menu"
+				aria-expanded={showModeDropdown}
 			>
-				<Monitor size={13} strokeWidth={1.5} />
-				<span>Local</span>
+				<currentMode.icon size={13} strokeWidth={1.5} />
+				<span class="mode-trigger-label">{currentMode.label}</span>
+				<ChevronDown size={12} strokeWidth={1.5} />
 			</button>
-			<!-- Worktree/Cloud only apply to a git repository. For a non-git project
-			     only Local is offered (and the mode is forced to Local above). -->
-			{#if isGitRepo}
-				<button
-					type="button"
-					class="mode-option"
-					class:active={$activeSession.executionMode === 'worktree'}
-					onclick={() => setMode('worktree')}
-				>
-					<GitFork size={13} strokeWidth={1.5} />
-					<span>Worktree</span>
-				</button>
-				<!-- Cloud is only offered when a second install is configured in Settings -->
-				{#if cloudConfigured === true}
-					<button
-						type="button"
-						class="mode-option"
-						class:active={$activeSession.executionMode === 'cloud'}
-						onclick={() => setMode('cloud')}
-						title="Offload this session to a second AI Shuffle install (GitHub repos only)"
-					>
-						<Cloud size={13} strokeWidth={1.5} />
-						<span>Cloud</span>
-					</button>
-				{/if}
+
+			{#if showModeDropdown}
+				<div class="mode-dropdown branch-dropdown" role="menu">
+					{#each availableModes as opt (opt.mode)}
+						<button
+							type="button"
+							class="branch-item"
+							class:active={$activeSession.executionMode === opt.mode}
+							onclick={() => selectMode(opt.mode)}
+							title={opt.title}
+							role="menuitemradio"
+							aria-checked={$activeSession.executionMode === opt.mode}
+						>
+							<opt.icon size={13} strokeWidth={1.5} />
+							<span class="branch-item-name">{opt.label}</span>
+						</button>
+					{/each}
+				</div>
 			{/if}
 		</div>
 
@@ -476,46 +530,52 @@
 		max-width: 100%;
 	}
 
-	/* Segmented pill */
-	.mode-toggle {
-		display: inline-flex;
-		align-items: center;
-		background: color-mix(in oklch, var(--foreground) 8%, var(--background));
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		padding: 2px;
-		gap: 2px;
+	/* Mode dropdown pill — styled to match the .branch-trigger pill */
+	.mode-selector {
+		position: relative;
 		flex-shrink: 0;
+		min-width: 0;
 	}
 
-	.mode-option {
+	.mode-trigger {
 		display: flex;
 		align-items: center;
 		gap: 5px;
-		padding: 4px 12px;
-		background: transparent;
-		border: none;
-		border-radius: calc(var(--radius) - 2px);
+		padding: 4px 10px;
+		background: color-mix(in oklch, var(--foreground) 8%, var(--background));
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
 		color: var(--muted-foreground);
 		font-size: 0.75rem;
 		font-weight: 500;
 		cursor: pointer;
 		transition: all 150ms ease;
 		white-space: nowrap;
+		max-width: 100%;
 	}
 
-	.mode-option:hover:not(.active) {
+	.mode-trigger:hover,
+	.mode-trigger.open {
+		border-color: var(--primary);
 		color: var(--foreground);
 	}
 
-	.mode-option.active {
-		background: var(--card);
-		color: var(--foreground);
-		box-shadow: var(--shadow-s);
-	}
-
-	.mode-option :global(svg) {
+	.mode-trigger :global(svg) {
 		flex-shrink: 0;
+	}
+
+	.mode-trigger-label {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	/* Mode dropdown — reuses .branch-dropdown visuals; anchored to the pill's left
+	   edge (it's the leftmost pill) and opens upward like the branch dropdown. */
+	.mode-dropdown {
+		left: 0;
+		right: auto;
+		min-width: 160px;
 	}
 
 	/* Branch selector */
@@ -784,12 +844,22 @@
 			max-width: min(120px, 30vw);
 		}
 
-		/* Break trigger-anchored positioning so dropdown anchors to .execution-mode-bar (full width) */
-		.branch-selector {
+		/* Break trigger-anchored positioning so dropdowns anchor to
+		   .execution-mode-bar (full width) and stay viewport-bounded */
+		.branch-selector,
+		.mode-selector {
 			position: static;
 		}
 
 		.branch-dropdown {
+			left: 12px;
+			right: 12px;
+			min-width: 0;
+			max-width: none;
+		}
+
+		/* .mode-dropdown overrides left/right above; reset them on mobile too */
+		.mode-dropdown {
 			left: 12px;
 			right: 12px;
 			min-width: 0;
