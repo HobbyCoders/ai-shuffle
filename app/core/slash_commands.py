@@ -176,11 +176,28 @@ def discover_commands(working_dir: str) -> List[SlashCommand]:
     commands = []
     working_path = Path(working_dir)
 
-    # Project commands directory
+    # Project commands directory (highest precedence)
     project_commands_dir = working_path / ".claude" / "commands"
 
     if project_commands_dir.exists() and project_commands_dir.is_dir():
         commands.extend(_scan_commands_directory(project_commands_dir, "project"))
+
+    # User-global commands (~/.claude/commands/). These are auto-loaded by the
+    # SDK at runtime via setting_sources "user" but were never surfaced here.
+    # A project command of the same name shadows the user one (Claude Code
+    # precedence: project > user).
+    try:
+        from app.core.plugin_models import _get_claude_dir
+        user_commands_dir = _get_claude_dir() / "commands"
+        if user_commands_dir.exists() and user_commands_dir.is_dir():
+            seen = {cmd.name.lower() for cmd in commands}
+            for cmd in _scan_commands_directory(user_commands_dir, "user"):
+                if cmd.name.lower() in seen:
+                    continue
+                seen.add(cmd.name.lower())
+                commands.append(cmd)
+    except Exception as e:
+        logger.error(f"Failed to discover user commands: {e}")
 
     return commands
 
@@ -492,6 +509,166 @@ def discover_plugin_commands() -> List[Dict[str, Any]]:
     return commands
 
 
+def _parse_skill_file(
+    skill_md: Path,
+    folder_name: str,
+    source: str,
+    namespace: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Parse a SKILL.md file into a command-style dict for the autocomplete popup.
+
+    The invokable name is the skill's folder name (this matches how skills are
+    invoked, i.e. /skill-name). Plugin skills are namespaced as
+    plugin-name:skill-name.
+    """
+    try:
+        content = skill_md.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.error(f"Failed to read skill file {skill_md}: {e}")
+        return None
+
+    frontmatter, body = parse_frontmatter(content)
+
+    name = folder_name
+    description = frontmatter.get("description", "")
+    if not description and body:
+        first_line = body.split("\n")[0].strip()
+        description = re.sub(r"^#+\s*", "", first_line)[:200]
+    # Collapse folded / multi-line YAML descriptions to a single line so the
+    # popup stays compact.
+    if description:
+        description = " ".join(str(description).split())
+
+    argument_hint = frontmatter.get("argument-hint")
+    if isinstance(argument_hint, list):
+        argument_hint = " ".join(
+            f"[{item}]" if not str(item).startswith("[") else str(item)
+            for item in argument_hint
+        )
+
+    display_name = f"{namespace}:{name}" if namespace else name
+    return {
+        "name": display_name,
+        "display": f"/{display_name}",
+        "description": description,
+        "argument_hint": argument_hint,
+        "type": "skill",
+        "source": source,
+    }
+
+
+def _scan_skills_directory(
+    skills_dir: Path,
+    source: str,
+    namespace: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Scan a skills directory for <name>/SKILL.md entries."""
+    skills: List[Dict[str, Any]] = []
+
+    if not skills_dir.exists() or not skills_dir.is_dir():
+        return skills
+
+    try:
+        for skill_dir in sorted(skills_dir.iterdir()):
+            if not skill_dir.is_dir() or skill_dir.name.startswith("."):
+                continue
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.exists():
+                continue
+            skill = _parse_skill_file(skill_md, skill_dir.name, source, namespace)
+            if skill:
+                skills.append(skill)
+    except PermissionError as e:
+        logger.warning(f"Permission denied accessing {skills_dir}: {e}")
+    except Exception as e:
+        logger.error(f"Error scanning skills directory {skills_dir}: {e}")
+
+    return skills
+
+
+def discover_plugin_skills() -> List[Dict[str, Any]]:
+    """
+    Discover skills from enabled plugins.
+
+    Skills are namespaced as plugin-name:skill-name, mirroring plugin commands.
+    """
+    # Import here to avoid circular imports
+    from app.core.plugin_service import get_plugin_service
+
+    skills: List[Dict[str, Any]] = []
+
+    try:
+        plugin_service = get_plugin_service()
+        installed = plugin_service.get_installed_plugins()
+        enabled_states = plugin_service.get_enabled_plugins()
+
+        for plugin in installed:
+            # Skip disabled plugins / plugins without skills
+            if not enabled_states.get(plugin.id, False):
+                continue
+            if not getattr(plugin, "has_skills", False):
+                continue
+
+            details = plugin_service.get_plugin_details(plugin.id)
+            if not details:
+                continue
+
+            skills_dir = Path(details.install_path) / "skills"
+            skills.extend(
+                _scan_skills_directory(skills_dir, source=plugin.id, namespace=plugin.name)
+            )
+    except Exception as e:
+        logger.error(f"Failed to discover plugin skills: {e}")
+
+    return skills
+
+
+def discover_skills(working_dir: str) -> List[Dict[str, Any]]:
+    """
+    Discover skills (SKILL.md folders) for the popup autocomplete.
+
+    Scans, in precedence order (project > user; plugin skills are namespaced
+    so they never collide):
+    - <working_dir>/.claude/skills/   (project)
+    - ~/.claude/skills/               (user-global)
+    - enabled plugins' skills/ directories
+
+    Skills are loaded by the SDK at runtime via setting_sources; this only
+    surfaces them for discovery. Returns command-style dicts (type="skill").
+    """
+    skills: List[Dict[str, Any]] = []
+    seen_names: set = set()
+
+    def _add(items: List[Dict[str, Any]]) -> None:
+        for skill in items:
+            key = skill["name"].lower()
+            if key in seen_names:
+                continue
+            seen_names.add(key)
+            skills.append(skill)
+
+    # Project skills (highest precedence)
+    try:
+        project_skills_dir = Path(working_dir) / ".claude" / "skills"
+        _add(_scan_skills_directory(project_skills_dir, "project"))
+    except Exception as e:
+        logger.error(f"Failed to discover project skills: {e}")
+
+    # User-global skills
+    try:
+        from app.core.plugin_models import _get_claude_dir
+        user_skills_dir = _get_claude_dir() / "skills"
+        _add(_scan_skills_directory(user_skills_dir, "user"))
+    except Exception as e:
+        logger.error(f"Failed to discover user skills: {e}")
+
+    # Plugin skills (namespaced as plugin-name:skill-name, never collide)
+    skills.extend(discover_plugin_skills())
+
+    return skills
+
+
 def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
     """
     Get all available commands for the popup autocomplete.
@@ -523,6 +700,10 @@ def get_all_commands(working_dir: str) -> List[Dict[str, Any]]:
 
     # Add plugin commands from enabled plugins
     commands.extend(discover_plugin_commands())
+
+    # Add skills (project + user-global + plugin). Skills are invoked just like
+    # slash commands (/skill-name) and are loaded by the SDK at runtime.
+    commands.extend(discover_skills(working_dir))
 
     # Note: INTERACTIVE_COMMANDS (/resume) and REST_API_COMMANDS (/rewind)
     # are intentionally excluded from the popup as they are handled separately

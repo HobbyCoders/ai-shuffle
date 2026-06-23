@@ -28,7 +28,7 @@
 		display: string;
 		description: string;
 		argument_hint?: string;
-		type: 'custom' | 'interactive' | 'sdk_builtin' | 'plugin';
+		type: 'custom' | 'interactive' | 'sdk_builtin' | 'plugin' | 'skill';
 		source?: string;
 		namespace?: string;
 	}

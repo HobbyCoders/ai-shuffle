@@ -19,7 +19,7 @@ from app.db import database
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.core.plugin_service import get_plugin_service
 from app.core.project_utils import get_project_working_dir_as_path, get_worktree_working_dir_as_path
-from app.core.project_agent_service import get_project_agent_service
+from app.core.project_agent_service import get_project_agent_service, get_user_agent_service
 from app.core.config import settings
 from app.core.model_registry import DEFAULT_MODEL
 from app.core.profiles import get_builtin_profile_defaults
@@ -199,11 +199,13 @@ async def get_all_available_subagents(
     """
     Get all available subagents for autocomplete from multiple sources:
     1. Profile-enabled subagents (from database)
-    2. Plugin file-based agents (from enabled plugins)
-    3. Project agents (if project_id provided)
+    2. Project agents (if project_id provided)
+    3. User-global agents (~/.claude/agents/, auto-loaded by the SDK)
+    4. Plugin file-based agents (from enabled plugins)
 
     Returns a unified list with source information for each agent.
-    Deduplication is handled with priority: profile > project > plugin.
+    Deduplication priority: profile > project > user > plugin (plugin agents
+    are namespaced, so they never collide by name).
     """
     api_user = get_api_user_from_request(request)
 
@@ -295,7 +297,49 @@ async def get_all_available_subagents(
                 # Log but don't fail if project agents can't be loaded
                 logging.warning(f"Failed to load project agents for {project_id}: {e}")
 
-    # 3. Plugin file-based agents (lowest priority)
+    # 3. User-global agents (~/.claude/agents/) - auto-loaded by the SDK at
+    #    runtime via setting_sources "user", surfaced here for discovery.
+    #    Claude Code precedence is project > user, so a project (or profile)
+    #    agent of the same name shadows the user one: dedupe by name against
+    #    everything added so far.
+    seen_names = {item.name.lower() for item in result}
+    try:
+        user_agent_service = get_user_agent_service()
+        for agent in user_agent_service.get_agents():
+            agent_id = f"user:{agent.name}"
+
+            # Skip if shadowed by a higher-priority agent of the same name,
+            # or already seen by id.
+            if agent.name.lower() in seen_names or agent_id in seen_ids:
+                continue
+
+            # Apply search filter
+            if search_lower:
+                name_match = search_lower in agent.name.lower()
+                desc_match = search_lower in agent.description.lower()
+                if not (name_match or desc_match):
+                    continue
+
+            seen_ids.add(agent_id)
+            seen_names.add(agent.name.lower())
+
+            # Need to get full agent details for prompt
+            agent_detail = user_agent_service.get_agent(agent.name)
+            result.append(UnifiedSubagentItem(
+                id=agent_id,
+                name=agent.name,
+                description=agent.description,
+                prompt=agent_detail.prompt if agent_detail else "",
+                tools=agent.tools,
+                model=agent.model,
+                source="user",
+                source_name="User (~/.claude)"
+            ))
+    except Exception as e:
+        # Log but don't fail if user-global agents can't be loaded
+        logging.warning(f"Failed to load user-global agents: {e}")
+
+    # 4. Plugin file-based agents (lowest priority)
     try:
         plugin_service = get_plugin_service()
         for agent in plugin_service.get_file_based_agents():

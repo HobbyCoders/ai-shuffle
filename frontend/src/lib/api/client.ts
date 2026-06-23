@@ -505,7 +505,7 @@ export interface AutocompleteSubagent {
 	prompt: string;
 	tools: string[] | null;
 	model: string | null;
-	source: 'profile' | 'plugin' | 'project';
+	source: 'profile' | 'plugin' | 'project' | 'user';
 	source_name: string | null;
 }
 

@@ -20,7 +20,7 @@
     // Subagent specific fields
     subagent_id?: string;
     subagent_description?: string;
-    subagent_source?: 'profile' | 'plugin' | 'project';
+    subagent_source?: 'profile' | 'plugin' | 'project' | 'user';
     subagent_prompt?: string;
     subagent_tools?: string[];
     subagent_model?: string | null;

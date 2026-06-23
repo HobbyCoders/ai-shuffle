@@ -458,9 +458,30 @@ class ProjectAgentService:
         return agent
 
 
+class UserAgentService(ProjectAgentService):
+    """
+    Discovers user-global file-based agents in ~/.claude/agents/.
+
+    These agents are auto-loaded by the Claude Agent SDK at runtime whenever a
+    profile's ``setting_sources`` includes ``"user"`` (the default), but they
+    were never surfaced in the app's autocomplete. This service exposes them
+    for discovery, reusing all of ``ProjectAgentService``'s parsing/CRUD logic
+    but rooted at the user-global Claude config dir instead of a project's
+    ``.claude`` directory.
+    """
+
+    def __init__(self, claude_dir: Path):
+        # Intentionally bypass ProjectAgentService.__init__ (which appends
+        # ".claude/agents"); user-global agents live directly under
+        # <claude_dir>/agents.
+        self.project_path = claude_dir
+        self.agents_dir = claude_dir / "agents"
+
+
 # Service instance cache (keyed by project_path)
 _agent_services: Dict[str, ProjectAgentService] = {}
 _agent_services_lock = threading.Lock()
+_user_agent_service: Optional[UserAgentService] = None
 
 
 def get_project_agent_service(project_path: Path) -> ProjectAgentService:
@@ -481,8 +502,26 @@ def get_project_agent_service(project_path: Path) -> ProjectAgentService:
         return _agent_services[cache_key]
 
 
+def get_user_agent_service() -> UserAgentService:
+    """
+    Get the cached user-global agent service that scans ~/.claude/agents/.
+
+    The directory is resolved per deployment mode (Docker uses the appuser
+    home), so this mirrors what the SDK loads via ``setting_sources: ["user"]``.
+    """
+    global _user_agent_service
+
+    with _agent_services_lock:
+        if _user_agent_service is None:
+            # Imported lazily to avoid pulling plugin machinery at module load.
+            from app.core.plugin_models import _get_claude_dir
+            _user_agent_service = UserAgentService(_get_claude_dir())
+        return _user_agent_service
+
+
 def clear_agent_service_cache():
     """Clear the agent service cache (useful for testing)"""
-    global _agent_services
+    global _agent_services, _user_agent_service
     with _agent_services_lock:
         _agent_services = {}
+        _user_agent_service = None

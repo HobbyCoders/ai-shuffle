@@ -6,7 +6,7 @@
     display: string;
     description: string;
     argument_hint?: string;
-    type: 'custom' | 'interactive' | 'sdk_builtin' | 'plugin';
+    type: 'custom' | 'interactive' | 'sdk_builtin' | 'plugin' | 'skill';
     source?: string;
   }
 
@@ -37,6 +37,7 @@
     const typeLabels: Record<string, string> = {
       sdk_builtin: 'Built-in',
       custom: 'Custom',
+      skill: 'Skills',
       plugin: 'Plugin',
       interactive: 'Interactive'
     };
@@ -68,7 +69,7 @@
 
     if (!query) {
       // Sort by type when showing all commands
-      const typeOrder = ['sdk_builtin', 'custom', 'plugin', 'interactive'];
+      const typeOrder = ['sdk_builtin', 'custom', 'skill', 'plugin', 'interactive'];
       filteredCommands = [...commands].sort((a, b) => {
         const aOrder = typeOrder.indexOf(a.type);
         const bOrder = typeOrder.indexOf(b.type);
@@ -147,6 +148,7 @@
       case 'plugin': return 'plugin';
       case 'interactive': return 'interactive';
       case 'sdk_builtin': return 'builtin';
+      case 'skill': return 'skill';
       default: return 'custom';
     }
   }
