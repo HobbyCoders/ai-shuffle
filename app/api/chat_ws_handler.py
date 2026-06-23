@@ -2488,6 +2488,29 @@ class ChatWebSocketHandler:
                 elif session_id in _stopped_sessions:
                     _stopped_sessions.discard(session_id)
                     ctx.debug(logger, "Skipping queue processing — user stopped session")
+
+                    # Discard an orphan user turn: the user pressed Stop before
+                    # the model produced any output. Such a turn isn't durably
+                    # persisted (it reads back empty on reload), so the lone user
+                    # message is misleading. Remove it from the live store — the
+                    # poller is the sole authority for the chat view, so a
+                    # frontend-only delete would be undone by the next poll — and
+                    # tell the frontend to restore the prompt to the input box so
+                    # the user can edit or resend it. Both stop sub-paths
+                    # (CancelledError force-cancel and natural-drain "interrupted")
+                    # reach here after end_streaming has already run.
+                    try:
+                        discarded_prompt = await live_session_store.discard_empty_user_turn(session_id)
+                    except Exception as discard_err:
+                        discarded_prompt = None
+                        ctx.warning(logger, f"discard_empty_user_turn failed: {discard_err}")
+                    if discarded_prompt is not None:
+                        await self.send_json({
+                            "type": "user_message_discarded",
+                            "session_id": session_id,
+                            "prompt": discarded_prompt,
+                        })
+                        ctx.debug(logger, "Discarded empty interrupted user turn; restoring prompt to input")
                 else:
                     # Check if a new query was already spawned by pre-close processing
                     async with _active_sessions_lock:

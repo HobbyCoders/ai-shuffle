@@ -712,6 +712,25 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				handleStoppedOrInterrupted(data);
 				break;
 
+			case 'user_message_discarded': {
+				// The user pressed Stop before any assistant output. The backend
+				// removed the orphan user message from the live store (so the
+				// turn isn't shown as a saved-but-empty exchange) and sent its
+				// text back so we can restore it to the input box for editing or
+				// resending. Set pendingInterruptPrompt (ChatInput watches it and
+				// repopulates the editor) and run a final poll so the poller —
+				// the sole authority for the chat view — drops the now-removed
+				// user message.
+				const discardedSessionId = data.session_id as string | undefined;
+				const prompt = typeof data.prompt === 'string' ? data.prompt : '';
+				const discardState = getState();
+				if (discardedSessionId && discardedSessionId === discardState.sessionId) {
+					update(s => ({ ...s, pendingInterruptPrompt: prompt }));
+					sessionPoller.pollFinal(discardedSessionId);
+				}
+				break;
+			}
+
 			case 'error': {
 				internal.interruptPending = false;
 				// Reject any pending interrupt-and-query promise

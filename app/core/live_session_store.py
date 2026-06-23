@@ -1485,6 +1485,52 @@ class LiveSessionStore:
 
             return [m.to_dict() for m in session.messages]
 
+    async def discard_empty_user_turn(self, session_id: str) -> Optional[str]:
+        """Drop the trailing user message when an interrupted turn produced no output.
+
+        When a user presses Stop before the model emits any text/thinking/tool/
+        subagent output, the turn isn't durably persisted — it reads back empty on
+        reload — so the lone user message left in the live store is misleading.
+        Remove it and return its content so the caller can hand the prompt back to
+        the frontend, which restores it to the input box for the user to edit or
+        resend.
+
+        MUST be called AFTER ``end_streaming`` (which filters whitespace-only
+        assistant text and task-notification noise). With that noise gone, a
+        trailing user message reliably means "nothing was produced this turn".
+
+        Returns the discarded prompt, or None when there is nothing to discard
+        (no session, empty turn, or the turn produced a real response that must be
+        kept).
+        """
+        async with self._get_session_lock(session_id):
+            session = self._sessions.get(session_id)
+            if not session or not session.messages:
+                return None
+
+            # The current turn's messages start at initial_message_count. Only act
+            # when the trailing message is this turn's user prompt with nothing
+            # after it — any assistant/tool output would sit after it in the list.
+            last_idx = len(session.messages) - 1
+            if last_idx < session.initial_message_count:
+                return None  # nothing was added this turn — leave history intact
+
+            last = session.messages[last_idx]
+            if last.role != "user" or "<task-notification>" in last.content:
+                return None  # real output exists (or it isn't a user prompt)
+
+            discarded = last.content
+            del session.messages[last_idx]
+            # Force a full snapshot on the next poll so the removal reaches the
+            # frontend (delta polls key off the now-shifted message slice).
+            session.needs_full_refresh = True
+            self._increment_update_id(session)
+            logger.info(
+                f"Discarded empty interrupted user turn for session {session_id} "
+                f"(no assistant output before stop)"
+            )
+            return discarded
+
     async def cleanup_ended_session(self, session_id: str) -> bool:
         """
         Remove an ended session from memory.

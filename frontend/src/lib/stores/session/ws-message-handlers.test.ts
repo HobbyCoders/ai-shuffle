@@ -235,6 +235,51 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('user_message_discarded handler', () => {
+		it('should set pendingInterruptPrompt and trigger a final poll', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+			let captured: string | null = '__unset__';
+
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => {
+					captured = fn(state).pendingInterruptPrompt;
+				}),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'user_message_discarded',
+				session_id: 'session-1',
+				prompt: 'write me a haiku',
+			});
+
+			// Prompt is stashed so ChatInput can restore it to the editor.
+			expect(captured).toBe('write me a haiku');
+			// Poller (sole authority for the chat view) re-fetches the now-cleaned
+			// live store so the orphan user message disappears.
+			expect(deps.sessionPoller.pollFinal).toHaveBeenCalledWith('session-1');
+		});
+
+		it('should ignore events for a non-active session', () => {
+			const state = mockState();
+			state.sessionId = 'session-1';
+
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({
+				type: 'user_message_discarded',
+				session_id: 'some-other-session',
+				prompt: 'not mine',
+			});
+
+			expect(deps.update).not.toHaveBeenCalled();
+			expect(deps.sessionPoller.pollFinal).not.toHaveBeenCalled();
+		});
+	});
+
 	describe('error handler', () => {
 		it('should set error on the store', () => {
 			const state = mockState();
