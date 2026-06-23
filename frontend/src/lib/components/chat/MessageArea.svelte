@@ -23,6 +23,7 @@
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import StreamingIndicator from './StreamingIndicator.svelte';
+	import { findStreamingAnchorIndex, shouldShowGapIndicator } from '$lib/stores/session/gap-indicator';
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import ToolUseGroup from './ToolUseGroup.svelte';
 	import SystemMessageGroup from './SystemMessageGroup.svelte';
@@ -171,39 +172,31 @@
 	// Chat preferences (reactive via .current getter)
 	const chatPrefs = $derived(chatPreferences.current);
 
-	// Find the last streaming message index - only that message should show the streaming indicator
-	// This prevents multiple bouncing dots from appearing after each tool call
-	const lastStreamingMessageIndex = $derived.by(() => {
-		for (let i = $activeSession.messages.length - 1; i >= 0; i--) {
-			if ($activeSession.messages[i].streaming) {
-				return i;
-			}
-		}
-		return -1;
-	});
+	// Find the message that owns the single streaming indicator/cursor — only
+	// that one shows the bouncing dots, otherwise a row of them appears after
+	// every tool call. Trailing EMPTY streaming assistant-text (the turn-start
+	// synthetic phantom, re-appended by the WS-merge) is skipped so it can't
+	// steal the anchor from a real streaming message; with no real streaming
+	// message it returns -1, letting the phantom render invisibly and the bottom
+	// gap indicator take over. See gap-indicator.ts.
+	const lastStreamingMessageIndex = $derived(findStreamingAnchorIndex($activeSession.messages));
 
-	// Show the existing streaming indicator at the bottom of the conversation
-	// whenever the turn is still active (isStreaming) but nothing else is
-	// currently signaling activity. This fills the dead air in the gap between a
-	// completed text block and the next tool call (the model generating the
-	// tool_use, or hidden thinking), where no message is streaming and no tool
-	// card exists yet — which otherwise looks frozen for many seconds. We suppress
-	// it when something already shows progress: a streaming message (cursor), a
-	// running tool (spinner), or a running subagent — to avoid a double indicator.
-	const showGapIndicator = $derived.by(() => {
-		if (!$activeSession.isStreaming) return false;
-		const msgs = $activeSession.messages;
-		if (msgs.length === 0) return false;
-		const last = msgs[msgs.length - 1];
-		if (last.streaming) {
-			// A streaming thinking block hidden by user preference renders nothing,
-			// so the indicator is still needed; otherwise the cursor covers it.
-			return last.type === 'thinking' && chatPrefs?.showThinkingBlocks === false;
-		}
-		if (last.type === 'tool_use' && last.toolStatus === 'running') return false;
-		if (last.type === 'subagent' && (last.agentStatus === 'running' || last.agentStatus === 'pending')) return false;
-		return true;
-	});
+	// Show the streaming indicator at the bottom of the conversation whenever the
+	// turn is still active (isStreaming) but nothing else is currently signaling
+	// activity — the dead air after a completed tool call and before the next
+	// assistant message, where the model is thinking/generating the next tool_use
+	// and the chat otherwise looks frozen for many seconds. A trailing empty
+	// streaming synthetic is treated as transparent so it can't suppress this;
+	// active background tasks defer to the calm "waiting" indicator instead. See
+	// gap-indicator.ts for the full contract + tests.
+	const showGapIndicator = $derived(
+		shouldShowGapIndicator(
+			$activeSession.messages,
+			$activeSession.isStreaming,
+			$activeSession.activeTasks?.length ?? 0,
+			chatPrefs?.showThinkingBlocks !== false
+		)
+	);
 
 	// --- Tool call grouping ---
 	// Groups 2+ consecutive "regular" tool_use messages into a single display item.
