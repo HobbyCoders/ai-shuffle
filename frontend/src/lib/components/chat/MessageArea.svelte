@@ -43,6 +43,7 @@
 	import TeamMemberMessage from '$lib/components/TeamMemberMessage.svelte';
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import TodoList from '$lib/components/TodoList.svelte';
+	import MediaLightbox from './MediaLightbox.svelte';
 
 	// Non-reactive scroll position cache to avoid triggering effects.
 	// Module-level so it persists across component instances.
@@ -1050,6 +1051,9 @@
 		</div>
 	{/if}
 </div>
+
+<!-- Fullscreen media preview overlay (driven by the lightbox store) -->
+<MediaLightbox />
 
 <style>
 	/* Browser-native virtualization: skip paint/layout for off-screen messages.

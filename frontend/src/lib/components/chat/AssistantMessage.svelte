@@ -5,6 +5,7 @@
 	import { marked } from 'marked';
 	import { onDestroy } from 'svelte';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
+	import { rewriteMediaMarkdown, clampRevealToMediaBoundary } from '$lib/utils/media';
 	import { Typewriter } from '$lib/utils/typewriter';
 	import StreamingIndicator from './StreamingIndicator.svelte';
 	import MessageActions from './MessageActions.svelte';
@@ -113,10 +114,12 @@
 
 	$effect(() => { _tw.setTarget(_twBestContent, streaming); });
 
-	/** Content fed to the markdown renderer — smoothed during streaming */
+	/** Content fed to the markdown renderer — smoothed during streaming. The
+	 * reveal length is clamped so a media markdown token is never shown
+	 * half-typed; it pops in whole once the cursor passes its end. */
 	const displayContent = $derived(
 		streaming && _twLength < _twBestContent.length
-			? _twBestContent.slice(0, _twLength)
+			? _twBestContent.slice(0, clampRevealToMediaBoundary(_twBestContent, _twLength))
 			: _twBestContent
 	);
 
@@ -130,18 +133,32 @@
 
 	// Use a plain object to avoid Svelte 5 compiling these as reactive signals.
 	// Mutating reactive `let` vars inside `$derived` corrupts the effect linked list.
-	// `html` and `stablePrefixHtml` hold SANITIZED markup. Sanitization is folded
-	// into the render functions so that during streaming DOMPurify only runs over
-	// the growing tail paragraph (and the stable prefix once, when it advances)
-	// instead of re-sanitizing the entire message on every delta — which was
-	// O(full content) per frame and got heavier as a response grew.
-	const _cache = { content: '', html: '', wasStreaming: false, stablePrefixContent: '', stablePrefixHtml: '' };
+	// `result.{prefix,tail}` and `stablePrefixHtml` hold SANITIZED markup.
+	// Sanitization is folded into the render functions so that during streaming
+	// DOMPurify only runs over the growing tail paragraph (and the stable prefix
+	// once, when it advances) instead of re-sanitizing the entire message on
+	// every delta — which was O(full content) per frame and got heavier as a
+	// response grew.
+	const _cache = {
+		content: '',
+		wasStreaming: false,
+		stablePrefixContent: '',
+		stablePrefixHtml: '',
+		result: { prefix: '', tail: '' }
+	};
 
-	const renderedHtml = $derived(renderMarkdownMemoized(displayContent, streaming));
+	// Rendered output is split into a stable PREFIX (completed paragraphs, whose
+	// HTML string is byte-identical across deltas) and a TAIL (the still-growing
+	// last paragraph). The template renders them as two separate {@html} blocks;
+	// because {@html} only mutates the DOM when its string value changes, any
+	// media that has settled into the prefix is NOT torn down and refetched when
+	// the tail keeps streaming. That is what stops the image from flickering /
+	// reloading while the rest of the message arrives.
+	const rendered = $derived(renderMarkdownMemoized(displayContent, streaming));
 
-	function renderMarkdownMemoized(text: string, isStreaming: boolean): string {
+	function renderMarkdownMemoized(text: string, isStreaming: boolean): { prefix: string; tail: string } {
 		// Fast path: content and streaming flag unchanged
-		if (text === _cache.content && isStreaming === _cache.wasStreaming) return _cache.html;
+		if (text === _cache.content && isStreaming === _cache.wasStreaming) return _cache.result;
 
 		// Transition from streaming→not-streaming: full re-render for final media processing
 		if (_cache.wasStreaming && !isStreaming) {
@@ -149,41 +166,46 @@
 			_cache.stablePrefixHtml = '';
 			_cache.content = text;
 			_cache.wasStreaming = false;
-			_cache.html = renderMarkdownFull(text, false);
-			return _cache.html;
+			_cache.result = { prefix: renderMarkdownFull(text, false), tail: '' };
+			return _cache.result;
 		}
 
 		// During streaming: incremental render if content was only appended
 		if (isStreaming && _cache.content.length > 0 && text.startsWith(_cache.content)) {
-			const result = renderMarkdownIncremental(text);
+			_cache.result = renderMarkdownIncremental(text);
 			_cache.content = text;
 			_cache.wasStreaming = true;
-			_cache.html = result;
-			return result;
+			return _cache.result;
 		}
 
-		// Full render (first render, content rewritten, or non-streaming)
+		// Full render (first render, content rewritten, or non-streaming).
+		// While streaming with no cached prefix yet, the whole thing is the tail
+		// (carries the streaming cursor); otherwise it is one settled block.
 		_cache.stablePrefixContent = '';
 		_cache.stablePrefixHtml = '';
 		_cache.content = text;
 		_cache.wasStreaming = isStreaming;
-		_cache.html = renderMarkdownFull(text, isStreaming);
-		return _cache.html;
+		_cache.result = isStreaming
+			? { prefix: '', tail: renderMarkdownFull(text, true) }
+			: { prefix: renderMarkdownFull(text, false), tail: '' };
+		return _cache.result;
 	}
 
 	/**
 	 * Incremental render: reuse cached HTML for completed paragraphs,
-	 * only re-parse from the last paragraph boundary onwards.
+	 * only re-parse from the last paragraph boundary onwards. Returns the
+	 * stable prefix and the growing tail separately so the template can render
+	 * them as independent {@html} blocks (settled media stays put).
 	 */
-	function renderMarkdownIncremental(text: string): string {
+	function renderMarkdownIncremental(text: string): { prefix: string; tail: string } {
 		// Find the last paragraph boundary (\n\n) in the text.
 		// Everything before it is "stable" — its markdown structure is complete.
 		const lastBoundary = text.lastIndexOf('\n\n');
 
 		if (lastBoundary <= 0) {
 			// No paragraph boundary yet — full parse (content is short)
-			let html = marked(replaceMediaWithPlaceholders(text), { breaks: true }) as string;
-			return sanitizeHtml(injectStreamingCursor(html));
+			const html = marked(rewriteMediaMarkdown(text), { breaks: true }) as string;
+			return { prefix: '', tail: sanitizeHtml(injectStreamingCursor(html)) };
 		}
 
 		const stableContent = text.substring(0, lastBoundary);
@@ -195,7 +217,7 @@
 			prefixHtml = _cache.stablePrefixHtml;
 		} else {
 			// Stable prefix grew — re-parse, sanitize, and cache it once.
-			prefixHtml = sanitizeHtml(marked(replaceMediaWithPlaceholders(stableContent), { breaks: true }) as string);
+			prefixHtml = sanitizeHtml(marked(rewriteMediaMarkdown(stableContent), { breaks: true }) as string);
 			_cache.stablePrefixContent = stableContent;
 			_cache.stablePrefixHtml = prefixHtml;
 		}
@@ -203,24 +225,10 @@
 		// Always re-parse the tail (last incomplete paragraph + new content).
 		// This is the only DOMPurify pass that runs every delta — bounded to the
 		// last paragraph rather than the whole message.
-		let tailHtml = marked(replaceMediaWithPlaceholders(tailContent), { breaks: true }) as string;
+		let tailHtml = marked(rewriteMediaMarkdown(tailContent), { breaks: true }) as string;
 		tailHtml = sanitizeHtml(injectStreamingCursor(tailHtml));
 
-		return prefixHtml + tailHtml;
-	}
-
-	/**
-	 * Replace media markdown with placeholders during streaming to prevent flickering.
-	 */
-	function replaceMediaWithPlaceholders(text: string): string {
-		const placeholder = '<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">';
-		let result = text;
-		result = result.replace(/!\[([^\]]*)\]\((data:image\/[^;]+;base64,[^)]+)\)/g, placeholder + 'Image loading...</div>');
-		result = result.replace(/!\[([^\]]*)\]\((\/api\/generated-images\/[^)]+)\)/g, placeholder + 'Image loading...</div>');
-		result = result.replace(/\[([^\]]*)\]\((\/api\/generated-videos\/[^)]+)\)/g, placeholder + 'Video loading...</div>');
-		result = result.replace(/"image_base64"\s*:\s*"([A-Za-z0-9+/=]{100,})"/g, placeholder + 'Image loading...</div>');
-		result = result.replace(/[^\]]+\]\((\/api\/files\/[^)]+)\)/g, placeholder + 'File preparing...</div>');
-		return result;
+		return { prefix: prefixHtml, tail: tailHtml };
 	}
 
 	/**
@@ -245,68 +253,15 @@
 	}
 
 	/**
-	 * Full markdown render (non-streaming or first render).
+	 * Full markdown render (non-streaming or first render). Media markdown
+	 * (images / video / audio) is rewritten into inline players with download +
+	 * expand controls in both cases, so generated media shows up immediately —
+	 * the only difference while streaming is the trailing cursor.
+	 * See $lib/utils/media for detection rules and produced markup.
 	 */
 	function renderMarkdownFull(text: string, isStreaming: boolean): string {
-		if (isStreaming) {
-			let html = marked(replaceMediaWithPlaceholders(text), { breaks: true }) as string;
-			return sanitizeHtml(injectStreamingCursor(html));
-		}
-
-		// Process base64 images with download capability and overlay buttons
-		const base64ImagePattern = /!\[([^\]]*)\]\((data:image\/[^;]+;base64,[^)]+)\)/g;
-
-		let processedContent = text.replace(base64ImagePattern, (match, alt, dataUrl) => {
-			return `<div class="generated-media-container relative my-4 inline-block">
-				<img src="${dataUrl}" alt="${alt || 'Generated image'}" class="max-w-full rounded-lg shadow-md border border-border" />
-				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-					<button onclick="(function(){
-						const link = document.createElement('a');
-						link.href = '${dataUrl}';
-						link.download = '${alt || 'generated-image'}.png';
-						link.click();
-					})()" class="image-download-btn p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors" title="Download image">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-						</svg>
-					</button>
-				</div>
-			</div>`;
-		});
-
-		const generatedImagePattern = /!\[([^\]]*)\]\((\/api\/generated-images\/[^)]+)\)/g;
-		processedContent = processedContent.replace(generatedImagePattern, (match, alt, imageUrl) => {
-			const filename = imageUrl.split('/').pop() || 'generated-image.png';
-			return `<div class="generated-media-container relative my-4 inline-block">
-				<img src="${imageUrl}" alt="${alt || 'Generated image'}" class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border" />
-				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-					<a href="${imageUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download image">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-						</svg>
-					</a>
-				</div>
-			</div>`;
-		});
-
-		const generatedVideoPattern = /\[([^\]]*)\]\((\/api\/generated-videos\/[^)]+)\)/g;
-		processedContent = processedContent.replace(generatedVideoPattern, (match, _text, videoUrl) => {
-			const filename = videoUrl.split('/').pop() || 'generated-video.mp4';
-			return `<div class="generated-media-container relative my-4 inline-block">
-				<video src="${videoUrl}" controls class="max-w-full max-h-[500px] rounded-lg shadow-lg border border-border">
-					Your browser does not support the video tag.
-				</video>
-				<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity">
-					<a href="${videoUrl}" download="${filename}" class="p-1.5 rounded bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download video">
-						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-						</svg>
-					</a>
-				</div>
-			</div>`;
-		});
-
-		return sanitizeHtml(marked(processedContent, { breaks: true }) as string);
+		const html = marked(rewriteMediaMarkdown(text), { breaks: true }) as string;
+		return isStreaming ? sanitizeHtml(injectStreamingCursor(html)) : sanitizeHtml(html);
 	}
 
 	/**
@@ -477,7 +432,8 @@
 		<div class="overflow-hidden max-w-full">
 			<div class="prose prose-sm max-w-none break-words pl-2" style="overflow-wrap: anywhere; word-break: break-word;">
 				{#if content}
-					{@html renderedHtml}
+					<!-- Two blocks: stable prefix (settled media stays mounted) + streaming tail -->
+					{@html rendered.prefix}{@html rendered.tail}
 				{:else if streaming && !hasPartialMessages}
 					<!-- Only show placeholder dots when partial messages is disabled -->
 					<div class="flex gap-1 py-2">

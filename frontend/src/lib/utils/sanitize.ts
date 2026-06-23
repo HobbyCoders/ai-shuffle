@@ -20,7 +20,9 @@ const PURIFY_CONFIG = {
 		'viewBox', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin',
 		'd', 'cx', 'cy', 'r', 'x', 'y', 'width', 'height', 'points',
 		'onclick', 'class', 'style', 'title', 'target', 'rel',
-		'data-language', 'data-filename', 'data-line-numbers'
+		'data-language', 'data-filename', 'data-line-numbers',
+		// Inline media players (<audio>/<video>) + download links — see media.ts
+		'controls', 'controlslist', 'preload', 'playsinline', 'loop', 'muted', 'autoplay', 'download', 'type', 'aria-label'
 	],
 	ALLOW_DATA_ATTR: true,
 	// Allow blob: and data: URIs for images/media
