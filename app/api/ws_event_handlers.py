@@ -316,6 +316,9 @@ async def handle_tool_result(
     state.current_tool_id = None
     state.current_tool_name = None
     output = event.get("output", "")
+    # Screenshot (data URI) extracted from MCP image content blocks — e.g. the
+    # Claude-in-Chrome browser tool — for inline display below the tool call.
+    screenshot = event.get("screenshot")
 
     # Team-tool follow-up: discover teammates and spin up transcript tailers.
     buffered = state.team_tool_buffer.pop(tool_id or "", None)
@@ -346,6 +349,7 @@ async def handle_tool_result(
         tool_id=tool_id,
         result=output,
         is_error=event.get("is_error", False),
+        screenshot=screenshot,
     )
     chunk_data = {
         "content": event.get("output", ""),
@@ -353,6 +357,9 @@ async def handle_tool_result(
         "tool_name": tool_name,
         "is_error": event.get("is_error", False),
     }
+    # Note: the screenshot itself is NOT broadcast in the chunk (it can be ~1MB).
+    # It's stored on the live message above and delivered once via the /live
+    # delta poll — the same path that carries tool_result content to the UI.
     # Flag tool results that likely modify the working tree so the frontend
     # can trigger an immediate git status poll (adaptive polling).
     if tool_name in {"Edit", "Write", "Bash", "NotebookEdit", "MultiEdit", "computer"}:

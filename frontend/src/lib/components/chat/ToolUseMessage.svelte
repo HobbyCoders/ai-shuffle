@@ -12,9 +12,11 @@
 		status: 'running' | 'complete' | 'error';
 		streaming?: boolean;
 		serverSide?: boolean;
+		/** Data URI of a screenshot from MCP image results (e.g. Claude-in-Chrome), shown inline below the tool call. */
+		screenshot?: string;
 	}
 
-	let { name, input, partialInput, result, status, streaming = false, serverSide = false }: Props = $props();
+	let { name, input, partialInput, result, status, streaming = false, serverSide = false, screenshot }: Props = $props();
 
 	// Chat preferences (reactive via .current getter)
 	const prefs = $derived(chatPreferences.current);
@@ -409,6 +411,11 @@
 				{/if}
 			</div>
 		</details>
+		<!-- Screenshot (e.g. Claude-in-Chrome) rendered directly below the tool
+		     call — no wrapper or border, shown regardless of expand/collapse. -->
+		{#if screenshot}
+			<img class="tool-screenshot" src={screenshot} alt="Screenshot from {name}" loading="lazy" />
+		{/if}
 	</div>
 </div>
 
@@ -420,5 +427,13 @@
 	.tool-summary:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
+	}
+
+	/* Directly below the tool call: no border, no card wrapper. */
+	.tool-screenshot {
+		display: block;
+		max-width: 100%;
+		height: auto;
+		margin-top: 0.5rem;
 	}
 </style>

@@ -85,6 +85,9 @@ class LiveMessage:
     tool_input: Optional[Dict[str, Any]] = None
     tool_result: Optional[str] = None
     tool_status: Optional[str] = None  # 'running', 'complete', 'error'
+    # Screenshot (data URI) extracted from MCP image content blocks — e.g. the
+    # Claude-in-Chrome browser tool — rendered inline below the tool call.
+    tool_screenshot: Optional[str] = None
 
     # For subagent messages
     agent_id: Optional[str] = None
@@ -135,6 +138,8 @@ class LiveMessage:
             result["toolResult"] = self.tool_result
         if self.tool_status:
             result["toolStatus"] = self.tool_status
+        if self.tool_screenshot:
+            result["toolScreenshot"] = self.tool_screenshot
 
         # Subagent fields
         if self.agent_id:
@@ -771,9 +776,15 @@ class LiveSessionStore:
         session_id: str,
         tool_id: str,
         result: str,
-        is_error: bool = False
+        is_error: bool = False,
+        screenshot: Optional[str] = None,
     ) -> None:
-        """Add tool result to the matching tool_use message."""
+        """Add tool result to the matching tool_use message.
+
+        ``screenshot`` is an optional data URI extracted from MCP image content
+        blocks (e.g. the Claude-in-Chrome browser tool) for inline display
+        directly below the tool call.
+        """
         async with self._get_session_lock(session_id):
             session = self._sessions.get(session_id)
             if not session:
@@ -786,6 +797,8 @@ class LiveSessionStore:
             for msg in session.messages:
                 if msg.type == "tool_use" and msg.tool_id == tool_id:
                     msg.tool_result = result
+                    if screenshot:
+                        msg.tool_screenshot = screenshot
                     if is_error:
                         msg.tool_status = ToolStatus.ERROR.value
                         msg.streaming = False

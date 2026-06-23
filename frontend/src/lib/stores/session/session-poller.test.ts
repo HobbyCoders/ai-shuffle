@@ -92,6 +92,65 @@ describe('session-poller · loadSession reconciliation', () => {
 		expect(session!.messages[session!.messages.length - 1].content).toBe('hi there!');
 	});
 
+	it('carries toolScreenshot from server tool_use messages through to the store', async () => {
+		const dataUri = 'data:image/png;base64,iVBORscreenshot';
+		fetchMock.mockResolvedValueOnce(
+			makeLiveResponse({
+				lastUpdateId: 5,
+				isStreaming: false,
+				messages: [
+					{
+						id: 'tool-shot',
+						role: 'assistant',
+						type: 'tool_use',
+						content: '',
+						toolName: 'mcp__claude-in-chrome__computer',
+						toolId: 'tool-shot',
+						toolStatus: 'complete',
+						toolResult: 'screenshot of page',
+						toolScreenshot: dataUri,
+						streaming: false,
+					},
+				],
+			})
+		);
+
+		const result = await sessionPoller.loadSession(SESSION_ID);
+		expect(result).not.toBeNull();
+		const session = sessionStateManager.getSession(SESSION_ID);
+		const toolMsg = session!.messages.find(m => m.id === 'tool-shot');
+		expect(toolMsg).toBeTruthy();
+		expect(toolMsg!.toolScreenshot).toBe(dataUri);
+	});
+
+	it('omits toolScreenshot for tool_use messages without an image', async () => {
+		fetchMock.mockResolvedValueOnce(
+			makeLiveResponse({
+				lastUpdateId: 5,
+				isStreaming: false,
+				messages: [
+					{
+						id: 'tool-plain',
+						role: 'assistant',
+						type: 'tool_use',
+						content: '',
+						toolName: 'Bash',
+						toolId: 'tool-plain',
+						toolStatus: 'complete',
+						toolResult: 'ok',
+						streaming: false,
+					},
+				],
+			})
+		);
+
+		await sessionPoller.loadSession(SESSION_ID);
+		const session = sessionStateManager.getSession(SESSION_ID);
+		const toolMsg = session!.messages.find(m => m.id === 'tool-plain');
+		expect(toolMsg).toBeTruthy();
+		expect(toolMsg!.toolScreenshot).toBeUndefined();
+	});
+
 	it('applies server state on first load when no prior entry exists', async () => {
 		fetchMock.mockResolvedValueOnce(
 			makeLiveResponse({

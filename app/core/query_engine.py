@@ -2055,8 +2055,9 @@ async def stream_to_websocket(
                             }
 
                     elif isinstance(block, ToolResultBlock):
-                        # Extract screenshot from MCP content blocks before truncation
-                        screenshot_b64 = extract_mcp_image(block.content)
+                        # Extract screenshot (as a data URI) from MCP content blocks
+                        # before truncation strips the image data for display.
+                        screenshot = extract_mcp_image(block.content)
                         output = truncate_large_payload(block.content)
                         tool_use_id = getattr(block, 'tool_use_id', None)
                         tool_name = tool_id_to_name.get(tool_use_id, getattr(block, 'name', 'unknown'))
@@ -2134,8 +2135,8 @@ async def stream_to_websocket(
                                 "is_error": getattr(block, 'is_error', False)
                             }
                             # Include screenshot for browser tools (MCP content has image blocks)
-                            if screenshot_b64:
-                                event["screenshot"] = screenshot_b64
+                            if screenshot:
+                                event["screenshot"] = screenshot
                             yield event
 
                     elif _SERVER_TOOL_TYPES and isinstance(block, _SERVER_TOOL_TYPES):

@@ -82,6 +82,7 @@
 						status={tool.toolStatus || 'running'}
 						streaming={tool.streaming}
 						serverSide={tool.serverSide ?? tool.server_side ?? false}
+						screenshot={tool.toolScreenshot}
 					/>
 				{/each}
 			</div>

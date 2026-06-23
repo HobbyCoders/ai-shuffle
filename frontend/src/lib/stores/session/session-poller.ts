@@ -695,6 +695,7 @@ function convertServerMessage(m: Record<string, unknown>, index: number): ChatMe
 	if (m.toolInput) msg.toolInput = m.toolInput as Record<string, unknown>;
 	if (m.toolResult !== undefined) msg.toolResult = m.toolResult as string;
 	if (m.toolStatus) msg.toolStatus = m.toolStatus as 'running' | 'complete' | 'error';
+	if (m.toolScreenshot) msg.toolScreenshot = m.toolScreenshot as string;
 
 	if (serverType === 'tool_use' && msg.streaming && msg.content) {
 		msg.partialToolInput = msg.content;

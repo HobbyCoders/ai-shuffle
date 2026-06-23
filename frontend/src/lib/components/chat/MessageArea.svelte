@@ -1005,6 +1005,7 @@
 							status={message.toolStatus || 'running'}
 							streaming={message.streaming}
 							serverSide={message.serverSide ?? message.server_side ?? false}
+							screenshot={message.toolScreenshot}
 						/>
 					{:else if message.type === 'tool_result'}
 						<!-- Skip standalone tool_result messages - they should be merged into tool_use -->

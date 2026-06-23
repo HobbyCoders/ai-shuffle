@@ -350,6 +350,45 @@ class TestToolHandling:
         assert msg.streaming is False
 
     @pytest.mark.asyncio
+    async def test_add_tool_result_stores_and_serializes_screenshot(self, streaming_session):
+        """A screenshot data URI must be stored on the tool_use message and
+        surfaced as ``toolScreenshot`` in the serialized payload."""
+        data_uri = "data:image/png;base64,iVBORscreenshot"
+        await streaming_session.add_tool_use(
+            "session-1",
+            tool_id="tool-shot",
+            name="mcp__claude-in-chrome__computer",
+            tool_input={"action": "screenshot"},
+        )
+        await streaming_session.add_tool_result(
+            "session-1",
+            tool_id="tool-shot",
+            result="took a screenshot",
+            is_error=False,
+            screenshot=data_uri,
+        )
+
+        session = streaming_session.get_session("session-1")
+        msg = session.messages[0]
+        assert msg.tool_screenshot == data_uri
+        assert msg.to_dict()["toolScreenshot"] == data_uri
+
+    @pytest.mark.asyncio
+    async def test_add_tool_result_without_screenshot_omits_field(self, streaming_session):
+        """Tools with no image result must not carry a toolScreenshot key."""
+        await streaming_session.add_tool_use(
+            "session-1", tool_id="tool-x", name="Read", tool_input={}
+        )
+        await streaming_session.add_tool_result(
+            "session-1", tool_id="tool-x", result="contents", is_error=False
+        )
+
+        session = streaming_session.get_session("session-1")
+        msg = session.messages[0]
+        assert msg.tool_screenshot is None
+        assert "toolScreenshot" not in msg.to_dict()
+
+    @pytest.mark.asyncio
     async def test_tool_result_error_status(self, streaming_session):
         """Should mark tool as error when is_error=True."""
         await streaming_session.add_tool_use(

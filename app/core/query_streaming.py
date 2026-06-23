@@ -20,18 +20,34 @@ DEFAULT_SDK_BUFFER_SIZE = settings.sdk_buffer_size
 
 def extract_mcp_image(content: Any) -> Optional[str]:
     """
-    Extract base64 image data from MCP-style content block lists.
+    Extract the first image from MCP-style content block lists as a data URI.
 
-    MCP tools can return content as a list of blocks:
-    [{"type": "text", "text": "..."}, {"type": "image", "data": "base64...", "mimeType": "image/jpeg"}]
+    MCP tools (e.g. the Claude-in-Chrome browser tool / computer-use) return
+    content as a list of blocks:
+        [{"type": "text", "text": "..."},
+         {"type": "image", "data": "<base64>", "mimeType": "image/png"}]
+    Blocks may arrive as plain dicts (MCP wire format / parsed JSONL) or as
+    Pydantic content objects (Anthropic SDK ImageContent), so both forms are
+    handled.
 
-    Returns the first image's base64 data, or None if no image found.
+    Returns a ready-to-render ``data:<mime>;base64,<data>`` URI for the first
+    image block, or None if the content has no image. The mime type defaults to
+    ``image/png`` when the block omits it.
     """
     if not isinstance(content, list):
         return None
     for block in content:
-        if isinstance(block, dict) and block.get("type") == "image":
-            return block.get("data")
+        # dict-based blocks (MCP wire format / parsed JSONL)
+        if isinstance(block, dict):
+            if block.get("type") == "image" and block.get("data"):
+                mime = block.get("mimeType") or block.get("mime_type") or "image/png"
+                return f"data:{mime};base64,{block['data']}"
+        # Pydantic content-block objects (e.g. ImageContent from the SDK)
+        elif getattr(block, "type", None) == "image":
+            data = getattr(block, "data", None)
+            if data:
+                mime = getattr(block, "mimeType", None) or "image/png"
+                return f"data:{mime};base64,{data}"
     return None
 
 

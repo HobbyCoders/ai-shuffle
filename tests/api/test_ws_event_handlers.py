@@ -327,6 +327,49 @@ class TestToolHandlers:
             chunk_data = mock_sync.broadcast_stream_chunk.call_args[1]["chunk_data"]
             assert chunk_data["tool_name"] == "Bash"
 
+    @pytest.mark.asyncio
+    async def test_tool_result_forwards_screenshot_to_store(self):
+        """A screenshot on the event is passed to the store but NOT duplicated
+        into the broadcast chunk (it's delivered via the /live poll)."""
+        ectx = make_ctx()
+        state = make_state(stream_started=True, current_tool_id="tool-1",
+                           current_tool_name="mcp__claude-in-chrome__computer")
+        data_uri = "data:image/png;base64,shotdata"
+        event = {
+            "type": "tool_result",
+            "tool_use_id": "tool-1",
+            "output": "screenshot taken",
+            "is_error": False,
+            "screenshot": data_uri,
+        }
+
+        with patch("app.api.ws_event_handlers.live_session_store") as mock_store, \
+             patch("app.api.ws_event_handlers.sync_engine") as mock_sync:
+            mock_store.add_tool_result = AsyncMock()
+            mock_sync.broadcast_stream_chunk = AsyncMock()
+
+            await handle_tool_result(event, ectx, state)
+
+            assert mock_store.add_tool_result.call_args[1]["screenshot"] == data_uri
+            chunk_data = mock_sync.broadcast_stream_chunk.call_args[1]["chunk_data"]
+            assert "screenshot" not in chunk_data
+
+    @pytest.mark.asyncio
+    async def test_tool_result_without_screenshot_passes_none(self):
+        """Non-image tool results forward screenshot=None to the store."""
+        ectx = make_ctx()
+        state = make_state(stream_started=True, current_tool_id="tool-1", current_tool_name="Read")
+        event = {"type": "tool_result", "tool_use_id": "tool-1", "output": "x", "is_error": False}
+
+        with patch("app.api.ws_event_handlers.live_session_store") as mock_store, \
+             patch("app.api.ws_event_handlers.sync_engine") as mock_sync:
+            mock_store.add_tool_result = AsyncMock()
+            mock_sync.broadcast_stream_chunk = AsyncMock()
+
+            await handle_tool_result(event, ectx, state)
+
+            assert mock_store.add_tool_result.call_args[1]["screenshot"] is None
+
 
 # ---------------------------------------------------------------------------
 # handle_stream_block_start
