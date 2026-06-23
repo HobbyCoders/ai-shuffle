@@ -149,12 +149,22 @@
 		refreshOpenNote();
 	}
 
+	// visibilitychange covers switching back to this tab within the same browser
+	// window — the window 'focus' event doesn't always fire for tab switches.
+	function handleVisibilityChange() {
+		if (document.visibilityState === 'visible') {
+			handleWindowFocus();
+		}
+	}
+
 	// Load data on mount
 	onMount(() => {
 		loadData();
 		window.addEventListener('focus', handleWindowFocus);
+		document.addEventListener('visibilitychange', handleVisibilityChange);
 		return () => {
 			window.removeEventListener('focus', handleWindowFocus);
+			document.removeEventListener('visibilitychange', handleVisibilityChange);
 			if (saveTimeout) {
 				clearTimeout(saveTimeout);
 			}
@@ -198,6 +208,11 @@
 		showPreview = false;
 		closeAutocomplete();
 		loadAttachments(note.id);
+		// The list comes from the non-reconciling endpoint, so it may hold stale
+		// content when the .md file was edited outside the app. Re-read through the
+		// single-note GET (which reconciles against disk) and adopt any newer
+		// content into the just-opened editor.
+		refreshOpenNote();
 	}
 
 	// Load attachments for a note
