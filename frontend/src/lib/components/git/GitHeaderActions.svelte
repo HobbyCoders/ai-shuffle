@@ -13,6 +13,7 @@
 	import { onDestroy } from 'svelte';
 	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, Check, Plus, Loader2, Lock, CheckCircle2, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket } from 'lucide-svelte';
 	import { git, diffStats, gitStatus, branches as branchStore, gitMode, changedFiles } from '$lib/stores/git.svelte';
+	import { checkoutBranchWithToast } from '$lib/stores/gitCheckoutAction';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import GitPromptPopover from './GitPromptPopover.svelte';
@@ -170,11 +171,8 @@
 		checkingOut = true;
 		closeDropdown('branch');
 		try {
-			await git.checkout(branchName);
-			// Refresh diff stats after checkout
-			await git.refreshDiffStats();
-		} catch (e) {
-			console.error('Failed to checkout branch:', e);
+			// Surface failures (incl. uncommitted-changes 409 → "Stash & switch").
+			await checkoutBranchWithToast(branchName, () => git.refreshDiffStats());
 		} finally {
 			checkingOut = false;
 		}

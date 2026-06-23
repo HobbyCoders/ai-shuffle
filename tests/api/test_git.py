@@ -962,6 +962,78 @@ class TestCheckout:
         assert response.status_code == 409
         assert "uncommitted changes" in response.json()["detail"]
 
+    def test_checkout_with_uncommitted_changes_auto_stash(
+        self, app, mock_database, mock_git_service, mock_settings, sample_project
+    ):
+        """Should stash uncommitted changes and checkout when auto_stash=True."""
+        mock_database.get_project.return_value = sample_project
+        mock_git_service.is_git_repo.return_value = True
+        mock_git_service.get_status.return_value = {
+            "is_clean": False,
+            "staged": [{"file": "test.py", "status": "M"}],
+            "modified": [],
+            "untracked": [],
+            "conflicts": []
+        }
+        mock_git_service.stash_push.return_value = True
+        mock_git_service.checkout.return_value = True
+
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
+                with patch("app.api.git.settings", mock_settings):
+                    with patch("app.api.git.get_api_user_from_request", return_value=None):
+                        client = TestClient(app)
+                        response = client.post(
+                            "/api/v1/projects/test-project-id/git/checkout",
+                            json={"ref": "feature/test", "auto_stash": True}
+                        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "Stashed changes" in data["message"]
+        # Must have stashed before checking out.
+        mock_git_service.stash_push.assert_called_once()
+        mock_git_service.checkout.assert_called_once()
+
+    def test_checkout_auto_stash_fails_to_stash(
+        self, app, mock_database, mock_git_service, mock_settings, sample_project
+    ):
+        """Should return 409 if auto_stash is requested but stashing fails."""
+        mock_database.get_project.return_value = sample_project
+        mock_git_service.is_git_repo.return_value = True
+        mock_git_service.get_status.return_value = {
+            "is_clean": False,
+            "staged": [{"file": "test.py", "status": "M"}],
+            "modified": [],
+            "untracked": [],
+            "conflicts": []
+        }
+        mock_git_service.stash_push.return_value = False
+
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
+                with patch("app.api.git.settings", mock_settings):
+                    with patch("app.api.git.get_api_user_from_request", return_value=None):
+                        client = TestClient(app)
+                        response = client.post(
+                            "/api/v1/projects/test-project-id/git/checkout",
+                            json={"ref": "feature/test", "auto_stash": True}
+                        )
+
+        assert response.status_code == 409
+        assert "stash" in response.json()["detail"].lower()
+        # Checkout must NOT have been attempted when the stash failed.
+        mock_git_service.checkout.assert_not_called()
+
     def test_checkout_nonexistent_ref(
         self, app, mock_database, mock_git_service, mock_settings, sample_project
     ):

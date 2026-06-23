@@ -17,6 +17,7 @@
 	import { GitBranch, ChevronDown, Check, Plus, Loader2, Lock, FolderClosed, Cloud } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { git, gitStatus, branches as branchStore, gitMode } from '$lib/stores/git.svelte';
+	import { checkoutBranchWithToast } from '$lib/stores/gitCheckoutAction';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 
 	interface Props {
@@ -104,10 +105,7 @@
 		checkingOut = true;
 		closeDropdown('branch');
 		try {
-			await git.checkout(branchName);
-			await git.refreshDiffStats();
-		} catch (e) {
-			console.error('Failed to checkout branch:', e);
+			await checkoutBranchWithToast(branchName, () => git.refreshDiffStats());
 		} finally {
 			checkingOut = false;
 		}

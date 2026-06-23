@@ -578,7 +578,9 @@ async def checkout_branch(
             detail="Project is not a git repository"
         )
 
-    # Check for uncommitted changes (untracked files don't block checkout)
+    # Check for uncommitted changes (untracked files don't block checkout).
+    # When auto_stash is requested, stash them before checking out instead of
+    # raising a 409 (mirrors the pull endpoint's auto_stash behavior).
     status_data = await run_git(git_service.get_status, working_dir)
     has_uncommitted = (
         status_data.get("staged") or
@@ -586,10 +588,19 @@ async def checkout_branch(
         status_data.get("conflicts")
     )
     if has_uncommitted:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Cannot checkout: you have uncommitted changes. Commit or stash them first."
+        if not body.auto_stash:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot checkout: you have uncommitted changes. Commit or stash them first."
+            )
+        stashed = await run_git(
+            git_service.stash_push, working_dir, f"auto-stash before checkout {body.ref}"
         )
+        if not stashed:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot checkout: failed to stash your uncommitted changes."
+            )
 
     success = await run_git(git_service.checkout, working_dir, body.ref)
 
@@ -612,9 +623,14 @@ async def checkout_branch(
     except Exception as e:
         logger.warning(f"Failed to broadcast branch change: {e}")
 
+    message = (
+        f"Stashed changes and checked out '{body.ref}'"
+        if (has_uncommitted and body.auto_stash)
+        else f"Checked out '{body.ref}'"
+    )
     return OperationResponse(
         success=True,
-        message=f"Checked out '{body.ref}'"
+        message=message
     )
 
 

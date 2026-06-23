@@ -556,13 +556,18 @@ export const git = {
 		}
 	},
 
-	async checkout(ref: string) {
-		if (!_state.projectId) return;
+	async checkout(ref: string, autoStash: boolean = false): Promise<{ success: boolean; message: string }> {
+		if (!_state.projectId) throw new Error('No project selected');
 
 		_update((s) => ({ ...s, loading: true, error: null }));
 
 		try {
-			await gitApi.checkout(_state.projectId, ref);
+			const response = await gitApi.checkout(
+				_state.projectId,
+				ref,
+				_state.worktreeId ?? undefined,
+				autoStash
+			);
 			// Abort any in-flight poll requests so the post-checkout refreshes
 			// below aren't blocked by stale _branchesInFlight / _statusInFlight guards.
 			// The poller can fire during the checkout API call, setting these flags
@@ -577,6 +582,7 @@ export const git = {
 			await git.refreshStatus();
 			await git.loadGraph();
 			_update((s) => ({ ...s, loading: false }));
+			return response;
 		} catch (e) {
 			const error = e as { detail?: string };
 			_update((s) => ({

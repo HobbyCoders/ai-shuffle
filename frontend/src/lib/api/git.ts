@@ -268,11 +268,14 @@ export async function deleteBranch(projectId: string, name: string): Promise<voi
 }
 
 /**
- * Checkout a branch or ref
+ * Checkout a branch or ref.
+ *
+ * When `autoStash` is true, the backend stashes uncommitted changes before
+ * checking out (instead of returning a 409). Mirrors the pull auto_stash flow.
  */
-export async function checkout(projectId: string, ref: string, worktreeId?: string): Promise<{ success: boolean; message: string }> {
+export async function checkout(projectId: string, ref: string, worktreeId?: string, autoStash: boolean = false): Promise<{ success: boolean; message: string }> {
     const params = worktreeId ? `?worktree_id=${encodeURIComponent(worktreeId)}` : '';
-    return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/checkout${params}`, { ref });
+    return api.post<{ success: boolean; message: string }>(`${BASE}/${projectId}/git/checkout${params}`, { ref, auto_stash: autoStash });
 }
 
 /**

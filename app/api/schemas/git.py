@@ -44,6 +44,7 @@ class CreateBranchRequest(BaseModel):
 class CheckoutRequest(BaseModel):
     """Request to checkout a branch"""
     ref: str = Field(..., min_length=1, max_length=255)
+    auto_stash: bool = Field(default=False, description="Auto-stash uncommitted changes before checkout instead of failing with 409")
 
 
 class CommitInfo(BaseModel):
