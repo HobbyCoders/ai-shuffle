@@ -13,8 +13,12 @@ These cover the two pure helpers behind the fix:
   ``tool_use_id`` so they land in the right inner group).
 """
 
+import pytest
+
 from claude_agent_sdk import (
     AssistantMessage,
+    TaskNotificationMessage,
+    TaskUpdatedMessage,
     ToolResultBlock,
     ToolUseBlock,
     TextBlock,
@@ -23,8 +27,11 @@ from claude_agent_sdk import (
 
 from app.core.query_engine import (
     _looks_like_subagent_launch_ack,
+    _record_task_message,
     _subagent_events_from_message,
+    _task_update_terminal_status,
 )
+from app.core.task_registry import task_registry
 
 
 class TestLooksLikeLaunchAck:
@@ -124,3 +131,125 @@ class TestSubagentEventsFromMessage:
         # to convert — must not raise.
         msg = UserMessage(content="plain string", parent_tool_use_id="tu-task")
         assert _subagent_events_from_message(msg) == []
+
+
+# ---------------------------------------------------------------------------
+# TaskUpdatedMessage terminal handling (the killed/stopped-ALONE gap)
+# ---------------------------------------------------------------------------
+#
+# Per the SDK docstring, a background task's terminal state can arrive ONLY as a
+# TaskUpdatedMessage (no following TaskNotificationMessage) — notably a TaskStop
+# reporting status="killed". Before this fix, _record_task_message ignored
+# TaskUpdatedMessage entirely, so a killed/stopped background task left the live
+# "Waiting for N background task(s)…" indicator stuck (registry task never
+# completed). These cover the pure status reader and the registry side-effect.
+
+def _updated(task_id, *, status=None, patch_status=None, uuid="uu-1"):
+    """Build a real SDK TaskUpdatedMessage (so isinstance checks match).
+
+    ``status`` sets the top-level attr; ``patch_status`` sets patch["status"].
+    The SDK populates changed fields in ``patch`` and may also surface the status
+    on the top-level attr, so we exercise both.
+    """
+    patch = {"end_time": 123}
+    if patch_status is not None:
+        patch["status"] = patch_status
+    return TaskUpdatedMessage(
+        subtype="task_updated",
+        data={},
+        task_id=task_id,
+        patch=patch,
+        status=status,
+        session_id="sess-1",
+        uuid=uuid,
+    )
+
+
+def _notif(task_id, *, status="completed", uuid="u-1", summary="s"):
+    return TaskNotificationMessage(
+        subtype="task_notification",
+        data={},
+        task_id=task_id,
+        status=status,
+        output_file="",
+        summary=summary,
+        uuid=uuid,
+        session_id="sess-1",
+        tool_use_id="tu-1",
+    )
+
+
+class TestTaskUpdateTerminalStatus:
+    def test_reads_top_level_status(self):
+        assert _task_update_terminal_status(_updated("t", status="killed")) == "killed"
+
+    def test_falls_back_to_patch_status(self):
+        assert (
+            _task_update_terminal_status(_updated("t", status=None, patch_status="completed"))
+            == "completed"
+        )
+
+    def test_non_terminal_returns_none(self):
+        assert _task_update_terminal_status(_updated("t", status="running")) is None
+        assert _task_update_terminal_status(_updated("t", status="pending")) is None
+        assert _task_update_terminal_status(_updated("t", status="paused")) is None
+
+    def test_no_status_anywhere_returns_none(self):
+        msg = _updated("t", status=None, patch_status=None)
+        assert _task_update_terminal_status(msg) is None
+
+
+class TestRecordTaskMessageUpdate:
+    @pytest.fixture(autouse=True)
+    def _clean_registry(self):
+        task_registry.reset_all()
+        yield
+        task_registry.reset_all()
+
+    def test_killed_alone_completes_registry_task(self):
+        # Task is running (started in the parent turn); a TaskStop kill arrives as
+        # a TaskUpdatedMessage ALONE — no notification will follow.
+        task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+        assert any(t["id"] == "task-1" for t in task_registry.get_active("sess-1"))
+
+        _record_task_message("sess-1", _updated("task-1", status="killed"))
+
+        # Indicator clears: the task is no longer "running".
+        assert task_registry.get_active("sess-1") == []
+        rec = task_registry.get_task("sess-1", "task-1")
+        assert rec["status"] == "killed"
+
+    def test_stopped_alone_completes_registry_task(self):
+        task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+        _record_task_message("sess-1", _updated("task-1", status="stopped"))
+        assert task_registry.get_active("sess-1") == []
+        assert task_registry.get_task("sess-1", "task-1")["status"] == "killed"
+
+    def test_non_terminal_update_leaves_task_running(self):
+        # A 'running' update must NOT clobber the task to terminal.
+        task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+        _record_task_message("sess-1", _updated("task-1", status="running"))
+        active_ids = {t["id"] for t in task_registry.get_active("sess-1")}
+        assert active_ids == {"task-1"}
+
+    def test_completed_update_then_notification_completes_once_cleanly(self):
+        # Normal completion: a TaskUpdatedMessage(completed) is followed by a
+        # TaskNotificationMessage(completed). Completing twice must be a harmless
+        # no-op (idempotent) — not an error, the final status is still terminal.
+        task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+
+        _record_task_message("sess-1", _updated("task-1", status="completed"))
+        assert task_registry.get_active("sess-1") == []
+        assert task_registry.get_task("sess-1", "task-1")["status"] == "completed"
+
+        # The notification still arrives — must not raise, status stays completed.
+        _record_task_message("sess-1", _notif("task-1", status="completed", summary="done"))
+        assert task_registry.get_active("sess-1") == []
+        rec = task_registry.get_task("sess-1", "task-1")
+        assert rec["status"] == "completed"
+        assert rec["summary"] == "done"
+
+    def test_update_for_unknown_task_is_noop(self):
+        # complete_task no-ops on an unknown task — defensive, never raises.
+        _record_task_message("sess-1", _updated("ghost", status="killed"))
+        assert task_registry.get_active("sess-1") == []

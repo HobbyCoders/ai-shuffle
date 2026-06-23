@@ -45,6 +45,17 @@ from app.api.ws_cleanup import (  # noqa: E402  (after logger by design)
 # TaskNotificationStatus literal — every TaskNotificationMessage is terminal).
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped"})
 
+# Statuses for which a TaskUpdatedMessage-ALONE should UNPARK the parent in the
+# drain pump. Deliberately ONLY the notification-less terminals: a TaskStop emits
+# "killed" (and "stopped" defensively) via a TaskUpdatedMessage with NO following
+# TaskNotificationMessage, so the pump must unpark on those. A normally completed/
+# failed task ALSO emits a TaskNotificationMessage (carrying the full result via
+# output_file); we let THAT drive the rich unpark and do NOT double-fire here.
+# (The registry indicator still clears for ALL terminal updates — that happens in
+# query_engine._record_task_message, independent of this set.) Dedicated set kept
+# distinct from ``_TERMINAL_TASK_STATUSES`` so the notification path is untouched.
+_UNPARK_ON_TASK_UPDATE_STATUSES = frozenset({"killed", "stopped"})
+
 
 # The note Claude Code attaches to every task-notification: it fires each time the
 # agent comes to rest with no live background children, and the user can resume it
@@ -312,7 +323,9 @@ async def _drain_notifications_impl(
         _record_task_message,
         _subagent_events_from_message,
         _task_notification_frame,
+        _task_update_terminal_status,
         TaskNotificationMessage,
+        TaskUpdatedMessage,
     )
     from app.api.ws_event_handlers import (
         dispatch_event,
@@ -371,6 +384,47 @@ async def _drain_notifications_impl(
                     await dispatch_event(_sub_ev, sub_ectx, sub_state)
             except Exception as _exc:
                 ctx.debug(logger, f"Drain pump: subagent re-dispatch failed: {_exc}")
+
+            # THE GAP: a killed/stopped (TaskStop) background task can terminate via
+            # a TaskUpdatedMessage ALONE — no following TaskNotificationMessage. The
+            # registry indicator already cleared above (_record_task_message handles
+            # ALL terminal updates), but without this branch the parent would hang
+            # silently. Deliver a minimal unpark so the parent acknowledges the stop.
+            # We trigger ONLY on killed/stopped (the notification-less terminals): a
+            # normally completed/failed task ALSO emits a TaskNotificationMessage
+            # carrying the full result, which drives the rich unpark below — so we
+            # must NOT also fire here for those, or the parent would unpark twice.
+            # A killed task has NO output_file/result, so we build a result-free
+            # pending payload; the unpark prompt builder tolerates an empty
+            # output_file (reads "" off disk).
+            if (
+                not isinstance(message, TaskNotificationMessage)
+                and isinstance(message, TaskUpdatedMessage)
+            ):
+                _u_status = _task_update_terminal_status(message)
+                if _u_status not in _UNPARK_ON_TASK_UPDATE_STATUSES:
+                    # Non-terminal, or a completed/failed update whose unpark is
+                    # owned by the forthcoming notification — registry already
+                    # cleared the indicator, nothing more to do here.
+                    continue
+                _u_task_id = getattr(message, "task_id", None)
+                _u_uuid = getattr(message, "uuid", None)
+                _u_signature = _u_uuid or f":{_u_status}"
+                if not task_registry.mark_notified(session_id, _u_task_id, _u_signature):
+                    # Already delivered (e.g. a notification raced in first) — keep draining.
+                    continue
+                pending = {
+                    "task_id": _u_task_id,
+                    "status": _u_status,
+                    "summary": None,
+                    "output_file": None,
+                    "uuid": _u_uuid,
+                    "usage": None,
+                    "tool_use_id": None,
+                }
+                # Fire per-completion: break out and deliver immediately so a later
+                # user message cancelling the pump can't lose this one.
+                break
 
             if not isinstance(message, TaskNotificationMessage):
                 continue

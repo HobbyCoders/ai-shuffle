@@ -54,6 +54,16 @@ except ImportError:
     class TaskNotificationMessage:
         pass
 try:
+    # TaskUpdatedMessage (SDK 0.2.x) can carry a task's terminal state WITHOUT a
+    # following TaskNotificationMessage — notably a TaskStop/killed background task
+    # (see the SDK docstring on TaskUpdatedMessage). We must handle its terminal
+    # status to clear the live "Waiting for N background task(s)…" indicator.
+    # Guarded so older SDK wheels stay importable.
+    from claude_agent_sdk import TaskUpdatedMessage
+except ImportError:
+    class TaskUpdatedMessage:  # safe stub for older SDKs (isinstance never matches a real msg)
+        pass
+try:
     from claude_agent_sdk import RateLimitEvent
 except ImportError:
     class RateLimitEvent:
@@ -150,6 +160,41 @@ _TASK_NOTIFICATION_STATUS_MAP = {
     "stopped": "killed",
 }
 
+# UNLIKE TaskNotificationMessage, a TaskUpdatedMessage is NOT always terminal — it
+# fires on every state transition (pending/running/paused/completed/failed/killed,
+# per the SDK's TaskUpdatedStatus literal). We act ONLY on its terminal statuses,
+# and map them onto the registry vocabulary. This is a DEDICATED set (not the
+# shared ``_TERMINAL_TASK_STATUSES`` in chat_ws_handler, whose values are the
+# *notification* literal) so adding the update-only "killed" value here cannot
+# alter the notification path's behaviour. "stopped" is included defensively even
+# though TaskUpdatedStatus uses "killed" for the TaskStop case.
+_TASK_UPDATE_TERMINAL_STATUS_MAP = {
+    "completed": "completed",
+    "failed": "error",
+    "killed": "killed",
+    "stopped": "killed",
+}
+
+
+def _task_update_terminal_status(message: Any) -> Optional[str]:
+    """Return the terminal status string from a ``TaskUpdatedMessage``, or ``None``.
+
+    Reads the status from the top-level ``.status`` attribute first, falling back
+    to ``patch["status"]`` (the SDK populates the changed fields in ``patch`` and
+    *may* also surface them on top-level attrs). Normalises an Enum to its value.
+    Returns ``None`` for non-terminal updates (pending/running/paused) so the
+    caller leaves a still-running task untouched.
+    """
+    raw = getattr(message, "status", None)
+    if raw is None:
+        patch = getattr(message, "patch", None)
+        if isinstance(patch, dict):
+            raw = patch.get("status")
+    if raw is None:
+        return None
+    raw = raw.value if hasattr(raw, "value") else str(raw)
+    return raw if raw in _TASK_UPDATE_TERMINAL_STATUS_MAP else None
+
 
 def _record_task_message(session_id: Optional[str], message: Any) -> None:
     """Feed an SDK task message into the in-memory ``task_registry``.
@@ -180,6 +225,21 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
             if summary is not None:
                 task_registry.update_task(session_id, message.task_id, summary=summary)
             task_registry.complete_task(session_id, message.task_id, mapped)
+        elif isinstance(message, TaskUpdatedMessage):
+            # THE GAP this fix closes: a killed/stopped (and sometimes completed)
+            # background task can report its terminal state HERE with NO following
+            # TaskNotificationMessage, which would otherwise strand the registry
+            # task "running" forever (frozen "Waiting for N background task(s)…"
+            # indicator). Only terminal updates flip it; non-terminal ones
+            # (pending/running/paused) are intentionally ignored so we never
+            # clobber a still-running task. complete_task is idempotent, so if the
+            # normal path later delivers a TaskNotificationMessage for the same
+            # task, completing again is a harmless no-op (no error, no dup event).
+            mapped = _TASK_UPDATE_TERMINAL_STATUS_MAP.get(
+                _task_update_terminal_status(message) or "", None
+            )
+            if mapped is not None:
+                task_registry.complete_task(session_id, message.task_id, mapped)
     except Exception:
         logger.debug("task_registry update for SDK task message failed", exc_info=True)
 

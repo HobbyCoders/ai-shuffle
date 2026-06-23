@@ -40,6 +40,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     TaskNotificationMessage,
     TaskStartedMessage,
+    TaskUpdatedMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -77,6 +78,19 @@ def _started(task_id, *, uuid="s-1", tool_use_id="tu-1"):
         uuid=uuid,
         session_id="sess-1",
         tool_use_id=tool_use_id,
+    )
+
+
+def _updated(task_id, *, status="killed", uuid="uu-1"):
+    """Build a real SDK TaskUpdatedMessage (so isinstance checks match)."""
+    return TaskUpdatedMessage(
+        subtype="task_updated",
+        data={},
+        task_id=task_id,
+        patch={"status": status, "end_time": 1},
+        status=status,
+        session_id="sess-1",
+        uuid=uuid,
     )
 
 
@@ -513,3 +527,109 @@ async def test_stopped_session_does_not_deliver_unpark():
     # complete_task still ran (indicator unfreezes), but no unpark while stopped.
     assert task_registry.get_active("sess-1") == []
     handler._deliver_unpark.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# 7. TaskUpdatedMessage-ALONE killed/stopped terminal (THE GAP this fix closes)
+#    A TaskStop'd background task reports "killed" via a TaskUpdatedMessage with
+#    NO following TaskNotificationMessage. The pump must clear the indicator AND
+#    unpark the parent so it acknowledges the stop instead of hanging forever.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pump_unparks_on_killed_task_updated_alone():
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    assert any(t["id"] == "task-1" for t in task_registry.get_active("sess-1"))
+
+    # ONLY a TaskUpdatedMessage(killed) arrives — no notification ever follows.
+    client = _FakeClient([_updated("task-1", status="killed", uuid="uu-1")], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # (a) indicator clears (registry task completed via _record_task_message).
+    assert task_registry.get_active("sess-1") == []
+    assert task_registry.get_task("sess-1", "task-1")["status"] == "killed"
+    # (b) the parent unparks with a result-free killed payload.
+    handler._deliver_unpark.assert_awaited_once()
+    pending = handler._deliver_unpark.await_args.kwargs["pending"]
+    assert len(pending) == 1
+    assert pending[0]["task_id"] == "task-1"
+    assert pending[0]["status"] == "killed"
+    assert pending[0]["output_file"] is None  # killed task has no result file
+    assert "sess-1" not in ws_cleanup._drain_pumps
+
+
+@pytest.mark.asyncio
+async def test_pump_stopped_status_update_alone_unparks():
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    client = _FakeClient([_updated("task-1", status="stopped", uuid="uu-2")], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    assert task_registry.get_active("sess-1") == []
+    handler._deliver_unpark.assert_awaited_once()
+    assert handler._deliver_unpark.await_args.kwargs["pending"][0]["status"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_pump_completed_update_then_notification_unparks_exactly_once():
+    """Regression: a NORMAL completion emits BOTH a TaskUpdatedMessage(completed)
+    and a TaskNotificationMessage(completed). The update must NOT fire its own
+    unpark (it carries no result) — the notification owns the rich unpark — so the
+    parent unparks EXACTLY once, and the indicator still clears."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+
+    client = _FakeClient(
+        [
+            _updated("task-1", status="completed", uuid="uu-1"),
+            _notif("task-1", status="completed", uuid="u-1", summary="done it"),
+        ],
+        hang=True,
+    )
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # Indicator cleared, and exactly ONE unpark — driven by the notification
+    # (carries the summary/result), not the result-free update.
+    assert task_registry.get_active("sess-1") == []
+    handler._deliver_unpark.assert_awaited_once()
+    pending = handler._deliver_unpark.await_args.kwargs["pending"]
+    assert len(pending) == 1
+    assert pending[0]["task_id"] == "task-1"
+    assert pending[0]["status"] == "completed"
+    assert pending[0]["summary"] == "done it"  # came from the notification frame
+
+
+@pytest.mark.asyncio
+async def test_pump_ignores_non_terminal_task_updated():
+    """A 'running'/'pending' TaskUpdatedMessage must neither complete the task nor
+    unpark — the pump keeps draining until a real terminal arrives."""
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+
+    # A non-terminal update, then the genuine killed terminal.
+    client = _FakeClient(
+        [
+            _updated("task-1", status="running", uuid="uu-0"),
+            _updated("task-1", status="killed", uuid="uu-1"),
+        ],
+        hang=True,
+    )
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # Only the killed terminal completed + unparked.
+    assert task_registry.get_active("sess-1") == []
+    handler._deliver_unpark.assert_awaited_once()
+    assert handler._deliver_unpark.await_args.kwargs["pending"][0]["status"] == "killed"
