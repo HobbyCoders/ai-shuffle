@@ -218,6 +218,9 @@ export interface AuthStatus {
 	is_admin: boolean;
 	setup_required: boolean;
 	claude_authenticated: boolean;
+	/** True only when the Claude OAuth token is present AND not expired.
+	 *  May be undefined on older backends — treat undefined as "unknown". */
+	claude_token_valid?: boolean;
 	github_authenticated: boolean;
 	onboarding_complete: boolean;
 	username: string | null;

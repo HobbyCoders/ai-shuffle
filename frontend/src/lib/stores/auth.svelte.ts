@@ -114,6 +114,12 @@ export const isAuthenticated = createDerived(() => _state.status?.authenticated 
 export const isAdmin = createDerived(() => _state.status?.is_admin ?? false);
 export const setupRequired = createDerived(() => _state.status?.setup_required ?? false);
 export const claudeAuthenticated = createDerived(() => _state.status?.claude_authenticated ?? false);
+// Honest token-validity: true only when the Claude OAuth token is present AND
+// not expired. Older backends omit the field — fall back to claude_authenticated
+// so existing installs don't show a spurious "expired" warning.
+export const claudeTokenValid = createDerived(
+	() => _state.status?.claude_token_valid ?? _state.status?.claude_authenticated ?? false
+);
 export const githubAuthenticated = createDerived(() => _state.status?.github_authenticated ?? false);
 export const onboardingComplete = createDerived(() => _state.status?.onboarding_complete ?? true);
 export const username = createDerived(() => _state.status?.username ?? null);

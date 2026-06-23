@@ -380,10 +380,65 @@ class AuthService:
         except Exception as e:
             logger.warning(f"Could not update settings.json: {e}")
 
+    def get_claude_token_status(self) -> Dict[str, Any]:
+        """
+        Inspect the on-disk Claude OAuth credential and report token validity.
+
+        Unlike ``is_claude_authenticated()`` (which returns True whenever a
+        non-empty credentials file exists, even if the token is expired), this
+        reports whether the access token is actually usable:
+
+            - token_valid: True only if a non-expired access token is present
+              (delegates to direct_oauth.has_valid_credentials()).
+            - expired:     True when credentials exist but the token is past
+              (or within the 5-min buffer of) its expiry.
+            - expires_at:  Unix timestamp in milliseconds, if known.
+            - has_refresh_token: whether a refresh token is present to renew it.
+
+        A credential with an empty refresh token AND an expired access token is
+        unrecoverable without a fresh login (force_reauth) — this is exactly the
+        "401 Invalid authentication credentials" failure mode.
+        """
+        token_valid = direct_oauth.has_valid_credentials()
+        expires_at: Optional[int] = None
+        has_refresh_token = False
+        expired = False
+
+        creds_file = self.config_dir / '.credentials.json'
+        try:
+            if creds_file.exists() and creds_file.stat().st_size > 0:
+                data = json.loads(creds_file.read_text())
+                oauth_data = data.get("claudeAiOauth", {}) or {}
+                expires_at = oauth_data.get("expiresAt")
+                has_refresh_token = bool(oauth_data.get("refreshToken"))
+                if not token_valid and oauth_data.get("accessToken"):
+                    # Credentials present but not valid → treat as expired/invalid.
+                    expired = True
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Could not read Claude credentials for token status: {e}")
+
+        return {
+            "token_valid": token_valid,
+            "expired": expired,
+            "expires_at": expires_at,
+            "has_refresh_token": has_refresh_token,
+        }
+
     def get_claude_auth_info(self) -> Dict[str, Any]:
-        """Get Claude CLI authentication info"""
+        """Get Claude CLI authentication info.
+
+        ``authenticated`` is kept as-is (file-exists semantics) for back-compat,
+        but the payload is enriched with honest token-validity fields so the UI
+        can distinguish "connected & valid" from "credentials present but
+        expired/invalid" and offer a re-authenticate path.
+        """
+        token_status = self.get_claude_token_status()
         return {
             "authenticated": self.is_claude_authenticated(),
+            "token_valid": token_status["token_valid"],
+            "expired": token_status["expired"],
+            "expires_at": token_status["expires_at"],
+            "has_refresh_token": token_status["has_refresh_token"],
             "config_dir": str(self.config_dir),
             "credentials_file": str(self.config_dir / '.credentials.json')
         }

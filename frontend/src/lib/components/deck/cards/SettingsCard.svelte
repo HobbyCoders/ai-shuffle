@@ -312,10 +312,15 @@
 	}
 
 	// OAuth functions
-	async function startClaudeOAuth() {
+	//
+	// `forceReauth` drives the recovery path: it deletes the existing (possibly
+	// expired / unrefreshable) credential server-side and starts a fresh OAuth
+	// flow, so a green-but-dead token can be replaced from the UI. The non-forced
+	// path short-circuits when already authenticated.
+	async function startClaudeOAuth(forceReauth = false) {
 		claudeLoginLoading = true;
 		try {
-			const result = await startClaudeLogin();
+			const result = await startClaudeLogin(forceReauth);
 			if (result.already_authenticated) {
 				await auth.checkAuth();
 				return;
@@ -323,6 +328,7 @@
 			if (result.success && result.oauth_url && result.state) {
 				claudeOAuthUrl = result.oauth_url;
 				claudeOAuthState = result.state;
+				claudeAuthCode = '';
 				window.open(result.oauth_url, '_blank', 'width=600,height=700');
 			} else {
 				error = result.error || result.message || 'Failed to start OAuth';
@@ -332,6 +338,11 @@
 		} finally {
 			claudeLoginLoading = false;
 		}
+	}
+
+	// Force a fresh login even if a credential already exists on disk.
+	function startClaudeReauth() {
+		return startClaudeOAuth(true);
 	}
 
 	async function completeClaudeOAuth() {
@@ -456,7 +467,8 @@
 							{githubToken}
 							onGithubTokenChange={(v) => githubToken = v}
 							{githubLoginLoading}
-							onStartClaudeOAuth={startClaudeOAuth}
+							onStartClaudeOAuth={() => startClaudeOAuth(false)}
+							onStartClaudeReauth={startClaudeReauth}
 							onCompleteClaudeOAuth={completeClaudeOAuth}
 							onConnectGithub={connectGithub}
 							onDisconnectGithub={disconnectGithub}
