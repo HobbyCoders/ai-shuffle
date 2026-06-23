@@ -310,8 +310,14 @@ async def _drain_notifications_impl(
     from app.core.task_registry import task_registry
     from app.core.query_engine import (
         _record_task_message,
+        _subagent_events_from_message,
         _task_notification_frame,
         TaskNotificationMessage,
+    )
+    from app.api.ws_event_handlers import (
+        dispatch_event,
+        EventContext,
+        MutableStreamState,
     )
 
     ctx = StreamingContext(
@@ -334,11 +340,37 @@ async def _drain_notifications_impl(
 
         ctx.debug(logger, "Drain pump: started reading pooled client between turns")
 
+        # Re-dispatch context for SLOW background sub-agent inner activity. The
+        # subagent node already lives in the live_session_store (created in-stream
+        # at launch); these handlers locate it by agent_id/tool_use_id, so the
+        # message_id here is immaterial (the FE renders agent_children via the
+        # /live park-poll, not the WS broadcast).
+        sub_ectx = EventContext(
+            ctx=ctx,
+            session_id=session_id,
+            message_id=ctx.message_id,
+            user_id=user_id,
+            project_id=project_id,
+            worktree_id=worktree_id,
+        )
+        sub_state = MutableStreamState()
+
         async for message in client.receive_messages():
             # Feed EVERY message into the registry — this is what unfreezes the
             # indicator (start/update/complete_task) for the terminal
             # notification even before we deliver the unpark.
             _record_task_message(session_id, message)
+
+            # Re-dispatch a SLOW background sub-agent's inner activity (assistant
+            # text + tool calls/results, identified by parent_tool_use_id) into the
+            # SAME subagent inner group it would have filled in-stream. Without this
+            # the node renders "completed / no activity recorded" because the parent
+            # turn's receive_response() already returned before these arrived.
+            try:
+                for _sub_ev in _subagent_events_from_message(message):
+                    await dispatch_event(_sub_ev, sub_ectx, sub_state)
+            except Exception as _exc:
+                ctx.debug(logger, f"Drain pump: subagent re-dispatch failed: {_exc}")
 
             if not isinstance(message, TaskNotificationMessage):
                 continue
@@ -347,6 +379,27 @@ async def _drain_notifications_impl(
             status = frame.get("status")
             if status not in _TERMINAL_TASK_STATUSES:
                 continue
+
+            # Complete the matching subagent node (keyed by tool_use_id). The node
+            # was kept RUNNING at launch (the launch-ACK no longer completes it), so
+            # the terminal notification is what marks it done/errored — mirrors the
+            # in-stream task_notification path for FAST sub-agents. Idempotent:
+            # no-ops if the node was already completed in-stream or isn't a subagent.
+            _notif_tool_use_id = frame.get("tool_use_id")
+            if _notif_tool_use_id:
+                try:
+                    await dispatch_event(
+                        {
+                            "type": "task_notification",
+                            "tool_use_id": _notif_tool_use_id,
+                            "status": status,
+                            "usage": frame.get("usage"),
+                        },
+                        sub_ectx,
+                        sub_state,
+                    )
+                except Exception as _exc:
+                    ctx.debug(logger, f"Drain pump: subagent completion dispatch failed: {_exc}")
 
             # Optional best-effort FE nudge; registry + poll already clear the
             # indicator, so failure here is harmless.

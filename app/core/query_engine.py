@@ -184,6 +184,76 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
         logger.debug("task_registry update for SDK task message failed", exc_info=True)
 
 
+# Phrases that identify a backgrounded sub-agent's launch-ACK ToolResult — the
+# immediate "Async agent launched successfully … working in the background …"
+# placeholder the SDK returns the moment a Task is started with
+# ``run_in_background``. This is a fallback to the ``run_in_background`` flag (the
+# primary signal) for the rare case the flag is absent; mirrors the content sniff
+# in ``live_session_store._is_background_ack`` / ``jsonl_parser``.
+_SUBAGENT_LAUNCH_ACK_PHRASES = (
+    "launched successfully",
+    "working in the background",
+    "running in the background",
+    "background with id",
+    "notified automatically",
+)
+
+
+def _looks_like_subagent_launch_ack(output: Any) -> bool:
+    """Best-effort sniff: does this Task ToolResult read like a background launch-ACK?"""
+    text = output if isinstance(output, str) else str(output or "")
+    low = text.lower()
+    return any(phrase in low for phrase in _SUBAGENT_LAUNCH_ACK_PHRASES)
+
+
+def _subagent_events_from_message(message: Any) -> List[Dict[str, Any]]:
+    """Convert a drained sub-agent inner message into ``subagent_*`` events.
+
+    A SLOW background sub-agent's inner activity (assistant text + tool calls)
+    arrives on the pooled SDK client AFTER the parent turn's ``receive_response``
+    has already returned, so the in-stream conversion in ``stream_to_websocket``
+    never sees it. The between-turns drain pump calls this to convert those
+    messages (identified by ``parent_tool_use_id``) into the SAME events the
+    in-stream path yields, so the subagent inner group fills in instead of
+    rendering "no activity recorded". Returns ``[]`` for anything that is not a
+    sub-agent inner message.
+    """
+    parent_tool_id = getattr(message, "parent_tool_use_id", None)
+    if not parent_tool_id:
+        return []
+    content = getattr(message, "content", None) or []
+    if isinstance(content, str):
+        return []
+
+    events: List[Dict[str, Any]] = []
+    for block in content:
+        if isinstance(block, TextBlock):
+            if block.text:
+                events.append({
+                    "type": "subagent_chunk",
+                    "agent_id": parent_tool_id,
+                    "content": block.text,
+                })
+        elif isinstance(block, ToolUseBlock):
+            events.append({
+                "type": "subagent_tool_use",
+                "agent_id": parent_tool_id,
+                "name": block.name,
+                "id": getattr(block, "id", None),
+                "input": block.input or {},
+            })
+        elif isinstance(block, ToolResultBlock):
+            events.append({
+                "type": "subagent_tool_result",
+                "agent_id": parent_tool_id,
+                "name": "unknown",
+                "tool_use_id": getattr(block, "tool_use_id", None),
+                "output": truncate_large_payload(block.content) if block.content else "",
+                "is_error": getattr(block, "is_error", False),
+            })
+    return events
+
+
 def _read_task_output_file(output_file: str, max_chars: int = 60_000) -> str:
     """Read a completed background task's full result off the local disk.
 
@@ -1828,7 +1898,16 @@ async def stream_to_websocket(
                             task_tool_uses[tool_id] = {
                                 "agent_type": agent_type,
                                 "description": tool_input.get("description", ""),
-                                "prompt": tool_input.get("prompt", "")
+                                "prompt": tool_input.get("prompt", ""),
+                                # Backgrounded sub-agents (run_in_background) return a
+                                # launch-ACK ToolResult immediately; that ack must NOT
+                                # complete the subagent node (the real result arrives
+                                # later via TaskNotificationMessage). Track the flag so
+                                # the ToolResult branches below can skip subagent_done.
+                                "run_in_background": bool(
+                                    tool_input.get("run_in_background")
+                                    or tool_input.get("runInBackground")
+                                ),
                             }
                             # Initialize children collector for this subagent
                             subagent_children[tool_id] = []
@@ -1910,16 +1989,22 @@ async def stream_to_websocket(
                         # Check if this is a result for a Task tool (subagent)
                         if tool_use_id in task_tool_uses:
                             task_info = task_tool_uses[tool_use_id]
-                            yield {
-                                "type": "subagent_done",
-                                "tool_id": tool_use_id,
-                                "agent_id": tool_use_id,  # Use tool_id as agent_id
-                                "agent_type": task_info.get("agent_type", "unknown"),
-                                "result": output,
-                                "is_error": getattr(block, 'is_error', False)
-                            }
-                            # Clean up tracking
-                            del task_tool_uses[tool_use_id]
+                            # A backgrounded sub-agent's FIRST ToolResult is only the
+                            # launch ACK, not its real output — keep the node RUNNING
+                            # (its inner activity streams via parent_tool_use_id and it
+                            # completes on the terminal TaskNotificationMessage). Only a
+                            # foreground Task/Agent's ToolResult is the final result.
+                            if not (task_info.get("run_in_background") or _looks_like_subagent_launch_ack(output)):
+                                yield {
+                                    "type": "subagent_done",
+                                    "tool_id": tool_use_id,
+                                    "agent_id": tool_use_id,  # Use tool_id as agent_id
+                                    "agent_type": task_info.get("agent_type", "unknown"),
+                                    "result": output,
+                                    "is_error": getattr(block, 'is_error', False)
+                                }
+                                # Clean up tracking
+                                del task_tool_uses[tool_use_id]
                         # Check if this tool result is from a subagent
                         elif parent_tool_id and parent_tool_id in task_tool_uses:
                             # Merge result into the matching child entry under the parent subagent
@@ -2123,16 +2208,24 @@ async def stream_to_websocket(
                         # Check if this is a result for a Task tool (subagent)
                         if tool_use_id in task_tool_uses:
                             task_info = task_tool_uses[tool_use_id]
-                            yield {
-                                "type": "subagent_done",
-                                "tool_id": tool_use_id,
-                                "agent_id": tool_use_id,  # Use tool_id as agent_id
-                                "agent_type": task_info.get("agent_type", "unknown"),
-                                "result": output,
-                                "is_error": block.is_error
-                            }
-                            # Clean up tracking
-                            del task_tool_uses[tool_use_id]
+                            # Backgrounded sub-agent: this ToolResult is only the launch
+                            # ACK ("Async agent launched successfully …"), not the real
+                            # result. Keep the node RUNNING — its inner activity streams
+                            # via parent_tool_use_id (in-stream and, after the parent
+                            # parks, via the drain pump) and it completes on the terminal
+                            # TaskNotificationMessage. Do NOT emit subagent_done / delete
+                            # tracking, or the node renders "completed / no activity".
+                            if not (task_info.get("run_in_background") or _looks_like_subagent_launch_ack(output)):
+                                yield {
+                                    "type": "subagent_done",
+                                    "tool_id": tool_use_id,
+                                    "agent_id": tool_use_id,  # Use tool_id as agent_id
+                                    "agent_type": task_info.get("agent_type", "unknown"),
+                                    "result": output,
+                                    "is_error": block.is_error
+                                }
+                                # Clean up tracking
+                                del task_tool_uses[tool_use_id]
                         # Check if this tool result is from a subagent
                         elif parent_tool_id and parent_tool_id in task_tool_uses:
                             # Merge result into the matching child entry under the parent subagent

@@ -36,7 +36,15 @@ import pytest
 import app.api.chat_ws_handler as cwh
 import app.api.ws_cleanup as ws_cleanup
 from app.core.task_registry import task_registry
-from claude_agent_sdk import TaskNotificationMessage, TaskStartedMessage
+from claude_agent_sdk import (
+    AssistantMessage,
+    TaskNotificationMessage,
+    TaskStartedMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +176,73 @@ async def test_pump_catches_slow_terminal_notification_and_unparks():
     assert pending[0]["uuid"] == "u-1"
     # Pump removed itself from the registry on exit.
     assert "sess-1" not in ws_cleanup._drain_pumps
+
+
+# ---------------------------------------------------------------------------
+# 1b. SLOW sub-agent inner activity — re-dispatched so the inner group fills in
+#     (assistant text + tool calls/results) instead of "no activity recorded",
+#     and the node is COMPLETED by the terminal notification.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pump_redispatches_subagent_inner_activity_and_completes():
+    task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+
+    # A SLOW background sub-agent's inner messages arrive on the pooled client
+    # AFTER the parent turn returned — each carries parent_tool_use_id="tu-1"
+    # (the spawning Task's tool_id = the subagent node's agent_id), then a
+    # terminal notification keyed to the same tool_use_id.
+    inner_text = AssistantMessage(
+        content=[TextBlock("STEP-1 done")], model="claude", parent_tool_use_id="tu-1"
+    )
+    inner_tool = AssistantMessage(
+        content=[ToolUseBlock(id="b1", name="Bash", input={"command": "echo hi"})],
+        model="claude",
+        parent_tool_use_id="tu-1",
+    )
+    inner_result = UserMessage(
+        content=[ToolResultBlock(tool_use_id="b1", content="hi\n", is_error=False)],
+        parent_tool_use_id="tu-1",
+    )
+    notif = _notif("task-1", uuid="u-1", tool_use_id="tu-1", summary="done")
+
+    client = _FakeClient([inner_text, inner_tool, inner_result, notif], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    captured = []
+
+    async def _capture(event, ectx, st):
+        captured.append(event)
+
+    with _patch_pool(state), patch(
+        "app.api.ws_event_handlers.dispatch_event",
+        new=AsyncMock(side_effect=_capture),
+    ):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    by_type = {e["type"]: e for e in captured}
+    # (a) inner activity was re-dispatched into the SAME inner group (agent_id="tu-1").
+    assert "subagent_chunk" in by_type
+    assert by_type["subagent_chunk"]["agent_id"] == "tu-1"
+    assert by_type["subagent_chunk"]["content"] == "STEP-1 done"
+    assert "subagent_tool_use" in by_type
+    assert by_type["subagent_tool_use"]["name"] == "Bash"
+    assert by_type["subagent_tool_use"]["id"] == "b1"
+    assert "subagent_tool_result" in by_type
+    assert by_type["subagent_tool_result"]["tool_use_id"] == "b1"
+    assert "hi" in by_type["subagent_tool_result"]["output"]
+    # (b) the terminal notification completed the node (keyed by tool_use_id).
+    assert "task_notification" in by_type
+    assert by_type["task_notification"]["tool_use_id"] == "tu-1"
+    assert by_type["task_notification"]["status"] == "completed"
+    # Order: inner activity precedes completion.
+    assert [e["type"] for e in captured].index("subagent_chunk") < [
+        e["type"] for e in captured
+    ].index("task_notification")
+    # (c) the registry still completed + the unpark still fired (regression guard).
+    assert task_registry.get_active("sess-1") == []
+    handler._deliver_unpark.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
