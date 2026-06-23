@@ -27,6 +27,9 @@ export interface ChatPreferences {
 	// Tool results
 	toolsStartExpanded: boolean;        // Initial collapse state for tool results
 
+	// Background tasks strip
+	activeTasksCollapsed: boolean;      // Whether the active-tasks strip is minimized
+
 	// Todo list
 	todosStartExpanded: boolean;        // Initial collapse state for todo list
 
@@ -43,6 +46,7 @@ const DEFAULT_PREFERENCES: ChatPreferences = {
 	thinkingStartExpanded: false,       // Collapsed by default (current behavior)
 	showThinkingSummary: true,          // Show summary when collapsed by default
 	toolsStartExpanded: false,          // Collapsed by default (current behavior)
+	activeTasksCollapsed: false,        // Expanded by default
 	todosStartExpanded: true,           // Expanded by default (current behavior)
 	autoScrollOnNewMessage: true,
 	showMessageTimestamps: false,       // Off by default - cleaner look
@@ -311,6 +315,7 @@ export const chatPreferences = {
 	setThinkingStartExpanded: (value: boolean) => updatePreference('thinkingStartExpanded', value),
 	setShowThinkingSummary: (value: boolean) => updatePreference('showThinkingSummary', value),
 	setToolsStartExpanded: (value: boolean) => updatePreference('toolsStartExpanded', value),
+	setActiveTasksCollapsed: (value: boolean) => updatePreference('activeTasksCollapsed', value),
 	setTodosStartExpanded: (value: boolean) => updatePreference('todosStartExpanded', value),
 	setAutoScrollOnNewMessage: (value: boolean) => updatePreference('autoScrollOnNewMessage', value),
 	setShowMessageTimestamps: (value: boolean) => updatePreference('showMessageTimestamps', value),

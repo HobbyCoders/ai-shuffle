@@ -11,12 +11,14 @@
 	 * Per task: a kind badge (agent/shell), the subject, the status, the elapsed
 	 * time since `startedAt` (ticking live), and an "x" to stop it.
 	 *
-	 * The header carries a collapse toggle: minimized, the whole panel shrinks to
-	 * a single "Running N tasks" line. The collapsed preference persists across
-	 * turns (and reloads) so it isn't reset every time tasks reappear.
+	 * Clicking anywhere on the header toggles minimized: the whole panel shrinks
+	 * to a single "Running N tasks" line. The collapsed state is a chat preference
+	 * (localStorage + cross-device server sync, same store the tool-result blocks
+	 * use) so it persists across turns, reloads, and devices.
 	 */
 	import { onDestroy } from 'svelte';
 	import type { Task } from '$lib/stores/types';
+	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 
 	interface Props {
 		tasks: Task[];
@@ -26,25 +28,13 @@
 
 	let { tasks, onStop }: Props = $props();
 
-	const COLLAPSE_KEY = 'aihub.activeTasks.collapsed';
-
-	function loadCollapsed(): boolean {
-		try {
-			return localStorage.getItem(COLLAPSE_KEY) === '1';
-		} catch {
-			return false;
-		}
-	}
-
-	let collapsed = $state(loadCollapsed());
+	// Persisted via the chat-preferences store (instant localStorage + debounced
+	// server sync), so the minimized state survives reloads and follows the user
+	// across devices.
+	const collapsed = $derived(chatPreferences.current.activeTasksCollapsed);
 
 	function toggleCollapsed() {
-		collapsed = !collapsed;
-		try {
-			localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0');
-		} catch {
-			/* private mode / SSR — best-effort only */
-		}
+		chatPreferences.setActiveTasksCollapsed(!collapsed);
 	}
 
 	// Tasks the user has asked to stop — disable + dim their row until the next
@@ -107,7 +97,14 @@
 {#if tasks.length > 0}
 	<div class="active-tasks">
 		<div class="active-tasks-inner">
-			<div class="active-tasks-header">
+			<button
+				type="button"
+				class="active-tasks-header"
+				onclick={toggleCollapsed}
+				aria-expanded={!collapsed}
+				title={collapsed ? 'Expand background tasks' : 'Minimize background tasks'}
+				aria-label={collapsed ? 'Expand background tasks' : 'Minimize background tasks'}
+			>
 				<svg class="w-3 h-3 tasks-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
 				</svg>
@@ -118,19 +115,10 @@
 						Background ({tasks.length})
 					{/if}
 				</span>
-				<button
-					type="button"
-					class="collapse-btn"
-					onclick={toggleCollapsed}
-					aria-expanded={!collapsed}
-					title={collapsed ? 'Expand background tasks' : 'Minimize background tasks'}
-					aria-label={collapsed ? 'Expand background tasks' : 'Minimize background tasks'}
-				>
-					<svg class="chevron" class:is-collapsed={collapsed} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
-					</svg>
-				</button>
-			</div>
+				<svg class="chevron" class:is-collapsed={collapsed} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
+				</svg>
+			</button>
 			{#if !collapsed}
 				<div class="task-rows">
 					{#each tasks as task (task.id)}
@@ -197,12 +185,28 @@
 		gap: 0.375rem;
 	}
 
+	/* The whole header is the collapse toggle — click anywhere on it. */
 	.active-tasks-header {
 		display: flex;
 		align-items: center;
 		gap: 0.375rem;
+		width: 100%;
+		padding: 0.1875rem 0.25rem;
+		margin: -0.1875rem -0.25rem;
+		border: none;
+		background: transparent;
+		font: inherit;
 		font-size: 0.6875rem;
 		color: var(--muted-foreground);
+		text-align: left;
+		border-radius: 0.375rem;
+		cursor: pointer;
+		transition: color 0.12s ease, background 0.12s ease;
+	}
+
+	.active-tasks-header:hover {
+		color: var(--foreground);
+		background: var(--muted);
 	}
 
 	.tasks-icon {
@@ -214,28 +218,10 @@
 		font-weight: 500;
 	}
 
-	.collapse-btn {
-		margin-left: auto;
-		flex-shrink: 0;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		padding: 0.125rem;
-		border: none;
-		background: transparent;
-		color: var(--muted-foreground);
-		border-radius: 0.25rem;
-		cursor: pointer;
-		transition: color 0.12s ease, background 0.12s ease;
-	}
-
-	.collapse-btn:hover {
-		color: var(--foreground);
-		background: var(--muted);
-	}
-
 	/* Expanded → chevron points up (collapse). Collapsed → points down (expand). */
 	.chevron {
+		margin-left: auto;
+		flex-shrink: 0;
 		width: 0.875rem;
 		height: 0.875rem;
 		transform: rotate(180deg);

@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
 import ActiveTasks from './ActiveTasks.svelte';
 import type { Task } from '$lib/stores/types';
+import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 
 function makeTask(over: Partial<Task> = {}): Task {
 	return {
@@ -24,6 +25,9 @@ function makeTask(over: Partial<Task> = {}): Task {
 
 beforeEach(() => {
 	localStorage.clear();
+	// The collapse state lives in the shared chat-preferences singleton; reset it
+	// so persistence from one test doesn't leak into the next.
+	chatPreferences.reset();
 });
 
 afterEach(() => {
@@ -103,16 +107,28 @@ describe('ActiveTasks', () => {
 		expect(screen.getByText('Task A')).toBeTruthy();
 	});
 
-	it('persists the collapsed preference to localStorage', async () => {
+	it('persists the collapsed state to the chat-preferences store', async () => {
 		render(ActiveTasks, { props: { tasks: [makeTask()] } });
 		await fireEvent.click(screen.getByRole('button', { name: /minimize background tasks/i }));
-		expect(localStorage.getItem('aihub.activeTasks.collapsed')).toBe('1');
+		expect(chatPreferences.current.activeTasksCollapsed).toBe(true);
 	});
 
 	it('starts collapsed when the persisted preference says so', () => {
-		localStorage.setItem('aihub.activeTasks.collapsed', '1');
+		chatPreferences.setActiveTasksCollapsed(true);
 		render(ActiveTasks, { props: { tasks: [makeTask({ subject: 'Task A' })] } });
 
+		expect(screen.getByText('Running 1 task')).toBeTruthy();
+		expect(screen.queryByText('Task A')).toBeNull();
+	});
+
+	it('keeps the collapsed state across a remount (persistence round-trip)', async () => {
+		const { unmount } = render(ActiveTasks, { props: { tasks: [makeTask({ subject: 'Task A' })] } });
+		await fireEvent.click(screen.getByRole('button', { name: /minimize background tasks/i }));
+		expect(screen.getByText('Running 1 task')).toBeTruthy();
+		unmount();
+
+		// A fresh instance (e.g. after a reload / new turn) reads the persisted state.
+		render(ActiveTasks, { props: { tasks: [makeTask({ subject: 'Task A' })] } });
 		expect(screen.getByText('Running 1 task')).toBeTruthy();
 		expect(screen.queryByText('Task A')).toBeNull();
 	});
