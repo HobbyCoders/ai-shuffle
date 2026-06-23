@@ -253,7 +253,9 @@
 		padding: 2px 8px; border-radius: 6px; white-space: nowrap;
 	}
 
-	.bsl-actions { display: flex; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity 120ms ease; }
+	/* Fixed width reserves space for the max action count (2: revert/delete + export),
+	   so the meta column stays aligned across rows regardless of which buttons a row shows. */
+	.bsl-actions { display: flex; justify-content: flex-end; gap: 2px; flex-shrink: 0; width: 58px; opacity: 0; transition: opacity 120ms ease; }
 	.bsl-row:hover .bsl-actions, .bsl-row:focus-within .bsl-actions { opacity: 1; }
 	.bsl-act {
 		display: grid; place-items: center; width: 28px; height: 28px;
