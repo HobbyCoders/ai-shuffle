@@ -744,6 +744,14 @@ async def stream_query(
         existing_state = None
 
     if not reusing_client:
+        # Admission backpressure: refuse a NEW session if the box is at its
+        # process/RAM/pool ceiling, rather than killing in-flight work later.
+        refusal = pool.admission_check()
+        if refusal is not None:
+            logger.warning(f"[Admission] Refusing new session {session_id}: {refusal}")
+            yield {"type": "error", "message": f"Server is at capacity — {refusal}. Please retry shortly."}
+            return
+
         # Evict LRU if pool is full
         await pool.evict_if_needed()
 
@@ -1487,6 +1495,14 @@ async def stream_to_websocket(
             if hooks_config:
                 options.hooks = hooks_config
                 logger.debug(f"[WS] Hooks configured: {list(hooks_config.keys())}")
+
+        # Admission backpressure: refuse a NEW session if the box is at its
+        # process/RAM/pool ceiling, rather than killing in-flight work later.
+        refusal = pool.admission_check()
+        if refusal is not None:
+            logger.warning(f"[Admission] Refusing new session {session_id}: {refusal}")
+            yield {"type": "error", "message": f"Server is at capacity — {refusal}. Please retry shortly."}
+            return
 
         # Evict LRU session if pool is full
         evicted = await pool.evict_if_needed()

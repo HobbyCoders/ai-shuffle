@@ -329,10 +329,14 @@ def _check_warnings(metrics: dict) -> list[str]:
     if pool_dead > 0:
         warnings.append(f"Session pool has {pool_dead} dead subprocess(es) - eviction will clean these")
 
-    # Stuck streaming sessions (streaming for too long)
+    # Long-streaming sessions (OBSERVE-ONLY — the monitor does NOT evict these;
+    # a long stream may be a legitimately busy multi-subagent orchestration).
     max_stream_secs = metrics.get("pool_max_streaming_seconds", 0)
     if max_stream_secs > 600:  # 10 minutes
-        warnings.append(f"Longest streaming session: {max_stream_secs:.0f}s - may be stuck")
+        warnings.append(
+            f"Longest streaming session: {max_stream_secs:.0f}s "
+            f"(observe-only — not evicted; may be a long orchestration)"
+        )
 
     # RSS growth rate (sustained memory growth indicates leak)
     rss_growth = metrics.get("rss_growth_mb_per_hour", 0)
@@ -365,9 +369,12 @@ def _check_warnings(metrics: dict) -> list[str]:
 async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reason: str) -> None:
     """Clean up live_session_store and sync_engine state for evicted pool sessions.
 
-    When session pool evicts a session (dead subprocess, stuck streaming, idle),
-    the corresponding in-memory state in LiveSessionStore and SyncEngine must
-    also be cleaned. Without this, message buffers and streaming flags accumulate.
+    When session pool evicts a session (dead subprocess or idle), the
+    corresponding in-memory state in LiveSessionStore and SyncEngine must also
+    be cleaned. Without this, message buffers and streaming flags accumulate.
+
+    NOTE: this is NEVER called for live/streaming sessions — the monitor no
+    longer force-evicts streaming sessions on a timer (see report_long_streaming).
     """
     for session_id in session_ids:
         try:
@@ -461,23 +468,45 @@ async def _periodic_cleanup() -> dict:
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to evict idle pool sessions: {e}")
 
-    # Evict sessions stuck in streaming state for too long (30 minutes)
-    # This is the critical safety net for the main leak: SDK subprocess hangs →
-    # is_streaming stays True → evict_idle/evict_dead skip it → memory leak
+    # OBSERVE-ONLY: report (do NOT evict) sessions streaming for a long time.
+    #
+    # We deliberately do NOT force-terminate live/streaming sessions on a timer.
+    # Elapsed streaming time cannot distinguish a legitimately busy long
+    # orchestration (e.g. one orchestrator driving 30+ subagents overnight) from
+    # a genuinely hung session. The previous timer-based eviction SIGTERM'd a
+    # healthy orchestrator mid-run in production: it killed the SDK subprocess,
+    # discarded the 161-message in-memory transcript, truncated the Postgres
+    # mirror, and orphaned the subagent child trees — the watchdog created the
+    # very leak it existed to detect. The SDK owns query lifecycle and is the
+    # ONLY thing that ends a live session (completion or user interrupt);
+    # genuinely dead subprocesses are handled by evict_dead() + the dead-tree
+    # reaper below. So here we only emit a warning observation.
     try:
         from app.core.session_pool import get_session_pool, _session_pool
         if _session_pool is not None:
             pool = get_session_pool()
-            stuck = await pool.evict_stuck_streaming(max_streaming_seconds=1800)
-            if stuck:
-                cleaned["stuck_streaming_sessions"] = len(stuck)
+            long_streaming = pool.report_long_streaming(warn_after_seconds=600)
+            for session_id, secs in long_streaming:
                 logger.warning(
-                    f"{_PREFIX} Force-evicted {len(stuck)} stuck streaming session(s): {stuck}"
+                    f"{_PREFIX} session {session_id} streaming for {secs:.0f}s "
+                    f"(observe-only — NOT evicting; SDK owns lifecycle)"
                 )
-                # Clean up live session store and sync engine for stuck sessions
-                await _cleanup_evicted_sessions(stuck, cleaned, "stuck")
+            if long_streaming:
+                cleaned["long_streaming_observed"] = len(long_streaming)
     except Exception as e:
-        logger.debug(f"{_PREFIX} Failed to evict stuck streaming sessions: {e}")
+        logger.debug(f"{_PREFIX} Failed to report long-streaming sessions: {e}")
+
+    # Reap PROVABLY-DEAD process trees: orphaned descendants (e.g. subagent node
+    # CLIs) of SDK subprocesses that have ALREADY terminated. This is process
+    # hygiene only — it operates exclusively on recorded descendant snapshots of
+    # subprocesses that already exited and never signals a live session.
+    try:
+        from app.core.session_pool import reap_terminated_process_trees
+        reaped = reap_terminated_process_trees()
+        if reaped:
+            cleaned["reaped_orphan_processes"] = reaped
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Failed to reap terminated process trees: {e}")
 
     # Clean up done tasks from _pending_cleanup_tasks
     try:

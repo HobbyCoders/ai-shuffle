@@ -138,6 +138,18 @@ class Settings(BaseSettings):
     # Each idle subprocess uses ~100MB RAM, so 3 sessions ≈ 300MB worst case.
     sdk_session_pool_size: int = 3
 
+    # Admission backpressure for the subagent fan-out. A single orchestrator
+    # session can spawn dozens of subagent node subprocesses; rather than letting
+    # a destructive watchdog reap in-flight work, we refuse to admit NEW top-level
+    # sessions once the box is at a process/RAM ceiling.
+    #   - sdk_max_child_processes: refuse new sessions when the server already has
+    #     this many descendant processes (0 = disabled). Tune to the box.
+    #   - sdk_admission_rss_mb: refuse new sessions when tree RSS exceeds this many
+    #     MB (0 = disabled).
+    # These only gate ADMISSION of new sessions; they never terminate live work.
+    sdk_max_child_processes: int = 0
+    sdk_admission_rss_mb: int = 0
+
     # SDK 0.1.65 SessionStore adapter (Postgres) — controls whether we mirror
     # transcripts into Postgres and, eventually, treat Postgres as the single
     # source of truth instead of reading JSONL files from ~/.claude/projects.
