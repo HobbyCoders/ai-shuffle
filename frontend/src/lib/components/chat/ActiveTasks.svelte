@@ -8,17 +8,61 @@
 	 * what's pending. Reads `activeTasks` from the active session — the poller
 	 * keeps it fresh on every /live poll. Renders nothing when there are no tasks.
 	 *
-	 * Per task: a kind badge (agent/shell), the subject, the status, and the
-	 * elapsed time since `startedAt` (ticking live).
+	 * Per task: a kind badge (agent/shell), the subject, the status, the elapsed
+	 * time since `startedAt` (ticking live), and an "x" to stop it.
+	 *
+	 * The header carries a collapse toggle: minimized, the whole panel shrinks to
+	 * a single "Running N tasks" line. The collapsed preference persists across
+	 * turns (and reloads) so it isn't reset every time tasks reappear.
 	 */
 	import { onDestroy } from 'svelte';
 	import type { Task } from '$lib/stores/types';
 
 	interface Props {
 		tasks: Task[];
+		/** Stop one task by id. The task drops off the next /live poll once stopped. */
+		onStop?: (taskId: string) => void | Promise<void>;
 	}
 
-	let { tasks }: Props = $props();
+	let { tasks, onStop }: Props = $props();
+
+	const COLLAPSE_KEY = 'aihub.activeTasks.collapsed';
+
+	function loadCollapsed(): boolean {
+		try {
+			return localStorage.getItem(COLLAPSE_KEY) === '1';
+		} catch {
+			return false;
+		}
+	}
+
+	let collapsed = $state(loadCollapsed());
+
+	function toggleCollapsed() {
+		collapsed = !collapsed;
+		try {
+			localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0');
+		} catch {
+			/* private mode / SSR — best-effort only */
+		}
+	}
+
+	// Tasks the user has asked to stop — disable + dim their row until the next
+	// poll removes them. Keyed by task id.
+	let stopping = $state<Record<string, boolean>>({});
+
+	async function stopTask(id: string) {
+		if (stopping[id]) return;
+		stopping = { ...stopping, [id]: true };
+		try {
+			await onStop?.(id);
+		} catch {
+			// Stop failed (e.g. task already gone) — re-enable so the user can retry.
+			const next = { ...stopping };
+			delete next[id];
+			stopping = next;
+		}
+	}
 
 	// Live clock so the elapsed time ticks without a new poll. Updated once per
 	// second; only mounts a timer when there's at least one task to show.
@@ -26,7 +70,7 @@
 	let timer: ReturnType<typeof setInterval> | null = null;
 
 	$effect(() => {
-		if (tasks.length > 0) {
+		if (tasks.length > 0 && !collapsed) {
 			if (timer === null) {
 				now = Date.now();
 				timer = setInterval(() => { now = Date.now(); }, 1000);
@@ -67,25 +111,64 @@
 				<svg class="w-3 h-3 tasks-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
 					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
 				</svg>
-				<span class="tasks-label">Background ({tasks.length})</span>
+				<span class="tasks-label">
+					{#if collapsed}
+						Running {tasks.length} {tasks.length === 1 ? 'task' : 'tasks'}
+					{:else}
+						Background ({tasks.length})
+					{/if}
+				</span>
+				<button
+					type="button"
+					class="collapse-btn"
+					onclick={toggleCollapsed}
+					aria-expanded={!collapsed}
+					title={collapsed ? 'Expand background tasks' : 'Minimize background tasks'}
+					aria-label={collapsed ? 'Expand background tasks' : 'Minimize background tasks'}
+				>
+					<svg class="chevron" class:is-collapsed={collapsed} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
+					</svg>
+				</button>
 			</div>
-			<div class="task-rows">
-				{#each tasks as task (task.id)}
-					<div class="task-row" class:is-error={task.status === 'error'} class:is-killed={task.status === 'killed'}>
-						<span class="task-badge" class:badge-agent={task.kind === 'agent'} class:badge-shell={task.kind === 'shell'}>
-							{kindLabel(task.kind)}
-						</span>
-						<span class="task-subject" title={task.summary ?? task.subject}>
-							{task.subject || task.summary || 'Task'}
-						</span>
-						<span class="task-status" data-status={task.status}>{task.status}</span>
-						{#if task.startedAt}
-							{@const e = elapsed(task.startedAt, now)}
-							{#if e}<span class="task-elapsed">{e}</span>{/if}
-						{/if}
-					</div>
-				{/each}
-			</div>
+			{#if !collapsed}
+				<div class="task-rows">
+					{#each tasks as task (task.id)}
+						<div
+							class="task-row"
+							class:is-error={task.status === 'error'}
+							class:is-killed={task.status === 'killed'}
+							class:is-stopping={stopping[task.id]}
+						>
+							<span class="task-badge" class:badge-agent={task.kind === 'agent'} class:badge-shell={task.kind === 'shell'}>
+								{kindLabel(task.kind)}
+							</span>
+							<span class="task-subject" title={task.summary ?? task.subject}>
+								{task.subject || task.summary || 'Task'}
+							</span>
+							<span class="task-status" data-status={task.status}>{task.status}</span>
+							{#if task.startedAt}
+								{@const e = elapsed(task.startedAt, now)}
+								{#if e}<span class="task-elapsed">{e}</span>{/if}
+							{/if}
+							{#if onStop}
+								<button
+									type="button"
+									class="stop-btn"
+									disabled={stopping[task.id]}
+									onclick={() => stopTask(task.id)}
+									title="Stop task"
+									aria-label="Stop task {task.subject || task.summary || ''}"
+								>
+									<svg class="stop-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 6l12 12M18 6L6 18" />
+									</svg>
+								</button>
+							{/if}
+						</div>
+					{/each}
+				</div>
+			{/if}
 		</div>
 	</div>
 {/if}
@@ -131,6 +214,38 @@
 		font-weight: 500;
 	}
 
+	.collapse-btn {
+		margin-left: auto;
+		flex-shrink: 0;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.125rem;
+		border: none;
+		background: transparent;
+		color: var(--muted-foreground);
+		border-radius: 0.25rem;
+		cursor: pointer;
+		transition: color 0.12s ease, background 0.12s ease;
+	}
+
+	.collapse-btn:hover {
+		color: var(--foreground);
+		background: var(--muted);
+	}
+
+	/* Expanded → chevron points up (collapse). Collapsed → points down (expand). */
+	.chevron {
+		width: 0.875rem;
+		height: 0.875rem;
+		transform: rotate(180deg);
+		transition: transform 0.15s ease;
+	}
+
+	.chevron.is-collapsed {
+		transform: rotate(0deg);
+	}
+
 	.task-rows {
 		display: flex;
 		flex-direction: column;
@@ -144,6 +259,10 @@
 		font-size: 0.6875rem;
 		color: var(--foreground);
 		min-width: 0;
+	}
+
+	.task-row.is-stopping {
+		opacity: 0.5;
 	}
 
 	.task-badge {
@@ -195,5 +314,34 @@
 		font-variant-numeric: tabular-nums;
 		font-size: 0.625rem;
 		color: var(--muted-foreground);
+	}
+
+	.stop-btn {
+		flex-shrink: 0;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.125rem;
+		border: none;
+		background: transparent;
+		color: var(--muted-foreground);
+		border-radius: 0.25rem;
+		cursor: pointer;
+		transition: color 0.12s ease, background 0.12s ease;
+	}
+
+	.stop-btn:hover:not(:disabled) {
+		color: var(--destructive);
+		background: color-mix(in srgb, var(--destructive) 12%, transparent);
+	}
+
+	.stop-btn:disabled {
+		cursor: default;
+		opacity: 0.5;
+	}
+
+	.stop-icon {
+		width: 0.8125rem;
+		height: 0.8125rem;
 	}
 </style>

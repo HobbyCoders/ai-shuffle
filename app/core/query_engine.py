@@ -136,6 +136,7 @@ from app.core.query_background import (  # noqa: F401 — re-exports
 from app.core.query_session_lifecycle import (  # noqa: F401 — re-exports
     get_session_state,
     interrupt_session,
+    stop_session_task,
     get_active_sessions,
     get_streaming_sessions,
 )

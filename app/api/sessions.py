@@ -953,6 +953,30 @@ async def get_sdk_session_info(
         }
 
 
+@router.post("/{session_id}/tasks/{task_id}/stop")
+async def stop_session_background_task(
+    request: Request,
+    session_id: str,
+    task_id: str,
+    token: str = Depends(require_auth),
+):
+    """Stop ONE in-flight background task (sub-agent or Monitor shell) by id.
+
+    Powers the "x" on the live background-tasks strip. Shell tasks are
+    terminated directly; background sub-agents are stopped via the SDK, which
+    then reports the terminal status that drops the task from the next /live
+    poll. Returns ``{"ok": bool, ...}`` — a failed stop is a 200 with ok=False
+    (e.g. the task already finished) rather than an error.
+    """
+    await require_session(request, session_id)
+
+    from app.core.query_engine import stop_session_task
+
+    async with api_error_handler("stop background task"):
+        result = await stop_session_task(session_id, task_id)
+        return {"session_id": session_id, "task_id": task_id, **result}
+
+
 @router.get("/{session_id}/subagents")
 async def list_session_subagents(
     request: Request,

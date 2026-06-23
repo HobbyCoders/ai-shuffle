@@ -23,7 +23,6 @@
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import StreamingIndicator from './StreamingIndicator.svelte';
-	import { deriveIndicatorState, waitingLabel } from '$lib/stores/session/indicator-state';
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import ToolUseGroup from './ToolUseGroup.svelte';
 	import SystemMessageGroup from './SystemMessageGroup.svelte';
@@ -205,19 +204,6 @@
 		if (last.type === 'subagent' && (last.agentStatus === 'running' || last.agentStatus === 'pending')) return false;
 		return true;
 	});
-
-	// Bottom-of-chat activity indicator, derived purely from streaming + active
-	// task count (see indicator-state.ts):
-	//   - streaming                       → 'dots'    (handled by showGapIndicator / per-message cursor)
-	//   - parked (!streaming) + tasks > 0 → 'waiting' (calm "Waiting for N task(s)…")
-	//   - parked + no tasks               → 'none'
-	// Bug 1: this guarantees the bouncing "..." never persists after a turn parks
-	// waiting on background work — the calm waiting text shows instead.
-	const activeTaskCount = $derived($activeSession.activeTasks?.length ?? 0);
-	const indicatorState = $derived(
-		deriveIndicatorState($activeSession.isStreaming, activeTaskCount)
-	);
-	const waitingText = $derived(waitingLabel(activeTaskCount));
 
 	// --- Tool call grouping ---
 	// Groups 2+ consecutive "regular" tool_use messages into a single display item.
@@ -979,14 +965,6 @@
 				<div class="pl-2 py-1">
 					<StreamingIndicator />
 				</div>
-			{:else if indicatorState === 'waiting'}
-				<!-- Bug 1: turn parked waiting on background tasks. Show a distinct,
-				     calm indicator instead of the bouncing "..." dots so the UI
-				     doesn't look frozen or like the model is still typing. -->
-				<div class="pl-2 py-1 flex items-center gap-2 text-xs text-muted-foreground">
-					<span class="waiting-pulse w-1.5 h-1.5 rounded-full"></span>
-					<span>{waitingText}</span>
-				</div>
 			{/if}
 
 			<!-- Error -->
@@ -1009,23 +987,4 @@
 		contain-intrinsic-size: auto 80px;
 	}
 
-	/* Calm "breathing" dot for the parked waiting indicator — distinct from the
-	   bouncing StreamingIndicator dots so a parked turn reads as waiting, not
-	   actively typing. */
-	.waiting-pulse {
-		background: var(--muted-foreground);
-		animation: waitingBreath 1.8s ease-in-out infinite;
-	}
-
-	@keyframes waitingBreath {
-		0%, 100% { opacity: 0.35; }
-		50% { opacity: 0.9; }
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.waiting-pulse {
-			animation: none;
-			opacity: 0.7;
-		}
-	}
 </style>

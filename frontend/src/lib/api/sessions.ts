@@ -175,3 +175,23 @@ export async function forkSession(sessionId: string, messageIndex: number): Prom
 	return api.post<ForkSessionResponse>(`/sessions/${sessionId}/fork`, { message_index: messageIndex });
 }
 
+/** Result of stopping one in-flight background task. */
+export interface StopTaskResult {
+	session_id: string;
+	task_id: string;
+	ok: boolean;
+	kind?: 'agent' | 'shell';
+	detail?: string;
+}
+
+/**
+ * Stop one in-flight background task (sub-agent or Monitor shell) by id.
+ * Backs the "x" on the live background-tasks strip. A failed stop resolves
+ * with `ok: false` rather than throwing (e.g. the task already finished).
+ */
+export async function stopSessionTask(sessionId: string, taskId: string): Promise<StopTaskResult> {
+	return api.post<StopTaskResult>(
+		`/sessions/${sessionId}/tasks/${encodeURIComponent(taskId)}/stop`
+	);
+}
+

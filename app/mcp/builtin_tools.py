@@ -76,6 +76,48 @@ def _registry_safe(fn) -> None:
         logger.debug("task_registry update failed", exc_info=True)
 
 
+async def stop_background_shell_task(
+    task_id: str, session_id: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Force-stop a Monitor shell background task by id.
+
+    Terminates the tracked subprocess (escalating to kill after 5s) and marks
+    the task ``killed`` in the registry. Shared by the ``TaskStop`` MCP tool and
+    the UI "stop task" endpoint.
+
+    Returns a small status dict when ``task_id`` is a known shell task, or
+    ``None`` when no such shell task exists — letting callers fall through to
+    SDK agent-task handling.
+    """
+    task = _background_tasks.get(task_id)
+    if not task:
+        return None
+    if task.process and task.process.returncode is None:
+        try:
+            task.process.terminate()
+            try:
+                await asyncio.wait_for(task.process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                task.process.kill()
+                await task.process.wait()
+        except ProcessLookupError:
+            pass
+    # Mark the task killed in the registry. The reader's completion path may also
+    # fire (with exit_code from terminate); the last write wins and both are
+    # terminal, so the surfaced status stays sane.
+    if session_id:
+        from app.core.task_registry import task_registry
+        _registry_safe(
+            lambda: task_registry.complete_task(session_id, task_id, "killed")
+        )
+    return {
+        "task_id": task_id,
+        "kind": "shell",
+        "running": task.is_running(),
+        "exit_code": task.exit_code,
+    }
+
+
 async def _spawn_background(
     command: str,
     cwd: Optional[str],
@@ -593,11 +635,12 @@ def create_builtin_tools_server(
     )
     async def task_stop(args: dict) -> dict:
         tid = (args.get("task_id") or "").strip()
-        task = _background_tasks.get(tid)
-        if not task:
+        result = await stop_background_shell_task(tid, session_id=session_id)
+        if result is None:
             # A background AGENT task (SDK-managed) can't be force-stopped from
-            # here — the app has no handle on it. Say so clearly instead of
-            # "not found" when the id is a real agent task the registry knows.
+            # here — this tool only owns Monitor shell subprocesses. Say so
+            # clearly instead of "not found" when the id is a real agent task the
+            # registry knows.
             if session_id:
                 from app.core.task_registry import task_registry
                 record = task_registry.get_task(session_id, tid)
@@ -612,28 +655,10 @@ def create_builtin_tools_server(
                         status=record.get("status"),
                     )
             return _err("task not found.", task_id=tid)
-        if task.process and task.process.returncode is None:
-            try:
-                task.process.terminate()
-                try:
-                    await asyncio.wait_for(task.process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    task.process.kill()
-                    await task.process.wait()
-            except ProcessLookupError:
-                pass
-        # Mark the task killed in the registry. The reader's completion path may
-        # also fire (with exit_code from terminate); the last write wins and both
-        # are terminal, so the surfaced status stays sane.
-        if session_id:
-            from app.core.task_registry import task_registry
-            _registry_safe(
-                lambda: task_registry.complete_task(session_id, tid, "killed")
-            )
         return _ok({
             "task_id": tid,
-            "running": task.is_running(),
-            "exit_code": task.exit_code,
+            "running": result["running"],
+            "exit_code": result["exit_code"],
         })
 
     all_tools.append(task_stop)

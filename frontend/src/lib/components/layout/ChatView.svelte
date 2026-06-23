@@ -12,6 +12,7 @@
 	 */
 	import { untrack } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { stopSessionTask } from '$lib/api/sessions';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
 	import TeamStatusBar from '$lib/components/TeamStatusBar.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
@@ -88,6 +89,14 @@
 		activeSession.sendUserQuestionResponse(request_id, tool_use_id, answers, sessionId);
 	}
 
+	// Stop one in-flight background task (the "x" on the ActiveTasks strip).
+	// The task drops off the next /live poll once the backend confirms the stop.
+	async function handleStopTask(taskId: string) {
+		const sessionId = $activeSession.sessionId;
+		if (!sessionId) return;
+		await stopSessionTask(sessionId, taskId);
+	}
+
 	// Handle project selection from WorkspaceSelector
 	function handleProjectSelect(projectId: string) {
 		activeSession.setProject(projectId);
@@ -142,7 +151,7 @@
 				     what's pending. -->
 				{#if $activeSession.activeTasks && $activeSession.activeTasks.length > 0}
 					<div class="active-tasks-strip">
-						<ActiveTasks tasks={$activeSession.activeTasks} />
+						<ActiveTasks tasks={$activeSession.activeTasks} onStop={handleStopTask} />
 					</div>
 				{/if}
 				<!-- Slice B: deferred-only strip when there are no active requests to

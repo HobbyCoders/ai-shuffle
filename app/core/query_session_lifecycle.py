@@ -54,6 +54,45 @@ async def interrupt_session(session_id: str) -> bool:
         return False
 
 
+async def stop_session_task(session_id: str, task_id: str) -> dict:
+    """Stop ONE background task (sub-agent OR Monitor shell) in a session.
+
+    Two kinds of task surface in the UI's ``activeTasks`` strip:
+
+    - **shell** (Monitor subprocess): terminated directly via its tracked
+      process and marked ``killed`` in the registry immediately.
+    - **agent** (background sub-agent): stopped through the SDK client's
+      ``stop_task()``. The CLI then emits a ``task_notification`` with status
+      ``stopped`` which the streaming loop maps to ``killed`` in the registry —
+      so the task drops off the next ``/live`` poll without us pre-marking it.
+
+    Returns ``{"ok": bool, "kind": ..., "detail"?: ...}``. Never raises.
+    """
+    # 1) Monitor shell task — terminate the subprocess directly.
+    from app.mcp.builtin_tools import stop_background_shell_task
+    shell = await stop_background_shell_task(task_id, session_id=session_id)
+    if shell is not None:
+        return {"ok": True, "kind": "shell", **shell}
+
+    # 2) Background sub-agent — ask the SDK to stop it.
+    state = get_session_pool().peek(session_id)
+    if not state:
+        return {"ok": False, "kind": "agent", "detail": "session not active"}
+    if not state.is_connected or not state.client:
+        return {"ok": False, "kind": "agent", "detail": "session not connected"}
+
+    try:
+        await state.client.stop_task(task_id)
+        logger.debug(f"Requested SDK stop_task for {task_id} in session {session_id}")
+        return {"ok": True, "kind": "agent", "task_id": task_id}
+    except Exception as e:
+        logger.error(
+            f"Failed to stop task {task_id} in session {session_id}: {e}",
+            exc_info=True,
+        )
+        return {"ok": False, "kind": "agent", "detail": str(e)}
+
+
 def get_active_sessions() -> list:
     """Get list of active session IDs (connected clients)"""
     return get_session_pool().active_session_ids()
