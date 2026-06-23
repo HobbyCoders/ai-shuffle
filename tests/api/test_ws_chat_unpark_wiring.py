@@ -197,6 +197,9 @@ async def test_fast_path_stash_then_unpark_spawns_followup(tmp_path):
     # stash directly, so emulate the start. Without it, _stash_terminal_notification
     # now (correctly) suppresses the notification as a prior-turn orphan.
     task_registry.mark_started_this_turn(sid, "task-1")
+    # The parent ALSO launched it in the background (tool_use_id "tu-1"); without
+    # this the stash suppresses it as a synchronous sub-agent (result already inline).
+    task_registry.mark_background_launch(sid, "tu-1")
 
     # FAST path: a sub-agent terminal notification arrives in-stream → stash it.
     cwh._stash_terminal_notification(stream_state, _terminal_event(out), sid)
@@ -324,8 +327,10 @@ async def test_slow_path_drain_impl_unparks_via_ws_collaborators(tmp_path):
     out = tmp_path / "out.txt"
     out.write_text("SLOW RESULT", encoding="utf-8")
 
-    # The agent task is "running" from the parent turn.
+    # The agent task is "running" from the parent turn, launched in the background
+    # (its launch tool_use_id is the notification's tool_use_id "tu-1").
     task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    task_registry.mark_background_launch("sess-1", "tu-1")
 
     client = _FakeClient([_sdk_notif("task-1", uuid="u-1", output_file=str(out))], hang=True)
     state = _fake_state(client)

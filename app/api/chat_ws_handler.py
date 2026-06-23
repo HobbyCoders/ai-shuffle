@@ -224,6 +224,27 @@ def _stash_terminal_notification(stream_state, event: dict, session_id: str) -> 
         )
         return
 
+    # SPURIOUS-UNPARK GATE (synchronous sub-agent fix): even when a notification
+    # arrives in-stream, only a task whose tool_use_id the PARENT recorded as a
+    # run_in_background=true launch should drive the follow-up unpark turn. A
+    # SYNCHRONOUS sub-agent's result already returned INLINE as a tool_result this
+    # turn (its node was completed at the query_engine "subagent_done" yield), so
+    # its at-rest notification carries no new info — do NOT stash it. The registry
+    # completion is still recorded upstream in _record_task_message, so the
+    # indicator never strands. Sits alongside the orphan guard above as a second,
+    # independent reason to suppress the in-stream unpark.
+    if not task_registry.was_background_launch(session_id, event.get("tool_use_id")):
+        _log_unpark_decision(
+            path="in-stream",
+            session_id=session_id,
+            task_id=task_id,
+            status=status,
+            signature=signature,
+            started_this_turn=True,
+            decision="suppress-foreground",
+        )
+        return
+
     if task_registry.mark_notified(session_id, task_id, signature):
         _log_unpark_decision(
             path="in-stream",
@@ -577,6 +598,31 @@ async def _drain_notifications_impl(
                 await send_json(dict(frame, session_id=session_id))
             except Exception:
                 pass
+
+            # SPURIOUS-UNPARK GATE (synchronous sub-agent fix): the SDK emits an
+            # at-rest TaskNotificationMessage for EVERY sub-agent when the parent
+            # comes to rest — including SYNCHRONOUS ones whose full result was
+            # already delivered INLINE as a tool_result during the turn, and
+            # grandchild background tasks a SUB-AGENT launched (which the parent
+            # never tracked). Only a notification whose tool_use_id the PARENT
+            # recorded as a run_in_background=true launch represents genuinely-
+            # backgrounded work the parent has NOT yet seen and therefore warrants
+            # the wake-up follow-up turn. For anything else, suppress the unpark and
+            # keep draining (do NOT break/deliver). The indicator already cleared
+            # above via _record_task_message, and the subagent node was already
+            # completed via the dispatch above, so suppressing here only drops the
+            # spurious follow-up turn — nothing strands.
+            if not task_registry.was_background_launch(session_id, frame.get("tool_use_id")):
+                _log_unpark_decision(
+                    path="pump",
+                    session_id=session_id,
+                    task_id=frame.get("task_id"),
+                    status=status,
+                    signature=frame.get("uuid") or f"{frame.get('output_file')}:{status}",
+                    started_this_turn=task_registry.was_started_this_turn(session_id, frame.get("task_id")),
+                    decision="suppress-foreground",
+                )
+                continue
 
             task_id = frame.get("task_id")
             output_file = frame.get("output_file")

@@ -1993,6 +1993,19 @@ async def stream_to_websocket(
                                     or tool_input.get("runInBackground")
                                 ),
                             }
+                            # Gate for the spurious-unpark fix: record the launch
+                            # tool_use_id IFF the parent launched it in the
+                            # background. The SDK puts this SAME id on the eventual
+                            # at-rest TaskNotificationMessage, so the unpark paths can
+                            # later confirm a notification belongs to a genuinely-
+                            # backgrounded sub-agent. A SYNCHRONOUS sub-agent's result
+                            # already returns INLINE this turn (node completed at the
+                            # "subagent_done" yield below) and must NOT wake the model
+                            # with a stale <task-notification>; recording nothing here
+                            # leaves the gate closed for it. Side-effect-only — does
+                            # not change what is yielded.
+                            if task_tool_uses[tool_id]["run_in_background"]:
+                                task_registry.mark_background_launch(session_id, tool_id)
                             # Initialize children collector for this subagent
                             subagent_children[tool_id] = []
                             # Record subagent in ordered turn events for persistence

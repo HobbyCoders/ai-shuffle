@@ -256,6 +256,66 @@ class TestStartedThisTurn:
         assert reg.was_started_this_turn("s1", "t1") is False
 
 
+class TestBackgroundLaunch:
+    """The cross-turn set gating the unpark to genuinely-backgrounded sub-agents.
+
+    A Task/Agent tool_use launched with run_in_background=true records its launch
+    tool_use_id; the at-rest TaskNotificationMessage's tool_use_id equals that id,
+    so the unpark paths only fire for recorded launches. SYNCHRONOUS sub-agents
+    (result already inline) and sub-agent-launched grandchildren (never recorded)
+    return False. UNLIKE started_this_turn, this set is NOT reset per turn — only
+    cleared on clear_session — because a turn-N launch notifies between turn N/N+1.
+    """
+
+    def test_mark_then_query_true(self, reg):
+        reg.mark_background_launch("s1", "tool-1")
+        assert reg.was_background_launch("s1", "tool-1") is True
+
+    def test_unknown_tool_use_is_false(self, reg):
+        # Never recorded -> synchronous sub-agent or untracked grandchild.
+        assert reg.was_background_launch("s1", "tool-1") is False
+        reg.mark_background_launch("s1", "tool-1")
+        # A DIFFERENT launch id in the same session is still unrecorded.
+        assert reg.was_background_launch("s1", "tool-2") is False
+
+    def test_independent_per_session(self, reg):
+        reg.mark_background_launch("s1", "tool-1")
+        # Same launch id in a DIFFERENT session is independent.
+        assert reg.was_background_launch("s2", "tool-1") is False
+
+    def test_blank_ids_never_record(self, reg):
+        reg.mark_background_launch("", "tool-1")
+        reg.mark_background_launch("s1", "")
+        assert reg.was_background_launch("", "tool-1") is False
+        assert reg.was_background_launch("s1", "") is False
+        # Defensive False on missing args even when nothing was recorded.
+        assert reg.was_background_launch("", "") is False
+        # No state stranded -> a real (session, tool_use_id) still records.
+        reg.mark_background_launch("s1", "tool-1")
+        assert reg.was_background_launch("s1", "tool-1") is True
+
+    def test_not_reset_per_turn(self, reg):
+        # The legit slow path: a launch in turn N must still be recognized when its
+        # notification arrives between turn N and N+1. reset_started_this_turn (the
+        # per-turn scope reset) must NOT touch the background-launch set.
+        reg.mark_background_launch("s1", "tool-1")
+        reg.reset_started_this_turn("s1")
+        assert reg.was_background_launch("s1", "tool-1") is True
+
+    def test_cleared_by_clear_session(self, reg):
+        reg.mark_background_launch("s1", "tool-1")
+        reg.mark_background_launch("s2", "tool-9")
+        reg.clear_session("s1")
+        # s1 cleared, s2 untouched.
+        assert reg.was_background_launch("s1", "tool-1") is False
+        assert reg.was_background_launch("s2", "tool-9") is True
+
+    def test_cleared_by_reset_all(self, reg):
+        reg.mark_background_launch("s1", "tool-1")
+        reg.reset_all()
+        assert reg.was_background_launch("s1", "tool-1") is False
+
+
 class TestClearAndNoOps:
     def test_clear_session(self, reg):
         reg.start_task("s1", "t1", "agent", "x")

@@ -167,6 +167,10 @@ def _patch_pool(state):
 async def test_pump_catches_slow_terminal_notification_and_unparks():
     # Registry already has the task "running" (it started in the parent turn).
     task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    # The parent launched it with run_in_background=true (its launch tool_use_id is
+    # the notification's tool_use_id "tu-1") — the gate that distinguishes a
+    # genuinely-backgrounded sub-agent (must unpark) from a synchronous one.
+    task_registry.mark_background_launch("sess-1", "tu-1")
     assert any(t["id"] == "task-1" for t in task_registry.get_active("sess-1"))
 
     client = _FakeClient([_notif("task-1", uuid="u-1", summary="done it")], hang=True)
@@ -201,6 +205,7 @@ async def test_pump_catches_slow_terminal_notification_and_unparks():
 @pytest.mark.asyncio
 async def test_pump_redispatches_subagent_inner_activity_and_completes():
     task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    task_registry.mark_background_launch("sess-1", "tu-1")  # genuine background launch
 
     # A SLOW background sub-agent's inner messages arrive on the pooled client
     # AFTER the parent turn returned — each carries parent_tool_use_id="tu-1"
@@ -301,6 +306,9 @@ async def test_stop_drain_pump_noop_when_none():
 @pytest.mark.asyncio
 async def test_pump_skips_already_notified_completion():
     task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    # Genuine background launch so the foreground gate passes and the dedup path
+    # (mark_notified) is the thing under test, not the suppress-foreground gate.
+    task_registry.mark_background_launch("sess-1", "tu-1")
     # Pre-arm: this (task, signature) was already delivered (e.g. caught in-stream).
     out_file = ""
     signature = "u-1"  # uuid takes precedence in the signature
@@ -332,6 +340,9 @@ async def test_pump_skips_already_notified_completion():
 async def test_two_tasks_each_deliver_via_sequential_pumps():
     task_registry.start_task("sess-1", "task-1", "agent", "first")
     task_registry.start_task("sess-1", "task-2", "agent", "second")
+    # Both notifications carry tool_use_id "tu-1" (the _notif default); record it as
+    # a genuine background launch so the foreground gate passes for both.
+    task_registry.mark_background_launch("sess-1", "tu-1")
 
     handler = _make_handler()
 
@@ -513,6 +524,9 @@ async def test_run_query_calls_stop_drain_pump_at_start():
 @pytest.mark.asyncio
 async def test_stopped_session_does_not_deliver_unpark():
     task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    # Genuine background launch so the unpark is blocked by the STOPPED guard (the
+    # thing under test), not by the suppress-foreground gate.
+    task_registry.mark_background_launch("sess-1", "tu-1")
     handler = _make_handler()
     client = _FakeClient([_notif("task-1", uuid="u-1")], hang=True)
     state = _fake_state(client)
@@ -674,12 +688,15 @@ def test_stash_suppresses_prior_turn_orphan_not_started_this_turn():
 
 
 def test_stash_fires_for_task_started_this_turn():
-    """In-stream stash: the genuine FAST path (started THIS turn) IS stashed."""
+    """In-stream stash: the genuine FAST path (started THIS turn AND launched in the
+    background) IS stashed."""
     from app.api.ws_event_handlers import MutableStreamState
 
     task_registry.reset_all()
     stream_state = MutableStreamState()
     task_registry.mark_started_this_turn("sess-1", "task-1")
+    # The parent launched it with run_in_background=true (tool_use_id "tu-1").
+    task_registry.mark_background_launch("sess-1", "tu-1")
     cwh._stash_terminal_notification(stream_state, _terminal_event("task-1"), "sess-1")
 
     assert len(stream_state.pending_task_notifications) == 1
@@ -695,6 +712,7 @@ def test_stash_does_not_double_stash_same_task():
     task_registry.reset_all()
     stream_state = MutableStreamState()
     task_registry.mark_started_this_turn("sess-1", "task-1")
+    task_registry.mark_background_launch("sess-1", "tu-1")  # genuine background launch
     ev = _terminal_event("task-1", uuid="u-1")
     cwh._stash_terminal_notification(stream_state, dict(ev), "sess-1")
     cwh._stash_terminal_notification(stream_state, dict(ev), "sess-1")
@@ -764,6 +782,10 @@ async def test_run_query_genuine_fast_path_still_unparks():
     handler = _make_handler()
     handler._start_drain_pump = MagicMock()
     handler._deliver_unpark = AsyncMock(return_value=True)
+    # The parent launched this agent in the background (tool_use_id "tu-1", the
+    # notification's tool_use_id). _background_launches is NOT reset per turn, so
+    # pre-setting it here survives run_query's start-of-turn reset.
+    task_registry.mark_background_launch("sess-1", "tu-1")
 
     events = [
         {"type": "task_started", "task_id": "task-1", "description": "bg work"},
@@ -791,4 +813,120 @@ async def test_run_query_genuine_fast_path_still_unparks():
     pending = handler._deliver_unpark.await_args.kwargs["pending"]
     assert len(pending) == 1
     assert pending[0]["task_id"] == "task-1"
+    task_registry.reset_all()
+
+
+# ---------------------------------------------------------------------------
+# 9. SYNCHRONOUS-SUBAGENT SUPPRESSION (the reported bug)
+#    The SDK emits an at-rest TaskNotificationMessage for EVERY sub-agent when the
+#    parent comes to rest — including SYNCHRONOUS ones whose full result was already
+#    delivered INLINE during the turn, and grandchild background tasks a SUB-AGENT
+#    launched (which the parent never tracked). Only a notification whose tool_use_id
+#    the PARENT recorded as a run_in_background=true launch may unpark. Anything else
+#    is suppressed: the indicator still clears (via _record_task_message), but no
+#    spurious follow-up turn fires.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pump_suppresses_synchronous_subagent_notification():
+    """Drain pump: a terminal notification whose tool_use_id was NOT recorded as a
+    background launch (a synchronous sub-agent, result already inline) must NOT
+    unpark — and the pump must NOT break-to-deliver (it keeps draining)."""
+    task_registry.start_task("sess-1", "task-1", "agent", "sync subagent")
+    # NOTE: deliberately NO mark_background_launch — this models a SYNCHRONOUS
+    # sub-agent (run_in_background=false) whose result already returned inline.
+    assert task_registry.was_background_launch("sess-1", "tu-1") is False
+
+    # hang=False so the pump terminates by exhausting the stream (the gate
+    # `continue`s rather than breaking, so a hanging client would block forever).
+    client = _FakeClient([_notif("task-1", uuid="u-1", tool_use_id="tu-1")], hang=False)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    # Indicator still cleared (registry completed via _record_task_message)...
+    assert task_registry.get_active("sess-1") == []
+    # ...but NO spurious unpark for the synchronous sub-agent.
+    handler._deliver_unpark.assert_not_awaited()
+    # The whole stream was drained (the gate did not break out early).
+    assert client.received == 1
+    assert "sess-1" not in ws_cleanup._drain_pumps
+
+
+@pytest.mark.asyncio
+async def test_pump_suppresses_subagent_launched_grandchild():
+    """Drain pump: a grandchild background task launched BY a sub-agent (its
+    tool_use_id was never recorded by the parent) is suppressed."""
+    task_registry.start_task("sess-1", "grandchild-1", "agent", "nested bg")
+    # The parent recorded a DIFFERENT background launch ("tu-parent"), never the
+    # grandchild's "tu-grandchild".
+    task_registry.mark_background_launch("sess-1", "tu-parent")
+
+    client = _FakeClient(
+        [_notif("grandchild-1", uuid="u-1", tool_use_id="tu-grandchild")], hang=False
+    )
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    assert task_registry.get_active("sess-1") == []
+    handler._deliver_unpark.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pump_unparks_genuine_background_launch():
+    """Drain pump: a terminal notification whose tool_use_id WAS recorded as a
+    background launch DOES unpark (the legit slow path)."""
+    task_registry.start_task("sess-1", "task-1", "agent", "real bg agent")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+
+    client = _FakeClient([_notif("task-1", uuid="u-1", tool_use_id="tu-1")], hang=True)
+    state = _fake_state(client)
+    handler = _make_handler()
+
+    with _patch_pool(state):
+        await handler._drain_notifications("sess-1", "claude-code", None, None)
+
+    assert task_registry.get_active("sess-1") == []
+    handler._deliver_unpark.assert_awaited_once()
+    assert handler._deliver_unpark.await_args.kwargs["pending"][0]["task_id"] == "task-1"
+
+
+def test_stash_suppresses_synchronous_subagent_notification():
+    """In-stream stash: a notification started-this-turn but NOT a background launch
+    (a synchronous sub-agent whose result already returned inline) is NOT stashed."""
+    from app.api.ws_event_handlers import MutableStreamState
+
+    task_registry.reset_all()
+    stream_state = MutableStreamState()
+    # Started this turn (passes the orphan guard) but NOT a background launch.
+    task_registry.mark_started_this_turn("sess-1", "task-1")
+    cwh._stash_terminal_notification(
+        stream_state, _terminal_event("task-1", tool_use_id="tu-1"), "sess-1"
+    )
+
+    # Nothing stashed -> the post-loop unpark has nothing to deliver.
+    assert stream_state.pending_task_notifications == []
+    task_registry.reset_all()
+
+
+def test_stash_fires_for_background_launched_task():
+    """In-stream stash: started-this-turn AND a recorded background launch IS
+    stashed (the genuine fast background path)."""
+    from app.api.ws_event_handlers import MutableStreamState
+
+    task_registry.reset_all()
+    stream_state = MutableStreamState()
+    task_registry.mark_started_this_turn("sess-1", "task-1")
+    task_registry.mark_background_launch("sess-1", "tu-1")
+    cwh._stash_terminal_notification(
+        stream_state, _terminal_event("task-1", tool_use_id="tu-1"), "sess-1"
+    )
+
+    assert len(stream_state.pending_task_notifications) == 1
+    assert stream_state.pending_task_notifications[0]["task_id"] == "task-1"
     task_registry.reset_all()
