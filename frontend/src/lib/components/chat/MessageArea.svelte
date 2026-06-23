@@ -24,6 +24,12 @@
 	import AssistantMessage from './AssistantMessage.svelte';
 	import StreamingIndicator from './StreamingIndicator.svelte';
 	import { findStreamingAnchorIndex, shouldShowGapIndicator } from '$lib/stores/session/gap-indicator';
+	import {
+		isNearBottom as computeIsNearBottom,
+		nextStickToBottom,
+		shouldAutoScrollOnChange,
+		type ScrollMetrics
+	} from '$lib/stores/session/auto-scroll';
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import ToolUseGroup from './ToolUseGroup.svelte';
 	import SystemMessageGroup from './SystemMessageGroup.svelte';
@@ -90,6 +96,10 @@
 	let isMounted = $state(false);
 	let scrollRafPending = false; // Throttle scroll handler to one per frame
 	let lastKnownScrollTop = 0; // For scroll-direction detection
+	// Full metrics from the previous handled scroll event — fed to the pure
+	// nextStickToBottom() so it can measure scroll direction against the same
+	// geometry the user actually saw.
+	let lastScrollMetrics: ScrollMetrics | null = null;
 	// Set on session switch — ensures scroll-to-bottom fires after messages load,
 	// even if intermediate DOM changes set shouldAutoScroll to false.
 	let pendingScrollToBottom = false;
@@ -381,11 +391,23 @@
 		return null;
 	}
 
-	// Check if near bottom of scroll container (within threshold)
+	// Read the current scroll geometry as plain metrics for the pure decision
+	// helpers in auto-scroll.ts.
+	function readScrollMetrics(): ScrollMetrics | null {
+		if (!containerRef) return null;
+		return {
+			scrollTop: containerRef.scrollTop,
+			scrollHeight: containerRef.scrollHeight,
+			clientHeight: containerRef.clientHeight
+		};
+	}
+
+	// Check if near bottom of scroll container (within threshold).
+	// Delegates to the pure, unit-tested helper in auto-scroll.ts.
 	function isNearBottom(): boolean {
-		if (!containerRef) return true;
-		const threshold = 150; // Slightly larger threshold for better UX
-		return containerRef.scrollHeight - containerRef.scrollTop - containerRef.clientHeight < threshold;
+		const m = readScrollMetrics();
+		if (!m) return true;
+		return computeIsNearBottom(m);
 	}
 
 	function scrollToBottom() {
@@ -396,6 +418,10 @@
 			const preCH = containerRef.clientHeight;
 			containerRef.scrollTop = containerRef.scrollHeight;
 			lastKnownScrollTop = containerRef.scrollTop;
+			// Refresh the scroll-direction baseline so a later genuine user scroll
+			// is measured against where WE left the viewport (the bottom), not a
+			// stale pre-scroll position that would read as a false scroll-up.
+			lastScrollMetrics = readScrollMetrics();
 			// eslint-disable-next-line no-console
 			if (STREAM_DEBUG) console.log(`[AS] scrollToBottom preSH=${preSH} preST=${preST} preCH=${preCH} postST=${containerRef.scrollTop} postSH=${containerRef.scrollHeight} depth=${programmaticScrollDepth}`);
 			// Use double RAF to ensure scroll events from this programmatic scroll are ignored
@@ -417,6 +443,7 @@
 			// against a stale pre-scroll position and falsely flagged as a scroll-up,
 			// disabling auto-scroll mid-stream (the "chat scrolls up after send" bug).
 			lastKnownScrollTop = containerRef.scrollTop;
+			lastScrollMetrics = readScrollMetrics();
 			return;
 		}
 
@@ -428,42 +455,33 @@
 			if (!containerRef) return;
 			if (programmaticScrollDepth > 0) {
 				lastKnownScrollTop = containerRef.scrollTop;
+				lastScrollMetrics = readScrollMetrics();
 				return;
 			}
 
 			const cacheKey = $activeSession.sessionId ?? 'new';
 			const currentScrollTop = containerRef.scrollTop;
+			const currentMetrics = readScrollMetrics();
 
 			// Save scroll position to non-reactive cache (doesn't trigger effects)
 			scrollPositionCache.set(cacheKey, currentScrollTop);
 			// Also save to session store for cross-session persistence
 			activeSession.setScrollTop(currentScrollTop);
 
-			const nearBottom = isNearBottom();
-
-			if (nearBottom) {
-				// User is at/near the bottom - enable auto-scroll
-				shouldAutoScroll = true;
-			} else if (currentScrollTop < lastKnownScrollTop) {
-				// Scroll position decreased while not near bottom.
-				// Require a minimum delta to distinguish intentional user scroll-up
-				// from layout-induced jitter (e.g., input area resize after sending
-				// a message causes the browser to adjust scrollTop by a few pixels,
-				// which would falsely disable auto-scroll for the entire stream).
-				const scrollUpDelta = lastKnownScrollTop - currentScrollTop;
-				// Threshold must exceed browser scroll-anchoring drift (~10-20px)
-				// that occurs when late-rendering content (tables, code blocks) shifts
-				// the scroll container after scrollToBottomUntilStable stops. A value
-				// too low causes the handler to treat post-switch layout drift as a
-				// user scroll-up and silently disable auto-scroll mid-render.
-				if (scrollUpDelta > 50) {
-					// eslint-disable-next-line no-console
-					if (STREAM_DEBUG) console.log(`[AS] handleScroll DISABLE currST=${currentScrollTop} lastST=${lastKnownScrollTop} delta=${scrollUpDelta} SH=${containerRef.scrollHeight} CH=${containerRef.clientHeight}`);
-					shouldAutoScroll = false;
-				}
+			// Decide the next stick-to-bottom flag via the pure, unit-tested helper.
+			// It enables when the user is at/near the bottom, disables on a
+			// deliberate scroll-up, and ignores sub-threshold layout jitter and
+			// content-growth-below-the-fold (which would otherwise falsely toggle
+			// the flag). On the very first event we have no prior baseline, so just
+			// trust the near-bottom geometry.
+			if (currentMetrics) {
+				const prev = lastScrollMetrics ?? currentMetrics;
+				const next = nextStickToBottom(shouldAutoScroll, prev, currentMetrics);
+				// eslint-disable-next-line no-console
+				if (STREAM_DEBUG && next !== shouldAutoScroll) console.log(`[AS] handleScroll ${next ? 'ENABLE' : 'DISABLE'} currST=${currentScrollTop} prevST=${prev.scrollTop} SH=${currentMetrics.scrollHeight} CH=${currentMetrics.clientHeight}`);
+				shouldAutoScroll = next;
+				lastScrollMetrics = currentMetrics;
 			}
-			// else: scrollTop increased or unchanged but not near bottom —
-			// likely content grew below viewport. Don't change shouldAutoScroll.
 
 			lastKnownScrollTop = currentScrollTop;
 		});
@@ -500,6 +518,7 @@
 					programmaticScrollDepth++;
 					containerRef.scrollTop = storedPosition;
 					lastKnownScrollTop = containerRef.scrollTop;
+					lastScrollMetrics = readScrollMetrics();
 					shouldAutoScroll = false;
 					requestAnimationFrame(() => {
 						programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
@@ -744,8 +763,9 @@
 		// Bug fix: when user sends a message, the ChatInput shrinks (clears text),
 		// causing the scroll container to grow. The browser adjusts scrollTop downward,
 		// which handleScroll misinterprets as a user scroll-up and disables autoscroll.
-		// Force autoscroll back on when the new message is from the user — they always
-		// want to see the response to what they just sent.
+		// A new user message ALWAYS re-engages stick-to-bottom — they always want to
+		// see the response to what they just sent, regardless of where they'd scrolled
+		// (see shouldAutoScrollOnChange in auto-scroll.ts).
 		const newUserMessage =
 			hasNewMessage &&
 			currentLength > 0 &&
@@ -760,9 +780,11 @@
 			if (STREAM_DEBUG) console.log(`[AS] effect len=${currentLength} prevLen=${prevMessagesLength} newMsg=${hasNewMessage} contentChg=${hasContentChange} autoS=${shouldAutoScroll} pend=${pendingScrollToBottom} newestId=${newest?.id} newestRole=${newest?.role} newestType=${newest?.type} newestStreaming=${newest?.streaming} cLen=${(newest?.content || '').length} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
 		}
 
-		// Scroll to bottom on content changes if auto-scroll is active,
-		// OR if a session switch is pending scroll-to-bottom (messages just loaded).
-		const shouldScroll = shouldAutoScroll || pendingScrollToBottom;
+		// Scroll to bottom on content changes when the pure decision says so
+		// (stuck to bottom, or a new user message), OR if a session switch is
+		// pending scroll-to-bottom (messages just loaded).
+		const shouldScroll =
+			shouldAutoScrollOnChange(shouldAutoScroll, newUserMessage) || pendingScrollToBottom;
 		if ((hasNewMessage || hasContentChange || hasMetadataChange) && shouldScroll && containerRef) {
 			const wasPending = pendingScrollToBottom;
 			if (pendingScrollToBottom) {
