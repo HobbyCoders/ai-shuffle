@@ -1863,6 +1863,12 @@ class TestEdgeCases:
         with patch("app.api.profiles.database") as mock_db:
             mock_db.get_profile.return_value = None
             mock_db.create_profile.return_value = created_profile
+            # Subagents referenced by the import must exist in the target
+            # environment, otherwise they are filtered out as ghost agents.
+            mock_db.get_all_subagents.return_value = [
+                {"id": "subagent-1"},
+                {"id": "subagent-2"},
+            ]
 
             request = AgentImportRequest(
                 version="1.0",
