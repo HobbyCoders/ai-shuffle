@@ -315,6 +315,15 @@ def _run_column_migrations(cursor):
             "ON session_messages(session_id, jsonl_uuid)"
         )
 
+    # Mobile companion app (UnifiedPush): per-device push endpoint URL so a
+    # self-hosted server can deliver notifications to the user's own push
+    # distributor (e.g. ntfy) without a shared Firebase project. Idempotent
+    # column add for databases created before the column existed.
+    if table_exists(cursor, "mobile_devices"):
+        if not column_exists(cursor, "mobile_devices", "unifiedpush_endpoint"):
+            cursor.execute("ALTER TABLE mobile_devices ADD COLUMN unifiedpush_endpoint TEXT")
+            migrations_applied.append("mobile_devices.unifiedpush_endpoint")
+
     # Ensure performance-critical indexes exist (idempotent, no version gate).
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)")
 
@@ -794,6 +803,7 @@ from app.db.mobile import (  # noqa: F401
     get_all_mobile_devices,
     update_mobile_device_capabilities,
     update_mobile_device_fcm_token,
+    update_mobile_device_unifiedpush_endpoint,
     update_mobile_device_last_seen,
     delete_mobile_device,
     create_pending_action,

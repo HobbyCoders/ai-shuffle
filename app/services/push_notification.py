@@ -124,16 +124,20 @@ class PushNotificationService:
         body: str,
         data: Optional[Dict[str, Any]] = None,
         priority: NotificationPriority = NotificationPriority.NORMAL,
+        unifiedpush_endpoint: Optional[str] = None,
     ) -> NotificationResult:
         """
         Send a push notification to a specific device.
 
         Args:
-            device_id: FCM registration token for the device
+            device_id: FCM registration token (or device id, for UnifiedPush)
             title: Notification title
             body: Notification body text
             data: Optional custom data payload
             priority: Notification priority
+            unifiedpush_endpoint: If set, deliver via UnifiedPush (HTTP POST to
+                this endpoint) instead of FCM. Used for self-hosted servers that
+                push to the user's own distributor without Firebase.
 
         Returns:
             NotificationResult with success status and message ID or error
@@ -149,6 +153,13 @@ class PushNotificationService:
             "priority": priority.value,
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
+
+        # UnifiedPush is selected per-device and is NOT gated by FCM mock mode —
+        # it is the primary transport for self-hosted servers with no Firebase.
+        if unifiedpush_endpoint:
+            return await self._send_unifiedpush_notification(
+                notification_data, unifiedpush_endpoint
+            )
 
         if self._mock_mode:
             return await self._send_mock_notification(notification_data)
@@ -224,6 +235,59 @@ class PushNotificationService:
                 device_id=notification_data["device_id"],
             )
 
+    async def _send_unifiedpush_notification(
+        self, notification_data: Dict[str, Any], endpoint: str
+    ) -> NotificationResult:
+        """Deliver a notification via UnifiedPush (HTTP POST to the device endpoint).
+
+        The body is a small JSON payload the Android app parses to raise a local
+        notification (title/body/data + a type for deep-linking into a session).
+        This path is independent of FCM/mock mode.
+        """
+        payload = {
+            "title": notification_data["title"],
+            "body": notification_data["body"],
+            "priority": notification_data.get("priority", NotificationPriority.NORMAL.value),
+            "data": notification_data.get("data", {}),
+            "timestamp": notification_data.get("timestamp"),
+        }
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(endpoint, json=payload)
+
+            success = 200 <= resp.status_code < 300
+            message_id = resp.headers.get("X-Message-ID") if success else None
+            notification_data["message_id"] = message_id
+            self._notify_callbacks(notification_data)
+
+            if not success:
+                logger.warning(
+                    f"UnifiedPush POST returned {resp.status_code} for endpoint "
+                    f"{endpoint[:60]}..."
+                )
+                return NotificationResult(
+                    success=False,
+                    error=f"HTTP {resp.status_code}",
+                    device_id=notification_data.get("device_id"),
+                )
+
+            logger.debug(f"UnifiedPush notification delivered to {endpoint[:60]}...")
+            return NotificationResult(
+                success=True,
+                message_id=message_id,
+                device_id=notification_data.get("device_id"),
+            )
+
+        except Exception as e:
+            logger.error(f"UnifiedPush notification failed: {e}")
+            return NotificationResult(
+                success=False,
+                error=str(e),
+                device_id=notification_data.get("device_id"),
+            )
+
     async def send_to_all_devices(
         self,
         title: str,
@@ -238,33 +302,63 @@ class PushNotificationService:
             title: Notification title
             body: Notification body text
             data: Optional custom data payload
-            device_tokens: List of FCM tokens. If None, fetches from device manager.
+            device_tokens: Explicit FCM tokens. If provided, those are used
+                directly (legacy/back-compat). If None, every registered device
+                is enumerated and dispatched on whichever transport it
+                registered — a UnifiedPush endpoint (preferred) or an FCM token.
 
         Returns:
             List of NotificationResult for each device
         """
-        if device_tokens is None:
-            # Import here to avoid circular imports
-            from app.services.mobile_device_manager import mobile_device_manager
+        # Legacy/explicit path: caller passed FCM tokens directly.
+        if device_tokens is not None:
+            if not device_tokens:
+                logger.debug("No devices to broadcast to")
+                return []
+            results = []
+            for token in device_tokens:
+                results.append(
+                    await self.send_notification(
+                        device_id=token, title=title, body=body, data=data
+                    )
+                )
+            successful = sum(1 for r in results if r.success)
+            logger.debug(f"Broadcast sent: {successful}/{len(results)} successful")
+            return results
 
-            devices = await mobile_device_manager.list_devices()
-            device_tokens = [
-                d["fcm_token"] for d in devices if d.get("fcm_token")
-            ]
+        # Default path: enumerate registered devices and dispatch per transport.
+        try:
+            from app.db import mobile as mobile_db
 
-        if not device_tokens:
-            logger.debug("No devices to broadcast to")
+            devices = mobile_db.get_all_mobile_devices()
+        except Exception as e:
+            logger.warning(f"Could not enumerate mobile devices for broadcast: {e}")
             return []
 
         results = []
-        for token in device_tokens:
-            result = await self.send_notification(
-                device_id=token,
-                title=title,
-                body=body,
-                data=data,
-            )
-            results.append(result)
+        for d in devices:
+            endpoint = d.get("unifiedpush_endpoint")
+            token = d.get("fcm_token")
+            if endpoint:
+                results.append(
+                    await self.send_notification(
+                        device_id=d.get("device_id", ""),
+                        title=title,
+                        body=body,
+                        data=data,
+                        unifiedpush_endpoint=endpoint,
+                    )
+                )
+            elif token:
+                results.append(
+                    await self.send_notification(
+                        device_id=token, title=title, body=body, data=data
+                    )
+                )
+
+        if not results:
+            logger.debug("No devices to broadcast to")
+            return results
 
         successful = sum(1 for r in results if r.success)
         logger.debug(f"Broadcast sent: {successful}/{len(results)} successful")
@@ -374,3 +468,34 @@ class PushNotificationService:
 
 # Global service instance
 push_notification_service = PushNotificationService()
+
+
+def fire_and_forget_notify(
+    title: str,
+    body: str,
+    data: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Best-effort broadcast to all registered devices without blocking the caller.
+
+    Used from async hot paths (session completion, user questions, permission
+    prompts) where streaming must never block on a slow or unreachable push
+    endpoint. Schedules the broadcast as a background task and swallows/logs all
+    errors. No-op if called outside a running event loop.
+    """
+    import asyncio
+
+    async def _run() -> None:
+        try:
+            await push_notification_service.send_to_all_devices(
+                title=title, body=body, data=data
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug(f"Background device notification failed: {e}")
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.debug("fire_and_forget_notify called with no running loop; skipped")
+        return
+
+    loop.create_task(_run())

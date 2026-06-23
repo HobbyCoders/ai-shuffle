@@ -9,8 +9,9 @@ Tests cover:
 - Global instance
 """
 
+import asyncio
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from app.services.push_notification import (
     NotificationPriority,
@@ -18,7 +19,25 @@ from app.services.push_notification import (
     NotificationResult,
     PushNotificationService,
     push_notification_service,
+    fire_and_forget_notify,
 )
+
+
+class _FakeResponse:
+    """Minimal stand-in for an httpx.Response."""
+
+    def __init__(self, status_code=200, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+
+
+def _fake_httpx_client(response):
+    """Build a MagicMock that behaves like httpx.AsyncClient(...) as a CM."""
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    client.post = AsyncMock(return_value=response)
+    return client
 
 
 # =============================================================================
@@ -196,3 +215,166 @@ class TestModuleImports:
         """PushNotificationService should be importable."""
         from app.services.push_notification import PushNotificationService
         assert PushNotificationService is not None
+
+
+# =============================================================================
+# UnifiedPush Transport Tests
+# =============================================================================
+
+class TestUnifiedPushTransport:
+    """Test the UnifiedPush (HTTP POST) delivery path."""
+
+    async def test_send_via_unifiedpush_success(self):
+        """A 2xx response from the endpoint should be a successful result."""
+        service = PushNotificationService()
+        client = _fake_httpx_client(_FakeResponse(200, {"X-Message-ID": "m-1"}))
+
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await service.send_notification(
+                device_id="device-1",
+                title="Done",
+                body="Session finished",
+                data={"type": "session_done"},
+                unifiedpush_endpoint="https://ntfy.sh/up_abc",
+            )
+
+        assert result.success is True
+        assert result.message_id == "m-1"
+        client.post.assert_awaited_once()
+        # The endpoint URL is the POST target; payload carries title/body/data.
+        args, kwargs = client.post.call_args
+        assert args[0] == "https://ntfy.sh/up_abc"
+        assert kwargs["json"]["title"] == "Done"
+        assert kwargs["json"]["data"] == {"type": "session_done"}
+
+    async def test_send_via_unifiedpush_http_error(self):
+        """A non-2xx response should produce a failed result, not raise."""
+        service = PushNotificationService()
+        client = _fake_httpx_client(_FakeResponse(502))
+
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await service.send_notification(
+                device_id="device-1",
+                title="Done",
+                body="Session finished",
+                unifiedpush_endpoint="https://ntfy.sh/up_abc",
+            )
+
+        assert result.success is False
+        assert "502" in (result.error or "")
+
+    async def test_unifiedpush_not_gated_by_mock_mode(self):
+        """UnifiedPush should send even when FCM is in mock mode."""
+        service = PushNotificationService()
+        service._mock_mode = True
+        service._initialized = True
+        client = _fake_httpx_client(_FakeResponse(200))
+
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await service.send_notification(
+                device_id="device-1",
+                title="T",
+                body="B",
+                unifiedpush_endpoint="https://ntfy.sh/up_abc",
+            )
+
+        # Did not fall through to the mock path; really attempted the POST.
+        client.post.assert_awaited_once()
+        assert result.success is True
+        assert service.get_mock_notifications() == []
+
+    async def test_send_via_unifiedpush_network_error(self):
+        """An httpx exception should be caught and reported as failure."""
+        service = PushNotificationService()
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        client.post = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await service.send_notification(
+                device_id="device-1",
+                title="T",
+                body="B",
+                unifiedpush_endpoint="https://ntfy.sh/up_abc",
+            )
+
+        assert result.success is False
+        assert "boom" in (result.error or "")
+
+
+# =============================================================================
+# Broadcast Dispatch Tests
+# =============================================================================
+
+class TestSendToAllDevices:
+    """Test per-transport dispatch when broadcasting to all devices."""
+
+    async def test_dispatches_per_transport(self):
+        """Each device uses its own transport; tokenless devices are skipped."""
+        service = PushNotificationService()
+        devices = [
+            {"device_id": "d1", "unifiedpush_endpoint": "https://ntfy.sh/a", "fcm_token": None},
+            {"device_id": "d2", "unifiedpush_endpoint": None, "fcm_token": "fcm-tok"},
+            {"device_id": "d3", "unifiedpush_endpoint": None, "fcm_token": None},
+        ]
+        service.send_notification = AsyncMock(return_value=NotificationResult(success=True))
+
+        with patch("app.db.mobile.get_all_mobile_devices", return_value=devices):
+            results = await service.send_to_all_devices(title="T", body="B")
+
+        # d3 has no transport, so only two sends happen.
+        assert len(results) == 2
+        calls = service.send_notification.await_args_list
+        assert calls[0].kwargs["unifiedpush_endpoint"] == "https://ntfy.sh/a"
+        assert calls[1].kwargs.get("unifiedpush_endpoint") is None
+        assert calls[1].kwargs["device_id"] == "fcm-tok"
+
+    async def test_explicit_tokens_use_fcm_path(self):
+        """Passing device_tokens keeps the legacy explicit-FCM behaviour."""
+        service = PushNotificationService()
+        service.send_notification = AsyncMock(return_value=NotificationResult(success=True))
+
+        results = await service.send_to_all_devices(
+            title="T", body="B", device_tokens=["tok-1", "tok-2"]
+        )
+
+        assert len(results) == 2
+        for call in service.send_notification.await_args_list:
+            assert call.kwargs.get("unifiedpush_endpoint") is None
+
+    async def test_no_devices_returns_empty(self):
+        """No registered devices yields an empty result list, no error."""
+        service = PushNotificationService()
+
+        with patch("app.db.mobile.get_all_mobile_devices", return_value=[]):
+            results = await service.send_to_all_devices(title="T", body="B")
+
+        assert results == []
+
+
+# =============================================================================
+# fire_and_forget_notify Tests
+# =============================================================================
+
+class TestFireAndForgetNotify:
+    """Test the non-blocking broadcast helper used by server hooks."""
+
+    async def test_schedules_broadcast(self):
+        """Within a running loop, it schedules a send_to_all_devices call."""
+        with patch.object(
+            push_notification_service, "send_to_all_devices", new=AsyncMock(return_value=[])
+        ) as mock_send:
+            fire_and_forget_notify("Title", "Body", {"type": "session_done"})
+            # Let the scheduled task run.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        mock_send.assert_awaited_once()
+        assert mock_send.await_args.kwargs["title"] == "Title"
+        assert mock_send.await_args.kwargs["data"] == {"type": "session_done"}
+
+    def test_no_running_loop_is_noop(self):
+        """Called with no running loop, it must not raise."""
+        # Executed in a plain sync test → no running event loop.
+        fire_and_forget_notify("Title", "Body")

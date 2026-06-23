@@ -223,6 +223,24 @@ class PermissionHandler:
         # Broadcast permission request to frontend
         await self._broadcast_permission_request(request, queue_position, broadcast_func)
 
+        # Notify watching mobile devices that approval is needed (best-effort,
+        # non-blocking). Fires once when the request is first queued (re-broadcast
+        # on resume goes through a different path, so no duplicate notifications).
+        try:
+            from app.services.push_notification import fire_and_forget_notify
+
+            fire_and_forget_notify(
+                title="Permission needed",
+                body=f"Approve {display_name or tool_name}?",
+                data={
+                    "type": "permission_request",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                },
+            )
+        except Exception:
+            pass
+
         logger.debug(f"Permission request queued: {request_id} for {tool_name}")
 
         # Wait for response (with timeout)

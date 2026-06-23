@@ -776,6 +776,21 @@ async def handle_done(
             source_device_id=None,
         )
 
+        # Notify watching mobile devices that the session finished (best-effort,
+        # non-blocking). Skip user-initiated interrupts — the user is present.
+        if not is_interrupted:
+            try:
+                from app.services.push_notification import fire_and_forget_notify
+
+                session_name = (session_row or {}).get("name") or "Your session"
+                fire_and_forget_notify(
+                    title="Session finished",
+                    body=f"{session_name} has finished responding.",
+                    data={"type": "session_done", "session_id": ectx.session_id},
+                )
+            except Exception:
+                pass  # Notifications are best-effort; never break streaming.
+
 
 # ---------------------------------------------------------------------------
 # Dispatch table and entry point

@@ -81,6 +81,24 @@ class UserQuestionHandler:
 
         logger.debug(f"User question request sent: {request_id} with {len(questions)} questions")
 
+        # Notify watching mobile devices that input is needed (best-effort,
+        # non-blocking — must never delay or break the question flow).
+        try:
+            from app.services.push_notification import fire_and_forget_notify
+
+            first_q = questions[0].get("question") if questions else "A question"
+            fire_and_forget_notify(
+                title="Question for you",
+                body=str(first_q),
+                data={
+                    "type": "user_question",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                },
+            )
+        except Exception:
+            pass
+
         # Wait for response (with timeout)
         try:
             await asyncio.wait_for(request.response_event.wait(), timeout=600.0)  # 10 min timeout

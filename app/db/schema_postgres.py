@@ -674,6 +674,7 @@ def create_postgres_schema(cursor) -> None:
             platform TEXT NOT NULL,
             api_key_hash TEXT NOT NULL,
             fcm_token TEXT,
+            unifiedpush_endpoint TEXT,
             capabilities JSONB DEFAULT '{}',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             last_seen TIMESTAMP WITH TIME ZONE

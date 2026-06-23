@@ -1126,6 +1126,17 @@ class PushTokenRequest(BaseModel):
     fcm_token: str = Field(..., min_length=1)
 
 
+class UnifiedPushEndpointRequest(BaseModel):
+    """Request to register/update a device's UnifiedPush endpoint URL.
+
+    The app gets this URL from its UnifiedPush distributor (e.g. ntfy) and
+    registers it so a self-hosted server can deliver notifications without a
+    shared Firebase project.
+    """
+    device_id: str
+    endpoint: str = Field(..., min_length=1)
+
+
 class TrustedAction(BaseModel):
     """A trusted action pattern for auto-approval"""
     id: str

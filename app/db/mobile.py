@@ -22,6 +22,7 @@ class MobileDeviceRow(TypedDict):
     platform: str
     api_key_hash: str
     fcm_token: Optional[str]
+    unifiedpush_endpoint: Optional[str]
     capabilities: Dict[str, Any]
     created_at: str
     last_seen: Optional[str]
@@ -167,6 +168,25 @@ def update_mobile_device_fcm_token(device_id: str, fcm_token: str) -> Optional[M
         cursor.execute("""
             UPDATE mobile_devices SET fcm_token = %s, last_seen = %s WHERE device_id = %s
         """, (fcm_token, now, device_id))
+        if cursor.rowcount == 0:
+            return None
+    return get_mobile_device(device_id)
+
+
+def update_mobile_device_unifiedpush_endpoint(
+    device_id: str, endpoint: str
+) -> Optional[MobileDeviceRow]:
+    """Update the UnifiedPush endpoint URL for a mobile device.
+
+    UnifiedPush lets self-hosted servers POST notifications directly to the
+    user's own push distributor (e.g. ntfy) without a shared Firebase project.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE mobile_devices SET unifiedpush_endpoint = %s, last_seen = %s WHERE device_id = %s
+        """, (endpoint, now, device_id))
         if cursor.rowcount == 0:
             return None
     return get_mobile_device(device_id)

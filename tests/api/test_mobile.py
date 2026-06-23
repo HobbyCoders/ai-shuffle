@@ -486,6 +486,133 @@ class TestRegisterPushToken:
 
 
 # =============================================================================
+# UnifiedPush Endpoint Tests
+# =============================================================================
+
+class TestRegisterUnifiedPushEndpoint:
+    """Test UnifiedPush endpoint registration."""
+
+    def test_register_endpoint_success(self, client, mock_database, mock_auth):
+        """UnifiedPush endpoint registration should succeed."""
+        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
+        mock_database.get_mobile_device_by_api_key_hash.return_value = {
+            "device_id": "test-device"
+        }
+        mock_database.update_mobile_device_unifiedpush_endpoint.return_value = {
+            "device_id": "test-device"
+        }
+
+        response = client.post(
+            "/api/v1/mobile/push/unifiedpush",
+            json={
+                "device_id": "test-device",
+                "endpoint": "https://ntfy.sh/up_abc123"
+            },
+            headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}valid_key"}
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+        mock_database.update_mobile_device_unifiedpush_endpoint.assert_called_once_with(
+            "test-device", "https://ntfy.sh/up_abc123"
+        )
+
+    def test_register_endpoint_device_mismatch(self, client, mock_database, mock_auth):
+        """UnifiedPush endpoint for mismatched device should fail with 403."""
+        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
+        mock_database.get_mobile_device_by_api_key_hash.return_value = {
+            "device_id": "device-a"
+        }
+
+        response = client.post(
+            "/api/v1/mobile/push/unifiedpush",
+            json={
+                "device_id": "device-b",
+                "endpoint": "https://ntfy.sh/up_abc123"
+            },
+            headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}valid_key"}
+        )
+
+        assert response.status_code == 403
+
+    def test_register_endpoint_device_not_found(self, client, mock_database, mock_auth):
+        """UnifiedPush endpoint update returning None should yield 404."""
+        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
+        mock_database.get_mobile_device_by_api_key_hash.return_value = {
+            "device_id": "test-device"
+        }
+        mock_database.update_mobile_device_unifiedpush_endpoint.return_value = None
+
+        response = client.post(
+            "/api/v1/mobile/push/unifiedpush",
+            json={
+                "device_id": "test-device",
+                "endpoint": "https://ntfy.sh/up_abc123"
+            },
+            headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}valid_key"}
+        )
+
+        assert response.status_code == 404
+
+    def test_register_endpoint_requires_valid_key(self, client, mock_database, mock_auth):
+        """Missing/invalid mobile key should yield 401."""
+        mock_auth["get_api_key"].return_value = None
+
+        response = client.post(
+            "/api/v1/mobile/push/unifiedpush",
+            json={"device_id": "test-device", "endpoint": "https://ntfy.sh/x"},
+        )
+
+        assert response.status_code == 401
+
+
+# =============================================================================
+# Web Session Tests
+# =============================================================================
+
+class TestCreateWebSession:
+    """Test minting a web session cookie from a mobile API key."""
+
+    def test_web_session_success(self, client, mock_database, mock_auth):
+        """Valid device key should mint a web session and set the cookie."""
+        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
+        mock_database.get_mobile_device_by_api_key_hash.return_value = {
+            "device_id": "test-device"
+        }
+
+        with patch("app.api.mobile.auth_service") as mock_auth_service:
+            mock_auth_service.create_session.return_value = "web-session-token-xyz"
+
+            response = client.post(
+                "/api/v1/mobile/web-session",
+                headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}valid_key"}
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "ok"
+        assert body["session_token"] == "web-session-token-xyz"
+        assert "expires_at" in body
+        # Cookie should be set on the response for the WebView CookieManager.
+        assert "session" in response.cookies
+        assert response.cookies["session"] == "web-session-token-xyz"
+
+    def test_web_session_requires_valid_key(self, client, mock_database, mock_auth):
+        """Invalid mobile key should yield 401 and not mint a session."""
+        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}unknown"
+        mock_database.get_mobile_device_by_api_key_hash.return_value = None
+
+        with patch("app.api.mobile.auth_service") as mock_auth_service:
+            response = client.post(
+                "/api/v1/mobile/web-session",
+                headers={"Authorization": f"Bearer {MOBILE_API_KEY_PREFIX}unknown"}
+            )
+            mock_auth_service.create_session.assert_not_called()
+
+        assert response.status_code == 401
+
+
+# =============================================================================
 # Admin Device Management Tests
 # =============================================================================
 

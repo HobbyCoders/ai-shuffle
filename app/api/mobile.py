@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List
 
-from fastapi import APIRouter, HTTPException, Depends, Request, status
+from fastapi import APIRouter, HTTPException, Depends, Request, Response, status
 
 from app.core.models import (
     MobileDevice,
@@ -17,8 +17,11 @@ from app.core.models import (
     PendingAction,
     ActionConfirmRequest,
     PushTokenRequest,
+    UnifiedPushEndpointRequest,
 )
 from app.api.auth import require_admin, get_api_key, hash_api_key
+from app.core.auth import auth_service
+from app.core.config import settings
 from app.db import database as db
 
 logger = logging.getLogger(__name__)
@@ -269,6 +272,75 @@ async def register_push_token(
     logger.debug(f"Updated FCM token for device {token_request.device_id}")
 
     return {"status": "ok", "message": "Push token registered"}
+
+
+@router.post("/push/unifiedpush")
+async def register_unifiedpush_endpoint(
+    request: Request,
+    up_request: UnifiedPushEndpointRequest,
+):
+    """
+    Register or update the device's UnifiedPush endpoint URL.
+
+    The Android app obtains this URL from its UnifiedPush distributor (e.g. ntfy)
+    and registers it so this server can deliver notifications without Firebase.
+    """
+    device = get_device_from_api_key(request)
+
+    if device["device_id"] != up_request.device_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Device ID mismatch"
+        )
+
+    updated = db.update_mobile_device_unifiedpush_endpoint(
+        up_request.device_id, up_request.endpoint
+    )
+
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Device not found"
+        )
+
+    logger.debug(f"Updated UnifiedPush endpoint for device {up_request.device_id}")
+
+    return {"status": "ok", "message": "UnifiedPush endpoint registered"}
+
+
+@router.post("/web-session")
+async def create_web_session(request: Request, response: Response):
+    """
+    Mint a web session cookie from a valid mobile API key.
+
+    Lets the Android app load this server's authenticated web UI inside a
+    WebView. The returned `session_token` is also injected into the WebView's
+    CookieManager by the app.
+
+    SECURITY: on a self-hosted instance, any holder of a valid device key is the
+    owner, so this grants a full web session (equivalent to admin login).
+    """
+    # Validates the aim_ key (raises 401 otherwise) and bumps last_seen.
+    get_device_from_api_key(request)
+
+    token = auth_service.create_session()
+
+    response.set_cookie(
+        key="session",
+        value=token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=settings.session_expire_days * 24 * 60 * 60,
+    )
+
+    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days)
+
+    return {
+        "status": "ok",
+        "session_token": token,
+        "expires_at": expires_at.isoformat(),
+    }
 
 
 @router.get("/devices", response_model=List[MobileDevice])
