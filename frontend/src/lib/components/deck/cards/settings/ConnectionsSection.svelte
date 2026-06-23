@@ -268,7 +268,7 @@
 				     recovery path when generations fail with an auth error (e.g. an
 				     expired token with no refresh token). When the token is still
 				     expired it becomes the prominent (primary-styled) action. -->
-				{#if !tokenExpired}<span class="kc-val">Authenticated</span>{/if}
+				{#if !tokenExpired}<span class="kc-val authed">Authenticated</span>{/if}
 				<button
 					type="button"
 					class="ed-btn kc-reauth"
@@ -474,11 +474,19 @@
 		font-size: 11.5px;
 		color: var(--muted-foreground);
 	}
+	/* The "Authenticated" status word reads green to match the "Active" badge
+	   (same --success token). Masked key values keep the muted .kc-val color. */
+	.kc-val.authed {
+		color: var(--success, #16a34a);
+	}
 	.kc-acts {
 		flex-shrink: 0;
 		display: flex;
 		gap: 8px;
 		align-items: center;
+		/* Vertically center the action column against the taller left body
+		   (the card itself stays flex-start so the icon aligns with the title). */
+		align-self: center;
 		flex-wrap: wrap;
 		justify-content: flex-end;
 	}
