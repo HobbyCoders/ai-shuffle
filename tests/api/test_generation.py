@@ -135,65 +135,124 @@ That's the generated config!'''
 
 
 class TestGenerateWithClaude:
-    """Test the Claude SDK integration."""
+    """Test the Claude SDK integration.
 
-    @pytest.mark.asyncio
-    async def test_generate_with_claude_success(self):
-        """Should return text response from Claude."""
-        from app.api.generation import generate_with_claude
+    AI generation always runs through the throwaway Claude Agent SDK
+    ``query()`` subprocess — there is no direct-HTTP path. The subprocess
+    authenticates the same way as the rest of Claude Code (the stored
+    anthropic_api_key, when set, is injected as ANTHROPIC_API_KEY by the
+    options builder; otherwise the OAuth account is used). These tests patch
+    the profile lookup and options builder so they need no DB and assert the
+    SDK path is the ONLY path.
+    """
+
+    @staticmethod
+    def _mock_query_yielding(text):
+        """Build an async-generator factory yielding one AssistantMessage."""
         from claude_agent_sdk import AssistantMessage, TextBlock
 
-        # Create mock message
         mock_text_block = MagicMock(spec=TextBlock)
-        mock_text_block.text = '{"name": "Generated"}'
-
+        mock_text_block.text = text
         mock_message = MagicMock(spec=AssistantMessage)
         mock_message.content = [mock_text_block]
 
         async def mock_query_gen(*args, **kwargs):
             yield mock_message
 
-        with patch("app.api.generation.query", return_value=mock_query_gen()):
+        return mock_query_gen
+
+    @pytest.mark.asyncio
+    async def test_generate_with_claude_success(self):
+        """Should return text response from Claude via the SDK query() path."""
+        from app.api.generation import generate_with_claude
+
+        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+                patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
+                patch("app.api.generation.query", return_value=self._mock_query_yielding('{"name": "Generated"}')()):
             result = await generate_with_claude("Test prompt")
 
         assert result == '{"name": "Generated"}'
 
     @pytest.mark.asyncio
     async def test_generate_with_claude_with_model(self):
-        """Should pass model parameter to Claude SDK."""
+        """Should forward the model override into build_generation_options."""
         from app.api.generation import generate_with_claude
-        from claude_agent_sdk import AssistantMessage, TextBlock
 
-        mock_text_block = MagicMock(spec=TextBlock)
-        mock_text_block.text = '{"result": "ok"}'
-
-        mock_message = MagicMock(spec=AssistantMessage)
-        mock_message.content = [mock_text_block]
-
-        async def mock_query_gen(*args, **kwargs):
-            yield mock_message
-
-        with patch("app.api.generation.query", return_value=mock_query_gen()) as mock_query:
+        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+                patch("app.core.generation_options.build_generation_options", return_value=MagicMock()) as mock_build, \
+                patch("app.api.generation.query", return_value=self._mock_query_yielding('{"result": "ok"}')()):
             result = await generate_with_claude("Test prompt", model="opus")
 
         assert '{"result": "ok"}' in result
+        # The model override flows to the options builder, not an HTTP call.
+        assert mock_build.call_args.kwargs.get("model_override") == "opus"
 
     @pytest.mark.asyncio
     async def test_generate_with_claude_sdk_error(self):
-        """Should raise HTTPException on SDK error."""
+        """Should raise HTTPException(500) when the SDK query() fails."""
         from app.api.generation import generate_with_claude
         from fastapi import HTTPException
 
-        async def mock_query_gen(*args, **kwargs):
-            raise RuntimeError("SDK connection failed")
-            yield  # Make it a generator
-
-        with patch("app.api.generation.query", side_effect=RuntimeError("SDK connection failed")):
+        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+                patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
+                patch("app.api.generation.query", side_effect=RuntimeError("SDK connection failed")):
             with pytest.raises(HTTPException) as exc_info:
                 await generate_with_claude("Test prompt")
 
         assert exc_info.value.status_code == 500
-        assert "AI generation failed" in exc_info.value.detail
+        # api_error_handler("run AI generation") -> "Failed to run AI generation"
+        assert "run AI generation" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_generate_with_claude_never_uses_http_path(self):
+        """Should NOT call the removed direct-HTTP generation path.
+
+        Regression guard for the refactor: even if a stored anthropic_api_key
+        exists, generation must go through query() (the SDK subprocess), never
+        an api.anthropic.com HTTP POST. We assert query() is invoked and that
+        no HTTP generation symbols are importable from the generation module.
+        """
+        import app.api.generation as generation_mod
+        from app.api.generation import generate_with_claude
+
+        # The removed HTTP-path symbols must no longer exist on the module.
+        assert not hasattr(generation_mod, "generate_via_http")
+        assert not hasattr(generation_mod, "is_http_generation_available")
+        assert not hasattr(generation_mod, "_extract_system_prompt_text")
+
+        query_called = {"n": 0}
+
+        def _spy_query(*args, **kwargs):
+            query_called["n"] += 1
+            return self._mock_query_yielding('{"ok": true}')()
+
+        # Even with a key "set", no HTTP client is constructed — query() runs.
+        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+                patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
+                patch("app.api.generation.query", side_effect=_spy_query), \
+                patch("httpx.AsyncClient.post", side_effect=AssertionError("HTTP path must not be used")):
+            result = await generate_with_claude("Test prompt")
+
+        assert result == '{"ok": true}'
+        assert query_called["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_generate_with_claude_does_not_depend_on_stored_key(self):
+        """Generation must succeed whether or not an Anthropic key is stored.
+
+        The key is now an auth credential consumed by the options/env builder,
+        not a precondition for generation. With the key lookup patched to
+        return a value, generation still routes through query() unchanged.
+        """
+        from app.api.generation import generate_with_claude
+
+        with patch("app.core.profiles.get_default_ai_profile", return_value=None), \
+                patch("app.core.generation_options.build_generation_options", return_value=MagicMock()), \
+                patch("app.api.settings_crypto.get_decrypted_api_key", return_value="sk-ant-stored"), \
+                patch("app.api.generation.query", return_value=self._mock_query_yielding('{"name": "X"}')()):
+            result = await generate_with_claude("Test prompt")
+
+        assert result == '{"name": "X"}'
 
 
 class TestGenerateProfileEndpoint:

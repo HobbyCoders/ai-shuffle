@@ -101,12 +101,17 @@ class IntegrationSettingsResponse(BaseModel):
     """Response containing integration configuration status"""
     fal_api_key_set: bool
     fal_api_key_masked: str
-    # Anthropic API key (drives the direct-HTTP path for one-shot AI
-    # generation — commit messages, PR descriptions, branch names, profile
-    # generation). When unset, those calls fall through to the SDK
-    # subprocess path.
+    # Anthropic API key — a Claude Code AUTHENTICATION credential. When set, it
+    # is injected as ANTHROPIC_API_KEY into every Claude Code subprocess and
+    # overrides the connected Claude account (API-key login). When unset, Claude
+    # Code uses the connected account / OAuth credentials.
     anthropic_api_key_set: bool = False
     anthropic_api_key_masked: str = ""
+    # Which auth method Claude Code is currently using:
+    #   "api_key"  — an anthropic_api_key is set (overrides the account)
+    #   "account"  — no key set; the connected Claude OAuth account is used
+    # Lets the UI surface the active method without a silent billing switch.
+    claude_code_auth_method: str = "account"
     # Model selections (all fal.ai model IDs)
     image_model: Optional[str] = None
     image_edit_model: Optional[str] = None
@@ -189,6 +194,9 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         fal_api_key_masked=mask_api_key(fal_key) if fal_key else "",
         anthropic_api_key_set=bool(anthropic_key),
         anthropic_api_key_masked=mask_api_key(anthropic_key) if anthropic_key else "",
+        # Key set → Claude Code authenticates with the API key (overrides the
+        # connected account). Key absent → connected OAuth account is used.
+        claude_code_auth_method="api_key" if anthropic_key else "account",
         image_model=image_model,
         image_edit_model=image_edit_model,
         video_model=video_model,
@@ -271,10 +279,11 @@ async def set_anthropic_api_key(
     """
     Set the Anthropic API key (admin only).
 
-    Used by the direct-HTTP path in `app.api.generation.generate_with_claude`
-    for one-shot AI generation calls (commit messages, PR descriptions,
-    branch names, profile/subagent generation). When unset, those calls
-    fall through to the Claude Agent SDK subprocess path.
+    This key is a Claude Code AUTHENTICATION credential. When set, it is
+    injected as ANTHROPIC_API_KEY into every Claude Code subprocess and
+    OVERRIDES the connected Claude account (API-key login wins, matching
+    claude.exe's native precedence). When unset, Claude Code uses the connected
+    account / OAuth credentials. Validated here before storage.
 
     Get your API key from: https://console.anthropic.com/settings/keys
     """
@@ -326,8 +335,8 @@ async def remove_anthropic_api_key(token: str = Depends(require_admin)):
     """
     Remove the Anthropic API key (admin only).
 
-    Generation calls will fall back to the SDK subprocess path until a new
-    key is configured.
+    Reverts Claude Code authentication to the connected Claude account /
+    OAuth credentials. No effect on the OAuth login flow itself.
     """
     database.delete_system_setting("anthropic_api_key")
     return {"success": True}

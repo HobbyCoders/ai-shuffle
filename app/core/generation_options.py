@@ -182,6 +182,11 @@ def _resolve_env(profile_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
     Always forces `CLAUDECODE=""` to prevent "nested session" detection when
     AI Shuffle is started from within a Claude Code session. Other env vars
     from the profile pass through.
+
+    Also injects the Claude Code auth credential (`ANTHROPIC_API_KEY`) when a
+    stored anthropic_api_key is set, mirroring the main chat subprocess. AI
+    generation authenticates exactly like every other Claude Code session: key
+    set → API-key auth wins; key absent → connected OAuth account is used.
     """
     env: Dict[str, str] = {}
     if profile_config:
@@ -189,6 +194,15 @@ def _resolve_env(profile_config: Optional[Dict[str, Any]]) -> Dict[str, str]:
         if isinstance(profile_env, dict):
             env.update({str(k): str(v) for k, v in profile_env.items()})
     env["CLAUDECODE"] = ""
+
+    # Inject the stored anthropic_api_key as the Claude Code auth credential
+    # (same precedence as chat sessions). Imported lazily to keep this module
+    # free of the heavier environment wiring at import time.
+    try:
+        from app.core.environment import inject_claude_code_auth
+        inject_claude_code_auth(env)
+    except Exception as e:  # noqa: BLE001 - auth injection is best-effort
+        logger.debug(f"Could not inject Claude Code auth for generation: {e}")
     return env
 
 

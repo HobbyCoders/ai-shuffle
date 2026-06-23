@@ -303,6 +303,38 @@ def _build_extra_args(
     return extra_args
 
 
+def inject_claude_code_auth(env: Dict[str, str]) -> Dict[str, str]:
+    """Inject the Claude Code auth credential into a subprocess env (in place).
+
+    The stored `anthropic_api_key` is an authentication credential for Claude
+    Code — NOT a separate generation transport. This is the always-on hook
+    that wires it into EVERY Claude Code subprocess (chat sessions, agents,
+    one-shot generation), mirroring how `FAL_KEY` is injected but unconditional
+    on ai_tools.
+
+    Precedence (matches `claude.exe`'s native behavior, where `ANTHROPIC_API_KEY`
+    overrides any stored OAuth credentials):
+
+    - **API key set** → inject `ANTHROPIC_API_KEY` (API-key auth wins). The
+      connected Claude account / OAuth credentials are ignored by the CLI for
+      that session, so billing flows through the API key.
+    - **API key absent** → inject nothing; leave the env untouched so the CLI
+      falls back to the existing OAuth account credentials.
+
+    We never delete or alter the OAuth login flow — this only ADDS the
+    key-injection path. Returns the same dict for convenience.
+    """
+    api_key = _get_decrypted_api_key("anthropic_api_key")
+    if api_key:
+        env["ANTHROPIC_API_KEY"] = api_key
+        logger.debug(
+            "Injected ANTHROPIC_API_KEY for Claude Code auth (API-key login "
+            "active; overrides connected account)"
+        )
+    # No key → inject nothing; OAuth account credentials remain in effect.
+    return env
+
+
 def _build_env_with_ai_tools(
     base_env: Optional[Dict[str, str]],
     ai_tools_config: Optional[Dict[str, Any]],
@@ -338,6 +370,12 @@ def _build_env_with_ai_tools(
     # the inherited value.
     env.pop("CLAUDECODE", None)
     env["CLAUDECODE"] = ""
+
+    # ALWAYS-ON: wire the stored anthropic_api_key in as the Claude Code auth
+    # credential for EVERY session, regardless of whether AI tools are enabled.
+    # Must happen BEFORE the ai_tools early-returns below — auth is not gated on
+    # ai_tools. (Key set → API-key auth wins; key absent → OAuth account auth.)
+    inject_claude_code_auth(env)
 
     # NOTE: The browser integration is now "Claude in Chrome" (the bundled CLI's
     # --chrome flag), not the Playwright MCP server. The CLI manages its own

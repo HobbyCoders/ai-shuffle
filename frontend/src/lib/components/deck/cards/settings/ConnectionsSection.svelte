@@ -36,15 +36,21 @@
 	}: Props = $props();
 
 	// ----- Anthropic API key (self-contained: this section owns its state) -----
-	// Enables the direct-HTTP path for one-shot AI generation (commit msgs,
-	// PR descriptions, branch names). Without it, those calls fall through
-	// to the slower SDK subprocess path.
+	// This key is a Claude Code AUTHENTICATION method. When set, Claude Code
+	// runs all sessions with it (injected as ANTHROPIC_API_KEY), overriding the
+	// connected Claude account. When cleared, Claude Code reverts to the account.
 	let anthropicKeySet = $state(false);
 	let anthropicKeyMasked = $state('');
 	let anthropicKeyInput = $state('');
 	let anthropicSaving = $state(false);
 	let anthropicError = $state('');
 	let anthropicSuccess = $state('');
+
+	// Which auth method Claude Code is actively using, from the backend:
+	// 'api_key' (key overrides the account) or 'account' (connected OAuth).
+	// API-key login wins whenever a key is set — no silent billing switch.
+	let claudeCodeAuthMethod = $state('account');
+	let usingApiKeyAuth = $derived(claudeCodeAuthMethod === 'api_key');
 
 	// ----- fal.ai key (self-contained) -----
 	// Lives here, not on AI Models, so every credential has a single home
@@ -64,6 +70,7 @@
 			const data = await res.json();
 			anthropicKeySet = !!data.anthropic_api_key_set;
 			anthropicKeyMasked = data.anthropic_api_key_masked ?? '';
+			claudeCodeAuthMethod = data.claude_code_auth_method ?? (data.anthropic_api_key_set ? 'api_key' : 'account');
 			falKeySet = !!data.fal_api_key_set;
 			falKeyMasked = data.fal_api_key_masked ?? '';
 		} catch (e) {
@@ -93,7 +100,10 @@
 			anthropicKeySet = true;
 			anthropicKeyMasked = data.masked_key ?? '';
 			anthropicKeyInput = '';
-			anthropicSuccess = 'Saved';
+			// Setting a key makes Claude Code authenticate with it, overriding
+			// the connected account.
+			claudeCodeAuthMethod = 'api_key';
+			anthropicSuccess = 'Saved — Claude Code now uses this API key';
 			setTimeout(() => (anthropicSuccess = ''), 2500);
 		} catch (e) {
 			anthropicError = e instanceof Error ? e.message : 'Network error';
@@ -117,7 +127,9 @@
 			}
 			anthropicKeySet = false;
 			anthropicKeyMasked = '';
-			anthropicSuccess = 'Removed';
+			// Clearing the key reverts Claude Code to the connected account.
+			claudeCodeAuthMethod = 'account';
+			anthropicSuccess = 'Removed — Claude Code reverted to the connected account';
 			setTimeout(() => (anthropicSuccess = ''), 2500);
 		} catch (e) {
 			anthropicError = e instanceof Error ? e.message : 'Network error';
@@ -196,11 +208,23 @@
 <!-- Anthropic / Claude -->
 <div class="set-group">
 	<div class="set-grouphead">
-		<h3><KeyRound />Anthropic &amp; Claude</h3>
-		<p>How this install talks to Claude.</p>
+		<h3><KeyRound />Claude Code login</h3>
+		<p>Choose how Claude Code authenticates: your Claude account, or an Anthropic API key. Pick one — an API key always overrides the account.</p>
 	</div>
 
-	<!-- Claude Code OAuth -->
+	<!-- Active-method banner -->
+	<div class="ed-note authnote">
+		<Info />
+		<div>
+			{#if usingApiKeyAuth}
+				<b>Authenticating with the Anthropic API key.</b> While a key is set it overrides the connected Claude account — all Claude Code sessions run and bill through this key. Remove the key to switch back to your account.
+			{:else}
+				<b>Authenticating with your connected Claude account.</b> Set an Anthropic API key below to authenticate with the key instead (it will override the account until removed).
+			{/if}
+		</div>
+	</div>
+
+	<!-- Claude Code OAuth (account login method) -->
 	<div class="keycard">
 		<div class="kc-ic">
 			<svg viewBox="0 0 24 24" fill="currentColor">
@@ -208,10 +232,12 @@
 			</svg>
 		</div>
 		<div class="kc-body">
-			<h4>Claude Code
-				{#if $claudeAuthenticated}<span class="sb ok">Connected</span>{:else}<span class="sb off">Not connected</span>{/if}
+			<h4>Claude account
+				{#if $claudeAuthenticated && !usingApiKeyAuth}<span class="sb ok">Active</span>
+				{:else if $claudeAuthenticated}<span class="sb off">Connected · overridden by API key</span>
+				{:else}<span class="sb off">Not connected</span>{/if}
 			</h4>
-			<p>Sign in with your Claude subscription to run sessions.</p>
+			<p>Sign in with your Claude subscription. Used as the login method whenever no API key is set.</p>
 		</div>
 		<div class="kc-acts">
 			{#if $claudeAuthenticated}
@@ -235,7 +261,7 @@
 		</div>
 	</div>
 
-	<!-- Anthropic API key -->
+	<!-- Anthropic API key (API-key login method) -->
 	<div class="keycard">
 		<div class="kc-ic">
 			<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -244,12 +270,12 @@
 		</div>
 		<div class="kc-body">
 			<h4>Anthropic API key
-				{#if anthropicKeySet}<span class="sb ok">Set</span>{:else}<span class="sb off">Optional</span>{/if}
+				{#if usingApiKeyAuth}<span class="sb ok">Active</span>{:else}<span class="sb off">Not set</span>{/if}
 			</h4>
 			{#if anthropicKeySet}
-				<p>Used for fast commit messages, PR descriptions and branch names. <code class="kc-val">{anthropicKeyMasked}</code></p>
+				<p>Claude Code authenticates with this key, overriding the connected account. <code class="kc-val">{anthropicKeyMasked}</code></p>
 			{:else}
-				<p>Speeds up one-shot AI generation (commit messages, PR descriptions).</p>
+				<p>Authenticate Claude Code with an API key instead of your account. Setting it overrides the connected account; removing it reverts to the account.</p>
 			{/if}
 		</div>
 		<div class="kc-acts">
@@ -265,7 +291,7 @@
 					class="inp kc-in"
 				/>
 				<button type="button" class="ed-btn primary" onclick={saveAnthropicKey} disabled={anthropicSaving || !anthropicKeyInput.trim()}>
-					{anthropicSaving ? '…' : 'Save'}
+					{anthropicSaving ? '…' : 'Use this key'}
 				</button>
 			{/if}
 		</div>
