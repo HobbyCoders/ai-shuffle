@@ -66,6 +66,17 @@ class TaskRegistry:
         # parent as an "unpark" notification. Guards the post-loop follow-up turn
         # against re-triggering on a duplicate TaskNotificationMessage.
         self._notified: Dict[str, set] = {}
+        # session_id -> set of task_ids whose TaskStartedMessage arrived during
+        # the CURRENT turn. Reset at the start of every turn (see
+        # ``reset_started_this_turn``). This scopes the in-stream "unpark" stash
+        # to the genuine FAST path — a background agent SPAWNED and COMPLETED
+        # before the parent's ResultMessage. A terminal notification for a task
+        # NOT in this set is a prior-turn orphan leaking from the SDK's pooled-
+        # client buffer; it must NOT fire a spurious in-stream unpark in this
+        # later, unrelated turn. (The slow path — a genuinely in-flight agent that
+        # completes AFTER its spawning turn — is handled by the between-turns
+        # drain pump, which is unaffected by this set.)
+        self._started_this_turn: Dict[str, set] = {}
 
     def mark_notified(self, session_id: str, task_id: str, signature: str) -> bool:
         """Idempotency latch for the parent "unpark" follow-up turn.
@@ -87,6 +98,39 @@ class TaskRegistry:
             return False
         seen.add(key)
         return True
+
+    def reset_started_this_turn(self, session_id: str) -> None:
+        """Clear the "started this turn" set for a session.
+
+        Called at the START of every turn (right after ``stop_drain_pump``) so the
+        in-stream unpark stash only ever fires for a background agent that both
+        started AND finished within the turn currently streaming. Defensive: a
+        missing ``session_id`` is a no-op.
+        """
+        if not session_id:
+            return
+        self._started_this_turn.pop(session_id, None)
+
+    def mark_started_this_turn(self, session_id: str, task_id: str) -> None:
+        """Record that ``task_id`` was started (TaskStartedMessage) this turn.
+
+        Defensive: a missing ``session_id``/``task_id`` never records, so a stray
+        message can't strand state.
+        """
+        if not session_id or not task_id:
+            return
+        self._started_this_turn.setdefault(session_id, set()).add(task_id)
+
+    def was_started_this_turn(self, session_id: str, task_id: str) -> bool:
+        """True iff ``task_id``'s TaskStartedMessage arrived during the current turn.
+
+        Used by the in-stream stash to distinguish a genuine FAST sub-agent
+        (spawned+completed this turn → unpark) from a prior-turn orphan leaking
+        from the pooled-client buffer (→ suppress, no spurious unpark).
+        """
+        if not session_id or not task_id:
+            return False
+        return task_id in self._started_this_turn.get(session_id, set())
 
     def start_task(
         self,
@@ -192,11 +236,13 @@ class TaskRegistry:
         """Drop all tasks for a session (called when the live session is removed)."""
         self._tasks.pop(session_id, None)
         self._notified.pop(session_id, None)
+        self._started_this_turn.pop(session_id, None)
 
     def reset_all(self) -> None:
         """Drop all task state. Used on shutdown and between tests."""
         self._tasks.clear()
         self._notified.clear()
+        self._started_this_turn.clear()
 
 
 # Global instance

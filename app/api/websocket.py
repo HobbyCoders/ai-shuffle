@@ -258,6 +258,16 @@ async def chat_websocket(
         # invariant requires it be stopped before a turn opens the client.
         await stop_drain_pump(session_id)
 
+        # Reset the per-session "tasks started this turn" set so the in-stream
+        # unpark stash only fires for a background agent that BOTH started and
+        # completed within THIS turn. Without this reset, a prior-turn orphan
+        # task_notification leaking from the SDK's pooled-client buffer would be
+        # treated as "started this turn" and fire a spurious unpark in this
+        # later, unrelated turn (the reported bug). The registry's own
+        # completion bookkeeping is unaffected.
+        from app.core.task_registry import task_registry as _task_registry
+        _task_registry.reset_started_this_turn(session_id)
+
         def _set_query_task(task: asyncio.Task) -> None:
             nonlocal query_task
             query_task = task

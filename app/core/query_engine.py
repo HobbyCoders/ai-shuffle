@@ -211,6 +211,13 @@ def _record_task_message(session_id: Optional[str], message: Any) -> None:
             task_registry.start_task(
                 session_id, message.task_id, "agent", getattr(message, "description", None)
             )
+            # Scope the in-stream unpark stash to THIS turn: record that this
+            # background agent's TaskStartedMessage arrived during the turn now
+            # streaming. Only a task in this set may fire an in-stream unpark when
+            # its terminal notification lands (the genuine FAST path). A terminal
+            # notification for a task NOT started this turn is a prior-turn orphan
+            # leaking from the SDK's pooled-client buffer and must be suppressed.
+            task_registry.mark_started_this_turn(session_id, message.task_id)
         elif isinstance(message, TaskProgressMessage):
             # Progress carries the latest description — surface it as the title.
             task_registry.update_task(

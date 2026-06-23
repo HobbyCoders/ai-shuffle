@@ -192,6 +192,12 @@ async def test_fast_path_stash_then_unpark_spawns_followup(tmp_path):
     stream_state = MutableStreamState()
     sid = "sess-1"
 
+    # Genuine FAST path: the agent's TaskStartedMessage arrived THIS turn. The
+    # real SDK lifecycle records this via _record_task_message; here we call the
+    # stash directly, so emulate the start. Without it, _stash_terminal_notification
+    # now (correctly) suppresses the notification as a prior-turn orphan.
+    task_registry.mark_started_this_turn(sid, "task-1")
+
     # FAST path: a sub-agent terminal notification arrives in-stream → stash it.
     cwh._stash_terminal_notification(stream_state, _terminal_event(out), sid)
     # A non-terminal / non-notification event is a no-op (should not stash).

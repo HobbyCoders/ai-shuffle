@@ -38,9 +38,20 @@ def _make_handler():
 
 
 def _fake_stream(events):
-    """Return an async-generator factory yielding the given events in order."""
+    """Return an async-generator factory yielding the given events in order.
+
+    Emulates the real ``stream_to_websocket`` registry side-effect: when a
+    ``task_started`` event is yielded, the real generator has just called
+    ``_record_task_message`` → ``mark_started_this_turn`` for it. We mirror that
+    here so the in-stream unpark stash's started-this-turn scope guard sees the
+    task as genuinely spawned in THIS turn (run_query resets the set at turn
+    start, so marking it before calling run_query would be wiped).
+    """
     async def _gen(*args, **kwargs):
+        sid = kwargs.get("session_id")
         for ev in events:
+            if ev.get("type") == "task_started" and sid:
+                task_registry.mark_started_this_turn(sid, ev.get("task_id"))
             yield ev
     return _gen
 
@@ -167,7 +178,14 @@ async def test_terminal_notification_spawns_one_followup_with_result(tmp_path):
     out = tmp_path / "out.txt"
     out.write_text("FULL SUBAGENT RESULT TEXT", encoding="utf-8")
 
+    # Genuine FAST path: the agent's TaskStartedMessage arrives THIS turn (the
+    # _fake_stream marks it started-this-turn as it yields), then its terminal
+    # notification arrives in-stream before `done`. Without the task_started
+    # event, the in-stream stash now (correctly) suppresses the notification as a
+    # prior-turn orphan. run_query resets the started-this-turn set at turn start,
+    # so the start MUST flow through the stream, not be pre-set.
     events = [
+        {"type": "task_started", "task_id": "task-1", "description": "bg work"},
         {
             "type": "task_notification",
             "task_id": "task-1",
@@ -209,6 +227,9 @@ async def test_duplicate_notification_same_uuid_spawns_no_followup(tmp_path):
     out = tmp_path / "out.txt"
     out.write_text("RESULT", encoding="utf-8")
 
+    # Genuine FAST path: agent started this turn (via the task_started event,
+    # which _fake_stream marks started-this-turn). The dedup under test is
+    # mark_notified (same uuid twice), not the started-this-turn scope guard.
     notif = {
         "type": "task_notification",
         "task_id": "task-1",
@@ -219,8 +240,13 @@ async def test_duplicate_notification_same_uuid_spawns_no_followup(tmp_path):
         "uuid": "uuid-1",
         "usage": None,
     }
-    # Same uuid twice in the same stream, then done.
-    events = [notif, dict(notif), {"type": "done", "session_id": "sess-1", "metadata": {}}]
+    # Started this turn, then the same uuid twice in the same stream, then done.
+    events = [
+        {"type": "task_started", "task_id": "task-1", "description": "bg work"},
+        notif,
+        dict(notif),
+        {"type": "done", "session_id": "sess-1", "metadata": {}},
+    ]
 
     handler = _make_handler()
     created = _RecordingCreateTask()

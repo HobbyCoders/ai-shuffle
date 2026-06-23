@@ -204,6 +204,58 @@ class TestMarkNotified:
         assert reg.mark_notified("s1", "t1", "uuid-1") is True
 
 
+class TestStartedThisTurn:
+    """The per-turn scope set that suppresses spurious in-stream unparks.
+
+    A background agent's TaskStartedMessage in the CURRENT turn marks it
+    "started this turn"; a terminal notification for a task NOT in this set is a
+    prior-turn orphan and must NOT fire an in-stream unpark. The set is reset at
+    the start of every turn.
+    """
+
+    def test_mark_then_query_true(self, reg):
+        reg.mark_started_this_turn("s1", "t1")
+        assert reg.was_started_this_turn("s1", "t1") is True
+
+    def test_unknown_task_is_false(self, reg):
+        # Never marked -> a prior-turn orphan.
+        assert reg.was_started_this_turn("s1", "t1") is False
+        reg.mark_started_this_turn("s1", "t1")
+        # A DIFFERENT task in the same session is still unknown.
+        assert reg.was_started_this_turn("s1", "t2") is False
+
+    def test_reset_clears_only_that_session(self, reg):
+        reg.mark_started_this_turn("s1", "t1")
+        reg.mark_started_this_turn("s2", "t9")
+        reg.reset_started_this_turn("s1")
+        # s1 cleared (turn boundary), s2 untouched.
+        assert reg.was_started_this_turn("s1", "t1") is False
+        assert reg.was_started_this_turn("s2", "t9") is True
+
+    def test_blank_ids_never_record(self, reg):
+        reg.mark_started_this_turn("", "t1")
+        reg.mark_started_this_turn("s1", "")
+        assert reg.was_started_this_turn("", "t1") is False
+        assert reg.was_started_this_turn("s1", "") is False
+        # No state stranded -> a real (session, task) still records.
+        reg.mark_started_this_turn("s1", "t1")
+        assert reg.was_started_this_turn("s1", "t1") is True
+
+    def test_reset_missing_session_is_noop(self, reg):
+        # Should not raise.
+        reg.reset_started_this_turn("nope")
+
+    def test_cleared_by_clear_session(self, reg):
+        reg.mark_started_this_turn("s1", "t1")
+        reg.clear_session("s1")
+        assert reg.was_started_this_turn("s1", "t1") is False
+
+    def test_cleared_by_reset_all(self, reg):
+        reg.mark_started_this_turn("s1", "t1")
+        reg.reset_all()
+        assert reg.was_started_this_turn("s1", "t1") is False
+
+
 class TestClearAndNoOps:
     def test_clear_session(self, reg):
         reg.start_task("s1", "t1", "agent", "x")

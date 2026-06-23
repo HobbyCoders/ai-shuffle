@@ -8,6 +8,7 @@ become methods.  Behaviour is identical to the original implementation.
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -29,6 +30,56 @@ from app.db.async_database import run_sync
 from app.db.base import WorktreeStatus
 
 logger = logging.getLogger(__name__)
+
+# Gate for verbose unpark-decision tracing. Off unless either env var is truthy.
+# Read once at import so the hot path only does a bool check. (Mirrors the
+# STREAM_DEBUG/AIHUB_DEBUG_STREAM gate in app/core/query_engine.py.) When on,
+# EVERY unpark decision (in-stream stash vs. drain pump) logs the task_id, status,
+# signature, whether the task was started-this-turn, and the registry status, so a
+# live incident can confirm the mechanism. Silent + cheap by default.
+_STREAM_DEBUG = bool(
+    os.environ.get("STREAM_DEBUG") or os.environ.get("AIHUB_DEBUG_STREAM")
+)
+
+
+def _log_unpark_decision(
+    *,
+    path: str,
+    session_id: str,
+    task_id: Any,
+    status: Any,
+    signature: Any,
+    started_this_turn: Any,
+    decision: str,
+) -> None:
+    """STREAM_DEBUG-gated trace of a single unpark decision.
+
+    No-op (just a bool check) unless STREAM_DEBUG/AIHUB_DEBUG_STREAM is set, so it
+    is safe to call on the hot streaming path. ``path`` is "in-stream" or "pump";
+    ``decision`` is a short verb ("stash"/"suppress-orphan"/"deliver"/"dedup"/…).
+    """
+    if not _STREAM_DEBUG:
+        return
+    try:
+        from app.core.task_registry import task_registry
+
+        rec = task_registry.get_task(session_id, task_id) if task_id else None
+        reg_status = rec.get("status") if rec else None
+    except Exception:
+        reg_status = None
+    logger.info(
+        "[STREAM_DEBUG] unpark-decision path=%s session=%s task_id=%s status=%s "
+        "signature=%s started_this_turn=%s registry_status=%s decision=%s",
+        path,
+        session_id,
+        task_id,
+        status,
+        signature,
+        started_this_turn,
+        reg_status,
+        decision,
+    )
+
 
 # Shared module-level sets tracking sessions with a pending two-phase
 # ``interrupt_for_query`` or a user-initiated stop.  Checked by run_query's
@@ -134,6 +185,17 @@ def _stash_terminal_notification(stream_state, event: dict, session_id: str) -> 
     ``task_registry.mark_notified``) so the post-loop unpark fires ONE
     consolidated follow-up turn. No-op for non-terminal / non-notification
     events, so it is safe to call for every streamed event.
+
+    SCOPE GUARD (spurious-unpark fix): only stash a notification for a task whose
+    ``TaskStartedMessage`` arrived during THIS turn (``was_started_this_turn``) —
+    the genuine FAST path is an agent SPAWNED and COMPLETED before the parent's
+    ResultMessage. The SDK's pooled client BUFFERS task notifications across turns;
+    an undrained prior-turn orphan (e.g. the drain pump broke after the first
+    terminal, or a user message cancelled it mid-wait) can leak into a LATER,
+    UNRELATED turn's ``receive_response()``. Such an orphan was NOT started this
+    turn, so we do NOT stash it → no jarring stale ``<task-notification>`` unpark.
+    The registry still records its completion in ``_record_task_message`` (runs
+    unconditionally on every message), so the indicator never strands.
     """
     from app.core.task_registry import task_registry
 
@@ -144,17 +206,53 @@ def _stash_terminal_notification(stream_state, event: dict, session_id: str) -> 
 
     task_id = event.get("task_id")
     output_file = event.get("output_file")
-    signature = event.get("uuid") or f"{output_file}:{event.get('status')}"
+    status = event.get("status")
+    signature = event.get("uuid") or f"{output_file}:{status}"
+
+    # Prior-turn orphan leaking from the pooled-client buffer — suppress the
+    # in-stream unpark (registry completion still recorded upstream).
+    started_this_turn = task_registry.was_started_this_turn(session_id, task_id)
+    if not started_this_turn:
+        _log_unpark_decision(
+            path="in-stream",
+            session_id=session_id,
+            task_id=task_id,
+            status=status,
+            signature=signature,
+            started_this_turn=False,
+            decision="suppress-orphan",
+        )
+        return
+
     if task_registry.mark_notified(session_id, task_id, signature):
+        _log_unpark_decision(
+            path="in-stream",
+            session_id=session_id,
+            task_id=task_id,
+            status=status,
+            signature=signature,
+            started_this_turn=True,
+            decision="stash",
+        )
         stream_state.pending_task_notifications.append({
             "task_id": task_id,
-            "status": event.get("status"),
+            "status": status,
             "summary": event.get("summary"),
             "output_file": output_file,
             "uuid": event.get("uuid"),
             "usage": event.get("usage"),
             "tool_use_id": event.get("tool_use_id"),
         })
+    else:
+        _log_unpark_decision(
+            path="in-stream",
+            session_id=session_id,
+            task_id=task_id,
+            status=status,
+            signature=signature,
+            started_this_turn=True,
+            decision="dedup",
+        )
 
 
 async def _deliver_unpark_impl(
@@ -412,7 +510,25 @@ async def _drain_notifications_impl(
                 _u_signature = _u_uuid or f":{_u_status}"
                 if not task_registry.mark_notified(session_id, _u_task_id, _u_signature):
                     # Already delivered (e.g. a notification raced in first) — keep draining.
+                    _log_unpark_decision(
+                        path="pump",
+                        session_id=session_id,
+                        task_id=_u_task_id,
+                        status=_u_status,
+                        signature=_u_signature,
+                        started_this_turn=task_registry.was_started_this_turn(session_id, _u_task_id),
+                        decision="dedup",
+                    )
                     continue
+                _log_unpark_decision(
+                    path="pump",
+                    session_id=session_id,
+                    task_id=_u_task_id,
+                    status=_u_status,
+                    signature=_u_signature,
+                    started_this_turn=task_registry.was_started_this_turn(session_id, _u_task_id),
+                    decision="deliver-killed",
+                )
                 pending = {
                     "task_id": _u_task_id,
                     "status": _u_status,
@@ -467,8 +583,26 @@ async def _drain_notifications_impl(
             signature = frame.get("uuid") or f"{output_file}:{status}"
             if not task_registry.mark_notified(session_id, task_id, signature):
                 # Already delivered (e.g. also caught in-stream) — keep draining.
+                _log_unpark_decision(
+                    path="pump",
+                    session_id=session_id,
+                    task_id=task_id,
+                    status=status,
+                    signature=signature,
+                    started_this_turn=task_registry.was_started_this_turn(session_id, task_id),
+                    decision="dedup",
+                )
                 continue
 
+            _log_unpark_decision(
+                path="pump",
+                session_id=session_id,
+                task_id=task_id,
+                status=status,
+                signature=signature,
+                started_this_turn=task_registry.was_started_this_turn(session_id, task_id),
+                decision="deliver",
+            )
             pending = {
                 "task_id": task_id,
                 "status": status,
@@ -1805,6 +1939,15 @@ class ChatWebSocketHandler:
         # client via receive_messages(); this turn will read it via
         # receive_response() — at most one reader at a time.
         await stop_drain_pump(session_id)
+
+        # Reset the per-session "tasks started this turn" set so the in-stream
+        # unpark stash only fires for a background agent that BOTH started and
+        # completed within THIS turn. Without this reset, a prior-turn orphan
+        # task_notification leaking from the SDK's pooled-client buffer would be
+        # treated as "started this turn" and fire a spurious unpark in this
+        # later, unrelated turn (the reported bug). The registry's own
+        # completion bookkeeping is unaffected.
+        task_registry.reset_started_this_turn(session_id)
 
         # Generate a message ID for this streaming session
         message_id = str(uuid.uuid4())

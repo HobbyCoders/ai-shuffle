@@ -633,3 +633,162 @@ async def test_pump_ignores_non_terminal_task_updated():
     assert task_registry.get_active("sess-1") == []
     handler._deliver_unpark.assert_awaited_once()
     assert handler._deliver_unpark.await_args.kwargs["pending"][0]["status"] == "killed"
+
+
+# ---------------------------------------------------------------------------
+# 8. SPURIOUS-UNPARK SUPPRESSION (the reported bug)
+#    A prior-turn orphan task_notification leaking IN-STREAM in a LATER, unrelated
+#    turn must NOT fire an unpark (it was not started THIS turn) — but the registry
+#    MUST still record its completion (the indicator never strands).
+# ---------------------------------------------------------------------------
+
+def _terminal_event(task_id="task-1", *, status="completed", uuid="u-1",
+                    output_file="", summary="s", tool_use_id="tu-1", usage=None):
+    """An in-stream terminal task_notification EVENT (dict), as run_query sees it."""
+    return {
+        "type": "task_notification",
+        "task_id": task_id,
+        "status": status,
+        "summary": summary,
+        "tool_use_id": tool_use_id,
+        "output_file": output_file,
+        "uuid": uuid,
+        "usage": usage,
+    }
+
+
+def test_stash_suppresses_prior_turn_orphan_not_started_this_turn():
+    """In-stream stash: a notification for a task NOT started this turn (a
+    prior-turn orphan leaking from the pooled-client buffer) is NOT stashed."""
+    from app.api.ws_event_handlers import MutableStreamState
+
+    task_registry.reset_all()
+    stream_state = MutableStreamState()
+    # NOTE: we deliberately do NOT call mark_started_this_turn — this models an
+    # orphan whose TaskStartedMessage belonged to an EARLIER turn (already reset).
+    cwh._stash_terminal_notification(stream_state, _terminal_event("orphan-1"), "sess-1")
+
+    # Nothing stashed -> the post-loop unpark has nothing to deliver.
+    assert stream_state.pending_task_notifications == []
+    task_registry.reset_all()
+
+
+def test_stash_fires_for_task_started_this_turn():
+    """In-stream stash: the genuine FAST path (started THIS turn) IS stashed."""
+    from app.api.ws_event_handlers import MutableStreamState
+
+    task_registry.reset_all()
+    stream_state = MutableStreamState()
+    task_registry.mark_started_this_turn("sess-1", "task-1")
+    cwh._stash_terminal_notification(stream_state, _terminal_event("task-1"), "sess-1")
+
+    assert len(stream_state.pending_task_notifications) == 1
+    assert stream_state.pending_task_notifications[0]["task_id"] == "task-1"
+    task_registry.reset_all()
+
+
+def test_stash_does_not_double_stash_same_task():
+    """Even started-this-turn, a duplicate (same signature) is deduped by
+    mark_notified — at most ONE pending entry per genuine completion."""
+    from app.api.ws_event_handlers import MutableStreamState
+
+    task_registry.reset_all()
+    stream_state = MutableStreamState()
+    task_registry.mark_started_this_turn("sess-1", "task-1")
+    ev = _terminal_event("task-1", uuid="u-1")
+    cwh._stash_terminal_notification(stream_state, dict(ev), "sess-1")
+    cwh._stash_terminal_notification(stream_state, dict(ev), "sess-1")
+
+    assert len(stream_state.pending_task_notifications) == 1
+    task_registry.reset_all()
+
+
+@pytest.mark.asyncio
+async def test_run_query_orphan_notification_does_not_unpark_but_clears_registry():
+    """Integration: a LATER turn whose stream surfaces a terminal notification for
+    a task that was NOT started this turn (a buffered prior-turn orphan) must NOT
+    spawn an unpark follow-up — but the registry must still complete the task so
+    the 'Waiting for N background task(s)…' indicator never strands.
+
+    Models the reported bug: an old background Explore/search task re-surfacing as
+    a spurious <task-notification> unpark in an unrelated turn.
+    """
+    task_registry.reset_all()
+    # Pretend the orphan was started in a PRIOR turn and is still "running" in the
+    # registry (its completion never got recorded because its notification was
+    # buffered). The current turn does NOT start it, so it is not started-this-turn.
+    task_registry.start_task("sess-1", "orphan-1", "agent", "old search")
+
+    handler = _make_handler()
+    handler._start_drain_pump = MagicMock()
+    handler._deliver_unpark = AsyncMock(return_value=True)
+
+    # The orphan's terminal notification leaks into THIS turn's stream, then done.
+    # _fake_stream does NOT mark it started-this-turn (no task_started event), so
+    # it is treated as the prior-turn orphan it is.
+    events = [
+        _terminal_event("orphan-1", uuid="u-old", summary="old result"),
+        {"type": "done", "session_id": "sess-1", "metadata": {}},
+    ]
+
+    # dispatch_event is mocked in _run_query_patches, so the in-stream
+    # _record_task_message that clears the registry doesn't run via the fake
+    # stream. Emulate that side-effect: the real stream_to_websocket would have
+    # called complete_task for the terminal notification.
+    def _stream_with_registry(evs):
+        async def _gen(*args, **kwargs):
+            sid = kwargs.get("session_id")
+            for ev in evs:
+                if ev.get("type") == "task_notification" and sid:
+                    # mirror _record_task_message's complete_task side-effect
+                    task_registry.complete_task(sid, ev.get("task_id"), "completed")
+                yield ev
+        return _gen
+
+    with _run_query_patches(handler, _stream_with_registry(events)):
+        await handler.run_query("unrelated prompt", "sess-1", "claude-code", None, None, None)
+
+    # (a) NO spurious unpark for the prior-turn orphan.
+    handler._deliver_unpark.assert_not_awaited()
+    # (b) registry still cleared the orphan (indicator unfreezes).
+    assert task_registry.get_active("sess-1") == []
+    assert task_registry.get_task("sess-1", "orphan-1")["status"] == "completed"
+    task_registry.reset_all()
+
+
+@pytest.mark.asyncio
+async def test_run_query_genuine_fast_path_still_unparks():
+    """Integration regression: an agent that BOTH starts and completes in THIS
+    turn STILL fires the in-stream unpark follow-up."""
+    task_registry.reset_all()
+    handler = _make_handler()
+    handler._start_drain_pump = MagicMock()
+    handler._deliver_unpark = AsyncMock(return_value=True)
+
+    events = [
+        {"type": "task_started", "task_id": "task-1", "description": "bg work"},
+        _terminal_event("task-1", uuid="u-1", summary="fresh result"),
+        {"type": "done", "session_id": "sess-1", "metadata": {}},
+    ]
+
+    def _stream_with_registry(evs):
+        async def _gen(*args, **kwargs):
+            sid = kwargs.get("session_id")
+            for ev in evs:
+                if ev.get("type") == "task_started" and sid:
+                    task_registry.start_task(sid, ev.get("task_id"), "agent", "bg work")
+                    task_registry.mark_started_this_turn(sid, ev.get("task_id"))
+                elif ev.get("type") == "task_notification" and sid:
+                    task_registry.complete_task(sid, ev.get("task_id"), "completed")
+                yield ev
+        return _gen
+
+    with _run_query_patches(handler, _stream_with_registry(events)):
+        await handler.run_query("hello", "sess-1", "claude-code", None, None, None)
+
+    # The genuine FAST path unparks exactly once.
+    handler._deliver_unpark.assert_awaited_once()
+    pending = handler._deliver_unpark.await_args.kwargs["pending"]
+    assert len(pending) == 1
+    assert pending[0]["task_id"] == "task-1"
+    task_registry.reset_all()
