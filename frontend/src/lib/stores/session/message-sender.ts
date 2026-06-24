@@ -391,6 +391,12 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const _state = getState();
 			if (_state.sessionId) {
 				wsConn.send({ type: 'stop', session_id: _state.sessionId });
+			} else if (internal.awaitingNewSession) {
+				// Brand-new session whose id the backend hasn't minted yet, so we
+				// have nothing to address the stop to. Defer it: the session_created
+				// / start handlers send the stop once the id arrives, so the backend
+				// can discard the orphan turn instead of silently dropping the click.
+				internal.stopRequestedBeforeSession = true;
 			}
 
 			const current = stopTimeout.get();

@@ -42,15 +42,8 @@ async def _collect_metrics() -> dict:
 
     # --- WebSocket tracking dicts ---
     try:
-        from app.api.websocket import (
-            _active_chat_sessions,
-            _pending_cleanup_tasks,
-        )
+        from app.api.websocket import _active_chat_sessions
         metrics["ws_active_chat_sessions"] = len(_active_chat_sessions)
-        metrics["ws_pending_cleanup_tasks"] = len(_pending_cleanup_tasks)
-        # Check for done tasks that haven't been cleaned up
-        done_cleanups = sum(1 for t in _pending_cleanup_tasks.values() if t.done())
-        metrics["ws_done_cleanup_tasks"] = done_cleanups
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to collect websocket metrics: {e}")
 
@@ -405,6 +398,19 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
             logger.debug(f"{_PREFIX} Failed to clean session handlers for {session_id}: {e}")
 
 
+async def _on_pool_eviction(session_id: str, reason: str) -> None:
+    """Eviction callback registered on the session pool (see set_eviction_callback).
+
+    Fired from SessionPool._do_evict the moment an LRU or idle eviction removes a
+    session, so the live-store message buffer + task registry are torn down on the
+    SAME event that ends the pooled SDK client — one lifecycle, no separate timer.
+    This is what replaced the standalone 30s delayed-cleanup task: buffer lifetime
+    is now bound to pool membership. Dead-eviction does NOT route here (it bypasses
+    _do_evict); the periodic sweep cleans those via _cleanup_evicted_sessions.
+    """
+    await _cleanup_evicted_sessions([session_id], {}, reason)
+
+
 async def _periodic_cleanup() -> dict:
     """Run periodic cleanup sweeps to prevent resource accumulation.
 
@@ -508,17 +514,6 @@ async def _periodic_cleanup() -> dict:
     except Exception as e:
         logger.debug(f"{_PREFIX} Failed to reap terminated process trees: {e}")
 
-    # Clean up done tasks from _pending_cleanup_tasks
-    try:
-        from app.api.websocket import _pending_cleanup_tasks
-        done_ids = [sid for sid, task in _pending_cleanup_tasks.items() if task.done()]
-        for sid in done_ids:
-            _pending_cleanup_tasks.pop(sid, None)
-        if done_ids:
-            cleaned["done_cleanup_tasks"] = len(done_ids)
-    except Exception as e:
-        logger.debug(f"{_PREFIX} Failed to clean done cleanup tasks: {e}")
-
     # Evict sessions whose worktree directory was deleted externally
     try:
         from app.core.session_pool import get_session_pool, _session_pool
@@ -617,6 +612,16 @@ async def start_resource_monitor(interval_seconds: int = 300) -> asyncio.Task:
     Returns:
         The background task (for cancellation in shutdown)
     """
+    # Wire pool eviction → live-store/registry cleanup. This makes LRU + idle
+    # eviction (both funnel through SessionPool._do_evict) tear down the per-session
+    # message buffer and task registry on the same event that ends the pooled SDK
+    # client — the single lifecycle that replaced the standalone 30s cleanup timer.
+    try:
+        from app.core.session_pool import get_session_pool
+        get_session_pool().set_eviction_callback(_on_pool_eviction)
+    except Exception as e:
+        logger.error(f"{_PREFIX} Failed to register pool eviction callback: {e}")
+
     task = asyncio.create_task(_monitor_loop(interval_seconds))
     logger.info(f"{_PREFIX} Started (interval={interval_seconds}s)")
     return task

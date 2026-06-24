@@ -263,6 +263,7 @@ const internal: InternalMutableState = {
 	pendingTools: new Set(),
 	interruptPending: false,
 	awaitingNewSession: false,
+	stopRequestedBeforeSession: false,
 	worktreeCreationGeneration: 0,
 	worktreeCreateAbort: null,
 	interruptConfirmResolve: null,

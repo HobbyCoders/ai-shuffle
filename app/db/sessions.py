@@ -903,6 +903,138 @@ def delete_session_message(session_id: str, message_id: int) -> bool:
         return cursor.rowcount > 0
 
 
+def delete_orphan_user_turn(session_id: str) -> Optional[str]:
+    """Delete the trailing user message when a turn was stopped before any output.
+
+    When the user presses Stop before the model emits any text/thinking/tool/
+    subagent output, the prompt was eagerly persisted (written before the SDK
+    runs) but the turn produced nothing — so the lone trailing ``user`` row is
+    misleading and re-surfaces on the next poll under ``postgres_only``. Remove
+    just that row so the chat reverts to its pre-prompt state.
+
+    Authoritative cleanup driven off the durable store (the source of truth the
+    ``/live`` poller reads once streaming ends), independent of whatever happened
+    to the in-memory live-session copy. The SESSION ROW IS LEFT INTACT — for a
+    worktree-backed session, deleting the session would orphan its worktree link.
+
+    Only acts when the most recent row is a real ``user`` prompt (not a
+    ``<task-notification>`` callback): any assistant/tool output this turn would
+    sit after it (higher id), proving the turn must be kept.
+
+    Returns the discarded prompt, or None when there is nothing to discard.
+    """
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"""SELECT id, role, content FROM session_messages
+                 WHERE session_id = {_ph}
+                 ORDER BY created_at DESC, id DESC LIMIT 1""",
+            (session_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        # RealDictCursor (postgres) returns dict-likes; sqlite returns tuples.
+        if isinstance(row, dict):
+            msg_id, role, content = row["id"], row["role"], row["content"]
+        else:
+            msg_id, role, content = row[0], row[1], row[2]
+        if role != "user" or "<task-notification>" in (content or ""):
+            return None
+        cursor.execute(
+            f"DELETE FROM session_messages WHERE session_id = {_ph} AND id = {_ph}",
+            (session_id, msg_id)
+        )
+        if cursor.rowcount > 0:
+            return content
+        return None
+
+
+def discard_orphan_first_turn(session_id: str) -> Optional[str]:
+    """Fully revert a brand-new session whose FIRST turn was stopped before output.
+
+    Under ``SESSION_STORE_MODE=postgres_only`` the chat view is read back from
+    ``session_store_entries`` (the SDK transcript mirror, keyed by the session's
+    ``sdk_session_id``) — NOT from ``session_messages``. So when the user presses
+    Stop before any output on the very first turn of a new session, deleting the
+    eager ``session_messages`` user row is not enough: the SDK may have already
+    mirrored the user line into the store, and the next poll/reload would
+    re-surface it. This wipes the whole (empty) SDK transcript for the turn and
+    NULLs ``sessions.sdk_session_id`` so the session looks untouched and the next
+    prompt starts a fresh SDK session.
+
+    Safe ONLY for a first turn — the caller must confirm the session had no
+    ``sdk_session_id`` *before* this turn. A follow-up turn shares its transcript
+    with the prior conversation; wiping it would destroy real history (use
+    :func:`delete_orphan_user_turn` there instead).
+
+    The SESSION ROW (and its ``worktree_id`` link) IS KEPT — deleting the session
+    would orphan a worktree-backed session's worktree.
+
+    Returns the discarded prompt text (from the trailing user row), or None.
+    """
+    _ph = ph()
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+
+        # The interrupted turn may have minted + mirrored an SDK session before
+        # being stopped. Read it so we can wipe its (empty) transcript.
+        cursor.execute(
+            f"SELECT sdk_session_id FROM sessions WHERE id = {_ph}", (session_id,)
+        )
+        srow = cursor.fetchone()
+        sdk_sid = None
+        if srow is not None:
+            sdk_sid = srow["sdk_session_id"] if isinstance(srow, dict) else srow[0]
+
+        if sdk_sid:
+            # Wipe the empty SDK transcript so postgres_only reads return nothing.
+            # Matched by session_id (the SDK UUID) ALONE — consistent with the
+            # session_id-only read path (project_key derivation from cwd is
+            # unreliable). The UUID is unique per session, so this can't touch
+            # another session's rows; subagent transcripts (subpath != NULL) for
+            # this same empty turn are correctly swept too.
+            cursor.execute(
+                f"DELETE FROM session_store_entries WHERE session_id = {_ph}",
+                (sdk_sid,),
+            )
+            cursor.execute(
+                f"DELETE FROM session_store_summaries WHERE session_id = {_ph}",
+                (sdk_sid,),
+            )
+            # Unlink the SDK session so the next prompt starts clean. update_session()
+            # can't express this — its ``sdk_session_id=None`` means "leave unchanged".
+            cursor.execute(
+                f"UPDATE sessions SET sdk_session_id = NULL WHERE id = {_ph}",
+                (session_id,),
+            )
+
+        # Drop the eager session_messages user row (legacy-table hygiene). Same
+        # guard as delete_orphan_user_turn: only a real trailing ``user`` prompt.
+        cursor.execute(
+            f"""SELECT id, role, content FROM session_messages
+                 WHERE session_id = {_ph}
+                 ORDER BY created_at DESC, id DESC LIMIT 1""",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+        discarded = None
+        if row is not None:
+            if isinstance(row, dict):
+                msg_id, role, content = row["id"], row["role"], row["content"]
+            else:
+                msg_id, role, content = row[0], row[1], row[2]
+            if role == "user" and "<task-notification>" not in (content or ""):
+                cursor.execute(
+                    f"DELETE FROM session_messages WHERE session_id = {_ph} AND id = {_ph}",
+                    (session_id, msg_id),
+                )
+                if cursor.rowcount > 0:
+                    discarded = content
+        return discarded
+
+
 def delete_session_messages_after(session_id: str, message_id: int) -> int:
     """Delete all messages after a specific message ID (for rewind)"""
     _ph = ph()

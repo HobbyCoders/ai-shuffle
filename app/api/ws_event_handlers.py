@@ -710,8 +710,6 @@ async def handle_done(
     state: MutableStreamState,
 ) -> None:
     """Handle done/interrupted event — end streaming and broadcast."""
-    from app.api.websocket import schedule_delayed_cleanup
-
     is_interrupted = event.get("type") == "interrupted"
     state.final_metadata = event.get("metadata", {})
 
@@ -770,8 +768,11 @@ async def handle_done(
         else:
             invalidate_parse_cache(sdk_sid)
 
-    # Schedule tracked delayed cleanup (cancellable if a new query starts)
-    schedule_delayed_cleanup(ectx.session_id, delay_seconds=30)
+    # The in-memory buffer is no longer torn down on a standalone timer. It stays
+    # warm for reconnecting clients and is cleaned when the session ages out of the
+    # pool (LRU/idle → SessionPool._do_evict → live-store/registry teardown). The
+    # pool refuses to evict a session with an in-flight background sub-agent, so a
+    # parked session is never cleaned out from under a running agent.
 
     # Broadcast stream end
     if state.stream_started:

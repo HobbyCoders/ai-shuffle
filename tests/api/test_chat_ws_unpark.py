@@ -146,8 +146,6 @@ def _run_query_patches(handler, fake_stream, created):
 
     # websocket helpers (lazy-imported inside run_query).
     import app.api.websocket as ws_mod
-    stack.enter_context(patch.object(ws_mod, "cancel_pending_cleanup", new=MagicMock()))
-    stack.enter_context(patch.object(ws_mod, "schedule_delayed_cleanup", new=MagicMock()))
     stack.enter_context(
         patch.object(ws_mod, "_active_chat_sessions", new={})
     )

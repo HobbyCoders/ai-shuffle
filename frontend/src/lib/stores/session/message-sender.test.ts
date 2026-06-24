@@ -48,6 +48,7 @@ function makeDeps(initial: ActiveSessionState) {
 		pendingTools: new Set<string>(),
 		interruptPending: false,
 		awaitingNewSession: false,
+		stopRequestedBeforeSession: false,
 		worktreeCreationGeneration: 0,
 		worktreeCreateAbort: null,
 		interruptConfirmResolve: null,
@@ -140,5 +141,54 @@ describe('message-sender worktree send backstop', () => {
 		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
 		expect(querySends).toHaveLength(1);
 		expect((querySends[0][0] as any).worktree_id).toBeUndefined();
+	});
+});
+
+/**
+ * stopGeneration: a Stop clicked on a brand-new session before the backend has
+ * minted its id can't be addressed yet (no session_id). It must be DEFERRED —
+ * recorded so the session_created/start handler can send it once the id arrives
+ * — instead of being silently dropped (the original "message saved even though I
+ * stopped before output" bug). Once a sessionId exists, the stop goes out
+ * immediately.
+ */
+describe('message-sender stopGeneration deferral', () => {
+	function stopSends(wsConn: { send: { mock: { calls: unknown[][] } } }) {
+		return wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'stop');
+	}
+
+	it('sends the stop immediately when a sessionId already exists', () => {
+		const { deps, wsConn } = makeDeps(baseState({ sessionId: 'sess-1', isStreaming: true }));
+		const sender = createMessageSender(deps);
+
+		sender.stopGeneration();
+
+		const sends = stopSends(wsConn);
+		expect(sends).toHaveLength(1);
+		expect((sends[0][0] as any).session_id).toBe('sess-1');
+		expect(deps.internal.stopRequestedBeforeSession).toBe(false);
+	});
+
+	it('defers the stop when no sessionId yet but a new session is awaited', () => {
+		const { deps, wsConn } = makeDeps(baseState({ sessionId: null, isStreaming: true }));
+		deps.internal.awaitingNewSession = true;
+		const sender = createMessageSender(deps);
+
+		sender.stopGeneration();
+
+		// Nothing addressable yet → must NOT send, but MUST record the intent.
+		expect(stopSends(wsConn)).toHaveLength(0);
+		expect(deps.internal.stopRequestedBeforeSession).toBe(true);
+	});
+
+	it('does nothing when there is no session and none is being created', () => {
+		const { deps, wsConn } = makeDeps(baseState({ sessionId: null }));
+		// awaitingNewSession stays false (no send in flight).
+		const sender = createMessageSender(deps);
+
+		sender.stopGeneration();
+
+		expect(stopSends(wsConn)).toHaveLength(0);
+		expect(deps.internal.stopRequestedBeforeSession).toBe(false);
 	});
 });

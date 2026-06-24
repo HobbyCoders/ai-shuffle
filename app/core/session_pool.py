@@ -18,7 +18,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable, Awaitable
 
 from claude_agent_sdk import ClaudeAgentOptions
 
@@ -288,6 +288,46 @@ class SessionPool:
         self._pool: OrderedDict[str, SessionState] = OrderedDict()
         self._max_size = max(1, max_size)
         self._eviction_lock = asyncio.Lock()
+        # Optional async hook fired from _do_evict AFTER a session leaves the pool
+        # (LRU + idle paths, which both funnel through _do_evict). It lets a higher
+        # layer tear down the per-session artifacts the pool itself knows nothing
+        # about — the live-store message buffer and the task registry — so a
+        # session's lifecycle is driven by ONE clock (pool membership) instead of a
+        # separate cleanup timer. See SessionPool.set_eviction_callback and the
+        # resource_monitor wiring. The pool stays decoupled: it never imports the
+        # live store or registry; the callback is injected at startup.
+        # NOTE: dead-eviction (evict_dead) does NOT go through _do_evict and is
+        # cleaned by the resource monitor directly, so it does not double-fire here.
+        self._eviction_callback: Optional[Callable[[str, str], Awaitable[None]]] = None
+
+    def set_eviction_callback(
+        self, callback: Optional[Callable[[str, str], Awaitable[None]]]
+    ) -> None:
+        """Register the async hook fired after a session is evicted via _do_evict.
+
+        The callback receives ``(session_id, reason)`` where reason ∈
+        {"lru", "lru_force", "idle"}. Injected at startup so the pool need not
+        import the live store or task registry. Passing ``None`` clears it.
+        """
+        self._eviction_callback = callback
+
+    def _has_background_work(self, session_id: str) -> bool:
+        """True iff a backgrounded sub-agent is still running for this session.
+
+        Lazy-imports the task registry (a leaf module that imports nothing back)
+        to avoid an import cycle while keeping ONE source of truth for the busy
+        signal. A session that is parked on an in-flight background sub-agent looks
+        idle to ``is_streaming`` (its parent turn already returned), so without this
+        check LRU/idle eviction would disconnect the pooled SDK client out from
+        under the running sub-agent — killing it mid-run and stranding the parent.
+        Defensive: any failure resolves to ``False`` (never block eviction on a
+        registry hiccup; the hard-cap force path remains the ultimate bound).
+        """
+        try:
+            from app.core.task_registry import task_registry
+            return task_registry.has_active_background_agent(session_id)
+        except Exception:
+            return False
 
     @property
     def max_size(self) -> int:
@@ -404,32 +444,47 @@ class SessionPool:
             if len(self._pool) < self._max_size:
                 return None
 
-            # Find the LRU session that is NOT streaming
+            # Find the LRU session that is neither streaming NOR parked on an
+            # in-flight background sub-agent. Evicting either would disconnect the
+            # pooled SDK client out from under live work: a streaming turn, or a
+            # backgrounded sub-agent whose parent turn already returned (parked).
             for session_id, state in self._pool.items():
-                if not state.is_streaming:
-                    return await self._do_evict(session_id, state)
+                if not state.is_streaming and not self._has_background_work(session_id):
+                    return await self._do_evict(session_id, state, "lru")
 
-            # All sessions are streaming — allow temporary over-capacity
-            # up to the hard cap
+            # Every session is busy (streaming or running a background sub-agent)
+            # — allow temporary over-capacity up to the hard cap.
             hard_cap = self.hard_cap
             if len(self._pool) < hard_cap:
                 logger.warning(
-                    f"[Pool] At capacity ({self._max_size}) with all sessions streaming. "
-                    f"Allowing temporary over-capacity ({len(self._pool)}/{hard_cap} sessions)."
+                    f"[Pool] At capacity ({self._max_size}) with all sessions busy "
+                    f"(streaming or background work). Allowing temporary over-capacity "
+                    f"({len(self._pool)}/{hard_cap} sessions)."
                 )
                 return None
 
-            # Hard cap reached — forcibly evict the LRU session (even if streaming)
-            # to prevent unbounded memory/subprocess growth
+            # Hard cap reached — forcibly evict the LRU session even if busy, to
+            # prevent unbounded memory/subprocess growth. This is the ultimate
+            # bound: it CAN kill a parked background sub-agent, but only when the
+            # box is already over 2x capacity with every session busy.
             lru_session_id, lru_state = next(iter(self._pool.items()))
             logger.error(
-                f"[Pool] Hard cap reached ({hard_cap}). Force-evicting LRU streaming "
+                f"[Pool] Hard cap reached ({hard_cap}). Force-evicting LRU busy "
                 f"session {lru_session_id} to prevent resource exhaustion."
             )
-            return await self._do_evict(lru_session_id, lru_state)
+            return await self._do_evict(lru_session_id, lru_state, "lru_force")
 
-    async def _do_evict(self, session_id: str, state: SessionState) -> str:
-        """Evict a specific session. Returns the evicted session_id."""
+    async def _do_evict(
+        self, session_id: str, state: SessionState, reason: str = "evicted"
+    ) -> str:
+        """Evict a specific session. Returns the evicted session_id.
+
+        After the subprocess is torn down, fires ``_eviction_callback`` (if set)
+        so the higher layer can clean up the live-store buffer + task registry for
+        this session. This is the single funnel for LRU + idle eviction, which is
+        why wiring cleanup here covers both without a separate timer. The callback
+        is best-effort: its failure never propagates out of eviction.
+        """
         del self._pool[session_id]
         # Snapshot the subprocess PID + descendant tree BEFORE disconnect (while
         # the parent is still alive and its children are discoverable) so the
@@ -444,6 +499,13 @@ class SessionPool:
                 logger.warning(f"[Pool] Error during eviction disconnect for {session_id}: {e}")
         record_terminated_subprocess(pid, descendants)
         logger.info(f"[Pool] Evicted session {session_id} (pool size: {len(self._pool)})")
+        if self._eviction_callback is not None:
+            try:
+                await self._eviction_callback(session_id, reason)
+            except Exception:
+                logger.warning(
+                    f"[Pool] Eviction callback failed for {session_id}", exc_info=True
+                )
         return session_id
 
     async def remove(self, session_id: str) -> Optional[SessionState]:
@@ -495,12 +557,14 @@ class SessionPool:
             state = self._pool.get(session_id)
             if state is None:
                 continue
-            # Never evict sessions that are currently streaming
-            if state.is_streaming:
+            # Never evict sessions that are currently streaming, nor sessions
+            # parked on an in-flight background sub-agent (the parent turn has
+            # returned so they look idle, but disconnecting would kill the agent).
+            if state.is_streaming or self._has_background_work(session_id):
                 continue
             idle_seconds = (now - state.last_activity).total_seconds()
             if idle_seconds >= max_idle_seconds:
-                await self._do_evict(session_id, state)
+                await self._do_evict(session_id, state, "idle")
                 evicted.append(session_id)
                 logger.info(
                     f"[Pool] Idle-evicted session {session_id} "

@@ -258,6 +258,36 @@ class TaskRegistry:
         records.sort(key=lambda r: r.get("started_at") or "", reverse=True)
         return [to_wire(r) for r in records]
 
+    def has_active_background_agent(self, session_id: str) -> bool:
+        """True iff a background sub-agent (kind=="agent") is still running.
+
+        This is the single source of truth for "this session has in-flight
+        background work" — the busy signal the session pool honors so it never
+        evicts/disconnects a PARKED session out from under a live sub-agent.
+
+        A parked session looks idle to every other signal: its parent turn's
+        ``receive_response()`` already returned at the parent ResultMessage, so
+        ``is_streaming`` is False and there are no team members — yet a backgrounded
+        sub-agent is still executing and its terminal TaskNotificationMessage has
+        not yet arrived (it is caught by the between-turns drain pump). Evicting the
+        pooled SDK client now would kill the sub-agent mid-run, strand its live-store
+        node "running", and wipe the unpark gate so the parent never resumes. Gating
+        eviction on this predicate closes that hole.
+
+        Only ``kind=="agent"`` counts: shell subprocesses (the Monitor tool family)
+        are independent of the pooled SDK client's lifecycle and must not pin a
+        session in the pool.
+
+        Defensive: a missing ``session_id`` returns ``False``.
+        """
+        bucket = self._tasks.get(session_id)
+        if not bucket:
+            return False
+        return any(
+            r.get("kind") == "agent" and r.get("status") == "running"
+            for r in bucket.values()
+        )
+
     def get_all(self, session_id: str, *, limit: int = 50) -> List[Dict[str, Any]]:
         """Running + recently-finished tasks, newest-first, each as a wire dict.
 

@@ -133,6 +133,50 @@ class TestFilteringOrdering:
 
 
 # =============================================================================
+# has_active_background_agent (the session-pool busy signal)
+# =============================================================================
+
+class TestHasActiveBackgroundAgent:
+    def test_false_for_unknown_session(self, reg):
+        assert reg.has_active_background_agent("missing") is False
+
+    def test_true_while_agent_running(self, reg):
+        reg.start_task("s1", "t1", "agent", "Background work")
+        assert reg.has_active_background_agent("s1") is True
+
+    def test_false_after_agent_completes(self, reg):
+        reg.start_task("s1", "t1", "agent", "Background work")
+        reg.complete_task("s1", "t1", "completed")
+        assert reg.has_active_background_agent("s1") is False
+
+    def test_false_after_agent_errors_or_killed(self, reg):
+        reg.start_task("s1", "t1", "agent", "Background work")
+        reg.complete_task("s1", "t1", "killed")
+        assert reg.has_active_background_agent("s1") is False
+
+    def test_shell_task_does_not_count(self, reg):
+        # Only kind=="agent" pins a session in the pool; a running shell
+        # subprocess (the Monitor tool family) is independent of the SDK client.
+        reg.start_task("s1", "sh1", "shell", "tail -f log")
+        assert reg.has_active_background_agent("s1") is False
+
+    def test_true_if_any_agent_running_among_finished(self, reg):
+        reg.start_task("s1", "done", "agent", "First")
+        reg.complete_task("s1", "done", "completed")
+        reg.start_task("s1", "live", "agent", "Second")
+        assert reg.has_active_background_agent("s1") is True
+
+    def test_isolated_per_session(self, reg):
+        reg.start_task("s1", "t1", "agent", "Background work")
+        assert reg.has_active_background_agent("s2") is False
+
+    def test_cleared_by_clear_session(self, reg):
+        reg.start_task("s1", "t1", "agent", "Background work")
+        reg.clear_session("s1")
+        assert reg.has_active_background_agent("s1") is False
+
+
+# =============================================================================
 # to_wire shape
 # =============================================================================
 

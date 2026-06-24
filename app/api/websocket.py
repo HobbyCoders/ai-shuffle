@@ -52,11 +52,8 @@ from app.api.ws_cleanup import (  # noqa: F401
     _drain_pumps,
     _draining_sessions,
     _interrupt_pending_sessions,
-    _pending_cleanup_tasks,
     _stopped_sessions,
-    cancel_pending_cleanup,
     cleanup_session_handlers,
-    schedule_delayed_cleanup,
     stop_all_drain_pumps,
     stop_drain_pump,
 )
@@ -606,8 +603,10 @@ async def chat_websocket(
                 interrupted=True
             )
 
-            # Schedule tracked delayed cleanup (cancellable if a new query starts)
-            schedule_delayed_cleanup(session_id, delay_seconds=30)
+            # Cleanup of the in-memory buffer is now driven by pool eviction
+            # (LRU/idle → SessionPool._do_evict → live-store/registry teardown),
+            # not a standalone timer. The buffer stays warm for reconnecting
+            # clients until the session ages out of the pool.
 
             # Broadcast stream end with interrupted flag
             if stream_state.stream_started:
@@ -633,8 +632,9 @@ async def chat_websocket(
                 interrupted=True
             )
 
-            # Schedule tracked delayed cleanup (cancellable if a new query starts)
-            schedule_delayed_cleanup(session_id, delay_seconds=30)
+            # Cleanup of the in-memory buffer is now driven by pool eviction
+            # (LRU/idle → SessionPool._do_evict → live-store/registry teardown),
+            # not a standalone timer.
 
             # Broadcast stream end on error
             if stream_state.stream_started:
@@ -727,15 +727,17 @@ async def chat_websocket(
             async with _active_sessions_lock:
                 if _active_chat_sessions.get(session_id) is current_task:
                     del _active_chat_sessions[session_id]
-                ctx.info(logger, f"Query teardown: active_sessions={len(_active_chat_sessions)} pending_cleanups={len(_pending_cleanup_tasks)}")
+                ctx.info(logger, f"Query teardown: active_sessions={len(_active_chat_sessions)}")
 
-            # If no devices are connected after query finished, schedule cleanup
-            # (don't destroy immediately — user may reopen within 30s)
+            # If no devices are connected after the query finished, only force-clean
+            # an ABNORMAL still-streaming buffer. A normal ended buffer is left warm
+            # for a reconnecting client and ages out via pool eviction (LRU/idle) —
+            # we no longer destroy it on a standalone timer.
             remaining_devices = sync_engine.get_device_count(session_id)
             if remaining_devices == 0:
-                ctx.debug(logger, "Query finished but no devices connected, scheduling cleanup")
                 if live_session_store.has_session(session_id) and live_session_store.is_streaming(session_id):
                     # Only force-cleanup if still marked as streaming (abnormal state)
+                    ctx.debug(logger, "Query finished but no devices connected and session stuck streaming, cleaning up")
                     await live_session_store.cleanup_session(session_id)
                     await cleanup_session_handlers(session_id)
                     ctx.debug(logger, "Cleaned up stuck streaming session")
@@ -1709,7 +1711,7 @@ async def chat_websocket(
                     if remaining_devices == 0 and is_task_done:
                         # No more devices watching and no active query
                         # Only cleanup sessions still in streaming state (abnormal);
-                        # ended sessions are handled by _delayed_session_cleanup
+                        # ended sessions age out via pool eviction (LRU/idle)
                         logger.debug(f"Last device disconnected from session {current_session_id}")
                         if live_session_store.has_session(current_session_id) and live_session_store.is_streaming(current_session_id):
                             await live_session_store.cleanup_session(current_session_id)

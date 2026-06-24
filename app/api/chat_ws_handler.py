@@ -949,7 +949,7 @@ class ChatWebSocketHandler:
                     if remaining_devices == 0 and is_task_done:
                         # No more devices watching and no active query
                         # Only cleanup sessions still in streaming state (abnormal);
-                        # ended sessions are handled by _delayed_session_cleanup
+                        # ended sessions age out via pool eviction (LRU/idle)
                         logger.debug(f"Last device disconnected from session {self.current_session_id}")
                         if live_session_store.has_session(self.current_session_id) and live_session_store.is_streaming(self.current_session_id):
                             await live_session_store.cleanup_session(self.current_session_id)
@@ -1967,18 +1967,13 @@ class ChatWebSocketHandler:
     ) -> None:
         """Execute query and stream results directly to WebSocket."""
         from app.api.websocket import (
-            _active_chat_sessions, _active_sessions_lock, schedule_delayed_cleanup,
-            cancel_pending_cleanup, stop_drain_pump,
+            _active_chat_sessions, _active_sessions_lock, stop_drain_pump,
         )
         from app.api.ws_event_handlers import EventContext, MutableStreamState, dispatch_event
         from app.core.query_engine import stream_to_websocket
         from app.core.jsonl_parser import parse_session_history
         from app.core.task_registry import task_registry
         import time
-
-        # Cancel any pending delayed cleanup for this session — a new query is starting,
-        # so the old cleanup must not fire and remove the session from live_session_store.
-        cancel_pending_cleanup(session_id)
 
         # SINGLE-READER INVARIANT: stop any between-turns drain pump BEFORE this
         # turn connects/queries the pooled SDK client. The pump reads the same
@@ -2098,6 +2093,18 @@ class ChatWebSocketHandler:
             heartbeat_task = asyncio.create_task(send_heartbeats())
 
             ctx.debug(logger, f"Calling stream_to_websocket, api_user_id={self.api_user_id}")
+            # A Stop can arrive during session setup — BEFORE the SDK session is
+            # registered in the pool. handle_stop records the id in
+            # _stopped_sessions and calls interrupt_session(), but with nothing
+            # pooled yet that interrupt no-ops and is never retried, so the model
+            # would stream a full response and the turn would NOT look empty.
+            # Re-issue the interrupt ONCE here: by the time events flow the SDK is
+            # pooled, so the interrupt now lands and the SDK winds down naturally
+            # (same proven path as a mid-stream Stop — keeps the pooled client
+            # healthy). We only do this while nothing user-visible has streamed
+            # (init does not flip stream_started), so a real partial turn is never
+            # disturbed; the finally block then discards the empty orphan turn.
+            stop_interrupt_reissued = False
             async for event in stream_to_websocket(
                 prompt=prompt,
                 session_id=session_id,
@@ -2107,6 +2114,16 @@ class ChatWebSocketHandler:
                 broadcast_func=self.send_json,  # Pass send_json for permission requests
                 api_user_id=self.api_user_id  # Pass for user-scoped credential resolution
             ):
+                if (
+                    not stop_interrupt_reissued
+                    and not stream_state.stream_started
+                    and session_id in _stopped_sessions
+                ):
+                    stop_interrupt_reissued = True
+                    from app.core.query_engine import interrupt_session
+                    await interrupt_session(session_id)
+                    ctx.info(logger, "Re-issued interrupt for a Stop that beat SDK pool registration")
+
                 event_type = event.get('type')
                 if event_type == 'plugin_message':
                     ctx.debug(logger, f"Sending plugin_message to frontend: {event}")
@@ -2332,8 +2349,10 @@ class ChatWebSocketHandler:
                 interrupted=True
             )
 
-            # Schedule tracked delayed cleanup (cancellable if a new query starts)
-            schedule_delayed_cleanup(session_id, delay_seconds=30)
+            # Cleanup of the in-memory buffer is now driven by pool eviction
+            # (LRU/idle → SessionPool._do_evict → live-store/registry teardown),
+            # not a standalone timer. The buffer stays warm for reconnecting
+            # clients until the session ages out of the pool.
 
             # Broadcast stream end with interrupted flag
             if stream_state.stream_started:
@@ -2359,8 +2378,9 @@ class ChatWebSocketHandler:
                 interrupted=True
             )
 
-            # Schedule tracked delayed cleanup (cancellable if a new query starts)
-            schedule_delayed_cleanup(session_id, delay_seconds=30)
+            # Cleanup of the in-memory buffer is now driven by pool eviction
+            # (LRU/idle → SessionPool._do_evict → live-store/registry teardown),
+            # not a standalone timer.
 
             # Broadcast stream end on error
             if stream_state.stream_started:
@@ -2489,28 +2509,84 @@ class ChatWebSocketHandler:
                     _stopped_sessions.discard(session_id)
                     ctx.debug(logger, "Skipping queue processing — user stopped session")
 
-                    # Discard an orphan user turn: the user pressed Stop before
-                    # the model produced any output. Such a turn isn't durably
-                    # persisted (it reads back empty on reload), so the lone user
-                    # message is misleading. Remove it from the live store — the
-                    # poller is the sole authority for the chat view, so a
-                    # frontend-only delete would be undone by the next poll — and
-                    # tell the frontend to restore the prompt to the input box so
-                    # the user can edit or resend it. Both stop sub-paths
-                    # (CancelledError force-cancel and natural-drain "interrupted")
-                    # reach here after end_streaming has already run.
-                    try:
-                        discarded_prompt = await live_session_store.discard_empty_user_turn(session_id)
-                    except Exception as discard_err:
-                        discarded_prompt = None
-                        ctx.warning(logger, f"discard_empty_user_turn failed: {discard_err}")
-                    if discarded_prompt is not None:
-                        await self.send_json({
-                            "type": "user_message_discarded",
-                            "session_id": session_id,
-                            "prompt": discarded_prompt,
-                        })
-                        ctx.debug(logger, "Discarded empty interrupted user turn; restoring prompt to input")
+                    # Orphan-turn discard: the user pressed Stop before the model
+                    # produced ANY user-visible output. stream_state.stream_started
+                    # flips True on the first content event (text delta, chunk,
+                    # tool_use, or a non-init system message); the SDK 'init' does
+                    # NOT flip it. So `not stream_started` means nothing streamed —
+                    # the turn is empty and the eagerly-persisted user prompt is
+                    # misleading. A mid-stream Stop AFTER output has stream_started
+                    # True and is a real, partial turn — keep it untouched.
+                    #
+                    # When empty: tell the frontend to pull the prompt back into the
+                    # input box, and clean every store the chat reads from. The
+                    # restore value is the `prompt` argument — exactly what the user
+                    # typed this turn — so it is authoritative and never races the
+                    # store teardown. The SESSION ROW IS KEPT: deleting it would
+                    # orphan a worktree session's worktree link.
+                    if not stream_state.stream_started:
+                        # Best-effort live-store cleanup: a fast force-cancel can
+                        # tear the live session down before end_streaming runs, so
+                        # this may already be a no-op by the time we get here.
+                        try:
+                            await live_session_store.discard_empty_user_turn(session_id)
+                        except Exception as discard_err:
+                            ctx.warning(logger, f"discard_empty_user_turn (live) failed: {discard_err}")
+                        # Durable cleanup. `sdk_sid` is the session's sdk_session_id
+                        # captured at the START of this turn (before streaming),
+                        # so it tells first turn from follow-up.
+                        if sdk_sid is None:
+                            # FIRST turn of a brand-new session. Under postgres_only
+                            # the chat is read back from session_store_entries (the
+                            # SDK transcript), so the SDK may already have mirrored
+                            # the user line there; deleting only the session_messages
+                            # row would NOT stop the next poll/reload from
+                            # re-surfacing it. Wipe the whole empty transcript and
+                            # unlink sdk_session_id so the session reverts cleanly
+                            # (worktree link preserved). Only here is it safe to
+                            # emit user_message_discarded: the follow-up poll reads
+                            # an empty store, so the message stays gone — and the
+                            # frontend pulls the prompt back into the input box.
+                            try:
+                                await run_sync(database.discard_orphan_first_turn, session_id)
+                            except Exception as durable_err:
+                                ctx.warning(logger, f"durable first-turn discard failed: {durable_err}")
+                            await self.send_json({
+                                "type": "user_message_discarded",
+                                "session_id": session_id,
+                                "prompt": prompt,
+                            })
+                            ctx.info(
+                                logger,
+                                "Discarded empty interrupted first turn "
+                                "(stopped before any output); restoring prompt to input",
+                            )
+                        else:
+                            # FOLLOW-UP turn that shares its transcript with the
+                            # prior conversation. We must NOT edit that transcript
+                            # (it holds real history), and the store still carries
+                            # this user line — so emitting user_message_discarded
+                            # would only flash the message out and let the next poll
+                            # re-add it. Leave the chat untouched; just drop the
+                            # eager session_messages row as legacy-table hygiene.
+                            # (Cleanly reverting a single follow-up turn would need
+                            # per-turn store surgery — a known limitation, not done
+                            # here; the reported bug is the first-turn case above.)
+                            try:
+                                await run_sync(database.delete_orphan_user_turn, session_id)
+                            except Exception as durable_err:
+                                ctx.warning(logger, f"orphan follow-up user-row cleanup failed: {durable_err}")
+                            ctx.info(
+                                logger,
+                                "Stopped before output on a follow-up turn — kept in place "
+                                "(postgres_only reads a shared transcript; no clean per-turn revert)",
+                            )
+                    else:
+                        ctx.debug(
+                            logger,
+                            "Stopped after output began — keeping the partial turn "
+                            "(not an orphan)",
+                        )
                 else:
                     # Check if a new query was already spawned by pre-close processing
                     async with _active_sessions_lock:

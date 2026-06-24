@@ -272,3 +272,40 @@ def test_admission_ceilings_disabled_by_default(monkeypatch):
     monkeypatch.setattr(cfg.settings, "sdk_admission_rss_mb", 0, raising=False)
     pool.put("ses-1", _make_state(is_streaming=True))
     assert pool.admission_check() is None
+
+
+# ─── (d) Pool-eviction → cleanup wiring (replaced the 30s timer) ────────────
+
+
+@pytest.mark.asyncio
+async def test_start_resource_monitor_registers_eviction_callback(monkeypatch):
+    """start_resource_monitor wires _on_pool_eviction onto the pool so LRU/idle
+    eviction drives live-store + registry cleanup (the deleted timer's job)."""
+    import app.core.resource_monitor as rm
+
+    pool = SessionPool(max_size=3)
+    monkeypatch.setattr(sp, "get_session_pool", lambda: pool, raising=False)
+
+    task = await rm.start_resource_monitor(interval_seconds=3600)
+    try:
+        assert pool._eviction_callback is rm._on_pool_eviction
+    finally:
+        await rm.stop_resource_monitor(task)
+
+
+@pytest.mark.asyncio
+async def test_on_pool_eviction_delegates_to_cleanup(monkeypatch):
+    """The registered callback forwards (session_id, reason) into the shared
+    _cleanup_evicted_sessions routine as a single-element batch."""
+    import app.core.resource_monitor as rm
+
+    calls = []
+
+    async def _fake_cleanup(session_ids, cleaned, reason):
+        calls.append((list(session_ids), reason))
+
+    monkeypatch.setattr(rm, "_cleanup_evicted_sessions", _fake_cleanup)
+
+    await rm._on_pool_eviction("ses-evicted", "idle")
+
+    assert calls == [(["ses-evicted"], "idle")]

@@ -460,8 +460,6 @@ def _run_query_patches(handler, fake_stream):
     stack.enter_context(patch("app.api.ws_event_handlers.dispatch_event", new=AsyncMock()))
 
     import app.api.websocket as ws_mod
-    stack.enter_context(patch.object(ws_mod, "cancel_pending_cleanup", new=MagicMock()))
-    stack.enter_context(patch.object(ws_mod, "schedule_delayed_cleanup", new=MagicMock()))
     stack.enter_context(patch.object(ws_mod, "_active_chat_sessions", new={}))
     return stack
 
@@ -598,6 +596,11 @@ async def test_pump_completed_update_then_notification_unparks_exactly_once():
     unpark (it carries no result) — the notification owns the rich unpark — so the
     parent unparks EXACTLY once, and the indicator still clears."""
     task_registry.start_task("sess-1", "task-1", "agent", "bg work")
+    # Genuine background launch (tool_use_id "tu-1") so the notification passes the
+    # spurious-foreground gate and OWNS the rich unpark. Without it the gate
+    # (correctly) suppresses the notification as a synchronous sub-agent and the
+    # pump keeps draining — against the hang=True client that blocks forever.
+    task_registry.mark_background_launch("sess-1", "tu-1")
 
     client = _FakeClient(
         [

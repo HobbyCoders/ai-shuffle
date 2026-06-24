@@ -5,7 +5,6 @@ Tests the dispatch table, individual event handlers, and the
 EventContext / MutableStreamState dataclasses.
 """
 
-import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -428,9 +427,9 @@ class TestStreamBlockStart:
 class TestHandleDone:
     """Tests for handle_done which handles both 'done' and 'interrupted' events.
 
-    handle_done does lazy imports of _delayed_session_cleanup (from websocket)
-    and pre_seed_parse_cache/invalidate_parse_cache (from jsonl_parser),
-    so we patch those at their origin modules.
+    handle_done does lazy imports of pre_seed_parse_cache/invalidate_parse_cache
+    (from jsonl_parser), so we patch those at their origin module. It no longer
+    schedules any delayed cleanup — buffer teardown is driven by pool eviction.
     """
 
     @pytest.mark.asyncio
@@ -443,7 +442,6 @@ class TestHandleDone:
         with patch("app.api.ws_event_handlers.live_session_store") as mock_store, \
              patch("app.api.ws_event_handlers.sync_engine") as mock_sync, \
              patch("app.api.ws_event_handlers.database") as mock_db, \
-             patch("app.api.websocket._delayed_session_cleanup", return_value=asyncio.sleep(0)), \
              patch("app.api.ws_event_handlers.asyncio.create_task"), \
              patch("app.core.jsonl_parser.pre_seed_parse_cache"), \
              patch("app.core.jsonl_parser.invalidate_parse_cache"):
@@ -469,7 +467,6 @@ class TestHandleDone:
         with patch("app.api.ws_event_handlers.live_session_store") as mock_store, \
              patch("app.api.ws_event_handlers.sync_engine") as mock_sync, \
              patch("app.api.ws_event_handlers.database") as mock_db, \
-             patch("app.api.websocket._delayed_session_cleanup", return_value=asyncio.sleep(0)), \
              patch("app.api.ws_event_handlers.asyncio.create_task"):
             mock_store.end_streaming = AsyncMock()
             mock_store.get_session_dict = MagicMock(return_value=None)
@@ -492,7 +489,6 @@ class TestHandleDone:
         with patch("app.api.ws_event_handlers.live_session_store") as mock_store, \
              patch("app.api.ws_event_handlers.sync_engine") as mock_sync, \
              patch("app.api.ws_event_handlers.database") as mock_db, \
-             patch("app.api.websocket._delayed_session_cleanup", return_value=asyncio.sleep(0)), \
              patch("app.api.ws_event_handlers.asyncio.create_task"):
             mock_store.end_streaming = AsyncMock()
             mock_store.get_session_dict = MagicMock(return_value=None)
@@ -540,6 +536,10 @@ class TestHandleSystem:
              patch("app.api.ws_event_handlers.sync_engine") as mock_sync:
             mock_store.add_system_message = AsyncMock()
             mock_sync.broadcast_stream_chunk = AsyncMock()
+            # handle_system runs _maybe_broadcast_stream_start first ("system" is a
+            # trigger event); on a not-yet-started stream it awaits this, so it must
+            # be awaitable or the await raises TypeError before add_system_message.
+            mock_sync.broadcast_stream_start = AsyncMock()
 
             await handle_system(event, ectx, state)
 

@@ -24,6 +24,7 @@ function createMockInternal(): InternalMutableState {
 		pendingTools: new Set(),
 		interruptPending: false,
 		awaitingNewSession: false,
+		stopRequestedBeforeSession: false,
 		worktreeCreationGeneration: 0,
 		worktreeCreateAbort: null,
 		interruptConfirmResolve: null,
@@ -277,6 +278,64 @@ describe('ws-message-handlers', () => {
 
 			expect(deps.update).not.toHaveBeenCalled();
 			expect(deps.sessionPoller.pollFinal).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('deferred Stop delivery (stopRequestedBeforeSession)', () => {
+		// A new session has no id when the user clicks Stop, so stopGeneration
+		// records the intent on internal.stopRequestedBeforeSession. The
+		// session_created / start handlers must flush it once the backend mints
+		// the id, then clear the flag so it never double-fires.
+		function newSessionDeps() {
+			const state = mockState();
+			state.sessionId = null; // brand-new session, no id yet
+			const d = createMockDeps({ getState: vi.fn(() => state) });
+			d.internal.awaitingNewSession = true;
+			d.internal.stopRequestedBeforeSession = true;
+			return d;
+		}
+
+		function stopSends(d: MessageHandlerDeps) {
+			return (d.wsSend as ReturnType<typeof vi.fn>).mock.calls.filter(
+				([m]) => (m as any)?.type === 'stop',
+			);
+		}
+
+		it('session_created flushes a deferred stop and clears the flag', () => {
+			deps = newSessionDeps();
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'session_created', session_id: 'sess-new' });
+
+			const sends = stopSends(deps);
+			expect(sends).toHaveLength(1);
+			expect((sends[0][0] as any).session_id).toBe('sess-new');
+			expect(deps.internal.stopRequestedBeforeSession).toBe(false);
+		});
+
+		it('start flushes a deferred stop and clears the flag', () => {
+			deps = newSessionDeps();
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'start', session_id: 'sess-new', message_id: 'm1' });
+
+			const sends = stopSends(deps);
+			expect(sends).toHaveLength(1);
+			expect((sends[0][0] as any).session_id).toBe('sess-new');
+			expect(deps.internal.stopRequestedBeforeSession).toBe(false);
+		});
+
+		it('does not send a stop when none was deferred', () => {
+			const state = mockState();
+			state.sessionId = null;
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			deps.internal.awaitingNewSession = true;
+			// stopRequestedBeforeSession stays false
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'session_created', session_id: 'sess-new' });
+
+			expect(stopSends(deps)).toHaveLength(0);
 		});
 	});
 
