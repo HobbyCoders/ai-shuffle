@@ -159,6 +159,15 @@
 	function teardown() {
 		if (ws) {
 			try {
+				// Tell Chrome to STOP the screencast before we drop the socket.
+				// Without this, the page target keeps an active screencast session
+				// capturing/encoding frames after the proxy WS closes — a steadily
+				// growing memory cost on a long-lived headless browser. Only worth
+				// sending while the socket is still open; closing the proxy WS tears
+				// down the upstream CDP connection regardless.
+				if (ws.readyState === WebSocket.OPEN) {
+					ws.send(JSON.stringify({ id: ++cmdId, method: 'Page.stopScreencast', params: {} }));
+				}
 				ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
 				ws.close();
 			} catch {

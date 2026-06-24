@@ -54,13 +54,29 @@ if ls -d /tmp/claude-mcp-browser-bridge-* >/dev/null 2>&1; then
     pass "Extension is talking to the native messaging host"
 else
     fail "Extension has not contacted the native messaging host" \
-         "ensure the extension is signed in + paired (CHROME_DEBUG sign-in), then retry a --chrome session"
+         "ensure the extension is signed in (use the in-app 'Set up browser' panel), then retry a --chrome session"
+fi
+
+# Pairing pin: the CLI persists chromeExtension.pairedDeviceId in ~/.claude.json
+# once a specific browser is pinned. Optional — with a single browser on the
+# account the CLI auto-selects it — but pinning makes selection deterministic
+# when another browser is also signed into the same Claude account.
+CLAUDE_JSON="$HOME/.claude.json"
+PAIRED_ID="$(grep -o '"pairedDeviceId"[[:space:]]*:[[:space:]]*"[^"]*"' "$CLAUDE_JSON" 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/')"
+if [ -n "$PAIRED_ID" ]; then
+    PAIRED_NAME="$(grep -o '"pairedDeviceName"[[:space:]]*:[[:space:]]*"[^"]*"' "$CLAUDE_JSON" 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/')"
+    pass "Pinned to a browser (${PAIRED_NAME:-$PAIRED_ID})"
+else
+    # Not a failure — auto-select still works with one browser.
+    printf '  \033[33m~\033[0m %s\n      -> %s\n' \
+        "No browser pinned (pairedDeviceId unset)" \
+        "fine with one browser; use the in-app 'Pair this browser' button to pin it deterministically"
 fi
 
 echo
-echo "Note: sign-in/pairing state can't be checked from here. If all items pass"
-echo "but the agent reports no browser, do the one-time extension sign-in"
-echo "(CHROME_DEBUG=1) — see the 'Claude in Chrome (Docker)' docs."
+echo "Note: if all items pass but the agent reports no browser, sign the"
+echo "extension in via the in-app 'Set up browser' panel, then click"
+echo "'Pair this browser' — see the 'Claude in Chrome (Docker)' docs."
 
 echo
 if [ -n "$FAILED" ]; then

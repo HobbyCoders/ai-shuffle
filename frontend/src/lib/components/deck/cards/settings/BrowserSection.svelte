@@ -13,6 +13,7 @@
 	import {
 		getChromeMcpStatus,
 		toggleChromeMcp,
+		pairChromeMcp,
 		type ChromeMcpStatus
 	} from '$lib/api/chromeMcp';
 	import ChromeSetupModal from '$lib/components/chrome/ChromeSetupModal.svelte';
@@ -20,7 +21,9 @@
 	let status = $state<ChromeMcpStatus | null>(null);
 	let loading = $state(true);
 	let error = $state('');
+	let pairMsg = $state('');
 	let toggling = $state(false);
+	let pairing = $state(false);
 	let setupOpen = $state(false);
 
 	async function load() {
@@ -48,6 +51,23 @@
 		}
 	}
 
+	async function onPair() {
+		if (!status || pairing) return;
+		pairing = true;
+		pairMsg = '';
+		error = '';
+		try {
+			const res = await pairChromeMcp();
+			status = res.status;
+			pairMsg = res.message;
+			if (!res.ok) error = res.message;
+		} catch (e: any) {
+			error = e?.detail || 'Failed to pair browser';
+		} finally {
+			pairing = false;
+		}
+	}
+
 	onMount(load);
 
 	// Checklist rows derived from status (label, ok, value text).
@@ -68,9 +88,16 @@
 					{ label: 'Extension installed', ok: status.extension_installed, note: status.extension_installed ? 'Installed' : 'Not yet installed' },
 					{ label: 'Native host', ok: status.native_host_present, note: status.native_host_present ? 'Present' : 'Missing' },
 					{
-						label: 'Paired with your account',
+						label: 'Signed in & connected',
+						ok: status.connected,
+						note: status.connected ? 'Extension is talking to the native host' : 'Not connected'
+					},
+					{
+						label: 'Pinned to this browser',
 						ok: status.paired,
-						note: status.paired ? (status.paired_device_name ?? 'Paired') : 'Not paired'
+						note: status.paired
+							? `Pinned${status.paired_device_name ? `: ${status.paired_device_name}` : ''}`
+							: 'Not pinned (auto-selects when only one browser is on the account)'
 					}
 				]
 			: []
@@ -129,24 +156,40 @@
 					{/each}
 				</div>
 				<div class="setup-actions">
-					{#if status.ready}
+					{#if status.paired}
+						<span class="b b-ok">Pinned</span>
+					{:else if status.connected}
+						<span class="b b-ok">Connected</span>
+					{:else if status.ready}
 						<span class="b b-ok">Ready</span>
-					{:else if status.paired}
-						<span class="b b-ok">Paired</span>
 					{:else}
 						<span class="b b-warn">Setup needed</span>
 					{/if}
+
+					{#if status.connected && !status.paired}
+						<!-- Working but not pinned: offer the one-click deterministic pin. -->
+						<button
+							type="button"
+							class="ed-btn primary"
+							onclick={onPair}
+							disabled={pairing}
+							title="Pin this container's browser so it stays selected even if another browser joins this account"
+						>{pairing ? 'Pairing…' : 'Pair this browser'}</button>
+					{/if}
+
 					<button
 						type="button"
-						class="ed-btn primary"
+						class="ed-btn"
+						class:primary={!status.connected && !status.paired}
 						onclick={() => (setupOpen = true)}
 						disabled={!status.enabled}
 						title={status.enabled ? 'Open the interactive browser setup' : 'Enable browser tools first'}
-					>{status.paired ? 'Re-pair browser' : 'Set up browser'}</button>
+					>Set up browser</button>
 					<button type="button" class="ed-btn sm" onclick={load} title="Refresh status">
 						<RefreshCw size={14} />
 					</button>
 				</div>
+				{#if pairMsg && !error}<p class="msg ok">{pairMsg}</p>{/if}
 				{#if error}<p class="msg err">{error}</p>{/if}
 			</div>
 		</div>
@@ -222,6 +265,9 @@
 	}
 	.msg.err {
 		color: var(--destructive);
+	}
+	.msg.ok {
+		color: var(--success, #16a34a);
 	}
 	code {
 		font-family: var(--font-mono, monospace);

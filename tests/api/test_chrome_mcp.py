@@ -50,7 +50,8 @@ def _patch_probes(**overrides):
         "_chrome_running": True,
         "_extension_installed": True,
         "_bridge_active": True,
-        "_paired_device": "My Laptop",
+        # _paired_device now returns (pairedDeviceId, pairedDeviceName).
+        "_paired_device": ("dev-123", "My Laptop"),
         "_cdp_enabled": True,
         "_extension_options_url": "chrome-extension://abc/options.html",
     }
@@ -111,7 +112,9 @@ class TestBuildStatus:
         assert status.extension_installed is True
         assert status.bridge_active is True
         assert status.paired is True
+        assert status.paired_device_id == "dev-123"
         assert status.paired_device_name == "My Laptop"
+        assert status.connected is True
         assert status.ready is True
         assert status.next_step.startswith("Ready")
 
@@ -134,32 +137,57 @@ class TestBuildStatus:
         assert "not running" in status.next_step.lower()
 
     @pytest.mark.asyncio
-    async def test_not_paired_but_cdp_ready_points_to_setup(self):
-        with _Probes(_paired_device=None, _bridge_active=False):
+    async def test_not_set_up_points_to_setup(self):
+        # Nothing connected, nothing pinned, CDP ready → first-time setup.
+        with _Probes(_paired_device=(None, None), _bridge_active=False):
             status = await _build_status()
         assert status.paired is False
+        assert status.connected is False
         assert status.ready is False
         assert "Set up browser" in status.next_step
 
     @pytest.mark.asyncio
-    async def test_not_paired_and_cdp_disabled_asks_for_env(self):
-        with _Probes(_paired_device=None, _bridge_active=False, _cdp_enabled=False):
+    async def test_not_set_up_and_cdp_disabled_asks_for_env(self):
+        with _Probes(_paired_device=(None, None), _bridge_active=False, _cdp_enabled=False):
             status = await _build_status()
         assert status.paired is False
         assert "CHROME_CDP=1" in status.next_step
 
     @pytest.mark.asyncio
-    async def test_not_paired_cdp_enabled_but_port_down_asks_restart(self):
+    async def test_not_set_up_cdp_enabled_but_port_down_asks_restart(self):
         # CHROME_CDP=1 but the running chrome hasn't opened the port yet.
-        with _Probes(_paired_device=None, _bridge_active=False, cdp_version=None):
+        with _Probes(_paired_device=(None, None), _bridge_active=False, cdp_version=None):
             status = await _build_status()
         assert status.cdp_available is False
         assert status.cdp_enabled is True
         assert "restart" in status.next_step.lower()
 
     @pytest.mark.asyncio
+    async def test_connected_but_not_pinned_is_ready_and_offers_pairing(self):
+        # Signed in & bridged (auto-select works) but no pairedDeviceId yet.
+        # This must NOT read as broken: ready=True, connected=True, paired=False,
+        # and the guidance should invite pinning, not setup.
+        with _Probes(_paired_device=(None, None), _bridge_active=True):
+            status = await _build_status()
+        assert status.paired is False
+        assert status.connected is True
+        assert status.ready is True
+        assert "Pair this browser" in status.next_step
+        assert "Not set up" not in status.next_step
+
+    @pytest.mark.asyncio
+    async def test_pinned_but_bridge_inactive_says_will_reconnect(self):
+        with _Probes(_bridge_active=False):
+            status = await _build_status()
+        assert status.paired is True
+        assert status.connected is False
+        # Pinned is the robust state — still ready, reconnect is automatic.
+        assert status.ready is True
+        assert "reconnect" in status.next_step.lower()
+
+    @pytest.mark.asyncio
     async def test_extension_options_url_omitted_when_not_installed(self):
-        with _Probes(_extension_installed=False, _paired_device=None, _bridge_active=False):
+        with _Probes(_extension_installed=False, _paired_device=(None, None), _bridge_active=False):
             status = await _build_status()
         assert status.extension_installed is False
         assert status.extension_options_url is None
@@ -206,6 +234,107 @@ class TestEndpoints:
         bare.include_router(router)
         with TestClient(bare) as c:
             assert c.get("/api/v1/chrome-mcp/status").status_code in (401, 403)
+            assert c.post("/api/v1/chrome-mcp/pair").status_code in (401, 403)
+
+
+# =============================================================================
+# Pairing — pin this container's own browser (pairedDeviceId)
+# =============================================================================
+def _status(**over) -> cm.ChromeMcpStatus:
+    """Build a ChromeMcpStatus for pairing-branch tests (sane 'connected' base)."""
+    base = dict(
+        enabled=True,
+        chrome_running=True,
+        cdp_available=True,
+        cdp_enabled=True,
+        extension_installed=True,
+        native_manifest_present=True,
+        native_host_present=True,
+        bridge_active=True,
+        paired=False,
+        paired_device_id=None,
+        paired_device_name=None,
+        connected=True,
+        ready=True,
+        next_step="…",
+    )
+    base.update(over)
+    return cm.ChromeMcpStatus(**base)
+
+
+class TestPairLocalBrowser:
+    @pytest.mark.asyncio
+    async def test_disabled_builtin_refuses(self):
+        with patch.object(cm, "_build_status", new=AsyncMock(return_value=_status(enabled=False))):
+            res = await cm._pair_local_browser()
+        assert res.ok is False
+        assert "disabled" in res.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_already_paired_is_noop_success(self):
+        already = _status(paired=True, paired_device_id="dev-1", paired_device_name="Container")
+        with patch.object(cm, "_build_status", new=AsyncMock(return_value=already)), \
+                patch.object(cm, "_run_pairing_query", new=AsyncMock()) as run:
+            res = await cm._pair_local_browser()
+        assert res.ok is True
+        assert res.paired_device_id == "dev-1"
+        run.assert_not_called()  # never runs the relay turn when already pinned
+
+    @pytest.mark.asyncio
+    async def test_no_bridge_tells_user_to_sign_in(self):
+        with patch.object(cm, "_build_status", new=AsyncMock(return_value=_status(connected=False, bridge_active=False, ready=False))), \
+                patch.object(cm, "_run_pairing_query", new=AsyncMock()) as run:
+            res = await cm._pair_local_browser()
+        assert res.ok is False
+        assert "sign" in res.message.lower()
+        run.assert_not_called()  # never hang the relay when nothing is connected
+
+    @pytest.mark.asyncio
+    async def test_successful_pin_verifies_persisted_id(self):
+        before = _status(paired=False)
+        after = _status(paired=True, paired_device_id="dev-local", paired_device_name="Browser 1")
+        statuses = [before, after]  # first call (pre), second call (refresh)
+        with patch.object(cm, "_build_status", new=AsyncMock(side_effect=statuses)), \
+                patch.object(cm, "_run_pairing_query", new=AsyncMock(return_value="PAIRED Browser 1")):
+            res = await cm._pair_local_browser()
+        assert res.ok is True
+        assert res.paired_device_id == "dev-local"
+        assert "Browser 1" in res.message
+
+    @pytest.mark.asyncio
+    async def test_query_runs_but_nothing_persisted_reports_ambiguous(self):
+        before = _status(paired=False)
+        after = _status(paired=False)  # still not pinned after the turn
+        with patch.object(cm, "_build_status", new=AsyncMock(side_effect=[before, after])), \
+                patch.object(cm, "_run_pairing_query", new=AsyncMock(return_value="AMBIGUOUS: A, B")):
+            res = await cm._pair_local_browser()
+        assert res.ok is False
+        assert "AMBIGUOUS" in res.message
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_clean_error(self):
+        import asyncio as _asyncio
+
+        before = _status(paired=False)
+        after = _status(paired=False)
+        with patch.object(cm, "_build_status", new=AsyncMock(side_effect=[before, after])), \
+                patch.object(cm, "_run_pairing_query", new=AsyncMock(side_effect=_asyncio.TimeoutError())):
+            res = await cm._pair_local_browser()
+        assert res.ok is False
+        assert "timed out" in res.message.lower()
+
+    def test_pair_endpoint_returns_result(self, client):
+        after = _status(paired=True, paired_device_id="dev-x", paired_device_name="Box")
+        with patch.object(cm, "_pair_local_browser", new=AsyncMock(return_value=cm.PairResult(
+            ok=True, message="Paired to Box.", paired_device_id="dev-x",
+            paired_device_name="Box", status=after,
+        ))):
+            resp = client.post("/api/v1/chrome-mcp/pair")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["paired_device_id"] == "dev-x"
+        assert body["status"]["paired"] is True
 
 
 # =============================================================================
