@@ -1,4 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AI Shuffle</string>
+
+    <!-- Server list -->
+    <string name="add_server">Add server</string>
+    <string name="empty_servers">No servers yet.\nTap + to connect to a server.</string>
+    <string name="delete_server_title">Remove server</string>
+    <string name="delete_server_message">Remove \"%1$s\"? You can add it again later.</string>
+    <string name="delete">Delete</string>
+    <string name="cancel">Cancel</string>
+    <string name="dismiss">Dismiss</string>
+
+    <!-- Add server -->
+    <string name="display_name">Display name</string>
+    <string name="server_url">Server URL</string>
+    <string name="connect">Connect</string>
+    <string name="error_invalid_input">Please check your input</string>
+
+    <!-- Chat / WebView -->
+    <string name="error_server_missing">Server not found</string>
+    <string name="error_open_external">Couldn\'t open link</string>
+    <string name="download_started">Download started</string>
+    <string name="error_download">Couldn\'t start download</string>
+
+    <!-- Push -->
+    <string name="channel_actions_name">Questions &amp; permissions</string>
+    <string name="channel_actions_desc">Prompts that need your response</string>
+    <string name="channel_updates_name">Updates</string>
+    <string name="channel_updates_desc">Session and status notifications</string>
+    <string name="no_distributor_hint">To receive push notifications, install a UnifiedPush distributor such as ntfy.</string>
 </resources>
