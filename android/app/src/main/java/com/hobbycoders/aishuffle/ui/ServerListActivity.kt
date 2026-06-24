@@ -1,10 +1,13 @@
 package com.hobbycoders.aishuffle.ui
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -15,13 +18,18 @@ import com.hobbycoders.aishuffle.R
 import com.hobbycoders.aishuffle.data.ServerStore
 import com.hobbycoders.aishuffle.databinding.ActivityServerListBinding
 import com.hobbycoders.aishuffle.model.Server
+import com.hobbycoders.aishuffle.net.NotificationStreamService
 import com.hobbycoders.aishuffle.push.NotificationHelper
-import com.hobbycoders.aishuffle.push.PushManager
 
 /**
  * Launcher screen: a list of saved servers. FAB adds one; tap opens chat;
- * long-press deletes. Also drives UnifiedPush distributor registration and the
- * Android 13+ notification-permission prompt.
+ * long-press deletes.
+ *
+ * Notifications are delivered by [NotificationStreamService], an embedded
+ * foreground service that holds an HTTPS Server-Sent-Events connection to each
+ * server — no Firebase and no separate UnifiedPush distributor app required.
+ * This screen starts that service whenever at least one server is configured
+ * and stops it when the last one is removed.
  */
 class ServerListActivity : AppCompatActivity() {
 
@@ -72,7 +80,12 @@ class ServerListActivity : AppCompatActivity() {
         binding.serverList.visibility = if (servers.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
 
         if (servers.isNotEmpty()) {
-            ensurePushRegistration()
+            // Bring the notification stream online (idempotent — safe each resume).
+            NotificationStreamService.start(this)
+            maybeHintBatteryOptimization()
+        } else {
+            // No servers left to watch: drop the connection and its notice.
+            NotificationStreamService.stop(this)
         }
     }
 
@@ -95,22 +108,35 @@ class ServerListActivity : AppCompatActivity() {
             .show()
     }
 
-    /** Try to register with a distributor; show a one-time hint if none exists. */
-    private fun ensurePushRegistration() {
-        when (PushManager.ensureRegistered(this)) {
-            is PushManager.RegisterOutcome.NoDistributor -> showNoDistributorHintOnce()
-            is PushManager.RegisterOutcome.Requested -> { /* nothing to do */ }
-        }
+    /**
+     * Android aggressively dozes background apps, which can silently kill the
+     * SSE connection. The persistent connection is far more reliable once the
+     * app is exempt from battery optimization, so prompt once.
+     */
+    private fun maybeHintBatteryOptimization() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+
+        val prefs = getSharedPreferences("ai_shuffle_ui", MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_BATTERY_HINT_SHOWN, false)) return
+
+        val power = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        if (power.isIgnoringBatteryOptimizations(packageName)) return
+
+        prefs.edit().putBoolean(KEY_BATTERY_HINT_SHOWN, true).apply()
+
+        Snackbar.make(binding.root, R.string.battery_hint_message, Snackbar.LENGTH_LONG)
+            .setAction(R.string.battery_hint_action) { openBatteryOptimizationSettings() }
+            .show()
     }
 
-    private fun showNoDistributorHintOnce() {
-        val prefs = getSharedPreferences("ai_shuffle_ui", MODE_PRIVATE)
-        if (prefs.getBoolean(KEY_NO_DISTRIBUTOR_SHOWN, false)) return
-        prefs.edit().putBoolean(KEY_NO_DISTRIBUTOR_SHOWN, true).apply()
-
-        Snackbar.make(binding.root, R.string.no_distributor_hint, Snackbar.LENGTH_INDEFINITE)
-            .setAction(R.string.dismiss) { /* dismiss */ }
-            .show()
+    private fun openBatteryOptimizationSettings() {
+        // Opens the global battery-optimization list (no special permission
+        // required). The user can mark AI Shuffle as "not optimized" there.
+        runCatching {
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }.onFailure {
+            runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+        }
     }
 
     private fun maybeRequestNotificationPermission() {
@@ -124,6 +150,6 @@ class ServerListActivity : AppCompatActivity() {
     }
 
     companion object {
-        private const val KEY_NO_DISTRIBUTOR_SHOWN = "no_distributor_hint_shown"
+        private const val KEY_BATTERY_HINT_SHOWN = "battery_hint_shown"
     }
 }

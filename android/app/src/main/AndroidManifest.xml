@@ -4,6 +4,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Persistent connection that delivers notifications without Firebase. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Re-establish the connection after a reboot. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:allowBackup="true"
@@ -34,7 +39,28 @@
             android:parentActivityName=".ui.ServerListActivity"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
-        <!-- UnifiedPush: distributor delivers endpoint/message broadcasts here. -->
+        <!-- Embedded push: holds the SSE connection(s) and posts notifications. -->
+        <service
+            android:name=".net.NotificationStreamService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Maintains a live connection to your self-hosted AI Shuffle servers to deliver notifications (questions, completions, permission requests) without Firebase or a separate push app." />
+        </service>
+
+        <!-- Restart the push connection after reboot / app update. -->
+        <receiver
+            android:name=".push.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- UnifiedPush (optional): distributor delivers broadcasts here. Kept
+             for users who prefer a distributor; not required for notifications. -->
         <receiver
             android:name=".push.AppMessagingReceiver"
             android:exported="true">

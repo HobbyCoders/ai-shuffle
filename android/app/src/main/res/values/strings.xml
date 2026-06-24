@@ -28,5 +28,20 @@
     <string name="channel_actions_desc">Prompts that need your response</string>
     <string name="channel_updates_name">Updates</string>
     <string name="channel_updates_desc">Session and status notifications</string>
+    <string name="channel_service_name">Connection</string>
+    <string name="channel_service_desc">Keeps notifications flowing while running in the background</string>
     <string name="no_distributor_hint">To receive push notifications, install a UnifiedPush distributor such as ntfy.</string>
+
+    <!-- Foreground service status -->
+    <string name="service_connecting">Connecting…</string>
+    <string name="service_reconnecting">Reconnecting…</string>
+    <plurals name="service_connected">
+        <item quantity="one">Connected to %d server</item>
+        <item quantity="other">Connected to %d servers</item>
+    </plurals>
+
+    <!-- Battery optimization hint -->
+    <string name="battery_hint_title">Allow background connection</string>
+    <string name="battery_hint_message">For reliable notifications, allow AI Shuffle to keep running in the background (exempt it from battery optimization).</string>
+    <string name="battery_hint_action">Open settings</string>
 </resources>

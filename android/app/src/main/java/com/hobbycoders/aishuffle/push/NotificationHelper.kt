@@ -24,6 +24,12 @@ object NotificationHelper {
     /** Default channel for informational messages (e.g. session done). */
     const val CHANNEL_DEFAULT = "ai_shuffle_updates"
 
+    /** Min-importance channel for the persistent foreground-service notice. */
+    const val CHANNEL_SERVICE = "ai_shuffle_service"
+
+    /** Fixed id for the ongoing foreground-service notification. */
+    const val FOREGROUND_NOTIFICATION_ID = 1001
+
     private const val GROUP = "ai_shuffle"
 
     fun ensureChannels(context: Context) {
@@ -42,8 +48,47 @@ object NotificationHelper {
             NotificationManager.IMPORTANCE_DEFAULT,
         ).apply { description = context.getString(R.string.channel_updates_desc) }
 
+        // IMPORTANCE_MIN keeps the ongoing "connected" notice silent and collapsed
+        // at the bottom of the shade, with no status-bar icon where possible.
+        val service = NotificationChannel(
+            CHANNEL_SERVICE,
+            context.getString(R.string.channel_service_name),
+            NotificationManager.IMPORTANCE_MIN,
+        ).apply {
+            description = context.getString(R.string.channel_service_desc)
+            setShowBadge(false)
+        }
+
         manager.createNotificationChannel(high)
         manager.createNotificationChannel(default)
+        manager.createNotificationChannel(service)
+    }
+
+    /**
+     * Builds the persistent, low-key notification shown while the push stream
+     * service is running. Tapping it opens the server list.
+     */
+    fun buildServiceNotification(context: Context, contentText: String): android.app.Notification {
+        ensureChannels(context)
+        val tapIntent = Intent(context, ServerListActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            0,
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return NotificationCompat.Builder(context, CHANNEL_SERVICE)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(context.getString(R.string.app_name))
+            .setContentText(contentText)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setOngoing(true)
+            .setShowWhen(false)
+            .setContentIntent(pendingIntent)
+            .build()
     }
 
     /**
