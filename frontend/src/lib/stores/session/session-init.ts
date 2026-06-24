@@ -163,22 +163,31 @@ export function mergeWsStreamBuffer(
 	}
 
 	// wsStreamContent is cleared only at turn boundaries by the WS layer, never
-	// when a text block finalizes mid-turn into a tool call. If a finalized
-	// (non-streaming) assistant text in the poller data already contains the
-	// buffer, the buffer is stale — drop it so it can't leak into a think-gap
-	// synthetic and masquerade as live streaming (the "dead air after tools"
-	// bug).
-	if (
-		finalWsContent &&
-		finalMessages.some(
-			(m) =>
-				m.role === 'assistant' &&
-				m.type === 'text' &&
-				!m.streaming &&
-				(m.content || '').startsWith(finalWsContent!)
-		)
-	) {
-		finalWsContent = '';
+	// when a text block finalizes mid-turn into a tool call. If the MOST RECENT
+	// finalized (non-streaming) assistant text already contains the buffer, the
+	// buffer is the leftover of that just-ended block — stale — so drop it before
+	// it can leak into a think-gap synthetic and masquerade as live streaming
+	// (the "dead air after tools" bug).
+	//
+	// Match ONLY the most recent finalized text, not any historical one. The
+	// buffer always tracks the latest block (each finalize drops it here, the next
+	// block refills it from empty), so a genuine stale buffer always equals the
+	// last finalized text and is still caught — but a NEW block's live partial
+	// ("Let me", "Here's") that merely prefixes an OLDER message is no longer
+	// dropped as false-stale, which would needlessly defeat the WS-ahead
+	// head-start.
+	if (finalWsContent) {
+		let lastFinalizedText: string | null = null;
+		for (let i = finalMessages.length - 1; i >= 0; i--) {
+			const m = finalMessages[i];
+			if (m.role === 'assistant' && m.type === 'text' && !m.streaming) {
+				lastFinalizedText = m.content || '';
+				break;
+			}
+		}
+		if (lastFinalizedText !== null && lastFinalizedText.startsWith(finalWsContent)) {
+			finalWsContent = '';
+		}
 	}
 
 	let pollerStreamIdx = -1;

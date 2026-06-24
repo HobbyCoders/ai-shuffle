@@ -134,6 +134,34 @@ describe('mergeWsStreamBuffer', () => {
 		expect(shouldShowGapIndicator(result.messages, true, 0, SHOWN)).toBe(false);
 	});
 
+	it('preserves a live WS-ahead partial that merely prefixes an OLDER finalized text', () => {
+		// A new block's live partial ("Let me") happens to prefix an EARLIER
+		// assistant text in the turn, but NOT the most recent finalized text. The
+		// staleness check matches only the most recent finalized text, so this
+		// genuinely-live buffer must be preserved (the WS-ahead head-start) — a
+		// broader "any finalized text" match would drop it as false-stale.
+		const prior = [userMsg(), phantom()];
+		const pollerData = [
+			userMsg(),
+			finalText('Let me look into this'), // older block, shares the "Let me" prefix
+			completeTool('Grep'),
+			finalText('Done searching'), // most recent finalized text — does NOT share the prefix
+			completeTool('Read')
+		];
+
+		const result = mergeWsStreamBuffer(pollerData, 'Let me', prior, true);
+
+		// "Let me" is the new block just starting → must be shown, not dropped.
+		expect(result.wsStreamContent).toBe('Let me');
+		const last = result.messages[result.messages.length - 1];
+		expect(last.role).toBe('assistant');
+		expect(last.type).toBe('text');
+		expect(last.streaming).toBe(true);
+		expect(last.content).toBe('Let me');
+		// A non-empty streaming text shows its own inline cursor → no gap dots.
+		expect(shouldShowGapIndicator(result.messages, true, 0, SHOWN)).toBe(false);
+	});
+
 	// ── Case 3: tool-only think-gap (regression) ───────────────────────────
 	it('introduces no stale synthetic for a tool-only think-gap (empty buffer)', () => {
 		// No text ever streamed → wsStreamContent empty. Tail ends with a completed
