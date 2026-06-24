@@ -466,7 +466,7 @@
 				? 'rebase-merge'
 				: 'merge';
 		const cleanup = prefs.cleanupAfterMerge
-			? ' After it merges, delete the branch (and clean up the worktree if this is a worktree session).'
+			? ' After it merges, delete the branch. If this is a worktree session, do not try to remove or delete the worktree folder itself — this session is running inside it and holds a lock on it, so removal will fail; leave the worktree directory cleanup to the app.'
 			: '';
 		return `${method.charAt(0).toUpperCase() + method.slice(1)} ${pr} into the default branch.${cleanup}`;
 	}
@@ -480,7 +480,7 @@
 				? 'rebase-merge'
 				: 'merge';
 		const cleanup = prefs.cleanupAfterMerge
-			? ', then delete the branch and clean up the worktree if applicable'
+			? ', then delete the branch. Do not try to remove or delete the worktree folder itself — this session is running inside it and holds a lock on it, so removal will fail; leave the worktree directory cleanup to the app'
 			: '';
 		const prStep = branchPR
 			? `then ${method} the existing pull request #${branchPR.number} into the default branch`
