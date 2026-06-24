@@ -13,6 +13,7 @@
 	import {
 		getChromeTargets,
 		getChromeMcpStatus,
+		pairChromeMcp,
 		type CdpTarget,
 		type ChromeMcpStatus
 	} from '$lib/api/chromeMcp';
@@ -34,6 +35,11 @@
 	let screencast = $state<ChromeScreencast | null>(null);
 	let knownPageIds = new Set<string>();
 	let firstPoll = true;
+	let pairing = $state(false);
+	let pairMsg = $state('');
+	// Auto-pair once per panel-open when we first see a connected-but-unpinned
+	// browser, so the common single-browser case pins itself with no extra click.
+	let autoPairTried = false;
 
 	function pageTargets(list: CdpTarget[]): CdpTarget[] {
 		return list.filter((t) => t.type === 'page');
@@ -69,8 +75,32 @@
 			const s = await getChromeMcpStatus();
 			status = s;
 			onStatus?.(s);
+			// Idempotent auto-pair: once per open, when connected but not yet
+			// pinned, pin this container's browser silently. The backend no-ops if
+			// already paired and returns a clear message (e.g. AMBIGUOUS) if it
+			// can't decide, which we surface without spamming.
+			if (s.connected && !s.paired && !autoPairTried && !pairing) {
+				autoPairTried = true;
+				void pair(true);
+			}
 		} catch {
 			/* ignore */
+		}
+	}
+
+	async function pair(auto = false) {
+		if (pairing) return;
+		pairing = true;
+		if (!auto) pairMsg = '';
+		try {
+			const res = await pairChromeMcp();
+			status = res.status;
+			onStatus?.(res.status);
+			pairMsg = res.message;
+		} catch (e: any) {
+			pairMsg = e?.detail || 'Failed to pair browser';
+		} finally {
+			pairing = false;
 		}
 	}
 
@@ -94,6 +124,8 @@
 		if (!open) return;
 		firstPoll = true;
 		knownPageIds = new Set();
+		autoPairTried = false;
+		pairMsg = '';
 		refreshTargets();
 		refreshStatus();
 		const t = setInterval(refreshTargets, 2500);
@@ -120,14 +152,21 @@
 
 				{#if status}
 					{#if status.paired}
-						<span class="sb ok">Paired{status.paired_device_name ? `: ${status.paired_device_name}` : ''}</span>
+						<span class="sb ok">Pinned{status.paired_device_name ? `: ${status.paired_device_name}` : ''}</span>
+					{:else if status.connected}
+						<span class="sb ok">Connected</span>
 					{:else}
-						<span class="sb off">Not paired</span>
+						<span class="sb off">Not connected</span>
 					{/if}
 				{/if}
 
 				<div class="spacer"></div>
 
+				{#if status?.connected && !status.paired}
+					<button type="button" class="btn primary" onclick={() => pair()} disabled={pairing}>
+						{pairing ? 'Pairing…' : 'Pair this browser'}
+					</button>
+				{/if}
 				{#if pageTargets(targets).length > 1}
 					<select class="sel" bind:value={selectedTargetId} aria-label="Browser tab">
 						{#each pageTargets(targets) as t (t.id)}
@@ -161,8 +200,14 @@
 			</div>
 
 			{#if status?.paired}
-				<p class="done">✓ Paired. You can close this panel — the browser will reconnect
-					automatically on future sessions, even after a restart.</p>
+				<p class="done">✓ Pinned to this browser. You can close this panel — the agent will
+					use it on future sessions, even after a restart and even if another browser is
+					signed into this Claude account.</p>
+			{:else if status?.connected}
+				<p class="done">✓ Signed in and connected. {pairMsg ||
+						'Pinning this browser so it stays selected…'}</p>
+			{:else if pairMsg}
+				<p class="pairmsg">{pairMsg}</p>
 			{/if}
 		</div>
 	{/snippet}
@@ -223,6 +268,11 @@
 		font-size: 13px;
 		color: var(--success, #16a34a);
 		font-weight: 500;
+	}
+	.pairmsg {
+		margin: 0;
+		font-size: 13px;
+		color: var(--muted-foreground);
 	}
 	.sb {
 		font-size: 10px;

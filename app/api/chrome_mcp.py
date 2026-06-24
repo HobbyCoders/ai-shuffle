@@ -48,10 +48,19 @@ from pydantic import BaseModel
 from app.api.auth import require_admin
 from app.api.common import api_error_handler
 from app.api.ws_auth import authenticate_websocket
-from app.core.builtin_mcp_servers import BROWSER_SERVER_NAME, CHROME_EXTENSION_ID
+from app.core.builtin_mcp_servers import (
+    BROWSER_CLI_FLAG,
+    BROWSER_SERVER_NAME,
+    CHROME_EXTENSION_ID,
+)
 from app.core.mcp_service import get_mcp_service
 
 logger = logging.getLogger(__name__)
+
+# Hard ceiling on the pairing query (one-shot SDK turn). The relay round-trip
+# (list browsers + select) is normally a few seconds; cap it so a stuck session
+# can't hang the request.
+PAIR_TIMEOUT_SECONDS = 90
 
 router = APIRouter(prefix="/api/v1/chrome-mcp", tags=["Chrome MCP"])
 
@@ -89,8 +98,13 @@ class ChromeMcpStatus(BaseModel):
     native_manifest_present: bool
     native_host_present: bool
     bridge_active: bool  # extension is talking to the native host
-    paired: bool
+    paired: bool  # a specific device is pinned in ~/.claude.json (pairedDeviceId)
+    paired_device_id: Optional[str] = None
     paired_device_name: Optional[str] = None
+    # Functional even when not pinned: the extension is signed in and reachable
+    # (a native-messaging bridge socket exists). With exactly one browser on the
+    # account the CLI auto-selects it every session, so this is "working".
+    connected: bool = False
     ready: bool  # everything needed for the agent to drive the browser
     next_step: str  # human guidance for the UI
     cdp_port: int = CDP_PORT
@@ -101,6 +115,16 @@ class ChromeMcpStatus(BaseModel):
 
 class ToggleRequest(BaseModel):
     enabled: bool
+
+
+class PairResult(BaseModel):
+    """Outcome of a pair-this-browser attempt + the refreshed status."""
+
+    ok: bool
+    message: str
+    paired_device_id: Optional[str] = None
+    paired_device_name: Optional[str] = None
+    status: ChromeMcpStatus
 
 
 class CdpTarget(BaseModel):
@@ -167,8 +191,8 @@ def _extension_options_url() -> Optional[str]:
     return f"chrome-extension://{CHROME_EXTENSION_ID}/{page}"
 
 
-def _paired_device() -> Optional[str]:
-    """Return the paired device name (or id) the CLI persisted, else None.
+def _paired_device() -> tuple[Optional[str], Optional[str]]:
+    """Return ``(pairedDeviceId, pairedDeviceName)`` the CLI persisted, else (None, None).
 
     The bundled CLI stores ``chromeExtension.pairedDeviceId`` /
     ``pairedDeviceName`` in ~/.claude.json once a browser is paired; it
@@ -177,12 +201,12 @@ def _paired_device() -> Optional[str]:
     try:
         data = json.loads(CLAUDE_JSON.read_text())
     except (OSError, ValueError):
-        return None
+        return None, None
     ext = data.get("chromeExtension") or {}
     device_id = ext.get("pairedDeviceId")
     if not device_id:
-        return None
-    return ext.get("pairedDeviceName") or device_id
+        return None, None
+    return device_id, ext.get("pairedDeviceName")
 
 
 async def _cdp_get(path: str) -> Optional[object]:
@@ -214,10 +238,21 @@ async def _build_status() -> ChromeMcpStatus:
     native_manifest_present = NM_MANIFEST.is_file()
     native_host_present = NATIVE_HOST_BIN.is_file() and os.access(NATIVE_HOST_BIN, os.X_OK)
     bridge_active = _bridge_active()
-    paired_device = _paired_device()
-    paired = paired_device is not None
+    paired_device_id, paired_device_name = _paired_device()
+    paired = paired_device_id is not None
 
-    ready = enabled and chrome_running and extension_installed and paired
+    # "Connected" = the extension is signed in and talking to the native host
+    # (a bridge socket exists). This is the real functional signal: with a single
+    # browser on the account the CLI auto-selects it every session even without a
+    # persisted pairing, so a connected-but-unpinned setup IS working — just not
+    # deterministic if a second browser later joins the account.
+    connected = enabled and chrome_running and extension_installed and bridge_active
+
+    # Ready when the agent can drive a browser: either it's pinned to this
+    # container's device (paired) OR the extension is connected (auto-select
+    # works). Pinning is the robust state, but we no longer call a working,
+    # connected setup "not ready".
+    ready = enabled and chrome_running and extension_installed and (paired or bridge_active)
 
     if not enabled:
         next_step = "Claude in Chrome is disabled. Enable it to use browser tools."
@@ -228,26 +263,38 @@ async def _build_status() -> ChromeMcpStatus:
             "Waiting for the Claude in Chrome extension to install (needs network "
             "to clients2.google.com). Give it ~1 minute after Chrome starts."
         )
-    elif not paired:
+    elif not bridge_active and not paired:
+        # Nothing connected and nothing pinned → genuine first-time setup.
         if not _cdp_enabled():
             next_step = (
-                "Not paired. In-app setup needs the localhost DevTools port: set "
+                "Not set up. In-app setup needs the localhost DevTools port: set "
                 "CHROME_CDP=1 and restart the container, then run Set up browser."
             )
         elif not cdp_available:
             next_step = (
-                "Not paired. Chrome needs a restart to open its localhost DevTools "
+                "Not set up. Chrome needs a restart to open its localhost DevTools "
                 "port — restart the container (or Chrome), then run Set up browser."
             )
         else:
-            next_step = "Not paired yet. Click “Set up browser” to sign in and pair."
-    elif not bridge_active:
-        next_step = (
-            "Paired. The extension will connect to the native host on the next "
-            "browser session — no action needed."
-        )
+            next_step = "Not set up yet. Click “Set up browser” to sign the extension in."
+    elif paired:
+        # Pinned to a specific device — the robust, deterministic state.
+        if bridge_active:
+            next_step = "Ready. Pinned to this browser — the agent will use it."
+        else:
+            next_step = (
+                "Pinned to this browser. The extension will reconnect to the native "
+                "host on the next browser session — no action needed."
+            )
     else:
-        next_step = "Ready. The agent can drive the browser."
+        # Connected (bridge active) but not pinned. Functional via auto-select,
+        # but a second browser on the account would make it ambiguous. Offer to
+        # pin without alarming the user that it's broken.
+        next_step = (
+            "Connected and working. Click “Pair this browser” to pin this "
+            "container's browser so it stays selected even if you sign another "
+            "browser into the same Claude account."
+        )
 
     return ChromeMcpStatus(
         enabled=enabled,
@@ -259,10 +306,179 @@ async def _build_status() -> ChromeMcpStatus:
         native_host_present=native_host_present,
         bridge_active=bridge_active,
         paired=paired,
-        paired_device_name=paired_device,
+        paired_device_id=paired_device_id,
+        paired_device_name=paired_device_name,
+        connected=connected,
         ready=ready,
         next_step=next_step,
         extension_options_url=_extension_options_url() if extension_installed else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pairing — pin this container's own browser as pairedDeviceId
+# ---------------------------------------------------------------------------
+# The instruction we give the one-shot agent turn. It must:
+#   1. list the browsers on the account,
+#   2. pick THIS container's own browser (the one with isLocal == true),
+#   3. select it (which fires onExtensionPaired → persists pairedDeviceId).
+# Kept terse and deterministic; we don't want the model to wander.
+_PAIR_PROMPT = (
+    "You are pinning this container's own browser for the Claude in Chrome "
+    "integration. Do exactly this and nothing else:\n"
+    "1. Call `list_connected_browsers`.\n"
+    "2. From the result, choose the browser whose `isLocal` is true (that is "
+    "this container's own headless browser). If none is local but there is "
+    "exactly one browser, choose that one. If there are multiple non-local "
+    "browsers and none is local, do NOT select any — reply with the word "
+    "AMBIGUOUS and the list of device names.\n"
+    "3. Call `select_browser` with that browser's `deviceId` to pin it.\n"
+    "4. Reply with the word PAIRED and the pinned device name. Do not call any "
+    "other tools."
+)
+
+# Allow only the browser-selection tools for the pairing turn — never the full
+# browser-driving surface. (mcp__claude-in-chrome__<tool> form.)
+_PAIR_ALLOWED_TOOLS = [
+    f"mcp__{BROWSER_SERVER_NAME}__list_connected_browsers",
+    f"mcp__{BROWSER_SERVER_NAME}__select_browser",
+]
+
+
+async def _run_pairing_query() -> str:
+    """Run a one-shot, non-interactive SDK turn that pins the local browser.
+
+    Reuses the SDK's bundled CLI (auto-resolved) with ``--chrome`` so the
+    ``mcp__claude-in-chrome__*`` tools are exposed, restricted to the two
+    selection tools, in ``bypassPermissions`` so it never blocks on a prompt.
+    Authenticates exactly like every other Claude Code subprocess (connected
+    account, or ANTHROPIC_API_KEY if configured). Returns the model's final
+    text (best-effort), which we only use for logging — the source of truth for
+    success is the persisted ``pairedDeviceId`` in ~/.claude.json.
+    """
+    # Imported lazily so importing this router never drags in the SDK/heavy deps.
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        TextBlock,
+        query,
+    )
+
+    from app.core.environment import inject_claude_code_auth
+
+    env: dict[str, str] = {"CLAUDECODE": ""}
+    try:
+        inject_claude_code_auth(env)
+    except Exception:  # noqa: BLE001 — auth injection is best-effort
+        logger.debug("Could not inject Claude Code auth for pairing", exc_info=True)
+
+    options = ClaudeAgentOptions(
+        permission_mode="bypassPermissions",
+        allowed_tools=_PAIR_ALLOWED_TOOLS,
+        # No setting_sources → don't load user/project settings for this internal
+        # one-shot. Suppress plugins so per-query hooks don't slow/interfere.
+        setting_sources=["local"],
+        settings=json.dumps({"enabledPlugins": {}}),
+        max_turns=4,  # list → select → confirm, with a little slack
+        include_partial_messages=False,
+        continue_conversation=False,
+        fork_session=False,
+        env=env,
+        # Enable the Claude in Chrome built-in → bare ``--chrome`` flag.
+        extra_args={BROWSER_CLI_FLAG: None},
+    )
+
+    chunks: List[str] = []
+    async for message in query(prompt=_PAIR_PROMPT, options=options):
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    chunks.append(block.text)
+    return "".join(chunks).strip()
+
+
+async def _pair_local_browser() -> PairResult:
+    """Pin this container's own browser; return the outcome + refreshed status.
+
+    Idempotent and defensive:
+      * already pinned → no-op success,
+      * no browser connected → clear "sign in first" error (we never run the
+        relay turn, which would only hang),
+      * otherwise run the one-shot selection turn and verify the persisted
+        ``pairedDeviceId`` actually changed/appeared.
+    """
+    status = await _build_status()
+
+    if not status.enabled:
+        return PairResult(
+            ok=False,
+            message="Claude in Chrome is disabled. Enable it first, then pair.",
+            status=status,
+        )
+
+    # Already pinned — no-op success.
+    if status.paired:
+        return PairResult(
+            ok=True,
+            message=f"Already paired to {status.paired_device_name or status.paired_device_id}.",
+            paired_device_id=status.paired_device_id,
+            paired_device_name=status.paired_device_name,
+            status=status,
+        )
+
+    # Nothing connected → the relay turn would just hang. Tell the user to sign in.
+    if not status.bridge_active:
+        return PairResult(
+            ok=False,
+            message=(
+                "No browser is connected yet. Open “Set up browser”, sign the "
+                "Claude extension into your account, then try pairing again."
+            ),
+            status=status,
+        )
+
+    try:
+        reply = await asyncio.wait_for(_run_pairing_query(), timeout=PAIR_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return PairResult(
+            ok=False,
+            message=(
+                "Pairing timed out waiting for the browser. Make sure exactly one "
+                "browser is signed into this Claude account, or use “Set up "
+                "browser” to pair manually."
+            ),
+            status=await _build_status(),
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a clean message, log detail
+        logger.warning("Pairing query failed: %s", exc, exc_info=True)
+        return PairResult(
+            ok=False,
+            message=f"Pairing failed: {exc}",
+            status=await _build_status(),
+        )
+
+    # Source of truth: did the CLI persist a pairedDeviceId?
+    refreshed = await _build_status()
+    if refreshed.paired:
+        return PairResult(
+            ok=True,
+            message=f"Paired to {refreshed.paired_device_name or refreshed.paired_device_id}.",
+            paired_device_id=refreshed.paired_device_id,
+            paired_device_name=refreshed.paired_device_name,
+            status=refreshed,
+        )
+
+    # No pairing was persisted. The model's reply often explains why (e.g.
+    # AMBIGUOUS when multiple non-local browsers are on the account).
+    detail = reply or "the browser did not report a device to pin"
+    return PairResult(
+        ok=False,
+        message=(
+            "Could not pin a browser automatically "
+            f"({detail[:300]}). If multiple browsers are signed into this Claude "
+            "account, sign the others out and retry, or use “Set up browser”."
+        ),
+        status=refreshed,
     )
 
 
@@ -282,6 +498,20 @@ async def toggle(request: ToggleRequest, token: str = Depends(require_admin)) ->
     async with api_error_handler("toggle Claude in Chrome"):
         get_mcp_service().set_server_enabled(BROWSER_SERVER_NAME, request.enabled)
         return await _build_status()
+
+
+@router.post("/pair", response_model=PairResult)
+async def pair(token: str = Depends(require_admin)) -> PairResult:
+    """Pin this container's own browser as the persisted ``pairedDeviceId``.
+
+    Runs a one-shot agent turn that lists the browsers on the account and
+    ``select_browser``s the local one, so the CLI auto-reconnects to THIS
+    container's browser on every later session — even when the user's personal
+    Chrome is signed into the same Claude account. Idempotent (already-paired is
+    a no-op success) and returns the refreshed status.
+    """
+    async with api_error_handler("pair Claude in Chrome browser"):
+        return await _pair_local_browser()
 
 
 @router.get("/targets", response_model=List[CdpTarget])
