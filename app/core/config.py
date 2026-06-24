@@ -150,6 +150,28 @@ class Settings(BaseSettings):
     sdk_max_child_processes: int = 0
     sdk_admission_rss_mb: int = 0
 
+    # Host memory floor for admission. The real crash signature on a shared host
+    # is the GLOBAL kernel OOM-killer (not a cgroup limit) reaping our node
+    # subprocesses when the WHOLE host runs out of memory — catastrophic with
+    # little/no swap. When host MemAvailable drops below this floor we refuse to
+    # admit a NEW top-level session (existing sessions and their subagent fan-out
+    # keep running), so we stop piling on at the cliff instead of letting the
+    # kernel SIGKILL a live session. Measures the whole host, every container —
+    # the only signal that reflects the actual OOM trigger. Fails open on any
+    # read error. This does NOT cap how many sessions you can run; it only holds
+    # back new admissions in the final moments before a host OOM. 0 = disabled.
+    # Raise it on zero-swap hosts, where there is no cushion for a spike.
+    sdk_admission_min_available_mb: int = 1536
+
+    # OOM victim ordering. A positive oom_score_adj written to each SDK node
+    # subprocess makes it (and the subagents it forks, which inherit the value)
+    # the kernel's PREFERRED OOM-kill target — so a host memory spike reaps one
+    # session's disposable, auto-recoverable subprocess instead of the Python
+    # orchestrator (which runs every session) or the database. Raising the score
+    # needs no privilege (only lowering does), so it works in an unprivileged
+    # container. Range 1..1000; 0 = disabled.
+    sdk_subprocess_oom_score_adj: int = 300
+
     # SDK 0.1.65 SessionStore adapter (Postgres) — controls whether we mirror
     # transcripts into Postgres and, eventually, treat Postgres as the single
     # source of truth instead of reading JSONL files from ~/.claude/projects.

@@ -81,7 +81,7 @@ from pathlib import Path
 from app.core.config import settings
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
-    requires_reconnect, graceful_disconnect
+    requires_reconnect, graceful_disconnect, mark_subprocess_oom_killable
 )
 from app.core.profiles import get_profile
 from app.core.sync_engine import sync_engine
@@ -1582,6 +1582,14 @@ async def stream_to_websocket(
     state.interrupt_requested = False  # Reset from previous query's interrupt
     state.streaming_started_at = datetime.now(timezone.utc)
     state.last_activity = datetime.now(timezone.utc)
+
+    # Make this session's node subprocess (and the subagents it is about to fork,
+    # which inherit the score) the kernel's preferred OOM-kill target. If the HOST
+    # runs out of memory mid-fan-out, the global OOM-killer then reaps one session's
+    # disposable, auto-recoverable subprocess instead of the Python orchestrator
+    # (which runs every session) or the database. Best-effort; set every turn,
+    # before the query() below triggers the fan-out. No-op if disabled/unprivileged.
+    mark_subprocess_oom_killable(state)
 
     # Initialize sdk_session_id - use resume_id if resuming, otherwise None until we get it from SDK
     sdk_session_id = resume_id

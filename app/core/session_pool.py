@@ -96,6 +96,52 @@ def subprocess_pid(state: SessionState) -> Optional[int]:
         return None
 
 
+def _host_available_mb() -> Optional[float]:
+    """Host MemAvailable in MB from /proc/meminfo, or None if unavailable.
+
+    MemAvailable already accounts for reclaimable page cache, so it is a good
+    proxy for "how close is the WHOLE host to OOM" — which, on a shared host
+    with little/no swap, is exactly what trips the global kernel OOM-killer that
+    reaps our subprocesses. Whole-host, every-container view. Returns None on any
+    error (non-Linux, missing file) so callers fail open.
+    """
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024.0
+    except Exception:
+        return None
+    return None
+
+
+def mark_subprocess_oom_killable(state: SessionState) -> None:
+    """Make the SDK subprocess the kernel's preferred OOM-kill victim.
+
+    Writes a positive ``oom_score_adj`` to the subprocess; subagents it forks
+    afterward inherit the value. Under a host OOM the kernel then reaps one
+    session's disposable, auto-recoverable node subprocess instead of the Python
+    orchestrator (PID 1, which runs EVERY session) or the database. Raising the
+    score needs no privilege — only lowering does — so this works in an
+    unprivileged container. Best-effort: never raises, never blocks a turn.
+    """
+    try:
+        from app.core.config import settings
+        adj = int(getattr(settings, "sdk_subprocess_oom_score_adj", 0) or 0)
+    except Exception:
+        adj = 0
+    if adj <= 0:
+        return
+    pid = subprocess_pid(state)
+    if not pid:
+        return
+    try:
+        with open(f"/proc/{pid}/oom_score_adj", "w") as f:
+            f.write(str(min(adj, 1000)))
+    except Exception:
+        pass  # non-Linux, missing /proc, or denied — degrade silently
+
+
 async def graceful_disconnect(adapter: ClaudeAgentAdapter, session_id: str) -> None:
     """Disconnect the provider adapter, giving the subprocess time to flush JSONL writes.
 
@@ -387,7 +433,28 @@ class SessionPool:
                 f"({len(self._pool)}/{self.hard_cap})"
             )
 
-        # 2) Process / RAM ceiling (covers subagent node subprocess fan-out,
+        # 2) Host memory floor. The crash that stops live sessions is the GLOBAL
+        #    kernel OOM-killer (NOT a cgroup limit — this container has none) SIGKILLing
+        #    our node subprocesses when the WHOLE host is out of memory, which is
+        #    catastrophic with little/no swap. When host MemAvailable is below the
+        #    floor, refuse to admit a NEW top-level session so we stop piling on at
+        #    the cliff — existing sessions and their subagent fan-out keep running.
+        #    This is the only check that sees the whole host (every container), not
+        #    just our own tree. Fails open (None) on any read error.
+        try:
+            from app.core.config import settings
+            min_avail_mb = getattr(settings, "sdk_admission_min_available_mb", 0) or 0
+        except Exception:
+            min_avail_mb = 0
+        if min_avail_mb > 0:
+            avail_mb = _host_available_mb()
+            if avail_mb is not None and avail_mb < min_avail_mb:
+                return (
+                    f"host low on memory: {avail_mb:.0f}MB available "
+                    f"< floor {min_avail_mb}MB"
+                )
+
+        # 3) Process / RAM ceiling (covers subagent node subprocess fan-out,
         #    which is NOT counted by the pool). Configurable; disabled at 0.
         try:
             from app.core.config import settings
