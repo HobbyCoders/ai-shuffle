@@ -107,14 +107,26 @@ def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -
     # Extract text content so downstream consumers get usable strings instead of Python repr
     if isinstance(content, list):
         text_parts = []
+        has_image = False
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
                 text_parts.append(block.get("text", ""))
             elif hasattr(block, "type") and hasattr(block, "text") and getattr(block, "type") == "text":
                 # Pydantic TextBlock objects from the Anthropic SDK
                 text_parts.append(getattr(block, "text", ""))
+            elif (isinstance(block, dict) and block.get("type") == "image") \
+                    or getattr(block, "type", None) == "image":
+                has_image = True
         if text_parts:
             content = "\n".join(text_parts)
+        elif has_image:
+            # Image-only result (e.g. a Chrome/computer screenshot or a Read of
+            # an image file). The image itself is surfaced separately via
+            # extract_mcp_image -> tool_screenshot, so the text output is empty.
+            # NEVER str() the block here: that dumps the raw base64 image dict as
+            # literal tool-output text — the {"type":"image","source":{...}} leak
+            # that showed up as the tool result on history reload.
+            return ""
         # else: fall through to str() for non-standard lists
 
     # Convert to string for size checking

@@ -443,6 +443,7 @@ async def get_session(request: Request, session_id: str, token: str = Depends(re
                         "toolId": m.get("toolId"),
                         "toolResult": m.get("toolResult"),  # Tool output grouped with tool_use
                         "toolStatus": m.get("toolStatus"),  # Status: running, complete, error
+                        "toolScreenshot": m.get("toolScreenshot"),  # Inline screenshot (Chrome/computer-use, Read of image)
                         "tool_name": m.get("toolName"),  # Also include snake_case for compatibility
                         "tool_input": m.get("toolInput"),  # Also include snake_case for compatibility
                         "metadata": m.get("metadata"),
@@ -736,6 +737,7 @@ async def get_live_session(
                 _OPTIONAL_LIVE_FIELDS = (
                     "subtype", "systemSubtype", "systemData",
                     "toolName", "toolId", "toolInput", "toolResult", "toolStatus",
+                    "toolScreenshot",  # inline screenshot (Chrome/computer-use, Read of image)
                     "agentId", "agentType", "agentDescription", "agentStatus", "agentChildren",
                     "metadata",
                 )
