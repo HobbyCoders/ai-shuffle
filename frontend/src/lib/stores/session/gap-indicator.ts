@@ -74,6 +74,11 @@ export function findStreamingAnchorIndex(messages: ChatMessage[]): number {
  *   - a running/pending subagent shows its own status             → no gap dots
  *   - anything else (completed tool, finalized text, user msg, …)  → gap dots
  *
+ * A streaming thinking block that the SDK reordered to sit just BEFORE a
+ * trailing streaming text block still governs the decision (hidden thinking →
+ * gap dots, shown thinking → its own header dots), so a stale streaming text
+ * tail can no longer hide an active hidden-thinking phase.
+ *
  * Active background tasks take priority (mirrors deriveIndicatorState): while
  * parked on a sub-agent the SDK keeps reporting isStreaming = true, but we want
  * the calm "waiting" indicator, never the bouncing gap dots.
@@ -107,10 +112,31 @@ export function shouldShowGapIndicator(
 
 	const last = messages[i];
 	if (last.streaming) {
-		// A streaming thinking block hidden by user preference renders nothing,
-		// so the gap indicator is still needed; otherwise the inline cursor /
-		// header dots on the streaming message already cover it.
-		return last.type === 'thinking' && showThinkingBlocks === false;
+		// Is the model actually THINKING right now? A streaming thinking block
+		// doesn't have to be the tail: the SDK can emit a text block and THEN
+		// start thinking without finalising that text (block_stop doesn't clear
+		// the streaming flag, and live_session_store.append_thinking inserts the
+		// thinking block *ahead* of the still-streaming text so it renders above
+		// it). That leaves a streaming TEXT tail while a streaming thinking block
+		// sits just before it. Scan the contiguous trailing streaming run so the
+		// indicator reflects the real activity, not the stale text tail.
+		let j = i;
+		let streamingThinking = false;
+		while (j >= 0 && messages[j].streaming) {
+			if (messages[j].type === 'thinking') {
+				streamingThinking = true;
+				break;
+			}
+			j--;
+		}
+		if (streamingThinking) {
+			// Thinking hidden by user preference renders nothing → gap dots are
+			// still needed; thinking shown → its header dots already cover it.
+			return showThinkingBlocks === false;
+		}
+		// No thinking in the streaming run: the streaming tail (inline text
+		// cursor / running tool / subagent) shows its own indicator.
+		return false;
 	}
 	if (last.type === 'tool_use' && last.toolStatus === 'running') return false;
 	if (

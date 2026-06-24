@@ -155,6 +155,25 @@ describe('shouldShowGapIndicator', () => {
 		expect(shouldShowGapIndicator(msgs, true, 0, SHOWN)).toBe(false);
 	});
 
+	it('shows the dots when a HIDDEN streaming thinking block is masked by a trailing streaming TEXT (SDK reorder)', () => {
+		// live_session_store.append_thinking inserts the thinking block AHEAD of an
+		// unfinalized streaming text (block_stop never cleared its streaming flag),
+		// so the tail is a streaming text while the model is actually thinking.
+		// Hidden thinking renders nothing → the dots are still needed.
+		const msgs = [userMsg(), completeTool(), streamingThinking('reasoning'), streamingText('partial…')];
+		expect(shouldShowGapIndicator(msgs, true, 0, HIDDEN)).toBe(true);
+		// Shown: the thinking block's own header dots cover it → no double indicator.
+		expect(shouldShowGapIndicator(msgs, true, 0, SHOWN)).toBe(false);
+	});
+
+	it('still suppresses dots for a plain streaming text tail with no thinking in the run', () => {
+		// Guard against over-broadening: a streaming text with no thinking block in
+		// the contiguous streaming run keeps its inline cursor and no gap dots.
+		const msgs = [userMsg(), completeTool(), streamingText('typing…')];
+		expect(shouldShowGapIndicator(msgs, true, 0, HIDDEN)).toBe(false);
+		expect(shouldShowGapIndicator(msgs, true, 0, SHOWN)).toBe(false);
+	});
+
 	// ── Active background tasks win (no regression of the parked "waiting") ─
 	it('is false when a background task is active, even while streaming (the park)', () => {
 		const msgs = [userMsg(), completeTool()];
