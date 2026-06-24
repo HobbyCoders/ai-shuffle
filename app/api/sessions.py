@@ -648,9 +648,29 @@ async def get_live_session(
         session_meta["worktree_deleted"] = wt_meta["worktree_deleted"]
         session_meta["execution_mode"] = wt_meta["execution_mode"]
 
-    # Check if session is in live store (actively streaming)
+    # Check if session is in the live store.
+    #
+    # A session stays in the live store AFTER its turn ends: end_streaming() keeps
+    # it in memory with is_streaming=False as a fast-reconnect snapshot. That
+    # snapshot is normally the full transcript, but it can be LESS complete than
+    # the authoritative Postgres store when the turn that produced it crashed
+    # mid-stream (OOM/SIGKILL) or was seeded with empty history because the session
+    # had no sdk_session_id yet. Serving such a stale buffer renders the chat with
+    # missing messages — the orphaned-session symptom.
+    #
+    # Rule: while a turn is ACTIVELY streaming, the in-memory buffer is the source
+    # of truth (it holds in-progress deltas the mirror hasn't written yet) and we
+    # serve it directly. Once the turn has ENDED, on a fresh load (since_update_id
+    # == 0) we fall through to the store loader and serve whichever source is MORE
+    # complete (see the completeness check before the response is built). This
+    # heals stale/truncated buffers left by a crashed or empty-seeded turn while
+    # preserving the brief post-turn window where the buffer leads the not-yet-
+    # flushed mirror. Parked delta polls (since_update_id > 0) keep their existing
+    # 304/delta behavior — a fresh open always resets to 0, which is where the
+    # completeness check runs.
+    pending_live_full = None
     if live_session_store.has_session(session_id):
-        # Check if there are updates since last poll
+        streaming_now = live_session_store.is_streaming(session_id)
         if since_update_id > 0:
             live_data = live_session_store.get_session_since(session_id, since_update_id)
             if live_data is None:
@@ -675,13 +695,19 @@ async def get_live_session(
             if session_meta:
                 live_data["session_meta"] = session_meta
             return live_data
-        else:
+        elif streaming_now:
+            # Fresh load of an actively-streaming session — in-memory is authoritative.
             live_data = live_session_store.get_session_dict(session_id)
             if live_data:
                 live_data["activeTasks"] = active_tasks
                 if session_meta:
                     live_data["session_meta"] = session_meta
                 return live_data
+        else:
+            # Fresh load of an ENDED session that still has an in-memory snapshot.
+            # Hold it as a candidate and fall through to the store loader; the
+            # completeness check below serves whichever is more complete.
+            pending_live_full = live_session_store.get_session_dict(session_id)
 
     # Not streaming — load from DB first (fast path), fall back to JSONL
     sdk_session_id = session.get("sdk_session_id")
@@ -781,6 +807,30 @@ async def get_live_session(
                 )
         except Exception as e:
             logger.warning(f"SDK get_session_messages fallback failed for live {session_id}: {e}")
+
+    # Heal stale/truncated live-store snapshots. If a kept (non-streaming) buffer
+    # exists and is MORE complete than the store transcript we just loaded, prefer
+    # it — this covers the brief post-turn window before the Postgres mirror has
+    # flushed the final messages. Otherwise the store wins, which is what recovers
+    # a session whose in-memory buffer was left truncated/empty by a mid-stream
+    # crash (OOM/SIGKILL) or an empty history seed. Without this, that stale buffer
+    # shadows the full transcript and the chat renders with missing messages.
+    if pending_live_full is not None:
+        live_msgs = pending_live_full.get("messages") or []
+        if len(live_msgs) > len(messages):
+            logger.debug(
+                f"Live endpoint: serving in-memory snapshot for {session_id} "
+                f"({len(live_msgs)} msgs > store {len(messages)} msgs)"
+            )
+            pending_live_full["activeTasks"] = active_tasks
+            if session_meta:
+                pending_live_full["session_meta"] = session_meta
+            return pending_live_full
+        logger.debug(
+            f"Live endpoint: store transcript for {session_id} is complete "
+            f"({len(messages)} msgs >= snapshot {len(live_msgs)} msgs) — "
+            f"healed any stale buffer"
+        )
 
     # Attach cost/duration metadata to final assistant messages (cached, O(N))
     # This ensures the poller gets cost data on the first poll after streaming ends
