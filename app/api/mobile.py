@@ -2,13 +2,17 @@
 Mobile device API routes for push notifications and action confirmations
 """
 
+import asyncio
+import json
 import secrets
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import List
 
 from fastapi import APIRouter, HTTPException, Depends, Request, Response, status
+from fastapi.responses import StreamingResponse
 
+from app.services.mobile_push_hub import mobile_push_hub
 from app.core.models import (
     MobileDevice,
     MobileDeviceRegisterRequest,
@@ -306,6 +310,51 @@ async def register_unifiedpush_endpoint(
     logger.debug(f"Updated UnifiedPush endpoint for device {up_request.device_id}")
 
     return {"status": "ok", "message": "UnifiedPush endpoint registered"}
+
+
+@router.get("/notifications/stream")
+async def notifications_stream(request: Request):
+    """
+    Server-Sent Events stream of notification events for this device.
+
+    The Android app's foreground service holds this connection open and raises a
+    local notification for each event, delivering push without Firebase *and*
+    without a separate UnifiedPush distributor app. Authenticated via the aim_
+    Bearer key.
+
+    Emits ``event: notification`` frames whose data is the JSON event
+    ``{type, title, body, data}``, plus periodic ``: keepalive`` comments so idle
+    connections survive proxy/timeout cutoffs.
+    """
+    # Validates the aim_ key (raises 401 otherwise) and bumps last_seen.
+    get_device_from_api_key(request)
+
+    async def event_generator():
+        queue = mobile_push_hub.subscribe()
+        try:
+            # Initial comment flushes proxy buffers and confirms the stream.
+            yield ": connected\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=25.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield f"event: notification\ndata: {json.dumps(event)}\n\n"
+        finally:
+            mobile_push_hub.unsubscribe(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/web-session")

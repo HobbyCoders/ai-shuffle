@@ -483,8 +483,22 @@ def fire_and_forget_notify(
     errors. No-op if called outside a running event loop.
     """
     import asyncio
+    from app.services.mobile_push_hub import mobile_push_hub
 
     async def _run() -> None:
+        # Deliver to connected SSE streams (the app's embedded foreground
+        # service) — push without Firebase or a UnifiedPush distributor app.
+        event = {
+            "type": (data or {}).get("type", "notification"),
+            "title": title,
+            "body": body,
+            "data": data or {},
+        }
+        try:
+            await mobile_push_hub.publish(event)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug(f"Hub publish failed: {e}")
+        # Also deliver to devices that registered a UnifiedPush/FCM transport.
         try:
             await push_notification_service.send_to_all_devices(
                 title=title, body=body, data=data

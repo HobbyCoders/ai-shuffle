@@ -374,6 +374,26 @@ class TestFireAndForgetNotify:
         assert mock_send.await_args.kwargs["title"] == "Title"
         assert mock_send.await_args.kwargs["data"] == {"type": "session_done"}
 
+    async def test_publishes_event_to_hub(self):
+        """It also publishes the event to the SSE hub (embedded-service path)."""
+        from app.services.mobile_push_hub import mobile_push_hub
+
+        with patch.object(
+            mobile_push_hub, "publish", new=AsyncMock()
+        ) as mock_publish, patch.object(
+            push_notification_service, "send_to_all_devices", new=AsyncMock(return_value=[])
+        ):
+            fire_and_forget_notify("Title", "Body", {"type": "session_done"})
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        mock_publish.assert_awaited_once()
+        event = mock_publish.await_args.args[0]
+        assert event["type"] == "session_done"
+        assert event["title"] == "Title"
+        assert event["body"] == "Body"
+        assert event["data"] == {"type": "session_done"}
+
     def test_no_running_loop_is_noop(self):
         """Called with no running loop, it must not raise."""
         # Executed in a plain sync test → no running event loop.

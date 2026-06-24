@@ -13,7 +13,7 @@ Tests cover:
 
 import pytest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -610,6 +610,58 @@ class TestCreateWebSession:
             mock_auth_service.create_session.assert_not_called()
 
         assert response.status_code == 401
+
+
+# =============================================================================
+# Notification SSE Stream Tests
+# =============================================================================
+
+class TestNotificationsStream:
+    """Test the Server-Sent Events notification stream."""
+
+    def test_stream_requires_valid_key(self, client, mock_database, mock_auth):
+        """Missing/invalid mobile key should yield 401 before streaming."""
+        mock_auth["get_api_key"].return_value = None
+
+        response = client.get("/api/v1/mobile/notifications/stream")
+
+        assert response.status_code == 401
+
+    async def test_stream_emits_connected_then_event(self, mock_database, mock_auth):
+        """The generator yields the connect comment, then published events."""
+        from app.api.mobile import notifications_stream
+        from app.services.mobile_push_hub import mobile_push_hub
+
+        mock_auth["get_api_key"].return_value = f"{MOBILE_API_KEY_PREFIX}valid_key"
+        mock_database.get_mobile_device_by_api_key_hash.return_value = {
+            "device_id": "test-device"
+        }
+
+        request = MagicMock()
+        request.is_disconnected = AsyncMock(return_value=False)
+
+        response = await notifications_stream(request)
+        assert response.media_type == "text/event-stream"
+
+        agen = response.body_iterator
+
+        def _text(frame):
+            return frame.decode() if isinstance(frame, (bytes, bytearray)) else frame
+
+        # First frame is the connect comment (subscribes the queue).
+        first = _text(await agen.__anext__())
+        assert "connected" in first
+
+        # Now a published event must surface as an SSE notification frame.
+        await mobile_push_hub.publish(
+            {"type": "session_done", "title": "Done", "body": "Finished", "data": {}}
+        )
+        second = _text(await agen.__anext__())
+        assert "event: notification" in second
+        assert "session_done" in second
+        assert "Done" in second
+
+        await agen.aclose()
 
 
 # =============================================================================
