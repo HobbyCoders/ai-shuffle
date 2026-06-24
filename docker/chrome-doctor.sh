@@ -3,7 +3,10 @@
 #   google-chrome (with extension) -> native messaging host -> claude bridge
 # Run it via: docker exec -u appuser -e HOME=/home/appuser <container> chrome-doctor
 
-PROFILE="$HOME/.config/google-chrome"
+# Non-default profile dir (matches docker/start-chrome.sh); the extension installs
+# here and start-chrome symlinks $PROFILE/NativeMessagingHosts to the canonical
+# ~/.config/google-chrome/NativeMessagingHosts the CLI writes to.
+PROFILE="$HOME/chrome-profile"
 EXT_ID="fcoeoabgfenejglbffodgkkbkcdhcgfn"
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 MANIFEST_NAME="com.anthropic.claude_code_browser_extension.json"

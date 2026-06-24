@@ -224,8 +224,13 @@ chown -R appuser:appuser /home/appuser/.config /home/appuser/.claude 2>/dev/null
 # browser reads. Supervised so a crash auto-restarts. Disable with START_CHROME=0.
 # One-time extension sign-in/pairing uses CHROME_DEBUG=1 (DevTools on :9222).
 if [ "${START_CHROME:-1}" = "1" ]; then
-    mkdir -p /home/appuser/.config/google-chrome
-    chown -R appuser:appuser /home/appuser/.config/google-chrome 2>/dev/null || true
+    # The browser profile lives in a NON-default dir (~/chrome-profile) so Chrome
+    # 136+ keeps honoring --remote-debugging-port for the one-time CHROME_DEBUG
+    # sign-in. Native-messaging manifests still go under ~/.config/google-chrome.
+    mkdir -p /home/appuser/chrome-profile \
+             /home/appuser/.config/google-chrome/NativeMessagingHosts
+    chown -R appuser:appuser /home/appuser/chrome-profile \
+             /home/appuser/.config/google-chrome 2>/dev/null || true
     # arm64 runs Chromium (symlinked as google-chrome-stable). Chromium reads user
     # native-messaging host manifests from ~/.config/chromium/NativeMessagingHosts/,
     # but the bundled CLI writes them to ~/.config/google-chrome/NativeMessagingHosts/.

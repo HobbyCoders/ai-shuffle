@@ -71,8 +71,10 @@ services:
       - claude-auth:/home/appuser/.claude
       # Persist GitHub CLI authentication
       - gh-auth:/home/appuser/.config/gh
-      # Persist the Chrome profile (extension + Claude in Chrome sign-in/pairing)
-      - browser-profile:/home/appuser/.config/google-chrome
+      # Persist the Chrome profile (extension + Claude in Chrome sign-in/pairing).
+      # Non-default dir on purpose — Chrome 136+ disables the DevTools debug port
+      # on the default ~/.config/google-chrome profile (see docker/start-chrome.sh).
+      - browser-profile:/home/appuser/chrome-profile
       # Persist database and session data
       - ai-shuffle-data:/data
       # Mount workspace directory for projects
