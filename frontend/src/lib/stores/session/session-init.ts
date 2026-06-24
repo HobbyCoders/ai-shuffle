@@ -31,6 +31,7 @@ export interface SessionInitDeps {
 	sessionPoller: {
 		onPollApplied: (cb: (sessionId: string, data: PollAppliedData) => void) => void;
 		onStreamEnd: (cb: (sessionId: string, usage: SessionUsage) => void) => void;
+		setInterruptGuard?: (cb: (sessionId: string) => boolean) => void;
 		loadSession: (sessionId: string) => Promise<PollAppliedData | null>;
 		startStreaming: (sessionId: string) => void;
 		stop: (sessionId: string) => void;
@@ -183,6 +184,15 @@ export function createSessionInit(deps: SessionInitDeps) {
 	// risk that corrupted Svelte 5's effect linked-list.
 
 	function setupPollCallback() {
+		// Tell the poller when the active session is mid-`interrupt_for_query` so
+		// its stop/park lifecycle leaves the timer alive across the drain window
+		// (the old query reports is_streaming=false before the replacement query
+		// starts streaming). `interruptPending` is the single source of truth —
+		// set in message-sender, cleared by the `start` handler / first fresh poll.
+		sessionPoller.setInterruptGuard?.(
+			(sessionId) => internal.interruptPending && getState().sessionId === sessionId
+		);
+
 		sessionPoller.onPollApplied((sessionId, data) => {
 			const _state = getState();
 			if (sessionId !== _state.sessionId) {

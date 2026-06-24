@@ -115,11 +115,38 @@ class SessionPoller {
 	private _onPollError: PollErrorCallback | null = null;
 
 	/**
+	 * Predicate: is this session mid-`interrupt_for_query` (old query interrupted,
+	 * the replacement query not yet streaming)?
+	 *
+	 * While true, a poll that reports `is_streaming=false` is the DRAINED OLD
+	 * query, not a genuine end-of-turn — so the lifecycle below must keep the
+	 * streaming-rate timer alive (and skip stream-end side effects) instead of
+	 * stopping. Without this guard, the first `is_streaming=false` poll during the
+	 * drain stops the timer; if the new query's `start` then arrives while a stale
+	 * poll is in flight, `startStreaming` no-ops (timer still present → generation
+	 * not bumped) and the late poll re-stops the timer — leaving the poller dead so
+	 * NO new messages render until the user refreshes the page.
+	 *
+	 * Injected so the single source of truth stays activeSession's
+	 * `interruptPending` flag rather than duplicating transition state here.
+	 */
+	private _isInterrupting: ((sessionId: string) => boolean) | null = null;
+
+	/**
 	 * Register a callback for when streaming ends.
 	 * Used to trigger notifications, session list refresh, etc.
 	 */
 	onStreamEnd(callback: StreamEndCallback): void {
 		this._onStreamEnd = callback;
+	}
+
+	/**
+	 * Register the interrupt-transition guard (see `_isInterrupting`). The
+	 * predicate returns true while `sessionId` is between an `interrupt_for_query`
+	 * and the replacement query's first streaming poll.
+	 */
+	setInterruptGuard(callback: (sessionId: string) => boolean): void {
+		this._isInterrupting = callback;
 	}
 
 	/**
@@ -601,12 +628,23 @@ class SessionPoller {
 		// to true upshifts to the streaming rate.
 		const hasActiveTasks = activeTasks.length > 0;
 		const hasTimer = this._timers.has(sessionId);
+		const interrupting = this._isInterrupting?.(sessionId) ?? false;
 
 		if (isStreaming) {
 			// Upshift (or keep): ensure the fast streaming-rate timer is running.
 			// Only manage the timer if one already exists for this session, so a
 			// one-shot loadSession (no timer) doesn't silently start a background
 			// poll loop — its caller (onConnected) owns the startStreaming call.
+			if (hasTimer) this._ensureTimer(sessionId, STREAMING_POLL_INTERVAL_MS);
+		} else if (interrupting) {
+			// interrupt_for_query in flight: this `is_streaming=false` poll is the
+			// DRAINED OLD query, not a real end-of-turn. Keep the streaming-rate
+			// timer alive so we catch the NEW query's stream the instant it begins;
+			// do NOT stop, downshift, or fire stream-end. This deterministically
+			// removes the teardown window — otherwise a drain-window poll (or a
+			// stale in-flight one landing after the new query's `start`) stops the
+			// timer and nothing restarts it, so new messages never render until a
+			// page refresh. See `_isInterrupting`.
 			if (hasTimer) this._ensureTimer(sessionId, STREAMING_POLL_INTERVAL_MS);
 		} else if (hasActiveTasks) {
 			// Park: downshift to the slow park-poll rate (or start it). We start a
