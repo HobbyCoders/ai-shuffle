@@ -20,15 +20,24 @@ DEFAULT_SDK_BUFFER_SIZE = settings.sdk_buffer_size
 
 def extract_mcp_image(content: Any) -> Optional[str]:
     """
-    Extract the first image from MCP-style content block lists as a data URI.
+    Extract the first image from a tool-result content block list as a data URI.
 
-    MCP tools (e.g. the Claude-in-Chrome browser tool / computer-use) return
-    content as a list of blocks:
-        [{"type": "text", "text": "..."},
-         {"type": "image", "data": "<base64>", "mimeType": "image/png"}]
-    Blocks may arrive as plain dicts (MCP wire format / parsed JSONL) or as
-    Pydantic content objects (Anthropic SDK ImageContent), so both forms are
-    handled.
+    Image tool results (e.g. the Claude-in-Chrome browser tool / computer-use)
+    arrive in one of two block shapes, depending on the path:
+
+    1. Anthropic API format (what the Agent SDK actually delivers at runtime and
+       what is written to the JSONL transcript)::
+
+           {"type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg",
+                       "data": "<base64>"}}
+
+    2. MCP wire format (raw MCP server output, kept as a fallback)::
+
+           {"type": "image", "data": "<base64>", "mimeType": "image/png"}
+
+    Blocks may be plain dicts (parsed JSONL / MCP wire) or Pydantic content
+    objects (SDK ImageContent), so both forms are handled for each shape.
 
     Returns a ready-to-render ``data:<mime>;base64,<data>`` URI for the first
     image block, or None if the content has no image. The mime type defaults to
@@ -37,13 +46,35 @@ def extract_mcp_image(content: Any) -> Optional[str]:
     if not isinstance(content, list):
         return None
     for block in content:
-        # dict-based blocks (MCP wire format / parsed JSONL)
+        # dict-based blocks (Anthropic API format / MCP wire / parsed JSONL)
         if isinstance(block, dict):
-            if block.get("type") == "image" and block.get("data"):
+            if block.get("type") != "image":
+                continue
+            # Anthropic API format: data nested under "source".
+            source = block.get("source")
+            if isinstance(source, dict) and source.get("data"):
+                mime = source.get("media_type") or source.get("mimeType") or "image/png"
+                return f"data:{mime};base64,{source['data']}"
+            # MCP wire format: flat "data" on the block.
+            if block.get("data"):
                 mime = block.get("mimeType") or block.get("mime_type") or "image/png"
                 return f"data:{mime};base64,{block['data']}"
         # Pydantic content-block objects (e.g. ImageContent from the SDK)
         elif getattr(block, "type", None) == "image":
+            # Anthropic API format: data nested under ``.source``.
+            source = getattr(block, "source", None)
+            if source is not None:
+                data = (
+                    source.get("data") if isinstance(source, dict)
+                    else getattr(source, "data", None)
+                )
+                if data:
+                    mime = (
+                        source.get("media_type") if isinstance(source, dict)
+                        else getattr(source, "media_type", None)
+                    ) or "image/png"
+                    return f"data:{mime};base64,{data}"
+            # MCP wire format: flat ``.data``.
             data = getattr(block, "data", None)
             if data:
                 mime = getattr(block, "mimeType", None) or "image/png"

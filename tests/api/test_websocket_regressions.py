@@ -253,6 +253,55 @@ class TestMCPContentExtraction:
         block = ImageContent(type="image", data="objdata", mimeType="image/png")
         assert extract_mcp_image([block]) == "data:image/png;base64,objdata"
 
+    def test_extract_mcp_image_api_source_format(self):
+        """Anthropic API format (data nested under ``source``) is extracted.
+
+        This is the shape the Agent SDK actually delivers at runtime and writes
+        to the JSONL transcript for Claude-in-Chrome / computer-use screenshots:
+            {"type": "image",
+             "source": {"type": "base64", "media_type": "image/jpeg",
+                        "data": "<base64>"}}
+        Regression guard for #419, where the extractor only read a flat top-level
+        ``data`` key and silently returned None for every real screenshot.
+        """
+        from app.core.query_engine import extract_mcp_image
+
+        content = [
+            {"type": "text", "text": "Successfully captured screenshot"},
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": "realb64data",
+                },
+            },
+        ]
+        assert extract_mcp_image(content) == "data:image/jpeg;base64,realb64data"
+
+    def test_extract_mcp_image_api_source_pydantic_block(self):
+        """SDK ImageBlock objects with a ``.source`` attribute are extracted."""
+        from types import SimpleNamespace
+
+        from app.core.query_engine import extract_mcp_image
+
+        block = SimpleNamespace(
+            type="image",
+            source=SimpleNamespace(
+                type="base64", media_type="image/png", data="objsrcdata"
+            ),
+        )
+        assert extract_mcp_image([block]) == "data:image/png;base64,objsrcdata"
+
+    def test_extract_mcp_image_api_source_empty_data_is_ignored(self):
+        """An API-format image block with empty source data yields None."""
+        from app.core.query_engine import extract_mcp_image
+
+        content = [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": ""}}
+        ]
+        assert extract_mcp_image(content) is None
+
     def test_extract_mcp_image_no_images(self):
         """extract_mcp_image should return None when no images present."""
         from app.core.query_engine import extract_mcp_image
