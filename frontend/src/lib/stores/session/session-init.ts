@@ -120,6 +120,124 @@ export function usageStoreUpdate(usage: SessionUsage): Partial<ActiveSessionStat
 }
 
 /**
+ * Phase 2 of the poll merge: reconcile the live WS partial-text buffer
+ * (`wsStreamContent`) with the poller's authoritative message list.
+ *
+ * Extracted as a pure, exported function so the staleness/clear logic can be
+ * unit-tested against the REAL merge code (the "dead air after tools" bug).
+ *
+ * Three cases while the turn is streaming:
+ *  - poller already has a streaming text AND the WS buffer is ahead of it →
+ *    render the longer WS buffer into that message (the WS-ahead head-start).
+ *  - poller has NO streaming text (a post-tool think-gap, or turn start before
+ *    the first text block) → re-append the turn-start synthetic so the bubble
+ *    survives the poll. Its content comes ONLY from genuinely-live WS-ahead
+ *    text; otherwise it is an EMPTY phantom that gap-indicator.ts treats as
+ *    transparent so the bottom gap dots can show.
+ *  - poller HAS a streaming text but the WS buffer is empty/behind → nothing to
+ *    merge; drop the (now-consumed) buffer.
+ *
+ * THE BUG this guards against: `wsStreamContent` is cleared by the WS layer
+ * ONLY at turn boundaries (handleDone / stopped / the `start` event), never
+ * when a text block finalizes mid-turn into a tool call. So once any text
+ * streams in a turn, the buffer stays non-empty for the rest of the turn. In a
+ * post-tool think-gap the poller has no streaming text, so the old code
+ * re-appended the synthetic with the stale buffer as its content — a NON-EMPTY
+ * streaming assistant-text at the tail. That is not an empty phantom, so it
+ * suppressed the gap dots (and rendered nothing the user could perceive) →
+ * total dead air for many seconds. The fix drops the buffer the moment a
+ * finalized assistant text already contains it.
+ *
+ * @returns the (possibly new) message array + the (possibly cleared) buffer.
+ */
+export function mergeWsStreamBuffer(
+	finalMessages: ChatMessage[],
+	wsStreamContent: string,
+	priorMessages: ChatMessage[],
+	isStreaming: boolean
+): { messages: ChatMessage[]; wsStreamContent: string } {
+	let finalWsContent = wsStreamContent;
+
+	if (!isStreaming) {
+		return { messages: finalMessages, wsStreamContent: '' };
+	}
+
+	// wsStreamContent is cleared only at turn boundaries by the WS layer, never
+	// when a text block finalizes mid-turn into a tool call. If a finalized
+	// (non-streaming) assistant text in the poller data already contains the
+	// buffer, the buffer is stale — drop it so it can't leak into a think-gap
+	// synthetic and masquerade as live streaming (the "dead air after tools"
+	// bug).
+	if (
+		finalWsContent &&
+		finalMessages.some(
+			(m) =>
+				m.role === 'assistant' &&
+				m.type === 'text' &&
+				!m.streaming &&
+				(m.content || '').startsWith(finalWsContent!)
+		)
+	) {
+		finalWsContent = '';
+	}
+
+	let pollerStreamIdx = -1;
+	for (let i = finalMessages.length - 1; i >= 0; i--) {
+		if (
+			finalMessages[i].role === 'assistant' &&
+			finalMessages[i].type === 'text' &&
+			finalMessages[i].streaming
+		) {
+			pollerStreamIdx = i;
+			break;
+		}
+	}
+
+	if (pollerStreamIdx >= 0 && finalWsContent) {
+		// WS-ahead head-start: render the longer live buffer into the poller's
+		// still-streaming text.
+		const pollerContent = finalMessages[pollerStreamIdx].content || '';
+		if (finalWsContent.length > pollerContent.length) {
+			finalMessages = [...finalMessages];
+			finalMessages[pollerStreamIdx] = { ...finalMessages[pollerStreamIdx], content: finalWsContent };
+		}
+	} else if (pollerStreamIdx < 0) {
+		// No streaming text in the poller data (post-tool think-gap or turn
+		// start). Re-append the turn-start synthetic so the bubble survives the
+		// poll. Source its content ONLY from finalWsContent — which now is
+		// either genuinely-live WS-ahead text or empty (stale was dropped
+		// above). Never fall back to the prior synthetic's content: that would
+		// perpetuate stale content across merges and recreate the dead-air bug.
+		const currentSynthetic = priorMessages.find(
+			(m: ChatMessage) => m.role === 'assistant' && m.streaming && m.type === 'text'
+		);
+		if (currentSynthetic) {
+			const appendedContent = finalWsContent;
+			// An empty synthetic that duplicates nothing still appends as a
+			// harmless empty phantom; a stale-content one is recognized as
+			// already finalized and skipped. Compare against the content we are
+			// actually about to append, not the prior synthetic's (stale) content.
+			const alreadyFinalized = finalMessages.some(
+				(m: ChatMessage) =>
+					m.role === 'assistant' &&
+					m.type === 'text' &&
+					!m.streaming &&
+					m.content === (appendedContent || currentSynthetic.content)
+			);
+			if (!alreadyFinalized) {
+				finalMessages = [...finalMessages, { ...currentSynthetic, content: appendedContent }];
+			}
+		}
+	} else {
+		// Poller has a streaming text but the WS buffer is empty/behind — nothing
+		// to merge; drop the consumed buffer.
+		finalWsContent = '';
+	}
+
+	return { messages: finalMessages, wsStreamContent: finalWsContent };
+}
+
+/**
  * Shallow structural compare of two active-task lists. Returns true when they
  * are equivalent for rendering (same length + same per-task fields that affect
  * display). Lets the poll callback keep the existing array reference when only
@@ -395,42 +513,15 @@ export function createSessionInit(deps: SessionInitDeps) {
 				}
 
 				// ── Phase 2: WS stream buffer merge ────────────────────────
-				if (data.isStreaming) {
-					let pollerStreamIdx = -1;
-					for (let i = finalMessages.length - 1; i >= 0; i--) {
-						if (finalMessages[i].role === 'assistant' && finalMessages[i].type === 'text' && finalMessages[i].streaming) {
-							pollerStreamIdx = i;
-							break;
-						}
-					}
-
-					if (pollerStreamIdx >= 0 && finalWsContent) {
-						const pollerContent = finalMessages[pollerStreamIdx].content || '';
-						if (finalWsContent.length > pollerContent.length) {
-							finalMessages = [...finalMessages];
-							finalMessages[pollerStreamIdx] = { ...finalMessages[pollerStreamIdx], content: finalWsContent };
-						}
-					} else if (pollerStreamIdx < 0) {
-						const currentSynthetic = s.messages.find(
-							(m: ChatMessage) => m.role === 'assistant' && m.streaming && m.type === 'text'
-						);
-						if (currentSynthetic) {
-							const alreadyFinalized = finalMessages.some(
-								(m: ChatMessage) => m.role === 'assistant' && m.type === 'text' && !m.streaming &&
-									m.content === currentSynthetic.content
-							);
-							if (!alreadyFinalized) {
-								finalMessages = [...finalMessages, {
-									...currentSynthetic,
-									content: finalWsContent || currentSynthetic.content,
-								}];
-							}
-						}
-					} else {
-						finalWsContent = '';
-					}
-				} else {
-					finalWsContent = '';
+				// Reconcile the live WS partial-text buffer with the poller's
+				// authoritative messages. Pure logic lives in mergeWsStreamBuffer
+				// (exported + unit-tested) — it also drops a STALE buffer so a
+				// post-tool think-gap synthetic stays a transparent empty phantom
+				// (the "dead air after tools" bug).
+				{
+					const merged = mergeWsStreamBuffer(finalMessages, finalWsContent, s.messages, data.isStreaming);
+					finalMessages = merged.messages;
+					finalWsContent = merged.wsStreamContent;
 				}
 
 				// ── Phase 3: Stabilize message identity ────────────────────
