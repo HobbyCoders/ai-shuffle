@@ -820,6 +820,10 @@ async def stream_query(
     tool_id_to_name = {}  # Track tool_use_id → tool_name for ToolResultBlock lookup
     metadata = {}
     sdk_session_id = resume_id  # Start with existing SDK session ID if resuming
+    # Persist-on-init guard (see stream_to_websocket): write the SDK session id
+    # to the sessions row the moment it's captured so a mid-turn crash can't
+    # orphan the session.
+    sdk_link_persisted = False
     interrupted = False
 
     try:
@@ -852,6 +856,22 @@ async def stream_query(
                     sdk_session_id = message.data["session_id"]
                     state.sdk_session_id = sdk_session_id
                     logger.debug(f"Captured SDK session ID: {sdk_session_id}")
+                    # Link it onto the sessions row immediately (decoupled from
+                    # end-of-turn persistence) so a mid-turn crash can't leave
+                    # sdk_session_id NULL and orphan the session.
+                    if resume_id is None and session_id and not sdk_link_persisted:
+                        try:
+                            await run_sync(
+                                database.update_session,
+                                session_id,
+                                sdk_session_id=sdk_session_id,
+                            )
+                            sdk_link_persisted = True
+                        except Exception as link_err:
+                            logger.warning(
+                                f"early sdk_session_id link failed for "
+                                f"{session_id}: {link_err}"
+                            )
 
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
@@ -1565,6 +1585,13 @@ async def stream_to_websocket(
 
     # Initialize sdk_session_id - use resume_id if resuming, otherwise None until we get it from SDK
     sdk_session_id = resume_id
+    # Persist-on-init guard: a brand-new session's sdk_session_id is only known
+    # once the SDK emits its `init` SystemMessage. We write it to the sessions
+    # row immediately (once) so a mid-turn crash can't orphan the session.
+    sdk_link_persisted = False
+    # Set when the turn dies via `except Exception`; suppresses the trailing
+    # `done` frame (we already emitted `error`) while persistence still runs.
+    crashed = False
 
     # Execute query
     # Note: SDK built-in commands like /context and /compact are passed directly to the SDK
@@ -1691,6 +1718,27 @@ async def stream_to_websocket(
                     sdk_session_id = message.data["session_id"]
                     state.sdk_session_id = sdk_session_id
                     logger.debug(f"[WS] Captured SDK session ID: {sdk_session_id}")
+                    # Link the SDK session id onto the sessions row the instant
+                    # it's known — decoupled from end-of-turn _persist_turn_results.
+                    # If the turn later crashes (OOM/SIGKILL during a subagent
+                    # fan-out), the old `except ... return` skipped persistence and
+                    # left sdk_session_id NULL, orphaning the whole session (blank
+                    # history in postgres_only mode). The session store entries are
+                    # already keyed by this id, so writing it here alone is enough
+                    # to recover the full transcript on reload.
+                    if resume_id is None and not sdk_link_persisted:
+                        try:
+                            await run_sync(
+                                database.update_session,
+                                session_id,
+                                sdk_session_id=sdk_session_id,
+                            )
+                            sdk_link_persisted = True
+                        except Exception as link_err:
+                            logger.warning(
+                                f"[WS] early sdk_session_id link failed for "
+                                f"{session_id}: {link_err}"
+                            )
 
                 else:
                     # Forward all system messages to frontend except noisy internal ones.
@@ -2445,8 +2493,15 @@ async def stream_to_websocket(
     except Exception as e:
         logger.error(f"[WS] Query error for session {session_id}: {e}")
         state.is_connected = False
+        crashed = True
         yield {"type": "error", "message": str(e)}
-        return
+        # Do NOT early-return here. Fall through to `finally` and the
+        # _persist_turn_results call below so the partial turn AND the
+        # sdk_session_id link are written even on a mid-turn crash. The bare
+        # `return` that used to live here skipped all persistence — that is how
+        # OOM/SIGKILL crashes orphaned sessions (sdk_session_id stayed NULL →
+        # blank history). The `crashed` flag suppresses the trailing `done`
+        # frame since we've already emitted an `error`.
 
     finally:
         # Mark as not streaming and reset interrupt flag
@@ -2495,7 +2550,7 @@ async def stream_to_websocket(
     # For slash commands that produced no visible content, yield a notification
     # SDK built-in commands like /memory, /cost, /model execute inside the subprocess
     # and may not produce any streaming events visible to the frontend
-    if is_slash_command and not has_visible_content and not interrupted:
+    if is_slash_command and not has_visible_content and not interrupted and not crashed:
         cmd_name = prompt.strip().split()[0]  # e.g., "/memory"
         logger.info(f"[WS] Slash command {cmd_name} produced no visible output for session {session_id}")
         yield {
@@ -2504,8 +2559,13 @@ async def stream_to_websocket(
             "data": {"content": f"Command {cmd_name} completed (no output)."}
         }
 
-    # Yield done or interrupted event
-    if interrupted:
+    # Yield done or interrupted event. On a crash we've already emitted an
+    # `error` frame above; emitting `done` too would mislead the frontend into
+    # treating the turn as a clean completion, so skip the terminal frame
+    # entirely (persistence has already run).
+    if crashed:
+        pass
+    elif interrupted:
         yield {
             "type": "interrupted",
             "session_id": session_id,

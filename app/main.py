@@ -122,12 +122,26 @@ async def lifespan(app: FastAPI):
     monitor_task = await start_resource_monitor(interval_seconds=300)
     plugin_task = start_plugin_auto_update()
 
+    # One-time, unbounded backfill: heal any sessions orphaned by a past
+    # mid-turn crash (NULL sdk_session_id but an intact transcript in the store →
+    # blank history in postgres_only). Runs off the event loop and logs an ERROR
+    # per heal so the operator is alerted. Periodic re-sweeps (bounded to recent
+    # sessions) continue inside the resource monitor loop.
+    from app.core.resource_monitor import reconcile_orphans_once
+    orphan_backfill_task = asyncio.create_task(reconcile_orphans_once())
+
     logger.info(f"API docs: http://localhost:{settings.port}/docs")
     logger.info("=" * 60)
 
     yield
 
     # Shutdown
+    if not orphan_backfill_task.done():
+        orphan_backfill_task.cancel()
+    try:
+        await orphan_backfill_task
+    except asyncio.CancelledError:
+        pass
     for task in bg_tasks:
         task.cancel()
         try:

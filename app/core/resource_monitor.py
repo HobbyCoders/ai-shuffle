@@ -571,6 +571,27 @@ async def _periodic_cleanup() -> dict:
     return cleaned
 
 
+async def reconcile_orphans_once(max_age_days: Optional[int] = None) -> list:
+    """Run the orphaned-session reconciler off the event loop.
+
+    Heals sessions whose ``sdk_session_id`` was left NULL by a mid-turn crash but
+    whose transcript is intact in the session store (blank history in
+    postgres_only mode). Each heal is logged at ERROR by the reconciler so the
+    operator is alerted that a crash occurred. Never raises — a reconcile failure
+    must not take down the monitor or startup.
+    """
+    try:
+        from app.core.orphan_reconciler import reconcile_orphaned_sessions
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: reconcile_orphaned_sessions(max_age_days=max_age_days),
+        )
+    except Exception as e:
+        logger.error(f"{_PREFIX} orphan reconcile failed: {e}", exc_info=True)
+        return []
+
+
 async def _monitor_loop(interval_seconds: int):
     """Main monitoring loop."""
     global _snapshot_count, _start_time
@@ -595,6 +616,11 @@ async def _monitor_loop(interval_seconds: int):
             cleaned = await _periodic_cleanup()
             if cleaned:
                 logger.info(f"{_PREFIX} Periodic cleanup: {cleaned}")
+
+            # Self-heal sessions orphaned by a mid-turn crash. Bounded to recent
+            # sessions so the sweep stays cheap; the unbounded backfill runs once
+            # at startup. Logs an ERROR per heal (recovery implies a prior crash).
+            await reconcile_orphans_once(max_age_days=14)
 
         except asyncio.CancelledError:
             logger.info(f"{_PREFIX} Monitor stopped after {_snapshot_count} snapshots")
