@@ -23,7 +23,6 @@
 
 import type { ChatMessage, SubagentChildMessage, MessageType, Task } from '../types';
 import { sessionState, type SessionUsage } from './session-state';
-import { messageCache } from '../message-cache';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -398,18 +397,6 @@ class SessionPoller {
 
 			const session = sessionState.getSession(sessionId);
 			if (session) {
-				// Refresh the IndexedDB cache with the freshly-loaded,
-				// server-authoritative messages so the NEXT open of this session
-				// hydrates instantly with the correct state instead of a stale
-				// snapshot. Previously the cache was only written on stream-end
-				// (session-init onStreamEnd), so reopening a session whose tail
-				// streamed/changed after the last cache write rendered the older
-				// "last seen" messages first, then visibly swapped in the newer
-				// ones once this fetch returned. Skip while streaming: those
-				// messages are partial and onStreamEnd writes the final version.
-				if (!session.isStreaming && session.messages.length > 0) {
-					messageCache.set(sessionId, session.messages);
-				}
 				const sessionMeta = data.session_meta as SessionMeta | undefined;
 				return {
 					messages: session.messages,

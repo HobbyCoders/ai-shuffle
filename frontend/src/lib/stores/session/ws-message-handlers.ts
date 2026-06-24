@@ -13,7 +13,6 @@
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import type { ActiveSessionState, StreamingSessionInfo } from '../active-session';
-import { messageCache } from '../message-cache';
 import { toast } from '../toast';
 import { rateLimit } from '../rate-limit';
 import { reportClientError } from '$lib/services/error-reporter';

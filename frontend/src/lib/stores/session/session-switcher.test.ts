@@ -87,10 +87,6 @@ function makeSwitcher(initial: ActiveSessionState) {
 			save: (id, e) => { ephemeralStore.set(id, e); },
 			restore: (id) => ephemeralStore.get(id) ?? null,
 		},
-		messageCache: {
-			get: vi.fn(async () => null),
-			delete: vi.fn(async () => {}),
-		},
 		sessionPoller: {
 			stop: vi.fn(),
 			// Return a non-null, non-streaming poll result so switchSession does

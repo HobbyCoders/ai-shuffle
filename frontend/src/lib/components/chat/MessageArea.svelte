@@ -18,7 +18,6 @@
 	import { profiles } from '$lib/stores/app-data.svelte';
 	import type { ChatMessage, TodoItem } from '$lib/stores/types';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
-	import { messageCache } from '$lib/stores/message-cache';
 	import { STREAM_DEBUG } from '$lib/utils/debug-log';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
@@ -76,14 +75,10 @@
 			activeSession.addSystemMessage(warning, 'rewind_warning');
 		}
 
-		// Clear stale messages from the store and IndexedDB cache.
+		// Clear stale messages from the store before reloading.
 		// Without this, the defensive check in the history handler would
 		// preserve old (broken) messages when the reload returns fewer/zero.
-		const sessionId = $activeSession.sessionId;
 		activeSession.clearMessages();
-		if (sessionId) {
-			messageCache.delete(sessionId);
-		}
 
 		activeSession.reloadSession(true);
 	}

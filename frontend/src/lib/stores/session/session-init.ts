@@ -38,10 +38,6 @@ export interface SessionInitDeps {
 		stopAll: () => void;
 		isPolling: (sessionId: string) => boolean;
 	};
-	sessionState: {
-		getSession: (sessionId: string) => { messages: ChatMessage[] } | undefined;
-		removeSession: (sessionId: string) => void;
-	};
 
 	// External modules
 	wsConn: {
@@ -55,10 +51,6 @@ export interface SessionInitDeps {
 		getPersistedProfile: () => string;
 		getPersistedProject: () => string;
 		destroy: () => void;
-	};
-	messageCache: {
-		get: (sessionId: string) => Promise<ChatMessage[] | null>;
-		set: (sessionId: string, messages: ChatMessage[]) => void;
 	};
 	appData: {
 		loadSessions: () => void;
@@ -173,8 +165,8 @@ function sameAgentUsage(
 export function createSessionInit(deps: SessionInitDeps) {
 	const {
 		update, getState, notifySubscribers, defaultState, setState,
-		internal, sessionPoller, sessionState,
-		wsConn, switcher, messageCache, appData,
+		internal, sessionPoller,
+		wsConn, switcher, appData,
 		disconnect: disconnectFn, persistSession, persistTimer,
 	} = deps;
 
@@ -580,11 +572,6 @@ export function createSessionInit(deps: SessionInitDeps) {
 			}
 
 			appData.loadSessions();
-
-			const finalSession = sessionState.getSession(sessionId);
-			if (finalSession && finalSession.messages.length > 0) {
-				messageCache.set(sessionId, finalSession.messages);
-			}
 		});
 	}
 
@@ -644,20 +631,6 @@ export function createSessionInit(deps: SessionInitDeps) {
 						selectedWorktreeBranch: persisted.selectedWorktreeBranch ?? null,
 						worktreeDeleted: persisted.worktreeDeleted ?? false,
 					}));
-
-					if (persisted.sessionId) {
-						const cached = await messageCache.get(persisted.sessionId);
-
-						if (initGen !== getInitGeneration()) {
-							console.debug(`[ActiveSession] init(): stale after messageCache (gen ${initGen} < ${getInitGeneration()}), bailing`);
-							return;
-						}
-
-						console.debug(`[ActiveSession] init(): cached messages for ${persisted.sessionId}: ${cached?.length ?? 0}`);
-						if (cached && cached.length > 0) {
-							update(s => ({ ...s, messages: cached }));
-						}
-					}
 				} else {
 					update(s => ({ ...s, profile: defaultProfile, project: defaultProject }));
 				}
