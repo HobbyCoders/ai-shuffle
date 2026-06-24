@@ -16,6 +16,7 @@
 	import { checkoutBranchWithToast } from '$lib/stores/gitCheckoutAction';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
+	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
 	import GitPromptPopover from './GitPromptPopover.svelte';
 
 	interface Props {
@@ -95,6 +96,11 @@
 	const deletions = $derived($diffStats?.deletions ?? 0);
 	const filesChanged = $derived($changedFiles?.length ?? $diffStats?.files_changed ?? 0);
 	const commitsAhead = $derived($gitStatus?.ahead ?? 0);
+	// Whether the branch carries real content over its base branch (non-empty
+	// base...HEAD diff). Distinct from commitsAhead: a branch can be ahead by
+	// commit count yet have a 0/0 net diff (empty/cancelling commits, or an
+	// already-merged/cleaned-up worktree) — those have nothing left to ship.
+	const branchDiffersFromBase = $derived($gitStatus?.differs_from_base ?? false);
 	const defaultBranch = $derived($githubRepoInfo?.default_branch ?? 'main');
 	const isOnDefaultBranch = $derived(currentBranch === defaultBranch);
 
@@ -110,6 +116,26 @@
 	const needsPull = $derived(commitsBehindUpstream > 0 && hasUpstream);
 	const canPush = $derived(!hasChanges && commitsAheadUpstream > 0 && hasUpstream && !needsPull);
 	const canCreatePR = $derived(!hasChanges && commitsAhead > 0 && !isOnDefaultBranch && !needsPull);
+
+	// Whether this folder is a *confirmed* git repo. Strict `=== true` (not the
+	// optimistic `!== false` used for the header gate): for a reused/cleaned-up
+	// worktree the folder may be empty, so Ship It must only show once status has
+	// loaded and positively confirms a repo — never on null/unconfirmed or stale
+	// state. (diffStats, which drives hasChanges, can outlive the repo in cache.)
+	const isRepoConfirmed = $derived($gitStatus?.is_git_repo === true);
+
+	// Ship It shows only when there's actually something to ship — uncommitted
+	// changes OR real content over the base branch — on a non-default branch
+	// that isn't behind upstream, and only for a confirmed repo. See
+	// computeShowShipIt for the full rationale.
+	const showShipIt = $derived(computeShowShipIt({
+		isRepoConfirmed,
+		hasChanges,
+		branchDiffersFromBase,
+		isOnDefaultBranch,
+		needsPull,
+		hasShipItHandler: !!onClickShipIt
+	}));
 
 	// Local branches for the dropdown (exclude remotes)
 	const localBranches = $derived(
@@ -462,8 +488,10 @@
 	{/if}
 
 	<!-- Ship It: one-click pipeline (commit → push → PR → merge → cleanup) -->
-	<!-- Shows on feature branches with uncommitted changes OR commits ahead of default branch -->
-	{#if (hasChanges || commitsAhead > 0) && !isOnDefaultBranch && !needsPull && onClickShipIt}
+	<!-- Shows only when there's something to ship: uncommitted changes OR real
+	     content over the base branch. Hidden for branches that are "ahead" by
+	     commit count but carry a 0/0 net diff (already-merged / cleaned-up). -->
+	{#if showShipIt}
 		<button
 			class="git-btn ship-it-btn"
 			onclick={onClickShipIt}

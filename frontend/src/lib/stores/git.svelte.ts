@@ -73,6 +73,24 @@ const EMPTY_STATE: GitState = {
 	error: null
 };
 
+// Definitive "this folder has no repo" status. Used when we positively learn the
+// working folder is gone (e.g. a cleaned-up / reused worktree whose directory no
+// longer exists → 404). Setting this — rather than leaving a stale is_git_repo=true
+// status behind — makes the header fail closed and hide Ship It and other git
+// controls instead of acting on a folder that isn't a repo.
+const NOT_A_REPO_STATUS: gitApi.GitStatus = {
+	is_git_repo: false,
+	current_branch: null,
+	remote_url: null,
+	has_changes: false,
+	staged: 0,
+	modified: 0,
+	untracked: 0,
+	ahead: 0,
+	behind: 0,
+	differs_from_base: false
+};
+
 const MAX_CACHE_ENTRIES = 10;
 
 // ============================================================================
@@ -212,12 +230,28 @@ function _syncToCache(fields: Partial<CachedState>) {
 
 /**
  * Check if an error is a 404 for a worktree that no longer exists.
- * When detected, sets _worktreeGone to stop all further polling.
+ * When detected, stops all further polling AND clears git state to a definitive
+ * "no repo" status so the header hides Ship It and other git controls instead of
+ * leaving stale is_git_repo=true behind. Worktree sessions are reusable, so a
+ * cleaned-up worktree's folder can be gone while its session is reopened.
  */
 function _checkWorktreeGone(e: unknown): boolean {
 	if (_state.worktreeId && isApiError(e) && e.status === 404) {
 		_worktreeGone = true;
 		console.warn(`[git] Worktree ${_state.worktreeId} no longer exists, stopping git polling`);
+		// Fail closed: drop any stale repo state (status/branches/diff) and evict
+		// the cache so restoreCacheImmediate() can't resurrect it on the next switch.
+		_update((s) => ({
+			...s,
+			status: NOT_A_REPO_STATUS,
+			branches: [],
+			commits: [],
+			worktrees: [],
+			diffStats: null,
+			changedFiles: null,
+			loading: false
+		}));
+		if (_loadedKey) _cache.delete(_loadedKey);
 		return true;
 	}
 	return false;
@@ -298,6 +332,13 @@ async function _loadCore(
 		}
 	} catch (e) {
 		if (_loadInFlight !== key) return;
+		// A 404 on the initial load means the worktree's folder is gone (cleaned-up
+		// / reused worktree session). _checkWorktreeGone clears state to a definitive
+		// no-repo status so the header hides Ship It rather than showing stale controls.
+		if (_checkWorktreeGone(e)) {
+			_loadedKey = key;
+			return;
+		}
 		const errObj = e as { detail?: string; message?: string; status?: number };
 		console.error('Failed to load git repository:', errObj.detail || errObj.message || e, errObj.status ?? '');
 		const error = e as { detail?: string; message?: string };

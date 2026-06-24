@@ -20,6 +20,10 @@ export interface GitStatus {
     untracked: number;
     ahead: number;
     behind: number;
+    /** True when the branch has real content over its base branch (non-empty
+     *  base...HEAD diff). False for branches whose commits net to no change,
+     *  so the UI can hide "Ship It" when there is nothing left to ship. */
+    differs_from_base: boolean;
 }
 
 // ============================================================================
