@@ -95,7 +95,13 @@
 		return arr;
 	});
 
-	const recent = $derived(sortSessions($sessions).slice().sort((a, b) => tsOf(b) - tsOf(a)).slice(0, RECENT_LIMIT));
+	// Pinned (favorited) sessions get their own section so they always stay
+	// visible at the top instead of competing with everything else for the
+	// limited Recent slots. Recent therefore excludes favorites.
+	const pinned = $derived($sessions.filter((s) => s.is_favorite).sort((a, b) => tsOf(b) - tsOf(a)));
+	const recent = $derived(
+		$sessions.filter((s) => !s.is_favorite).sort((a, b) => tsOf(b) - tsOf(a)).slice(0, RECENT_LIMIT)
+	);
 
 	const selectedGroup = $derived(selectedKey ? projectGroups.find((g) => g.key === selectedKey) ?? null : null);
 
@@ -202,6 +208,17 @@
 						</button>
 					</div>
 				{:else}
+					{#if pinned.length}
+						<section class="board-section">
+							<h2 class="section-label">
+								<Star size={12} strokeWidth={2} fill="currentColor" class="section-icon" />
+								Pinned <span class="section-count">{pinned.length}</span>
+							</h2>
+							<div class="row-list">
+								{#each pinned as s (s.id)}{@render sessionRow(s, true)}{/each}
+							</div>
+						</section>
+					{/if}
 					{#if recent.length}
 						<section class="board-section">
 							<h2 class="section-label">Recent</h2>
@@ -441,6 +458,7 @@
 		border-radius: 999px;
 		letter-spacing: 0;
 	}
+	.section-label :global(.section-icon) { color: var(--warning); }
 
 	/* Project grid */
 	.proj-grid {
