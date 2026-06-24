@@ -176,23 +176,20 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			prompt = prompt.trim();
 			const _state = getState();
 
-			// Reopen completed worktree before sending message
-			if (_state.worktreeDeleted && _state.worktreeId && _state.project) {
+			// Worktree sessions never block. When the worktree is not materialized
+			// (worktreeDeleted), best-effort reopen it before sending — but the
+			// backend auto-recreates it from the branch on the query path
+			// regardless, so we never set a permanent error or return false here.
+			if (_state.worktreeDeleted) {
 				update(s => ({ ...s, isReopeningWorktree: true, error: null }));
-				try {
-					await reopenWorktree(_state.project, _state.worktreeId);
-					update(s => ({ ...s, worktreeDeleted: false, isReopeningWorktree: false }));
-				} catch (e: any) {
-					const msg = e?.message || String(e);
-					update(s => ({ ...s, isReopeningWorktree: false, error: `Failed to reopen worktree: ${msg}` }));
-					return false;
+				if (_state.worktreeId && _state.project) {
+					try {
+						await reopenWorktree(_state.project, _state.worktreeId);
+					} catch {
+						/* best-effort: backend auto-recreates on the query path */
+					}
 				}
-			}
-
-			// Legacy worktree sessions: worktree was deleted before reopen feature existed
-			if (_state.worktreeDeleted && !_state.worktreeId) {
-				update(s => ({ ...s, error: 'This worktree session cannot be resumed — the worktree was permanently deleted. Start a new session instead.' }));
-				return false;
+				update(s => ({ ...s, worktreeDeleted: false, isReopeningWorktree: false }));
 			}
 
 			// Cloud setup on first message — offload to the configured second

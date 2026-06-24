@@ -1,7 +1,18 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { createMessageSender, type MessageSenderDeps } from './message-sender';
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
+import { reopenWorktree } from '$lib/api/git';
+
+// message-sender pulls these from $lib/api/git at module load. Only reopenWorktree
+// is exercised here (the best-effort reopen for cleaned-up worktree sessions); the
+// rest are stubbed so the import binding resolves.
+vi.mock('$lib/api/git', () => ({
+	reopenWorktree: vi.fn(async () => {}),
+	migrateUploadsToWorktree: vi.fn(async () => {}),
+	generateBranchName: vi.fn(async () => ({ branch_name: 'auto/x' })),
+	generateBranchNameLocal: vi.fn(() => 'auto/x'),
+}));
 
 /**
  * Regression tests for the "work in main" worktree bug.
@@ -141,6 +152,66 @@ describe('message-sender worktree send backstop', () => {
 		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
 		expect(querySends).toHaveLength(1);
 		expect((querySends[0][0] as any).worktree_id).toBeUndefined();
+	});
+});
+
+/**
+ * Worktree sessions are never a dead end. A session whose worktree folder was
+ * cleaned up (worktreeDeleted) must NOT block the send or surface a permanent
+ * "worktree deleted" error — it best-effort reopens, clears the flag, and sends
+ * the query (carrying worktree_id) so the backend transparently recreates the
+ * worktree from its branch on the query path.
+ */
+describe('message-sender cleaned-up worktree never blocks', () => {
+	beforeEach(() => {
+		vi.mocked(reopenWorktree).mockReset();
+		vi.mocked(reopenWorktree).mockResolvedValue(undefined as never);
+	});
+
+	function deletedWorktreeState() {
+		return baseState({
+			executionMode: 'worktree',
+			sessionId: 'ses-1', // existing session → reaches the WS query path
+			worktreeId: 'wt-1',
+			worktreeBranch: 'feat/login',
+			worktreeDeleted: true,
+			title: 'Existing chat',
+			messages: [{ id: 'u0', role: 'user', content: 'earlier' } as any],
+		});
+	}
+
+	it('best-effort reopens, clears the flag, and sends the query', async () => {
+		const { deps, wsConn, getState } = makeDeps(deletedWorktreeState());
+		const sender = createMessageSender(deps);
+
+		const result = await sender.sendMessage('keep going');
+
+		expect(result).toBe(true);
+		// No permanent block: flag cleared, spinner reset, no error set.
+		expect(getState().worktreeDeleted).toBe(false);
+		expect(getState().isReopeningWorktree).toBe(false);
+		expect(getState().error).toBeNull();
+		// Best-effort reopen attempted with the session's worktree.
+		expect(reopenWorktree).toHaveBeenCalledWith('proj-1', 'wt-1');
+		// The query went out carrying worktree_id so the backend recreates it.
+		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
+		expect(querySends).toHaveLength(1);
+		expect((querySends[0][0] as any).worktree_id).toBe('wt-1');
+	});
+
+	it('still sends when the best-effort reopen fails (backend auto-recreates)', async () => {
+		vi.mocked(reopenWorktree).mockRejectedValueOnce(new Error('reopen 500'));
+		const { deps, wsConn, getState } = makeDeps(deletedWorktreeState());
+		const sender = createMessageSender(deps);
+
+		const result = await sender.sendMessage('keep going anyway');
+
+		expect(result).toBe(true);
+		expect(getState().worktreeDeleted).toBe(false);
+		expect(getState().isReopeningWorktree).toBe(false);
+		expect(getState().error).toBeNull();
+		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
+		expect(querySends).toHaveLength(1);
 	});
 });
 

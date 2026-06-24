@@ -7,11 +7,12 @@
 	 * when a git project is available and GitHub CLI is authenticated (matching
 	 * the header's previous gate); the profile pill is always available.
 	 *
-	 * When the interactive branch pill is suppressed but the session still has
-	 * project/worktree context worth showing — GitHub CLI not authenticated, or
-	 * the worktree was cleaned up — a read-only context badge takes its place.
-	 * This badge previously lived in the page header; it moves here so all of the
-	 * session's context indicators sit together above the input.
+	 * When the interactive branch pill is suppressed (GitHub CLI not
+	 * authenticated) but the session still has project/worktree context worth
+	 * showing, a read-only context badge takes its place. This badge previously
+	 * lived in the page header; it moves here so all of the session's context
+	 * indicators sit together above the input. (Cleaned-up worktree sessions keep
+	 * the normal branch pill — read-only in worktree mode — not a badge.)
 	 *
 	 * In the empty/new-session state the ExecutionModeBar (Local/Worktree toggle)
 	 * is hosted here too, next to the profile pill, so all pre-send session
@@ -31,7 +32,7 @@
 	import { projects } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { git, gitStatus } from '$lib/stores/git.svelte';
-	import { FolderClosed, GitBranch, Lock, Cloud } from 'lucide-svelte';
+	import { FolderClosed, GitBranch, Cloud } from 'lucide-svelte';
 
 	const projectName = $derived(
 		$projects.find((p) => p.id === $activeSession.project)?.name ?? null
@@ -43,12 +44,13 @@
 	const isEmptyState = $derived($activeSession.messages.length === 0);
 
 	// Show the interactive branch pill in an active chat (messages present).
-	// Mirrors the header's previous gate: project + GitHub auth + a live
-	// (non-cleaned-up) session.
+	// Mirrors the header's previous gate: project + GitHub auth. Cleaned-up
+	// worktree sessions still show it — it's read-only in worktree mode (the
+	// BranchSelector locks the dropdown), so it just surfaces the worktree's
+	// branch; the worktree is recreated transparently on the next send.
 	const showBranch = $derived(
 		!!$activeSession.project &&
 			$githubAuthenticated &&
-			!$activeSession.worktreeDeleted &&
 			$activeSession.messages.length > 0
 	);
 
@@ -78,7 +80,6 @@
 			executionMode: $activeSession.executionMode,
 			selectedWorktreeBranch: $activeSession.selectedWorktreeBranch,
 			worktreeBranch: $activeSession.worktreeBranch,
-			worktreeDeleted: $activeSession.worktreeDeleted,
 			githubAuthenticated: $githubAuthenticated
 		})
 	);
@@ -106,9 +107,7 @@
 	{:else if badge}
 		<span
 			class="context-badge"
-			class:deleted={badge.deleted}
 			class:cloud={badge.cloud}
-			aria-disabled={badge.deleted ? 'true' : undefined}
 			title={badge.title}
 		>
 			{#if projectName}
@@ -123,9 +122,6 @@
 			{#if badge.branch}
 				<GitBranch size={13} strokeWidth={1.5} />
 				<span class="pill-label branch-name">{badge.branch}</span>
-			{/if}
-			{#if badge.deleted}
-				<Lock size={10} strokeWidth={1.5} />
 			{/if}
 		</span>
 	{/if}
@@ -168,12 +164,6 @@
 		font-weight: 500;
 		white-space: nowrap;
 		cursor: default;
-	}
-
-	/* Cleaned-up worktree: muted + dashed border to read as read-only/historical. */
-	.context-badge.deleted {
-		opacity: 0.7;
-		border-style: dashed;
 	}
 
 	/* Cloud session: subtle accent so it's distinguishable from local/worktree. */

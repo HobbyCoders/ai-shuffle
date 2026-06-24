@@ -27,7 +27,7 @@ from app.core.user_question_handler import user_question_handler
 from app.core.webhook_service import dispatch_session_complete, dispatch_session_error
 from app.db import database
 from app.db.async_database import run_sync
-from app.db.base import WorktreeStatus
+from app.api.worktree_session_meta import enrich_session_worktree_meta
 
 logger = logging.getLogger(__name__)
 
@@ -1419,26 +1419,17 @@ class ChatWebSocketHandler:
                     streaming_usage = None
                     active_block_type = None
 
-        # Add worktree info if session is linked to a worktree
+        # Add worktree info if session is linked to a worktree. Worktree sessions
+        # are always reopenable — we never null worktree_id; worktree_deleted only
+        # means "not materialized right now" (recreated on next send). See helper.
         worktree_id = session.get("worktree_id")
-        if worktree_id:
-            worktree = database.get_worktree(worktree_id)
-            if worktree and worktree.get("status") == WorktreeStatus.ACTIVE:
-                session["worktree_id"] = worktree_id
-                session["worktree_branch"] = worktree.get("branch_name")
-                session["worktree_path"] = worktree.get("worktree_path")
-                session["worktree_deleted"] = False
-            elif worktree and worktree.get("status") == WorktreeStatus.COMPLETED:
-                session["worktree_id"] = worktree_id
-                session["worktree_branch"] = worktree.get("branch_name")
-                session["worktree_path"] = worktree.get("worktree_path")
-                session["worktree_deleted"] = True
-            else:
-                session["worktree_id"] = None
-                session["worktree_deleted"] = True
-        elif session.get("worktree_branch"):
-            # Worktree was fully unlinked (ON DELETE SET NULL) but stored info remains
-            session["worktree_deleted"] = True
+        worktree = database.get_worktree(worktree_id) if worktree_id else None
+        wt_meta = enrich_session_worktree_meta(session, worktree)
+        if wt_meta:
+            session["worktree_id"] = wt_meta["worktree_id"]
+            session["worktree_branch"] = wt_meta["worktree_branch"]
+            session["worktree_path"] = wt_meta["worktree_path"]
+            session["worktree_deleted"] = wt_meta["worktree_deleted"]
 
         # Build response with optional streamingUsage and activeBlockType for late-joiners
         history_response = {

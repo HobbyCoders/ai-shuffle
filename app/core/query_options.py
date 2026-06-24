@@ -78,9 +78,11 @@ def _resolve_session_worktree_cwd(
     """Resolve the working directory for a session that may be a worktree session.
 
     A worktree session must NEVER silently execute in the project's main checkout.
-    When the linked worktree is missing or not active we first attempt to
-    auto-recreate it (mirrors the user-facing "reopen worktree" flow); only if
-    that fails do we raise so the caller surfaces a clear error.
+    When the linked worktree is missing or not active we auto-recreate it from
+    its branch (last git state). Even when NO worktree record is linked to the
+    session, we create a fresh worktree from the session's backup branch column
+    and link it — worktree sessions are never a dead end. We only raise when git
+    genuinely fails, so we never fall back to running in main.
 
     Returns:
         (working_dir, execution_mode, worktree_info) when the session resolves to
@@ -88,8 +90,8 @@ def _resolve_session_worktree_cwd(
         session and the caller should use normal project/local resolution.
 
     Raises:
-        WorktreeUnavailableError: the session IS a worktree session but no valid,
-        active worktree could be resolved (auto-recreate failed or no record).
+        WorktreeUnavailableError: the session IS a worktree session but a valid,
+        active worktree could not be resolved or created (git failure).
     """
     # Lazy import to avoid a circular import (worktree_manager → query_engine).
     from app.core.worktree_manager import worktree_manager
@@ -150,11 +152,61 @@ def _resolve_session_worktree_cwd(
         or session.get("worktree_branch")
         or session.get("worktree_path")
     ):
-        raise WorktreeUnavailableError(
-            session_id,
-            session.get("worktree_branch"),
-            "no worktree record is linked to this session",
+        # Worktree-flagged session with no linked record. Rather than dead-end,
+        # CREATE a fresh worktree from the branch (last git state) and link it.
+        # Only raise if git genuinely fails — we must NEVER silently run in main.
+        branch_name = session.get("worktree_branch")
+        if not branch_name:
+            raise WorktreeUnavailableError(
+                session_id, None, "worktree session has no branch to recreate from"
+            )
+        project_id = session.get("project_id")
+        if not project_id:
+            raise WorktreeUnavailableError(
+                session_id, branch_name, "worktree session has no project to recreate in"
+            )
+        try:
+            repo = database.get_git_repository_by_project(project_id)
+            project = database.get_project(project_id)
+            if not repo or not project:
+                raise WorktreeUnavailableError(
+                    session_id,
+                    branch_name,
+                    "project is not a git repository — cannot recreate worktree",
+                )
+            # Detect whether the branch already exists locally; create a new
+            # branch off the default branch only when it doesn't (mirrors
+            # recreate_worktree's branch-existence detection).
+            main_dir = get_project_working_dir(project)
+            branches = worktree_manager.git_service.list_branches(
+                main_dir, include_remote=False
+            )
+            local_branch_names = [b["name"] for b in branches if not b["is_remote"]]
+            branch_exists = branch_name in local_branch_names
+            create_new = not branch_exists
+            base_branch = repo.get("default_branch", "main") if create_new else None
+            new_wt = worktree_manager.create_worktree(
+                project_id,
+                branch_name,
+                create_new_branch=create_new,
+                base_branch=base_branch,
+            )
+            database.update_session(session_id, worktree_id=new_wt["id"])
+        except WorktreeUnavailableError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise WorktreeUnavailableError(session_id, branch_name, str(e)) from e
+        if not worktree_manager.is_worktree_valid(new_wt):
+            raise WorktreeUnavailableError(
+                session_id, branch_name, "recreated worktree is still not valid"
+            )
+        working_dir = get_worktree_working_dir(new_wt)
+        logger.info(
+            f"[Options] Session {session_id} had no linked worktree record — "
+            f"created+linked worktree {new_wt['id']} from branch "
+            f"'{branch_name}' at {working_dir}"
         )
+        return working_dir, "worktree", _build_info(new_wt)
 
     # Genuinely not a worktree session — caller uses project/local resolution.
     return None, None, None
