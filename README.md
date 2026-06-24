@@ -120,7 +120,8 @@ docker compose up -d
 | `LOCAL_MODE` | `false` | Use local filesystem paths |
 | `COMMAND_TIMEOUT` | `300` | Subprocess timeout (seconds) |
 | `START_CHROME` | `1` | Launch headless Chrome for Claude in Chrome (`0` to disable) |
-| `CHROME_DEBUG` | `0` | Expose Chrome DevTools on `:9222` for the one-time extension sign-in |
+| `CHROME_CDP` | `1` | Bind Chrome's DevTools port to `127.0.0.1` so the in-app **Set up browser** panel works (`0` to disable) |
+| `CHROME_DEBUG` | `0` | Legacy: also expose DevTools on `:9222` over the network (not needed — the in-app panel replaces it) |
 
 ### Claude in Chrome (Docker)
 
@@ -128,26 +129,26 @@ The image bundles **Google Chrome** and force-installs the Claude in Chrome
 extension so agent sessions can drive a real browser (`mcp__claude-in-chrome__*`).
 Chrome starts automatically (headless, as the app user) when the container boots.
 The extension needs a **one-time sign-in + pairing** because the browser is
-headless:
+headless — do it from the app, no exposed ports required:
 
-1. Set `CHROME_DEBUG=1` and map port `9222` (uncomment the line in
-   `docker-compose.yml`), then restart: `docker compose up -d`.
-2. Get a DevTools link: open `http://<host>:9222/json`, copy the `id` of a
-   `"type": "page"` entry, then open
-   `http://<host>:9222/devtools/inspector.html?ws=<host>:9222/devtools/page/<id>`.
-   The left pane is a live, clickable view of the headless browser.
-3. In that view, go to `https://claude.ai` and **sign in** to your Claude account.
-4. Open `chrome-extension://fcoeoabgfenejglbffodgkkbkcdhcgfn/sidepanel.html`,
-   click **Log in**, then **Authorize** on the consent page. This is what
-   connects the extension to your account.
-5. Run an agent session that uses the browser; if a pairing prompt appears, name
-   the browser and **Connect**.
-6. Set `CHROME_DEBUG=0`, remove the `9222` mapping, and restart. The profile
-   (extension, sign-in, pairing) persists in the `browser-profile` volume, so
-   this is one-time.
+1. Sign in to AI Shuffle as **admin** and open **Settings → Browser**.
+2. The panel shows a live status checklist (Chrome running, DevTools port,
+   extension installed, paired). Make sure **Enable browser tools** is on, then
+   click **Set up browser**.
+3. An interactive view of the headless browser opens. Click **Extension sign-in**
+   (or use the URL bar to go to `https://claude.ai`) and **sign in** to your
+   Claude account, then **Authorize** the extension on the consent page.
+4. If a pairing prompt appears, name the browser and **Connect**. The panel flips
+   to **Paired ✓** automatically — you can close it.
 
-> ⚠️ While `CHROME_DEBUG=1`, anyone who can reach port `9222` can control the
-> browser. Don't leave it on. Diagnose the chain with
+That's it. The profile (extension, sign-in, pairing) persists in the
+`browser-profile` volume and the pairing in `~/.claude.json` (on the `claude-auth`
+volume), so the browser **auto-reconnects on later restarts** without prompting.
+
+> 🔒 The DevTools port is bound to `127.0.0.1` only and is never published to the
+> network; the **Set up browser** panel reaches it through an authenticated,
+> admin-only proxy behind the normal app login. You do **not** need `CHROME_DEBUG`
+> or a `9222` port mapping. Diagnose the chain from the panel, or with
 > `docker exec -u appuser -e HOME=/home/appuser ai-shuffle chrome-doctor`.
 >
 > Like local mode, the agent drives a real browser with **no egress filtering**

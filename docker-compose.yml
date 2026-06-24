@@ -86,9 +86,11 @@ services:
     # Port mapping
     ports:
       - "${PORT:-8000}:8000"
-      # Uncomment for the ONE-TIME Claude in Chrome extension sign-in/pairing
-      # (set CHROME_DEBUG=1). Exposes the headless browser's DevTools — anyone
-      # who can reach this port can control the browser, so turn it off after.
+      # Claude in Chrome sign-in/pairing is done IN-APP (Settings → Browser →
+      # Set up browser) over a localhost-only DevTools port proxied behind the
+      # admin login — no port mapping needed. The line below is the legacy
+      # CHROME_DEBUG=1 escape hatch that exposes DevTools on the network; leave
+      # it commented unless you specifically need raw DevTools access.
       # - "${CHROME_DEBUG_PORT:-9222}:9222"
 
     # Health check

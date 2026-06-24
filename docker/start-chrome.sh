@@ -34,19 +34,33 @@ if ! pgrep -f 'chrome.*--ozone-platform=headless' >/dev/null 2>&1; then
           "$PROFILE/SingletonCookie" 2>/dev/null || true
 fi
 
-# CHROME_DEBUG=1 exposes the browser's DevTools on port 9222 (map it in Docker!)
-# so you can see and control this headless browser from any device for the
-# one-time sign-in/pairing: open the DevTools inspector and drive the live
-# screencast. Chrome only binds DevTools to 127.0.0.1 in non-headless ozone
-# mode, so it listens internally on 9221 and socat relays 0.0.0.0:9222 ->
-# 127.0.0.1:9221. Anyone on the network can control the browser while this is
-# on; turn it off after pairing.
+# DevTools (CDP) wiring. Two independent knobs:
+#
+# CHROME_CDP=1 (default): bind DevTools to a LOCALHOST-only port ($CDP_PORT,
+#   default 9221) inside the container. Nothing is published to the network —
+#   it is reachable only by the AI Shuffle backend, which proxies it (behind app
+#   login) for the in-app "Set up browser" panel. This is how the one-time
+#   extension sign-in/pairing is done now: no exposed port, no DevTools URLs.
+#   Requires the non-default --user-data-dir above (Chrome 136+ ignores the
+#   debug port on the default profile).
+#
+# CHROME_DEBUG=1 (legacy/manual): ALSO relay that localhost port out to
+#   0.0.0.0:${CHROME_DEBUG_PORT:-9222} via socat so you can open Chrome's raw
+#   DevTools inspector from another device. Anyone who can reach that port can
+#   control the browser — prefer the in-app panel; turn this off after use.
+CDP_PORT="${CHROME_CDP_PORT:-9221}"
 DEBUG_ARGS=()
+if [ "${CHROME_CDP:-1}" = "1" ] || [ "${CHROME_DEBUG:-0}" = "1" ]; then
+    DEBUG_ARGS=(--remote-debugging-port="$CDP_PORT")
+fi
 if [ "${CHROME_DEBUG:-0}" = "1" ]; then
-    DEBUG_ARGS=(--remote-debugging-port=9221 --remote-allow-origins=*)
-    pkill -f 'socat.*:9221' 2>/dev/null || true
+    # The browser DevTools front-end sends an Origin header; allow it for the
+    # legacy external path. The backend proxy sends none, so this is not needed
+    # for the in-app panel.
+    DEBUG_ARGS+=(--remote-allow-origins=*)
+    pkill -f "socat.*:$CDP_PORT" 2>/dev/null || true
     socat TCP-LISTEN:"${CHROME_DEBUG_PORT:-9222}",fork,reuseaddr,bind=0.0.0.0 \
-          TCP:127.0.0.1:9221 &
+          TCP:127.0.0.1:"$CDP_PORT" &
 fi
 
 # --ozone-platform=headless: full browser (extensions, native messaging)

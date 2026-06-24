@@ -144,9 +144,10 @@ On **Windows local mode** this uses your existing desktop Chrome:
 > active session at a time for predictable results.
 
 > **Docker:** the container image bundles Google Chrome + the Claude in Chrome
-> extension and launches a headless browser automatically (`START_CHROME=1`). It
-> needs a one-time sign-in/pairing via `CHROME_DEBUG=1` — see
-> "Claude in Chrome (Docker)" in the README.
+> extension and launches a headless browser automatically (`START_CHROME=1`). Do
+> the one-time sign-in/pairing from the app — **Settings → Browser → Set up
+> browser** opens an interactive view of the headless browser behind the admin
+> login (no exposed DevTools port). See "Claude in Chrome (Docker)" in the README.
 
 > **Security note (SSRF / local-network reach).** The agent drives a real browser
 > with **no egress filtering** and your real cookies/sessions. It can reach

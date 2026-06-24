@@ -20,7 +20,7 @@
 	import { timezonePreference } from '$lib/stores/timezonePreference.svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import { User, MessageSquare, KeyRound, Boxes, Plug, SlidersHorizontal, ScrollText } from 'lucide-svelte';
+	import { User, MessageSquare, KeyRound, Boxes, Plug, SlidersHorizontal, ScrollText, Globe } from 'lucide-svelte';
 	import AIToolsSettings from '$lib/components/settings/AIToolsSettings.svelte';
 
 	// Sub-components
@@ -29,6 +29,7 @@
 	import ConnectionsSection from './settings/ConnectionsSection.svelte';
 	import ChatBehaviorSection from './settings/ChatBehaviorSection.svelte';
 	import HotkeysSection from './settings/HotkeysSection.svelte';
+	import BrowserSection from './settings/BrowserSection.svelte';
 	import SystemTab from './settings/SystemTab.svelte';
 	import LogsTab from './settings/LogsTab.svelte';
 
@@ -41,7 +42,7 @@
 	}: Props = $props();
 
 	// Navigation — rail mirrors the mockup's information architecture.
-	type Tab = 'account' | 'chat' | 'connections' | 'ai' | 'connectors' | 'system' | 'logs';
+	type Tab = 'account' | 'chat' | 'connections' | 'ai' | 'connectors' | 'browser' | 'system' | 'logs';
 	let activeTab: Tab = $state('account');
 
 	interface RailItem {
@@ -61,6 +62,7 @@
 			? [
 					{ id: 'admin-divider', label: 'Admin', heading: true } as RailItem,
 					{ id: 'connectors', label: 'Connectors', icon: Plug },
+					{ id: 'browser', label: 'Browser', icon: Globe },
 					{ id: 'system', label: 'System', icon: SlidersHorizontal },
 					{ id: 'logs', label: 'Logs', icon: ScrollText }
 				]
@@ -487,6 +489,13 @@
 				{#if activeTab === 'connectors' && $isAdmin}
 					<div class="tab-content" transition:fade={{ duration: 150 }}>
 						<ConnectorManager />
+					</div>
+				{/if}
+
+				<!-- BROWSER -->
+				{#if activeTab === 'browser' && $isAdmin}
+					<div class="tab-content" transition:fade={{ duration: 150 }}>
+						<BrowserSection />
 					</div>
 				{/if}
 

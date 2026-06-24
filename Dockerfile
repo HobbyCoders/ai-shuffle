@@ -149,8 +149,13 @@ RUN chown appuser:appuser /app
 # ── Claude in Chrome integration defaults ──
 # START_CHROME=1 launches headless Google Chrome at container start so the
 # bundled CLI's --chrome integration has a browser to drive (set 0 to disable).
-# CHROME_DEBUG=1 exposes DevTools on :9222 for the one-time extension sign-in.
+# CHROME_CDP=1 binds DevTools to a localhost-only port so the AI Shuffle backend
+#   can proxy it for the in-app "Set up browser" panel (one-time sign-in/pairing
+#   with no exposed port). Set 0 to disable the in-app browser setup UI.
+# CHROME_DEBUG=1 additionally relays DevTools out to :9222 for manual/legacy
+#   access — prefer the in-app panel; this exposes the browser to the network.
 ENV START_CHROME=1 \
+    CHROME_CDP=1 \
     CHROME_DEBUG=0 \
     CHROME_EXECUTABLE=/usr/bin/google-chrome-stable
 

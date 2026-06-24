@@ -247,6 +247,8 @@ if [ "${START_CHROME:-1}" = "1" ]; then
         while true; do
             setpriv --reuid=appuser --regid=appuser --init-groups \
                 env HOME=/home/appuser \
+                    CHROME_CDP="${CHROME_CDP:-1}" \
+                    CHROME_CDP_PORT="${CHROME_CDP_PORT:-9221}" \
                     CHROME_DEBUG="${CHROME_DEBUG:-0}" \
                     CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-9222}" \
                     CHROME_EXECUTABLE="${CHROME_EXECUTABLE:-/usr/bin/google-chrome-stable}" \
