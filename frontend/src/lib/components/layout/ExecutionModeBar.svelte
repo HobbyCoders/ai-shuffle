@@ -838,16 +838,17 @@
 		to { transform: rotate(360deg); }
 	}
 
-	/* Mobile: tighter branch name limit + viewport-bounded dropdown */
+	/* Mobile: tighter branch name limit + viewport-bounded dropdowns */
 	@media (max-width: 639px) {
 		.branch-name {
 			max-width: min(120px, 30vw);
 		}
 
-		/* Break trigger-anchored positioning so dropdowns anchor to
-		   .execution-mode-bar (full width) and stay viewport-bounded */
-		.branch-selector,
-		.mode-selector {
+		/* Branch dropdown can hold long branch names, so reanchor it to the
+		   (relatively-positioned) .execution-mode-bar and stretch it edge-to-edge
+		   within the viewport. The bar is wider in worktree mode (mode + branch
+		   pills), which is the only state this dropdown appears in. */
+		.branch-selector {
 			position: static;
 		}
 
@@ -858,12 +859,20 @@
 			max-width: none;
 		}
 
-		/* .mode-dropdown overrides left/right above; reset them on mobile too */
+		/* Mode menu: keep it anchored to its OWN trigger (.mode-selector stays
+		   position: relative). The shared .branch-dropdown rule above anchors to
+		   .execution-mode-bar, but that container is shrink-wrapped to the pills —
+		   in local mode it's just the narrow "Local" pill, so left/right:12px
+		   collapsed this menu to a sliver and truncated the mode labels. Anchor to
+		   the trigger's right edge instead (the mode pill always sits right of the
+		   profile pill, so the menu grows leftward and stays on screen), sized to
+		   its short fixed labels and clamped to the viewport. */
 		.mode-dropdown {
-			left: 12px;
-			right: 12px;
+			left: auto;
+			right: 0;
+			width: max-content;
 			min-width: 0;
-			max-width: none;
+			max-width: calc(100vw - 24px);
 		}
 	}
 
