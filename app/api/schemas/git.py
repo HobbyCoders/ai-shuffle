@@ -84,6 +84,11 @@ class GitStatusResponse(BaseModel):
     untracked: List[str] = []
     ahead: int = 0
     behind: int = 0
+    # True when the branch carries real content over its base branch (a
+    # three-dot base...HEAD diff is non-empty). Unlike `ahead` (a raw commit
+    # count), this is False for branches whose commits net to no change — so the
+    # UI can hide "Ship It" when there is nothing left to ship.
+    differs_from_base: bool = False
     conflicts: List[str] = []
     # Repository info from database
     repository_id: Optional[str] = None
